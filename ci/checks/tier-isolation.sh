@@ -218,8 +218,12 @@ while IFS= read -r -d '' f; do
     fi
   done
   [[ ${allowed} -eq 1 ]] && continue
-  # Check for any assignment of tier='published'
-  if grep -qE "tier\s*=\s*['\"]published['\"]|SET tier\s*=\s*['\"]published['\"]" "${f}"; then
+  # Check for any assignment of tier='published'. Comment lines are excluded
+  # (per the stated intent above): T-0558 sandbox-gate READ-predicate comments
+  # in records.ts/process-defs.ts quote `a.tier = 'published'` and must not trip
+  # the ASSIGNMENT seam.
+  if grep -vE '^[[:space:]]*(//|\*|/\*)' "${f}" \
+       | grep -qE "tier\s*=\s*['\"]published['\"]|SET tier\s*=\s*['\"]published['\"]"; then
     echo "FAIL FF-10: ${f} assigns tier='published' outside promote module"
     ERRORS=$((ERRORS + 1))
     TIER_PUBLISHED_VIOLATIONS=$((TIER_PUBLISHED_VIOLATIONS + 1))

@@ -1,0 +1,69 @@
+{
+  "task_id": "T-0574",
+  "verdict": "approved",
+  "_scope": "Существующий экран web/src/screens/screen-llm-connections.jsx, дельта T-0574: (1) компонент AssistantBinder — кнопка «Назначить ассистенту» на карточке профиля + чип «ассистент использует этот профиль» (двойное состояние, скрытие кнопки на уже-назначенном), исходы 200/403/404/сеть человекочитаемы; (2) резолвер assistantBinding (GET /api/agents) + best-effort загрузка, деградирует в disabled без блокировки экрана; (3) статический блок-инструкция AC-11 «Откуда взять ключ и что с ним сделать» (console.anthropic.com → API Keys → Create Key), без дев-жаргона; (4) фикс EmptyState message→description (проп больше не игнорировался — CTA-текст теперь виден). Судится соразмерно дельте.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/ux-g2-theme-pairing.sh → exit 0 (strict-by-construction): оба token-source (tokens.css + form-theme.css) light-default в :root + [data-theme=dark] reachable",
+      "ci/checks/ux/ux-g6-no-new-hardcode.sh --required → 0 findings на диффе T-0574: ни одного нового hardcode-цвета/рукотворного оверлея (все новые стили — var(--chs-*))",
+      "ci/checks/ux/ux-g4-state-primitives.sh --required → 0 findings: ни одной новой рукотворной loading/empty/error-ветки (кит-примитивы LoadingState/EmptyState/ErrorState); catch в loadAssistantBinding деградирует молча ОСОЗНАННО (первичный ErrorState загрузки списка остаётся)",
+      "ci/checks/ux/ux-g5-jargon-denylist.sh --required → продуктовый экран screen-llm-connections.jsx ЧИСТ (0 findings). 24 findings по всему web/ — исключительно в *.test.jsx (T-id в describe-строках + telLinear в тест-фикстуре screen-process-analytics.test.jsx): не видимый продуктовый текст, pre-existing repo-wide шум, не введён T-0574. Блок AC-11 (683-694) проверен точечно — endpoint/handle/resolve/BYO/tenant/UUID отсутствуют.",
+      "npx vitest run (web/vitest.config.js) screen-llm-connections.test.jsx + __tests__/screen-llm-connections.a11y.test.jsx → 32/32 passed"
+    ],
+    "green_note": "В реальном пайплайне npm run fitness гоняет G5/G6/G2 в informational-режиме (без --required) → exit 0. Я дополнительно прогнал G4/G6/G5 с --required (строгий флип) — на диффе T-0574 всё зелёное, красных правил нет."
+  },
+  "themes_checked": [],
+  "_themes_note": "Real-click в двух темах НЕ пройден на живом стенде — судил по коду + токенам + тестам (честно, не притворяюсь). Причины: (а) web-тест-тир — vitest environment 'node' без jsdom/react-dom (см. заголовок __tests__/screen-llm-connections.a11y.test.jsx: Field вызывает useId, mount вне render невозможен в этом репо) → source-text-проверки, DOM не поднять дёшево; (б) AC-6/AC-12 самой спеки — manual/LIVE_PROOF на задеплоенном dev-стенде (D-064), реальный клик в обеих темах доедет там. Статический анализ тем: ВСЕ токены новых элементов (--chs-color-success/danger/surface-raised/text-muted, --chs-space-*, --chs-text-xs) определены и в :root (light), и в [data-theme=dark]; контраст text-muted на surface-raised = 5.4:1 (light) / 7.2:1 (dark) — WCAG AA пройден в обеих. Ни одного цвета/размера мимо слоя (G6 --required = 0). Chip success-soft/success — существующий kit-паттерн chipStyle, читаем в обеих темах (pre-existing, доказан на /llm-connections ранее).",
+  "pattern_sources": [
+    {
+      "element": "EmptyState (нет профилей) — first-use empty state",
+      "pattern": "Empty States (first-use variant): message + supporting detail + primary action; announce via role=status",
+      "mcp_ref": "uxpatterns get_pattern user-feedback/empty-states → Variations#first-use-empty-state, Anatomy (state message + supporting detail + primary action)",
+      "applied": true
+    },
+    {
+      "element": "LoadingState (загрузка списка) + Button busy (Назначить ассистенту / Проверить подключение)",
+      "pattern": "Loading Indicator: inline spinner + button busy state, aria-busy на busy-target, role=status/live-region",
+      "mcp_ref": "uxpatterns get_pattern user-feedback/loading-indicator → Variations#button-busy-state, Accessibility (aria-busy, announce state changes)",
+      "applied": true
+    },
+    {
+      "element": "AssistantBinder — назначить/уже-назначено (двойное состояние кнопка↔чип)",
+      "pattern": "local design principles §4 (assign-in-place: кнопка пока не назначено → чип-подтверждение вместо disabled-кнопки; исход первого клика человекочитаем, честный 404-путь). Внешнего паттерна MCP на «assign affordance» нет — деградация до principles.md отмечена.",
+      "mcp_ref": "principles.md §4 (locally-authored; uxpatterns не покрывает этот примитив — деградация честно помечена)",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-llm-connections.jsx:821-826 (EmptyState «Пока нет профилей»)",
+      "issue": "Empty-state даёт текстовый указатель «Создайте первое LLM-соединение выше.», но не передаёт kit-слот action (CTA-кнопку). По MCP-анатомии first-use empty-state ожидается видимое primary-действие, а не только проза со ссылкой «выше». Не dead-end (форма создания реально видна на том же экране прямо над списком, тот же скролл-контейнер) → не blocking; но идеал — кнопка «Создать соединение», которая фокусирует/скроллит к форме.",
+      "suggestion": "Передать в <EmptyState action={<Button size=\"sm\" onClick={scrollToCreateForm}>Создать соединение</Button>} />. Опционально — оставить как есть, т.к. форма над списком и путь не теряется; фиксирую на будущее, не требую в этой задаче."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-llm-connections.jsx:245-254 (AssistantBinder Button при !assistantBinding)",
+      "issue": "Пока список агентов не загрузился (assistantBinding===null), кнопка «Назначить ассистенту» disabled — правило аффорданса §4 соблюдено (не молчаливый no-op). Но у disabled-кнопки нет видимой причины (tooltip/подпись), почему она недоступна; при медленной сети владелец видит серую кнопку без объяснения. Клик по случайно-включённой кнопке уже честен (msg «Ассистент тенанта пока недоступен — обновите страницу»), поэтому не blocking.",
+      "suggestion": "На disabled-состоянии дать краткую подпись/Tooltip «Загружаю ассистента…» или показывать эту же строку рядом. Мелочь UX-полировки; исход клика уже человекочитаем, так что nit."
+    }
+  ],
+  "principles_updated": [
+    "§4 — добавлено правило «Назначение-на-месте вместо ухода в другой экран»: действие, замыкающее цепочку, даётся в потоке текущего экрана; двойное состояние кнопка→чип-подтверждение обязательно (не disabled-кнопка «уже назначено»); исход первого клика всегда человекочитаем, включая честный 404-путь. Извлечено из AssistantBinder T-0574."
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-9 Empty — видимый EmptyState с призывом (kit, role=status), не пустой экран", "covered": true},
+    {"ac": "AC-9 Loading — видимый LoadingState (kit, role=status/aria-busy), не замороженный UI", "covered": true},
+    {"ac": "AC-9 Error — видимый ErrorState с «Повторить» (kit, role=alert) при ошибке загрузки списка", "covered": true},
+    {"ac": "AC-11 инструкция человекочитаема — console.anthropic.com → «API Keys» → «Create Key» + что вставить; блок 683-694 без endpoint/handle/resolve/BYO/tenant/UUID", "covered": true},
+    {"ac": "AC-4 (UX-грань) «Назначить ассистенту» из потока экрана без ухода на /agents; 404-путь честен (не мёртвая кнопка), уже-назначено → чип вместо кнопки", "covered": true},
+    {"ac": "AC-3/F3 (UX-грань) исходы «Проверить подключение» — три человекочитаемых состояния, ошибка не raw-JSON (mapTestResponse: 401/403/404/битый-JSON → русские фразы)", "covered": true},
+    {"ac": "AC-12/N7 OBLIK — только --chs-* токены на новых элементах (G6 --required=0), label/aria на поле ключа (kit Field, доказано a11y-тестом), контраст статус-чипов AA в обеих темах (статически)", "covered": true},
+    {"ac": "AC-12 real-click в обеих темах на живом стенде — НЕ пройден здесь (vitest node-env без DOM), доедет LIVE_PROOF-ом (AC-6/AC-12 manual, D-064)", "covered": false}
+  ]
+}

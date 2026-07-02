@@ -13,9 +13,14 @@
  *   2. kc.createHumanUser (throw EMAIL_TAKEN / AUTH_UNAVAILABLE on failure)
  *   3. DB transaction: tenant(self-ref) + role(tenant-owner) + employee(slug=sub) + confirmed role_assignment
  *      + T-0373 (PD-7): assistant-agent employee + role-configurator + their role_assignments + authoring_draft grants
+ *      + T-0574: agent_card row for assistant-agent (3f-bis) — makes it addressable
+ *        for PUT /api/agents/:id/llm-connection (else 404 AGENT_NOT_FOUND)
  *   4. On DB failure after KC create → best-effort kc.deleteUser (FF-2) then rethrow
  *
- * No new migrations: employee/role/role_assignment/tenant/grant tables exist (ADR §3).
+ * Migrations: employee/role/role_assignment/tenant/grant tables exist (ADR §3).
+ * T-0574 adds NO new migration for register.ts itself (agent_card already exists,
+ * migration 032/093) — only migrations/115_assistant_agent_card_backfill.sql for
+ * PRE-EXISTING tenants registered before this change.
  * resolveActorTenant/extractActor signatures UNCHANGED (FF-7).
  */
 
@@ -347,6 +352,42 @@ export async function registerTenant(
          VALUES ($1, $2, 'assistant-agent', 'agent', 'Ассистент (AI-агент)', NULL, $3, $3)
          ON CONFLICT DO NOTHING`,
         [tenantId, agentEmployeeId, ts],
+      );
+
+      // 3f-bis (T-0574): agent_card row for assistant-agent — makes it ADDRESSABLE
+      // for PUT /api/agents/:id/llm-connection (else 404 AGENT_NOT_FOUND, ADR
+      // T-0574 §1) and visible in GET /api/agents (registry-driven, FROM
+      // agent_card). employee_id = agentEmployeeId (adresses like a workforce
+      // agent — no addressing-contract change, C1/C2). agent_type='assistant'
+      // (taxonomy, migration 093). kc_client_id='assistant-agent-'||tenantId —
+      // per-tenant deterministic, globally UNIQUE (migration 092), NOT a
+      // Keycloak service account (the assistant never authenticates as one — it
+      // is an internal tenant chat-helper), NOT a hardcoded value.
+      //
+      // The LLM-config columns (endpoint / model / the RL-3 opaque-handle
+      // column / the named-connection FK / autonomy threshold) are
+      // DELIBERATELY OMITTED from the column list (not written as literal
+      // NULLs) — all are NULL-defaulting columns (migration 032/094), so
+      // omission reaches the exact same dormant state the ADR asks for. This
+      // keeps register.ts out of the T-0025 custody allow-set
+      // (ci/checks/secret-handle-isolation.sh FF-25-3): register.ts is not,
+      // and must not become, a custody site for that column — it is resolved
+      // later, only through the allow-listed DAO (src/db/agent-provision.ts),
+      // once the owner assigns a connection profile (T-0498).
+      // ON CONFLICT DO NOTHING keeps this idempotent (fresh id per attempt →
+      // never conflicts on a genuinely new tenant; harmless no-op otherwise).
+      await client.query(
+        `INSERT INTO choros.agent_card
+           (tenant_id, id, employee_id, employee_kind, agent_type, kc_client_id,
+            created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, 'agent', 'assistant', $3, $4, $4)
+         ON CONFLICT DO NOTHING`,
+        // kc_client_id computed in JS (not `'...' || $1::text` in-SQL) — binding
+        // the SAME placeholder ($1 = tenantId, a uuid column) both bare AND
+        // ::text-cast in one statement makes Postgres's parameter-type inference
+        // ambiguous ("inconsistent types deduced for parameter $1"), caught by
+        // this task's own live-Postgres test (assistant-llm-binding.test.ts).
+        [tenantId, agentEmployeeId, `assistant-agent-${tenantId}`, ts],
       );
 
       // 3g. role_assignment: owner → role-configurator (CONFIRMED, self-bootstrap)

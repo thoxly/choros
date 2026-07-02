@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0574",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/dual-control-isolation.sh (FF-DC7) — RESOLVED на HEAD (fd3479d)",
+      "issue": "[RESOLVED] Первый ревью-прогон (срез 83115b7) фиксировал красный FF-DC7: миграции 115/116 без relief-блоков валили `npm run fitness`. Разрешение: rider-коммит 9c66e51 (17:23:08, лёг во время ревью-прогона, до ревью-коммита 638901e 17:34:23) добавил scoped relief-пару T0574-DC-MIG115-GUARD/T0574-DC-MIG116-GUARD по прецедентному per-migration GUARD-паттерну (073/109/106/107 и др.) + санкцию mechanism-класса в frozen-sanctions.jsonl; b75172f (17:19:34) добавил стемы 115/116 в role-criticality-migration-excludes.txt (self-service data-файл, не frozen, консистентно с прецедентами 083/084/109); fd3479d добавил rider-provenance комментарий на 116-блок (comment-only, ноль изменений предиката/логики) и исправил pr-handoff (все три rider-коммита включая ранее не задокументированный 83115b7; честные ci_local-числа). ПЕРЕПРОВЕРЕНО ревьюером на HEAD (fd3479d): (а) `bash ci/checks/dual-control-isolation.sh` → PASS, cancellation-семантика подтверждена (FAIL-строки 115/116 гасятся scoped-relief PASS-строками, итог 'all checks green'); (б) relief-пара честная — флаги ставятся ТОЛЬКО при точном имени файла миграции, контент-верификация comment-stripped SQL (115: запрет CREATE/ALTER/DROP TABLE, ADD/DROP COLUMN, RLS/POLICY; 116: то же ПЛЮС позитивное требование DROP/ADD CONSTRAINT), каждый relief гасит ровно один ERRORS-инкремент — чужая новая миграция с CREATE TABLE по-прежнему валит гейт, предикат не ослаблен; (в) `bash ci/checks/frozen-checks-immutable.sh` → PASS (FF-FCI12 санкции на все 5 затронутых frozen-чеков); (г) полный прогон всех 277 шагов `npm run fitness` индивидуально → 0 failures; (д) дельта 638901e..HEAD = ровно fd3479d (dual-control-isolation.sh comment-only + pr-handoff.json), никаких других изменений.",
+      "suggestion": "Ничего не требуется — зафиксировано для трассировки разрешения."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": false},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": false}
+  ],
+  "riders_verdict": {
+    "9efede7_migration_116": "честный: реальный pre-existing дефект (bare composite ON DELETE SET NULL нулит NOT NULL tenant_id), корректный PG15+ column-specific фикс, идемпотентен (guard по confdelsetcols), не зависит от номера, покрыт live-тестом llm-connection-fk-set-null.test.ts",
+    "0794731_fitness_fffl11_ffbud10": "честный: FF-FL-11 baseline-бамп документирует легитимный T-0431 init:true фикс (не маскирует регресс); FF-BUD-10 thaw аддитивен (allowlist T-0477 accounting-поверхности) + НОВЫЙ FF-BUD-10b сам ловит enforcement-утечку (choros.reservation) — не ослабление",
+    "83115b7_false_positive_fixes": "честный (изначально не задокументирован в pr-handoff — исправлено в fd3479d): все 4 фикса проверены построчно — sk- word-boundary regex (реальные ключи ловятся), test-fixture exclusions в secret-handle/tier-isolation свипах (прод-инварианты не тронуты), seed single-source allowlist на тестовые FAKE_*-фикстуры; детекция не сужена ни в одном",
+    "9c66e51_ffdc7_relief": "честный: scoped per-migration relief по устоявшемуся GUARD-паттерну, контент-верифицирован, предикат FF-DC7 не ослаблен (адверс-семантика сохранена), санкция в frozen-sanctions.jsonl",
+    "b75172f_role_criticality_excludes": "честный: две строки в self-service data-файле (не frozen), формат/обоснование консистентны с прецедентами 083/084/109"
+  },
+  "role_gap_evidence": [
+    "Riders в общем worktree без изоляции cwd: на ветку T-0574 легло ПЯТЬ rider-коммитов (9efede7, 0794731, 83115b7, b75172f, 9c66e51), причём (а) 83115b7 изначально отсутствовал в pr-handoff (исправлено после ревью), (б) 9c66e51/b75172f легли ВО ВРЕМЯ ревью-прогона, из-за чего первый вердикт (638901e, changes_requested по R-1) был вынесен по устаревшему срезу. Все пять по содержимому честные (проверено), но системный паттерн 'чип-сессии пишут в ревьюируемый worktree параллельно с ревью' ломает атомарность среза ревью. Кандидат в ledgers/role-gaps.md: (1) ревьюер обязан фиксировать HEAD-sha в начале ревью и перепроверять его перед коммитом вердикта; (2) список riders из промпта оркестратора считать заведомо неполным — источник истины только git log/diff."
+  ]
+}

@@ -28,6 +28,7 @@ allowed_seed_files=(
   "src/http/invoke.ts"        # T-0024: ORG_SEED_CHILDREN (pre-existing dup, dedup = follow-up task)
   "src/http/agents.ts"        # T-0042: ORG_SEED_CHILDREN (pre-existing dup, dedup = follow-up task)
   "src/http/secret-handle.ts" # T-0025: ORG_SEED_CHILDREN (pre-existing dup, dedup = follow-up task)
+  "src/__tests__/grants-dao.test.ts" # FAKE_*_WITH_SEED test fixtures — not showcase-content dups
 )
 
 seed_matches=$(grep -Rn "const [A-Z_]*_SEED" "$REPO_ROOT/src/" 2>/dev/null || true)
