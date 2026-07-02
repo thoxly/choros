@@ -41,6 +41,9 @@ import { ConsequenceSummary } from '../util/confirm-helpers.jsx';
 // T-0545: AI-emit seam — SAME gate as human editor (FF-T0545-SAME-GATE).
 import { emitSurfaceLocal, defaultEmitIntent } from '../forms/form-emit-seam.js';
 import { parseRecordSchema } from './apps-schema.js';
+// T-0573 (review R-1): канонический envelope {error:{code,message}} — текст
+// ошибки теперь вложен в d.error.message (см. assistant-error-text.js).
+import { assistantErrorText } from './assistant-error-text.js';
 
 /* ---------------------------------------------------------------------------
    TODO-SEAM T-0359/T-0360: заменить stub-вызовы реальными API-запросами.
@@ -161,12 +164,14 @@ function useMessagesStub(threadId, onFirstMessage) {
       });
 
       if (r.status === 503) {
-        // LLM не настроен — честный 503.
+        // LLM недоступен — честный 503. T-0573 (review R-1): текст сервера
+        // теперь в каноническом envelope d.error.message (LLM_UNAVAILABLE, с
+        // /llm-connections); плоское d.message — legacy-совместимость.
         const d = await r.json().catch(() => ({}));
         const assistantMsg = {
           id: `msg-dormant-${Date.now()}`,
           role: 'assistant',
-          text: d.message ?? 'LLM не настроен — настройте BYO-ключ для активации ассистента.',
+          text: assistantErrorText(d, 'LLM не настроен — настройте BYO-ключ для активации ассистента.'),
           ts: new Date().toISOString(),
           streaming_done: true,
         };
@@ -175,8 +180,13 @@ function useMessagesStub(threadId, onFirstMessage) {
       }
 
       if (!r.ok) {
-        const msg = await r.text().catch(() => `HTTP ${r.status}`);
-        throw new Error(msg);
+        // T-0573 (review R-1, соседняя точка потребления): 4xx/5xx тоже несут
+        // канонический envelope (router.ts sendErrorEnvelope) — показываем
+        // message из него, а не сырой JSON-текст целиком.
+        const raw = await r.text().catch(() => '');
+        let parsed = null;
+        try { parsed = JSON.parse(raw); } catch { /* не-JSON тело — показываем как есть */ }
+        throw new Error(assistantErrorText(parsed, raw || `HTTP ${r.status}`));
       }
 
       const assistantMsg = await r.json();
