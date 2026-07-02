@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0593",
+  "status": "pr_open",
+  "branch": "task/T-0593-ff13-coalesce",
+  "pr_url": "local:task/T-0593-ff13-coalesce",
+  "base_ref": "74b9eb0",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true,
+    "db": true
+  },
+  "test_counts": {
+    "total_passed": 4,
+    "ff13_carve_out": 1,
+    "ff_rp_14_force_test": 1,
+    "bundle_coherence_total": 2
+  },
+  "files_changed": [
+    "ci/checks/db/bundle-coherence.test.ts"
+  ],
+  "deliverables": {
+    "predicate_fix": "ci/checks/db/bundle-coherence.test.ts · HANGING_RECORD_GRANTS_SQL — wrapped carve-out AND-condition in NOT COALESCE(..., false) to handle NULL-propagation when scope keys are absent (e.g. incomplete scope missing nodeId); NULL→false, NOT false→true, hanging grant is caught",
+    "planted_test_case": "ci/checks/db/bundle-coherence.test.ts · FF-RP-14 case (d) — planted NULL-facet record-grant with INCOMPLETE scope ('{\"kind\":\"node\"}' without nodeId, hierarchy, nodeLevel); must be caught by amended predicate; demonstrates COALESCE fallback correctness",
+    "force_test_proves": "FF-RP-14 (T-0570 ADR §10.3 p.3) now proves the invariant's force in BOTH directions via 4 planted assertions: (a) NON-sentinel scope caught, (b) non-read op caught, (d) INCOMPLETE scope caught via COALESCE, (c) exact sentinel read shape exempt; ROLLBACK guarantees zero DB residue"
+  },
+  "fitness_checks": {
+    "FF-13": "no grant with resource_type='record' and null resource_facet outside the sanctioned default-read shape (T-0570 ADR §10 carve-out); zero rows on seeded data",
+    "FF-RP-14": "carve-out precision force-test (ROLLBACK): planted (a) NON-sentinel NULL-facet read-grant CAUGHT, (b) non-read op on sentinel NULL-facet CAUGHT, (d) INCOMPLETE scope NULL-facet CAUGHT via COALESCE fallback, (c) exact sentinel+read+NULL-facet EXEMPT; all 4 planted rows inspected inline",
+    "FF-RP-15": "read-pdp-sentinel-coherence.sh — RESOURCE_ROOT_NODE_ID literal identical across: src/core/read-visibility.ts (source of truth) / migrations/117_default_read_grant_backfill.sql / ci/checks/db/bundle-coherence.test.ts (FF-13 carve-out); no predicate literal drift"
+  },
+  "validation": {
+    "manual_qa": "Executed live postgres:16 via docker compose (port 54432, npm install + migrate + fitness:db:setup-template); vitest run --dir ci/checks/db bundle-coherence returned 3 tests passed (FF-12, FF-13, FF-RP-14 with 4 expect-ons); sentinel coherence gard green",
+    "bug_proof": "Demonstrated NULL-propagation bug in original predicate via psql: BROKEN predicate returned ZERO rows (planted hanging-grant missed), FIXED predicate returned ONE row (hanging-grant caught); proves case (d) uskol_avoided before fix",
+    "diff": "Two-line change to HANGING_RECORD_GRANTS_SQL: line 105 'AND NOT (' → 'AND NOT COALESCE(', line 111 added fallback 'false' parameter; wraps 5-condition AND-block in COALESCE(result, false); semantically: NULL from AND → false by COALESCE → NOT false = true → WHERE filter matches row"
+  },
+  "non_frozen_check_modifications": [],
+  "frozen_check_sanctions": [],
+  "deviations_from_adr": [],
+  "no_merge_to_main": false,
+  "no_github_pr": false,
+  "no_foreign_worktree_edits": false,
+  "friction_events": [],
+  "notes": "Residual fix from T-0570 ADR §10 (T-0570-r iteration 2): NULL-facet carve-out for default-open READ grant was structurally sound but syntactically blinded by NULL-propagation in the AND-predicate. When scope JSON lacked keys (e.g. scope='{\"kind\":\"node\"}' without nodeId), jsonb extraction returned NULL, AND-condition cascaded to NULL, NOT(NULL)=NULL, WHERE filtered the hanging row out. COALESCE(condition, false) forces NULL→false before NOT, recovering the intended carve-out precision. FF-RP-14 force-test upgraded to catch the NULL-propagation edge case via planted case (d): inline assertion proves the fix works and the carve-out remains tight (exempt only the exact sentinel shape). CI integration: sentry check read-pdp-sentinel-coherence.sh remains green; RESOURCE_ROOT_NODE_ID literal unchanged; no drift."
+}

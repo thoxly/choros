@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0593",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 18,
+    "passed": 18,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "FF-13 / AC-13 (T-0082, amended T-0570 ADR SS10)", "test": "ci/checks/db/bundle-coherence.test.ts :: FF-13 -- 0 hanging record-grants on seeded data (carve-out unaffected by COALESCE wrap)", "result": "pass"},
+    {"ac": "FF-RP-14 case (a) NON-sentinel scope caught", "test": "ci/checks/db/bundle-coherence.test.ts :: FF-RP-14 expect(ids).toContain(badScopeId)", "result": "pass"},
+    {"ac": "FF-RP-14 case (b) non-read op caught", "test": "ci/checks/db/bundle-coherence.test.ts :: FF-RP-14 expect(ids).toContain(badOpId)", "result": "pass"},
+    {"ac": "FF-RP-14 case (c) exact sentinel read shape exempt", "test": "ci/checks/db/bundle-coherence.test.ts :: FF-RP-14 expect(ids).not.toContain(exemptId)", "result": "pass"},
+    {"ac": "FF-RP-14 case (d) planted INCOMPLETE-scope NULL-propagation caught via COALESCE (new)", "test": "ci/checks/db/bundle-coherence.test.ts :: FF-RP-14 expect(ids).toContain(incompleteScopeId)", "result": "pass"},
+    {"ac": "FF-RP-15 sentinel-literal coherence (unaffected by diff, re-verified)", "test": "ci/checks/read-pdp-sentinel-coherence.sh + --self-test", "result": "pass"},
+    {"ac": "FF-RP-1/FF-RP-2/FF-RP-3/FF-RP-5/FF-RP-12 (adjacent READ-PDP invariants, unaffected regression check)", "test": "ci/checks/db/records-read-pdp.db.test.ts (4 tests)", "result": "pass"},
+    {"ac": "RP-1..RP-11 (unit-level READ-PDP composition, unaffected regression check)", "test": "src/__tests__/records-read-pdp.test.ts (11 tests)", "result": "pass"}
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "planted_case_regression_check": {
+    "description": "Anti-false-pass verification (mandatory for this judge pass): temporarily reverted ONLY the SQL predicate in HANGING_RECORD_GRANTS_SQL from 'AND NOT COALESCE((...), false)' back to the pre-fix 'AND NOT (...)' form, leaving the planted case (d) test code (assertions + INSERT) completely untouched, then re-ran FF-RP-14 against the same live Postgres instance.",
+    "revert_method": "Edit tool surgical revert of ci/checks/db/bundle-coherence.test.ts lines 105-111 only (removed 'COALESCE(' wrapper + trailing comma + 'false' fallback arg, restored original 'NOT (...)' form); verified via git diff --stat that exactly 1 file / 5 lines changed before restoring.",
+    "reverted_fix": true,
+    "planted_case_d_result": "failed_as_expected",
+    "failure_detail": "AssertionError at bundle-coherence.test.ts:236 -- \"FF-RP-14: NULL-facet record-grant with an INCOMPLETE scope (missing nodeId) must be caught by COALESCE fallback (NULL-propagation fix): expected [ ...(2) ] to include '<incompleteScopeId>'\". Cases (a) and (b) in the same FF-RP-14 test were unaffected (2 passed assertions before the failing one), and FF-12/FF-13 (separate `it` blocks) remained green -- confirms the regression is isolated to exactly the NULL-propagation edge the fix targets, not a broad breakage.",
+    "conclusion": "Confirmed NOT a false-positive placebo test: the planted case (d) assertion is a real tripwire that goes red in the absence of the COALESCE fix and green with it. This is the primary evidence that the fix does what it claims.",
+    "restore_method": "git checkout -- ci/checks/db/bundle-coherence.test.ts",
+    "post_restore_verification": "git status showed clean working tree; git diff --stat showed 0 files changed; full bundle-coherence.test.ts suite re-run immediately after restore -- 3/3 tests passed again (FF-12, FF-13, FF-RP-14 all green)."
+  },
+  "notes": {
+    "environment": "Isolated, purpose-built postgres:16 container (docker run --name t-0593-judge -p 5433:5432, POSTGRES_DB=choros/POSTGRES_USER=choros_migrator/POSTGRES_PASSWORD=choros_dev_pw), independent from any existing dev stack (t-0595-postgres-1 from an unrelated task was left untouched). DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:5433/choros. All 105 migration files (through 119_process_app_binding_target_registry_slug) applied cleanly via `npm run migrate`; template built via `npx tsx scripts/db-setup-template.ts`. Container removed after the full test run (`docker rm -f t-0593-judge`).",
+    "runs_performed": [
+      "npx vitest run --dir ci/checks/db --no-file-parallelism bundle-coherence --reporter=verbose : 1 file passed, 3 tests passed (FF-12 / AC-12, FF-13 / AC-13, FF-RP-14) -- FF-RP-14 is a single `it()` block containing 4 expect() assertions covering planted cases (a)/(b)/(c)/(d), matching the pr-handoff's claimed 4-assertion count.",
+      "bash ci/checks/read-pdp-sentinel-coherence.sh : PASS (RESOURCE_ROOT_NODE_ID literal coherent across read-visibility.ts / migration 117 / bundle-coherence.test.ts carve-out) -- confirms the sentinel literal is byte-unchanged by this diff.",
+      "bash ci/checks/read-pdp-sentinel-coherence.sh --self-test : PASS (good fixture clean rc=0, drifted-literal fixture flagged rc=1).",
+      "npx vitest run --dir ci/checks/db --no-file-parallelism records-read-pdp --reporter=verbose : 1 file passed, 4 tests passed (FF-RP-1/FF-RP-2, FF-RP-3, FF-RP-5, FF-RP-12) -- adjacent READ-PDP DB invariants unaffected by this diff, run as a broader-than-case regression check.",
+      "npx vitest run src/__tests__/records-read-pdp.test.ts --reporter=verbose : 11 tests passed (RP-1..RP-11) -- unit-level READ-PDP composition unaffected by this diff.",
+      "Anti-false-pass planted-case regression check: see planted_case_regression_check above (case (d) fails red without the fix, passes green with it; working tree restored clean)."
+    ],
+    "records_read_pdp_db_role_clarified": "records-read-pdp.db is NOT a fixture/database file, it is a live-Postgres test suite: ci/checks/db/records-read-pdp.db.test.ts (the '.db.' infix is this project's naming convention for tests requiring a live database connection, distinct from src/__tests__/records-read-pdp.test.ts which is a pure in-memory unit suite). No separate fixture artifact named records-read-pdp.db was found in the repo.",
+    "test_counts_reconciliation": "docs/handoff/T-0593.pr-handoff.json claims test_counts.total_passed=4 / bundle_coherence_total=2 (this appears to undercount: FF-12 is a pre-existing test in the same file not newly touched by this diff, and the handoff's own text elsewhere says '3 tests passed (FF-12, FF-13, FF-RP-14 with 4 expect-ons)', which matches what this judge observed: 3 `it()` blocks / 4 assertions inside FF-RP-14. The total_passed:4/bundle_coherence_total:2 fields in the handoff's structured test_counts block look like a minor internal inconsistency in the handoff's own bookkeeping (likely counting only the two blocks this task touched, FF-13 body + FF-RP-14, and conflating assertion-count with test-count) -- not a correctness issue, since the prose fields in the same document and this judge's independent live run agree on the real numbers (3 tests / 4 assertions in FF-RP-14). Flagged for awareness; not a blocking finding.",
+    "sentinel_and_scope_confirmation": "FF-RP-15 sentinel literal ('00000000-0000-0000-0000-0000000000r0') confirmed untouched by this diff via git diff inspection and a fresh PASS of read-pdp-sentinel-coherence.sh; SS10 sanctioned-comment block confirmed intact (no lines in the comment range 83-99 appear in the diff hunks)."
+  }
+}
