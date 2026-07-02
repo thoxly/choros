@@ -1,0 +1,135 @@
+{
+  "task_id": "T-0599",
+  "verdict": "pass",
+  "deterministic": {
+    "root_vitest": {"total": 4901, "passed": 4891, "skipped": 10, "failed": 0, "files": "254 passed | 2 skipped (256)", "exit": 0},
+    "web_vitest": {"total": 1604, "passed": 1604, "skipped": 0, "failed": 0, "files": "59 passed (59)", "exit": 0},
+    "db_fitness_live_pg": {"file": "ci/checks/db/assistant-llm-binding.test.ts", "passed": 6, "failed": 0, "exit": 0, "_note": "живой Postgres (docker compose -p t-0599-judge, DATABASE_URL localhost:55432). 6/6 поимённо: 3f-bis dormant, FF-3 list+bind, FF-4 loadTenantLlmConfig, T-0599 FF-2 (llm_bound:false до bind), T-0599 FF-1 (llm_bound:true после bind через llm_connection.secret_handle, inline-колонка NULL), FF-7 403 non-privileged."},
+    "tsc": {"result": "pass", "exit": 0, "_note": "npx tsc --noEmit — 0 ошибок"},
+    "eslint_src": {"result": "pass", "errors": 0, "warnings": 36, "_note": "0 errors; 36 pre-existing no-console warnings в НЕсвязанных server-файлах (agent-dispatch-loop, timer-firing-loop и др.), НЕ в agents-list.ts"},
+    "_note": "Все лейны перегнаны судьёй-тестером НЕЗАВИСИМО с чистого запуска (не доверие handoff-числам). Числа совпали с pr-handoff (root 4891, web 1604, DB 6/6). Живой PG поднят под dedicated проектом t-0599-judge и СНЕСЁН с volume (docker compose down -v) по завершении — порт 55432 закрыт, контейнер удалён."
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1 (GET /api/agents → llm_bound:true для assistant, привязанного через llm_connection.secret_handle, inline NULL) — fitness",
+      "test": "ci/checks/db/assistant-llm-binding.test.ts :: 'T-0599 FF-1 (AC-1): after binding to a connection WITH a secret_handle, GET /api/agents reports llm_bound:true (not the stale inline column)' — ЖИВОЙ PG. Тест: registerOne → POST /api/llm-connections (anthropic) → UPDATE llm_connection SET secret_handle напрямую (путь /llm-connections key-bind) → PUT /api/agents/:id/llm-connection (200) → проверка что agent_card.llm_secret_handle ОСТАЛСЯ NULL → GET /api/agents → afterAssistant.llm_bound === true. Доказывает сигнал идёт из JOIN на llm_connection, НЕ из побочной записи в устаревшую inline-колонку. Перегнан судьёй — passed.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2 (GET /api/agents → llm_bound:false без привязки) — fitness",
+      "test": "ci/checks/db/assistant-llm-binding.test.ts :: 'T-0599 FF-2 (AC-2): before any bind, GET /api/agents reports llm_bound:false for the assistant' — ЖИВОЙ PG. registerOne → GET /api/agents → assistant по slug='assistant-agent' → llm_bound === false. Перегнан — passed.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3 (serializeAgent/llm_bound 4 комбинации null/non-null) — test",
+      "test": "src/__tests__/agents-list.test.ts :: describe('T-0599 llm_bound honesty — 4 combinations') — 4 it(): (conn non-null, inline null)→true (T-0498 путь); (conn null, inline non-null)→true (legacy); (оба non-null)→conn wins per COALESCE→true; (оба null)→false. Моделирует COALESCE(connSecret, inlineSecret) через ?? (зеркало SQL) и проверяет результирующий serializeAgent().llm_bound. Файл 9/9 (root vitest). Оговорка: unit проверяет РЕШЕНИЕ serializeAgent над COALESCE-значением, сам SQL-JOIN доказан отдельно живым PG (FF-1/FF-2) — корректное разделение уровней.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4 (баннер не рендерится до разрешения запроса) — test",
+      "test": "web/src/screens/__tests__/screen-assistant.llm-banner.test.js :: 'the hook starts in loading:true, llmBound:null' + 'showLlmBanner requires BOTH loading finished AND llmBound proven false'. Source-presence lock на предикате showLlmBanner = !llmStatusLoading && llmBound===false. Оговорка (см. review F-3): source-presence, не behavioral mount (проектная конвенция экрана). web vitest — passed.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5 (llm_bound:false → баннер warning-тон, без жаргона) — test",
+      "test": "llm-banner.test.js :: 'the banner uses tone=\"warning\" on the Notice kit component' + 'the visible banner text contains no dev-jargon denylist tokens' (проверяет отсутствие LLM_NOT_CONFIGURED/OpenAILlmPort/secretHandle/llm_bound/llm_connection_id в тексте баннера). Плюс ux-g5 0 находок в screen-assistant.jsx. passed.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6 (admin → кнопка → navigate('/llm-connections')) — test",
+      "test": "llm-banner.test.js :: 'AssistantLlmBanner reads admin status from getNavCapabilities()' + 'isAdmin mirrors isGenesisOwner || zones.includes(admin)' + 'deep-link button navigates to /llm-connections rendered ONLY when isAdmin'. Судья дополнительно доказал предикат-идентичность серверу (org.ts:379 === assistant.ts:1184) — см. review role_gap. passed.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7 (не-admin → без кнопки, текст к администратору, без голого пути) — test",
+      "test": "llm-banner.test.js :: 'non-admin text redirects to administrator without bare /llm-connections path' (извлекает non-admin ветку тернара, проверяет 'администратор' присутствует И '/llm-connections' отсутствует в non-admin строке). passed.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8 (llm_bound:true → баннер не рендерится) — test",
+      "test": "llm-banner.test.js :: showLlmBanner требует llmBound===false строго; llm_bound:true (или null) не проходит. Source-presence на предикате. passed.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9 (503-путь T-0573/T-0595 не регрессирует) — test",
+      "test": "web/src/screens/__tests__/screen-assistant.error-envelope.test.js — 12/12 НЕИЗМЕНЁН диффом (git diff dev...HEAD не содержит его). Плюс llm-banner.test.js регресс-guard: '503 branch and deepLinks render block still present verbatim' (r.status===503, deepLinks.map, navigate(dl.path)). Плюс assistant-llm-message-jargon.sh PASS. web vitest — оба файла passed.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10 (npm run ci root, web vitest, tsc, eslint src) — fitness",
+      "test": "tsc --noEmit exit 0; eslint src 0 errors; root vitest 4891 passed exit 0; web vitest 1604 passed exit 0. Все перегнаны судьёй.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11 (ux-g2/g5/g6) — fitness",
+      "test": "ux-g2-theme-pairing.sh PASS (оба token-source); ux-g6-no-new-hardcode.sh PASS даже в --required (0 находок); ux-g5-jargon-denylist.sh 28 всего/0 в T-0599 продуктовых файлах (все находки T-id-in-describe в .test.jsx, baseline не изменён).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12 (Notice только --chs-* токены, экспортирован, переиспользован) — test",
+      "test": "llm-banner.test.js :: 'Notice defined and exported in components.jsx' + 'Notice only uses --chs-* tokens (no hardcoded colors/inline style)' + 'screen-assistant.jsx imports Notice from shared kit'. Плюс ux-g6 0 hardcode на .chs-notice*/.chs-asst__llm-banner. 8 тон-токенов в обеих темах (grep tokens.css). passed.",
+      "result": "pass"
+    }
+  ],
+  "adversarial": [
+    {
+      "probe": "Тенант с ассистентом, привязанным ЧЕРЕЗ llm_connection (новый путь) → llm_bound=true в СЫРОМ ответе /api/agents",
+      "result": "pass",
+      "note": "ЖИВОЙ PG (FF-1): секрет привязан на llm_connection.secret_handle (не на agent_card), PUT /api/agents/:id/llm-connection связывает профиль, GET /api/agents в сыром HTTP-теле возвращает llm_bound:true для записи assistant-agent. Тест ЯВНО перепроверяет что agent_card.llm_secret_handle остался NULL — доказывает сигнал из JOIN, не из записи в устаревшую колонку. Это точный adversarial-сценарий задания (а)."
+    },
+    {
+      "probe": "Непривязанный ассистент → llm_bound=false + баннер-условие",
+      "result": "pass",
+      "note": "ЖИВОЙ PG (FF-2): без bind → llm_bound:false. Клиентский предикат showLlmBanner = !loading && llmBound===false → баннер показывается ровно на этом факте. Adversarial-сценарий задания (б)."
+    },
+    {
+      "probe": "RLS/тенант-изоляция: JOIN на llm_connection (RLS-таблица) не протекает через тенант-границу",
+      "result": "pass",
+      "note": "ЖИВОЙ PG: cross-tenant/isolation DB-тесты (фильтр 'GET /api/agents', 4 файла, 11/11) + agents_list.test.ts 6/6 — JOIN внутри withTenantTx (GUC choros.tenant_id), llm_connection FORCE RLS с политикой tenant_id=current_setting (migration 094:66-79), plus явный lc.tenant_id=ac.tenant_id в ON. Двойная защита. Листинг не сломан, чужие строки не притянуты."
+    },
+    {
+      "probe": "Admin-семантика: рассинхрон клиентский isGenesisOwner||zones.includes(admin) vs серверный T-0595 isGenesisOwner||adminGrants>0",
+      "result": "pass",
+      "note": "СТАТИЧЕСКИ доказано отсутствие рассинхрона: navCaps.zones заполняется сервером (org.ts:379: isGenesisOwner||adminGrants.length>0 → push 'admin') — ТОТ ЖЕ предикат, что T-0595 deep-link (assistant.ts:1184). Клиентский предикат сворачивается в isGenesisOwner||adminGrants>0. grant-admin не-владелец: adminGrants>0 → zones has 'admin' → кнопка показана, консистентно с honest-503. Fail-closed: navCaps===null → isAdmin=false → без кнопки, текст к администратору."
+    },
+    {
+      "probe": "loading/unknown fail-quiet: ошибка запроса не фабрикует ложную тревогу",
+      "result": "pass",
+      "note": ".catch → llmBound:null (не false); запись-не-найдена → null; showLlmBanner требует ===false строго. Сетевая ошибка → баннер НЕ показывается (не ложное 'точно нет ключа'). llm-banner.test.js локирует .catch(()=>setState({loading:false,llmBound:null}))."
+    },
+    {
+      "probe": "Потребители llm_bound не регрессируют от изменившегося значения",
+      "result": "pass",
+      "note": "screen-agents.jsx (Tooltip+StatusChip) читает llm_bound как boolean, тесты не проверяют конкретное значение (screen-agents.test.jsx 14/14 green, структурные) — становится точнее. resolveAssistantBinding (T-0574) НЕ читает llm_bound вообще (читает id + llm_connection_id + agent_type) — семантически не затронут. Совместимость полная."
+    },
+    {
+      "probe": "anti-case-lock хвост (D-064) / mutation-sniff на регресс-замках",
+      "result": "pass",
+      "note": "ux-гейты rights-изоляция вне периметра (T-0599 не трогает write-core/rights). FF-1 несёт встроенный anti-case-lock: проверка agent_card.llm_secret_handle IS NULL ПОСЛЕ bind — если бы кодер жульнически писал в inline-колонку для прохождения теста, этот assert поймал бы (сигнал обязан идти из JOIN). Тест не может быть удовлетворён побочной записью в устаревшую поверхность."
+    }
+  ],
+  "failures": [],
+  "notes": {
+    "coverage_gaps_found": "None по автотестам. Один manual-only разрыв, вне тестового тира по конвенции проекта (тот же, что T-0597): LIVE_PROOF real-render/real-click баннера на живом стенде в обеих темах — владелец видит амбер-плашку 'Ассистент пока не может отвечать' на нерабочем ассистенте, кликает «Открыть LLM-соединения», привязывает ключ на /llm-connections, возвращается → баннер исчезает on-focus (F7). Не покрываем в vitest 'node' без DOM (source-presence конвенция экрана). Доедет LIVE_PROOF-ом (D-064, manual). Все AC с verifiable_as=test/fitness покрыты автоматически и перегнаны независимо.",
+    "test_convention_caveat": "Клиентский тест screen-assistant.llm-banner.test.js — source-presence (regex по shipped-коду), не behavioral mount. Проектная конвенция этого экрана (совпадает с screen-assistant.error-envelope.test.js — vitest node без jsdom, mount-харнесс не существует). Regex-локи строги для тривиального клиентского предиката (showLlmBanner, admin-тернар, focus-listener, текст), но НЕ исполняют рендер. Реальное поведение обеспечено на правильных уровнях: серверная честность llm_bound доказана ЖИВЫМ PG (FF-1/FF-2), клиентский предикат тривиален и статически проверяем. Дыры покрытия нет; real-render — LIVE_PROOF (manual).",
+    "anti_false_pass_checks_performed": [
+      "Не доверял заявленным counts — перегнал полный root vitest (4891/4901), web vitest (1604/1604), живой PG DB-лейн (6/6) с чистого запуска; совпадение с pr-handoff подтверждено.",
+      "Поднял РЕАЛЬНЫЙ Postgres (docker compose -p t-0599-judge, migrate+setup-template) — FF-1/FF-2 не skip'нуты (LIVE gate = DATABASE_URL установлен), поимённо verbose-подтверждены как passed, не downed/skipped.",
+      "Проверил КЛЮЧЕВОЙ anti-case в FF-1: тест перепроверяет agent_card.llm_secret_handle IS NULL после bind — доказывает, что llm_bound:true приходит из JOIN на llm_connection, а не из жульнической записи в устаревшую inline-колонку. Тест не удовлетворяется побочным эффектом.",
+      "Проверил предикат-идентичность (п.1а задания): agents-list.ts COALESCE(lc.secret_handle, ac.llm_secret_handle) === agent-provision.ts:213 readConfiguredAgentLlmConfig — байт-в-байт тот же JOIN+COALESCE, что реальный рантайм-резолвер.",
+      "Проверил RLS (п.1б) кодом (migration 094 FORCE RLS + tenant-policy) И живым PG (cross-tenant тесты 11/11) — JOIN не протекает.",
+      "Проверил потребителей llm_bound (п.1в) grep'ом: screen-agents.jsx (не тестирует значение), resolveAssistantBinding/T-0574 (не читает llm_bound вовсе) — регресса нет.",
+      "Проверил admin-рассинхрон (п.4): клиентский предикат = серверный nav-capabilities (org.ts:379) = серверный T-0595 (assistant.ts:1184) — свёрнуто идентичны; fail-closed при navCaps=null.",
+      "ux-g6 в REQUIRED-режиме (строже заявленного informational) — 0 находок.",
+      "Выполнил ux-g5-фильтр по T-0599 продуктовым файлам — 0 находок; все 28 baseline-находок — T-id-in-describe в .test.jsx.",
+      "eslint src — 0 errors (36 no-console warnings pre-existing, не в agents-list.ts); tsc exit 0.",
+      "Снёс живой PG с volume по завершении (docker compose -p t-0599-judge down -v) — порт 55432 закрыт, контейнер/volume удалены."
+    ],
+    "residual_findings_nonblocking": [
+      "F-1 (nit, review): два экрана идентифицируют ассистента разными дискриминаторами (slug T-0599 vs agent_type T-0574) — сходятся на одной строке (migration 115/118 сеют оба), не баг; спека §1 неточна ('agent_type не бэкфиллился' — на деле бэкфиллится). Follow-up: унифицировать helper + поправить спеку.",
+      "F-2 (info, review): GET /api/agents на каждый маунт+focus чуть избыточен (отдаёт всех агентов ради одной записи) — приемлемо на масштабе соло-продукта, reuse-эндпойнта обоснован ADR.",
+      "F-3 (info, review): клиентский тест source-presence, не behavioral mount — проектная конвенция экрана, дыры покрытия нет, real-render = LIVE_PROOF manual.",
+      "F-1/F-2 (info, ux): формулировка баннера на грани избыточности (симптом+причина) — легитимная пара; персистентный неустранимый баннер для не-админа честен, но держать в поле зрения на будущее."
+    ]
+  }
+}

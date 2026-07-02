@@ -25,6 +25,19 @@
  * llm_secret_handle is read solely to compute a boolean `llm_bound` and NEVER
  * appears in any serialized field. The redacted-summary surface is the dedicated
  * GET /api/agents/:id/secret-handle/status endpoint, not this list.
+ *
+ * T-0599 (honesty fix): `llm_bound` used to read ONLY the DEPRECATED inline
+ * `agent_card.llm_secret_handle` column (migration 032), which is NULL by
+ * design for any agent bound via the newer named-connection profile
+ * (`agent_card.llm_connection_id`, migration 094/T-0498 — the path the
+ * `/llm-connections` screen and tenant-zero backfill migration 118 actually
+ * use). The REAL runtime resolver that the LLM port factory relies on
+ * (`src/db/agent-provision.ts::readConfiguredAgentLlmConfig`) LEFT JOINs
+ * `choros.llm_connection` and takes `COALESCE(lc.secret_handle,
+ * ac.llm_secret_handle)`. `listAgentsTx` below now does the SAME join +
+ * COALESCE, so `llm_bound` reflects the SAME ground truth the real LLM call
+ * uses — one source of truth, not a second "real" field bolted on next to a
+ * stale one.
  */
 
 import pg from "pg";
@@ -222,6 +235,14 @@ export function serializeAgent(row: AgentListRow): AgentPublic {
  * serializer falls back to kc_client_id. Reads llm_secret_handle ONLY to compute
  * llm_bound; the value never escapes serializeAgent.
  *
+ * T-0599: ALSO LEFT JOINs choros.llm_connection (migration 094) on
+ * ac.llm_connection_id and resolves llm_endpoint/llm_model/llm_secret_handle via
+ * COALESCE(connection, inline) — the SAME resolution order as the real runtime
+ * config reader (src/db/agent-provision.ts::readConfiguredAgentLlmConfig). An
+ * agent bound through the named-connection profile (the current /llm-connections
+ * path, T-0498) now reports its TRUE bound state instead of always reading NULL
+ * from the deprecated inline column.
+ *
  * The optional `agentId` filter matches EITHER the agent's employee_id (workforce,
  * the historical addressing) OR the surrogate agent_card id (org-less) — so
  * GET /api/agents/:id resolves both addressing schemes.
@@ -239,15 +260,17 @@ async function listAgentsTx(
               e.slug           AS slug,
               e.display_name   AS display_name,
               ac.kc_client_id  AS kc_client_id,
-              ac.llm_endpoint  AS llm_endpoint,
-              ac.llm_model     AS llm_model,
-              ac.llm_secret_handle AS llm_secret_handle,
+              COALESCE(lc.endpoint, ac.llm_endpoint)           AS llm_endpoint,
+              COALESCE(lc.model, ac.llm_model)                 AS llm_model,
+              COALESCE(lc.secret_handle, ac.llm_secret_handle) AS llm_secret_handle,
               ac.llm_connection_id AS llm_connection_id,
               p.title          AS position_title,
               d.display_name   AS department_name
          FROM choros.agent_card ac
          LEFT JOIN choros.employee e
               ON e.tenant_id = ac.tenant_id AND e.id = ac.employee_id
+         LEFT JOIN choros.llm_connection lc
+              ON lc.tenant_id = ac.tenant_id AND lc.id = ac.llm_connection_id
          LEFT JOIN choros.position p
               ON p.tenant_id = e.tenant_id AND p.id = e.position_id
          LEFT JOIN choros.department d

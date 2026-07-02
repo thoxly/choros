@@ -291,6 +291,92 @@ describe.skipIf(!LIVE)('T-0574 — assistant-agent LLM binding (live Postgres)',
   });
 
   // -------------------------------------------------------------------------
+  // T-0599 FF-1/FF-2 (AC-1/AC-2) — GET /api/agents reports the assistant's
+  // llm_bound honestly for the CURRENT (named-connection) binding path.
+  //
+  // Before T-0599, listAgentsTx read ONLY the deprecated inline
+  // agent_card.llm_secret_handle column — which register.ts's 3f-bis seed
+  // (see the DORMANT test above) and the bind flow above BOTH leave NULL even
+  // after a successful llm_connection bind (the secret lives on
+  // llm_connection.secret_handle, not on agent_card). llm_bound would falsely
+  // report false even though the SAME resolver FF-4 just proved
+  // (loadTenantLlmConfig) sees a fully-configured LLM. This is the exact
+  // ground-truth signal the proactive assistant-screen banner (T-0599) relies
+  // on — it must match the REAL runtime resolution, not the stale column.
+  // -------------------------------------------------------------------------
+  it('T-0599 FF-2 (AC-2): before any bind, GET /api/agents reports llm_bound:false for the assistant', async () => {
+    const a = await registerOne('BannerUnbound');
+    try {
+      const listRes = await request(baseUrl, 'GET', '/api/agents', { 'x-dev-user': a.ownerSlug });
+      expect(listRes.statusCode).toBe(200);
+      const agents = (JSON.parse(listRes.body) as { agents: Array<Record<string, unknown>> }).agents;
+      const assistant = agents.find((ag) => ag.slug === 'assistant-agent');
+      expect(assistant, 'assistant-agent must be addressable by slug').toBeDefined();
+      expect(assistant!.llm_bound).toBe(false);
+    } finally {
+      await cleanup(a.tenantId);
+    }
+  });
+
+  it('T-0599 FF-1 (AC-1): after binding to a connection WITH a secret_handle, GET /api/agents reports llm_bound:true (not the stale inline column)', async () => {
+    const a = await registerOne('BannerBound');
+    try {
+      const listRes = await request(baseUrl, 'GET', '/api/agents', { 'x-dev-user': a.ownerSlug });
+      const agents = (JSON.parse(listRes.body) as { agents: Array<Record<string, unknown>> }).agents;
+      const assistantId = agents.find((ag) => ag.slug === 'assistant-agent')!.id as string;
+
+      const connRes = await request(baseUrl, 'POST', '/api/llm-connections', { 'x-dev-user': a.ownerSlug }, {
+        name: 'T-0599 banner-honesty profile',
+        provider: 'anthropic',
+        endpoint: 'https://api.anthropic.com/v1',
+        model: 'claude-3-5-sonnet-t0599',
+      });
+      const connId = (JSON.parse(connRes.body) as { id: string }).id;
+
+      // Bind the secret directly on the CONNECTION (not agent_card) — the
+      // actual /llm-connections key-bind path, same as FF-4 above.
+      await withClient(migratorUrl(), async (c) => {
+        await c.query('BEGIN');
+        await c.query(`SET LOCAL choros.tenant_id = '${a.tenantId}'`);
+        await c.query(
+          `UPDATE choros.llm_connection SET secret_handle = $2 WHERE tenant_id = $1 AND id = $3`,
+          [a.tenantId, 'vault://secret/t0599-banner-honesty', connId],
+        );
+        await c.query('COMMIT');
+      });
+
+      const bindRes = await request(
+        baseUrl, 'PUT', `/api/agents/${assistantId}/llm-connection`, { 'x-dev-user': a.ownerSlug },
+        { llm_connection_id: connId },
+      );
+      expect(bindRes.statusCode).toBe(200);
+
+      // Re-fetch the list: llm_bound must now be true, AND the underlying
+      // agent_card.llm_secret_handle column must STILL be NULL (proving the
+      // signal comes from the connection JOIN, not a side-effect write to the
+      // deprecated column).
+      const rawRow = await withClient(migratorUrl(), async (c) => {
+        await c.query('BEGIN');
+        await c.query(`SET LOCAL choros.tenant_id = '${a.tenantId}'`);
+        const { rows } = await c.query(
+          `SELECT llm_secret_handle FROM choros.agent_card WHERE tenant_id = $1 AND employee_id = $2`,
+          [a.tenantId, assistantId],
+        );
+        await c.query('COMMIT');
+        return rows[0] as { llm_secret_handle: string | null } | undefined;
+      });
+      expect(rawRow!.llm_secret_handle, 'inline column must remain untouched (NULL) — signal comes from the connection JOIN').toBeNull();
+
+      const afterRes = await request(baseUrl, 'GET', '/api/agents', { 'x-dev-user': a.ownerSlug });
+      const afterAgents = (JSON.parse(afterRes.body) as { agents: Array<Record<string, unknown>> }).agents;
+      const afterAssistant = afterAgents.find((ag) => ag.slug === 'assistant-agent');
+      expect(afterAssistant!.llm_bound).toBe(true);
+    } finally {
+      await cleanup(a.tenantId);
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // FF-7 (AC-10, N6) — fail-closed authz: a non-privileged member gets 403.
   // -------------------------------------------------------------------------
   it('FF-7: a non-privileged tenant member gets 403 ADMIN_GATE_REJECTED, not 500 / silent success', async () => {

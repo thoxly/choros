@@ -562,6 +562,33 @@
 .chs-toast__close:hover { background: var(--chs-color-hover); color: var(--chs-color-text); }
 .chs-toast__close:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
 
+/* ---------------- T-0599: Notice (персистентная плашка) ---------------- */
+/* В отличие от Toast — живёт в потоке экрана, нет auto-dismiss/close. Мягкий
+   -soft фон тона (не surface+border-left, как Toast) — читается как часть
+   контента экрана, не floating-уведомление. */
+.chs-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--chs-space-4);
+  width: 100%;
+  padding: var(--chs-space-5) var(--chs-space-6);
+  border-radius: var(--chs-radius-3);
+  border: 1px solid transparent;
+}
+.chs-notice--warning { background: var(--chs-color-warning-soft); border-color: var(--chs-color-warning); }
+.chs-notice--warning .chs-notice__icon { color: var(--chs-color-warning); }
+.chs-notice--error   { background: var(--chs-color-danger-soft);  border-color: var(--chs-color-danger); }
+.chs-notice--error   .chs-notice__icon { color: var(--chs-color-danger); }
+.chs-notice--success { background: var(--chs-color-success-soft); border-color: var(--chs-color-success); }
+.chs-notice--success .chs-notice__icon { color: var(--chs-color-success); }
+.chs-notice--info    { background: var(--chs-color-info-soft);    border-color: var(--chs-color-info); }
+.chs-notice--info    .chs-notice__icon { color: var(--chs-color-info); }
+.chs-notice__icon { flex: none; display: inline-flex; padding-top: 1px; }
+.chs-notice__body { flex: 1; min-width: 0; }
+.chs-notice__title { font-size: var(--chs-text-base); font-weight: var(--chs-weight-medium); color: var(--chs-color-text); }
+.chs-notice__msg { font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); line-height: var(--chs-leading-snug); }
+.chs-notice__action { flex: none; }
+
 /* ---------------- T-0547: Badge ---------------- */
 /* Inline-метка. Тон дублирует текстовое содержимое (§1.4.1). */
 .chs-badge {

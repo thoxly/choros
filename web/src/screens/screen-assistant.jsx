@@ -32,7 +32,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
-  Button, EmptyState, LoadingState, ErrorState, Skeleton, ConfirmDialog, KitIcon,
+  Button, EmptyState, LoadingState, ErrorState, Skeleton, ConfirmDialog, KitIcon, Notice,
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
@@ -44,6 +44,10 @@ import { parseRecordSchema } from './apps-schema.js';
 // T-0573 (review R-1): канонический envelope {error:{code,message}} — текст
 // ошибки теперь вложен в d.error.message (см. assistant-error-text.js).
 import { assistantErrorText } from './assistant-error-text.js';
+// T-0599: admin-статус для deep-link кнопки баннера — УЖЕ резолвлен
+// shell.jsx auth-bootstrap до монтирования этого экрана (module-level кэш,
+// синхронный геттер, без нового запроса).
+import { getNavCapabilities } from '../app-shell/active-tenant.js';
 
 /* ---------------------------------------------------------------------------
    TODO-SEAM T-0359/T-0360: заменить stub-вызовы реальными API-запросами.
@@ -241,6 +245,45 @@ function useBudgetStub(threadId) {
   }, [threadId]);
 
   return budget;
+}
+
+/**
+ * T-0599: proactive LLM-key status — reuses the EXISTING GET /api/agents
+ * (no admin gate, src/http/agents-list.ts) rather than a new endpoint. Finds
+ * the assistant-agent row by slug and reads its (now honestly-resolved,
+ * T-0599 server fix) `llm_bound`. `llmBound: null` covers BOTH honest
+ * "unknown" cases (network error, row not found) — the banner only shows on
+ * a PROVEN `false`, never on "we couldn't tell" (loading-honesty, no flash of
+ * a wrong state — F3/F5 of the spec).
+ *
+ * F7 (live banner): re-reads on mount AND on window focus — covers the
+ * practical scenario (bind a key on /llm-connections, come back to the
+ * assistant tab) without polling/realtime.
+ */
+function useAssistantLlmStatus() {
+  const [state, setState] = useState({ loading: true, llmBound: null });
+
+  const load = useCallback(() => {
+    setState((s) => ({ ...s, loading: true }));
+    fetch('/api/agents', { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => {
+        const agents = Array.isArray(d.agents) ? d.agents : [];
+        const assistant = agents.find((a) => a.slug === 'assistant-agent');
+        setState({ loading: false, llmBound: assistant ? Boolean(assistant.llm_bound) : null });
+      })
+      .catch(() => setState({ loading: false, llmBound: null }));
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [load]);
+
+  return state;
 }
 
 /* ---------------------------------------------------------------------------
@@ -987,6 +1030,50 @@ function ThreadView({ thread, messages, streaming, msgError, onSend, contextRef,
 }
 
 /**
+ * T-0599: проактивный баннер «ассистент пока не может отвечать» — ДО отправки
+ * сообщения (сегодня статус узнаётся только после честного 503, T-0573/T-0595).
+ * Рендерится РОДИТЕЛЕМ только когда `llmBound === false` (F4/F5/F8 спеки) —
+ * этот компонент сам ничего не решает про loading/unknown, только про
+ * admin/non-admin ветку кнопки.
+ *
+ * Admin-статус — синхронно из уже резолвленного клиентского кэша
+ * getNavCapabilities() (T-0539, заполняется shell.jsx auth-bootstrap ДО
+ * монтирования этого экрана) — ТОТ ЖЕ предикат, что решает видимость
+ * admin-зоны в сайдбаре (nav-config.js::projectZones). Кнопка — чистая
+ * клиентская навигация (navigate('/llm-connections')), не обходит серверный
+ * гейт T-0595 (тот управляет ДЕТАЛЯМИ honest-503 envelope на сервере).
+ *
+ * Текст зеркалит стиль ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN/_NON_ADMIN
+ * (src/core/assistant-messages.ts, T-0595) — web/ не импортирует src/
+ * (раздельные пакеты), поэтому текст держится в web-слое, но той же
+ * формулировкой: страница названа фактическим nav/h1-титулом «LLM-соединения»
+ * (nav-config.js:162), не-админ направляется к администратору без голого пути.
+ */
+function AssistantLlmBanner() {
+  const navigate = useNavigate();
+  const navCaps = getNavCapabilities();
+  const isAdmin = Boolean(navCaps && (navCaps.isGenesisOwner || (navCaps.zones || []).includes('admin')));
+
+  return (
+    <Notice
+      tone="warning"
+      title="Ассистент пока не может отвечать"
+      message={
+        isAdmin
+          ? 'Не подключён LLM-ключ. Подключите или проверьте ключ на странице «LLM-соединения».'
+          : 'Не подключён LLM-ключ. Обратитесь к администратору вашей организации, чтобы подключить ключ.'
+      }
+      action={isAdmin ? (
+        <Button variant="ghost" size="sm" onClick={() => navigate('/llm-connections')}>
+          Открыть LLM-соединения
+        </Button>
+      ) : undefined}
+      className="chs-asst__llm-banner"
+    />
+  );
+}
+
+/**
  * Заглушка «ни один тред не выбран» — правая панель пустая.
  */
 function NothingSelected({ onCreate }) {
@@ -1023,6 +1110,12 @@ export default function AssistantScreen() {
   const { push: pushToast } = useToastContext();
   const { threads, error: threadsError, load: loadThreads, createThread, patchThread, deleteThread } = useThreadsStub();
   const loading = threads === null;
+
+  // T-0599: проактивный баннер «LLM-ключ не подключён» — ДО отправки сообщения.
+  // Рендерится ТОЛЬКО когда loading завершился И llmBound доказанно false
+  // (F3/F5: не мигает до ответа, не показывается на честной неизвестности).
+  const { loading: llmStatusLoading, llmBound } = useAssistantLlmStatus();
+  const showLlmBanner = !llmStatusLoading && llmBound === false;
 
   // Активный тред — из URL-параметра или стейта
   const [activeThread, setActiveThread] = useState(null);
@@ -1184,6 +1277,9 @@ export default function AssistantScreen() {
 
       {/* Правая панель: тред или пустышка */}
       <section className="chs-asst__main" aria-label="Разговор с ассистентом">
+        {/* T-0599: проактивный баннер — над тредом, виден независимо от того,
+            выбран ли конкретный разговор (баннер про ассистента в целом). */}
+        {showLlmBanner && <AssistantLlmBanner />}
         {activeThread ? (
           <ThreadView
             thread={activeThread}

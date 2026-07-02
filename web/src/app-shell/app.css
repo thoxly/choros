@@ -989,6 +989,13 @@
   background: var(--chs-color-bg);
 }
 
+/* T-0599: проактивный баннер «LLM-ключ не подключён» — над тредом/пустышкой,
+   не скроллится вместе с сообщениями. */
+.chs-asst__llm-banner {
+  flex: none;
+  margin: var(--chs-space-4) var(--chs-space-4) 0;
+}
+
 .chs-asst__empty-pane {
   display: flex;
   align-items: center;
