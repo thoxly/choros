@@ -1,0 +1,12 @@
+{
+  "_comment": "T-0576 anti-case-lock.sh data-baseline (D-064 §5 full denylist). NOT code — a plain flat object of literal-key -> recorded code-only count (src/**/*.ts + web/src/**/*.{jsx,tsx}, excluding __tests__/.test.*, excluding comment lines; methodology mirrors detel-literal-baseline.sh). Semantics: 'erodes, does not grow' -- anti-case-lock.sh FAILs only when a count exceeds (not: differs from) its recorded value here. Any future task that reduces one of these counts is expected to ALSO lower the matching value here in its own diff (visible in code review, same transparency principle as frozen-sanctions.jsonl append-only). Recorded on T-0576's own HEAD (afa856b + this task's additions produce zero net new violations -- this task is CI-infrastructure only, it adds no case-specific literal beyond this baseline's own denylist keys, which are legitimate meta-strings, not hardcodes).",
+  "role-approver": 2,
+  "soglasovanie": 2,
+  "tel-approval": 1,
+  "telLinear": 8,
+  "e-larina": 2,
+  "e-orlov": 2,
+  "approvalRequired": 1,
+  "gw-approval-threshold": 1,
+  "aggregate": 19
+}

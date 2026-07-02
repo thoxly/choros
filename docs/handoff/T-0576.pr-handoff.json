@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0576",
+  "status": "pr_open",
+  "branch": "task/T-0576-anticase-ci",
+  "pr_url": "local:task/T-0576-anticase-ci",
+  "ci_local": {
+    "build": true,
+    "build_result": "npm run build (tsc + seed/tsconfig) green inside the full fitness chain run",
+    "lint": true,
+    "lint_result": "npx eslint src — 0 errors, 36 warnings (all pre-existing no-console/style warnings, rc=0)",
+    "types": true,
+    "types_result": "tsc --noEmit path exercised via npm run build (same tsc project); zero type errors",
+    "tests": true,
+    "tests_result": "npx vitest run — 254 files passed | 2 skipped (256); 4877 tests passed | 10 skipped (4887); exit 0. This task touches NO src/** code (ci/checks + docs + package.json only) — suite identical to base",
+    "fitness": true,
+    "fitness_result": "FULL npm run fitness chain green end-to-end (exit 0) at design commit fece4bb, INCLUDING the new tail links anti-case-lock.sh + --self-test. Notable: http-route-auth-coverage.sh now fully green (the T-0575 sanctioned known-red at FF-0328-3 is structurally gone after this task's FROZEN_FILES narrowing); frozen-checks-immutable.sh prints SANCTION+AUDIT [FF-FCI12] for this task's edit of the foreign check and passes; anti-case-lock.sh production run: Phase 1 all three delegates clean, Phase 2 all 8 denylist literals == baseline (aggregate 19 == 19); idempotency verified (two consecutive runs, byte-identical stdout). AFTER the review-fix commit (R-1/R-2/R-3, diff = own script + own spec docs + this handoff only, no other chain link affected): re-ran the changed tail link — anti-case-lock.sh production x2 (idempotent, exit 0, aggregate 19==19 with widened both-plane scope) + --self-test (now 5 assertions incl. the new eroded-to-zero fixture) + all three delegate --self-tests (unchanged files, still green)"
+  },
+  "review_fixes": [
+    "R-1 (blocker, fixed): count_literal()/read_baseline() grep pipelines died silently (rc=1 -> pipefail -> set -e) when a literal's count reached 0 — the exact eroded-to-zero end-state the gate exists to reward. Fixed by wrapping every grep stage in rc-tolerant subshells `(grep ... || true)` with an explicit empty->0 branch; zero now prints an explicit '<literal>: 0 (baseline N) OK (eroded)' PASS line. Reviewer's reproduction scenario re-run post-fix: temporarily renamed the sole gw-approval-threshold occurrence in src/core/dmn-gateway.ts -> gate PASS (rc=0) with 'gw-approval-threshold: 0 (baseline 1) OK (eroded)' + aggregate 18<19; file restored, git status clean. --self-test extended with two R-1 regression fixtures: (4) zero-occurrence literal returns '0' without killing the script; (5) full Phase-2 scan on an all-zero fixture tree PASSes and prints the eroded lines (Phase 2 extracted into run_denylist_scan() with re-pointable SRC_ROOT/WEB_ROOT/BASELINE_FILE globals to make this testable).",
+    "R-2 (nit, fixed): stale 7/18 numbers in spec.md §2 recon table and spec.contract.json (summary, AC-2, O3) corrected to 8/19 — the web/src/forms/FormBuilder.jsx:509 telLinear placeholder is now recorded in the SPEC recon table too, matching ADR §4 and the shipped anti-case-baseline.json (which were already correct).",
+    "R-3 (nit, fixed): all 8 denylist literals now scanned on BOTH planes (src/**/*.ts + web/src/**/*.{jsx,tsx}), not only telLinear — defense-in-depth against future web-side hardcodes. Verified live: baseline unchanged (the other 7 literals count 0 on the web plane; the sole approvalRequired web occurrence is a JSDoc comment line, filtered by the comment-strip methodology), production run still 19==19 green."
+  ],
+  "files_changed": [
+    "ci/checks/anti-case-lock.sh",
+    "ci/checks/data/anti-case-baseline.json",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "ci/checks/http-route-auth-coverage.sh",
+    "docs/adr/ADR-T0576-anticase-ci.md",
+    "docs/adr/T-0576.adr.contract.json",
+    "docs/specs/T-0576-anticase-ci.spec.md",
+    "docs/specs/T-0576.spec.contract.json",
+    "package.json"
+  ],
+  "deviations_from_adr": [
+    "SPEC+DESIGN+BUILD выполнены ОДНИМ агентом в одной сессии по санкции оркестратора (малая devops-задача): механизм построен и верифицирован живьём при написании ADR (два коммита — spec 733e120, design+build fece4bb), не разнесён на отдельный BUILD-прогон. ADR §5 фиксирует результаты живой верификации как часть DESIGN-артефакта.",
+    "Правка ЧУЖОГО чека ci/checks/http-route-auth-coverage.sh (владелец T-0328): FF-0328-3 FROZEN_FILES сужен до РОВНО src/http/secret-handle.ts (process-start.ts убран из byte-diff арма). САНКЦИОНИРОВАНО дважды: (1) существующая запись T-0575 в ci/checks/data/frozen-sanctions.jsonl явно называет T-0576 исполнителем этого сужения ('T-0576 will align FF-0328-3 §5 with the ADR §4.2 text'); (2) собственная founder-класс запись этой задачи (task=T-0576, file=ci/checks/http-route-auth-coverage.sh, decision=ADR-T0576-anticase-ci.md-§4-ff-0328-3-narrowing) добавлена append-only. frozen-checks-immutable.sh распознаёт санкцию (FF-FCI12 SANCTION+AUDIT строки) и проходит. FF-0328-1/2 армы и owner-header (строка 2 '# T-0328 ·') НЕ тронуты. Основание: ADR T-0328 §4.2 — process-start.ts contract-frozen (enforced start-route-isolation.sh FF-7-1..3), не byte-frozen (byte-freeze остаётся только на secret-handle.ts per §4.1)."
+  ],
+  "friction_events": [
+    "Worktree был provisioned без node_modules (0 записей) — первый полный npm run fitness прогон упал на npm run build (tsc: Cannot find @types/node). Исправлено npm ci --no-audit --no-fund в worktree; после установки полная цепь зелёная. DURABLE: свежий worktree Choros требует npm ci ДО npm run fitness (цепь содержит npm run build ~середине)."
+  ]
+}
