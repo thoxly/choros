@@ -216,14 +216,20 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== FF-FL-11: Existing postgres/keycloak blocks unmodified ==="
-# Compare against baseline commit f693923 (T-0061 BUILD fix — KC healthcheck changed from
-# curl to bash /dev/tcp with hardcoded container-internal port 9000; Flowable healthcheck
-# changed from --password= to URL-embedded basic-auth; both are authorized fixes for
-# pre-existing T-0054/T-0058 bugs, ported in-scope per orchestrator mandate).
+# Compare against baseline commit 06174c1 (T-0483 — engine self-heal). This baseline
+# supersedes f693923 (T-0061 KC/Flowable healthcheck fixes); it advances past two
+# further authorized, in-scope changes to the postgres/keycloak blocks that f693923
+# predated, so the freeze tracks the current sanctioned state:
+#   - T-0431 (2026-06-23): keycloak `init: true` (tini as PID 1) — reaps the zombie
+#     PIDs the CMD-SHELL healthcheck spawns; without it KC dies (~22h) and login goes
+#     down. f693923 predated this, producing a stale-guard FF-FL-11b false-positive.
+#   - T-0483 (2026-06-25): restart: unless-stopped on postgres + keycloak — self-heal
+#     parity with flowable + choros (root substrate must come back after a transient
+#     death). 06174c1 carries this line on every service incl. pg/keycloak.
 # Strategy: extract service blocks by AWK (no pyyaml needed) and diff.
 # A service block starts at "  <name>:" (2-space indent) and ends before the next
 # 2-space-indent service key or end of file.
-BASELINE_SHA="f693923"
+BASELINE_SHA="06174c1"
 
 extract_service_block() {
   local file_content="$1"
