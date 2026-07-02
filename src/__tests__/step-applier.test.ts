@@ -28,6 +28,7 @@ import {
   SOGLASOVANIE_SLUG,
   STEP_APPLIED_EVENT,
   SYSTEM_ACTOR,
+  StepTargetUnresolvedError,
   type ApplyStepResultArgs,
   type AppliedA,
   type Skipped,
@@ -316,7 +317,7 @@ describe("applyStepResult — fail-closed (FF-G3)", () => {
     ).rejects.toThrow(/unresolved/i);
   });
 
-  it("SA-9: no «Согласование» registry seeded for the app → throws", async () => {
+  it("SA-9: no «Согласование» registry seeded for the app → throws StepTargetUnresolvedError (T-0575 AC-7)", async () => {
     const { store } = makeOutboxSpy();
     const { client } = makeStubClient((sql, values) => {
       if (/FROM choros\.audit_event/i.test(sql) && !/INSERT/i.test(sql)) {
@@ -335,9 +336,58 @@ describe("applyStepResult — fail-closed (FF-G3)", () => {
       return [];
     });
 
+    // T-0575 [W1/деТЭЛ] BUG-017 (AC-7): the bare 500-worthy Error is now a
+    // TYPED, structured error — STEP_TARGET_UNRESOLVED, HTTP 422 — not a
+    // generic 500 with no diagnostic code (the BUG-017 "500 without a log"
+    // symptom). The tx ROLLBACK / fail-closed semantics are unchanged; only
+    // the error's shape/observability improved.
     await expect(
       applyStepResult(client, baseArgs({ stepClass: "A", outboxStore: store })),
-    ).rejects.toThrow(/has no.*soglasovanie/i);
+    ).rejects.toThrow(StepTargetUnresolvedError);
+    await expect(
+      applyStepResult(client, baseArgs({ stepClass: "A", outboxStore: store })),
+    ).rejects.toMatchObject({
+      statusCode: 422,
+      code: "STEP_TARGET_UNRESOLVED",
+    });
+  });
+
+  it("SA-10 (T-0575 FF-4/AC-6): target resolved from process_app_binding.target_registry_slug — ARBITRARY slug, not the ТЭЛ-named 'soglasovanie'", async () => {
+    const ARBITRARY_SLUG = "zakupki-rezultat";
+    const { store, enqueued } = makeOutboxSpy();
+    const { client, calls } = makeStubClient((sql, values) => {
+      if (/FROM choros\.audit_event/i.test(sql) && !/INSERT/i.test(sql)) {
+        return [auditStartedPayload()];
+      }
+      if (/FROM choros\.process_app_binding/i.test(sql)) {
+        // T-0575: binding row carries an EXPLICIT non-ТЭЛ target_registry_slug.
+        return [{ application_id: APPLICATION_ID, target_registry_slug: ARBITRARY_SLUG }];
+      }
+      if (/FROM choros\.registry_def/i.test(sql)) {
+        if (Array.isArray(values) && values.includes(ARBITRARY_SLUG)) {
+          return [{ id: APPROVALS_REGISTRY_ID, application_id: APPLICATION_ID }];
+        }
+        // Must NOT be resolved by the old ТЭЛ literal.
+        if (Array.isArray(values) && values.includes(SOGLASOVANIE_SLUG)) {
+          return [];
+        }
+        return [{ id: PRIMARY_REGISTRY_ID, slug: "purchases", display_name: "Заявки" }];
+      }
+      if (/FROM choros\.cross_app_ref/i.test(sql)) return [];
+      if (/INSERT INTO choros\.record/i.test(sql)) return [];
+      return [];
+    });
+
+    const result = await applyStepResult(client, baseArgs({ outboxStore: store }));
+
+    expect(result.kind).toBe("applied-A");
+    const applied = result as AppliedA;
+    const recordInsert = calls.find((c) => /INSERT INTO choros\.record/i.test(c.sql));
+    expect(recordInsert?.values).toContain(APPROVALS_REGISTRY_ID);
+    expect(enqueued).toHaveLength(1);
+    expect(applied.recordId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
   });
 });
 
