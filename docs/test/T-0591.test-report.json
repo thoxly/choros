@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0591",
+  "verdict": "pass",
+  "deterministic": {
+    "backend_vitest_root": {"files": 254, "skipped_files": 2, "tests_passed": 4882, "tests_skipped": 10, "tests_failed": 0},
+    "backend_inbox_engine_drive_targeted": {"file": "src/__tests__/inbox-engine-drive.test.ts", "tests_passed": 46, "tests_failed": 0, "note": "41 pre-existing T-0571/T-0522 tests unchanged expectations + 5 new T-0591 tests, all green"},
+    "web_vitest": {"files": 56, "tests_passed": 1541, "tests_failed": 0},
+    "web_vite_build": {"result": "pass", "modules": 516},
+    "tsc_build": {"result": "pass", "detail": "npm run build (tsc + seed/tsconfig.json project) — clean, no errors"},
+    "eslint": {"result": "pass", "errors": 0, "warnings": 36, "note": "all 36 warnings are pre-existing no-console warnings in unrelated files, none introduced by this diff"}
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "src/__tests__/inbox-engine-drive.test.ts :: \"AC-1 drive-deadline: a hung engine call exhausts the shared budget → ok:false ENGINE_DRIVE_TIMEOUT within the configured wall-clock bound\" (budgetMs=50, asserts elapsed<2000ms against a never-resolving getActiveUserTasks) — independently corroborated with a reviewer-authored standalone harness (budgetMs=80, measured elapsed=82ms, deleted after use, not part of the diff)", "result": "pass"},
+    {"ac": "AC-2", "test": "src/__tests__/inbox-engine-drive.test.ts :: \"AC-2 502 envelope: approve handler surfaces ENGINE_DRIVE_TIMEOUT as a 502 {error:{code,stage,instanceId}}\" — real HTTP round-trip via buildHandlerServer, ENGINE_DRIVE_DEADLINE_MS=50 env override, asserts status=502, error.code/stage/instanceId", "result": "pass"},
+    {"ac": "AC-3", "test": "src/__tests__/inbox-engine-drive.test.ts :: \"AC-3 no-regress: a healthy engine still yields 200 {engine:'completed'}\" (both explicit driveDeadlineMs and default-inherited paths) + full pre-existing T-0571/T-0522 describe blocks (41 tests) unchanged and green", "result": "pass"},
+    {"ac": "AC-4", "test": "src/__tests__/inbox-engine-drive.test.ts :: \"AC-4 retry-within-budget: a single transient failure followed by success still completes when the retry fits inside the remaining budget\"", "result": "pass"},
+    {"ac": "AC-5", "test": "manual review of web/src/screens/screen-inbox.jsx ENGINE_DRIVE_ERROR_MESSAGE.ENGINE_DRIVE_TIMEOUT string: \"Движок отвечает дольше обычного — действие могло примениться, обновите страницу, чтобы увидеть актуальное состояние\" — no technical jargon (no 'timeout'/'retry'/'exception'/'ENGINE_DRIVE' latin tokens), explicitly conveys outcome uncertainty ('могло примениться') rather than guaranteed failure, points at refreshing rather than blind retry. ux-g5-jargon-denylist.sh (fitness, informational) reports 0 new findings in this file.", "result": "pass"},
+    {"ac": "AC-6", "test": "full describe(\"T-0571 approve handler...\") + \"idempotent\" suites in inbox-engine-drive.test.ts — all pre-existing assertions unchanged, all green (part of the 46/46)", "result": "pass"},
+    {"ac": "AC-7", "test": "bash ci/checks/anti-case-lock.sh (Phase 1 delegates: read-pdp-anti-case.sh PASS, rights-ui-anti-case.sh PASS, detel-literal-baseline.sh PASS aggregate 5<7; Phase 2 full D-064 denylist repo-wide: aggregate 19==19 baseline, erodes-or-steady OK)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "engine-drive-no-literal-defkey.sh (FF-1 T-0571 regression guard)", "result": "pass"},
+    {"check": "ux-g5-jargon-denylist.sh (informational, screen-inbox.jsx)", "result": "pass, 0 new findings"}
+  ],
+  "wall_clock_verification": {
+    "method": "Standalone Node script (outside vitest, process.on('unhandledRejection') instrumented) racing a fn() that rejects 200ms AFTER a 50ms budget already won — zero unhandled rejections observed, callWithBudget correctly returned BUDGET_EXHAUSTED. Separately, a reviewer-authored vitest harness (temporarily added to src/__tests__/, deleted immediately after running, never committed) called reconcileInstanceEngineDrive directly with a port whose 3 methods all return `new Promise(() => {})` (permanently pending, never resolves, never rejects) and driveDeadlineMs=80 — measured wall-clock elapsed=82ms, res.ok=false, res.code=ENGINE_DRIVE_TIMEOUT, res.stage='poll'. This is ~500x faster than the ~40s+ withRetry worst case the spec's F-2 finding was about, confirming the deadline mechanism actually bounds a genuinely-hung engine call, not just a slow-but-eventually-settling one.",
+    "result": "pass"
+  },
+  "db_lane": {
+    "attempted": true,
+    "docker_available": true,
+    "result": "ran live against a throwaway Postgres 16 (port 55433, isolated from sibling worktrees' own DB containers already occupying 54432/55432) — applied all 105 migrations, built fitness:db test template, ran ci/checks/db/engine-drive-generic.db.test.ts: 3/3 pass. HONEST CAVEAT: each sub-test self-skipped its live-Flowable assertion ('[skip] Flowable not reachable at http://localhost:8082/flowable-rest/service') because only Postgres was started, not the full docker-compose stack with Flowable REST — so this run exercised the DB-adjacent scaffolding (test-template cloning, migrations, tenant setup) but did NOT exercise a real Flowable engine round-trip. This matches the ADR's own scope claim (O2/O5: additive TS-only change, no SQL/schema touched by T-0591) — the db-lane test file itself is UNCHANGED by this diff (not in files_changed), so this run is a non-regression spot-check, not new coverage this task requires. Container torn down after the run; no state left behind.",
+    "not_run_reason": null
+  },
+  "friction_events": [
+    "docker compose up -d postgres failed on first attempt: port 55432 already bound by a sibling worktree's own postgres container (t-0595-postgres-1) — resolved by overriding POSTGRES_PORT=55433 for this throwaway instance rather than touching the other worktree's running stack."
+  ]
+}
