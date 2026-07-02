@@ -1,0 +1,100 @@
+{
+  "task_id": "T-0594",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 5987,
+    "passed": 5977,
+    "failed": 0,
+    "note": "5987 = root `npx vitest run` (256 files: 254 passed + 2 skipped; 4892 tests: 4882 passed + 10 skipped) + `npm run fitness:db` (104 files / 1095 tests, all passed). Skipped tests (10 root-suite + 0 db-suite) are pre-existing environment-gated skips (e.g. Flowable-not-reachable), not failures."
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/db/migration-120-ownerless-unarm.test.ts :: 'FF-1 (AC-1): migration 120 unarms ONLY T_OWNERLESS (role_assignment+grants gone), leaves role/employee/agent_card intact, and does not touch T_FULL/T_PARTIAL' — live Postgres 16, mixed 3-tenant fixture. Result: T_OWNERLESS role_assignment/grants deleted to 0, role/employee/agent_card counts unchanged (1/1/1), AC-1 invariant predicate (verbatim SQL form of migration-118's countInvariantViolations) still returns 1 violation for T_OWNERLESS post-120 (F4 confirmed: same count as pre-120, now for the honest 'missing owner-facing rows' reason instead of 'armed but unreachable'); T_FULL/T_PARTIAL row-counts byte-identical before/after (N1). INDEPENDENTLY RE-VERIFIED by this tester with a raw-psql fixture outside the coder's test harness (not reusing armTenantZero()/seedOwner() helpers): fresh ownerless-tenant seed -> migration 120 body -> DELETE 1 (role_assignment) + DELETE 4 (grant), matching exactly.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "ci/checks/db/migration-120-ownerless-unarm.test.ts :: 'FF-2 (AC-2): running migration 120 a SECOND time is a no-op' (2nd+3rd runs on the same fixture, live PG, 0 further deletes, row counts and AC-1 violation counts stable). INDEPENDENTLY RE-VERIFIED: triple-ran migration 120's raw SQL body (psql -f, not vitest) against a hand-seeded ownerless-tenant fixture in a template-cloned database, outside any test harness — run 1: 'DELETE 1' + 'DELETE 4'; run 2: 'DELETE 0' + 'DELETE 0'; run 3: 'DELETE 0' + 'DELETE 0'. Confirms idempotency at the raw-SQL level, not merely through the coder's own test assertions.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "ci/checks/db/migration-120-ownerless-unarm.test.ts :: 'AC-3 static: migration 120 has no literal tenant UUID and is driven by joins over choros.role_assignment/role' — regex-verified against the actual file content (comments stripped), asserts FROM choros.role_assignment ra / JOIN choros.role owner_role both present. Manually re-read migrations/120_ownerless_tenant_zero_unarm.sql in full: confirmed zero literal UUID-shaped strings anywhere in the executable SQL (only the header comment references no tenant UUID either), both DELETE blocks are pure set-driven joins.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "ci/checks/db/migration-118-tenant-zero-backfill.test.ts (FF-1/FF-2/FF-3, unmodified by this task — confirmed absent from `git diff dev...HEAD --stat`) re-run live alongside migration-120's own tests: 5/5 pass, unchanged logic, unchanged assertions. Confirms migration 120 introduces zero regression to migration 118's own pre-existing (owner-having) coverage.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "bash ci/checks/dual-control-isolation.sh — PASS: FF-DC7 fires the expected 'unexpected migration' false-red for migrations/120_ownerless_tenant_zero_unarm.sql, immediately cancelled by the new T0594-DC-MIG120-GUARD relief block AFTER independently content-verifying the migration body contains no CREATE/ALTER/DROP TABLE, no ADD/DROP COLUMN, no RLS/POLICY, and no mention of confirmed2_by — same fail-closed pattern as the pre-existing T0570/T0573/T0575 relief blocks for migrations 117/118/119. Final summary line: 'PASS: dual-control-isolation — all checks green (FF-DC1..DC8, FF-DC11)'.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "npm run fitness:db (live Postgres 16, isolated docker-compose project t-0594-judge, port 55432, torn down after with `docker compose -p t-0594-judge down -v`) — 104 files passed (104), 1095 tests passed (1095), 0 failed; matches pr-handoff's claimed counts exactly. npx tsc --noEmit — 0 errors. npx vitest run (root) — 254 files passed + 2 skipped (256), 4882 tests passed + 10 skipped (4892), 0 failed; matches pr-handoff exactly. bash ci/checks/frozen-checks-immutable.sh — PASS (auto_additive sanction for dual-control-isolation.sh valid: A-1..A-4 additive-diff check PASS, врag-attestation family TENANT-ISO covers the file, corpus_ref efa4b97 confirmed ancestor of HEAD).",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "npm run fitness:db:setup-template",
+      "result": "pass",
+      "note": "All 106 migration files (001..120) applied cleanly to a fresh Postgres 16 instance on the first try, including the new migration 120; template hash cc440061, matching pr-handoff's claimed hash exactly."
+    },
+    {
+      "check": "npx vitest run --dir ci/checks/db --no-file-parallelism (full fitness:db)",
+      "result": "pass",
+      "note": "104 test files / 1095 tests, 0 failed. Includes migration-120-ownerless-unarm.test.ts (4/4) and migration-118-tenant-zero-backfill.test.ts (5/5) both run in the same full suite pass, not merely in isolation."
+    },
+    {
+      "check": "npx vitest run (root, full suite)",
+      "result": "pass",
+      "note": "254 files passed + 2 skipped (256); 4882 tests passed + 10 skipped (4892); 0 failed."
+    },
+    {
+      "check": "bash ci/checks/dual-control-isolation.sh",
+      "result": "pass",
+      "note": "T0594-DC-MIG120-GUARD relief fires correctly and only after content verification; real FF-DC7 invariant (031 is the only true dual-control migration) preserved."
+    },
+    {
+      "check": "bash ci/checks/frozen-checks-immutable.sh",
+      "result": "pass",
+      "note": "T-0594's auto_additive sanction on dual-control-isolation.sh verified valid (A-1..A-4, врag-attestation, corpus ancestry)."
+    },
+    {
+      "check": "Manual raw-psql triple-run idempotency probe (outside any test harness)",
+      "result": "pass",
+      "note": "Cloned choros_test_template_cc440061 into a scratch DB, seeded a bare ownerless-tenant fixture by hand, ran migrations/120_ownerless_tenant_zero_unarm.sql via `psql -f` three consecutive times: run 1 DELETE 1 + DELETE 4, runs 2-3 DELETE 0 + DELETE 0 both times. Database dropped after."
+    },
+    {
+      "check": "Manual raw-psql adversarial race probe (owner role_assignment deleted AFTER 118-style arming, BEFORE 120 runs — the exact scenario named in the task brief)",
+      "result": "pass (with non-blocking finding R-2, see review)",
+      "note": "Migration 120 deletes EXACTLY the documented rows (assistant-agent->role-configurator role_assignment + 4 grants) and nothing beyond that — confirms 'не должен удалить лишнего сверх задокументированного'. Does NOT delete the former-owner's own role-configurator role_assignment (out of B1's scope by design — agent-only predicate) — re-ran migration 118's own unmodified AC-1 invariant predicate against this post-race, post-120 state and confirmed it STILL correctly flags the tenant as non-compliant (1 violation), i.e. not a silent monitoring gap."
+    },
+    {
+      "check": "Manual raw-psql client-controlled-source probe (role_assignment.source is body-controlled with no CHECK/enum per ci/checks/db/role-assignment.test.ts:392; confirmed_by is always server-derived per R-AUTH)",
+      "result": "pass (with non-blocking finding R-1, see review)",
+      "note": "Constructed a role_assignment row shaped like a legitimate admin action (confirmed_by = a real actor id, source = 'backfill') on assistant-agent -> role-configurator in an ownerless tenant; migration 120's B1 predicate (checks ra.source only, not ra.confirmed_by) deletes it. Grant deletion (B2) is NOT exposed to this vector since grant.confirmed_by can never be client-set to 'backfill' via the live write path. Narrow blast radius (requires an already-ownerless tenant plus a delegable-admin-holding actor, itself requiring the same owner-existed-then-removed precondition) — assessed non-blocking, recommended as a fast-follow tightening (add confirmed_by='backfill' to B1's WHERE clause) rather than a gate on this task."
+    }
+  ],
+  "failures": [],
+  "notes": {
+    "coverage_gaps_found": "None requiring a new automated test on THIS task's own AC set — all AC-1..AC-6 trace to an existing, executed test written by the coder, independently re-run and in several cases independently reproduced with hand-crafted fixtures outside the coder's own test file.",
+    "adversarial_probe_performed_per_task_instruction": "Per the task's explicit instruction ('посади тенант с владельцем, у которого role_assignment УДАЛЁН вручную ПОСЛЕ 118 — эмуляция гонки — 120 не должен удалить лишнего сверх задокументированного'): constructed this EXACT scenario via raw psql (not the coder's test file, not a reused helper) — a tenant that had a genuine confirmed owner at the moment migration 118 armed role-configurator (owner->cfg + agent->cfg + 4 grants, all source/confirmed_by/granted_by='backfill', the true 118 shape), then had the owner's own tenant-owner role_assignment deleted by hand (simulating either an operator mistake or a race between 118's and 120's respective apply-times). Result: migration 120 deletes EXACTLY the agent->role-configurator row and the 4 grants — nothing beyond what F1/the migration's own documented scope promises — CONFIRMING the task's central safety demand holds ('не удалить лишнего сверх задокументированного'). It additionally surfaces a scope boundary (R-2, non-blocking): the former-owner's OWN role-configurator role_assignment (A4's product) is untouched, since B1 is structurally agent-only — but this is independently confirmed to remain caught by migration 118's own unmodified AC-1 monitoring predicate (re-ran that exact verbatim SQL against the post-race, post-120 state: 1 violation, correctly flagged), so it is a scope limitation, not a silent hole. A second, self-initiated adversarial probe (not requested verbatim by the task brief, but directly responsive to its 'DELETE-предикаты: scoped ТОЧНО' demand) targeted the marker-precision of B1 specifically: traced role_assignment.source to be client-controlled with no CHECK/enum (confirmed via the pre-existing role-assignment.test.ts:392) versus confirmed_by which is always server-derived (R-AUTH) — constructed a 'legitimate-looking' role_assignment with source='backfill' but a real confirmed_by, and confirmed migration 120's B1 (which checks source only) deletes it. Recorded as R-1 (minor, non-blocking) in the review — B2 (grant deletion) is immune to the analogous vector since grant.confirmed_by is never client-settable.",
+    "anti_false_pass_checks_performed": [
+      "Did not accept the pr-handoff's claimed test counts (104 files/1095 tests fitness:db; 254+2/4882+10 root vitest) at face value — independently stood up a fresh, differently-named docker-compose project (t-0594-judge, not the coder's t-0594) on the same free port, ran fitness:db:setup-template and fitness:db from scratch, and confirmed byte-identical counts and template hash (cc440061).",
+      "Did not rely solely on the coder's own migration-120-ownerless-unarm.test.ts fixtures (armTenantZero()/seedOwner() helpers) — built independent raw-psql fixtures for both the idempotency triple-run and the two adversarial probes, so a bug specific to the coder's own test helper construction could not hide behind a passing coder-authored assertion.",
+      "For the race-scenario probe, did not stop at 'migration 120 ran without error' — explicitly queried the surviving row set after the run, identified the surviving row belonged to the former-owner (not the agent), and then independently re-ran migration 118's own unmodified AC-1 predicate against the post-120 state to confirm the surviving dangling grant is still caught by existing monitoring (closing the loop the task's own point-5 demanded: verifying the invariant's semantics did not silently change).",
+      "For dual-control-isolation.sh, read the full PASS/FAIL sequence rather than trusting only the final exit code — confirmed the FF-DC7 FAIL line for migration 120 is immediately followed by the T0594-DC-MIG120-GUARD PASS line (content-verified relief, not a blanket bypass) and that the check's own final summary line is unambiguously 'all checks green'.",
+      "Tore down the judge's own docker-compose project (`docker compose -p t-0594-judge down -v`) after all verification, per task instruction ('снеси'), and removed all ad hoc scratch test files/scripts from the worktree before finishing (`git status --short` confirmed clean)."
+    ],
+    "residual_findings_nonblocking": [
+      "R-1 (minor): migration 120's B1 (role_assignment DELETE) trusts the client-controllable `source` column alone as its migration-118-provenance marker, instead of also requiring `confirmed_by='backfill'` (which B2/grant correctly does and which can never be client-set). Narrow blast radius, pre-existing looseness in the underlying schema, recommended as a fast-follow tightening, not a gate.",
+      "R-2 (info): migration 120's B1 is structurally scoped to the assistant-agent's role_assignment only — a former owner's own role-configurator role_assignment (if one was armed by 118 while an owner still existed, then the owner was later removed) survives untouched. Confirmed this is not a silent gap: migration 118's own unmodified AC-1 invariant predicate still flags such a tenant as non-compliant."
+    ]
+  }
+}
