@@ -701,13 +701,33 @@ describe("T-0373 (PD-7) — tenant-zero seeding: assistant-agent + authoring_dra
       { orgName: "T0373RAOrg", email: "t0373ra@test.com", password: "password123" },
     );
 
-    // Count role_assignment INSERTs with ON CONFLICT DO NOTHING (the T-0373 ones)
-    // The original role_assignment (3d) does NOT have ON CONFLICT DO NOTHING
+    // Resolve the configuratorRoleId from the role-configurator role INSERT
+    // (VALUES ($1, $2, 'role-configurator', ...) → values[1] = its id) so the
+    // role_assignment filter below can scope to ONLY role-configurator
+    // assignments — T-0570 additively seeds its OWN role_assignment pair
+    // (owner/assistant-agent → role-reader) with the identical
+    // "ON CONFLICT DO NOTHING" shape, so a text-only filter would now also
+    // (correctly) match those; this test's contract is specifically about
+    // role-configurator, so it must disambiguate by role_id.
+    const configuratorRoleInsert = capturedQueries.find(
+      (q) =>
+        q.text.includes("INSERT") &&
+        q.text.includes("choros.role") &&
+        !q.text.includes("role_assignment") &&
+        q.text.includes("role-configurator"),
+    );
+    expect(configuratorRoleInsert).toBeDefined();
+    const configuratorRoleId = configuratorRoleInsert!.values![1];
+
+    // Count role_assignment INSERTs with ON CONFLICT DO NOTHING whose role_id
+    // param (values[3]) is the configurator role (the T-0373 ones).
+    // The original role_assignment (3d) does NOT have ON CONFLICT DO NOTHING.
     const configuratorRaInserts = capturedQueries.filter(
       (q) =>
         q.text.includes("INSERT") &&
         q.text.includes("role_assignment") &&
-        q.text.includes("ON CONFLICT DO NOTHING"),
+        q.text.includes("ON CONFLICT DO NOTHING") &&
+        q.values?.[3] === configuratorRoleId,
     );
     // Should have 2: owner→role-configurator + assistant-agent→role-configurator
     expect(configuratorRaInserts).toHaveLength(2);
@@ -977,11 +997,14 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
     await pool.end();
   });
 
-  it("FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 3 roles, 2 employees, 3 confirmed role_assignments (T-0469 updated)", async () => {
+  it("FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 4 roles, 2 employees, 5 confirmed role_assignments (T-0570 updated)", async () => {
     // T-0373 (PD-7): registerTenant also seeds role-configurator + assistant-agent.
     // T-0469 [auth]: registerTenant ALSO seeds role-constructor-admin (UNASSIGNED).
     //   roles 2→3; employees stay 2 (no new employee); role_assignments stay 3
     //   (the constructor-admin role is seeded but assigned to nobody on registration).
+    // T-0570 (D3, READ-PDP): registerTenant ALSO seeds role-reader (default-open
+    //   READ grant holder) + 2 CONFIRMED role_assignments (owner→reader,
+    //   assistant-agent→reader): roles 3→4; role_assignments 3→5.
     const kcLocal = new InMemoryKeycloakUserPort();
     const nowMs = () => Date.now();
     const req = {
@@ -1018,17 +1041,19 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
       );
       expect(tenants.rows).toHaveLength(1);
 
-      // Exactly 3 roles: tenant-owner + role-configurator (T-0373) +
-      // role-constructor-admin (T-0469, seeded-but-unassigned).
+      // Exactly 4 roles: tenant-owner + role-configurator (T-0373) +
+      // role-constructor-admin (T-0469, seeded-but-unassigned) + role-reader
+      // (T-0570, default-open READ grant holder).
       const roles = await client.query(
         `SELECT slug FROM choros.role WHERE tenant_id = $1 ORDER BY slug`,
         [tenantId],
       );
-      expect(roles.rows).toHaveLength(3);
+      expect(roles.rows).toHaveLength(4);
       const roleSlugs = roles.rows.map((r: { slug: string }) => r.slug);
       expect(roleSlugs).toContain("tenant-owner");
       expect(roleSlugs).toContain("role-configurator");
       expect(roleSlugs).toContain("role-constructor-admin");
+      expect(roleSlugs).toContain("role-reader");
 
       // T-0469 boundary: role-constructor-admin is seeded but assigned to NOBODY
       // on registration (the owner grants it explicitly later). So the assignment
@@ -1078,18 +1103,46 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
       expect(empSlugs).toContain(kcSub);
       expect(empSlugs).toContain("assistant-agent");
 
-      // Exactly 3 confirmed role_assignments (T-0373):
+      // Exactly 5 confirmed role_assignments (T-0373 + T-0570):
       //   1. owner → tenant-owner
       //   2. owner → role-configurator
       //   3. assistant-agent → role-configurator
+      //   4. owner → role-reader
+      //   5. assistant-agent → role-reader
       const assignments = await client.query(
         `SELECT confirmed_by FROM choros.role_assignment WHERE tenant_id = $1`,
         [tenantId],
       );
-      expect(assignments.rows).toHaveLength(3);
+      expect(assignments.rows).toHaveLength(5);
       for (const ra of assignments.rows) {
         expect(ra.confirmed_by).not.toBeNull();
       }
+
+      // T-0570 (D3, READ-PDP): role-reader holds exactly one grant — read/record
+      // scoped at the RESOURCE_ROOT sentinel, CONFIRMED, delegable.
+      const readerRoleId = (
+        await client.query(
+          `SELECT id FROM choros.role WHERE tenant_id = $1 AND slug = 'role-reader'`,
+          [tenantId],
+        )
+      ).rows[0].id;
+      const readerGrants = await client.query(
+        `SELECT resource_type, operation, scope, delegable, confirmed_by
+           FROM choros."grant" WHERE tenant_id = $1 AND role_id = $2`,
+        [tenantId, readerRoleId],
+      );
+      expect(readerGrants.rows).toHaveLength(1);
+      const readGrant = readerGrants.rows[0];
+      expect(readGrant.resource_type).toBe("record");
+      expect(readGrant.operation).toBe("read");
+      expect(readGrant.delegable).toBe(true);
+      expect(readGrant.confirmed_by).not.toBeNull();
+      expect(readGrant.scope).toEqual({
+        kind: "node",
+        hierarchy: "resource",
+        nodeLevel: "application",
+        nodeId: "00000000-0000-0000-0000-0000000000r0",
+      });
     } finally {
       client.release();
 

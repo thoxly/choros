@@ -95,6 +95,12 @@ import { FsObjectStore } from "./adapters/s3-object-store.js";
 import { makeFileRecordResolver } from "./core/grant-resolver.js";
 import { makeDbGrantSource } from "./db/grants-dao.js";
 import { SEED_ORACLE } from "./http/seed-ancestry.js";
+// T-0570 (D3, READ-PDP): production wiring for the records READ-PDP gate —
+// same getGrantsForSubject DAO (single-resolver) + composite resource-ancestry
+// oracle (org delegate + resource root-sentinel/inline-chain).
+import { loadTenantOrgAncestry } from "./db/org-ancestry.js";
+import { makeResourceAncestryOracle } from "./db/resource-ancestry.js";
+import type { RowAncestry } from "./core/read-visibility.js";
 
 const { Pool } = pg;
 
@@ -807,6 +813,30 @@ function buildRouter(
         coveringGrants: await getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
         policy: await getFieldVisibilityPolicy(grantsPool, tenantId),
       }),
+      // T-0570 (D3, READ-PDP): read-visibility resolver — active in production,
+      // wired in the SAME commit that ships migrations/115 (the default-open
+      // backfill), so the gate never turns on before every tenant has a
+      // covering grant (NF-2). grants: same getGrantsForSubject DAO as every
+      // other PDP consumer (single-resolver, FR-7). ancestry: composite oracle
+      // — org hierarchy delegates to the real per-tenant department tree
+      // (loadTenantOrgAncestry, unchanged semantics); resource hierarchy answers
+      // via the RESOURCE_ROOT sentinel (O(1) "covers everything", ADR §2.1 rule
+      // 2) and self-identity (rule 1, record-scoped narrow grants, AC-5) without
+      // materializing a per-tenant resource map. The rowIndex is empty here
+      // (rule 3 registry/application-scoped narrowing — an explicit, documented
+      // future increment, ADR §2.1/§5 out-of-scope) — record-scoped narrow
+      // grants (rule 1) and the default-open root grant (rule 2) both work fully.
+      resolveReadVisibility: async (actorSlug: string, tenantId: string, nowMs: number) => {
+        const [grants, orgOracle] = await Promise.all([
+          getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+          loadTenantOrgAncestry(grantsPool, tenantId),
+        ]);
+        const emptyRowIndex = new Map<string, RowAncestry>();
+        return {
+          grants,
+          ancestry: makeResourceAncestryOracle(orgOracle, emptyRowIndex),
+        };
+      },
       // T-0351 E16: wire the shared flowableClient for on_create trigger.
       flowable: flowableClient ?? undefined,
       // T-0536 [D8-R4 delivery]: wire the internal-signal emitter so a committed
