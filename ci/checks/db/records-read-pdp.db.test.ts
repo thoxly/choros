@@ -11,7 +11,7 @@
 //     that HELD a covering READ grant on a record BEFORE the READ-PDP gate is
 //     wired (honest-degrade path, resolveReadVisibility absent), the actor
 //     sees the record; AFTER the gate is wired (resolveReadVisibility present,
-//     mirroring migration 115's backfilled default-open grant), the SAME actor
+//     mirroring migration 117's backfilled default-open grant), the SAME actor
 //     still sees the SAME record — no visibility regression on activation.
 //
 //   FF-RP-1/FF-RP-2 (AC-1/AC-2): an actor with ZERO covering READ grant sees
@@ -378,9 +378,9 @@ describe.skipIf(!hasDb)('T-0570 FF-RP-3: backfill preserves pre-gate visibility 
     expect(before.statusCode).toBe(200);
     expect(before.records.map((r) => r['id']).sort()).toEqual([record1Id, record2Id].sort());
 
-    // Simulate the migration-115 backfill for this actor: employee + role-reader
+    // Simulate the migration-117 backfill for this actor: employee + role-reader
     // + role_assignment + RESOURCE_ROOT-scoped read grant (byte-identical shape
-    // to what registerTenant / migration 115 seed).
+    // to what registerTenant / migration 117 seed).
     await withClient(migratorUrl(), async (c) => {
       const empId = await seedEmployee(c, TENANT_A, 'a-backfill-actor');
       const roleId = await seedRole(c, TENANT_A, 'role-reader');

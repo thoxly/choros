@@ -91,7 +91,7 @@ describe.skipIf(skipAll)(
 // primitive by construction, regardless of which role holds it (full-width
 // delegation legally reproduces the shape under another role). The literal below
 // must stay byte-identical to RESOURCE_ROOT_NODE_ID in src/core/read-visibility.ts
-// and to migrations/115_default_read_grant_backfill.sql — pinned by FF-RP-15
+// and to migrations/117_default_read_grant_backfill.sql — pinned by FF-RP-15
 // (ci/checks/read-pdp-sentinel-coherence.sh); db-tests intentionally do not import
 // from src/ (house pattern), hence grep-coherence instead of an import.
 //

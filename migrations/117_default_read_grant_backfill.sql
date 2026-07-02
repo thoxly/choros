@@ -1,4 +1,4 @@
--- 115 · default_read_grant_backfill (T-0570, D3: READ-PDP) — backfill the
+-- 117 · default_read_grant_backfill (T-0570, D3: READ-PDP) — backfill the
 -- tenant-wide default-open READ grant into EVERY EXISTING tenant.
 --
 -- WHY: T-0570 turns GET /api/records and GET /api/records/:id into READ-PDP
@@ -97,8 +97,8 @@ SELECT
   owner.employee_id,
   reader_role.id,
   '{"kind":"set","members":[]}'::jsonb,
-  'migration-115',
-  'migration-115',
+  'migration-117',
+  'migration-117',
   'registration',
   t.created_at,
   t.created_at
@@ -138,8 +138,8 @@ SELECT
   agent.id,
   reader_role.id,
   '{"kind":"set","members":[]}'::jsonb,
-  'migration-115',
-  'migration-115',
+  'migration-117',
+  'migration-117',
   'registration',
   t.created_at,
   t.created_at
@@ -173,9 +173,9 @@ SELECT
   '{"kind":"node","hierarchy":"resource","nodeLevel":"application","nodeId":"00000000-0000-0000-0000-0000000000r0"}'::jsonb,
   NULL,
   true,
-  'migration-115',
+  'migration-117',
   NULL,
-  'migration-115',
+  'migration-117',
   NULL,
   NULL,
   t.created_at

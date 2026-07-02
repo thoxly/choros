@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# T-0570 (D3, READ-PDP) · FF-RP-6 — backfill migration 115 must iterate
+# T-0570 (D3, READ-PDP) · FF-RP-6 — backfill migration 117 must iterate
 # choros.tenant, NEVER hardcode a single tenant UUID (anti-pattern of
 # migrations/088_configurator_authoring_draft_grant_seed.sql, which seeds ONLY
 # the dev-silo tenant via a fixed literal UUID and silently fails to backfill
 # any real self-registered tenant).
 #
 # THE CONTRACT (ADR §2.2 / FF-RP-6):
-#   migrations/115_default_read_grant_backfill.sql MUST contain
+#   migrations/117_default_read_grant_backfill.sql MUST contain
 #   `FROM choros.tenant` (an iteration source) in each of its INSERT ... SELECT
 #   statements, and MUST NOT contain a literal tenant-shaped UUID
 #   (8-4-4-4-12 hex) anywhere in a VALUES/tenant_id position.
@@ -24,7 +24,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-MIGRATION="${PROJECT_ROOT}/migrations/115_default_read_grant_backfill.sql"
+MIGRATION="${PROJECT_ROOT}/migrations/117_default_read_grant_backfill.sql"
 
 # A tenant-shaped UUID literal (8-4-4-4-12 hex), quoted in SQL (single-quoted).
 UUID_LITERAL_RE="'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'"
@@ -63,7 +63,7 @@ check_migration() {
   local hardcoded
   hardcoded="$( (echo "${code_only}" | grep -oE "${UUID_LITERAL_RE}" | tr -d "'" | grep -v "^${resource_root_sentinel}\$") || true )"
   if [[ -n "${hardcoded}" ]]; then
-    echo "FAIL [FF-RP-6]: hardcoded tenant-shaped UUID literal found in migration 115 (anti-pattern of migration 088):"
+    echo "FAIL [FF-RP-6]: hardcoded tenant-shaped UUID literal found in migration 117 (anti-pattern of migration 088):"
     echo "${hardcoded}"
     errors=$((errors + 1))
   fi
@@ -118,7 +118,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
   exit $?
 fi
 
-echo "[T-0570] read-pdp-no-hardcoded-tenant: FF-RP-6 migration-115 tenant-iteration check"
+echo "[T-0570] read-pdp-no-hardcoded-tenant: FF-RP-6 migration-117 tenant-iteration check"
 set +e
 check_migration "${MIGRATION}"
 errors=$?
@@ -127,5 +127,5 @@ if [[ ${errors} -gt 0 ]]; then
   echo "FAIL: read-pdp-no-hardcoded-tenant found ${errors} violation(s)"
   exit 1
 fi
-echo "PASS: read-pdp-no-hardcoded-tenant — migration 115 iterates choros.tenant, no hardcoded tenant UUID"
+echo "PASS: read-pdp-no-hardcoded-tenant — migration 117 iterates choros.tenant, no hardcoded tenant UUID"
 exit 0

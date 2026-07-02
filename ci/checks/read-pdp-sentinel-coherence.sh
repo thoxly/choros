@@ -5,7 +5,7 @@
 # import from src/ by house pattern, so single-source is enforced by grep, not
 # by import):
 #   1. src/core/read-visibility.ts            (the exported constant — source of truth)
-#   2. migrations/115_default_read_grant_backfill.sql (the seeded grant's scope)
+#   2. migrations/117_default_read_grant_backfill.sql (the seeded grant's scope)
 #   3. ci/checks/db/bundle-coherence.test.ts  (the FF-13 sanctioned carve-out, T-0570 ADR §10)
 # Drift in ANY of the three ⇒ red. --self-test plants good/bad fixtures.
 set -euo pipefail
@@ -58,11 +58,11 @@ echo "[T-0570] read-pdp-sentinel-coherence: FF-RP-15 sentinel literal identical 
 errors=0
 check_coherence \
   "${PROJECT_ROOT}/src/core/read-visibility.ts" \
-  "${PROJECT_ROOT}/migrations/115_default_read_grant_backfill.sql" \
+  "${PROJECT_ROOT}/migrations/117_default_read_grant_backfill.sql" \
   "${PROJECT_ROOT}/ci/checks/db/bundle-coherence.test.ts" || errors=$?
 if [[ ${errors} -gt 0 ]]; then
   echo "FAIL: read-pdp-sentinel-coherence found ${errors} drift(s)"
   exit 1
 fi
-echo "PASS: read-pdp-sentinel-coherence — RESOURCE_ROOT_NODE_ID literal coherent across read-visibility.ts / migration 115 / FF-13 carve-out"
+echo "PASS: read-pdp-sentinel-coherence — RESOURCE_ROOT_NODE_ID literal coherent across read-visibility.ts / migration 117 / FF-13 carve-out"
 exit 0

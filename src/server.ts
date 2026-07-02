@@ -814,7 +814,7 @@ function buildRouter(
         policy: await getFieldVisibilityPolicy(grantsPool, tenantId),
       }),
       // T-0570 (D3, READ-PDP): read-visibility resolver — active in production,
-      // wired in the SAME commit that ships migrations/115 (the default-open
+      // wired in the SAME commit that ships migrations/117 (the default-open
       // backfill), so the gate never turns on before every tenant has a
       // covering grant (NF-2). grants: same getGrantsForSubject DAO as every
       // other PDP consumer (single-resolver, FR-7). ancestry: composite oracle

@@ -230,7 +230,7 @@ export type ActorPrivilegeResolver = (
  * READ-PDP gate is NOT applied — the LIST/DETAIL handlers behave EXACTLY as
  * pre-T-0570 (tenant-RLS + sandbox-gate only). The gate activates the moment
  * composition root injects this resolver — which it does in the SAME commit
- * that applies migrations/115 (the default-open backfill), so the gate never
+ * that applies migrations/117 (the default-open backfill), so the gate never
  * activates before every existing tenant has a covering grant (NF-2).
  *
  * @param actorSlug  the caller identity (dev-user slug / OIDC sub)
@@ -293,7 +293,7 @@ export interface RecordRoutesDeps {
    * When absent (honest-degrade, NF-2): the READ-PDP filter is skipped entirely
    * — LIST/DETAIL behave byte-identically to pre-T-0570 (tenant-RLS + sandbox-
    * gate only). Production wiring injects this resolver in the SAME commit that
-   * applies the migrations/115 default-open backfill, so the gate never turns on
+   * applies the migrations/117 default-open backfill, so the gate never turns on
    * before every tenant has a covering grant.
    */
   resolveReadVisibility?: ReadVisibilityResolver;

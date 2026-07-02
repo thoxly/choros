@@ -114,7 +114,7 @@ nodeLevel:"application", nodeId: RESOURCE_ROOT_NODE_ID}`, `delegable:true` (су
   (BEGIN…COMMIT, `SET LOCAL choros.tenant_id`), рядом с блоками 3e–3j: INSERT `role-reader` +
   `role_assignment`(owner→reader, agent→reader) + `grant`(read/record/RESOURCE_ROOT), все
   `ON CONFLICT DO NOTHING` (AC-4, атомарно).
-- **Существующие тенанты** — backfill-миграция `115_default_read_grant_backfill.sql`, которая
+- **Существующие тенанты** — backfill-миграция `117_default_read_grant_backfill.sql`, которая
   **итерирует `choros.tenant`** (`INSERT … SELECT t.id, gen_random_uuid()…, 'read', … FROM
   choros.tenant t`), генерируя per-tenant роль/назначения/грант БЕЗ единого захардкоженного UUID.
   Это ЗЕРКАЛО-АНТИПОД migration 088 (`088_configurator_authoring_draft_grant_seed.sql`, которая
@@ -144,7 +144,7 @@ resource-оракул §2.1). Затем:
 после того как backfill-миграция §2.2 засидировала гранты (NF-2: сид — предусловие включения гейта,
 не следствие). Это делает переход byte-совместимым и держит все существующие read-тесты зелёными
 (§6). Production-wiring в `server.ts` подключает `resolveReadVisibility` в том же коммите, что
-применяет миграцию 115.
+применяет миграцию 117.
 
 Опция оптимизации (разрешена, не обязательна): SQL-предикат `EXISTS` на `choros."grant"` в WHERE
 `listRecordsPaginated` (доп. `AND`, как `sandboxReadPredicate`) — если профилирование потребует;
@@ -218,7 +218,7 @@ export const READER_ROLE_SLUG = "role-reader"; // платформенная р�
 nodeId **структурно не может** совпасть с id реального приложения, и `gen_random_uuid()` не может
 его породить. Rule-2 оракула (§2.1/§4.4) никогда не сработает на реальном узле по коллизии.
 Значение — единый литерал в ТРЁХ местах (`src/core/read-visibility.ts`,
-`migrations/115_default_read_grant_backfill.sql`, carve-out в
+`migrations/117_default_read_grant_backfill.sql`, carve-out в
 `ci/checks/db/bundle-coherence.test.ts` §10) — когерентность пинит FF-RP-15
 (db-тесты по house-паттерну НЕ импортируют из `src/`, поэтому single-source обеспечивается
 grep-равенством, не импортом).
@@ -311,10 +311,10 @@ export function makeResourceAncestryOracle(
 |---|---|---|
 | **FF-RP-1** | `GET /api/records`: строка без покрывающего READ-гранта отсутствует в списке; при пустом grant-множестве (гейт активен, гранта нет) список пуст, не полон. | `src/__tests__/records-read-pdp.test.ts`: инжектировать `resolveReadVisibility`, вернуть 0 covering-грантов ⇒ list=[]; вернуть default-грант ⇒ все строки. (AC-1) |
 | **FF-RP-2** | `GET /api/records/:id` без покрывающего гранта ⇒ 404 (не 200/403), неотличимо от not-found/cross-tenant. | `records-read-pdp.test.ts`: detail при 0 covering-грантов ⇒ `HttpError(404)`, форма ответа == not-found. (AC-2) |
-| **FF-RP-3** | Backfill не ломает: тенант, существовавший до миграции 115, после сида+гейта даёт тот же видимый набор строк, что через старый RLS-путь. | `ci/checks/db/records-read-pdp.db.test.ts`: seed тенант без reader-гранта → применить 115 → сравнить видимый набор до/после == равны. (AC-3) |
+| **FF-RP-3** | Backfill не ломает: тенант, существовавший до миграции 117, после сида+гейта даёт тот же видимый набор строк, что через старый RLS-путь. | `ci/checks/db/records-read-pdp.db.test.ts`: seed тенант без reader-гранта → применить 115 → сравнить видимый набор до/после == равны. (AC-3) |
 | **FF-RP-4** | `registerTenant` сидирует default-open READ-грант (role-reader + assignment + grant) АТОМАРНО в одной транзакции с T-0373; сразу после регистрации владелец видит записи. | `ci/checks/db/records-read-pdp.db.test.ts`: `registerTenant` → сразу `getGrantsForSubject(owner)` содержит read/record/RESOURCE_ROOT грант; abort-инъекция ⇒ ни role-reader, ни grant не осели. (AC-4) |
 | **FF-RP-5** | Сужение record-level без правки платформы: узкий READ-грант одному актору убирает записи вне scope; другой актор с default-грантом видит все. | `records-read-pdp.test.ts`: два актора, одному — грант на подмножество (через `createGrant`/DAO, БЕЗ правки `records.ts`); проверить асимметрию видимости. (AC-5) |
-| **FF-RP-6** | Backfill-миграция 115 итерирует `choros.tenant`; НЕТ захардкоженного tenant-UUID (анти-паттерн 088). | `ci/checks/read-pdp-no-hardcoded-tenant.sh`: grep миграции 115 на литерал UUID тенанта (`[0-9a-f]{8}-…`) в позиции tenant_id/VALUES ⇒ FAIL; требует `FROM choros.tenant` / `SELECT … tenant`. Self-test с bad/good фикстурами. (AC-3, FR-2) |
+| **FF-RP-6** | Backfill-миграция 117 итерирует `choros.tenant`; НЕТ захардкоженного tenant-UUID (анти-паттерн 088). | `ci/checks/read-pdp-no-hardcoded-tenant.sh`: grep миграции 117 на литерал UUID тенанта (`[0-9a-f]{8}-…`) в позиции tenant_id/VALUES ⇒ FAIL; требует `FROM choros.tenant` / `SELECT … tenant`. Self-test с bad/good фикстурами. (AC-3, FR-2) |
 | **FF-RP-7** | Анти-кейс (D-064): в diff `src/` нет строк `role-approver`, `soglasovanie`, `tel-`, `Согласование`(конст.), `e-larina`, `e-orlov`, `e-configurator`. | `ci/checks/read-pdp-anti-case.sh`: `git diff`-scoped grep -nE по добавленным строкам под `src/` ⇒ FAIL при совпадении; self-test bad/good. (AC-9, NF-4) |
 | **FF-RP-8** | Латтис/handle не тронуты: `grant-lattice.ts`, `object-handle.ts`, `grant-resolver.ts`, `field-visibility.ts` — байтово без правок экспортов; refToScope не изменён. | `ci/checks/read-pdp-frozen-core.sh`: `git diff --name-only` не содержит этих 4 файлов (кроме импортов); переиспользует `mutation-gateway-isolation.sh` FROZEN_EXPORTS-стиль. (NF-5, FR-7) |
 | **FF-RP-9** | N+1 отсутствует: `GET /api/records` с N≥50 строк резолвит гранты за O(1) запросов (не O(N)); containment — in-memory. | `records-read-pdp.test.ts`: счётчик вызовов `resolveReadVisibility`/`getGrantsForSubject` == 1 на HTTP-запрос при N=50. (AC-7, NF-1) |
@@ -323,7 +323,7 @@ export function makeResourceAncestryOracle(
 | **FF-RP-12** | Tenant-isolation первична: запись тенанта B невидима актору тенанта A даже при гипотетически широком READ-гранте (RLS + explicit filter — первый фильтр). | `ci/checks/db/records-read-pdp.db.test.ts`: актор A с RESOURCE_ROOT-грантом, SET tenant=B-строка ⇒ 0 строк/404. (AC-10, NF-3) |
 | **FF-RP-13** | Honest-degrade: `resolveReadVisibility` absent ⇒ READ-путь byte-identical дотаск-поведению (RLS+sandbox), все существующие read-тесты зелёные. | `npm run fitness` + `records-pagination.test.ts`/`records-field-visibility*.test.ts`/`records-sandbox-gate.test.ts` (и `ci/checks/db/records_crud.test.ts`) зелёные без инъекции резолвера. (NF-2) |
 | **FF-RP-14** *(amended)* | Инвариант T-0082 FF-13 СОХРАНЯЕТ СИЛУ после carve-out: NULL-facet record-грант с ЛЮБЫМ не-сентинел scope (или не-read operation) по-прежнему ловится амендированным предикатом; exempt — ТОЛЬКО точная структурная форма default-read гранта. | `ci/checks/db/bundle-coherence.test.ts`: (i) амендированный FF-13-запрос ⇒ 0 строк на сидированных данных; (ii) force-тест: в транзакции с ROLLBACK вставить NULL-facet record-грант с НЕ-сентинел scope ⇒ тот же WHERE-предикат возвращает эту строку (инвариант жив); read+сентинел-строка предикатом НЕ возвращается. (§10) |
-| **FF-RP-15** *(amended)* | Сентинел — единый литерал: значение `RESOURCE_ROOT_NODE_ID` в `src/core/read-visibility.ts` == литерал в `migrations/115_*.sql` == литерал carve-out в `ci/checks/db/bundle-coherence.test.ts`; дрейф любого из трёх ⇒ красный. | `ci/checks/read-pdp-sentinel-coherence.sh`: извлечь значение константы из read-visibility.ts, grep-подтвердить точное вхождение в оба других файла; self-test bad/good. Wired в `npm run fitness`. (§10) |
+| **FF-RP-15** *(amended)* | Сентинел — единый литерал: значение `RESOURCE_ROOT_NODE_ID` в `src/core/read-visibility.ts` == литерал в `migrations/117_*.sql` == литерал carve-out в `ci/checks/db/bundle-coherence.test.ts`; дрейф любого из трёх ⇒ красный. | `ci/checks/read-pdp-sentinel-coherence.sh`: извлечь значение константы из read-visibility.ts, grep-подтвердить точное вхождение в оба других файла; self-test bad/good. Wired в `npm run fitness`. (§10) |
 
 ---
 
@@ -345,7 +345,7 @@ export function makeResourceAncestryOracle(
 
 Контракт: НИ ОДИН не должен потребовать правки, кроме опционального добавления инъекции
 `resolveReadVisibility` в новых read-pdp-кейсах. Production-путь (`server.ts`) подключает резолвер
-в том же коммите, что применяет миграцию 115 (сид — предусловие включения гейта, NF-2).
+в том же коммите, что применяет миграцию 117 (сид — предусловие включения гейта, NF-2).
 
 ---
 
@@ -355,7 +355,7 @@ export function makeResourceAncestryOracle(
 |---|---|
 | AC-1 (list прячет без гранта) | §2.3 LIST-фильтр + FF-RP-1 |
 | AC-2 (detail 404 без гранта) | §2.3 DETAIL + FF-RP-2 |
-| AC-3 (backfill не ломает) | §2.2 миграция 115 + FF-RP-3, FF-RP-6; сид легален для FF-13 T-0082 через §10 carve-out + FF-RP-14/15 |
+| AC-3 (backfill не ломает) | §2.2 миграция 117 + FF-RP-3, FF-RP-6; сид легален для FF-13 T-0082 через §10 carve-out + FF-RP-14/15 |
 | AC-4 (registerTenant атомарный сид) | §2.2 register.ts + FF-RP-4; сид легален для FF-13 T-0082 через §10 carve-out + FF-RP-14/15 |
 | AC-5 (сужение record-level = настройка) | §2.1 правило 3 + §4 `validateNarrowing` + FF-RP-5 |
 | AC-6 (field-level поверх record-level) | §2.4 + FF-RP-11 |
@@ -371,7 +371,7 @@ export function makeResourceAncestryOracle(
 
 `runtime:node` — TS/Node HTTP-слой (`src/http/records.ts`) + чистое ядро (`src/core/read-visibility.ts`)
 + DB-слой (`src/db/resource-ancestry.ts`, `getGrantsForSubject`) + Postgres-миграция
-(`migrations/115_default_read_grant_backfill.sql`) + seed в `src/core/register.ts`. Fitness: vitest
+(`migrations/117_default_read_grant_backfill.sql`) + seed в `src/core/register.ts`. Fitness: vitest
 (`src/__tests__/records-read-pdp.test.ts`) + live-PG (`ci/checks/db/records-read-pdp.db.test.ts` и
 амендированный `ci/checks/db/bundle-coherence.test.ts` §10, `npm run fitness:db`) + shell-линтеры
 (`read-pdp-no-hardcoded-tenant.sh`, `read-pdp-anti-case.sh`, `read-pdp-frozen-core.sh`,
@@ -405,7 +405,7 @@ resource_facet IS NULL` обязан вернуть **0 строк**; NULL-facet
 Этот ADR (§2.2/§4.5) сидирует default-open READ-грант с `resource_type='record'` и
 `resource_facet=NULL` — т.к. в T-0021-ядре **строго-отсутствующий facet = whole-resource
 read** (все поля видимы; `grantFacetFields` → `undefined` → union всех ключей,
-grant-resolver.ts:359–372). Миграция 115 + сид `register.ts` (блок 3p) создают такой грант
+grant-resolver.ts:359–372). Миграция 117 + сид `register.ts` (блок 3p) создают такой грант
 в каждом тенанте ⇒ FF-13 красный для каждого существующего И каждого нового тенанта.
 
 **Природа коллизии:** латентное противоречие двух ратифицированных контрактов. T-0082
@@ -465,7 +465,7 @@ mutation-gateway-isolation.sh FROZEN_EXPORTS, preserving every isolation invaria
 4. Единство литерала сентинела — FF-RP-15 (`read-pdp-sentinel-coherence.sh`):
    db-тесты по house-паттерну не импортируют из `src/` (проверено: ни один
    `ci/checks/db/*.ts` не импортирует `../../src`), поэтому single-source обеспечивает
-   grep-равенство трёх вхождений (read-visibility.ts / migration 115 / carve-out).
+   grep-равенство трёх вхождений (read-visibility.ts / migration 117 / carve-out).
 
 ### 10.4 Отвергнутые альтернативы коллизии
 
@@ -483,7 +483,7 @@ mutation-gateway-isolation.sh FROZEN_EXPORTS, preserving every isolation invaria
    (ROLLBACK-транзакция: не-сентинел NULL-facet ловится, сентинел-read — нет).
 2. `ci/checks/read-pdp-sentinel-coherence.sh` — НОВЫЙ мелкий гард FF-RP-15 (grep-равенство
    литерала в 3 файлах; self-test bad/good по house-паттерну; wired в `package.json` fitness).
-3. Больше НИЧЕГО: `migrations/115_*.sql`, `src/core/register.ts`,
+3. Больше НИЧЕГО: `migrations/117_*.sql`, `src/core/register.ts`,
    `src/core/read-visibility.ts`, `src/db/resource-ancestry.ts`, `src/http/records.ts`,
    frozen-ядро (grant-resolver/lattice/object-handle/field-visibility) — НЕ трогаются;
    уже зелёные RP-тесты не задеваются (в READ-пути изменений нет).
