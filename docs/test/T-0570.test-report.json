@@ -1,10 +1,10 @@
 {
   "task_id": "T-0570",
-  "verdict": "fail",
+  "verdict": "pass",
   "deterministic": {
-    "total": 5913,
-    "passed": 5912,
-    "failed": 1
+    "total": 5916,
+    "passed": 5916,
+    "failed": 0
   },
   "coverage_by_ac": [
     {"ac": "AC-1", "test": "src/__tests__/records-read-pdp.test.ts :: RP-2 (empty grant set -> list=[]), RP-3 (root-sentinel grant -> all rows); ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-1/FF-RP-2 (zero covering grant -> empty list)", "result": "pass"},
@@ -20,29 +20,25 @@
     {"ac": "AC-11", "test": "manual/LIVE_PROOF -- out of TEST phase scope per task instructions (docs/review/T-0570.review.json explicitly marks AC-11 covered:false / manual, pending live-stand run)", "result": "pass"}
   ],
   "secondary_ux": [],
-  "failures": [
-    {
-      "test": "ci/checks/db/bundle-coherence.test.ts > FF-13 / AC-13 · every grant with resource_type='record' has resource_facet IS NOT NULL",
-      "is_product_defect": true,
-      "root_class": "product-defect"
-    }
-  ],
+  "failures": [],
   "notes": {
-    "coverage_gaps_found": "none — all AC-1..AC-10 map to an existing, executed test (no test authored by tester; AC-11 is manual/n/a per task scope).",
-    "runs_performed": [
-      "npx vitest run (full unit suite): 251 files passed, 2 skipped (253); 4853 tests passed, 10 skipped (4863); 0 failed. Matches PR-handoff's claimed count exactly.",
-      "npm run fitness:db on isolated docker postgres (docker compose -p t-0570-test, POSTGRES_PORT=55433, migrations/run.mjs applied all 101 files cleanly including 115_default_read_grant_backfill.sql, npm run fitness:db:setup-template then npm run fitness:db): 92 files passed + 1 FAILED (93); 1053 tests passed + 1 FAILED (1054). Docker container + volume torn down after the run (docker compose -p t-0570-test down -v).",
-      "bash ci/checks/read-pdp-anti-case.sh --self-test -> PASS (good/bad/sneaky-PoC/sanity-list fixtures all correct); bash ci/checks/read-pdp-anti-case.sh (real branch diff) -> PASS.",
-      "bash ci/checks/read-pdp-no-hardcoded-tenant.sh --self-test -> PASS; bash ci/checks/read-pdp-no-hardcoded-tenant.sh (real) -> PASS.",
-      "bash ci/checks/read-pdp-frozen-core.sh --self-test -> PASS; bash ci/checks/read-pdp-frozen-core.sh (real) -> PASS (grant-lattice.ts/object-handle.ts/grant-resolver.ts/field-visibility.ts byte-unchanged vs base e2417705)."
+    "iteration_2_context": "Test-iteration 1 (commit 39326d0) returned verdict=fail on a live product collision: the default-open READ grant seeded by migration 115 + register.ts (resource_type='record', resource_facet=NULL — the ratified T-0021 whole-resource-read encoding) violated the T-0082 FF-13/AC-13 data invariant (ci/checks/db/bundle-coherence.test.ts), red for every existing and future tenant. The architect resolved the collision by amended ADR (docs/adr/ADR-T0570-read-pdp.md §10, design commit 3f74294): variant (a), sanctioned structural carve-out (T-0033 FROZEN-FILE-TENSION precedent). The coder implemented it in commit 15b9d57: (1) FF-13 predicate amended with the exact §10.2 structural exemption NOT(read + RESOURCE_ROOT sentinel scope-shape), with a bidirectional sanction comment referencing both contracts; (2) new force-test FF-RP-14 in the same file (ROLLBACK tx) proving the carve-out is precise in both directions; (3) new ci/checks/read-pdp-sentinel-coherence.sh (FF-RP-15) pinning the sentinel literal identical across read-visibility.ts / migration 115 / the carve-out, wired additively into the fitness chain. Delta 39326d0..15b9d57 touches NO production files (only the amended db-test, the new shell check, ADR docs, package.json wiring) — all prior unit/CI results remain structurally valid and were re-run fresh anyway.",
+    "coverage_gaps_found": "none — all AC-1..AC-10 map to an existing, executed test; AC-11 is manual/n/a per task scope. New in iteration 2: FF-RP-14 (carve-out precision force-test) and FF-RP-15 (sentinel-literal coherence) both verified fresh.",
+    "runs_performed_iteration_2": [
+      "npx vitest run (full unit suite, fresh): 251 files passed, 2 skipped (253); 4853 tests passed, 10 skipped (4863); 0 failed.",
+      "npm run fitness:db on a FRESH isolated docker postgres (docker compose -p t-0570-test, port 55433, all 101 migrations incl. 115 applied cleanly, template rebuilt): 93 files passed (93); 1055 tests passed (1055); 0 FAILED — the iteration-1 red (bundle-coherence FF-13) is gone and the file now carries +1 test (FF-RP-14). Container and volume torn down after the run.",
+      "Targeted fresh re-run of the two coordinator-named files on the same live PG: ci/checks/db/bundle-coherence.test.ts 3/3 passed (FF-12, amended FF-13, FF-RP-14), ci/checks/db/records-read-pdp.db.test.ts 4/4 passed.",
+      "bash ci/checks/read-pdp-sentinel-coherence.sh -> PASS; --self-test -> PASS (coherent fixtures clean, drifted-literal fixture flagged).",
+      "Re-run of the three prior read-pdp checks (unchanged by delta): read-pdp-anti-case.sh, read-pdp-no-hardcoded-tenant.sh, read-pdp-frozen-core.sh — all PASS + all --self-test PASS."
     ],
-    "failure_classification_detail": "ci/checks/db/bundle-coherence.test.ts (T-0082, FF-13/AC-13) asserts NO choros.\"grant\" row with resource_type='record' may have resource_facet IS NULL — the T-0082 ADR (docs/design/T-0082-bundle-coherence.adr.md:176) explicitly documents this as an INTENTIONALLY STRONGER-than-schema invariant: 'grant on a specific record without specifying which registry/record it references = a hanging grant = the object-schema<->grant desync from §7'. T-0570's ADR (docs/adr/ADR-T0570-read-pdp.md:98/153/265) explicitly designs the default-open READ grant with resource_facet=NULL meaning 'whole-resource ⇒ all fields visible' -- this is a direct, intentional-on-both-sides collision between two ADRs, not an accidental regression or a coder oversight in wiring. Anti-false-FAIL verification performed: (1) queried the live seeded DB directly -- exactly ONE grant with resource_type='record' AND resource_facet IS NULL exists in the dev-silo tenant (a0000000-0000-0000-0000-000000000001), and its granted_by column is literally 'migration-115' (T-0570's own backfill migration), confirming the hanging grant is newly introduced by this task, not pre-existing debt; (2) confirmed migrations/115 is not applied on the branch's own merge-base (e2417705, only migrations up to 114 exist there) -- so on a pristine pre-T-0570 checkout this exact hanging-grant row cannot exist, meaning bundle-coherence.test.ts was green before this branch; (3) src/core/register.ts (T-0570's registerTenant additions, lines ~590-656) seeds the IDENTICAL resource_facet=NULL/resource_type='record' grant shape for EVERY newly-registered tenant going forward, so this is not a one-off backfill artifact confined to the dev-silo tenant -- FF-13 will be permanently red in the `db` CI job for every tenant after this task merges. This is a genuine product defect: the PR-handoff's friction_events entry lumping 'bundle-coherence' into '5 pre-existing unrelated reds... not touched by this task' is INCORRECT for this file -- the failure IS caused by files this task added (migrations/115_default_read_grant_backfill.sql + src/core/register.ts), verified live, not asserted from memory. Not a tooling-gap (the harness/docker/template setup worked correctly and the other 92 db-suite files passed clean) and not a wrong test (FF-13's intent — one row must unambiguously say which record/registry a narrow grant targets — is a deliberate, documented platform invariant that T-0570's own object_model directly contradicts for the default-open case). Verdict: fail, return to coder to either (a) get an explicit ADR-level reconciliation/exception for FF-13 covering the RESOURCE_ROOT sentinel case (mirroring how T-0570 already got a sanctioned exception for dual-control-isolation.sh via auto-sanction-additive.sh), or (b) encode the default-open grant's 'whole-resource' semantics without a NULL facet (e.g. an explicit sentinel facet value) so FF-13's invariant holds without carve-outs.",
-    "anti_false_fail_checks_performed": [
-      "Verified failure exists on a FRESH, isolated docker postgres (port 55433, project t-0570-test) freshly created for this test run, not reused/stale state from a prior run.",
-      "Verified via direct SQL query against the live seeded DB that the offending grant row's granted_by='migration-115', tying it unambiguously to this task's own migration rather than pre-existing seed data.",
-      "Verified merge-base e2417705 has no migration 115 (migrations dir tops out at 114), so this exact failure could not have existed before this branch.",
-      "Verified the failure is reproducible via BOTH paths this task adds (backfill migration 115 AND registerTenant in register.ts) -- not an isolated one-off in a single seed path.",
-      "Ruled out harness/tooling-gap: all other 92 files in ci/checks/db passed cleanly on the same isolated postgres/template setup in the same run, including the task's own new records-read-pdp.db.test.ts (4/4 pass) and register.test.ts live-DB block (pass) -- the setup itself is sound."
+    "anti_false_pass_checks_performed": [
+      "Prior-red-scenario reproduction: on the freshly seeded DB, the ORIGINAL (pre-amendment) FF-13 SQL predicate still returns exactly 1 row (the migration-115 default-read grant) — proving the offending data shape is still present and the green is due to the sanctioned carve-out, not to the data having changed; the AMENDED predicate returns 0 rows on the same data.",
+      "FF-RP-14 adversarial verification beyond the test itself: planted (in a rolled-back tx, direct SQL) a NULL-facet record-grant with a FULL non-sentinel scope (registry-level node) -> CAUGHT by the amended predicate, confirming the invariant kept its force against the exact hanging-grant shape T-0082 outlawed.",
+      "Carve-out precision probe (SQL NULL propagation): planted read+NULL-facet grants with (i) scope='{}' and (ii) the sentinel shape minus nodeId -> both ESCAPE the amended predicate (inner AND-chain evaluates to SQL NULL, NOT(NULL)=NULL, row excluded from WHERE), whereas the pre-amendment predicate caught them. Assessed severity: PRIVILEGE-INERT residual, not a blocker — (a) such partial-shape scopes cannot confer any access through the PDP (isNarrowerOrEqual finds no containment for a parent scope lacking nodeId/kind: no self-match, no root-rule match, no rowIndex-walk match), so no privilege-carrying hanging grant can hide behind the escape; (b) scope is jsonb NOT NULL by DDL (migration 008) and every platform writer (grants DAO, register.ts, all migrations) writes full scope shapes, so producing such a row requires a deliberate malformed direct-SQL write; (c) the ADR §10.2 contract SQL itself prescribes this exact predicate — the coder implemented the ratified design verbatim. Same class as reviewer nit R-3 (deliberately-constructed evasion outside the gate's threat model). Recorded as residual: a follow-up could tighten the carve-out to AND NOT COALESCE((...), false) to restore full tripwire coverage over malformed rows.",
+      "Verified the fix delta (39326d0..15b9d57) touches no src/ or migrations/ files (git diff --name-only) — frozen production surface intact; read-pdp-frozen-core.sh re-confirms the four T-0018/T-0015/T-0021/T-0081 core files byte-unchanged vs base e2417705."
+    ],
+    "residual_findings_nonblocking": [
+      "FF-13 carve-out NULL-propagation edge (see anti_false_pass_checks_performed[2]): read-operation record-grants with NULL facet AND a partial/malformed scope (missing sentinel keys) escape the amended predicate via SQL three-valued logic. Privilege-inert (cannot confer access), unreachable via any platform write path, trivially tightenable with COALESCE(..., false). Non-blocking; suggested follow-up for the FF-13 owner or a T-0570 polish pass."
     ]
   }
 }
