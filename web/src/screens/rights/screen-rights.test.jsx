@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { dedupHolders, holderCount } from './screen-rights.jsx';
+import { dedupAssignments, holderCount, scopeText } from './screen-rights.jsx';
 
 const fs = await import('fs');
 const path = await import('path');
@@ -107,67 +107,122 @@ describe('ra-overview-forms — write path hits ONLY existing endpoints (AC-4/5/
 // T-0608 (пункт д) — живой факт приёмки: rail count showed grantCount() (число
 // ГРАНТОВ роли) where the user reads "число держателей" («Конфигуратор 4» при
 // 2 держателях, «Снабженец 0» при 3 — a role can hold grants independently of
-// who holds it). Separately, a duplicate role_assignment row for the same
-// employee («Семён Сидоров» ×2») rendered as two badges. dedupHolders/
-// holderCount are pure (exported) functions — real unit tests, not just
-// source-presence.
+// who holds it). Separately, holders rendered per-row.
+//
+// F-1 fix (review+ux blocking): migrations/020_role_assignment.sql:29-32 —
+// NO UNIQUE(employee_id, role_id): the same (employee, role) LEGITIMATELY
+// coexists across different org_scope/window. So dedup keys on the COMPOSITE
+// identity (employee + org_scope + window), NOT employee_id alone:
+//   - true duplicates (identical scope+window) collapse (and revoke together);
+//   - differently-scoped assignments of the SAME person stay SEPARATE rows,
+//     each with its own scope label and its own Revoke.
+//   - holderCount answers "сколько ЧЕЛОВЕК" → distinct employee_id (a person
+//     with two scopes is one person) — a DIFFERENT question, correctly by-person.
 // ---------------------------------------------------------------------------
-describe('dedupHolders / holderCount (T-0608 пункт д — honest holder count + dedup)', () => {
-  const roleAssignmentsWithDuplicate = [
-    { id: 'ra-1', employee_id: 'emp-semyon', employee_slug: 'e-sidorov', employee_display: 'Семён Сидоров', employee_kind: 'human' },
-    { id: 'ra-2', employee_id: 'emp-semyon', employee_slug: 'e-sidorov', employee_display: 'Семён Сидоров', employee_kind: 'human' },
-    { id: 'ra-3', employee_id: 'emp-other', employee_slug: 'e-other', employee_display: 'Другой Сотрудник', employee_kind: 'human' },
+describe('holderCount — distinct PEOPLE, not grants or assignment rows (T-0608 д)', () => {
+  const twoScopesOnePerson = [
+    { id: 'ra-fin', employee_id: 'emp-semyon', employee_display: 'Семён Сидоров', employee_kind: 'human', org_scope: { kind: 'node', nodeId: 'dept-fin' }, valid_from: null, valid_until: null },
+    { id: 'ra-cs', employee_id: 'emp-semyon', employee_display: 'Семён Сидоров', employee_kind: 'human', org_scope: { kind: 'node', nodeId: 'dept-cs' }, valid_from: null, valid_until: null },
+    { id: 'ra-other', employee_id: 'emp-other', employee_display: 'Другой', employee_kind: 'human', org_scope: { kind: 'node', nodeId: 'dept-fin' }, valid_from: null, valid_until: null },
   ];
 
-  it('collapses two role_assignment rows for the SAME employee into one holder', () => {
-    const holders = dedupHolders(roleAssignmentsWithDuplicate);
-    expect(holders.length).toBe(2);
-    const semyon = holders.find((h) => h.employee_id === 'emp-semyon');
-    expect(semyon).toBeDefined();
-  });
-
-  it('carries ALL underlying assignment ids for the deduped holder (so revoke clears every duplicate)', () => {
-    const holders = dedupHolders(roleAssignmentsWithDuplicate);
-    const semyon = holders.find((h) => h.employee_id === 'emp-semyon');
-    expect(semyon.ids).toEqual(['ra-1', 'ra-2']);
-    const other = holders.find((h) => h.employee_id === 'emp-other');
-    expect(other.ids).toEqual(['ra-3']);
-  });
-
-  it('holderCount counts DISTINCT employees, not assignment rows or grants', () => {
-    const role = { assignments: roleAssignmentsWithDuplicate, grants: [{ id: 'g1' }, { id: 'g2' }, { id: 'g3' }, { id: 'g4' }] };
-    // 2 distinct holders (Семён + другой), even though there are 3 assignment
+  it('counts DISTINCT employees (a person with two scopes is ONE person), not grants', () => {
+    const role = { assignments: twoScopesOnePerson, grants: [{ id: 'g1' }, { id: 'g2' }, { id: 'g3' }, { id: 'g4' }] };
+    // 2 distinct people (Семён across 2 scopes + Другой), despite 3 assignment
     // rows and 4 grants — the bug was showing grants.length (4) here.
     expect(holderCount(role)).toBe(2);
   });
-
   it('a role with grants but zero holders reports 0 (not grants.length)', () => {
-    const role = { assignments: [], grants: [{ id: 'g1' }] };
-    expect(holderCount(role)).toBe(0);
+    expect(holderCount({ assignments: [], grants: [{ id: 'g1' }] })).toBe(0);
   });
-
   it('a role with holders but zero grants reports the holder count (not 0)', () => {
-    const role = { assignments: roleAssignmentsWithDuplicate, grants: [] };
-    expect(holderCount(role)).toBe(2);
-  });
-
-  it('an empty assignments list dedups to an empty holder list', () => {
-    expect(dedupHolders([])).toEqual([]);
+    expect(holderCount({ assignments: twoScopesOnePerson, grants: [] })).toBe(2);
   });
 });
 
-describe('RevokeAssignmentButton — revokes ALL duplicate ids, not just the first (T-0608 пункт д)', () => {
-  it('accepts an `ids` array prop in addition to the single `id` prop', () => {
-    expect(formsSrc).toMatch(/function RevokeAssignmentButton\(\{\s*id,\s*ids,/);
+describe('dedupAssignments — composite key: different scopes stay separate, true dupes collapse (T-0608 д, F-1)', () => {
+  const semyonFin = { id: 'ra-fin', employee_id: 'emp-semyon', employee_display: 'Семён Сидоров', employee_kind: 'human', org_scope: { kind: 'node', nodeId: 'dept-fin' }, valid_from: null, valid_until: null };
+  const semyonCs = { id: 'ra-cs', employee_id: 'emp-semyon', employee_display: 'Семён Сидоров', employee_kind: 'human', org_scope: { kind: 'node', nodeId: 'dept-cs' }, valid_from: null, valid_until: null };
+  // A genuine duplicate of semyonFin (identical scope + window, different row id).
+  const semyonFinDupe = { id: 'ra-fin-2', employee_id: 'emp-semyon', employee_display: 'Семён Сидоров', employee_kind: 'human', org_scope: { kind: 'node', nodeId: 'dept-fin' }, valid_from: null, valid_until: null };
+
+  // (а) THE regression test the F-2 gap demanded: one person, TWO assignments
+  // with DIFFERENT org_scope → TWO separate holder rows (NOT collapsed).
+  it('(а) one person, TWO different org_scopes → TWO separate holder rows', () => {
+    const rows = dedupAssignments([semyonFin, semyonCs]);
+    expect(rows.length).toBe(2);
+    // Each carries ONLY its own id — scopes are not conflated.
+    const fin = rows.find((r) => JSON.stringify(r.org_scope).includes('dept-fin'));
+    const cs = rows.find((r) => JSON.stringify(r.org_scope).includes('dept-cs'));
+    expect(fin.ids).toEqual(['ra-fin']);
+    expect(cs.ids).toEqual(['ra-cs']);
   });
-  it('loops over targetIds calling revokeAssignment for each (never just the first)', () => {
+
+  // (б) revoke of scope-A does NOT touch scope-B: each row's `ids` is that
+  // scope's assignments only, so «Отозвать» on отдел-fin never revokes отдел-cs.
+  it('(б) revoking one scope does NOT drag the other scope’s assignment along', () => {
+    const rows = dedupAssignments([semyonFin, semyonCs]);
+    const fin = rows.find((r) => JSON.stringify(r.org_scope).includes('dept-fin'));
+    // The Revoke for the fin row targets ['ra-fin'] ONLY — ra-cs is untouched.
+    expect(fin.ids).not.toContain('ra-cs');
+    expect(fin.ids).toEqual(['ra-fin']);
+  });
+
+  it('TRUE duplicates (identical employee + scope + window) DO collapse and carry both ids', () => {
+    const rows = dedupAssignments([semyonFin, semyonFinDupe, semyonCs]);
+    // 2 rows: {fin+finDupe collapsed}, {cs}.
+    expect(rows.length).toBe(2);
+    const fin = rows.find((r) => JSON.stringify(r.org_scope).includes('dept-fin'));
+    expect(fin.ids.sort()).toEqual(['ra-fin', 'ra-fin-2']);
+  });
+
+  it('different validity WINDOW also keeps assignments separate (not just scope)', () => {
+    const q1 = { ...semyonFin, id: 'ra-q1', valid_until: 1000 };
+    const q2 = { ...semyonFin, id: 'ra-q2', valid_from: 1000 };
+    const rows = dedupAssignments([q1, q2]);
+    expect(rows.length).toBe(2);
+  });
+
+  it('an empty assignments list yields an empty list', () => {
+    expect(dedupAssignments([])).toEqual([]);
+  });
+});
+
+describe('scopeText — plain-string scope label for the ConfirmDialog (T-0608 д, F-1)', () => {
+  it('names a node scope via the dictionary (falls back to a human label, never raw JSON)', () => {
+    const dict = { orgTree: [{ id: 'dept-fin', label: 'Финансы' }] };
+    expect(scopeText({ kind: 'node', nodeId: 'dept-fin' }, dict)).toBe('узел: Финансы');
+    expect(scopeText({ kind: 'node', nodeId: 'unknown' }, dict)).toBe('узел оргструктуры');
+  });
+  it('empty/absent scope → «весь тенант», never raw JSON', () => {
+    expect(scopeText(null, {})).toBe('весь тенант');
+    expect(scopeText({ kind: 'tags', tags: [] }, {})).toBe('весь тенант');
+  });
+});
+
+describe('RevokeAssignmentButton — targets ONE scope, names it in the confirm (T-0608 д, F-1)', () => {
+  it('accepts `ids` + `scopeLabel` props', () => {
+    expect(formsSrc).toMatch(/function RevokeAssignmentButton\(\{\s*id,\s*ids,\s*subjectLabel[^)]*scopeLabel/);
+  });
+  it('loops over targetIds calling revokeAssignment for each (identical-scope dupes only)', () => {
     const idx = formsSrc.indexOf('function RevokeAssignmentButton');
     const body = formsSrc.slice(idx, formsSrc.indexOf('function RevokeGrantButton'));
     expect(body).toMatch(/for \(const targetId of targetIds\)/);
     expect(body).toContain('await revokeAssignment(targetId);');
   });
-  it('screen-rights passes ids={a.ids} (the deduped holder group), not a single a.id', () => {
+  it('ConfirmDialog message names the SCOPE and states other scopes survive (no silent over-revoke)', () => {
+    const idx = formsSrc.indexOf('function RevokeAssignmentButton');
+    const body = formsSrc.slice(idx, formsSrc.indexOf('function RevokeGrantButton'));
+    expect(body).toContain('охват:');
+    expect(body).toContain('другие охваты этого человека сохранятся');
+  });
+  it('screen-rights passes ids={a.ids} + scopeLabel (per-assignment, not per-person)', () => {
     expect(screenSrc).toContain('ids={a.ids}');
+    expect(screenSrc).toContain('scopeLabel={scopeLabel}');
+  });
+  it('screen-rights keys holder rows on the composite assignment identity, not employee_id', () => {
+    expect(screenSrc).toContain('key={assignmentIdentityKey(a)}');
+    expect(screenSrc).toContain('dedupAssignments(role.assignments)');
   });
 });
 

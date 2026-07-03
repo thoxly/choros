@@ -165,7 +165,7 @@ interface TenantStateBody {
     id: string;
     slug: string;
     name: string | null;
-    assignments: Array<{ id: string; employee_id: string }>;
+    assignments: Array<{ id: string; employee_id: string; org_scope: unknown; valid_from: number | null; valid_until: number | null }>;
     grants: Array<{ id: string; resource_type: string; operation: string }>;
     pending: {
       assignments: Array<{ id: string }>;
@@ -358,6 +358,17 @@ describe.skipIf(!hasDb)('T-0572 FF-T0572-8: semi-confirmed rows are pending, nev
     // Active rows present.
     expect(workerRole!.assignments.map((a) => a.id)).toContain(activeAssignmentId);
     expect(workerRole!.grants.map((g) => g.id)).toContain(activeGrantId);
+
+    // T-0608 (F-1): every active assignment surfaces org_scope + the validity
+    // window (valid_from/valid_until) — the client dedups holders by the FULL
+    // composite identity (employee + scope + window), never employee_id alone
+    // (migrations/020: NO UNIQUE(employee_id, role_id) — differently-scoped
+    // assignments of the same person are distinct, must not collapse/over-revoke).
+    const activeRa = workerRole!.assignments.find((a) => a.id === activeAssignmentId);
+    expect(activeRa).toBeDefined();
+    expect(activeRa!).toHaveProperty('org_scope');
+    expect(activeRa!).toHaveProperty('valid_from');
+    expect(activeRa!).toHaveProperty('valid_until');
 
     // Pending (semi-confirmed) rows present ONLY in pending, never active.
     expect(workerRole!.pending.assignments.map((a) => a.id)).toContain(pendingAssignmentId);

@@ -85,23 +85,46 @@ T-0605) + `actionErrorMessage(code)` (проверяет `ENGINE_DRIVE_ERROR_MES
 (X)»; оба пусты → `null` (вызывающий сам решает последний фолбэк — никогда
 не изобретает подмену).
 
-### 1.4. (д) Счётчик держателей + дубли
+### 1.4. (д) Счётчик держателей + дубли — с F-1 fix (composite key)
 
-`holderCount(role) = dedupHolders(role.assignments).length` — число
-РАЗЛИЧНЫХ `employee_id`, заменяет `grantCount(role) = role.grants.length`
-(число грантов роли — независимая от держателей величина, ноль корреляции).
+**Счётчик.** `holderCount(role)` = число РАЗЛИЧНЫХ `employee_id`, заменяет
+`grantCount(role) = role.grants.length` (число грантов роли — независимая от
+держателей величина, ноль корреляции). Счётчик ЧЕСТНО отвечает на «сколько
+ЧЕЛОВЕК держит роль» — человек с двумя разными охватами это ОДИН человек,
+поэтому дедуп по `employee_id` здесь корректен (это другой вопрос, чем
+«сколько назначений»).
 
-`dedupHolders(assignments)` группирует по `employee_id`, схлопывает в один
-объект-holder, несущий ВСЕ исходные `assignment.id` в поле `ids`.
-`RevokeAssignmentButton` принимает `ids` (в дополнение к legacy `id`) и
-отзывает КАЖДЫЙ id последовательно на одно подтверждение — критично, чтобы
-отзыв дубля не оставлял «невидимый» активный ряд (revoke только первого id
-из двух создал бы ЛОЖНОЕ ощущение отзыва при реально сохранённом доступе).
+**Секция держателей + Revoke — КОМПОЗИТНЫЙ ключ (F-1, review+ux blocking).**
+`migrations/020_role_assignment.sql:29-32` документирует явный инвариант
+FR-2: **NO UNIQUE(employee_id, role_id)** — несколько назначений одной
+(employee, role) пары ЛЕГИТИМНО сосуществуют, когда различаются `org_scope`
+или окном валидности («approver в fin до Q3, в cs с Q4»). Это НЕ дубли, а
+разные гранты. Первая версия T-0608 дедупила по `employee_id` одному —
+(1) прятала разные охваты в один бейдж, (2) `Отозвать` снимал ВСЕ охваты
+одним кликом с ConfirmDialog, помеченным только именем. Отзыв лишнего гранта.
 
-**Read DAO (`rights-overview.ts`) НЕ меняется** — продолжает честно
-возвращать ВСЕ `role_assignment`-ряды как ground truth; дедуп — чисто
-display-слой экрана, не сокрытие состояния от админа (админ по-прежнему
-может отозвать оба ряда, теперь одним кликом вместо двух).
+Исправление:
+- `dedupAssignments(assignments)` дедупит по КОМПОЗИТНОМУ ключу
+  `assignmentIdentityKey(a)` = `employee_id + JSON(org_scope) + valid_from +
+  valid_until`. Схлопываются ТОЛЬКО истинные дубли (полностью идентичные);
+  различные-по-охвату/окну назначения — ОТДЕЛЬНЫЕ строки, каждая с
+  собственным scope-лейблом (`ScopeSummary` + новый `.chs-ov-holder__scope`)
+  и собственным `Отозвать`, целящимся ТОЛЬКО в свои `ids`.
+- Ключ СТРОГО консервативен: `JSON.stringify` scope как есть — false
+  negative (равные-но-переупорядоченные scope как разные) лишь показывает
+  лишнюю строку, НИКОГДА не over-collapse ⇒ никогда не over-revoke (корень
+  F-1 устранён по построению).
+- `RevokeAssignmentButton` получает `scopeLabel` (человеческая строка из
+  нового `scopeText`) — ConfirmDialog называет охват («охват: X») и явно
+  сообщает «другие охваты этого человека сохранятся».
+- Rail-бейджи держателей рендерятся по distinct `employee_id` (компактный
+  взгляд «кто держит роль», не авторитетный per-scope список).
+
+**Read DAO (`rights-overview.ts`)** — ЕДИНСТВЕННОЕ изменение аддитивное:
+`OverviewAssignment` теперь несёт `valid_from`/`valid_until` (окно уже
+читалось из БД для `inWindow`, теперь ещё и в wire), чтобы клиент имел
+полный композитный ключ. По-прежнему возвращает ВСЕ ряды как ground truth —
+дедуп/скрытие НЕ на уровне API.
 
 ### 1.5. (е) 401 mid-session
 
@@ -143,11 +166,16 @@ task-detail, complete-action, load, load-more, claim, approve) — живой
 3. **(г) Миграция данных: UPDATE choros.employee SET display_name=... для
    пустых рядов.** Отвергнуто (см. §4) — риск неверной атрибуции.
 4. **(д) Write-side идемпотентность на POST /api/role-assignments (409 при
-   дубле).** Отвергнуто ИЗ РАМОК этой P2-задачи (тянет глубже — нужно
-   решить семантику "то же самое" на write-пути: тот же org_scope? любой
-   scope? затрагивает T-0044 дуал-контроль-флоу). Follow-up зафиксирован
-   (§5). Текущий фикс — честный минимум: read-side дедуп для отображения +
-   корректный отзыв дублей.
+   дубле).** Отвергнуто ИЗ РАМОК этой P2-задачи — но теперь семантика "то же
+   самое" ОПРЕДЕЛЕНА через тот же композитный ключ (employee+role+scope+
+   window), так что follow-up (§5) имеет чёткий контракт. Затрагивает T-0044
+   дуал-контроль-флоу. Текущий фикс — честный минимум: read-side дедуп ТОЛЬКО
+   истинных дублей (композитный ключ) + раздельный per-scope отзыв.
+6. **(д, F-1) Дедуп держателей по `employee_id` одному.** Отвергнуто
+   (это была первая версия, поймана review+ux как blocking): нарушает
+   инвариант `migrations/020:29-32` (разные охваты одного человека — не
+   дубли), теряет охваты, отзывает лишнее. Композитный ключ — единственно
+   корректная модель.
 5. **(е) Глобальный monkey-patch `window.fetch`.** Отвергнуто: слишком
    широкий blast radius для P2-гигиены (влияет на ВСЕ fetch, включая
    сторонние/未предвиденные вызовы); opt-in обёртчик безопаснее и
@@ -159,24 +187,32 @@ task-detail, complete-action, load, load-more, claim, approve) — живой
   `instancesWithNextTask` вычисление + третье условие прятать base-строку.
 - `src/http/seed-write.ts::GET /api/org/tenant-state` — `display_name`
   добавлен в SELECT employee (аддитивно).
+- `src/http/rights-overview.ts::OverviewAssignment` — `valid_from`/`valid_until`
+  surface в wire (F-1: полный композитный ключ на клиенте).
 - `web/src/lib/format.js::formatPersonName` — новая чистая функция.
 - `web/src/forms/field-renderer.jsx::fetchEmployees` — экспортирована (была
   module-private).
 - `web/src/screens/screen-record-detail.jsx` — резолвит `created_by` через
   `fetchEmployees` + `formatPersonName`.
-- `web/src/screens/rights/screen-rights.jsx` — `holderCount`, `dedupHolders`
-  (экспортированы для юнит-тестов), `WhoCanDoWhat`/`RoleRailItem` используют
-  дедуп.
-- `web/src/screens/rights/ra-overview-forms.jsx` — `RevokeAssignmentButton`
-  принимает `ids`; дропдаун использует `formatPersonName`.
+- `web/src/screens/rights/screen-rights.jsx` (F-1) — `holderCount` (distinct
+  employee_id), `dedupAssignments` (композитный ключ), `scopeText`
+  (экспортированы); `WhoCanDoWhat` рендерит per-scope holder-строки со
+  scope-лейблом; `RoleRailItem` — distinct-people бейджи.
+- `web/src/screens/rights/ra-overview-forms.jsx` (F-1) —
+  `RevokeAssignmentButton` принимает `ids` (один охват) + `scopeLabel`,
+  ConfirmDialog называет охват; дропдаун использует `formatPersonName`.
+- `web/src/app-shell/app.css` — `.chs-ov-holder__scope` (мут. вторичный
+  scope-лейбл, токены темы).
 - `web/src/app-shell/dev-auth.js::fetchWithAuthRetry` — новая функция.
 - `web/src/screens/screen-inbox.jsx` — `ACTION_ERROR_MESSAGE` +
   `actionErrorMessage`; все fetch-вызовы на `fetchWithAuthRetry`.
 - Тесты: `src/__tests__/inbox-engine-drive.test.ts` (+2 теста, а/б),
   `ci/checks/db/seed-pack.test.ts` (display_name assertion),
+  `ci/checks/db/rights-overview.db.test.ts` (F-1: org_scope+window на wire),
   `web/src/lib/format.test.js` (новый), `web/src/app-shell/fetch-with-auth-retry.test.js`
   (новый), `web/src/screens/screen-inbox.test.jsx` (+2 describe),
-  `web/src/screens/rights/screen-rights.test.jsx` (+3 describe),
+  `web/src/screens/rights/screen-rights.test.jsx` (F-1: разный-охват → 2
+  строки, revoke-А-не-трогает-Б, scopeText, композитный ключ),
   `web/src/screens/screen-record-detail.test.jsx` (+1 describe).
 
 ## 4. Идентити-фикс: почему БЕЗ миграции данных
@@ -205,8 +241,10 @@ follow-up, вне рамок).
   fetch-обёрток по всему SPA) — системная дыра "мёртвый токен = мёртвый
   экран" шире одного экрана.
 - Write-side идемпотентность `POST /api/role-assignments` (409/reuse при
-  дубле employee+role) — устранило бы КОРЕНЬ дублей на записи, не только на
-  чтении.
+  ИСТИННОМ дубле — идентичный employee+role+scope+window, тот же композитный
+  ключ, что теперь используется для дедупа на чтении) — устранило бы КОРЕНЬ
+  истинных дублей на записи. Различные-по-охвату назначения при этом
+  остаются легитимными (не 409).
 - UI/эндпоинт для редактирования `employee.display_name` постфактум (нет
   сейчас ни одного, кроме INSERT-time).
 - Общий рефакторинг сырых/молчаливых ошибок по всем web-экранам (T-0605

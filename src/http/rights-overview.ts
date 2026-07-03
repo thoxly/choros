@@ -76,6 +76,16 @@ export interface OverviewAssignment {
   employee_display: string | null;
   employee_kind: "human" | "agent" | "service";
   org_scope: unknown;
+  // T-0608 (F-1 fix): validity window surfaced so the client can dedup by the
+  // FULL composite identity of an assignment (employee + org_scope + window) —
+  // migrations/020_role_assignment.sql:29-32 documents NO UNIQUE(employee_id,
+  // role_id): the same (employee, role) legitimately coexists across different
+  // org_scope/window (e.g. "approver in fin until Q3, in cs from Q4"). Those
+  // are NOT duplicates — collapsing them by employee_id alone hides scopes and
+  // makes a single "Отозвать" revoke MORE than the admin intends. epoch-ms;
+  // null = open-ended (no lower/upper bound).
+  valid_from: number | null;
+  valid_until: number | null;
   state: "active";
 }
 
@@ -313,6 +323,10 @@ async function loadTenantState(
             | "agent"
             | "service",
           org_scope: ra.org_scope,
+          // T-0608 (F-1): surface the window (epoch-ms) so the client's dedup
+          // key is the FULL assignment identity, not just employee_id.
+          valid_from: ra.valid_from === null ? null : Number(ra.valid_from),
+          valid_until: ra.valid_until === null ? null : Number(ra.valid_until),
           state: "active",
         });
       } else if (isPending) {

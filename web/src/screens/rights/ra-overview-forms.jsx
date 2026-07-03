@@ -349,15 +349,20 @@ function GrantRightForm({ roles, dictionaries, sourcesLoading = false, onDone })
 // screen-org.jsx pendingDelete), НЕ window.confirm и НЕ одноклик-revoke.
 // ---------------------------------------------------------------------------
 
-// T-0608 (пункт д): `id` (single) OR `ids` (array) — a holder can be backed by
-// MORE THAN ONE active role_assignment row (e.g. two "Назначить роль" submits
-// for the same employee+role — no write-side idempotency guard dedupes them,
-// see rights-overview.ts §byEmployee dedup). The overview screen now renders
-// ONE holder badge per employee (dedup by employee_id) but must still revoke
-// ALL underlying assignment rows so access actually disappears — revoking only
-// the first-seen id would leave a second live row silently granting the same
-// role after the admin believes it is gone. `ids` wins when both are passed.
-function RevokeAssignmentButton({ id, ids, subjectLabel = '', onDone }) {
+// T-0608 (F-1 fix, review+ux blocking): `id` (single) OR `ids` (array) of the
+// role_assignment rows to revoke. Per the schema invariant (migrations/020_
+// role_assignment.sql:29-32: NO UNIQUE(employee_id, role_id)), the caller
+// (screen-rights.jsx dedupAssignments) groups ONLY TRUE duplicates (identical
+// employee + org_scope + validity window) into one row — so `ids` here is
+// exactly one SCOPE's worth of assignments (usually a single id; >1 only when
+// the SAME scope was accidentally assigned twice). Differently-scoped
+// assignments are SEPARATE holder rows with SEPARATE Revoke buttons, so this
+// never revokes a scope the admin did not intend.
+//
+// `scopeLabel` (plain string from scopeText) names the exact scope in the
+// ConfirmDialog — so «Отозвать» tells the admin WHICH scope goes, never a bare
+// name that could hide that a person has other scopes still standing.
+function RevokeAssignmentButton({ id, ids, subjectLabel = '', scopeLabel = '', onDone }) {
   const targetIds = ids && ids.length > 0 ? ids : (id ? [id] : []);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -367,7 +372,7 @@ function RevokeAssignmentButton({ id, ids, subjectLabel = '', onDone }) {
     try {
       // Sequential, not Promise.all: keeps the toast/error attributable to a
       // stable order and avoids concurrent writes against the same tenant tx
-      // pool for what is a rare (>1) case.
+      // pool for the rare (>1) identical-scope-assigned-twice case.
       for (const targetId of targetIds) {
         await revokeAssignment(targetId);
       }
@@ -380,6 +385,14 @@ function RevokeAssignmentButton({ id, ids, subjectLabel = '', onDone }) {
       setBusy(false);
     }
   };
+  // Message names BOTH the person AND the scope — so the admin sees exactly
+  // which assignment (which охват) is being revoked, and that other scopes of
+  // the same person are untouched.
+  const who = subjectLabel ? `у: ${subjectLabel}` : 'это назначение';
+  const scopeClause = scopeLabel ? ` (охват: ${scopeLabel})` : '';
+  const message = subjectLabel
+    ? `Отозвать роль ${who}${scopeClause}? Доступ по этому назначению пропадёт сразу; другие охваты этого человека сохранятся.`
+    : `Отозвать это назначение${scopeClause}? Доступ по нему пропадёт сразу.`;
   return (
     <>
       <Button variant="ghost" size="sm" onClick={() => setConfirmOpen(true)}>Отозвать</Button>
@@ -387,9 +400,7 @@ function RevokeAssignmentButton({ id, ids, subjectLabel = '', onDone }) {
         open={confirmOpen}
         tone="danger"
         title="Отозвать роль?"
-        message={subjectLabel
-          ? `Отозвать роль у: ${subjectLabel}? Доступ по этой роли пропадёт сразу.`
-          : 'Отозвать это назначение? Доступ по этой роли пропадёт сразу.'}
+        message={message}
         confirmLabel="Отозвать"
         cancelLabel="Отмена"
         loading={busy}
