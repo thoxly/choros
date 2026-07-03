@@ -208,6 +208,38 @@ export function formatError(statusOrCode) {
 }
 
 // ---------------------------------------------------------------------------
+// formatPersonName — T-0608 (пункт г): человек-фолбэк для пустого display_name
+// ---------------------------------------------------------------------------
+
+/**
+ * Разрешает отображаемое имя человека/сотрудника с честным фолбэком.
+ *
+ * Живой факт приёмки: employee-запись без имени рендерилась как сырой
+ * UUID/slug («АВТОР: 4c653940-…», сотрудник «4c653940-…» в дропдауне) — ни
+ * один экран не отличал «имени нет» от «имя есть, просто короткое». Эта
+ * функция — ЕДИНСТВЕННЫЙ уровень честного отображения: имя пусто И email
+ * доступен → «Без имени (email)»; имя пусто И email недоступен → «Без
+ * имени»; иначе — само имя. Никогда не возвращает сырой UUID/slug молча —
+ * тот остаётся доступен вызывающему как последний fallback (this function
+ * does not know about slug/id; callers pass it only when name+email are both
+ * absent, mirroring the existing `a.employee_display || a.employee_slug ||
+ * a.employee_id` chains already in ra-overview-forms.jsx/screen-rights.jsx).
+ *
+ * @param {string|null|undefined} name - display_name (может быть '' или null)
+ * @param {string|null|undefined} [email] - email/slug для фолбэка в скобках
+ * @returns {string|null} - имя, «Без имени (email)», «Без имени», или null
+ *   (null когда И имя, И email отсутствуют — вызывающий сам решает последний
+ *   fallback, напр. raw id/slug, чтобы НИЧЕГО не потерялось молча)
+ */
+export function formatPersonName(name, email) {
+  const trimmedName = typeof name === 'string' ? name.trim() : '';
+  if (trimmedName) return trimmedName;
+  const trimmedEmail = typeof email === 'string' ? email.trim() : '';
+  if (trimmedEmail) return `Без имени (${trimmedEmail})`;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // formatRef — UUID/id/slug → имя сущности из кэша
 // ---------------------------------------------------------------------------
 

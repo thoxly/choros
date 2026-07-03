@@ -25,6 +25,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Select, StatusChip, ConfirmDialog, LoadingState } from '../../components/components.jsx';
 import { useToastContext } from '../../app-shell/toast-context.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
+import { formatPersonName } from '../../lib/format.js';
 
 // ---------------------------------------------------------------------------
 // Write helpers — each hits exactly ONE existing endpoint (AC-4/AC-5/AC-6).
@@ -210,7 +211,18 @@ function AssignRoleForm({ roles, employees, dictionaries, sourcesLoading = false
         value={employeeId}
         onChange={(e) => setEmployeeId(e.target.value)}
         placeholder="Выберите сотрудника…"
-        options={(employees ?? []).map((e) => ({ value: e.id, label: e.slug }))}
+        // T-0608 (пункт г): GET /api/org/tenant-state now selects display_name
+        // (was id+slug only) — an employee whose slug happens to be a raw
+        // Keycloak-user UUID (every KC-registered human: slug==sub) no longer
+        // renders as that UUID when a real display_name exists. formatPersonName
+        // falls back to «Без имени» (no secondary identifier is available at
+        // this layer — employee carries no email column) rather than silently
+        // showing nothing; the slug remains the LAST-resort fallback (never
+        // hides the row entirely).
+        options={(employees ?? []).map((e) => ({
+          value: e.id,
+          label: formatPersonName(e.display_name) || e.slug,
+        }))}
         hint={(employees ?? []).length === 0
           ? (
             <>
@@ -337,14 +349,28 @@ function GrantRightForm({ roles, dictionaries, sourcesLoading = false, onDone })
 // screen-org.jsx pendingDelete), НЕ window.confirm и НЕ одноклик-revoke.
 // ---------------------------------------------------------------------------
 
-function RevokeAssignmentButton({ id, subjectLabel = '', onDone }) {
+// T-0608 (пункт д): `id` (single) OR `ids` (array) — a holder can be backed by
+// MORE THAN ONE active role_assignment row (e.g. two "Назначить роль" submits
+// for the same employee+role — no write-side idempotency guard dedupes them,
+// see rights-overview.ts §byEmployee dedup). The overview screen now renders
+// ONE holder badge per employee (dedup by employee_id) but must still revoke
+// ALL underlying assignment rows so access actually disappears — revoking only
+// the first-seen id would leave a second live row silently granting the same
+// role after the admin believes it is gone. `ids` wins when both are passed.
+function RevokeAssignmentButton({ id, ids, subjectLabel = '', onDone }) {
+  const targetIds = ids && ids.length > 0 ? ids : (id ? [id] : []);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const { push: pushToast } = useToastContext();
   const handleConfirm = async () => {
     setBusy(true);
     try {
-      await revokeAssignment(id);
+      // Sequential, not Promise.all: keeps the toast/error attributable to a
+      // stable order and avoids concurrent writes against the same tenant tx
+      // pool for what is a rare (>1) case.
+      for (const targetId of targetIds) {
+        await revokeAssignment(targetId);
+      }
       pushToast({ tone: 'success', message: 'Назначение отозвано.' });
       setConfirmOpen(false);
       onDone && onDone();

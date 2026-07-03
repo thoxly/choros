@@ -38,6 +38,21 @@ describe('screen-record-detail — edit (T-0568)', () => {
   });
 });
 
+describe('screen-record-detail — author display name (T-0608 пункт г)', () => {
+  it('resolves created_by (a slug) to a display name via fetchEmployees, not raw', () => {
+    expect(src).toContain("import { fetchEmployees } from '../forms/field-renderer.jsx'");
+    expect(src).toContain('fetchEmployees()');
+  });
+  it('renders the resolved name through formatPersonName, falling back to the raw slug (never blank)', () => {
+    expect(src).toContain('formatPersonName(authorNames.get(record.created_by)) || record.created_by');
+  });
+  it('a failed /api/org lookup degrades non-fatally (record still renders)', () => {
+    const idx = src.indexOf('fetchEmployees()');
+    const block = src.slice(idx, idx + 400);
+    expect(block).toMatch(/\.catch\(/);
+  });
+});
+
 describe('screen-record-detail — delete (T-0568)', () => {
   it('DELETEs /api/records/:id (frozen contract), 204/404 both "gone"', () => {
     expect(src).toContain('/api/records/${encodeURIComponent(id)}');

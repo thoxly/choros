@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { dedupHolders, holderCount } from './screen-rights.jsx';
 
 const fs = await import('fs');
 const path = await import('path');
@@ -99,6 +100,81 @@ describe('ra-overview-forms — write path hits ONLY existing endpoints (AC-4/5/
   });
   it('does NOT introduce any new write route literal (no /api/rights/overview/* POST)', () => {
     expect(formsSrc).not.toMatch(/\/api\/rights\/overview/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0608 (пункт д) — живой факт приёмки: rail count showed grantCount() (число
+// ГРАНТОВ роли) where the user reads "число держателей" («Конфигуратор 4» при
+// 2 держателях, «Снабженец 0» при 3 — a role can hold grants independently of
+// who holds it). Separately, a duplicate role_assignment row for the same
+// employee («Семён Сидоров» ×2») rendered as two badges. dedupHolders/
+// holderCount are pure (exported) functions — real unit tests, not just
+// source-presence.
+// ---------------------------------------------------------------------------
+describe('dedupHolders / holderCount (T-0608 пункт д — honest holder count + dedup)', () => {
+  const roleAssignmentsWithDuplicate = [
+    { id: 'ra-1', employee_id: 'emp-semyon', employee_slug: 'e-sidorov', employee_display: 'Семён Сидоров', employee_kind: 'human' },
+    { id: 'ra-2', employee_id: 'emp-semyon', employee_slug: 'e-sidorov', employee_display: 'Семён Сидоров', employee_kind: 'human' },
+    { id: 'ra-3', employee_id: 'emp-other', employee_slug: 'e-other', employee_display: 'Другой Сотрудник', employee_kind: 'human' },
+  ];
+
+  it('collapses two role_assignment rows for the SAME employee into one holder', () => {
+    const holders = dedupHolders(roleAssignmentsWithDuplicate);
+    expect(holders.length).toBe(2);
+    const semyon = holders.find((h) => h.employee_id === 'emp-semyon');
+    expect(semyon).toBeDefined();
+  });
+
+  it('carries ALL underlying assignment ids for the deduped holder (so revoke clears every duplicate)', () => {
+    const holders = dedupHolders(roleAssignmentsWithDuplicate);
+    const semyon = holders.find((h) => h.employee_id === 'emp-semyon');
+    expect(semyon.ids).toEqual(['ra-1', 'ra-2']);
+    const other = holders.find((h) => h.employee_id === 'emp-other');
+    expect(other.ids).toEqual(['ra-3']);
+  });
+
+  it('holderCount counts DISTINCT employees, not assignment rows or grants', () => {
+    const role = { assignments: roleAssignmentsWithDuplicate, grants: [{ id: 'g1' }, { id: 'g2' }, { id: 'g3' }, { id: 'g4' }] };
+    // 2 distinct holders (Семён + другой), even though there are 3 assignment
+    // rows and 4 grants — the bug was showing grants.length (4) here.
+    expect(holderCount(role)).toBe(2);
+  });
+
+  it('a role with grants but zero holders reports 0 (not grants.length)', () => {
+    const role = { assignments: [], grants: [{ id: 'g1' }] };
+    expect(holderCount(role)).toBe(0);
+  });
+
+  it('a role with holders but zero grants reports the holder count (not 0)', () => {
+    const role = { assignments: roleAssignmentsWithDuplicate, grants: [] };
+    expect(holderCount(role)).toBe(2);
+  });
+
+  it('an empty assignments list dedups to an empty holder list', () => {
+    expect(dedupHolders([])).toEqual([]);
+  });
+});
+
+describe('RevokeAssignmentButton — revokes ALL duplicate ids, not just the first (T-0608 пункт д)', () => {
+  it('accepts an `ids` array prop in addition to the single `id` prop', () => {
+    expect(formsSrc).toMatch(/function RevokeAssignmentButton\(\{\s*id,\s*ids,/);
+  });
+  it('loops over targetIds calling revokeAssignment for each (never just the first)', () => {
+    const idx = formsSrc.indexOf('function RevokeAssignmentButton');
+    const body = formsSrc.slice(idx, formsSrc.indexOf('function RevokeGrantButton'));
+    expect(body).toMatch(/for \(const targetId of targetIds\)/);
+    expect(body).toContain('await revokeAssignment(targetId);');
+  });
+  it('screen-rights passes ids={a.ids} (the deduped holder group), not a single a.id', () => {
+    expect(screenSrc).toContain('ids={a.ids}');
+  });
+});
+
+describe('screen-rights / ra-overview-forms — identity display fallback (T-0608 пункт г)', () => {
+  it('the employee picker resolves display_name (not the raw slug/UUID) via formatPersonName', () => {
+    expect(formsSrc).toContain("import { formatPersonName } from '../../lib/format.js'");
+    expect(formsSrc).toContain('formatPersonName(e.display_name) || e.slug');
   });
 });
 

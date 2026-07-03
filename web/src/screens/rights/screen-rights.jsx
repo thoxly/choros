@@ -28,9 +28,37 @@ import {
   AssignRoleForm, GrantRightForm, RevokeAssignmentButton, RevokeGrantButton, PendingBadge,
 } from './ra-overview-forms.jsx';
 
-const grantCount = (r) => r.grants.length;
+// T-0608 (пункт д, живой факт приёмки): the rail showed grantCount() (число
+// ГРАНТОВ роли) in the position a user reads as "сколько держателей" — «4» у
+// Конфигуратора (4 гранта, 2 держателя) и «0» у Снабженца (0 грантов — грант
+// живёт на роли отдельно от holder-состава — при 3 держателях). Renamed +
+// re-pointed at the HONEST holder count (see dedupHolders below): distinct
+// employees holding the role, not grant rows.
+export const holderCount = (r) => dedupHolders(r.assignments).length;
+
+// T-0608 (пункт д): one employee can back MORE THAN ONE active role_assignment
+// row for the SAME role (no write-side idempotency guard on POST
+// /api/role-assignments — two "Назначить роль" submits for the same
+// employee+role both land active). rights-overview.ts intentionally returns
+// every row as ground truth (hiding one would make it un-revokable — see
+// RevokeAssignmentButton's `ids` support), so the SCREEN dedups for display:
+// group by employee_id, keep one badge, but carry ALL row ids so "Отозвать"
+// can clear every duplicate in one confirm (never leaves a silent live row).
+export function dedupHolders(assignments) {
+  const byEmployee = new Map();
+  for (const a of assignments) {
+    const existing = byEmployee.get(a.employee_id);
+    if (existing) {
+      existing.ids.push(a.id);
+    } else {
+      byEmployee.set(a.employee_id, { ...a, ids: [a.id] });
+    }
+  }
+  return [...byEmployee.values()];
+}
 
 function RoleRailItem({ role, active, onSelect }) {
+  const holders = dedupHolders(role.assignments);
   return (
     <button className="chs-rolerow" aria-current={active ? "true" : undefined} onClick={() => onSelect(role.id)}>
       <span className="chs-rolerow__main">
@@ -38,13 +66,13 @@ function RoleRailItem({ role, active, onSelect }) {
         <span className="chs-rolerow__scope">{role.slug}</span>
       </span>
       <span className="chs-rolerow__holders">
-        {role.assignments.slice(0, 3).map((a) => (
-          <span key={a.id} className={`chs-rolerow__h chs-rolerow__h--${a.employee_kind}`} title={a.employee_display || a.employee_slug}>
+        {holders.slice(0, 3).map((a) => (
+          <span key={a.employee_id} className={`chs-rolerow__h chs-rolerow__h--${a.employee_kind}`} title={a.employee_display || a.employee_slug}>
             <ExecutorBadge type={a.employee_kind} name="" bare showLabel={false} />
           </span>
         ))}
       </span>
-      <span className="chs-rolerow__count">{grantCount(role)}</span>
+      <span className="chs-rolerow__count">{holderCount(role)}</span>
     </button>
   );
 }
@@ -142,6 +170,10 @@ function ScopeSummary({ scope, dictionaries }) {
 // ---------------------------------------------------------------------------
 
 function WhoCanDoWhat({ role, canManage, dictionaries, onChanged }) {
+  // T-0608 (пункт д): one badge per employee — dedupHolders folds duplicate
+  // role_assignment rows (same employee_id) into one entry carrying every
+  // underlying id so revoke clears all of them, not just the first.
+  const holders = dedupHolders(role.assignments);
   return (
     <section className="chs-section2">
       <div className="chs-section2__head">
@@ -150,15 +182,15 @@ function WhoCanDoWhat({ role, canManage, dictionaries, onChanged }) {
       </div>
 
       <div className="chs-ov-holders">
-        {role.assignments.length === 0 ? (
+        {holders.length === 0 ? (
           <span className="chs-derivedcol__empty">Роль пока никому не назначена</span>
         ) : (
-          role.assignments.map((a) => (
-            <div className="chs-ov-holder" key={a.id}>
+          holders.map((a) => (
+            <div className="chs-ov-holder" key={a.employee_id}>
               <ExecutorBadge type={a.employee_kind} name={a.employee_display || a.employee_slug || a.employee_id} />
               {canManage && (
                 <RevokeAssignmentButton
-                  id={a.id}
+                  ids={a.ids}
                   subjectLabel={a.employee_display || a.employee_slug || ''}
                   onDone={onChanged}
                 />

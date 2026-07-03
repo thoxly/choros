@@ -554,6 +554,72 @@ describe("process.next_task surfaced in listInstanceInboxTasks (T-0443)", () => 
     const projections = await listInstanceProjections(pool, TENANT);
     expect(projections[0]?.status).toBe("done");
   });
+
+  // -------------------------------------------------------------------------
+  // T-0608 (пункт б) — живой факт приёмки: «Заказ поставщику» показывалось
+  // ДВАЖДЫ в инбоксе (base process.started строка + process.next_task строка)
+  // с ДВУМЯ разными дедлайнами. Root cause: a process.next_task can appear via
+  // a path OTHER than the base row's own task.approved — e.g. a timer
+  // escalation (reconcileInstanceTimers, T-0458) whose target role differs
+  // from the base step's own role. Before this fix, the base row was hidden
+  // ONLY on ITS OWN task.approved/instance.ended — never on "an unrelated
+  // next_task row now exists for this instance". Both rows survived
+  // simultaneously. The fix: the base row is ALSO hidden once ANY
+  // process.next_task row exists for its instance (every emit site proves,
+  // via a live engine.getActiveUserTasks call, that the base step is no
+  // longer the engine's active task before appending that row).
+  // -------------------------------------------------------------------------
+  it("T-0608 б: base row is hidden once an UNAPPROVED next_task exists for its instance (escalation path, no base task.approved ever recorded)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    const client = await pool.connect();
+    await client.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
+    const tx = client as unknown as PgClientLike;
+
+    // Base process.started — NEVER approved (mirrors the live-факт: the base
+    // step's OWN task.approved was never recorded through our /action route;
+    // the instance moved on via a timer-fired escalation instead).
+    const baseTaskId = await appendProcessStarted(tx, {
+      instanceId: INST,
+      procKey: PROC_KEY,
+      actor: ACTOR,
+      nowMs: 1000,
+      tenantId: TENANT,
+    });
+    client.release();
+
+    // Sanity: with only the base row, it IS visible (pre-condition).
+    const before = await listInstanceInboxTasks(pool, TENANT);
+    expect(before.find((t) => t.id === baseTaskId)).toBeDefined();
+
+    // Timer-escalation surfaces a next_task addressed to a DIFFERENT role
+    // (e.g. "role-manager", not the base step's own role) — exactly the
+    // reconcileInstanceTimers design (escalation target ≠ base role), which
+    // is why the OLD exclusion in that function (matching base role) never
+    // caught this case.
+    const escalationTaskId = "eeeeeeee-1111-2222-3333-444444444444";
+    await appendNextTaskEvent(pool, TENANT, {
+      instanceId: INST,
+      procKey: PROC_KEY,
+      actor: "system:timer",
+      nowMs: 1600 * 60_000, // ~ deadline drift the acceptance report noted (11:09 vs 11:19)
+      taskDefKey: "task-manager-escalation",
+      taskName: "Заказ поставщику (эскалация)",
+      taskRole: "role-manager",
+      taskStep: "Заказ поставщику",
+      inboxTaskId: escalationTaskId,
+      escalated: true,
+    });
+
+    const tasks = await listInstanceInboxTasks(pool, TENANT);
+    const instTasks = tasks.filter((t) => t.inst === INST);
+
+    // KEY ASSERTION: exactly ONE row for this instance now — the escalation
+    // row — never both (the pre-fix behaviour was 2 rows here).
+    expect(instTasks).toHaveLength(1);
+    expect(instTasks[0]?.id).toBe(escalationTaskId);
+    expect(tasks.find((t) => t.id === baseTaskId)).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1690,6 +1756,51 @@ describe("T-0522 reconcileInboxEngineDriveOnRead — self-healing net (mock engi
     const total = await reconcileInboxEngineDriveOnRead(pool, D_TENANT, engine);
     expect(total).toBe(0);
     expect(db.events.filter((e) => e.type === NEXT_TASK_TYPE)).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // T-0608 (пункт а) — живой факт приёмки: движок закрыл userTask
+  // («Проверка руководителем», end_time зафиксирован в Flowable), но строка в
+  // «Мои задачи»/«Из пула» продолжала висеть «в пуле» сутки+. This test proves
+  // the mechanism that self-heals exactly that: a base row whose task.approved
+  // was NEVER recorded through our /action route (e.g. the engine task was
+  // closed some other way, or the completion race predates the T-0571 fix)
+  // still gets hidden on the VERY NEXT read once the engine reports the
+  // instance ended — reconcileInboxEngineDriveOnRead re-drives EVERY waiting
+  // instance (not just approved-at-least-once ones), so isInstanceEnded=true
+  // emits instance.ended regardless of our own audit history for the base row.
+  // -------------------------------------------------------------------------
+  it("T-0608 а: a base row NEVER approved through our route still disappears once the engine reports the instance ended (stale-pool self-heal)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    const baseTaskId = await seedStarted(pool, D_TENANT, D_INST);
+
+    // Pre-condition: with no reconcile yet, the stale base row IS visible
+    // (mirrors the accepted stand's «висит в пуле сутки+» symptom).
+    const before = await listInstanceInboxTasks(pool, D_TENANT);
+    expect(before.find((t) => t.id === baseTaskId)).toBeDefined();
+
+    // The engine reports the instance already ended — closed some way other
+    // than our own task.approved audit event (no task.approved was ever
+    // written for baseTaskId in this test, by construction).
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+
+    const emitted = await reconcileInboxEngineDriveOnRead(pool, D_TENANT, engine);
+    expect(emitted).toBe(0); // nothing to fan-out — the instance is over.
+    // instance.ended was emitted (best-effort, self-healed) even though we
+    // never recorded a task.approved for the base row ourselves.
+    expect(db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE)).toHaveLength(1);
+    // NEVER completes a task on read — pure mirror.
+    expect(engine.completeUserTask).not.toHaveBeenCalled();
+
+    // The stale base row is now GONE from the very next inbox read.
+    const after = await listInstanceInboxTasks(pool, D_TENANT);
+    expect(after.find((t) => t.id === baseTaskId)).toBeUndefined();
+    expect(after.filter((t) => t.inst === D_INST)).toHaveLength(0);
   });
 });
 

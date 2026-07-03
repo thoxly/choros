@@ -902,6 +902,25 @@ export async function listInstanceProjections(
  * Base task (process.started) is hidden once task.approved exists for it — the
  * base approve step is done regardless of whether the instance itself ended
  * (the 6M extra-approve step is then exposed via process.next_task).
+ *
+ * T-0608 (пункт б, живой факт приёмки: «Заказ поставщику» showed TWICE — the
+ * base process.started row AND a process.next_task row, with two different
+ * deadlines). The base row was previously hidden ONLY on its OWN
+ * task.approved (a human/our-endpoint action) or instance.ended — but a
+ * process.next_task row can appear via a DIFFERENT path (timer escalation,
+ * T-0458; engine-drive reconcile, T-0522/T-0571; message delivery, T-0459)
+ * WITHOUT ever touching the base row's own task.approved. Every one of those
+ * four emit sites (reconcileInstanceTimers / reconcileInstanceEngineDrive /
+ * deliverMessageEnvelope / surfaceMessageCatchWaits) only appends a
+ * process.next_task after confirming — via a LIVE engine.getActiveUserTasks
+ * call — that the engine has moved to a genuinely NEW active task for that
+ * instance. So the mere EXISTENCE of any process.next_task row for an
+ * instance is itself proof the base step is no longer the engine's live task
+ * for that instance, independent of whether OUR audit trail ever recorded an
+ * explicit approve for the base row. The base row is now ALSO hidden once the
+ * instance has at least one next_task row (regardless of that next_task's own
+ * approved state — its mere presence proves the base step was already
+ * superseded when it was emitted).
  */
 export async function listInstanceInboxTasks(
   pool: pg.Pool,
@@ -911,14 +930,25 @@ export async function listInstanceInboxTasks(
   const limit = Math.min(opts?.limit ?? 200, 500);
   const { started, endedInstanceIds, approvedTaskIds, nextTaskRows } = await readEvents(pool, tenantId, limit);
 
+  // T-0608 (пункт б): instances that have AT LEAST ONE process.next_task row
+  // (approved or not) — proof the engine already advanced past the base step.
+  const instancesWithNextTask = new Set<string>();
+  for (const row of nextTaskRows) {
+    const payload = (row.payload ?? {}) as Record<string, unknown>;
+    const inst = strField(payload, "inst", "");
+    if (inst) instancesWithNextTask.add(inst);
+  }
+
   const tasks: InstanceInboxTask[] = [];
 
-  // 1. Base process.started rows (hide once approved OR instance ended).
+  // 1. Base process.started rows (hide once approved, OR instance ended, OR
+  //    superseded by a process.next_task row — T-0608 пункт б).
   for (const row of started) {
     const payload = (row.payload ?? {}) as Record<string, unknown>;
     const inst = strField(payload, "inst", `instance:${row.id}`);
     if (approvedTaskIds.has(row.id)) continue; // base approve done → hide base task.
     if (endedInstanceIds.has(inst)) continue; // instance ended → no more tasks.
+    if (instancesWithNextTask.has(inst)) continue; // superseded by a live next_task (T-0608 б).
     tasks.push({
       id: row.id,
       role: strField(payload, "task_role", APPROVER_ROLE),
