@@ -231,14 +231,52 @@ describe('T-0609 — real resources merged into the grant form dictionary', () =
     expect(screenSrc).toContain('/api/rights/dictionaries');
   });
   it('real resources are merged into dictionaries.resources BEFORE the demo entries', () => {
-    expect(screenSrc).toMatch(/\[\.\.\.realResources,\s*\.\.\.\(dicts\?\.resources\s*\?\?\s*\[\]\)\]/);
+    expect(screenSrc).toMatch(/\[\.\.\.realResources,\s*\.\.\.demoTagged\]/);
+  });
+  it('demo dictionary entries are TAGGED demoSeed at the merge point (UX-2)', () => {
+    expect(screenSrc).toMatch(/demoTagged = \(dicts\?\.resources \?\? \[\]\)\.map\(\(r\) => \(\{ \.\.\.r, demoSeed: true \}\)\)/);
   });
   it('fetchRealResources degrades to [] on any failure (best-effort, never blocks the form)', () => {
     const idx = screenSrc.indexOf('async function fetchRealResources');
     const body = screenSrc.slice(idx, idx + 400);
     expect(body).toMatch(/catch\s*\{\s*return \[\];\s*\}/);
   });
-  it('GrantRightForm resource <Select> is unchanged structurally (still maps {uri,name})', () => {
-    expect(formsSrc).toMatch(/resources\.map\(\(r\)\s*=>\s*\(\{\s*value:\s*r\.uri,\s*label:\s*r\.name\s*\}\)\)/);
+});
+
+// ---------------------------------------------------------------------------
+// T-0609 F-1 fix — a grant on a REAL resource must be RESOLVABLE by the PDP:
+// the covering predicate matches by SCOPE containment in the resource hierarchy
+// (never by resource_type), so the form must emit
+// {kind:'node', hierarchy:'resource', nodeId:<real UUID>, nodeLevel} for real
+// resources — an org-hierarchy scope short-circuits to "not covered" on the
+// hierarchy mismatch and the produced grant is inert (review F-1, blocking).
+// The live end-to-end proof is ci/checks/db/rights-resource-grant-resolve.db.test.ts;
+// these are the structural assertions on the form source.
+// ---------------------------------------------------------------------------
+describe('T-0609 F-1 — GrantRightForm emits resource-hierarchy scope for real resources', () => {
+  it('identifies a real resource by id + node_level from /api/rights/resources', () => {
+    expect(formsSrc).toMatch(/selectedResource\.id && selectedResource\.node_level/);
+  });
+  it("emits scope {hierarchy:'resource', nodeId:<real id>, nodeLevel:<level>} for a real resource", () => {
+    expect(formsSrc).toMatch(/hierarchy:\s*'resource'/);
+    expect(formsSrc).toMatch(/nodeId:\s*selectedResource\.id/);
+    expect(formsSrc).toMatch(/nodeLevel:\s*selectedResource\.node_level/);
+  });
+  it('real resource → org ScopePicker replaced by an honest whole-resource scope line', () => {
+    expect(formsSrc).toMatch(/isRealResource \? \(/);
+    expect(formsSrc).toContain('Охват: ресурс целиком');
+  });
+  it('demo entries are visibly marked in the selector («· демо») (UX-2)', () => {
+    expect(formsSrc).toMatch(/r\.demoSeed \? `\$\{r\.name\} · демо` : r\.name/);
+  });
+  it('demo resource selected → honest hint that the grant does not control data access (UX-1)', () => {
+    expect(formsSrc).toContain('Демо-ресурс из ознакомительного набора');
+    expect(formsSrc).toContain('не ограничивает доступ к данным тенанта');
+  });
+  it('demo resource success toast is QUALIFIED — no false «Право выдано» for an inert grant (UX-1)', () => {
+    expect(formsSrc).toContain('Право выдано (демо-ресурс: попадёт в обзор ролей, но не ограничивает доступ к данным).');
+  });
+  it('real resource does not require the org scope picker to submit (scope derived from the resource)', () => {
+    expect(formsSrc).toMatch(/\(isRealResource \|\| scope\)/);
   });
 });

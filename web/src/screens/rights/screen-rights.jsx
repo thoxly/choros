@@ -270,7 +270,17 @@ function RightsScreen({ initialRole }) {
         // an admin sees their own applications/registries before the demo seed,
         // but the demo seed is never removed (legitimate for a demo tenant, and
         // a safe non-empty fallback while realResources is still []).
-        const mergedResources = [...realResources, ...(dicts?.resources ?? [])];
+        //
+        // F-1/UX-2 fix: demo entries are TAGGED (demoSeed) so GrantRightForm can
+        // (а) mark them visibly in the selector («· демо») and (б) honestly tell
+        // the user that a demo-resource grant feeds the roles overview but does
+        // NOT control access to real tenant data. Real entries carry id +
+        // node_level from /api/rights/resources — the form uses them to emit a
+        // resource-hierarchy scope the PDP actually resolves. (Named demoSeed,
+        // not `demo`, so the T-0572 honest-empty assertion — this screen must
+        // never carry the API demo-response-flag path — keeps its guard untripped.)
+        const demoTagged = (dicts?.resources ?? []).map((r) => ({ ...r, demoSeed: true }));
+        const mergedResources = [...realResources, ...demoTagged];
         setDictionaries(dicts ? { ...dicts, resources: mergedResources } : dicts);
       }).finally(() => setSourcesLoading(false));
     }

@@ -57,34 +57,45 @@ FF-T0572-FROZEN) — этот файл нельзя редактировать. 
   `listRegistryDefs` `:818`) — оба tenant-scoped через `resolveActorTenant` + RLS, DAO уже
   готовы, ничего писать заново не нужно.
 
-### 2.3. Формат resource-идентификации у РЕАЛЬНЫХ грантов (T-0570 READ-PDP) — канон
+### 2.3. Enforcement-путь гранта — что РЕАЛЬНО решает PDP (ревизия после ревью F-1)
 
 - `choros."grant".resource_type` — колонка `text NOT NULL`, **без CHECK/enum на уровне
   БД** (`migrations/008_grant.sql:19`). TS-тип `Grant["resourceType"]`
-  (`src/core/grant-lattice.ts:38-49`, ФАЙЛ ЗАМОРОЖЕН) — закрытый union
-  `"application"|"registry"|"record"|"process_instance"|mgmt_object:${string}|"effect_resource"`,
-  но это ТОЛЬКО TS-каст (`as Grant["resourceType"]`), не рантайм-проверка.
-- **Канонический паттерн READ-PDP** (`migrations/117_default_read_grant_backfill.sql:162-189`):
-  `resource_type = 'record'` (грубый КАКОЙ-РОД-ресурса), а КОНКРЕТНАЯ адресация — в
-  `scope = {"kind":"node","hierarchy":"resource","nodeLevel":"application","nodeId":"<id>"}`
-  (`src/core/grant-resolver.ts:197-218` `refToScope`). Т.е. в этом паттерне «что за
-  ресурс» несёт `scope`, а не `resource_type`.
-- **Параллельный, тоже реальный и тоже широко используемый паттерн** — компетентностные
-  гранты (`DICT_PRESETS`, `src/http/grants.ts:457-672`, использован в 10+ пресетах ролей,
-  SoD, оси критичности `ra-data.jsx:240-265`): `resource_type` = свободная строка,
-  ИМЕНУЮЩАЯ конкретный ресурс/инструмент (`"mcp://ledger.invoices"`), а `scope` несёт
-  ТОЛЬКО org-hierarchy сужение (`scope_org: "fin"` → `{kind:"node",hierarchy:"org",…}`).
-  Это ДРУГАЯ, но равно легитимная и глубоко укоренённая (presets/SoD/critLevel/
-  audit-trail) конвенция резолюции ресурса.
-- `GrantRightForm` относится ВТОРОМУ паттерну (org-scope + именующий `resource_type`) —
-  именно так уже был спроектирован весь стек над ним (`ScopePicker` → `hierarchy:"org"`,
-  `axesFromGrants`/`RES_BY_URI` читают признаки ресурса по `resource_type`-строке).
-  Переключать этот паттерн на resource-hierarchy (T-0570-style) means переписывать
-  `ScopePicker`, `axesFromGrants`, критичность-оси и все 14 пресетов — это НОВЫЙ большой
-  рефактор грант-модели, вне периметра «честный источник ресурсов в существующей форме».
-  Решение (см. ADR §1): оставить `resource_type` тем же свободно-строковым форматом,
-  который эта форма и весь её нижестоящий стек уже используют — не выдумывать ВТОРОЙ
-  формат, просто наполнить его РЕАЛЬНЫМИ значениями вместо демо-фикстуры.
+  (`src/core/grant-lattice.ts:38-49`, ФАЙЛ ЗАМОРОЖЕН) — закрытый union, но это ТОЛЬКО
+  TS-каст (`as Grant["resourceType"]`), не рантайм-проверка.
+- **ЕДИНСТВЕННЫЙ enforcement-предикат PDP** (`src/core/grant-resolver.ts:589-607`
+  `resolveFor`, зеркально `src/core/read-visibility.ts:130-143` `isRecordReadable`):
+  грант покрывает запрос ⇔ `tenantId` совпал ∧ `operation` совпала ∧ `isEffective(now)`
+  ∧ `isNarrowerOrEqual(handleScope, g.scope, ancestry)`. **`resource_type` НЕ читается
+  вообще** (`refToResourceType` используется лишь в buildMaskContext для T-0033
+  маскировки — не в allow/deny). Runtime-запрос несёт `handleScope =
+  {hierarchy:"resource", nodeId:<UUID>}` (`refToScope`, `grant-resolver.ts:197-237`);
+  `isNarrowerOrEqual` короткозамыкает на несовпадении иерархий
+  (`grant-lattice.ts:280`): **org-scope грант НИКОГДА не покрывает resource-запрос**.
+- **Следствие (ревью F-1, blocking, доказано живым probe)**: org-scope гранты
+  компетентностного паттерна (`DICT_PRESETS`/демо `mcp://…`, `scope_org` →
+  `{hierarchy:"org"}`) НЕ драйвят PDP allow/deny. Они питают ТОЛЬКО отображение —
+  оси критичности/SoD-обзор (`axesFromGrants`/`RES_BY_URI`, `ra-data.jsx:240-265`,
+  и то лишь для 10 захардкоженных demo-uri). Первая редакция этой спеки называла это
+  «равно легитимной конвенцией резолюции ресурса» — ФОРМУЛИРОВКА ВВОДИЛА В ЗАБЛУЖДЕНИЕ
+  и снята: у формы «Дать роли право» до фикса НЕ БЫЛО enforcement-эффекта ни для
+  демо-, ни для реальных ресурсов.
+- **Канонический enforcement-паттерн** (T-0570 READ-PDP,
+  `migrations/117_default_read_grant_backfill.sql:162-189`): конкретная адресация
+  ресурса живёт в `scope = {"kind":"node","hierarchy":"resource","nodeLevel":…,
+  "nodeId":"<UUID>"}`; composite resource-ancestry oracle
+  (`src/db/resource-ancestry.ts` rules 1/3) покрывает record→registry→application
+  цепочку. `resource_type` — классификационная/display-метка.
+- **Решение (фикс F-1, путь A ревью)**: при выборе РЕАЛЬНОГО ресурса форма эмитит
+  `scope = {kind:"node", hierarchy:"resource", nodeId:<реальный UUID
+  application/registry_def>, nodeLevel:"application"|"registry"}` — id и node_level
+  отдаёт `GET /api/rights/resources` рядом с uri/name. Грант резолвится ТЕМ ЖЕ путём,
+  что READ-PDP. `resource_type` остаётся человекочитаемой меткой
+  (`registry:<slug>[.<slug>]`) — PDP её не читает, а grant-trail/обзор показывают как
+  есть. Org-`ScopePicker` для реального ресурса не применим (охват гранта ЕСТЬ узел
+  ресурса) — заменяется честной строкой охвата. Демо-ресурсы остаются на прежнем
+  org-scope пути, но помечаются в UI («· демо») с честной подсказкой и
+  квалифицированным тостом — без ложного успеха (UX-1/UX-2).
 
 ### 2.4. Узлы охвата (scope-picker) — демо-оргдерево, НЕ реальная оргструктура
 
@@ -141,13 +152,17 @@ FF-T0572-FROZEN) — этот файл нельзя редактировать. 
 
 1. **Ресурсы**: новый read-only эндпоинт `GET /api/rights/resources` (новый файл,
    НЕ трогает замороженный `grants.ts`), отдающий tenant-scoped список
-   `{uri, name}`, где `uri` — стабильный строковый идентификатор в ТОМ ЖЕ свободном
-   формате, что уже используется этой формой (`resource_type` как именующая строка),
-   построенный из РЕАЛЬНЫХ `application`/`registry_def` строк тенанта (переиспользуя
-   существующие `listApplications`/`listRegistryDefs` DAO). Frontend (`screen-rights.jsx`)
-   подгружает оба справочника и передаёт в `GrantRightForm` ОБЪЕДИНЁННЫЙ список: реальные
-   ресурсы тенанта — первыми, демо-ресурсы (если тенант демо-сид держит) — следом,
-   явно ничего не удаляя из демо-контура (демо-тенант легитимно может показывать демо-сид).
+   `{uri, name, id, node_level}` из РЕАЛЬНЫХ `application`/`registry_def` строк тенанта
+   (переиспользуя существующие `listApplications`/`listRegistryDefs` DAO): `uri` —
+   человекочитаемая метка для `resource_type`/display, `id` + `node_level` —
+   **enforcement-идентичность** (F-1 фикс): форма строит из них
+   `scope = {kind:"node", hierarchy:"resource", nodeId:<id>, nodeLevel:<node_level>}`,
+   и выданный грант РЕЗОЛВИТСЯ PDP тем же путём, что READ-PDP (§2.3). Frontend
+   (`screen-rights.jsx`) подгружает оба справочника и передаёт в `GrantRightForm`
+   ОБЪЕДИНЁННЫЙ список: реальные ресурсы тенанта — первыми, демо-ресурсы — следом,
+   помеченные `demoSeed` (в селекторе «· демо», честная подсказка + квалифицированный
+   тост — демо-грант питает обзор ролей, но не управляет доступом; UX-1/UX-2), явно
+   ничего не удаляя из демо-контура (демо-тенант легитимно показывает демо-сид).
 2. **Переменные/история**: два новых read-only метода `FlowableClient`
    (`getHistoricVariableInstances`, `getHistoricActivityInstances`), вызываемые из
    `GET /api/processes/:id` под СУЩЕСТВУЮЩИМ tenant-membership гейтом; ответ несёт
@@ -157,19 +172,25 @@ FF-T0572-FROZEN) — этот файл нельзя редактировать. 
 
 ## 4. Функциональные требования
 
-- **F1.** `GET /api/rights/resources` возвращает `{resources: [{uri, name}]}`,
-  tenant-scoped (RLS через `resolveActorTenant`), построенные из `application`+
-  `registry_def` строк ТЕКУЩЕГО тенанта (`uri` — стабильная строка, см. ADR §2 для
-  точного формата).
+- **F1.** `GET /api/rights/resources` возвращает `{resources: [{uri, name, id,
+  node_level}]}`, tenant-scoped (RLS через `resolveActorTenant`), построенные из
+  `application`+`registry_def` строк ТЕКУЩЕГО тенанта: `uri` — стабильная
+  display-метка, `id` — реальный UUID строки, `node_level` —
+  `"application"|"registry"` (enforcement-идентичность для scope гранта).
 - **F2.** `screen-rights.jsx` подгружает новый эндпоинт наряду с
   `/api/rights/dictionaries` и передаёт `GrantRightForm` объединённый список
-  ресурсов (реальные + демо, реальные первыми). Пустой тенант (нет ни одного
-  application/registry_def) — честно деградирует к демо-списку (не пустой
-  дропдаун), с явной информацией что это демо (без нового «demo:true»-флага —
-  честная надпись в hint, как и для остальных пустых справочников этой формы).
-- **F3.** Выбор реального ресурса и сабмит формы даёт РАБОЧИЙ грант — round-trip
-  через `POST /api/grants` (незаменённый, замороженный write-путь) с новым
-  `resource_type` проходит валидацию (уже принимает произвольную непустую строку).
+  ресурсов (реальные + демо, реальные первыми; демо помечены `demoSeed` на
+  merge-точке). Пустой тенант (нет ни одного application/registry_def) — честно
+  деградирует к демо-списку (не пустой дропдаун), каждый демо-пункт ВИДИМО помечен
+  «· демо» в селекторе (не молчаливая подмена).
+- **F3.** Выбор РЕАЛЬНОГО ресурса и сабмит формы даёт РЕЗОЛВИМЫЙ грант: форма эмитит
+  `scope = {kind:"node", hierarchy:"resource", nodeId:<id>, nodeLevel:<node_level>}`
+  через незаменённый `POST /api/grants` (замороженный write-путь; `parseScopeElement`
+  уже принимает `hierarchy:"resource"`), и `resolveFor` (production PDP) РАЗРЕШАЕТ
+  операцию по записи этого реестра/приложения для держателя роли. Org-`ScopePicker`
+  для реального ресурса не рендерится — вместо него честная строка охвата («Охват:
+  ресурс целиком…»); демо-ресурс идёт прежним org-scope путём с квалифицированным
+  тостом (не ложное «Право выдано»).
 - **F4.** `FlowableClient` получает `getHistoricVariableInstances(instanceId)` →
   `GET /history/historic-variable-instances?processInstanceId=` (маппинг
   `{name, value}[]`), и `getHistoricActivityInstances(instanceId)` →
@@ -195,10 +216,11 @@ FF-T0572-FROZEN) — этот файл нельзя редактировать. 
   `src/http/rights.ts`, `src/core/dual-control.ts`, `src/core/role-criticality.ts`,
   `src/core/grant-resolver.ts`, `src/core/grant-lattice.ts`,
   `src/http/rights-change-requests.ts` (`ci/checks/rights-ui-frozen-write.sh`).
-- **N3.** Не изобретать второй resource-идентификационный формат — `resource_type`
-  остаётся свободной именующей строкой (тот же паттерн, что уже несёт этот стек,
-  §2.3); scope остаётся org-hierarchy (не переключаем на resource-hierarchy —
-  это отдельный рефактор, вне периметра).
+- **N3.** Не изобретать второй resource-идентификационный формат для ENFORCEMENT —
+  конкретный ресурс адресуется в `scope` (resource-hierarchy nodeId = реальный UUID),
+  ровно как канонический T-0570 READ-PDP паттерн (§2.3); `resource_type` — display/
+  классификационная метка, PDP её не читает. Демо-путь (org-scope) не переименовывается
+  и не мигрирует в этой задаче — он помечается честно (UX-1/UX-2).
 - **N4.** D-064: никаких кейс-литералов в `src/` (реальные имена ресурсов приходят из
   данных тенанта на рантайме, не как строковые константы в коде).
 - **N5.** Честная деградация: отсутствие движка/DB не должно 500-ить ни один
@@ -211,10 +233,11 @@ FF-T0572-FROZEN) — этот файл нельзя редактировать. 
 - **O1.** Узлы охвата (`ScopePicker`/`DICT_ORG_TREE`) — демо-дерево, НЕ реальная
   оргструктура. Сведение в один источник с `/api/org` — отдельная архитектурная
   задача (нужно решить семантику «узел охвата» как продуктовое понятие). Follow-up.
-- **O2.** Переключение `GrantRightForm`/`DICT_PRESETS`-паттерна на resource-hierarchy
-  (T-0570 READ-PDP style, `scope.nodeId` = конкретный registry/application id) —
-  отдельный, гораздо более широкий рефактор грант-модели (затрагивает `ScopePicker`,
-  оси критичности, все 14 пресетов, SoD). Follow-up (ADR §4 обсуждает подробнее).
+- **O2.** Миграция ДЕМО-контура (`DICT_PRESETS`, 14 замороженных пресетов, оси
+  критичности `axesFromGrants`/`RES_BY_URI`, SoD-правила) на resource-hierarchy —
+  отдельный рефактор. РЕАЛЬНЫЕ ресурсы этой формы УЖЕ переключены на
+  resource-hierarchy (фикс F-1, §2.3/§3); вне рамок остаётся только демо/пресет-стек,
+  который пока живёт org-scope путём (помечен честно в UI). Follow-up (ADR §4).
 - **O3.** Полный редактор/просмотрщик переменных с типами/схемой — только плоский
   список имя/значение (минимум приёмки), не типизированный редактор.
 - **O4.** Действия над инстансом (approve/reject из detail-вью) — экран остаётся

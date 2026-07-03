@@ -4,8 +4,13 @@
 **Phase:** DESIGN
 **Task:** T-0609 [P1]
 **Date:** 2026-07-03
-**Спека:** `docs/specs/T-0609-rights-real-resources.spec.md` + `docs/specs/T-0609.spec.contract.json` (AC-1..AC-14)
+**Спека:** `docs/specs/T-0609-rights-real-resources.spec.md` + `docs/specs/T-0609.spec.contract.json` (AC-1..AC-17)
 **База:** dev @ `51fbc32` (ветка `task/T-0609-rights-real-resources`, содержит T-0605)
+**Ревизия:** после независимого ревью (839a53e, BLOCKING F-1) §1.1–§1.3 переработаны:
+грант из формы должен РЕЗОЛВИТЬСЯ PDP — форма эмитит resource-hierarchy scope для
+реальных ресурсов (путь A ревью); первая редакция §1.3 рамила разрыв как «выбор формата
+resource_type» — снято как вводящее в заблуждение (enforcement решает scope-иерархия,
+не формат строки).
 
 ---
 
@@ -18,49 +23,27 @@
 ### 1.1. Серверная часть
 
 ```ts
-// src/http/rights-resources.ts (НОВЫЙ файл)
-export function registerRightsResourcesRoute(
-  router: Router,
-  pool: pg.Pool,
-  resolveActorTenant: (actorSlug: string) => Promise<string>,
-): void {
-  router.register("GET", "/api/rights/resources", withAuth(async (req, res) => {
-    const actorId = await extractActorFromReq(req, pool); // тот же паттерн, что registry-defs.ts
-    const tenantId = await resolveActorTenant(actorId);
-    const apps = await listApplications(pool, tenantId);      // ПЕРЕИСПОЛЬЗУЕТ src/http/applications.ts
-    const regs = await listRegistryDefs(pool, tenantId, null); // ПЕРЕИСПОЛЬЗУЕТ src/http/registry-defs.ts
-    const appById = new Map(apps.map(a => [a.id, a]));
-    const resources = [
-      ...apps.map(a => ({
-        uri: `registry:${a.slug}`,
-        name: a.display_name,
-      })),
-      ...regs.map(r => {
-        const app = appById.get(r.application_id);
-        const appSlug = app ? app.slug : r.application_id;
-        return {
-          uri: `registry:${appSlug}.${r.slug}`,
-          name: app ? `${app.display_name} · ${r.display_name}` : r.display_name,
-        };
-      }),
-    ];
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ resources }));
-  }));
-}
+// src/http/rights-resources.ts (НОВЫЙ файл) — каждая запись:
+// {
+//   uri:  `registry:<app_slug>` | `registry:<app_slug>.<reg_slug>`,  // display-метка (→ resource_type)
+//   name: display_name (для реестра — `<app> · <reg>`),
+//   id:   реальный UUID application/registry_def,                     // ← enforcement: scope.nodeId
+//   node_level: 'application' | 'registry',                           // ← enforcement: scope.nodeLevel
+// }
+// Тенант-скоуп: extractActor → resolveActorTenant → listApplications/
+// listRegistryDefs (ПЕРЕИСПОЛЬЗОВАНЫ из applications.ts / registry-defs.ts,
+// RLS через их собственный withTenantTx). Регистрация — server.ts, DB-режим.
 ```
 
-**`uri` формат: `registry:<application_slug>` (уровень приложения) и
-`registry:<application_slug>.<registry_slug>` (уровень конкретного реестра).** Это ТОТ ЖЕ
-класс значения (свободная именующая строка), что уже несёт `resource_type` во ВСЕЙ
-существующей форме — `mcp://ledger.invoices` не более и не менее «формат», чем
-`registry:zakupki.zayavki`; обе — непрозрачные строки-имена без DB-constraint и без
-рантайм-парсинга схемы (подтверждено: `grep` не находит НИ ОДНОГО места, парсящего
-`resource_type` как URL/scheme — `mcp://` нигде не разбирается структурно, это чисто
-display/naming-конвенция). Слаг, а не UUID, — потому что слаг стабилен для человека,
-читающего audit-trail/пресет (`grant-trail.ts` и подобные показывают `resource_type` как
-есть), а UUID был бы нечитаем в тех же местах, где сегодня читаемо `mcp://ledger.invoices`.
+**`uri` формат: `registry:<application_slug>[.<registry_slug>]`** — человекочитаемая
+display-метка, уходящая в `resource_type` (grant-trail/обзор показывают её как есть;
+слаг читаем там, где UUID был бы шумом). **`id` + `node_level` — enforcement-идентичность
+(фикс F-1)**: PDP-предикат (`resolveFor`/`isRecordReadable`) матчит грант ТОЛЬКО по
+scope-содержанию в resource-иерархии и НЕ читает `resource_type` — поэтому конкретный
+ресурс адресуется в `scope = {kind:'node', hierarchy:'resource', nodeId:<id>,
+nodeLevel:<node_level>}`, ровно как канонический READ-PDP грант (миграция 117); composite
+resource-ancestry oracle (`src/db/resource-ancestry.ts` rules 1/3) покрывает
+record→registry→application цепочку без нового кода.
 
 Функция регистрируется В `server.ts` рядом с `registerApplicationRoutes`/
 `registerRegistryDefRoutes` (когда `grantsPool` присутствует — DB-режим), НЕ заменяет и не
@@ -72,57 +55,56 @@ display/naming-конвенция). Слаг, а не UUID, — потому ч�
 `web/src/screens/rights/screen-rights.jsx` добавляет `fetchRealResources()` (тот же паттерн,
 что `fetchDictionaries()`/`fetchEmployees()` — best-effort, `[]` на ошибку) и передаёт
 `GrantRightForm` ОБЪЕДИНЁННЫЙ массив: реальные ресурсы тенанта первыми, затем
-`dictionaries.resources` (демо) — без дедупликации по имени (реальный тенант обычно не
-пересекается с демо-именами; в демо-тенанте реальных пока нет, список = чистый демо, как
-сегодня — нет функционального изменения для демо-тенанта). `GrantRightForm` НЕ меняется
-структурно (`resources.map(r => ({value:r.uri,label:r.name}))` уже принимает любой
-`{uri,name}` массив) — только composition-точка в `screen-rights.jsx` меняется.
+`dictionaries.resources` (демо) — демо-записи ТЕГИРУЮТСЯ `demoSeed` на merge-точке
+(UX-2: различимость реального и демо). `GrantRightForm` (F-1 фикс):
 
-```jsx
-// screen-rights.jsx — рядом с fetchDictionaries()
-async function fetchRealResources() {
-  try {
-    const res = await fetch('/api/rights/resources', { headers: authHeaders() });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data.resources) ? data.resources : [];
-  } catch {
-    return [];
-  }
-}
-// на загрузке: const [dicts, real] = await Promise.all([fetchDictionaries(), fetchRealResources()]);
-// dictionaries передаваемый в формы: { ...dicts, resources: [...real, ...(dicts?.resources ?? [])] }
-```
+- **Реальный ресурс** (запись несёт `id` + `node_level`): форма эмитит
+  `scope = {kind:'node', hierarchy:'resource', nodeId:<id>, nodeLevel:<node_level>}` —
+  org-`ScopePicker` НЕ рендерится (охват гранта ЕСТЬ узел ресурса; сужение по
+  подразделению для resource-гранта в одноэлементной scope-модели невыразимо), вместо
+  него честная строка «Охват: ресурс целиком — право действует на все записи …».
+  Тост — прежний «Право выдано.» (теперь честный: грант РЕЗОЛВИТСЯ).
+- **Демо-ресурс** (`demoSeed`, без `id`): прежний org-scope путь БЕЗ изменений, но
+  (а) пункт селектора помечен «· демо», (б) при выборе — честная подсказка
+  «право появится в обзоре ролей, но не ограничивает доступ к данным тенанта»,
+  (в) success-тост КВАЛИФИЦИРОВАН («Право выдано (демо-ресурс: попадёт в обзор ролей,
+  но не ограничивает доступ к данным).») — ложного успеха для инертного гранта нет
+  (UX-1 blocking закрыт вариантом «пометить», как разрешено ревью/направлением).
 
-### 1.3. Почему НЕ переключаем `resource_type` на T-0570 resource-hierarchy формат
+### 1.3. Enforcement-путь: почему scope, а не resource_type (ревизия после ревью F-1)
 
-T-0570 READ-PDP канон (`migrations/117_default_read_grant_backfill.sql`): `resource_type`
-= грубый род (`'record'`/`'registry'`/`'application'`), а конкретный ресурс — в
-`scope = {kind:'node', hierarchy:'resource', nodeLevel, nodeId:<uuid>}`. Формально это
-«канонический» формат для НОВЫХ resource-hierarchy грантов. НО `GrantRightForm` целиком
-спроектирована вокруг ДРУГОГО, тоже полностью легитимного паттерна (используемого 10+
-пресетами, осями критичности, SoD): `resource_type` = именующая строка КОНКРЕТНОГО
-ресурса, `scope` = org-hierarchy сужение (какое подразделение). Переключение первого на
-второе потребовало бы:
+Первая редакция этого раздела рамила вопрос как «выбор формата resource_type» и называла
+org-scope паттерн «равно легитимной конвенцией резолюции ресурса». **Это было вводящим в
+заблуждение и снято.** Факты (доказаны живым probe ревью + пином RESOLVE-4 в
+`ci/checks/db/rights-resource-grant-resolve.db.test.ts`):
 
-- Переписать `ScopePicker` так, чтобы для гранта (в отличие от назначения роли) он выбирал
-  RESOURCE-узел, а не ORG-узел — но тот же компонент используется в `AssignRoleForm` для
-  org-охвата назначения; расщепление на два разных виджета — уже архитектурное решение,
-  не «правка справочника».
-- Переписать `axesFromGrants`/`RES_BY_URI` (`ra-data.jsx:254-265`) — критичность роли
-  сегодня читается ПО ИМЕНИ ресурса (`r.guarded`/`r.external`/`r.sensitive` по `resource_type`
-  строке); в resource-hierarchy формате эта информация должна была бы жить ГДЕ-ТО ещё
-  (на `registry_def`? На отдельной таблице классификации?) — не определено, не тривиально.
-- Переписать все 14 `DICT_PRESETS` (`grants.ts:457-672`, ФАЙЛ ЗАМОРОЖЕН — физически
-  невозможно без нарушения freeze-гейта).
+- Covering-предикат PDP (`grant-resolver.ts:589-607`) фильтрует гранты по
+  tenant+operation+isEffective+`isNarrowerOrEqual(handleScope, g.scope, ancestry)`.
+  **`resource_type` в allow/deny НЕ участвует** (`refToResourceType` — только
+  buildMaskContext, T-0033 маскировка).
+- Runtime-запрос всегда несёт `handleScope {hierarchy:'resource', nodeId:<UUID>}`
+  (`refToScope`); `isNarrowerOrEqual` короткозамыкает на несовпадении иерархий
+  (`grant-lattice.ts:280`). **Org-scope грант структурно неспособен покрыть
+  resource-запрос** — независимо от значения `resource_type`.
+- Значит «наполнить resource_type реальными именами» БЕЗ смены scope-иерархии оставляло
+  экран декоративным на enforcement-пути — ровно blocking-находка F-1.
 
-Это НЕ «второй формат вместо канонического» — оба формата (resource-hierarchy и
-именующая-строка) уже сосуществуют в репозитории СЕГОДНЯ, обслуживая РАЗНЫЕ участки
-системы (READ-PDP default-open грант vs ролевые компетентностные гранты). Задача
-«зафиксирована в спеке» напрямую предупреждает не изобретать ВТОРОЙ формат — мы этого не
-делаем: используем формат, УЖЕ живущий именно в этом (компетентностном) паттерне, только
-наполняем его реальными значениями. Полное слияние двух паттернов в один — follow-up
-(O2), отдельная и существенно более широкая архитектурная работа.
+Решение: для РЕАЛЬНЫХ ресурсов форма переходит на канонический enforcement-паттерн
+(T-0570/миграция 117): конкретный ресурс в `scope` (resource-hierarchy, реальный UUID),
+`resource_type` — display-метка. Это НЕ «второй формат»: это ЕДИНСТВЕННЫЙ формат, который
+PDP вообще резолвит. Демо/пресет-стек (`DICT_PRESETS` — заморожен, оси критичности
+`axesFromGrants`/`RES_BY_URI`, SoD-отображение) продолжает жить org-scope путём —
+он питает ТОЛЬКО отображение и помечен честно в UI; его миграция — follow-up O2.
+
+Живое доказательство enforcement-пути — `ci/checks/db/rights-resource-grant-resolve.db.test.ts`
+(live PG, production-компоненты: реальный `POST /api/grants` → `makeDbGrantSource`/
+`getGrantsForSubject` → `resolveFor` + `makeResourceAncestryOracle`):
+- RESOLVE-1: грант телом формы (resource-hierarchy scope, nodeId=реальный registry UUID)
+  → `resolveFor` РАЗРЕШАЕТ read записи этого реестра (`denied:false`).
+- RESOLVE-2: запись чужого реестра/приложения → `no_grant`.
+- RESOLVE-3: субъект другого тенанта → `cross_tenant` (fail-closed до чтения грантов).
+- RESOLVE-4 (F-1 pin): грант ДО-фиксной формы (org-scope) → `no_grant` — регресс к
+  org-scope эмиссии для реальных ресурсов красит suite.
 
 ## 2. Решение — переменные и история инстанса процесса
 
@@ -220,12 +202,18 @@ tenantId = resolveActorTenant(...); ... } catch { /* 404 */ } }` ветки — 
    пула (`registerDictionariesRoute(router)` регистрируется БЕЗ `pool` вообще,
    `server.ts:587`) — более инвазивная правка сигнатуры, чем отдельный новый эндпоинт.
 
-2. **Полное переключение `resource_type` на T-0570 resource-hierarchy формат
-   (`scope.nodeId` = registry/application UUID).** Отвергнуто как ВНЕ ПЕРИМЕТРА этой
-   задачи (см. §1.3) — требует переписать `ScopePicker`, `axesFromGrants`, критичность-оси,
-   14 замороженных пресетов. Это «построить новый экран прав» по факту (переработка всей
-   модели формы), что задача прямо запрещает («не строй новый экран прав — только честный
-   источник ресурсов в существующей форме»). Follow-up O2.
+2. **[ПЕРЕСМОТРЕНО после ревью F-1] Оставить эмиссию формы на org-scope, ограничившись
+   наполнением `resource_type` реальными именами.** Первая редакция ADR так и решила —
+   ревью доказало живым probe, что такой грант ИНЕРТЕН на PDP (org-scope структурно не
+   покрывает resource-запрос, §1.3) — т.е. экран остаётся декоративным, ровно blocking-режим
+   отказа. Отвергнуто; принят путь A ревью: реальные ресурсы эмитят resource-hierarchy
+   scope (реализовано, §1.1–§1.3). Что ПО-ПРЕЖНЕМУ отвергнуто в этой задаче — миграция
+   ДЕМО/пресет-стека (`DICT_PRESETS` — 14 замороженных пресетов, `axesFromGrants`/
+   критичность-оси, SoD-отображение) на resource-hierarchy: он питает только отображение,
+   честно помечен в UI («· демо» + квалифицированный тост) и уходит в follow-up O2.
+   Вариант B ревью (только задокументировать/пометить, БЕЗ починки резолва реальных
+   ресурсов) отвергнут: доступность реального ресурса «для грантов» и означает
+   резолвимость выданного гранта.
 
 3. **Слить `ScopePicker`'ово оргдерево с реальной `/api/org` оргструктурой в этой же
    задаче.** Отвергнуто — структурно другая модель (`department/position/employee` vs
@@ -253,22 +241,24 @@ tenantId = resolveActorTenant(...); ... } catch { /* 404 */ } }` ветки — 
   оргструктурой тенанта (`choros.department`, `GET /api/org`). Нужна отдельная задача:
   решить продуктовую семантику «узел охвата гранта» (department id? Отдельная
   классификация?) прежде чем сводить источники.
-- **O2** — полное переключение компетентностных грантов (`GrantRightForm`/
-  `DICT_PRESETS`) на T-0570 resource-hierarchy формат — большой рефактор грант-модели
-  (`ScopePicker`, критичность-оси, 14 пресетов, SoD). Два параллельных resource-адресующих
-  паттерна (hierarchy vs именующая строка) продолжат сосуществовать до этого рефактора.
+- **O2** — миграция ДЕМО/пресет-стека (`DICT_PRESETS` — 14 замороженных пресетов,
+  критичность-оси `axesFromGrants`/`RES_BY_URI`, SoD-отображение) на resource-hierarchy.
+  РЕАЛЬНЫЕ ресурсы формы уже переключены (фикс F-1, §1.3); до этого рефактора демо-гранты
+  остаются org-scope (питают только отображение, помечены «· демо» в UI, тост
+  квалифицирован — ложного успеха нет).
 - **O3** — типизированный редактор переменных (со схемой типов) вместо плоского списка
   имя/значение.
 
 ## 5. Fitness-функции и трассируемость
 
-См. `docs/adr/T-0609.adr.contract.json` (FF-1..FF-8, traceability AC↔FF).
+См. `docs/adr/T-0609.adr.contract.json` (FF-1..FF-9, traceability AC↔FF).
 
 ## 6. Эскалация
 
 Нет. Оба решения — READ-only расширения (новый GET-эндпоинт, два новых read-метода
-FlowableClient), не вводят новых прав/authority-путей, не трогают замороженные
-write-core файлы, не расширяют видимость сверх текущего гейта. Узлы охвата и полное
-resource-hierarchy переключение — сознательно вынесены в follow-up (задача явно
-разрешает это для узлов охвата; для resource-hierarchy — по аналогии, т.к. это тот же
-класс «отдельная архитектурная работа вне периметра существующей формы»).
+FlowableClient) плюс правка ЭМИССИИ существующей формы (scope-shape тела POST /api/grants
+— write-путь сам не тронут, замороженные файлы не тронуты). Форма теперь производит
+гранты, резолвимые ЕДИНСТВЕННЫМ существующим PDP-предикатом — никакой новый
+authority-путь не вводится (наоборот: устраняется класс структурно-инертных грантов).
+Видимость страницы инстанса не расширена сверх текущего гейта. Узлы охвата (O1) и
+миграция демо/пресет-стека (O2) — сознательно вынесены в follow-up.

@@ -186,7 +186,7 @@ describe('GET /api/rights/resources (T-0609)', () => {
     expect(r.statusCode).toBe(401);
   }));
 
-  it('AC-1: real tenant application + registry_def rows appear as {uri, name} entries', requireDb(async () => {
+  it('AC-1: real tenant application + registry_def rows appear as {uri, name, id, node_level} entries', requireDb(async () => {
     const appSlug = `zakupki-${uuid().slice(0, 8)}`;
     const regSlug = `zayavki-${uuid().slice(0, 8)}`;
 
@@ -201,16 +201,25 @@ describe('GET /api/rights/resources (T-0609)', () => {
 
     const r = await makeRequest(baseUrl, 'GET', '/api/rights/resources', { 'x-dev-user': 'actor-a' });
     expect(r.statusCode).toBe(200);
-    const body = JSON.parse(r.body) as { resources: Array<{ uri: string; name: string }> };
+    const body = JSON.parse(r.body) as {
+      resources: Array<{ uri: string; name: string; id: string; node_level: string }>;
+    };
     expect(Array.isArray(body.resources)).toBe(true);
 
     const appEntry = body.resources.find((res) => res.uri === `registry:${appSlug}`);
     expect(appEntry).toBeDefined();
     expect(appEntry?.name).toBe('Заявка на закупку');
+    // T-0609 F-1: id + node_level are the ENFORCEMENT identity — the form builds
+    // the grant's resource-hierarchy scope from them (nodeId=<id>, nodeLevel=<level>);
+    // without them the produced grant can never cover a resource-hierarchy request.
+    expect(appEntry?.id).toBe(appId);
+    expect(appEntry?.node_level).toBe('application');
 
     const regEntry = body.resources.find((res) => res.uri === `registry:${appSlug}.${regSlug}`);
     expect(regEntry).toBeDefined();
     expect(regEntry?.name).toBe('Заявка на закупку · Заявки');
+    expect(regEntry?.id).toBe(regId);
+    expect(regEntry?.node_level).toBe('registry');
   }));
 
   it('AC-1 regression (tenant isolation): actor-a never sees tenant B applications/registries', requireDb(async () => {

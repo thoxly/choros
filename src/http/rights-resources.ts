@@ -88,11 +88,32 @@ async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string
 export interface RightsResource {
   uri: string;
   name: string;
+  /**
+   * T-0609 F-1 fix: the row's real UUID — the grant's scope nodeId. The PDP
+   * covering predicate (grant-resolver.ts resolveFor / read-visibility.ts
+   * isRecordReadable) matches a grant by SCOPE containment over the resource
+   * hierarchy (isNarrowerOrEqual(handleScope, g.scope)) and never reads
+   * resource_type — so for a grant produced by the «Дать роли право» form to
+   * actually resolve, its scope must be {kind:'node', hierarchy:'resource',
+   * nodeId:<this id>, nodeLevel:<node_level below>} — the SAME shape refToScope
+   * emits for runtime requests and the composite resource-ancestry oracle
+   * (src/db/resource-ancestry.ts rules 1/3) covers. The form builds that scope
+   * from these two fields; uri stays the human-stable display label carried in
+   * resource_type.
+   */
+  id: string;
+  /** Resource-hierarchy node level `id` lives at — the grant's scope nodeLevel. */
+  node_level: "application" | "registry";
 }
 
 /** Build the application-level resource entry: "registry:<slug>". */
 function applicationResource(app: ApplicationRow): RightsResource {
-  return { uri: `registry:${app.slug}`, name: app.display_name };
+  return {
+    uri: `registry:${app.slug}`,
+    name: app.display_name,
+    id: app.id,
+    node_level: "application",
+  };
 }
 
 /**
@@ -109,7 +130,12 @@ function registryResource(
   const app = appById.get(reg.application_id);
   const appSlug = app ? app.slug : reg.application_id;
   const name = app ? `${app.display_name} · ${reg.display_name}` : reg.display_name;
-  return { uri: `registry:${appSlug}.${reg.slug}`, name };
+  return {
+    uri: `registry:${appSlug}.${reg.slug}`,
+    name,
+    id: reg.id,
+    node_level: "registry",
+  };
 }
 
 /**
