@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0608",
+  "verdict": "request-changes",
+  "reviewed_sha": "fd96ae2",
+  "base_sha": "6ae4299a6560e2850fbcafb74a3956a1a2dc691f",
+  "ci_seen": {
+    "green": true,
+    "_note": "Судья прогнал всё независимо, не доверяя handoff-числам. Дифф 6ae4299..HEAD — 21 файл. Гейты, прогнанные соло: npm test → 4965 passed | 10 skipped (258 файлов, exit 0); cd web && npx vitest run → 1684 passed (62 файла, exit 0); npm run build (tsc + seed tsconfig) → exit 0; DATABASE_URL=…:55432 npm run fitness:db → 1111 passed (110 файлов, exit 0, в т.ч. role-assignment-scope.test.ts — бэкенд-контракт scoped-назначений цел); bash ci/checks/tier-isolation.sh → PASS (FF-1..FF-11 green); bash ci/checks/anti-case-lock.sh → PASS (aggregate 24=24, delegates clean). Контракты spec/adr/pr-handoff валидны через demiurge/schemas/validate.py (3× exit 0). ВСЕ гейты зелёные — но зелёные тесты пинят НЕВЕРНУЮ модель дедупа (см. F-1): гейт не ловит логическую ошибку, потому что тест-фикстура использует employee-дубли БЕЗ различного охвата."
+  },
+  "claim_verifications": [
+    {
+      "claim": "(а) reconcileInboxEngineDriveOnRead (T-0522) уже гасит стейл-строку — новый код не нужен, пин регресс-тестом",
+      "verdict": "verified",
+      "evidence": "src/http/process-projection.ts:1742+ reconcileInboxEngineDriveOnRead прогоняет КАЖДУЮ waiting-инстанцию (не только approved-хоть-раз); isInstanceEnded=true → emit instance.ended независимо от того, был ли task.approved у base-строки. listInstanceInboxTasks:950 hides base row on endedInstanceIds. Новый тест 'T-0608 а' пинит именно это (base НЕ approved нашим route → всё равно исчезает после reconcile). Мутация MUT-1 подтвердила. Автор прав: механизм существует, добавлен только регресс-пин."
+    },
+    {
+      "claim": "(б) base-строка скрывается когда instancesWithNextTask.has(inst) — НЕ потеряет реальную задачу в AND-split/6M",
+      "verdict": "verified",
+      "evidence": "КЛЮЧЕВАЯ адверс-проверка. Инвариант T-0571 §2.1 (process-projection.ts:1274-1283, AMBIGUOUS_ACTIVE_TASK): 'the base process.started event represents exactly one waiting human step by construction — branches/AND-splits arrive as process.next_task with an already-real defKey, never as a base row'. Т.е. base-строка НИКОГДА не является конкурентной AND-split-веткой — все ветки эмитятся отдельными next_task-строками. Плюс защита при эмиссии: reconcileInboxEngineDriveOnRead:1149-1154 (unresolvedBaseRole exclusion) НЕ эмитит next_task пока base-задача ещё активна в движке (candidateGroups overlap base role → continue). Каждый из 4 emit-сайтов сначала делает live getActiveUserTasks. Вывод: если next_task существует — base-шаг гарантированно уже пройден движком; скрытие base НЕ теряет живую задачу. Тесты T-0443 9a/9b/9c (2-step approval, pending next_task, done-фильтрация) прогнаны — зелёные, реальная задача из инбокса не теряется."
+    },
+    {
+      "claim": "(г) formatPersonName + display_name в SELECT /api/org/tenant-state; genesis уже пишет display_name=email → без миграции данных",
+      "verdict": "verified",
+      "evidence": "migrations/016_employee.sql:19 display_name text NOT NULL — колонка всегда существует и заполнена, SELECT в seed-write.ts:983 безопасен (additive, расширяет форму строки). src/core/register.ts:300 genesis: INSERT … display_name=$4 где $4=req.email, slug=$3=kcUserId (UUID) — подтверждает и баг (slug=UUID), и фикс (резолв в display_name). Миграция данных действительно не нужна."
+    },
+    {
+      "claim": "(д) holderCount/dedupHolders (было grantCount!) + revoke всех дублей; read-DAO не тронут (dedup display-only)",
+      "verdict": "REFUTED (partially)",
+      "evidence": "grantCount→holderCount — ВЕРНО (grantCount показывал число грантов там где читается 'держатели'; мутация MUT-2 подтвердила пин). НО dedupHolders дедупит по employee_id ОДНОМУ, игнорируя org_scope. migrations/020_role_assignment.sql:29-32 (ЯВНЫЙ дизайн-инвариант): 'NO UNIQUE(employee_id, role_id) (FR-2): multiple assignments of the same (employee, role) legitimately coexist when they differ by org_scope or window (same person approver in fin until Q3, in cs from Q4). De-duplication is an application concern.' rights-overview.ts:315 отдаёт org_scope per-assignment; AssignRoleForm требует scope (canSubmit=employeeId&&roleId&&scope). Значит два РАЗНЫХ по охвату назначения одного employee+role — ЛЕГИТИМНО различны, НЕ дубли. dedupHolders их схлопывает: (1) скрывает разные охваты в один бейдж, (2) RevokeAssignmentButton ids=[ra-fin,ra-cs] → ОДИН клик отзывает ОБА охвата, ConfirmDialog помечен только именем ('Отозвать роль у: Семён?') без предупреждения о множественности. Это отзыв лишнего гранта = BLOCKING по критерию задачи."
+    },
+    {
+      "claim": "(е) fetchWithAuthRetry (refresh-once→retry-once→login-redirect); dev-режим passthrough; не зациклится",
+      "verdict": "verified",
+      "evidence": "dev-auth.js: после первого fetch проверяет isKeycloakMode(config) — в dev возвращает 401 как есть (auth-mode.js:44-45, DEFAULT_AUTH_CONFIG={mode:'dev'}, getAuthConfig дефолтит в dev при незагруженном конфиге → race при бутстрапе безопасен, нет ложного редиректа). tryRefresh ровно ОДИН раз; retry ровно ОДИН раз; при втором 401 — login (не рекурсия). tryRefresh (keycloak-auth.js:339-364) clearSession на всех fail-путях → нет повторной петли. login:377 window.location.assign — one-way. Мутация MUT-3 (рекурсия вместо login) → тест 'never loops' красный. Зацикливания нет."
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "web/src/screens/rights/screen-rights.jsx:37-52 (dedupHolders) + web/src/screens/rights/ra-overview-forms.jsx:360-401 (RevokeAssignmentButton ids)",
+      "issue": "dedupHolders группирует role_assignment-строки по employee_id ЕДИНСТВЕННО, игнорируя org_scope и validity-окно. Но migrations/020_role_assignment.sql:29-32 прямо документирует, что несколько назначений одного (employee, role) ЛЕГИТИМНО сосуществуют когда различаются охватом/окном ('approver в fin до Q3, в cs с Q4') — это НЕ случайные дубли, а разные гранты. Два следствия: (1) РАЗНЫЕ охваты схлопываются в один бейдж — информация об охватах теряется в секции держателей; (2) КРИТИЧНО: RevokeAssignmentButton получает ids=[все строки группы] и отзывает ВСЕ охваты одним кликом с ConfirmDialog, помеченным только именем человека ('Отозвать роль у: Семён? Доступ по этой роли пропадёт сразу') — админ, намеревавшийся отозвать доступ Семёна к отделу А, молча отзовёт и доступ к отделу Б. Это отзыв лишнего гранта — BLOCKING по прямому критерию задачи ('отзыв лишнего гранта = blocking'). Автор в комментарии кода (screen-rights.jsx:31-40, ra-overview-forms.jsx:352-359) охарактеризовал источник дублей как 'два submit одного employee+role без idempotency-гарда' — но это подмена: схема ЯВНО отличает 'тот же охват' (истинный дубль) от 'другой охват' (легитимный отдельный грант). Настоящий дубль (идентичный employee+role+scope+window) редок и мог бы дедупиться; текущий код дедупит СЛИШКОМ агрессивно.",
+      "suggestion": "Дедупить по КОМПОЗИТНОМУ ключу (employee_id + сериализованный org_scope + valid_from/until), а не по employee_id. Так истинные дубли (полностью идентичные) схлопнутся и отзовутся вместе — корректно, а различные-по-охвату назначения останутся отдельными бейджами с раздельным Отозвать (каждый со своим id). Альтернатива если дедуп по одному employee_id обязателен для рейла-счётчика: РАЗДЕЛИТЬ два поведения — holderCount дедупит по employee_id (число ЛЮДЕЙ — честно), но секция 'Кто что может' и Revoke НЕ дедупят (одна строка на назначение, каждая со своим охватом и своим Отозвать). Плюс: если оставлять массовый revoke — ConfirmDialog должен явно назвать число/охваты отзываемых назначений ('Отозвать 2 назначения роли у Семёна: отдел А, отдел Б?'), иначе отзыв лишнего непрозрачен."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/rights/screen-rights.test.jsx:107-183 (dedupHolders/holderCount тесты)",
+      "issue": "Тест-фикстура roleAssignmentsWithDuplicate использует два employee-дубля БЕЗ поля org_scope (ra-1/ra-2 идентичны кроме id). Поэтому все тесты зелёные — но они пинят именно ту неверную модель, что описана в F-1: они утверждают 'два назначения одного employee → один держатель, ids=[оба]' как ПРАВИЛЬНОЕ поведение, тогда как для назначений с РАЗНЫМ охватом это неверно. Тест закрепляет дефект, а не ловит его — прямое следствие F-1, отдельно чинить не нужно (исправление F-1 повлечёт правку фикстуры)."
+    },
+    {
+      "id": "F-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/rights/screen-rights.jsx:70 (rail holder title) + :190 (badge)",
+      "issue": "Мелочь для полноты: рейл-бейджи держателей (holders.slice(0,3)) и секция-бейджи рендерят только employee_display/slug — org_scope назначения нигде не показан в секции держателей (ScopeSummary применён только к ГРАНТАМ, :214). Это pre-existing (охват держателя не отображался и до T-0608), НЕ регресс данной задачи — но усугубляет непрозрачность F-1 (после дедупа даже теоретическая возможность увидеть разные охваты исчезает). Отмечено информационно."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "(а) стейл-задача самолечится reconcileInboxEngineDriveOnRead + регресс-пин", "covered": true},
+    {"ac": "(б) base-дубль скрывается на наличие next_task, реальная задача не теряется (инвариант T-0571 §2.1)", "covered": true},
+    {"ac": "(в) ACTION_ERROR_MESSAGE/actionErrorMessage — человеческие тексты approve/complete", "covered": true},
+    {"ac": "(г) formatPersonName + display_name, honest fallback, без миграции", "covered": true},
+    {"ac": "(д) holderCount вместо grantCount", "covered": true},
+    {"ac": "(д) dedupHolders + revoke всех дублей — КОРРЕКТНО для различных охватов", "covered": false, "note": "F-1 blocking: дедуп по employee_id схлопывает легитимно-различные-по-охвату назначения и отзывает лишнее"},
+    {"ac": "(е) fetchWithAuthRetry на 7 сайтах screen-inbox, retry-once, dev passthrough", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "(б) проверен НЕЗАВИСИМЫМ чтением инварианта T-0571 §2.1 (process-projection.ts:1274-1283) + emit-guard reconcileInboxEngineDriveOnRead:1149-1154, не из handoff — установлено, что base-строка по конструкции не бывает AND-split-веткой, скрытие безопасно.",
+    "(д) РЕФУТИРОВАН независимым чтением migrations/020_role_assignment.sql:29-32 (дизайн-инвариант 'multiple assignments legitimately coexist by org_scope/window') + rights-overview.ts:315 (org_scope per-assignment) + AssignRoleForm canSubmit требует scope — доказано, что дедуп по employee_id отзывает лишнее.",
+    "Мутации MUT-1/2/3 подтвердили, что тесты пинят фиксы (а/д-счётчик/е), но ни один тест не покрывает различный-охват-кейс — гейт не ловит F-1 (F-2).",
+    "Все 6 гейтов прогнаны соло (npm test 4965, web vitest 1684, build, fitness:db 1111, tier-isolation, anti-case-lock) — числа не взяты из handoff."
+  ]
+}
