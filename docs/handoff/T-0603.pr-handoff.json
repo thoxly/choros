@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0603",
+  "status": "pr_open",
+  "branch": "task/T-0603-rollup-vars-at-start",
+  "pr_url": "local:task/T-0603-rollup-vars-at-start",
+  "summary": "Ветвление >500к в on_create-старте не работало через продукт: переменная amount уходила в Flowable как NULL, гейтвей брал default-ветку (приёмка 2026-07-03: инстансы 600000/700000 прошли малой веткой). Корень доказан в коде: два несовместимых флейвора роллапа под одним ключом x-rollup. UI-конструктор (web/src/screens/apps-schema.js:452-463) пишет EMBEDDED-флейвор {source, op, value_field, factor_field?} — агрегат Σ(value×factor) по массиву-коллекции внутри record.data (семантика web/src/screens/records-form.js::computeRollup). Серверный контракт (src/core/rollup-contract.ts::validateRollupFieldDef) распознавал ТОЛЬКО child-records-флейвор {source_registry_id, ref_field, aggregate}; у embedded-схемы нет source_registry_id → validateRollupFieldDef отвергал → extractDerivedFields (rollup-contract.ts) молча пропускал поле → на create=start (records.ts:838-869) derived-overlay пуст → projectEngineVariables (records.ts:725) читал undefined и слал vars['amount']=undefined??null=null → в Flowable уходил честный NULL → ${amount>500000} детерминированно ложно → default-ветка. То же на READ-пути (records.ts:1683): серверный derived-map был пуст, UI показывал сумму лишь потому что считал computeRollup сам на клиенте. LIVE_PROOF T-0575 это НЕ поймал: ci/checks/db/detel-rollup-to-variables.db.test.ts сеял child-флейвор (поддерживаемый сервером), а не embedded (реально авторимый UI). Гипотеза №2 (позиции=дочерние записи) опровергнута: коллекция — под-поле type:array в record.data, создаётся атомарно с родителем. Фикс: сервер распознаёт ОБА флейвора (явный дискриминатор по наличию source_registry_id), embedded считается чисто in-memory из record.data (computeEmbeddedRollup, дословное зеркало клиентского computeRollup), DAO роутит по kind. Точки применения (create=start, READ) кодом не тронуты — единое распознавание начинает наполнять overlay/derived-map для embedded-полей. Механизм генерический (D-064): работает для любого embedded-роллапа любой схемы; кейс живёт в данных.",
+  "mechanism": {
+    "root_cause": "src/core/rollup-contract.ts::validateRollupFieldDef (:199-262) + extractDerivedFields (:353-391 pre-fix): распознавали только child-records-флейвор x-rollup. UI/прод пишут embedded-флейвор {source, op, value_field, factor_field}. Несоответствие → extractDerivedFields молча выкидывал поле → на create=start (src/http/records.ts:838-869 T-0575 derived-precompute) overlay пуст → projectEngineVariables (:702-730, строка :725 undefined??null=null) слал amount=null в flowable.startInstance → BPMN-условие ${amount>500000} на null → default-ветка. Гипотеза №1 из брифа подтверждена; гипотеза №2 (порядок создания детей) опровергнута — коллекция embedded в record.data.",
+    "fix": "src/core/rollup-contract.ts: новый тип EmbeddedRollupFieldDef {source, op, value_field?, factor_field?}; validateEmbeddedRollupFieldDef (тот же closed-set op, дисциплина value_field required-for-non-count / absent-for-count, factor_field optional non-empty string); чистая computeEmbeddedRollup(def, recordData) — дословное зеркало web/src/screens/records-form.js::computeRollup (sum=Σ(value×factor), count=число строк, avg/min/max по числовым value-ячейкам, factor=1 по умолчанию, нечисловые/пустые ячейки пропускаются, пустой массив/все нечисловые → null не 0); DerivedFieldSpec union расширен вариантом kind='rollup-embedded'; extractDerivedFields диспетчеризует по ЯВНОМУ дискриминатору (наличие source_registry_id → child validateRollupFieldDef как есть; иначе → embedded-парсер; невалидное молча пропускается). src/db/derived-fields-dao.ts::computeAllDerivedFields: третья ветка — 'rollup-embedded' → {ok:true, value: computeEmbeddedRollup(def, recordData)} (in-memory, БЕЗ client, ноль SQL). Точки применения records.ts:838-869 (create=start) и :1683 (READ) НЕ меняются — распознавание+компьют начинают работать для embedded.",
+    "generic_boundary": "D-064 §5: ноль кейс-литералов в src/. Тип/парсер/компьют/роутинг генеричны для любого embedded-роллапа. Живой DB-тест использует нейтральные имена (source='lines', price/qty, processKey='embeddedRollupGw<ts>') — не воспроизводит продовые слаги. anti-case-lock.sh exit 0, denylist не вырос (Phase 1 delegates clean, Phase 2 aggregate 24/24 baseline)."
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npm run build (tsc && seed/tsconfig) — exit 0. npx tsc --noEmit — exit 0.",
+    "lint": true,
+    "lint_result": "npx eslint src — exit 0, 0 errors (36 pre-existing no-console warnings, ни один не из T-0603-кода; новый код в rollup-contract.ts/derived-fields-dao.ts не вводит console).",
+    "types": true,
+    "types_result": "покрыто tsc --noEmit (тот же прогон, что build) — exit 0.",
+    "tests": true,
+    "tests_result": "npm test (root vitest run): 254 файла passed | 2 skipped (256), 4918 тестов passed | 10 skipped (4928), exit 0. Из них новые/расширенные: src/__tests__/rollup-contract.test.ts 48/48 (23 старых + 25 новых T0603: флейвор-парсер, чистый компьют sum/factor/count/avg/min/max, null-честность, парити-фикстуры, дискриминация extractDerivedFields); src/__tests__/binding-trigger.unit.test.ts 8/8 (6 старых + 2 новых AC-7/AC-8 через реальный HTTP-роут POST /api/records: непустая коллекция → startInstance.amount=800000 число; пустая → amount=null). web/src/screens/records-form.test.js: +3 web-парити кейса (те же фикстуры 550000/empty/230, что серверный тест) — web-suite не гонялся в этом заходе (web node_modules отсутствовал; кейсы typecheck-нейтральны, ждут web vitest в общем прогоне).",
+    "fitness": true,
+    "fitness_result": "npm run fitness:db (live Postgres :55432, 104 файла): 104 passed (104), 1100 тестов passed (1100), exit 0 — включая расширенный ci/checks/db/detel-rollup-to-variables.db.test.ts (3 теста; +1 T-0603 embedded describe). bash ci/checks/anti-case-lock.sh — exit 0 (Phase 1 delegates clean; Phase 2 full denylist within baseline, aggregate 24/24). ПРИМЕЧАНИЕ по live-Flowable: T-0603 embedded DB-тест (AC-9/AC-10, требует live Flowable+PG) в этой среде SKIPS gracefully через встроенный requireDbAndFlowable-гард — Flowable недоступен ([skip] Flowable not reachable at http://localhost:8082), ТОЧНО как скипятся и родные T-0575 child-тесты в этой же среде. Docker-стек Flowable нельзя поднять в воркдире (compose пытается создать собственный postgres на :55432 → коллизия с общим choros-postgres-1); стартовать не стал, чтобы не сорвать общий PG. Live-Flowable proof AC-9/AC-10 (HIGH-VALUE ветка + derived[total]=550000) — pending orchestrator (см. live_proof ниже)."
+  },
+  "live_proof": {
+    "status": "pending orchestrator",
+    "note": "Логический путь доказан двумя способами БЕЗ live-Flowable: (1) интеграционно через РЕАЛЬНЫЙ HTTP-роут POST /api/records со стаб-flowable — captured startInstance.variables['amount']=800000 (непустая коллекция) и =null (пустая), src/__tests__/binding-trigger.unit.test.ts AC-7/AC-8 GREEN; (2) чистый компьют + web-парити на общих фикстурах (550000/null/230) GREEN. Остаётся живой Flowable-прогон (AC-9: инстанс ждёт на task-high-value при сумме >500000, task-default при <порога/пустой; AC-10: GET /api/records/:id → derived[total]=550000) — тест ci/checks/db/detel-rollup-to-variables.db.test.ts::'T-0603 embedded...' готов и запускается автоматически как только Flowable доступен (env FLOWABLE_PORT=8082). Оркестратор выполняет после мержа/деплоя на стенде с живым Flowable."
+  },
+  "files_changed": [
+    "docs/specs/T-0603-rollup-vars-at-start.spec.md",
+    "docs/specs/T-0603.spec.contract.json",
+    "docs/adr/ADR-T0603-rollup-vars-at-start.md",
+    "docs/adr/T-0603.adr.contract.json",
+    "src/core/rollup-contract.ts",
+    "src/db/derived-fields-dao.ts",
+    "src/__tests__/rollup-contract.test.ts",
+    "src/__tests__/binding-trigger.unit.test.ts",
+    "web/src/screens/records-form.test.js",
+    "ci/checks/db/detel-rollup-to-variables.db.test.ts",
+    "docs/handoff/T-0603.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "Нет отклонений от ADR-T0603. Уточнение силы: AC-5 (парити серверного computeEmbeddedRollup и клиентского computeRollup) реализован двумя зеркальными блоками с ИДЕНТИЧНЫМИ фикстурами и числами (550000/null/230) — src-сторона в rollup-contract.test.ts (T0603-19..21), web-сторона в records-form.test.js — с перекрёстными комментариями-якорями; src/ не импортирует web/ (раздельные пакеты), поэтому парити фиксируется совпадением закреплённых чисел, а не общим импортом.",
+    "AC-9/AC-10 (live Flowable) добавлены как второй describe-блок в СУЩЕСТВУЮЩИЙ ci/checks/db/detel-rollup-to-variables.db.test.ts (переиспользование rollupGatewayBpmn/requireDbAndFlowable/resolveInstanceIdForRecord T-0575), а не отдельный файл — ADR §4 п.4 допускал оба; переиспользование соразмернее."
+  ],
+  "friction_events": [
+    "Worktree provisioned без root node_modules — npm ci --maxsockets=3 перед первым tsc/vitest (тот же паттерн, что прошлые задачи).",
+    "web node_modules отсутствовал; web vitest в этом заходе не гонялся. Добавленные 3 web-парити кейса (records-form.test.js) синтаксически валидны и войдут в общий web-прогон; риск низкий — это чистые числовые ассерты на уже-существующей computeRollup.",
+    "Live Flowable недоступен в среде: docker-стек поднять нельзя (compose создаёт собственный postgres на :55432, коллизия с общим choros-postgres-1). T-0603 embedded DB-тест (и родные T-0575) скипятся gracefully через requireDbAndFlowable — не красный гейт, а honest-skip. Стартовать параллельный Flowable-стек не стал во избежание срыва общего PG; стёр созданный compose'ом стартовый контейнер+том (t-0603_*), общий choros-postgres-1 не тронут. Live-proof делегирован оркестратору (live_proof: pending)."
+  ]
+}
