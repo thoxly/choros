@@ -1,0 +1,72 @@
+{
+  "task_id": "T-0615",
+  "status": "ready",
+  "decision": "Раскладку (diagram-interchange, DI) генерим НА КЛИЕНТЕ при открытии определения в модельере, ДО importXML (вариант A). Обоснование над B: A чинит ВСЕ уже сохранённые определения без DI (seed/API/emit ИИ, включая боевой процесс закупок) без миграции данных, локализован в единственной точке рендера web/src/canvas/bpmn-modeler-wrapper.jsx, зависимость клиентская; B (серверная генерация DI при сохранении) не чинит сохранённые без бэкфилла и требует bpmn-moddle в бэкенде (сейчас чистые строковые трансформы) — оставлен follow-up O1. Реализация: новый чистый модуль web/src/canvas/bpmn-ensure-layout.js с hasDiagramInterchange(xml) (структурный prefix-agnostic регэксп /<(?:[A-Za-z_][\\w.-]*:)?BPMNDiagram(?=[\\s/>])/, якорён на '<' — не ловит подстроку в атрибуте/тексте) и ensureLayout(xml)→{xml,layoutApplied} (DI есть → исходный XML байт-в-байт layoutApplied=false; DI нет → await layoutProcess(xml) из bpmn-auto-layout@1.3.0 → XML с DI layoutApplied=true; провал layoutProcess или не-DI на выходе → throw 'auto-layout failed…'/'auto-layout produced no diagram interchange'; не-строка/пусто → throw 'must be a non-empty string'). bpmn-modeler-wrapper.jsx: useEffect заменяет modeler.importXML(xmlToLoad).then(...) на ensureLayout(xmlToLoad).then(prepared=>modeler.importXML(prepared.xml)).then(...прежний post-import...).catch(...); один .catch различает провал авто-раскладки (/auto-layout/i → 'Не удалось построить схему автоматически…') от реджекта importXML ('Не удалось открыть диаграмму…'), оба через onError (честная деградация T-0484 сохранена, пустой канвас без объяснения невозможен). D-064: детект DI структурный, ноль кейс-литералов, anti-case-lock baseline (aggregate 24=24). layoutProcess — чистый bpmn-moddle-трансформ без DOM (проверено в node), поэтому unit-тесты в vitest env=node гоняют реальную раскладку без инстанса BpmnModeler.",
+  "rejected_alternatives": [
+    {
+      "option": "Вариант B (серверная генерация DI при сохранении/публикации) как первичный",
+      "why_not": "Не чинит уже сохранённые определения без DI без одноразового бэкфилла; требует bpmn-moddle в бэкенде (сейчас чистые строковые трансформы src/core/bpmn-deploy-normalizer.ts) — новая рантайм-зависимость + миграция данных ради 'показать схему'. Оставлен follow-up O1."
+    },
+    {
+      "option": "Всегда прогонять авто-раскладку, включая XML с DI",
+      "why_not": "Перетёр бы авторскую раскладку (осознанно расставленные координаты) на автоматическую сетку. ensureLayout НЕ трогает XML с DI (layoutApplied=false, байт-в-байт)."
+    },
+    {
+      "option": "Ловить реджект importXML и только тогда раскладывать (retry-after-fail)",
+      "why_not": "Мутнее: нужно точно распознать именно 'no diagram to display' среди прочих ошибок парсинга; дважды инициализирует импорт; нет чистого места для честной деградации. Структурный предикат до импорта детерминирован."
+    },
+    {
+      "option": "Править bpmnlint / bpmn-js чтобы рисовать без DI",
+      "why_not": "bpmn-js по архитектуре рендерит DI; 'нарисовать без координат' = переписать рендерер. Авто-раскладка bpmn-io — штатный инструмент ровно для этого."
+    }
+  ],
+  "object_model": [],
+  "contracts": [
+    "web/src/canvas/bpmn-ensure-layout.js — НОВЫЙ чистый модуль: hasDiagramInterchange(xml)→boolean (структурный детектор DI) + ensureLayout(xml)→Promise<{xml,layoutApplied}> (генерит DI когда отсутствует, иначе байт-в-байт; честный бросок при провале раскладки).",
+    "web/src/canvas/bpmn-modeler-wrapper.jsx — импорт ensureLayout; useEffect вклинивает ensureLayout(xmlToLoad) перед modeler.importXML в ту же .then/.catch цепочку; .catch различает провал авто-раскладки от реджекта importXML, оба через onError (T-0484-путь сохранён).",
+    "web/package.json — добавлена клиентская зависимость bpmn-auto-layout@^1.3.0 (bpmn-io; транзитивные bpmn-moddle@^10, min-dash@^5 совместимы с bpmn-js@17).",
+    "web/src/canvas/bpmn-ensure-layout.test.js — НОВЫЙ unit-тест (vitest env=node): AC-1..AC-4 на чистый модуль + реальный layoutProcess."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "Определение без DI, прогнанное через ensureLayout → layoutApplied=true и выход содержит BPMNDiagram+BPMNShape+Bounds (канвас получил бы рисуемые узлы); узлы исходного процесса сохранены.",
+      "ci_check": "cd web && npx vitest run src/canvas/bpmn-ensure-layout.test.js"
+    },
+    {
+      "id": "FF-2",
+      "rule": "Определение с DI → ensureLayout возвращает исходный XML байт-в-байт (layoutApplied=false); координата автора x=\"4242\" сохранена — авто-раскладка не вызвана.",
+      "ci_check": "cd web && npx vitest run src/canvas/bpmn-ensure-layout.test.js"
+    },
+    {
+      "id": "FF-3",
+      "rule": "hasDiagramInterchange prefix-agnostic (bpmndi:/di:/без-префикса) TRUE; слово только в значении атрибута/тексте → FALSE; пустой/не-строка → FALSE.",
+      "ci_check": "cd web && npx vitest run src/canvas/bpmn-ensure-layout.test.js"
+    },
+    {
+      "id": "FF-4",
+      "rule": "Честная деградация: malformed BPMN без DI → ensureLayout реджектит /auto-layout/i; пустой/не-строка → реджект /non-empty string/i (не возвращает DI-less XML).",
+      "ci_check": "cd web && npx vitest run src/canvas/bpmn-ensure-layout.test.js"
+    },
+    {
+      "id": "FF-5",
+      "rule": "bpmn-modeler-wrapper.jsx зовёт ensureLayout ДО importXML и сохраняет .catch→onError (провал авто-раскладки и реджект importXML поверхностны пользователю, не пустой канвас).",
+      "ci_check": "grep -n 'ensureLayout' web/src/canvas/bpmn-modeler-wrapper.jsx && grep -n '\\.catch(' web/src/canvas/bpmn-modeler-wrapper.jsx && grep -n 'onError' web/src/canvas/bpmn-modeler-wrapper.jsx"
+    },
+    {
+      "id": "FF-6",
+      "rule": "D-064: anti-case-lock.sh зелёный (aggregate на baseline 24=24, ни один литерал не вырос); ноль кейс-литералов добавлено в src/web/src.",
+      "ci_check": "bash ci/checks/anti-case-lock.sh"
+    }
+  ],
+  "traceability": [
+    { "ac": "AC-1", "covered_by": "FF-1" },
+    { "ac": "AC-2", "covered_by": "FF-2" },
+    { "ac": "AC-3", "covered_by": "FF-3" },
+    { "ac": "AC-4", "covered_by": "FF-4" },
+    { "ac": "AC-5", "covered_by": "FF-5" },
+    { "ac": "AC-6", "covered_by": "FF-6" }
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0615-bpmn-auto-layout.md",
+  "escalation": "Не требуется. Изменение локально в клиентском модельере, не трогает деньги/секреты/необратимое/границу фаундера. Новая зависимость client-only от bpmn-io (совместимые транзитивные версии с bpmn-js@17). Поведение определений с DI не меняется; провал авто-раскладки деградирует честным баннером, не пустым канвасом."
+}
