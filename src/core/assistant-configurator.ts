@@ -55,6 +55,9 @@ import {
   type RelationCascadeDecision,
 } from "./relation-cascade.js";
 import type { ChatLlmRequest, ChatLlmResult, ChatToolCall } from "./llm-port.js";
+// T-0600: canonical, jargon-free error text for a caught LLM failure — never
+// echo the raw err.message (may embed a provider's raw JSON body).
+import { canonicalizeLlmError } from "./llm-port.js";
 // T-0475 [E-AGENTS L4]: operating a SYSTEM agent (the configurator IS one) is the
 // capability axis canOperateSystemAgent — authoring_draft OR system_agent:operate.
 import { canOperateSystemAgent } from "./capability-authz.js";
@@ -1194,11 +1197,16 @@ async function runConfiguratorLoop(
     try {
       result = await ctx.llm.chat(request);
     } catch (err) {
-      // LLM error (dormant, network, etc.) — return partial results with error note
-      const errMsg =
-        err instanceof Error ? err.message : String(err);
+      // T-0600: LLM error (dormant, provider auth failure, network, etc.) —
+      // return partial results with an HONEST, canonical note. The raw err
+      // (which for a provider 4xx embeds the provider's full raw response
+      // body, see openai-llm-port.ts::_post) is logged server-side ONLY —
+      // never interpolated into user-visible text (that was the T-0600 leak:
+      // a prior revision embedded err.message verbatim here).
+      console.error(`[T-0600] configurator LLM call failed: ${String(err)}`);
+      const canonical = canonicalizeLlmError(err);
       finalText =
-        `Ошибка LLM-порта: ${errMsg}. ` +
+        `${canonical} ` +
         (approvedOps.length > 0 || blockedOps.length > 0
           ? "Частичные результаты ниже."
           : "Конфигурация не была изменена.");

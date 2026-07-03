@@ -32,7 +32,7 @@ import type {
   ChatLlmRequest,
   ChatLlmResult,
 } from "../llm-port.js";
-import { LlmDormantError } from "../llm-port.js";
+import { LlmDormantError, LlmUnavailableError } from "../llm-port.js";
 import type { GroundingContext } from "../process-gen-validator.js";
 
 // ---------------------------------------------------------------------------
@@ -269,5 +269,70 @@ describe("extractBpmnXml", () => {
   });
   it("returns null on prose with no XML", () => {
     expect(extractBpmnXml("Я подумаю над этим.")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0600 (AC-8): runProcessGenLoop's llm_error path must NEVER echo a caught
+// LlmUnavailableError's raw message (which, for a provider 4xx, embeds the
+// provider's FULL raw response body — see openai-llm-port.ts::_post) into
+// outcome.message. A live acceptance run showed exactly this class of leak
+// surfacing in chat via src/http/assistant.ts's generate_process branch
+// (`generate_process[${outcome.status}]: ${outcome.message}`).
+// ---------------------------------------------------------------------------
+
+/** Throws a caller-supplied error on every chat() call. */
+class ThrowingChatPort implements LlmPort {
+  constructor(private readonly err: unknown) {}
+  complete(_req: LlmRequest): Promise<LlmResult> {
+    return Promise.reject(this.err);
+  }
+  async chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    throw this.err;
+  }
+}
+
+const PROVIDER_JSON_FIXTURE =
+  'OpenAI API error 401: {"error":{"message":"Incorrect API key provided: sk-***. ' +
+  'You can find your API key at https://platform.openai.com/account/api-keys.",' +
+  '"type":"invalid_request_error","param":null,"code":"invalid_api_key"}}';
+
+describe("T-0600 — runProcessGenLoop honest error text (no raw provider body leak)", () => {
+  it("a provider 401 (raw JSON body in err.message) never reaches outcome.message — canonical text instead, cause=error preserved", async () => {
+    const bot = new ThrowingChatPort(new LlmUnavailableError(PROVIDER_JSON_FIXTURE));
+    const out = await runProcessGenLoop(makeReq(bot));
+    expect(out.status).toBe("llm_error");
+    if (out.status === "llm_error") {
+      // AC-9: existing status/cause contract is preserved.
+      expect(out.cause).toBe("error");
+      expect(out.message).not.toContain("invalid_request_error");
+      expect(out.message).not.toContain("Incorrect API key");
+      expect(out.message).not.toContain("invalid_api_key");
+      expect(out.message).not.toContain("sk-***");
+      expect(out.message.toLowerCase()).toMatch(/ключ/);
+    }
+  });
+
+  it("a generic adapter failure (network) never leaks its raw message either", async () => {
+    const bot = new ThrowingChatPort(new LlmUnavailableError("OpenAI API network error: ECONNRESET some.internal.host:443"));
+    const out = await runProcessGenLoop(makeReq(bot));
+    expect(out.status).toBe("llm_error");
+    if (out.status === "llm_error") {
+      expect(out.cause).toBe("error");
+      expect(out.message).not.toContain("ECONNRESET");
+      expect(out.message).not.toContain("some.internal.host");
+      expect(out.message).not.toContain("OpenAI API");
+    }
+  });
+
+  it("dormant path still reports cause=dormant with a canonical, jargon-free message", async () => {
+    const bot = new ThrowingChatPort(new LlmDormantError("llm runtime dormant — configure agent_card.llm_* to enable"));
+    const out = await runProcessGenLoop(makeReq(bot));
+    expect(out.status).toBe("llm_error");
+    if (out.status === "llm_error") {
+      expect(out.cause).toBe("dormant");
+      expect(out.message).not.toContain("agent_card");
+      expect(out.message).not.toContain("llm_*");
+    }
   });
 });
