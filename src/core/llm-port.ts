@@ -240,6 +240,74 @@ export function classifyLlmUnavailability(err: unknown): "unavailable" | null {
 }
 
 // ---------------------------------------------------------------------------
+// T-0600: provider-auth-fail classifier + canonical error text.
+//
+// A live acceptance run surfaced a SECOND honesty defect distinct from the
+// dormant/adapter-failure split above: two call sites (assistant-configurator.ts
+// ::runConfiguratorLoop, process-gen-loop.ts::runProcessGenLoop) catch a
+// thrown LlmUnavailableError LOCALLY (never reaching classifyLlmUnavailability/
+// the HTTP layer's honest-503 path) and interpolated err.message VERBATIM into
+// user-visible chat text. For a provider 4xx, src/adapters/openai-llm-port.ts's
+// `_post` embeds the provider's FULL raw response body in that message
+// (`OpenAI API error ${statusCode}: ${text}`) — so a raw, unredacted vendor
+// JSON blob (e.g. `{"error":{"message":"Incorrect API key...",...}}`) was
+// reaching the end user. That raw body is exactly the kind of dev-jargon/
+// internal-detail leak assistant-llm-message-jargon.sh already polices for
+// the T-0573 canonical constants — this closes the SAME class of leak at the
+// two places that bypass that machinery entirely.
+//
+// isProviderAuthFailure classifies BY THE MESSAGE PREFIX OUR OWN ADAPTER
+// CONTROLS ("OpenAI API error 401/403:") — never by parsing the provider's
+// arbitrary JSON body, which is not a stable contract across providers/
+// endpoints. canonicalizeLlmError turns ANY caught LLM error into a fixed,
+// jargon-free Russian sentence — the raw message is NEVER echoed, regardless
+// of classification outcome. The full original error is the CALLER's
+// responsibility to log server-side (console.error) before discarding it;
+// this function only ever returns the safe, canonical text.
+// ---------------------------------------------------------------------------
+
+/**
+ * T-0600: true when `err` is an `LlmUnavailableError` whose message shows the
+ * adapter's OWN "OpenAI API error 401/403: ..." prefix (invalid/revoked
+ * provider key) — as opposed to a timeout, network error, malformed
+ * response, or a different HTTP status. Matches on the prefix our adapter
+ * writes, never on the provider's raw body content.
+ */
+export function isProviderAuthFailure(err: unknown): boolean {
+  if (!(err instanceof LlmUnavailableError)) return false;
+  return /OpenAI API error (401|403):/.test(err.message);
+}
+
+/**
+ * T-0600 (F4/F5): convert a caught LLM error into a canonical, jargon-free,
+ * Russian, human-readable message — NEVER echoing the raw err.message (which
+ * may embed a provider's raw JSON response body, an internal exception
+ * string, or other dev-facing detail). Use this at any call site that
+ * currently (or might) interpolate a caught LLM error into user-visible
+ * text; the honest-503 path (respondLlmUnavailable, src/http/assistant.ts)
+ * does NOT need this helper — it already ignores err.message entirely and
+ * uses the T-0573/T-0595 canonical ASSISTANT_LLM_UNAVAILABLE_MESSAGE_*
+ * constants unconditionally.
+ *
+ * The full original error is NOT logged by this function — callers must log
+ * it themselves (e.g. `console.error`) BEFORE discarding it, so operators
+ * retain full diagnostic detail server-side while the user only ever sees
+ * the safe canonical sentence below.
+ */
+export function canonicalizeLlmError(err: unknown): string {
+  if (isProviderAuthFailure(err)) {
+    return "Ключ LLM отклонён провайдером. Проверьте или замените ключ в LLM-соединениях.";
+  }
+  if (err instanceof LlmDormantError) {
+    return "LLM-ключ не подключён. Настройте профиль ассистента в LLM-соединениях.";
+  }
+  // Generic adapter failure (timeout / network / malformed response / any
+  // other provider HTTP status) — same honest, human framing; no status
+  // code, no raw body, no "port"/"adapter"/technical jargon.
+  return "Не удалось обработать запрос из-за проблемы с подключением к LLM. Попробуйте ещё раз позже.";
+}
+
+// ---------------------------------------------------------------------------
 // dormantLlmPort — the fail-closed default (FR-7 / AC-4, three-lock §6).
 // ---------------------------------------------------------------------------
 

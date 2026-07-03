@@ -35,7 +35,7 @@
  */
 
 import type { LlmPort, ChatLlmRequest, ChatMessage } from "./llm-port.js";
-import { LlmDormantError } from "./llm-port.js";
+import { LlmDormantError, canonicalizeLlmError } from "./llm-port.js";
 import {
   validateGeneratedProcess,
   formatLintFeedback,
@@ -237,16 +237,18 @@ export async function runProcessGenLoop(
         return {
           status: "llm_error",
           cause: "dormant",
-          message:
-            "LLM-порт не настроен (dormant) — генерация процесса недоступна. " +
-            "Подключите модель в настройках агента.",
+          message: canonicalizeLlmError(err),
         };
       }
-      const msg = err instanceof Error ? err.message : String(err);
+      // T-0600: log the full error server-side ONLY — the raw err.message
+      // (which for a provider 4xx embeds the provider's full raw response
+      // body, see openai-llm-port.ts::_post) must never reach the caller;
+      // this used to be interpolated verbatim into `message` below.
+      console.error(`[T-0600] process-gen LLM call failed: ${String(err)}`);
       return {
         status: "llm_error",
         cause: "error",
-        message: `Ошибка LLM-порта при генерации процесса: ${msg}.`,
+        message: canonicalizeLlmError(err),
       };
     }
 

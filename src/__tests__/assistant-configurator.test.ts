@@ -35,6 +35,7 @@ import { StubChatLlmPort } from "../core/__tests__/stub-chat-llm-port.js";
 import type { GrantSource } from "../core/grant-resolver.js";
 import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 import type { LlmPort, LlmRequest, LlmResult, ChatLlmRequest, ChatLlmResult } from "../core/llm-port.js";
+import { LlmUnavailableError } from "../core/llm-port.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 
 // ---------------------------------------------------------------------------
@@ -898,5 +899,57 @@ describe("AC-T465-4: propose_plan is declared in the configurator toolset [D8-G4
     const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{ function?: { name?: string } }>;
     const names = tools.map((t) => t.function?.name);
     expect(names).toContain("propose_plan");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0600 (AC-7): runConfiguratorLoop's catch(err) block must NEVER echo a
+// caught LlmUnavailableError's raw message (which, for a provider 4xx, embeds
+// the provider's FULL raw response body — see openai-llm-port.ts::_post) into
+// the user-visible finalText. A live acceptance run showed exactly this leak
+// ("Ошибка LLM-порта: OpenAI API error 401: {raw json}") — this test proves
+// the fix (canonicalizeLlmError, src/core/llm-port.ts) is actually wired in.
+// ---------------------------------------------------------------------------
+
+/** Throws a caller-supplied error on every chat() call — models an adapter failure. */
+class ThrowingLlmPort implements LlmPort {
+  constructor(private readonly err: unknown) {}
+
+  complete(_req: LlmRequest): Promise<LlmResult> {
+    return Promise.reject(this.err);
+  }
+
+  async chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    throw this.err;
+  }
+}
+
+const PROVIDER_JSON_FIXTURE =
+  'OpenAI API error 401: {"error":{"message":"Incorrect API key provided: sk-***. ' +
+  'You can find your API key at https://platform.openai.com/account/api-keys.",' +
+  '"type":"invalid_request_error","param":null,"code":"invalid_api_key"}}';
+
+describe("T-0600 — runConfiguratorLoop honest error text (no raw provider body leak)", () => {
+  it("a provider 401 (raw JSON body in err.message) never reaches finalText — canonical Russian text instead", async () => {
+    const llm = new ThrowingLlmPort(new LlmUnavailableError(PROVIDER_JSON_FIXTURE));
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("настрой процесс согласования закупок", ctx);
+
+    expect(result.text).not.toContain("invalid_request_error");
+    expect(result.text).not.toContain("Incorrect API key");
+    expect(result.text).not.toContain("invalid_api_key");
+    expect(result.text).not.toContain("sk-***");
+    expect(result.text.toLowerCase()).toMatch(/ключ/);
+    expect(result.text.toLowerCase()).toMatch(/провайдер/);
+  });
+
+  it("a generic adapter failure (network/timeout) never leaks its raw message either", async () => {
+    const llm = new ThrowingLlmPort(new LlmUnavailableError("OpenAI API network error: ECONNRESET some.internal.host:443"));
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("настрой процесс согласования закупок", ctx);
+
+    expect(result.text).not.toContain("ECONNRESET");
+    expect(result.text).not.toContain("some.internal.host");
+    expect(result.text).not.toContain("OpenAI API");
   });
 });

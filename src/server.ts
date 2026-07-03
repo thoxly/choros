@@ -106,56 +106,20 @@ import type { RowAncestry } from "./core/read-visibility.js";
 const { Pool } = pg;
 
 // ---------------------------------------------------------------------------
-// T-0363 (E17): DeepSeek / OpenAI-compatible LLM composition root.
+// T-0496 default endpoint/model — NOT a key/secret fallback.
 //
-// Read from process.env ONCE at module-evaluation time.
-// No secret value is logged or committed — only the opaque handle reference.
-// RL-3: the raw key is never stored raw; the env-backed SecretResolverPort
-//   reads it at call-time from process.env so it is never captured in a closure.
-// The secretHandle "env://DEEPSEEK_API_KEY" passes validateSecretHandleShape:
-//   - length ≥ 8 ✓  - not a vendor prefix ✓  - not bare hex ✓  - not JWT ✓
+// "Проверить подключение" (registerLlmConnectionTestRoute below) fills in a
+// default OpenAI-compatible endpoint/model ONLY when a tenant's OWN connection
+// profile left those two (non-secret) string fields blank; the secret handle
+// used for the actual call is ALWAYS the tenant's own (via tenantSecretResolver,
+// never this constant). This is unrelated to the T-0600 BYO fix below — that
+// fix removed a KEY fallback (a shared secret used on the tenant's behalf).
+// Defaulting a blank endpoint/model string is not a credential and carries no
+// BYO risk; kept minimal (no API-key constant, no secret resolver) precisely
+// so it cannot regrow into the removed fallback.
 // ---------------------------------------------------------------------------
-
-const DEEPSEEK_API_KEY   = process.env["DEEPSEEK_API_KEY"];
-const DEEPSEEK_BASE_URL  = process.env["DEEPSEEK_BASE_URL"] ?? "https://api.deepseek.com";
-const DEEPSEEK_MODEL     = process.env["DEEPSEEK_MODEL"]    ?? "deepseek-chat";
-
-/**
- * Opaque handle for the DeepSeek API key.
- * The handle is an env-reference string — NOT a raw key.
- * It passes validateSecretHandleShape (env:// prefix, length > 8, no vendor prefix).
- */
-const DEEPSEEK_HANDLE = "env://DEEPSEEK_API_KEY";
-
-// Validate at startup so misconfiguration fails loudly rather than at first request.
-const _handleVerdict = validateSecretHandleShape(DEEPSEEK_HANDLE);
-if (!_handleVerdict.ok) {
-  // This is a programming error — the handle constant above must be corrected.
-  throw new Error(
-    `[T-0363] Invalid DeepSeek secret handle (${_handleVerdict.reason}): ` +
-    `handle (redacted): ${redactHandle(DEEPSEEK_HANDLE)}`,
-  );
-}
-
-/**
- * Env-backed SecretResolverPort for DeepSeek.
- * Reads the raw key from process.env at CALL TIME only — never stored in a closure.
- * RL-3: the resolver is the ONLY place that touches the raw key.
- * Stage-deploy invariant: this object is created in src/server.ts (composition root),
- * NOT in src/core/** or src/adapters/** (stage-deploy boundary intact).
- */
-const deepseekSecretResolver: SecretResolverPort = {
-  async resolveSecret(handle: string, _ctx: { tenantId: string }): Promise<string> {
-    if (handle === DEEPSEEK_HANDLE) {
-      const key = process.env["DEEPSEEK_API_KEY"];
-      if (!key) {
-        throw new Error(`[T-0363] DeepSeek API key not found in environment (handle: ${redactHandle(handle)})`);
-      }
-      return key;
-    }
-    throw new Error(`[T-0363] Unknown secret handle: ${redactHandle(handle)}`);
-  },
-};
+const DEEPSEEK_BASE_URL = process.env["DEEPSEEK_BASE_URL"] ?? "https://api.deepseek.com";
+const DEEPSEEK_MODEL    = process.env["DEEPSEEK_MODEL"]    ?? "deepseek-chat";
 
 /**
  * T-0413 (SECURITY-FU): tenant-facing secret resolver.
@@ -163,18 +127,20 @@ const deepseekSecretResolver: SecretResolverPort = {
  * SECURITY: the `env://` scheme is SYSTEM-ONLY and MUST NOT be resolvable from a
  * tenant-supplied handle. A tenant admin controls BOTH the secret-handle stored in
  * agent_card AND the llm_endpoint (PUT /api/llm-config). If a tenant could supply
- * an env:// handle (even the allow-listed DEEPSEEK_API_KEY), they could point the
- * endpoint at an attacker host and have the server ship the SHARED system key as a
- * Bearer token — exfiltrating a credential shared across all tenants.
+ * an env:// handle, they could point the endpoint at an attacker host and have
+ * the server ship a server-side env value as a Bearer token — exfiltrating a
+ * credential via a tenant-controlled request.
  *
  * Therefore `env://` handles are NEVER resolvable through the tenant path,
  * regardless of which var name they reference. Tenant BYO keys MUST be stored
  * through the encrypted secret-handle custody store (POST /api/agents/:id/secret-handle,
  * T-0025) and resolved through that path only.
  *
- * The system env fallback (DEEPSEEK_API_KEY when no tenant config exists) is wired
- * separately in makeLlmPortFactory via deepseekSecretResolver — that path is NOT
- * reachable by a tenant-supplied handle.
+ * T-0600: the system env KEY fallback that USED to live in makeLlmPortFactory
+ * (a global DEEPSEEK_API_KEY silently used on behalf of an unconfigured
+ * tenant) has been REMOVED — see makeLlmPortFactory's doc comment below for
+ * the full rationale. This resolver's env:// rejection stands regardless;
+ * it was never the thing that made the old fallback reachable from a tenant.
  */
 // Exported for adversarial testing (T-0413): a test can call
 // resolveSecret("env://...") against the REAL composition-root resolver
@@ -259,8 +225,26 @@ export const tenantSecretResolver: SecretResolverPort = {
  *
  * Priority order:
  *   1. Per-tenant agent_card config (all three llm_* fields non-null AND handle valid).
- *   2. Global env fallback (DEEPSEEK_API_KEY — backward-compatible T-0363 path).
- *   3. dormantLlmPort → 503 (fail-closed default).
+ *   2. dormantLlmPort → 503 (fail-closed default).
+ *
+ * T-0600 (BYO honesty fix): a PRIOR revision of this factory fell back to a
+ * global env-configured key (DEEPSEEK_API_KEY, T-0363) whenever step 1 found
+ * no per-tenant config. That silently routed a tenant WITHOUT its own
+ * assigned LLM profile through a shared server-side key — a BYO-doctrine
+ * violation (a live acceptance run surfaced this: an unconfigured tenant's
+ * assistant answered via the shared key instead of the honest dormant
+ * 503). The env-fallback step is REMOVED here: no per-tenant config (or an
+ * invalid handle shape) now goes straight to dormantLlmPort, which
+ * src/http/assistant.ts's classifyLlmUnavailability/respondLlmUnavailable
+ * (T-0573/T-0595) turns into the canonical honest "connect your LLM key"
+ * 503 — never a silent live call on someone else's key. The DEEPSEEK_*
+ * env-composition-root code (constants + deepseekSecretResolver) was the
+ * ONLY consumer of that fallback step and has been deleted outright (a
+ * validated-but-unreachable constant is its own kind of dishonesty in the
+ * code — see ADR-T0600 §1.1 for the full call-site audit). This does NOT
+ * touch the grantsPool===null branch (server.ts below, `if (grantsPool)`):
+ * that branch never registers the assistant route at all, so this factory
+ * is never invoked in that mode — no new degradation is introduced there.
  *
  * Each call queries the DB fresh so live config changes are picked up without
  * a restart (no caching — the per-message latency hit is a single indexed
@@ -268,8 +252,12 @@ export const tenantSecretResolver: SecretResolverPort = {
  *
  * Called only from buildRouter's assistant route wiring and llm-config route —
  * both in src/server.ts (composition root). NOT called from core or adapters.
+ *
+ * Exported (T-0600, AC-1) so a unit test can assert the BYO-honesty contract
+ * directly against the REAL composition-root factory — not a re-implemented
+ * copy — even though `DEEPSEEK_API_KEY` is set in the test's process env.
  */
-async function makeLlmPortFactory(
+export async function makeLlmPortFactory(
   tenantId: string,
   grantsPool: pg.Pool | null,
 ) {
@@ -287,21 +275,14 @@ async function makeLlmPortFactory(
         secretResolver: tenantSecretResolver,
       });
     }
-    // Invalid handle shape in DB → fall through to env fallback (log but don't crash).
+    // T-0600: an invalid handle shape in the per-tenant DB row must NOT
+    // silently degrade to a shared server key either — fail closed to
+    // dormant, same as "no config at all" (step 2 below).
   }
 
-  // 2. Global env fallback (T-0363 backward-compatible path).
-  if (DEEPSEEK_API_KEY) {
-    return new OpenAILlmPort({
-      endpoint: DEEPSEEK_BASE_URL,
-      model:    DEEPSEEK_MODEL,
-      secretHandle: DEEPSEEK_HANDLE,
-      tenantId,
-      secretResolver: deepseekSecretResolver,
-    });
-  }
-
-  // 3. No config → dormant (fail-closed, three-lock §6).
+  // 2. No usable per-tenant config → dormant (fail-closed, three-lock §6).
+  // T-0600: NO global env fallback here for a real tenant path (see doc
+  // comment above) — this IS the BYO-honesty fix.
   return dormantLlmPort;
 }
 
@@ -1033,9 +1014,10 @@ function buildRouter(
   }
 
   // T-0359 (E17): Register AI-assistant routes (thread/message/budget).
-  // T-0363 (b): llmPortFactory now wires DeepSeek when DEEPSEEK_API_KEY is set.
-  // T-0382 (D5): llmPortFactory is now async and reads per-tenant agent_card config
-  //   first, falling back to global env (backward-compatible).
+  // T-0382 (D5): llmPortFactory is async and reads per-tenant agent_card config.
+  // T-0600: NO global env fallback anymore — see makeLlmPortFactory's doc
+  //   comment for the BYO-honesty rationale (a prior revision fell back to a
+  //   shared DEEPSEEK_API_KEY; that step has been removed).
   // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
   // APPEND-ONLY: the last register* call before setFallback.
   if (grantsPool) {
@@ -1043,8 +1025,8 @@ function buildRouter(
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
-      // T-0382: async factory — reads per-tenant agent_card llm_* then falls back
-      // to global DEEPSEEK_API_KEY env; dormantLlmPort → 503 when neither is set.
+      // T-0382: async factory — reads per-tenant agent_card llm_* config only;
+      // no config (or an invalid handle) → dormantLlmPort (T-0600).
       llmPortFactory: (tenantId: string) => makeLlmPortFactory(tenantId, grantsPool),
       // T-0477 [E-AGENTS L5]: spend-tracking context factory — resolves the default
       // llm_connection for the tenant (for prices/connection_id). Non-fatal: returns

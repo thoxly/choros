@@ -20,8 +20,12 @@
  *   - The opaque secret handle is returned as `secretHandle` (RL-3 custody).
  *   - The value is read ONLY at factory call time (not at startup) so stale env
  *     values do not shadow live DB config that the tenant has updated.
- *   - If the DB row is absent or all three fields are NULL, we return null so
- *     the caller falls back to the global env config (backward-compatible).
+ *   - If the DB row is absent or all three fields are NULL, we return null.
+ *     T-0600: the caller (makeLlmPortFactory) no longer falls back to a
+ *     global env config on null — it goes straight to dormantLlmPort (honest
+ *     503). A prior revision's env fallback was a BYO-doctrine violation
+ *     (see ADR-T0600); this reader's null-contract is unchanged, only what
+ *     the caller does with null changed.
  *
  * Called from: src/server.ts makeLlmPortFactory (composition root only).
  */
@@ -88,7 +92,11 @@ async function withTenantReadTx<T>(
  * (slug "assistant-agent") if present, otherwise the first configured agent.
  *
  * Returns null when no configured agent_card row exists for the tenant, or
- * when the pool is null (no-DB mode — honest degrade to global env fallback).
+ * when the pool is null (no-DB mode). T-0600: the caller (makeLlmPortFactory,
+ * server.ts) no longer falls back to a global env-configured key on null —
+ * null now means "answer honestly dormant" (no per-tenant LLM key assigned),
+ * not "borrow the shared server key" (that fallback was the BYO-doctrine
+ * violation T-0600 fixes; see ADR-T0600 §1.1).
  *
  * CALLER MUST: validate the returned secretHandle via validateSecretHandleShape
  * before passing to OpenAILlmPort (done in makeLlmPortFactory in server.ts).
@@ -121,7 +129,10 @@ export async function loadTenantLlmConfig(
       };
     });
   } catch {
-    // DB failure → fall back to global env config (honest degrade, not crash).
+    // DB failure → treat as "no per-tenant config" (honest degrade, not crash).
+    // T-0600: the caller no longer has a global env fallback to reach for —
+    // this now flows straight to dormantLlmPort (honest 503), never a
+    // shared server key.
     return null;
   }
 }
