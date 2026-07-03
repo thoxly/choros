@@ -63,6 +63,7 @@ import type {
   MatrixLookupFieldDef,
   DerivedFieldSpec,
 } from "../core/rollup-contract.js";
+import { computeEmbeddedRollup } from "../core/rollup-contract.js";
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -249,12 +250,17 @@ export async function computeAllDerivedFields(
       let fieldResult: DerivedFieldResult;
 
       if (spec.kind === "rollup") {
+        // child-records flavor — SQL GROUP BY over another registry's rows.
         fieldResult = await computeRollupValue(
           client,
           tenantId,
           parentRecordId,
           spec.def,
         );
+      } else if (spec.kind === "rollup-embedded") {
+        // embedded flavor — PURE in-memory aggregate over a collection array that
+        // is already in this record's `data`. No DB access (no `client` use).
+        fieldResult = { ok: true, value: computeEmbeddedRollup(spec.def, recordData) };
       } else {
         fieldResult = await computeMatrixLookupValue(
           client,
