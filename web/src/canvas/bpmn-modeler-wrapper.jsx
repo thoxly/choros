@@ -47,6 +47,11 @@ import ChorosPaletteModule from './bpmn-palette-provider.js';
 // first-class serializable attribute on bpmn:Activity so saveXML preserves it.
 import ChorosModdleDescriptor from './choros-moddle-extension.js';
 
+// T-0615: guarantee renderable diagram interchange — definitions ingested as
+// raw BPMN (seed / API / AI-emit) lack DI and would blank the canvas; this
+// computes a layout before importXML while leaving author layouts untouched.
+import { ensureLayout } from './bpmn-ensure-layout.js';
+
 /* --------------------------------------------------------------------------
    Default diagram: Start → UserTask (human) → ServiceTask (service/agent) →
                     SendTask (external) → End
@@ -188,8 +193,17 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
     // Returns a detach function used in cleanup.
     const detachMarkerListeners = attachExecMarkerListeners(modeler);
 
-    modeler
-      .importXML(xmlToLoad)
+    // T-0615: bpmn-js can only render a definition that carries diagram
+    // interchange (a <BPMNDiagram> with node coordinates). Definitions ingested
+    // as raw BPMN (seed / API / AI-emit) have none → importXML would reject with
+    // "no diagram to display" and leave a blank canvas. ensureLayout() detects
+    // the absence of DI and computes a layout (bpmn-auto-layout) BEFORE import,
+    // while leaving author-placed layouts untouched. If auto-layout itself
+    // fails, it throws — the .catch below surfaces an honest error (never a
+    // silent blank canvas). We resolve the render-ready XML in an async step,
+    // then feed it to the SAME importXML→.then()/.catch() pipeline as before.
+    ensureLayout(xmlToLoad)
+      .then((prepared) => modeler.importXML(prepared.xml))
       .then(() => {
         // Fit the diagram into the viewport after import
         modeler.get('canvas').zoom('fit-viewport', 'auto');
@@ -229,9 +243,15 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
         // the parent so it can show an honest error banner.
         console.error('[choros/bpmn-modeler] importXML error:', err);
         if (typeof onError === 'function') {
-          onError(
-            `Не удалось открыть диаграмму: ${err?.message || 'неверный или повреждённый BPMN'}`,
-          );
+          // T-0615: distinguish an auto-layout failure (the definition had no
+          // diagram interchange AND we could not compute one) from a genuine
+          // importXML rejection, so the message names the real cause instead of
+          // implying the BPMN itself is corrupt.
+          const isLayoutFailure = /auto-layout/i.test(err?.message || '');
+          const message = isLayoutFailure
+            ? `Не удалось построить схему автоматически: ${err?.message || 'ошибка авто-раскладки'}`
+            : `Не удалось открыть диаграмму: ${err?.message || 'неверный или повреждённый BPMN'}`;
+          onError(message);
         }
       });
 
