@@ -1,0 +1,55 @@
+{
+  "task_id": "T-0615",
+  "status": "ready",
+  "summary": "Живой факт со стенда (2026-07-03, подтверждён консолью): модельер процессов (/processes/:id/edit) падает с bpmn-js `importXML error: no diagram to display` для ЛЮБОГО определения, чей choros.process_definition.bpmn_xml не содержит diagram-interchange (DI, блок <bpmndi:BPMNDiagram> с координатами узлов). Пользователь видит пустой канвас с палитрой, но без диаграммы — процесс невозможно посмотреть/править. Определения, залитые голым BPMN через seed/API/emit ИИ-ассистента, приходят без DI; определения, созданные в модельере, — с DI и рисуются. Причина: bpmn-js — рендерер DI; без <bpmndi:BPMNDiagram> нет BPMNPlane→BPMNShape/BPMNEdge→нечего рисовать→importXML реджектит. Голый BPMN исполним Flowable, но не несёт координат. Разведка: единственная точка рендера — web/src/canvas/bpmn-modeler-wrapper.jsx (единственный инстанс BpmnModeler + importXML; xmlToLoad=initialXml||DEFAULT_DIAGRAM_XML на строке 165; уже есть .then/.catch с честным onError-баннером T-0484). Бэкенд (src/http/process-defs.ts, src/core/bpmn-deploy-normalizer.ts) хранит bpmn_xml строкой и при публикации нормализует, но НЕ генерит координаты (чистые строковые трансформы, без bpmn-moddle). ФИКС (вариант A — клиент, первичный): новый чистый модуль web/src/canvas/bpmn-ensure-layout.js с hasDiagramInterchange(xml) (структурный prefix-agnostic детектор элемента BPMNDiagram) и ensureLayout(xml)→{xml,layoutApplied} (DI есть → исходный XML байт-в-байт, layoutApplied=false; DI нет → layoutProcess(xml) из bpmn-auto-layout@1.3.0 → XML с DI, layoutApplied=true; провал layoutProcess → бросок именованной ошибки 'auto-layout failed'). bpmn-modeler-wrapper.jsx вклинивает ensureLayout(xmlToLoad) перед importXML в ту же промис-цепочку; .catch различает провал авто-раскладки ('Не удалось построить схему автоматически…') от реджекта importXML ('Не удалось открыть диаграмму…') и показывает через onError (честная деградация, не немой пустой канвас). Механизм ОБЩИЙ (D-064): детект DI структурный, не по имени процесса — ноль кейс-литералов. bpmn-auto-layout — клиентская зависимость (web/package.json), в бэкенд src не течёт. Чинит ВСЕ существующие определения при открытии без миграции данных. Вариант B (серверная генерация DI при сохранении + бэкфилл) — follow-up O1.",
+  "functional": [
+    "F1. Новый чистый модуль web/src/canvas/bpmn-ensure-layout.js экспортирует hasDiagramInterchange(xml)→boolean — структурный prefix-agnostic детектор элемента BPMNDiagram (любой/без namespace-префикс; не ложно-срабатывает на подстроку в значении атрибута/тексте; безопасен для пустого/не-строкового ввода).",
+    "F2. ensureLayout(xml)→Promise<{xml,layoutApplied}>: DI отсутствует → layoutProcess(xml) → XML с DI (layoutApplied=true); результат несёт BPMNShape+Bounds (канвас получает рисуемые узлы).",
+    "F3. DI уже присутствует → ensureLayout возвращает исходный XML БАЙТ-В-БАЙТ (layoutApplied=false), авто-раскладка НЕ вызывается: раскладка автора не перетирается.",
+    "F4. Честная деградация: провал layoutProcess (или отсутствие DI на выходе) → ensureLayout бросает именованную ошибку 'auto-layout failed: …'; wrapper в .catch показывает 'Не удалось построить схему автоматически: …' через onError, не пустой канвас.",
+    "F5. bpmn-modeler-wrapper.jsx вклинивает ensureLayout(xmlToLoad) перед importXML в ту же цепочку .then()/.catch(); существующий onError-путь T-0484 сохранён."
+  ],
+  "non_functional": [
+    "N1. D-064: ноль кейс-литералов в src/web/src; детект DI структурный; anti-case-lock.sh на baseline (aggregate 24=24).",
+    "N2. bpmn-auto-layout — клиентская зависимость (web/package.json), не в бэкенд src; bpmn-linter-isolation.sh (скан src) не затронут.",
+    "N3. Тесты в node-окружении (vitest env=node): чистый модуль тестируется без инстанса BpmnModeler (нужен DOM); layoutProcess — bpmn-moddle-трансформ, работает в node.",
+    "N4. Поведение определений С DI не меняется (их XML не трогается)."
+  ],
+  "out_of_scope": [
+    "O1. Серверная генерация DI при сохранении/публикации (вариант B) + бэкфилл уже сохранённых определений без DI — требует bpmn-moddle на бэкенде; клиентский фикс покрывает открытие всех определений без миграции.",
+    "O2. bpmn-auto-layout не раскладывает под-процессы (свёрнуто), группы, аннотации, message flow, второго+ участника коллаборации — ограничение движка bpmn-io; при таких определениях раскладка частичная, но канвас рисуется."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Определение БЕЗ diagram-interchange, прогнанное через ensureLayout, получает DI: layoutApplied=true и выходной XML содержит BPMNDiagram + BPMNShape + Bounds (канвас получил бы рисуемые узлы). Узлы исходного процесса сохранены.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "Определение С diagram-interchange, прогнанное через ensureLayout, возвращается байт-в-байт (layoutApplied=false); отличительная координата автора (x=\"4242\") сохранена — авто-раскладка НЕ вызвана.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "hasDiagramInterchange — структурный prefix-agnostic детектор: TRUE для bpmndi:/di:/без-префикса BPMNDiagram; FALSE когда слово встречается только как значение атрибута/текст; FALSE для пустого/не-строкового ввода.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "Честная деградация: malformed BPMN без DI → ensureLayout реджектит именованной ошибкой /auto-layout/i (не возвращает DI-less XML, который блокнул бы канвас); пустой/не-строковый ввод → реджект /non-empty string/i.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "bpmn-modeler-wrapper.jsx зовёт ensureLayout ДО importXML и сохраняет .catch→onError путь (провал авто-раскладки и реджект importXML оба поверхностны пользователю, не немой пустой канвас).",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-6",
+      "text": "D-064: anti-case-lock.sh зелёный (aggregate на baseline, ни один литерал не вырос); ни одного кейс-литерала не добавлено в src/web/src.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0615-bpmn-auto-layout.spec.md"
+}

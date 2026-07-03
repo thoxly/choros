@@ -1,0 +1,55 @@
+{
+  "task_id": "T-0615",
+  "verdict": "approved",
+  "reviewed_sha": "d9fc200",
+  "base_sha": "6fe5d7bc6c2948b06001e0c8d16e9facd52818e9",
+  "ci_seen": {
+    "green": true,
+    "_note": "Независимый судья (D-007, НЕ автор) прогнал всё в worktree /Users/shoxy/Code/choros-wt/T-0615 (ветка task/T-0615-bpmn-auto-layout). ГЕЙТЫ: (1) cd web && npm ci → exit 0, bpmn-auto-layout@1.3.0 установлен. (2) cd web && npx vitest run — 62 files, 1694/1694 PASS (+12 новых в bpmn-ensure-layout.test.js; существующие тесты модельера не сломаны). (3) npm run build (root, tsc ×2) exit 0; cd web && npm run build — 523 modules transformed, exit 0 (chunk-size WARN на bpmn-js пре-существующий, не связан). (4) bash ci/checks/anti-case-lock.sh PASS (Phase1 delegates clean; Phase2 aggregate 24=24 baseline steady — ни один D-064-литерал не вырос) + --self-test PASS (8/8 детекторов функциональны). (5) bash ci/checks/bpmn-linter-isolation.sh PASS (frozen files object-handle/grant-lattice/types/jobStore unmodified; no xml/bpmn runtime deps в бэкенд package.json; WARN про 2 runtime deps ajv/pg пре-существующий). (6) Контракты spec/adr/handoff валидны против schemas/{spec,adr,pr-handoff}.schema.json (validate_file → []). КОМПАТ (живьём в node, реальный layoutProcess не мок): DI-less BPMN → выход с BPMNDiagram+BPMNShape+BPMNEdge+Bounds+waypoint, узлы сохранены, ИДЕМПОТЕНТЕН (второй прогон layoutApplied=false, байт-в-байт) — bpmn-moddle-конфликта с bpmn-js@17.11.1 нет. ИЗОЛЯЦИЯ: bpmn-auto-layout только в web/src (3 файла), НЕ в root package.json, НЕ в бэкенд src. МУТАЦИИ 3/3 KILLED (детали в role_gap_evidence). Живое доказательство рендера на стенде — pending orchestrator (handoff live_proof), но механизм доказан детерминированно+живым layoutProcess."
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "web/src/canvas/bpmn-ensure-layout.js hasDiagramInterchange (регэксп) — крайний случай пустого BPMNDiagram",
+      "issue": "Детектор возвращает TRUE для XML, где элемент <bpmndi:BPMNDiagram> ПРИСУТСТВУЕТ, но пуст (без BPMNShape/BPMNEdge внутри). В этом случае ensureLayout вернёт XML байт-в-байт (layoutApplied=false), а importXML может отрисовать пустой plane. НЕ РЕГРЕСС и НЕ вносится этой задачей: такой XML уже нёс DI до правки; автор DI явно записал 'пустую диаграмму', bpmn-js рисует её как валидный (пустой) plane — это корректное поведение, а не немой blank от отсутствия DI. Практически не встречается: голый BPMN (seed/API/emit) вообще не содержит BPMNDiagram (детектится как false → раскладывается); модельерский XML несёт полный DI. Проверено адверсариально: 12/12 edge-кейсов детектора зелёные (пустой блок, self-closed, di:/bpmndi:/без-префикса, слово в атрибуте/тексте/комментарии, BPMNDiagramFoo, fooBPMNDiagram, null/number/'').",
+      "suggestion": "Оставить для MVP. Если на стенде встретится определение с пустым BPMNDiagram-блоком (маловероятно) — усилить детектор до наличия BPMNShape ИЛИ вынести в follow-up. Не блокирует."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "web/src/canvas/bpmn-ensure-layout.js hasDiagramInterchange — DI внутри CDATA",
+      "issue": "Регэксп срабатывает TRUE, если строка '<bpmndi:BPMNDiagram/>' встречается внутри CDATA-секции (<![CDATA[...]]>), т.к. детектор — чистая строковая инспекция без XML-парса. Практически иррелевантно: BPMN-определения не встраивают BPMNDiagram в CDATA. Косметика.",
+      "suggestion": "Оставить. Не блокирует."
+    },
+    {
+      "id": "F-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/handoff/T-0615.pr-handoff.json friction_events[0] + docs/adr/T-0615.adr.contract.json FF-5",
+      "issue": "Автор честно отметил в friction_events, что разведка ошибочно сообщила о ci/checks/process-editor-di-guard.sh — файла НЕТ (подтверждено: 172 .sh в ci/checks, process-editor-di-guard.sh отсутствует). FF-5 корректно переформулирован как grep-проверка структуры wrapper (ensureLayout + .catch + onError), а не как несуществующий гейт. Проверено: grep-контракт FF-5 проходит вживую — ensureLayout@205 (import@53) ПЕРЕД importXML@206 (.then(prepared=>modeler.importXML(prepared.xml))), .catch@240, onError@254; T-0484-путь честной деградации сохранён. Это не дыра — контракт .catch→onError реально исполняется в коде и покрыт мутацией MUT-3. Отмечено как прозрачность, не как дефект.",
+      "suggestion": "Ничего не требуется — автор задокументировал честно, FF-5 валиден."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1 DI-less → ensureLayout даёт DI (layoutApplied=true, BPMNDiagram+BPMNShape+Bounds, узлы сохранены)", "covered": true, "evidence": "bpmn-ensure-layout.test.js AC-1 PASS + живой layoutProcess в node: выход несёт BPMNDiagram/BPMNShape/BPMNEdge/Bounds/waypoint, userTask сохранён; MUT-1 (детектор always-true) убил AC-1"},
+    {"ac": "AC-2 DI есть → байт-в-байт (layoutApplied=false, x=4242 сохранён, авто-раскладка НЕ вызвана)", "covered": true, "evidence": "AC-2 + AC-2-isolation + large-input PASS; MUT-2 (детектор always-false) убил AC-2 — доказывает, что перетирание авторской раскладки ловится тестом (blocking-сценарий покрыт)"},
+    {"ac": "AC-3 hasDiagramInterchange prefix-agnostic + no-false-positive + defensive", "covered": true, "evidence": "test prefix-agnostic/no-false-positive/empty-non-string PASS + судейский edge-probe 12/12 зелёный (обе стороны: ложный has-DI и ложный no-DI)"},
+    {"ac": "AC-4 честная деградация: malformed без DI → throw /auto-layout/i; пусто/не-строка → /non-empty string/i", "covered": true, "evidence": "honest-degradation + empty-reject PASS; MUT-3 (swallow catch → return DI-less) убил honest-degradation тест — немой пустой канвас невозможен"},
+    {"ac": "AC-5 wrapper зовёт ensureLayout ДО importXML, .catch→onError сохранён", "covered": true, "evidence": "grep-контракт FF-5 живьём: ensureLayout@205 перед importXML@206, .catch@240 различает /auto-layout/i vs importXML-реджект, оба через onError@254 (T-0484 сохранён). manual/live-proof на стенде pending orchestrator"},
+    {"ac": "AC-6 D-064: anti-case-lock зелёный (aggregate 24=24), ноль кейс-литералов в src/web/src", "covered": true, "evidence": "anti-case-lock.sh PASS + self-test; grep кейс-литералов в 3 изменённых файлах — CLEAN; purchaseApproval-вхождения — пре-существующие в НЕтронутых файлах, не в диффе T-0615, не в D-064-денилисте"},
+    {"ac": "Новый-процесс путь (DEFAULT_DIAGRAM_XML c template DI) не затронут", "covered": true, "evidence": "судейский probe: детектор(DEFAULT)=true → ensureLayout layoutApplied=false → байт-в-байт template; ensureLayout не вмешивается в создание нового определения"},
+    {"ac": "O2 частичная раскладка (под-процесс) → канвас НЕ пустой", "covered": true, "evidence": "судейский probe: subProcess-определение → layoutApplied=true, выход несёт BPMNShape+Bounds (свёрнутый sub, но канвас рисуется) — граница O2 честная, не скрытый дефект"}
+  ],
+  "role_gap_evidence": [
+    "МУТАЦИЯ 1 (hasDiagramInterchange → всегда true): AC-1 (DI-less получает раскладку) + prefix-agnostic-FALSE + no-false-positive + honest-degradation КРАСНЫ → 4 теста failed. KILLED. Восстановлено.",
+    "МУТАЦИЯ 2 (hasDiagramInterchange → всегда false): AC-2 (байт-в-байт, x=4242, layoutApplied=false) + isolation + large-input + prefix-TRUE-кейсы КРАСНЫ → 6 тестов failed. KILLED. Это ключ: перетирание авторской раскладки (blocking = потеря данных) ЛОВИТСЯ тестом. Восстановлено.",
+    "МУТАЦИЯ 3 (catch деградации → return {xml, layoutApplied:false} вместо throw): honest-degradation тест (malformed → throw /auto-layout/i) КРАСЕН → 1 test failed. KILLED. Немой возврат DI-less XML (blocking = немой пустой канвас) ловится. Восстановлено байт-в-байт (diff -q verified).",
+    "Судейский edge-probe детектора (вне авторских тестов): 12/12 кейсов зелёные, включая обе опасные стороны — ложный 'есть DI' на DI-less (регресс пустого канваса) и ложный 'нет DI' на XML С раскладкой (потеря данных). Оба направления корректны для реальных BPMN-shape.",
+    "Компат-probe (реальный layoutProcess@1.3.0, не мок): DI-less вход → полный DI на выходе + идемпотентность (второй прогон layoutApplied=false, байт-в-байт) → bpmn-moddle@10 совместим с bpmn-js@17.11.1, конфликта нет.",
+    "Изоляция bpmn-auto-layout: grep только web/src (3 файла), нет в root package.json, нет в бэкенд src → bpmn-linter-isolation.sh PASS, зависимость не течёт в рантайм-зону бэкенда.",
+    "Скоуп-честность: O1 (серверный DI+бэкфилл) реально отдельная задача (нужен bpmn-moddle в бэкенде + миграция); O2 (под-процессы/коллаборация) деградирует в НЕпустой частичный рендер (доказано probe) — не спрятанный дефект. Границы разумны для MVP."
+  ]
+}
