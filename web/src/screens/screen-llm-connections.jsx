@@ -5,14 +5,25 @@
    ЖИВЫЕ контракты:
      GET  /api/llm-connections   — список профилей тенанта (без ключа).
      POST /api/llm-connections   — создать профиль (имя/провайдер/эндпойнт/модель/
-          цены; опц. secret_handle — ТОЛЬКО ссылка-хэндл, не сырой ключ).
+          цены; сервер по-прежнему принимает опциональный secret_handle —
+          ССЫЛКА, не сырой ключ — но ЭТА ФОРМА его больше не отправляет, см.
+          T-0602 ниже).
 
    БЕЗОПАСНОСТЬ (RL-3):
-     - Сырой API-ключ НЕ принимается и НЕ хранится. Поле «секрет-хэндл» — это
-       ССЫЛКА (env://ИМЯ / vault://путь / app://id), shape-guard на сервере
-       отклоняет сырой ключ (sk-…, JWT, hex). Сырой ключ → 400.
+     - Сырой API-ключ НЕ принимается и НЕ хранится нигде на этом экране.
+     - T-0602: поле «секрет-хэндл» УБРАНО из формы создания — разведка кода
+       (src/server.ts, T-0413/T-0600) подтвердила, что env:// категорически
+       отклоняется на tenant-пути, а vault:// не резолвится ни для кого
+       (Stage-2, resolveSecret port объявлен, но никогда не вызывается) —
+       поле было структурно нерабочей ловушкой для владельца тенанта, не
+       просто «продвинутым». Единственный живой путь ключа — «Вставить
+       API-ключ» на карточке профиля (app://, ConnectionKeyBinder, T-0476).
+       Серверный shape-guard (secret_handle, если его пришлют другим путём)
+       не меняется — сырой ключ по-прежнему отклоняется отдельно (sk-…, JWT,
+       hex → 400).
      - Хэндл НИКОГДА не возвращается на клиент: список отдаёт secret_bound:bool +
-       схему-сокращение (env://...).
+       схему-сокращение (redactHandle), которую карточка теперь показывает
+       человеческой подписью (humanizeSecretHandleScheme), не сырой строкой.
 
    ДИЗАЙН: строго OBLIK — только --chs-* токены, kit-компоненты.
    ============================================================================ */
@@ -28,17 +39,25 @@ import { authHeaders } from '../app-shell/dev-auth.js';
 // T-0477 [E-AGENTS L5]: added priceIn/priceOut defaults per provider.
 // Prices are approximate public list rates (USD/1k tokens, 2024-2025 vintage).
 // Users can always override these — they are just convenient defaults.
+// T-0602: added consoleHint (where to get a key for THIS provider) so the
+// instruction block above the form can be dynamic instead of hardcoded to
+// Anthropic — null for self-hosted/other, where no single console URL exists.
 // ---------------------------------------------------------------------------
 const PROVIDER_PRESETS = [
   // DeepSeek: deepseek-chat  input $0.14/1k  output $0.28/1k  (2025 pricing)
-  { value: 'deepseek',    label: 'DeepSeek',    endpoint: 'https://api.deepseek.com/v1',   model: 'deepseek-chat',       priceIn: '0.14', priceOut: '0.28', currency: 'USD' },
+  { value: 'deepseek',    label: 'DeepSeek',    endpoint: 'https://api.deepseek.com/v1',   model: 'deepseek-chat',       priceIn: '0.14', priceOut: '0.28', currency: 'USD',
+    consoleHint: { url: 'platform.deepseek.com', label: 'API keys' } },
   // OpenAI: gpt-4o-mini  input $0.15/1k  output $0.60/1k
-  { value: 'openai',      label: 'OpenAI',      endpoint: 'https://api.openai.com/v1',     model: 'gpt-4o-mini',         priceIn: '0.15', priceOut: '0.60', currency: 'USD' },
+  { value: 'openai',      label: 'OpenAI',      endpoint: 'https://api.openai.com/v1',     model: 'gpt-4o-mini',         priceIn: '0.15', priceOut: '0.60', currency: 'USD',
+    consoleHint: { url: 'platform.openai.com/api-keys', label: 'Create new secret key' } },
   // Anthropic: claude-3-5-sonnet  input $3.00/1k  output $15.00/1k
-  { value: 'anthropic',   label: 'Anthropic',   endpoint: 'https://api.anthropic.com/v1',  model: 'claude-3-5-sonnet',   priceIn: '3.00', priceOut: '15.00', currency: 'USD' },
-  // Self-hosted: no price defaults (pricing varies per setup)
-  { value: 'self-hosted', label: 'Self-hosted', endpoint: '',                              model: '',                    priceIn: '', priceOut: '', currency: 'USD' },
-  { value: 'other',       label: 'Другой',      endpoint: '',                              model: '',                    priceIn: '', priceOut: '', currency: 'USD' },
+  { value: 'anthropic',   label: 'Anthropic',   endpoint: 'https://api.anthropic.com/v1',  model: 'claude-3-5-sonnet',   priceIn: '3.00', priceOut: '15.00', currency: 'USD',
+    consoleHint: { url: 'console.anthropic.com', label: 'API Keys → Create Key' } },
+  // Self-hosted: no price defaults (pricing varies per setup), no single console URL.
+  { value: 'self-hosted', label: 'Self-hosted', endpoint: '',                              model: '',                    priceIn: '', priceOut: '', currency: 'USD',
+    consoleHint: null },
+  { value: 'other',       label: 'Другой',      endpoint: '',                              model: '',                    priceIn: '', priceOut: '', currency: 'USD',
+    consoleHint: null },
 ];
 
 // ---------------------------------------------------------------------------
@@ -181,6 +200,29 @@ export function resolveAssistantBinding(agents) {
     assistantEmployeeId: assistant.id,
     assistantConnectionId: assistant.llm_connection_id ?? null,
   };
+}
+
+/* ===========================================================================
+   T-0602 — humanizeSecretHandleScheme: карточка профиля больше не показывает
+   сырой редактированный хэндл (напр. "app://a1b2c3…") первой строкой — только
+   человеческую подпись, определённую по схеме префикса. Схема ВСЕГДА
+   сохранена в первых символах redactHandle()'s output (T-0474/T-0476/T-0413
+   convention — все три схемы префиксные по построению на сервере), так что
+   это чисто клиентское форматирование уже отданных данных, без нового поля.
+   =========================================================================== */
+
+/**
+ * Pure: redacted secret-handle summary → human label for the card. Returns
+ * null when the scheme is unknown/absent (caller renders nothing extra — the
+ * secret_bound chip already carries the primary signal).
+ * Exported for unit-testing (project convention).
+ */
+export function humanizeSecretHandleScheme(redacted) {
+  if (typeof redacted !== 'string' || redacted.length === 0) return null;
+  if (redacted.startsWith('app://')) return 'Ключ зашифрован и привязан';
+  if (redacted.startsWith('env://')) return 'Ключ сервера (настроен оператором)';
+  if (redacted.startsWith('vault://')) return 'Ключ из внешнего хранилища (настроено оператором)';
+  return null;
 }
 
 /**
@@ -539,7 +581,10 @@ export default function LlmConnectionsScreen() {
   const [provider, setProvider] = useState(ANTHROPIC_PRESET.value);
   const [endpoint, setEndpoint] = useState(ANTHROPIC_PRESET.endpoint);
   const [model, setModel] = useState(ANTHROPIC_PRESET.model);
-  const [secretHandle, setSecretHandle] = useState('');
+  // T-0602: секрет-хэндл-поле убрано из формы создания (см. ADR-T0602 §1) —
+  // env:// категорически отклоняется на tenant-пути (T-0413), vault:// не
+  // резолвится ни для кого (Stage-2). Единственный живой путь ключа —
+  // «Вставить API-ключ» на карточке ПОСЛЕ создания (ConnectionKeyBinder).
   // T-0597: pre-fill with Anthropic price presets (initial provider, was DeepSeek).
   const [priceIn, setPriceIn] = useState(ANTHROPIC_PRESET.priceIn);
   const [priceOut, setPriceOut] = useState(ANTHROPIC_PRESET.priceOut);
@@ -548,10 +593,6 @@ export default function LlmConnectionsScreen() {
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitErr, setSubmitErr] = useState(null);
   const [createOk, setCreateOk] = useState(false);
-  // T-0597 (находка №9): true когда только что созданный профиль НЕ получил
-  // секрет-хэндл — успех-баннер дописывает честный следующий шаг вместо
-  // подразумевания «готово».
-  const [createOkNoKey, setCreateOkNoKey] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // -------------------------------------------------------------------------
@@ -628,6 +669,13 @@ export default function LlmConnectionsScreen() {
     setSubmitErr(null);
   };
 
+  // T-0602: the instruction block above the form reads this so the «where do
+  // I get a key» hint follows whatever provider is currently selected, not a
+  // hardcoded Anthropic default. Falls back to the Anthropic preset only if
+  // `provider` somehow holds an unknown value (defensive — Select only ever
+  // offers PROVIDER_PRESETS values).
+  const selectedPreset = PROVIDER_PRESETS.find((p) => p.value === provider) ?? ANTHROPIC_PRESET;
+
   // -------------------------------------------------------------------------
   // Client-side validation (server is the authority; this is a UX pre-check)
   // -------------------------------------------------------------------------
@@ -643,15 +691,8 @@ export default function LlmConnectionsScreen() {
         errs.endpoint = 'Некорректный URL.';
       }
     }
-    // Secret handle is OPTIONAL but, if present, must look like a reference, not a raw key.
-    const sh = secretHandle.trim();
-    if (sh) {
-      if (/^sk-|^xai-|^AIza/.test(sh) || /^eyJ[A-Za-z0-9_-]+\./.test(sh) || /^[0-9a-fA-F]{32,}$/.test(sh)) {
-        errs.secretHandle = 'Это похоже на СЫРОЙ ключ. Укажите ССЫЛКУ-хэндл (env://ИМЯ, vault://путь).';
-      } else if (sh.length < 8) {
-        errs.secretHandle = 'Слишком короткий хэндл.';
-      }
-    }
+    // T-0602: секрет-хэндл-поле убрано из формы (см. ADR-T0602 §1) — ключ
+    // вводится ПОСЛЕ создания через «Вставить API-ключ» на карточке.
     for (const [k, label] of [['priceIn', priceIn], ['priceOut', priceOut]]) {
       const v = (k === 'priceIn' ? priceIn : priceOut).trim();
       if (v && (!Number.isFinite(Number(v)) || Number(v) < 0)) {
@@ -669,7 +710,6 @@ export default function LlmConnectionsScreen() {
     e.preventDefault();
     setSubmitErr(null);
     setCreateOk(false);
-    setCreateOkNoKey(false);
     if (!validate()) return;
     setSaving(true);
     try {
@@ -681,7 +721,8 @@ export default function LlmConnectionsScreen() {
       };
       if (endpoint.trim()) body.endpoint = endpoint.trim();
       if (model.trim()) body.model = model.trim();
-      if (secretHandle.trim()) body.secret_handle = secretHandle.trim();
+      // T-0602: no secret_handle from this form — the key is bound AFTER
+      // creation via «Вставить API-ключ» on the card (app://, ConnectionKeyBinder).
       if (priceIn.trim()) body.price_input_per_1k = Number(priceIn.trim());
       if (priceOut.trim()) body.price_output_per_1k = Number(priceOut.trim());
 
@@ -692,13 +733,8 @@ export default function LlmConnectionsScreen() {
       });
       if (res.status === 201) {
         setCreateOk(true);
-        // T-0597 (находка №9): remember whether THIS created profile had no key,
-        // captured BEFORE the field reset below — the success banner uses it to
-        // add an honest next-step line instead of implying the profile is ready.
-        setCreateOkNoKey(!secretHandle.trim());
         // Reset only the per-profile fields; keep provider/currency for the next one.
         setName('');
-        setSecretHandle('');
         await loadConnections();
         return;
       }
@@ -714,7 +750,7 @@ export default function LlmConnectionsScreen() {
     } finally {
       setSaving(false);
     }
-  }, [name, provider, endpoint, model, secretHandle, priceIn, priceOut, currency, isDefault, loadConnections]);
+  }, [name, provider, endpoint, model, priceIn, priceOut, currency, isDefault, loadConnections]);
 
   // -------------------------------------------------------------------------
   // Render
@@ -725,18 +761,28 @@ export default function LlmConnectionsScreen() {
         LLM-соединения
       </h1>
 
-      {/* T-0574 (F6/AC-11): статическая инструкция, без дев-жаргона — где
-          взять ключ Anthropic и что с ним делать на этой странице. */}
+      {/* T-0602 (было T-0574 F6/AC-11): динамическая инструкция, без дев-жаргона —
+          путь пользователя (создать профиль → вставить ключ → проверить →
+          назначить ассистенту), подсказка «где взять ключ» следует за ВЫБРАННЫМ
+          в форме провайдером вместо жёсткой привязки к Anthropic. */}
       <div style={{ ...sectionStyle, background: 'var(--chs-color-surface-raised)' }}>
         <h2 style={headingStyle}>Откуда взять ключ и что с ним сделать</h2>
         <p style={{ ...descStyle, margin: 0 }}>
-          Зайдите на <span style={monoStyle}>console.anthropic.com</span>, откройте
-          раздел «API Keys» и нажмите «Create Key» — сервис покажет ключ один раз,
-          скопируйте его. Ниже создайте профиль с провайдером «Anthropic», нажмите
-          «Вставить API-ключ» и вставьте скопированное значение в открывшееся поле.
-          После сохранения нажмите «Проверить подключение» — если всё в порядке,
-          назначьте профиль ассистенту одной кнопкой на его карточке, и ассистент
-          компании начнёт отвечать на ваших сообщениях этим ключом.
+          {selectedPreset.consoleHint ? (
+            <>
+              Зайдите на <span style={monoStyle}>{selectedPreset.consoleHint.url}</span>, откройте
+              раздел «{selectedPreset.consoleHint.label}» — сервис покажет ключ один раз,
+              скопируйте его.{' '}
+            </>
+          ) : (
+            'У вашего провайдера должен быть раздел с API-ключами в личном кабинете — создайте там ключ и скопируйте его. '
+          )}
+          Ниже создайте профиль (провайдер уже выбран — «{selectedPreset.label}»), нажмите
+          «Вставить API-ключ» на его карточке и вставьте скопированное значение в
+          открывшееся поле. После сохранения нажмите «Проверить подключение» — если
+          всё в порядке, назначьте профиль ассистенту одной кнопкой на той же
+          карточке, и ассистент компании начнёт отвечать на ваших сообщениях этим
+          ключом.
         </p>
       </div>
 
@@ -745,8 +791,8 @@ export default function LlmConnectionsScreen() {
         <h2 style={headingStyle}>Новый профиль</h2>
         <p style={descStyle}>
           Именованное подключение к LLM (провайдер, эндпойнт, модель, цены). Профиль
-          можно переиспользовать для разных агентов. Сырой ключ здесь не хранится — в
-          поле «секрет-хэндл» укажите ССЫЛКУ (например <span style={monoStyle}>env://DEEPSEEK_API_KEY</span>).
+          можно переиспользовать для разных агентов. После создания вставьте API-ключ
+          на карточке профиля ниже — здесь, в форме создания, ключ не указывается.
         </p>
 
         <div style={fieldGap}>
@@ -788,15 +834,8 @@ export default function LlmConnectionsScreen() {
             mono
           />
 
-          <Field
-            label="Секрет-хэндл (ссылка, не ключ)"
-            value={secretHandle}
-            onChange={(e) => setSecretHandle(e.target.value)}
-            placeholder="env://DEEPSEEK_API_KEY"
-            invalid={!!fieldErrors.secretHandle}
-            hint={fieldErrors.secretHandle || 'Опционально. ССЫЛКА на секрет (env:// / vault:// / app://). Сырой ключ будет отклонён.'}
-            mono
-          />
+          {/* T-0602: секрет-хэндл-поле убрано (ADR-T0602 §1) — ключ вводится
+              ПОСЛЕ создания через «Вставить API-ключ» на карточке ниже. */}
 
           <div style={rowGap}>
             <div style={{ flex: '1 1 160px' }}>
@@ -846,8 +885,9 @@ export default function LlmConnectionsScreen() {
           {submitErr && <div style={bannerErrStyle}>{submitErr}</div>}
           {createOk && (
             <div style={bannerOkStyle}>
-              Профиль создан.
-              {createOkNoKey && ' Теперь вставьте API-ключ, чтобы он заработал.'}
+              {/* T-0602: эта форма больше не может передать ключ (поле убрано,
+                  ADR-T0602 §1) — next-step honest и безусловен. */}
+              Профиль создан. Теперь вставьте API-ключ, чтобы он заработал.
             </div>
           )}
         </div>
@@ -906,6 +946,13 @@ export default function LlmConnectionsScreen() {
                     {c.secret_bound && <Icon name="check" />}
                     {c.secret_bound ? 'ключ привязан' : 'ключ не привязан'}
                   </span>
+                  {/* T-0602: человеческая подпись по схеме хэндла вместо сырого
+                      "app://…"/"env://…" как основной строки (ADR-T0602 §3). Сырой
+                      редактированный хэндл остаётся, но ВТОРОЙ, мелкой строкой —
+                      техническая деталь, не первичный текст. */}
+                  {humanizeSecretHandleScheme(c.secret_handle_redacted) && (
+                    <span style={metaStyle}>{humanizeSecretHandleScheme(c.secret_handle_redacted)}</span>
+                  )}
                   {c.secret_handle_redacted && (
                     <span style={monoStyle}>{c.secret_handle_redacted}</span>
                   )}

@@ -1,5 +1,5 @@
 /**
- * web/src/screens/screen-llm-connections.test.jsx  (T-0496, T-0574)
+ * web/src/screens/screen-llm-connections.test.jsx  (T-0496, T-0574, T-0602)
  *
  * Тесты кнопки «Проверить подключение» + «Назначить ассистенту» на экране
  * LLM-соединений.
@@ -11,11 +11,13 @@
  *     401/403/404, не-200/битый JSON → честная ошибка.
  *   - T-0574: resolveAssistantBinding(agents) — чистая функция, резолвит адрес +
  *     текущую привязку ассистента из GET /api/agents. Экспортирована → unit-тест.
+ *   - T-0602: humanizeSecretHandleScheme(redacted) — чистая функция, карточка
+ *     профиля показывает человеческую подпись вместо сырого "app://…"/"env://…".
  *   - CSS-токены: только существующие --chs-* (success/danger-soft и т.п.).
  */
 
 import { describe, it, expect } from 'vitest';
-import { mapTestResponse, resolveAssistantBinding } from './screen-llm-connections.jsx';
+import { mapTestResponse, resolveAssistantBinding, humanizeSecretHandleScheme } from './screen-llm-connections.jsx';
 
 // ---------------------------------------------------------------------------
 // mapTestResponse — успех
@@ -203,10 +205,10 @@ describe('T-0574 — «Назначить ассистенту» UI present, no 
 });
 
 // ---------------------------------------------------------------------------
-// T-0574 (AC-11/F6) — static, non-dev-jargon instruction block present
+// T-0602 (было T-0574 AC-11/F6) — динамическая, non-dev-jargon инструкция
 // ---------------------------------------------------------------------------
 
-describe('T-0574 — инструкция «где взять ключ Anthropic» (AC-11)', async () => {
+describe('T-0602 — инструкция «Откуда взять ключ» — провайдер-динамическая (AC-5/AC-6)', async () => {
   const fs = await import('fs');
   const path = await import('path');
   const filePath = path.default.resolve(
@@ -215,26 +217,47 @@ describe('T-0574 — инструкция «где взять ключ Anthropic
   );
   const src = fs.default.readFileSync(filePath, 'utf-8');
 
-  it('упоминает console.anthropic.com и путь API Keys → Create Key', () => {
-    expect(src).toContain('console.anthropic.com');
-    expect(src).toContain('API Keys');
-    expect(src).toContain('Create Key');
+  it('PROVIDER_PRESETS carries consoleHint for deepseek/openai/anthropic, null for self-hosted/other', () => {
+    const presetsBlock = src.slice(src.indexOf('const PROVIDER_PRESETS'), src.indexOf('const PROVIDER_PRESETS') + 1600);
+    expect(presetsBlock).toContain('platform.deepseek.com');
+    expect(presetsBlock).toContain('platform.openai.com/api-keys');
+    expect(presetsBlock).toContain('console.anthropic.com');
+    expect(presetsBlock).toMatch(/consoleHint:\s*null/);
   });
+
+  it('instruction block derives its text from selectedPreset (reactive to the chosen provider), not a hardcoded provider', () => {
+    // selectedPreset is derived from PROVIDER_PRESETS.find on the `provider` state —
+    // the SAME state the Select controls — so switching providers changes the hint.
+    expect(src).toMatch(/const selectedPreset = PROVIDER_PRESETS\.find\(\(p\) => p\.value === provider\)/);
+    const start = src.indexOf('Откуда взять ключ и что с ним сделать');
+    const end = src.indexOf('Новый профиль');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const block = src.slice(start, end);
+    expect(block).toMatch(/selectedPreset\.consoleHint/);
+  });
+
+  it('honest neutral fallback text present for providers without a consoleHint (self-hosted/other)', () => {
+    expect(src).toContain('У вашего провайдера должен быть раздел с API-ключами в личном кабинете');
+  });
+
   it('НЕ содержит дев-жаргона (endpoint/handle/resolve/UUID/HTTP-код) в тексте инструкции', () => {
     // Extract just the instruction block (between its marker comment and the
     // create-form heading) so we scope the check to VISIBLE product text, not
     // the whole file (which legitimately uses "endpoint"/"handle" elsewhere as
-    // dev-facing field labels/JS identifiers, out of scope for AC-11).
+    // dev-facing field labels/JS identifiers, out of scope for this AC).
     const start = src.indexOf('Откуда взять ключ и что с ним сделать');
     const end = src.indexOf('Новый профиль');
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const block = src.slice(start, end);
     expect(block).not.toMatch(/endpoint/i);
-    expect(block).not.toMatch(/handle/i);
+    expect(block).not.toMatch(/\bhandle\b/i);
     expect(block).not.toMatch(/resolve/i);
     expect(block).not.toMatch(/UUID/i);
     expect(block).not.toMatch(/HTTP\s*\d{3}/);
+    expect(block).not.toMatch(/env:\/\//);
+    expect(block).not.toMatch(/vault:\/\//);
   });
 });
 
@@ -333,13 +356,13 @@ describe('T-0597 — честный статус готовности профи
   );
   const src = fs.default.readFileSync(filePath, 'utf-8');
 
-  it('createOkNoKey state captures whether the just-created profile had no key', () => {
-    expect(src).toContain('const [createOkNoKey, setCreateOkNoKey] = useState(false)');
-    expect(src).toContain('setCreateOkNoKey(!secretHandle.trim())');
-  });
-  it('success banner appends the honest next-step line only when createOkNoKey', () => {
+  it('T-0602: success banner unconditionally includes the honest next-step line (the form can no longer submit a key at all)', () => {
     expect(src).toContain('Теперь вставьте API-ключ, чтобы он заработал.');
-    expect(src).toMatch(/\{createOkNoKey && ' Теперь вставьте API-ключ, чтобы он заработал\.'\}/);
+    // The old conditional (createOkNoKey &&) is gone — the form structurally
+    // cannot pass a key anymore (secret-handle field removed, ADR-T0602 §1),
+    // so the banner text is unconditional plain text, not a ternary/&&.
+    expect(src).not.toContain('createOkNoKey');
+    expect(src).toContain('Профиль создан. Теперь вставьте API-ключ, чтобы он заработал.');
   });
   it('chipStyle uses warning tokens (not neutral) when the key is unbound', () => {
     const idx = src.indexOf('const chipStyle');
@@ -352,5 +375,107 @@ describe('T-0597 — честный статус готовности профи
   });
   it('the «Вставить API-ключ» button is primary only while unbound', () => {
     expect(src).toContain("variant={secretBound ? 'ghost' : 'primary'}");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0602 — секрет-хэндл-поле убрано из формы создания (AC-1/AC-2/AC-4)
+// ---------------------------------------------------------------------------
+
+describe('T-0602 — форма «Новый профиль» не содержит секрет-хэндл-поле (AC-1/AC-2/AC-4)', async () => {
+  const fs = await import('fs');
+  const path = await import('path');
+  const filePath = path.default.resolve(
+    new URL(import.meta.url).pathname,
+    '../screen-llm-connections.jsx',
+  );
+  const src = fs.default.readFileSync(filePath, 'utf-8');
+
+  it('AC-1: no "Секрет-хэндл" field label anywhere in the file', () => {
+    expect(src).not.toMatch(/Секрет-хэндл/);
+  });
+
+  it('AC-1: no secretHandle/setSecretHandle state left in the component', () => {
+    expect(src).not.toMatch(/const \[secretHandle, setSecretHandle\]/);
+    expect(src).not.toMatch(/\bsetSecretHandle\(/);
+  });
+
+  it('AC-1: no leftover env://DEEPSEEK_API_KEY placeholder (the dead tenant-handle example)', () => {
+    expect(src).not.toContain('env://DEEPSEEK_API_KEY');
+  });
+
+  it('AC-2: onCreate never builds a secret_handle POST field from form state', () => {
+    const start = src.indexOf('const onCreate = useCallback');
+    const end = src.indexOf('\n  }, [name, provider, endpoint, model, priceIn, priceOut, currency, isDefault, loadConnections]);');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const onCreateBody = src.slice(start, end);
+    expect(onCreateBody).not.toMatch(/body\.secret_handle/);
+    expect(onCreateBody).not.toMatch(/secretHandle/);
+  });
+
+  it('AC-4: create-form description does not mention секрет-хэндл/ссылку/env:\\/\\//vault:\\/\\/', () => {
+    const start = src.indexOf('<h2 style={headingStyle}>Новый профиль</h2>');
+    const end = src.indexOf('<div style={fieldGap}>');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const block = src.slice(start, end);
+    expect(block).not.toMatch(/секрет-хэндл/i);
+    expect(block).not.toMatch(/env:\/\//);
+    expect(block).not.toMatch(/vault:\/\//);
+    // Honest replacement: points at the card-level key-insertion step instead.
+    expect(block).toMatch(/вставьте API-ключ[\s\S]{0,20}на карточке/i);
+  });
+
+  it('server contract (secret_handle as an optional POST field) is untouched — this is a client-only removal (OOS-1)', () => {
+    // The route file itself is out of scope for this task; this is a documentation
+    // assertion that we did not touch it (grep sanity, not a behavioural test).
+    const fsSync = fs.default;
+    const serverFile = path.default.resolve(
+      new URL(import.meta.url).pathname,
+      '../../../../src/http/llm-connections.ts',
+    );
+    expect(fsSync.existsSync(serverFile)).toBe(true);
+    const serverSrc = fsSync.readFileSync(serverFile, 'utf-8');
+    expect(serverSrc).toContain('secret_handle');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0602 — humanizeSecretHandleScheme (AC-7): человеческая подпись на карточке
+// ---------------------------------------------------------------------------
+
+describe('humanizeSecretHandleScheme', () => {
+  it('app:// → "Ключ зашифрован и привязан"', () => {
+    expect(humanizeSecretHandleScheme('app://a1b2c3...')).toBe('Ключ зашифрован и привязан');
+  });
+  it('env:// → "Ключ сервера (настроен оператором)"', () => {
+    expect(humanizeSecretHandleScheme('env://...')).toBe('Ключ сервера (настроен оператором)');
+  });
+  it('vault:// → "Ключ из внешнего хранилища (настроено оператором)"', () => {
+    expect(humanizeSecretHandleScheme('vault://...')).toBe('Ключ из внешнего хранилища (настроено оператором)');
+  });
+  it('unknown scheme → null (caller renders nothing extra)', () => {
+    expect(humanizeSecretHandleScheme('mystery://...')).toBeNull();
+  });
+  it('null / undefined / empty string → null', () => {
+    expect(humanizeSecretHandleScheme(null)).toBeNull();
+    expect(humanizeSecretHandleScheme(undefined)).toBeNull();
+    expect(humanizeSecretHandleScheme('')).toBeNull();
+  });
+
+  it('the screen renders the humanized label ahead of the raw redacted string on the card (secondary line)', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const filePath = path.default.resolve(
+      new URL(import.meta.url).pathname,
+      '../screen-llm-connections.jsx',
+    );
+    const src = fs.default.readFileSync(filePath, 'utf-8');
+    const humanIdx = src.indexOf('humanizeSecretHandleScheme(c.secret_handle_redacted)');
+    const rawIdx = src.indexOf('<span style={monoStyle}>{c.secret_handle_redacted}</span>');
+    expect(humanIdx).toBeGreaterThan(-1);
+    expect(rawIdx).toBeGreaterThan(-1);
+    expect(humanIdx).toBeLessThan(rawIdx);
   });
 });
