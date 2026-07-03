@@ -716,7 +716,9 @@ async function updateSchemaInTx(args: {
 // T-0263 — create/list/get over registry_def (migration 004 + 070 versioning)
 // ---------------------------------------------------------------------------
 
-interface RegistryDefCrudRow {
+// T-0609: exported alongside listRegistryDefs (see note there) so callers can type
+// the rows without re-declaring the shape.
+export interface RegistryDefCrudRow {
   id: string;
   application_id: string;
   slug: string;
@@ -815,7 +817,10 @@ async function createRegistryDef(args: {
   });
 }
 
-async function listRegistryDefs(
+// T-0609: exported so src/http/rights-resources.ts can reuse the SAME tenant-scoped
+// read (no second registry-listing query invented) to surface real registries as
+// grant-form resource options. Read-only reuse — this DAO is otherwise unchanged.
+export async function listRegistryDefs(
   pool: pg.Pool,
   tenantId: string,
   applicationId: string | null,

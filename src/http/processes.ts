@@ -26,6 +26,7 @@ import {
   listInstanceProjections,
   type InstanceProjection,
 } from "./process-projection.js";
+import type { FlowableClient } from "../core/flowable-client.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -230,6 +231,65 @@ function projectionToInstance(p: InstanceProjection): ProcessInstance {
 }
 
 // ---------------------------------------------------------------------------
+// T-0609: instance history detail (variables + BPMN activity history), read
+// live from the engine via the two new FlowableClient read-only methods
+// (getHistoricVariableInstances / getHistoricActivityInstances). This is the
+// engine-native replacement for the raw SQL a P0 gateway-branch diagnosis
+// previously required — no product surface showed "which branch did this
+// instance take, with what values" before this.
+//
+// Best-effort by design: BOTH sub-fetches degrade independently to an empty
+// result on engine error (never throw past this function) so a Flowable
+// outage never turns the instance-detail response into a 500 — only
+// `historyAvailable` flips to false, and the caller keeps the honest
+// best-effort audit-projection note it already shows today.
+// ---------------------------------------------------------------------------
+
+/** Wire shape appended to a ProcessInstance response (T-0609). */
+export interface InstanceHistoryDetail {
+  variables: { name: string; value: unknown }[];
+  history: {
+    step: string;
+    kind: string;
+    startedAt: string | null;
+    endedAt: string | null;
+    completedBy: string | null;
+  }[];
+  /** false when the engine could not be reached for the activity history. */
+  historyAvailable: boolean;
+}
+
+async function fetchInstanceHistoryDetail(
+  flowable: FlowableClient,
+  engineInstanceId: string,
+): Promise<InstanceHistoryDetail> {
+  // Both methods are OPTIONAL on FlowableClient (mirrors pingEngine — existing
+  // partial test-stub clients across src/__tests__/ need no change). Absent ⇒
+  // the same honest-degrade as an engine error.
+  const [varsResult, actsResult] = await Promise.all([
+    flowable.getHistoricVariableInstances
+      ? flowable.getHistoricVariableInstances(engineInstanceId)
+      : Promise.resolve({ ok: false as const, code: "UNKNOWN" as const }),
+    flowable.getHistoricActivityInstances
+      ? flowable.getHistoricActivityInstances(engineInstanceId)
+      : Promise.resolve({ ok: false as const, code: "UNKNOWN" as const }),
+  ]);
+
+  const variables = varsResult.ok ? varsResult.variables : [];
+  const history = actsResult.ok
+    ? actsResult.activities.map((a) => ({
+        step: a.activityName || a.activityId,
+        kind: a.activityType,
+        startedAt: a.startTime,
+        endedAt: a.endTime,
+        completedBy: a.assignee,
+      }))
+    : [];
+
+  return { variables, history, historyAvailable: actsResult.ok };
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -391,9 +451,18 @@ export function registerProcessesRoutes(
           const projections = await listInstanceProjections(startDeps.pool, tenantId);
           const match = projections.find((p) => p.inst === instanceId);
           if (match) {
+            // T-0609: variables + detailed transition history, read from the SAME
+            // Flowable client already threaded into startDeps — under the SAME
+            // tenant-membership gate this whole branch already applies (no new
+            // PDP/capability path; the live acceptance directive was explicit:
+            // do not widen visibility beyond what this page already grants).
+            // Best-effort: an engine error degrades to empty arrays +
+            // historyAvailable:false, never a 500 (the instance's core fields
+            // above do not depend on the engine being reachable).
+            const detail = await fetchInstanceHistoryDetail(startDeps.flowable, match.inst);
             res.statusCode = 200;
             res.setHeader("Content-Type", "application/json");
-            res.end(JSON.stringify(projectionToInstance(match)));
+            res.end(JSON.stringify({ ...projectionToInstance(match), ...detail }));
             return;
           }
         } catch {

@@ -36,6 +36,9 @@ import {
   progressFraction,
   filterInstanceHistory,
   hasSourceRecord,
+  hasVariables,
+  hasDetailedHistory,
+  formatHistoryTimestamp,
 } from './process-instance.logic.js';
 
 const EXEC_LABEL = { human: 'Человек', agent: 'Агент', service: 'Сервис' };
@@ -125,6 +128,57 @@ function HistoryRow({ ev }) {
   );
 }
 
+/**
+ * T-0609: one row of the ENGINE-SOURCED detailed history (startEvent/userTask/
+ * gateway/endEvent) — distinct from HistoryRow above, which renders the OLD
+ * best-effort audit-projection filter. Shown only when the backend reports
+ * historyAvailable:true (hasDetailedHistory).
+ */
+function HistoryStepRow({ step }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--chs-space-3)', padding: 'var(--chs-space-2) 0', flexWrap: 'wrap' }}>
+      <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', flexShrink: 0 }}>
+        {formatHistoryTimestamp(step.startedAt)}
+      </Mono>
+      <span style={{ fontSize: 'var(--chs-text-sm)' }}>{step.step}</span>
+      <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+        {step.kind}
+      </span>
+      {step.endedAt ? (
+        <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+          → {formatHistoryTimestamp(step.endedAt)}
+        </span>
+      ) : (
+        <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-accent, var(--chs-color-info))' }}>
+          в процессе
+        </span>
+      )}
+      {step.completedBy && (
+        <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+          · {step.completedBy}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** T-0609: one name/value row of the process-variables table. */
+function VariableRow({ variable }) {
+  const displayValue = typeof variable.value === 'object' && variable.value !== null
+    ? JSON.stringify(variable.value)
+    : String(variable.value);
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--chs-space-3)', padding: 'var(--chs-space-2) 0' }}>
+      <Mono style={{ fontSize: 'var(--chs-text-sm)', flexShrink: 0, minWidth: 160 }}>
+        {variable.name}
+      </Mono>
+      <Mono style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', wordBreak: 'break-all' }}>
+        {displayValue}
+      </Mono>
+    </div>
+  );
+}
+
 function ProcessInstanceScreen() {
   const { instanceId } = useParams();
   const navigate = useNavigate();
@@ -158,10 +212,14 @@ function ProcessInstanceScreen() {
   useEffect(() => { loadInstance(); }, [loadInstance]);
 
   // Best-effort history: filter the /api/audit redacted projection by target ==
-  // instanceId. No new endpoint (ADR §3). Failure is non-fatal — the section
-  // degrades to an honest note. Runs once the instance resolves.
+  // instanceId (pre-T-0609 path, ADR T-0556 §3). T-0609: skipped entirely when
+  // the backend already reports historyAvailable:true (engine-sourced detailed
+  // history) — no point issuing a second, admin-gated /api/audit fetch (and for
+  // a non-owner it would just 403 unused) when the detailed section already has
+  // what it needs. Runs once the instance resolves.
   useEffect(() => {
     if (!instance || !instanceId) return;
+    if (hasDetailedHistory(instance)) return;
     let cancelled = false;
     (async () => {
       try {
@@ -277,6 +335,18 @@ function ProcessInstanceScreen() {
               <h2 style={sectionTitleStyle}>Прогресс</h2>
               <ProgressBar progress={instance.progress} />
 
+              {/* T-0609: process variables (name/value) — best-effort from the engine's
+                  historic-variable-instances read (GET /api/processes/:id). Rendered
+                  only when non-empty (not every process carries variables). */}
+              {hasVariables(instance) && (
+                <>
+                  <h2 style={sectionTitleStyle}>Переменные процесса</h2>
+                  <div>
+                    {instance.variables.map((v, i) => <VariableRow key={v.name || i} variable={v} />)}
+                  </div>
+                </>
+              )}
+
               {/* Related inbox tasks — link to /inbox (action stays there). */}
               <h2 style={sectionTitleStyle}>Связанные задачи</h2>
               <p style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', marginBottom: 'var(--chs-space-3)' }}>
@@ -290,9 +360,26 @@ function ProcessInstanceScreen() {
                 Открыть «Мои задачи»
               </Link>
 
-              {/* History / timeline — best-effort from the audit projection. */}
+              {/* History / timeline. T-0609: when the backend reports
+                  historyAvailable:true (engine-sourced historic-activity-instances
+                  read succeeded), render the DETAILED step-by-step history —
+                  otherwise fall back UNCHANGED to the pre-T-0609 best-effort
+                  audit-projection filter (regression-safety for no-DB/no-engine
+                  deployments, where this field is simply absent). */}
               <h2 style={sectionTitleStyle}>История переходов</h2>
-              {history === null ? (
+              {hasDetailedHistory(instance) ? (
+                instance.history.length === 0 ? (
+                  <p style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+                    Движок процессов пока не зафиксировал ни одного шага для этого экземпляра.
+                  </p>
+                ) : (
+                  <div>
+                    {instance.history.map((step, i) => (
+                      <HistoryStepRow key={`${step.step}-${i}`} step={step} />
+                    ))}
+                  </div>
+                )
+              ) : history === null ? (
                 <LoadingState label="Загрузка истории…" compact />
               ) : history.length === 0 ? (
                 <p style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>

@@ -59,7 +59,7 @@ function makeProjectionPool(startedRows: Array<Record<string, unknown>>): import
 }
 
 const TENANT_ID = "11111111-1111-1111-1111-111111111111";
-const ACTOR = "e-orlov";
+const ACTOR = "e-test-approver";
 
 /** One started-instance audit row, shaped as readEvents expects (StartedRow). */
 function startedRow(inst: string): Record<string, unknown> {
@@ -264,6 +264,183 @@ describe("T-0564 · /api/processes no-DB fallback (seed preserved)", () => {
     const { status } = await httpReq(
       "GET",
       `${harness.baseUrl()}/api/processes/NOPE`,
+    );
+    expect(status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0609 — variables + detailed transition history on GET /api/processes/:id
+// (DB-mode). Live acceptance finding: a P0 gateway-branch diagnosis previously
+// required raw SQL against the Flowable tables because no product surface
+// showed instance variables or activity-level history.
+// ---------------------------------------------------------------------------
+
+function makeDepsWithFlowable(
+  startedRows: Array<Record<string, unknown>>,
+  flowable: StartInstanceDeps["flowable"],
+): StartInstanceDeps {
+  return {
+    pool: makeProjectionPool(startedRows),
+    flowable,
+    resolveActorTenant: async () => TENANT_ID,
+  };
+}
+
+describe("T-0609 · GET /api/processes/:id variables + history", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+  let harness: ReturnType<typeof buildServer>;
+
+  beforeAll(async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0609";
+    const flowableStub = {
+      getHistoricVariableInstances: async () => ({
+        ok: true as const,
+        variables: [{ name: "amount", value: 42000 }],
+      }),
+      getHistoricActivityInstances: async () => ({
+        ok: true as const,
+        activities: [
+          {
+            activityId: "start1",
+            activityName: "Начало",
+            activityType: "startEvent",
+            startTime: "2026-07-03T10:00:00.000+0000",
+            endTime: "2026-07-03T10:00:00.000+0000",
+            assignee: null,
+          },
+          {
+            activityId: "task-approve",
+            activityName: "Утверждение",
+            activityType: "userTask",
+            startTime: "2026-07-03T10:00:01.000+0000",
+            endTime: null,
+            assignee: "e-test-approver",
+          },
+        ],
+      }),
+    } as unknown as StartInstanceDeps["flowable"];
+    harness = buildServer(makeDepsWithFlowable([startedRow(LIVE_INST)], flowableStub));
+    await new Promise<void>((resolve) =>
+      harness.server.listen(0, "127.0.0.1", () => resolve()),
+    );
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = prevDbUrl;
+  });
+
+  it("AC-7: returns variables[] and history[] alongside the existing projection fields", async () => {
+    const { status, json } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes/${LIVE_INST}`,
+      { "x-dev-user": ACTOR },
+    );
+    expect(status).toBe(200);
+    const data = json as Record<string, unknown>;
+    // Regression: existing fields untouched.
+    expect(data.id).toBe(LIVE_INST);
+    expect(data.procId).toBe(LIVE_PROC);
+    // New fields.
+    expect(data.variables).toEqual([{ name: "amount", value: 42000 }]);
+    expect(data.historyAvailable).toBe(true);
+    expect(data.history).toEqual([
+      {
+        step: "Начало",
+        kind: "startEvent",
+        startedAt: "2026-07-03T10:00:00.000+0000",
+        endedAt: "2026-07-03T10:00:00.000+0000",
+        completedBy: null,
+      },
+      {
+        step: "Утверждение",
+        kind: "userTask",
+        startedAt: "2026-07-03T10:00:01.000+0000",
+        endedAt: null,
+        completedBy: "e-test-approver",
+      },
+    ]);
+  });
+});
+
+describe("T-0609 · GET /api/processes/:id honest degrade when the engine is unavailable", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+  let harness: ReturnType<typeof buildServer>;
+
+  beforeAll(async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0609-degrade";
+    const flowableStub = {
+      getHistoricVariableInstances: async () => ({ ok: false as const, code: "ENGINE_UNAVAILABLE" as const }),
+      getHistoricActivityInstances: async () => ({ ok: false as const, code: "ENGINE_UNAVAILABLE" as const }),
+    } as unknown as StartInstanceDeps["flowable"];
+    harness = buildServer(makeDepsWithFlowable([startedRow(LIVE_INST)], flowableStub));
+    await new Promise<void>((resolve) =>
+      harness.server.listen(0, "127.0.0.1", () => resolve()),
+    );
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = prevDbUrl;
+  });
+
+  it("AC-8: engine error degrades to empty variables/history + historyAvailable:false, still 200", async () => {
+    const { status, json } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes/${LIVE_INST}`,
+      { "x-dev-user": ACTOR },
+    );
+    expect(status).toBe(200);
+    const data = json as Record<string, unknown>;
+    expect(data.id).toBe(LIVE_INST);
+    expect(data.variables).toEqual([]);
+    expect(data.history).toEqual([]);
+    expect(data.historyAvailable).toBe(false);
+  });
+});
+
+describe("T-0609 · GET /api/processes/:id with a bare FlowableClient stub (no history methods)", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+  let harness: ReturnType<typeof buildServer>;
+
+  beforeAll(async () => {
+    // Mirrors the pre-existing "T-0564 DB-mode" harness's bare {} stub (dozens of other
+    // tests in this file use the SAME pattern) — the optional-method guard in
+    // fetchInstanceHistoryDetail must degrade safely rather than throw.
+    process.env["DATABASE_URL"] = "postgres://fake/T-0609-bare";
+    harness = buildServer(makeDeps([startedRow(LIVE_INST)]));
+    await new Promise<void>((resolve) =>
+      harness.server.listen(0, "127.0.0.1", () => resolve()),
+    );
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = prevDbUrl;
+  });
+
+  it("AC-9 regression: tenant-scope gate unchanged, response stays 200 with honest-empty history fields", async () => {
+    const { status, json } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes/${LIVE_INST}`,
+      { "x-dev-user": ACTOR },
+    );
+    expect(status).toBe(200);
+    const data = json as Record<string, unknown>;
+    expect(data.variables).toEqual([]);
+    expect(data.history).toEqual([]);
+    expect(data.historyAvailable).toBe(false);
+  });
+
+  it("AC-9 regression: a non-member actor still gets 404 (visibility not widened)", async () => {
+    const { status } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes/does-not-exist`,
+      { "x-dev-user": ACTOR },
     );
     expect(status).toBe(404);
   });

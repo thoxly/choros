@@ -136,7 +136,9 @@ async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string
 // Row type + serializer
 // ---------------------------------------------------------------------------
 
-interface ApplicationRow {
+// T-0609: exported alongside listApplications (see note there) so callers can type
+// the rows without re-declaring the shape.
+export interface ApplicationRow {
   id: string;
   slug: string;
   display_name: string;
@@ -295,7 +297,10 @@ async function patchApplication(
   });
 }
 
-async function listApplications(pool: pg.Pool, tenantId: string): Promise<ApplicationRow[]> {
+// T-0609: exported so src/http/rights-resources.ts can reuse the SAME tenant-scoped
+// read (no second application-listing query invented) to surface real applications as
+// grant-form resource options. Read-only reuse — this DAO is otherwise unchanged.
+export async function listApplications(pool: pg.Pool, tenantId: string): Promise<ApplicationRow[]> {
   return withTenantTx(pool, tenantId, async (client) => {
     const res = await client.query<ApplicationRow>(
       `${APP_READ_SELECT}

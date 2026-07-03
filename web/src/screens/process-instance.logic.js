@@ -115,3 +115,57 @@ export function hasSourceRecord(instance) {
     instance.recordId.trim().length > 0,
   );
 }
+
+/**
+ * T-0609: whether the instance carries any process variables to render. Live
+ * acceptance finding — a P0 gateway-branch diagnosis previously required raw SQL
+ * against the Flowable tables because no product surface showed instance
+ * variables. Backend contract: GET /api/processes/:id now (best-effort, DB mode
+ * only) adds `variables: Array<{name, value}>`.
+ *
+ * @param {{ variables?: Array<{name: string, value: unknown}> }|null|undefined} instance
+ * @returns {boolean}
+ */
+export function hasVariables(instance) {
+  return Boolean(
+    instance &&
+    Array.isArray(instance.variables) &&
+    instance.variables.length > 0,
+  );
+}
+
+/**
+ * T-0609: whether the engine-sourced DETAILED history (step/kind/start/end/
+ * completedBy) is available for this instance, as opposed to the pre-T-0609
+ * best-effort audit-projection filter (filterInstanceHistory above). Backend
+ * contract: GET /api/processes/:id sets `historyAvailable: true` only when the
+ * engine's historic-activity-instances read succeeded (DB mode + reachable
+ * engine); absent/false ⇒ the caller keeps the OLD best-effort audit path
+ * unchanged (regression-safety for no-DB / no-engine deployments).
+ *
+ * @param {{ historyAvailable?: boolean }|null|undefined} instance
+ * @returns {boolean}
+ */
+export function hasDetailedHistory(instance) {
+  return Boolean(instance && instance.historyAvailable === true);
+}
+
+/**
+ * T-0609: human-readable formatting of one engine-sourced history row's
+ * start/end timestamps. Flowable returns ISO-8601 strings (or null while a
+ * step is still active / has not started — should not happen for startTime,
+ * but endTime is legitimately null for the currently-active step). Returns
+ * '—' for null/invalid so the UI never shows "Invalid Date".
+ *
+ * @param {string|null|undefined} isoTs
+ * @returns {string}
+ */
+export function formatHistoryTimestamp(isoTs) {
+  if (typeof isoTs !== 'string' || isoTs.length === 0) return '—';
+  const d = new Date(isoTs);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('ru-RU', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+}

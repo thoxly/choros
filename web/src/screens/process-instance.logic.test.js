@@ -15,6 +15,9 @@ import {
   progressFraction,
   filterInstanceHistory,
   hasSourceRecord,
+  hasVariables,
+  hasDetailedHistory,
+  formatHistoryTimestamp,
 } from './process-instance.logic.js';
 
 describe('instanceDetailPath — navigation target for the instance detail view', () => {
@@ -113,5 +116,51 @@ describe('hasSourceRecord — record-source link gate (T-0414)', () => {
     expect(hasSourceRecord({ recordId: '  ' })).toBe(false);
     expect(hasSourceRecord({})).toBe(false);
     expect(hasSourceRecord(null)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0609 — process variables + engine-sourced detailed history.
+// ---------------------------------------------------------------------------
+
+describe('hasVariables — process-variables section gate (T-0609)', () => {
+  it('true only when variables is a non-empty array', () => {
+    expect(hasVariables({ variables: [{ name: 'amount', value: 42000 }] })).toBe(true);
+  });
+  it('false for missing/empty/malformed variables', () => {
+    expect(hasVariables({ variables: [] })).toBe(false);
+    expect(hasVariables({})).toBe(false);
+    expect(hasVariables(null)).toBe(false);
+    expect(hasVariables({ variables: 'not-an-array' })).toBe(false);
+  });
+});
+
+describe('hasDetailedHistory — engine-sourced history gate (T-0609)', () => {
+  it('true only when historyAvailable is exactly true', () => {
+    expect(hasDetailedHistory({ historyAvailable: true })).toBe(true);
+  });
+  it('false when historyAvailable is false/absent (regression: old audit-filter path)', () => {
+    expect(hasDetailedHistory({ historyAvailable: false })).toBe(false);
+    expect(hasDetailedHistory({})).toBe(false);
+    expect(hasDetailedHistory(null)).toBe(false);
+    // Non-DB / no-engine fixtures never carry this field at all — must NOT be
+    // mistaken for "available" (truthy coercion bug class).
+    expect(hasDetailedHistory({ historyAvailable: undefined })).toBe(false);
+  });
+});
+
+describe('formatHistoryTimestamp — engine ISO-8601 → human-readable (T-0609)', () => {
+  it('formats a valid ISO-8601 timestamp', () => {
+    const out = formatHistoryTimestamp('2026-07-03T10:00:00.000+0000');
+    expect(out).not.toBe('—');
+    expect(typeof out).toBe('string');
+  });
+  it('returns — for null (the currently-active step has no endTime yet)', () => {
+    expect(formatHistoryTimestamp(null)).toBe('—');
+  });
+  it('returns — for undefined / empty / malformed input (never "Invalid Date")', () => {
+    expect(formatHistoryTimestamp(undefined)).toBe('—');
+    expect(formatHistoryTimestamp('')).toBe('—');
+    expect(formatHistoryTimestamp('not-a-date')).toBe('—');
   });
 });

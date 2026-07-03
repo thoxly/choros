@@ -69,6 +69,23 @@ async function fetchDictionaries() {
   return res.json();
 }
 
+// T-0609: the tenant's REAL applications/registries (live acceptance finding — the
+// demo /api/rights/dictionaries resource seed was the ONLY option ever reachable from
+// the «Дать роли право» form's resource selector; a real tenant could never grant a
+// right on its own applications/registries). Best-effort — [] on any failure, same
+// posture as fetchEmployees below, so an unreachable/absent endpoint never blocks the
+// form (it just falls back to the demo dictionary, unchanged from today).
+async function fetchRealResources() {
+  try {
+    const res = await fetch('/api/rights/resources', { headers: authHeaders() });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data.resources) ? data.resources : [];
+  } catch {
+    return [];
+  }
+}
+
 async function fetchEmployees() {
   try {
     const res = await fetch(`/api/org/tenant-state?tenant_id=${getActiveTenantId()}`, { headers: authHeaders() });
@@ -245,9 +262,27 @@ function RightsScreen({ initialRole }) {
     if (state?.can_manage) {
       setSourcesLoading(true);
       Promise.all([
-        fetchDictionaries().then(setDictionaries),
+        fetchDictionaries(),
         fetchEmployees().then(setEmployees),
-      ]).finally(() => setSourcesLoading(false));
+        fetchRealResources(),
+      ]).then(([dicts, , realResources]) => {
+        // T-0609: real tenant resources FIRST, demo dictionary resources after —
+        // an admin sees their own applications/registries before the demo seed,
+        // but the demo seed is never removed (legitimate for a demo tenant, and
+        // a safe non-empty fallback while realResources is still []).
+        //
+        // F-1/UX-2 fix: demo entries are TAGGED (demoSeed) so GrantRightForm can
+        // (а) mark them visibly in the selector («· демо») and (б) honestly tell
+        // the user that a demo-resource grant feeds the roles overview but does
+        // NOT control access to real tenant data. Real entries carry id +
+        // node_level from /api/rights/resources — the form uses them to emit a
+        // resource-hierarchy scope the PDP actually resolves. (Named demoSeed,
+        // not `demo`, so the T-0572 honest-empty assertion — this screen must
+        // never carry the API demo-response-flag path — keeps its guard untripped.)
+        const demoTagged = (dicts?.resources ?? []).map((r) => ({ ...r, demoSeed: true }));
+        const mergedResources = [...realResources, ...demoTagged];
+        setDictionaries(dicts ? { ...dicts, resources: mergedResources } : dicts);
+      }).finally(() => setSourcesLoading(false));
     }
   }, [state?.can_manage]);
 

@@ -249,6 +249,25 @@ function AssignRoleForm({ roles, employees, dictionaries, sourcesLoading = false
 
 // ---------------------------------------------------------------------------
 // GrantRightForm (FR-3) — дать роли право.
+//
+// T-0609 F-1 fix — грант на РЕАЛЬНЫЙ ресурс должен резолвиться PDP.
+// Covering-предикат PDP (grant-resolver.ts resolveFor / read-visibility.ts
+// isRecordReadable) матчит грант ПО SCOPE-содержанию в resource-иерархии —
+// resource_type он не читает. Runtime-запрос несёт scope
+// {hierarchy:'resource', nodeId:<UUID>}; org-scope грант его НИКОГДА не покроет
+// (isNarrowerOrEqual короткозамыкает на несовпадении иерархий). Поэтому:
+//   - реальный ресурс (запись из GET /api/rights/resources несёт id +
+//     node_level) → форма эмитит scope {kind:'node', hierarchy:'resource',
+//     nodeId:<id>, nodeLevel:<node_level>} — ровно тот shape, что refToScope
+//     даёт запросам и что composite resource-ancestry oracle покрывает (тот же
+//     enforcement-путь, что READ-PDP / миграция 117). ScopePicker (org-сужение)
+//     для такого гранта не применим — охват гранта ЕСТЬ узел ресурса; вместо
+//     пикера показывается честная строка охвата.
+//   - демо-ресурс (без id; помечен demoSeed в словаре) → прежний org-scope
+//     путь БЕЗ изменений, но помечен в селекторе («· демо»), с честной
+//     подсказкой и КВАЛИФИЦИРОВАННЫМ тостом: право попадёт в обзор ролей
+//     (критичность/SoD), но НЕ управляет доступом к данным тенанта — никакого
+//     ложного «Право выдано» для инертного гранта (UX-1).
 // ---------------------------------------------------------------------------
 
 function GrantRightForm({ roles, dictionaries, sourcesLoading = false, onDone }) {
@@ -262,22 +281,45 @@ function GrantRightForm({ roles, dictionaries, sourcesLoading = false, onDone })
   const resources = dictionaries?.resources ?? [];
   const operations = dictionaries?.operations ?? [];
 
-  const canSubmit = roleId && resourceType && operation && scope;
+  // T-0609 F-1: реальный ресурс идентифицируется наличием id + node_level
+  // (их отдаёт только GET /api/rights/resources; демо-словарь их не несёт).
+  const selectedResource = resources.find((r) => r.uri === resourceType) ?? null;
+  const isRealResource = Boolean(selectedResource && selectedResource.id && selectedResource.node_level);
+
+  // Для реального ресурса охват выводится из самого ресурса — org-пикер не нужен.
+  const canSubmit = roleId && resourceType && operation && (isRealResource || scope);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!canSubmit) return;
     setBusy(true);
     try {
-      const result = await grantRight({ roleId, resourceType, operation, scope, grantedBy: UI_GRANTED_BY });
+      // T-0609 F-1: реальный ресурс → resource-иерархия scope с реальным UUID
+      // (тот же shape, что refToScope у runtime-запросов — грант РЕЗОЛВИТСЯ).
+      const effectiveScope = isRealResource
+        ? {
+            kind: 'node',
+            hierarchy: 'resource',
+            nodeId: selectedResource.id,
+            nodeLevel: selectedResource.node_level,
+          }
+        : scope;
+      const result = await grantRight({ roleId, resourceType, operation, scope: effectiveScope, grantedBy: UI_GRANTED_BY });
       if (result.state === 'semi-confirmed') {
         pushToast({
           tone: 'info',
           title: 'Право ждёт второго подтверждения',
           message: 'Критичное изменение требует ещё одного подтверждающего — см. вкладку «Критичность».',
         });
-      } else {
+      } else if (isRealResource) {
         pushToast({ tone: 'success', message: 'Право выдано.' });
+      } else {
+        // UX-1: демо-ресурс — квалифицированный успех, не ложное обещание:
+        // такой грант питает обзор ролей, но не управляет доступом к данным.
+        pushToast({
+          tone: 'success',
+          message: 'Право выдано (демо-ресурс: попадёт в обзор ролей, но не ограничивает доступ к данным).',
+        });
       }
       setRoleId(''); setResourceType(''); setOperation(''); setScope(null);
       onDone && onDone();
@@ -307,10 +349,12 @@ function GrantRightForm({ roles, dictionaries, sourcesLoading = false, onDone })
         value={resourceType}
         onChange={(e) => setResourceType(e.target.value)}
         placeholder="Выберите ресурс…"
-        options={resources.map((r) => ({ value: r.uri, label: r.name }))}
+        options={resources.map((r) => ({ value: r.uri, label: r.demoSeed ? `${r.name} · демо` : r.name }))}
         hint={resources.length === 0
           ? 'Справочник ресурсов недоступен — обновите страницу.'
-          : undefined}
+          : (selectedResource && !isRealResource
+            ? 'Демо-ресурс из ознакомительного набора: право появится в обзоре ролей, но не ограничивает доступ к данным тенанта.'
+            : undefined)}
       />
       <Select
         label="Операция"
@@ -322,7 +366,15 @@ function GrantRightForm({ roles, dictionaries, sourcesLoading = false, onDone })
           ? 'Справочник операций недоступен — обновите страницу.'
           : undefined}
       />
-      <ScopePicker dictionaries={dictionaries} value={scope} onChange={setScope} />
+      {isRealResource ? (
+        <div className="chs-ov-scope">
+          <span className="chs-hint">
+            Охват: ресурс целиком — право действует на все записи «{selectedResource.name}».
+          </span>
+        </div>
+      ) : (
+        <ScopePicker dictionaries={dictionaries} value={scope} onChange={setScope} />
+      )}
       <Button type="submit" variant="primary" size="sm" disabled={!canSubmit} loading={busy}>
         Выдать право
       </Button>
