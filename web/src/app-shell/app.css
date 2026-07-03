@@ -630,6 +630,9 @@
    ============================================================================ */
 .chs-ov-holders { display: flex; flex-wrap: wrap; gap: var(--chs-space-5); margin-top: var(--chs-space-6); margin-bottom: var(--chs-space-6); }
 .chs-ov-holder { display: flex; align-items: center; gap: var(--chs-space-3); padding: var(--chs-space-3) var(--chs-space-4); border: 1px solid var(--chs-color-border); border-radius: var(--chs-radius-2); background: var(--chs-color-surface); }
+/* T-0608 (F-1): per-assignment scope shown next to the holder so differently-
+   scoped assignments of the same person are visibly distinct. Muted secondary. */
+.chs-ov-holder__scope { font-size: var(--chs-text-xs); color: var(--chs-color-text-muted); }
 /* Grants table gains an optional 4th (action) column when canManage — a
    modifier class widens the shared 3-column grid (base rule above). */
 .chs-grants__colhead--actions,

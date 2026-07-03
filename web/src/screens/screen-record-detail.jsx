@@ -24,8 +24,11 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDialog } from '../components/components.jsx';
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
-import { formatDate, formatError, formatJsonReadable } from '../lib/format.js';
+import { formatDate, formatError, formatJsonReadable, formatPersonName } from '../lib/format.js';
 import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel, computeRollup } from './records-form.js';
+// T-0608 (пункт г): resolve record.created_by (an employee SLUG — for a
+// Keycloak-registered human, slug === the KC user UUID) to a display name.
+import { fetchEmployees } from '../forms/field-renderer.jsx';
 // T-0568: reuse the SAME create-drawer for editing (prefilled → PUT).
 import { CreateRecordDrawer } from './screen-app-records.jsx';
 import {
@@ -406,6 +409,24 @@ function RecordDetailScreen() {
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // T-0608 (пункт г): slug → display-name map for record.created_by (an
+  // employee SLUG, which for a Keycloak-registered human equals the KC user
+  // UUID — rendering it raw is exactly the «АВТОР: 4c653940-…» bug). Loaded
+  // once per screen mount (not per-record) — /api/org is tenant-wide and
+  // cheap; a failed load degrades to the raw slug (fetchAuthorNames below),
+  // never blocks the record itself from rendering.
+  const [authorNames, setAuthorNames] = useState(() => new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchEmployees()
+      .then((list) => {
+        if (cancelled) return;
+        setAuthorNames(new Map(list.map((e) => [e.id, e.name])));
+      })
+      .catch(() => { /* degrade to raw slug — non-fatal, see render below */ });
+    return () => { cancelled = true; };
+  }, []);
 
   const loadRecord = useCallback(async () => {
     if (!id) { setError('Не указан идентификатор записи'); return; }
@@ -680,7 +701,12 @@ function RecordDetailScreen() {
                 <div style={fieldRowStyle}>
                   <span style={labelStyle}>Автор</span>
                   <Mono style={{ ...valueStyle, fontSize: 'var(--chs-text-xs)' }}>
-                    {record.created_by}
+                    {/* T-0608 (пункт г): resolve the slug to a display name via
+                        the /api/org-backed map; fall back to the raw slug when
+                        the lookup has no entry (e.g. still loading, or the
+                        author has no position and /api/org's tree omits them)
+                        — degrades to the PREVIOUS behaviour, never worse. */}
+                    {formatPersonName(authorNames.get(record.created_by)) || record.created_by}
                   </Mono>
                 </div>
               )}

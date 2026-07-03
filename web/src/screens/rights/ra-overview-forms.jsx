@@ -25,6 +25,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Select, StatusChip, ConfirmDialog, LoadingState } from '../../components/components.jsx';
 import { useToastContext } from '../../app-shell/toast-context.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
+import { formatPersonName } from '../../lib/format.js';
 
 // ---------------------------------------------------------------------------
 // Write helpers — each hits exactly ONE existing endpoint (AC-4/AC-5/AC-6).
@@ -210,7 +211,18 @@ function AssignRoleForm({ roles, employees, dictionaries, sourcesLoading = false
         value={employeeId}
         onChange={(e) => setEmployeeId(e.target.value)}
         placeholder="Выберите сотрудника…"
-        options={(employees ?? []).map((e) => ({ value: e.id, label: e.slug }))}
+        // T-0608 (пункт г): GET /api/org/tenant-state now selects display_name
+        // (was id+slug only) — an employee whose slug happens to be a raw
+        // Keycloak-user UUID (every KC-registered human: slug==sub) no longer
+        // renders as that UUID when a real display_name exists. formatPersonName
+        // falls back to «Без имени» (no secondary identifier is available at
+        // this layer — employee carries no email column) rather than silently
+        // showing nothing; the slug remains the LAST-resort fallback (never
+        // hides the row entirely).
+        options={(employees ?? []).map((e) => ({
+          value: e.id,
+          label: formatPersonName(e.display_name) || e.slug,
+        }))}
         hint={(employees ?? []).length === 0
           ? (
             <>
@@ -389,14 +401,33 @@ function GrantRightForm({ roles, dictionaries, sourcesLoading = false, onDone })
 // screen-org.jsx pendingDelete), НЕ window.confirm и НЕ одноклик-revoke.
 // ---------------------------------------------------------------------------
 
-function RevokeAssignmentButton({ id, subjectLabel = '', onDone }) {
+// T-0608 (F-1 fix, review+ux blocking): `id` (single) OR `ids` (array) of the
+// role_assignment rows to revoke. Per the schema invariant (migrations/020_
+// role_assignment.sql:29-32: NO UNIQUE(employee_id, role_id)), the caller
+// (screen-rights.jsx dedupAssignments) groups ONLY TRUE duplicates (identical
+// employee + org_scope + validity window) into one row — so `ids` here is
+// exactly one SCOPE's worth of assignments (usually a single id; >1 only when
+// the SAME scope was accidentally assigned twice). Differently-scoped
+// assignments are SEPARATE holder rows with SEPARATE Revoke buttons, so this
+// never revokes a scope the admin did not intend.
+//
+// `scopeLabel` (plain string from scopeText) names the exact scope in the
+// ConfirmDialog — so «Отозвать» tells the admin WHICH scope goes, never a bare
+// name that could hide that a person has other scopes still standing.
+function RevokeAssignmentButton({ id, ids, subjectLabel = '', scopeLabel = '', onDone }) {
+  const targetIds = ids && ids.length > 0 ? ids : (id ? [id] : []);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const { push: pushToast } = useToastContext();
   const handleConfirm = async () => {
     setBusy(true);
     try {
-      await revokeAssignment(id);
+      // Sequential, not Promise.all: keeps the toast/error attributable to a
+      // stable order and avoids concurrent writes against the same tenant tx
+      // pool for the rare (>1) identical-scope-assigned-twice case.
+      for (const targetId of targetIds) {
+        await revokeAssignment(targetId);
+      }
       pushToast({ tone: 'success', message: 'Назначение отозвано.' });
       setConfirmOpen(false);
       onDone && onDone();
@@ -406,6 +437,14 @@ function RevokeAssignmentButton({ id, subjectLabel = '', onDone }) {
       setBusy(false);
     }
   };
+  // Message names BOTH the person AND the scope — so the admin sees exactly
+  // which assignment (which охват) is being revoked, and that other scopes of
+  // the same person are untouched.
+  const who = subjectLabel ? `у: ${subjectLabel}` : 'это назначение';
+  const scopeClause = scopeLabel ? ` (охват: ${scopeLabel})` : '';
+  const message = subjectLabel
+    ? `Отозвать роль ${who}${scopeClause}? Доступ по этому назначению пропадёт сразу; другие охваты этого человека сохранятся.`
+    : `Отозвать это назначение${scopeClause}? Доступ по нему пропадёт сразу.`;
   return (
     <>
       <Button variant="ghost" size="sm" onClick={() => setConfirmOpen(true)}>Отозвать</Button>
@@ -413,9 +452,7 @@ function RevokeAssignmentButton({ id, subjectLabel = '', onDone }) {
         open={confirmOpen}
         tone="danger"
         title="Отозвать роль?"
-        message={subjectLabel
-          ? `Отозвать роль у: ${subjectLabel}? Доступ по этой роли пропадёт сразу.`
-          : 'Отозвать это назначение? Доступ по этой роли пропадёт сразу.'}
+        message={message}
         confirmLabel="Отозвать"
         cancelLabel="Отмена"
         loading={busy}

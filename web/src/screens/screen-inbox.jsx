@@ -19,7 +19,10 @@ import {
   Drawer, EmptyState, LoadingState, ErrorState, KitIcon,
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
-import { authHeaders, devHeaders } from '../app-shell/dev-auth.js';
+// T-0608 (пункт е): every fetch on this screen now goes through
+// fetchWithAuthRetry (built on top of authHeaders internally) — direct
+// authHeaders()/devHeaders() calls are no longer needed here.
+import { fetchWithAuthRetry } from '../app-shell/dev-auth.js';
 // T-0597 (находка №6): блокирующий alert-модал на claim/approve ошибках заменён на pushToast —
 // тот же провайдер, что уже используют rights/assistant экраны (консистентный
 // error-тон, duration:0/role=alert — не гаснет сам, но не блокирует поток).
@@ -66,9 +69,8 @@ function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
     setFieldErrors({});
     setFormError(null);
 
-    fetch(
+    fetchWithAuthRetry(
       `/api/forms/binding?processKey=${encodeURIComponent(processKey)}&stepKey=${encodeURIComponent(stepKey)}`,
-      { headers: authHeaders() }
     )
       .then((r) => {
         if (r.status === 404) { setBinding(false); return; }
@@ -378,6 +380,38 @@ function claimErrorMessage(code) {
   return CLAIM_ERROR_MESSAGE[code] ?? `Не удалось взять задачу: ${code}`;
 }
 
+// T-0608 (пункт в): human-readable messages for the approve/complete action
+// (POST /api/inbox/:id/action) error codes that are NOT already covered by
+// ENGINE_DRIVE_ERROR_MESSAGE (the 502 engine-drive family). Before this map,
+// approveTask's fallback surfaced ANY other code (NOT_ELIGIBLE, NOT_FOUND,
+// VALIDATION, FORM_VALIDATION — all real 4xx codes the action route can
+// return, see src/http/inbox.ts POST /api/inbox/:id/action) as a raw
+// `Ошибка: ${code}` toast — the same class of defect T-0605 fixed for claim.
+// handleComplete already special-cased NOT_ELIGIBLE inline; this map replaces
+// that one-off with the same principle CLAIM_ERROR_MESSAGE established:
+// every code the endpoint can emit gets a human sentence, never a bare code.
+const ACTION_ERROR_MESSAGE = {
+  NOT_ELIGIBLE: "Нет права на выполнение этого шага",
+  NOT_FOUND: "Эта задача уже недоступна — обновите страницу",
+  VALIDATION: "Не удалось отправить запрос — обновите страницу и попробуйте снова",
+  FORM_VALIDATION: "Форма заполнена некорректно — проверьте значения полей",
+};
+
+/**
+ * Map an approve/complete action error code to a human sentence. Checks the
+ * engine-drive family first (502 codes), then the action-route family above;
+ * falls back to a sentence that still names the code (never silent, never a
+ * bare `Ошибка: CODE` with no context) so an unmapped future code is still
+ * legible while remaining diagnosable.
+ */
+function actionErrorMessage(code) {
+  return (
+    ENGINE_DRIVE_ERROR_MESSAGE[code] ??
+    ACTION_ERROR_MESSAGE[code] ??
+    `Не удалось выполнить действие: ${code}`
+  );
+}
+
 function TaskDetailPanel({ taskId, onClose, onActionDone }) {
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState(null); // { item, projection }
@@ -392,7 +426,10 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
     setLoading(true);
     setFetchError(null);
     try {
-      const res = await fetch(`/api/inbox/${taskId}`, { headers: authHeaders() });
+      // T-0608 (пункт е): fetchWithAuthRetry — a mid-session-expired token
+      // self-heals here (silent refresh + retry) instead of surfacing a dead
+      // "HTTP 401" that a click on «Повторить» would just repeat forever.
+      const res = await fetchWithAuthRetry(`/api/inbox/${taskId}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body?.error?.message || `HTTP ${res.status}`);
@@ -422,17 +459,23 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
       if (formData && Object.keys(formData).length > 0) {
         approveBody.formValues = formData;
       }
-      const res = await fetch(`/api/inbox/${taskId}/action`, {
+      // T-0608 (пункт е): fetchWithAuthRetry — a 401 here means the request
+      // never reached the approve logic at all (auth rejected before any
+      // mutation), so a single silent-refresh-and-retry is safe (no
+      // double-submit risk) and beats surfacing a dead-token error.
+      const res = await fetchWithAuthRetry(`/api/inbox/${taskId}/action`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...authHeaders() },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify(approveBody),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         const code = body?.error?.code ?? `HTTP ${res.status}`;
         // T-0571 (amended after REVIEW F-1): typed engine-drive 502 codes get a
-        // human-readable message, same as the pre-existing NOT_ELIGIBLE case below.
-        throw new Error(ENGINE_DRIVE_ERROR_MESSAGE[code] ?? (code === 'NOT_ELIGIBLE' ? 'Нет права на выполнение этого шага' : `Ошибка: ${code}`));
+        // human-readable message. T-0608 (пункт в): the one-off NOT_ELIGIBLE
+        // ternary is replaced by actionErrorMessage — every code the action
+        // route can return now maps to a human sentence, not just this one.
+        throw new Error(actionErrorMessage(code));
       }
       setOutcome(body);
       // Notify parent to refresh the inbox list.
@@ -646,7 +689,10 @@ function InboxScreen() {
       if (sortSla) qs.set("sort", "sla");
       // Page 1 on initial/refresh load.
       qs.set("page", "1");
-      const res = await fetch(`/api/inbox?${qs.toString()}`, { headers: devHeaders() });
+      // T-0608 (пункт е): fetchWithAuthRetry self-heals a mid-session-expired
+      // token (silent refresh + one retry) instead of surfacing a dead "HTTP
+      // 401" whose «Повторить» would just resend the same expired token.
+      const res = await fetchWithAuthRetry(`/api/inbox?${qs.toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setItems(data.items);
@@ -669,7 +715,7 @@ function InboxScreen() {
       if (exec) qs.set("exec", exec);
       if (sortSla) qs.set("sort", "sla");
       qs.set("page", String(nextPage));
-      const res = await fetch(`/api/inbox?${qs.toString()}`, { headers: devHeaders() });
+      const res = await fetchWithAuthRetry(`/api/inbox?${qs.toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setItems((prev) => [...(prev || []), ...(data.items || [])]);
@@ -688,9 +734,10 @@ function InboxScreen() {
     if (claiming[taskId]) return; // inflight guard
     setClaiming((s) => ({ ...s, [taskId]: true }));
     try {
-      const res = await fetch(`/api/inbox/${taskId}/claim`, {
+      // T-0608 (пункт е): a 401 here is auth-rejected before the claim logic
+      // runs — a silent-refresh-and-retry is safe (no double-claim risk).
+      const res = await fetchWithAuthRetry(`/api/inbox/${taskId}/claim`, {
         method: 'POST',
-        headers: devHeaders(),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -718,17 +765,23 @@ function InboxScreen() {
     if (approving[taskId]) return; // inflight guard
     setApproving((s) => ({ ...s, [taskId]: true }));
     try {
-      const res = await fetch(`/api/inbox/${taskId}/action`, {
+      // T-0608 (пункт е): 401 self-heals (refresh-once + retry-once) instead
+      // of surfacing a raw error toast for a mid-session-expired token.
+      const res = await fetchWithAuthRetry(`/api/inbox/${taskId}/action`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...devHeaders() },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action: 'approve' }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         const code = body?.error?.code ?? `HTTP ${res.status}`;
         // T-0571 (amended after REVIEW F-1): typed engine-drive 502 codes get a
-        // human-readable message instead of the raw code.
-        throw new Error(ENGINE_DRIVE_ERROR_MESSAGE[code] ?? `Ошибка: ${code}`);
+        // human-readable message instead of the raw code. T-0608 (пункт в): the
+        // fallback used to be a bare `Ошибка: ${code}` — this table-row quick-
+        // approve path hit that fallback for NOT_ELIGIBLE/NOT_FOUND/VALIDATION
+        // (only handleComplete had the NOT_ELIGIBLE special case). Now both
+        // paths share the same actionErrorMessage map — no raw code anywhere.
+        throw new Error(actionErrorMessage(code));
       }
       // Task approved → instance done; re-fetch to drop the task from the list.
       await load();

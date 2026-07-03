@@ -132,13 +132,25 @@ describe('AC-7: seed apply → 3 dept / 7 positions / 12 employees', () => {
       const state = stateRes.body as {
         departments: Array<{ id: string; slug: string }>;
         positions: Array<{ id: string; slug: string }>;
-        employees: Array<{ id: string; slug: string }>;
+        employees: Array<{ id: string; slug: string; display_name: string }>;
         roles: Array<{ id: string; slug: string }>;
       };
 
       expect(state.departments.length, 'AC-7: exactly 3 departments').toBe(3);
       expect(state.positions.length, 'AC-7: exactly 7 positions').toBe(7);
       expect(state.employees.length, 'AC-7: exactly 12 employees').toBe(12);
+
+      // T-0608 (пункт г): every employee row carries a non-empty display_name —
+      // before this fix, the endpoint selected only id+slug, so ANY consumer
+      // (e.g. screen-rights.jsx's employee picker) had no display name to
+      // render and fell back to the raw slug (a raw Keycloak UUID for
+      // KC-registered humans).
+      for (const emp of state.employees) {
+        expect(
+          typeof emp.display_name === 'string' && emp.display_name.length > 0,
+          `AC-7 (T-0608): employee ${emp.slug} must carry a non-empty display_name`,
+        ).toBe(true);
+      }
 
       // Verify summary counts
       expect(summary.created['tenant'], 'applyPack: tenant created = 1').toBe(1);

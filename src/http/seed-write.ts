@@ -971,8 +971,16 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
         `SELECT id, slug, department_id FROM choros.position WHERE tenant_id = $1 ORDER BY slug`,
         [tenantId],
       );
-      const employees = await client.query<{ id: string; slug: string }>(
-        `SELECT id, slug FROM choros.employee WHERE tenant_id = $1 ORDER BY slug`,
+      // T-0608 (пункт г): display_name is now selected alongside id/slug — this
+      // is additive (widens the row shape, never narrows it), so the existing
+      // reset-diff importer consumer is unaffected. Before this fix, callers of
+      // this endpoint (e.g. screen-rights.jsx's "Назначить роль" employee
+      // picker) had NO display name to render at all and fell back to the raw
+      // slug — for a KC-registered human, slug == the Keycloak user UUID, so
+      // the dropdown showed a bare UUID regardless of what the employee row's
+      // display_name column actually held.
+      const employees = await client.query<{ id: string; slug: string; display_name: string }>(
+        `SELECT id, slug, display_name FROM choros.employee WHERE tenant_id = $1 ORDER BY slug`,
         [tenantId],
       );
       const roles = await client.query<{ id: string; slug: string }>(

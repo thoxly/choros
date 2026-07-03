@@ -28,9 +28,76 @@ import {
   AssignRoleForm, GrantRightForm, RevokeAssignmentButton, RevokeGrantButton, PendingBadge,
 } from './ra-overview-forms.jsx';
 
-const grantCount = (r) => r.grants.length;
+// T-0608 (пункт д, живой факт приёмки): the rail showed grantCount() (число
+// ГРАНТОВ роли) in the position a user reads as "сколько держателей" — «4» у
+// Конфигуратора (4 гранта, 2 держателя) и «0» у Снабженца (0 грантов — грант
+// живёт на роли отдельно от holder-состава — при 3 держателях). Renamed +
+// re-pointed at the HONEST count of DISTINCT PEOPLE holding the role (see
+// holderCount / dedupAssignments split below), not grant rows.
+//
+// holderCount answers "сколько ЧЕЛОВЕК держит роль" → distinct employee_id
+// (a person with two differently-scoped assignments is ONE person). This is a
+// DIFFERENT question from "сколько НАЗНАЧЕНИЙ" and correctly dedups by person.
+export const holderCount = (r) =>
+  new Set((r.assignments || []).map((a) => a.employee_id)).size;
+
+// T-0608 (F-1 fix, review+ux blocking): the holders SECTION and Revoke key on
+// the FULL assignment identity, NOT employee_id alone.
+//
+// migrations/020_role_assignment.sql:29-32 documents NO UNIQUE(employee_id,
+// role_id): the same (employee, role) LEGITIMATELY coexists across different
+// org_scope/window ("approver in fin until Q3, in cs from Q4"). Those are
+// SEPARATE grants — collapsing them by employee_id would (1) hide the scopes
+// and (2) make one "Отозвать" click revoke MORE than the admin intends. Only
+// a TRUE duplicate — identical employee + org_scope + validity window — is
+// collapsed (and revoked together, correctly). Different scopes render as
+// SEPARATE holder rows, each with its OWN Revoke targeting only its ids.
+function assignmentIdentityKey(a) {
+  // Stable, order-independent serialization of org_scope + window. JSON.stringify
+  // of the raw scope object is used verbatim — two assignments are "the same
+  // scope" only when the server returned byte-identical scope jsonb (it does not
+  // reorder object keys within a single response, so equal scopes serialize
+  // equally); a false NEGATIVE (treating equal-but-reordered scopes as distinct)
+  // only shows an extra row — it NEVER over-collapses, so it never causes the
+  // blocking over-revoke. window: valid_from/valid_until (null = open-ended).
+  let scopeStr;
+  try {
+    scopeStr = JSON.stringify(a.org_scope ?? null);
+  } catch {
+    scopeStr = String(a.org_scope);
+  }
+  return `${a.employee_id}::${scopeStr}::${a.valid_from ?? ''}::${a.valid_until ?? ''}`;
+}
+
+// Collapse ONLY true duplicates (identical employee + scope + window); keep
+// differently-scoped assignments of the same person as separate entries. Each
+// returned entry carries its own `ids` (the assignment ids of the collapsed
+// TRUE duplicates only) so Revoke clears exactly that scope, never others.
+export function dedupAssignments(assignments) {
+  const byIdentity = new Map();
+  for (const a of (assignments || [])) {
+    const key = assignmentIdentityKey(a);
+    const existing = byIdentity.get(key);
+    if (existing) {
+      existing.ids.push(a.id);
+    } else {
+      byIdentity.set(key, { ...a, ids: [a.id] });
+    }
+  }
+  return [...byIdentity.values()];
+}
 
 function RoleRailItem({ role, active, onSelect }) {
+  // Rail badges = distinct PEOPLE (one glyph per person, even with multiple
+  // scopes) — the rail is a compact "who holds this" glance, not the authoritative
+  // per-scope list (that lives in the «Кто что может» section below).
+  const seen = new Set();
+  const people = [];
+  for (const a of (role.assignments || [])) {
+    if (seen.has(a.employee_id)) continue;
+    seen.add(a.employee_id);
+    people.push(a);
+  }
   return (
     <button className="chs-rolerow" aria-current={active ? "true" : undefined} onClick={() => onSelect(role.id)}>
       <span className="chs-rolerow__main">
@@ -38,13 +105,13 @@ function RoleRailItem({ role, active, onSelect }) {
         <span className="chs-rolerow__scope">{role.slug}</span>
       </span>
       <span className="chs-rolerow__holders">
-        {role.assignments.slice(0, 3).map((a) => (
-          <span key={a.id} className={`chs-rolerow__h chs-rolerow__h--${a.employee_kind}`} title={a.employee_display || a.employee_slug}>
+        {people.slice(0, 3).map((a) => (
+          <span key={a.employee_id} className={`chs-rolerow__h chs-rolerow__h--${a.employee_kind}`} title={a.employee_display || a.employee_slug}>
             <ExecutorBadge type={a.employee_kind} name="" bare showLabel={false} />
           </span>
         ))}
       </span>
-      <span className="chs-rolerow__count">{grantCount(role)}</span>
+      <span className="chs-rolerow__count">{holderCount(role)}</span>
     </button>
   );
 }
@@ -153,12 +220,49 @@ function ScopeSummary({ scope, dictionaries }) {
   return <span>Особый охват</span>;
 }
 
+// T-0608 (F-1 fix): plain-STRING mirror of ScopeSummary — for the ConfirmDialog
+// message (a string prop, not JSX). So «Отозвать» names the exact scope the
+// admin is revoking, never a bare name that hides which of several scopes goes.
+// Kept in lockstep with ScopeSummary's branches; degrades to «особый охват»,
+// never to raw JSON.
+export function scopeText(scope, dictionaries) {
+  if (!scope || typeof scope !== 'object') return 'весь тенант';
+  if (scope.kind === 'node') {
+    if (scope.nodeId === RESOURCE_ROOT_SENTINEL) return 'весь тенант';
+    const node = (dictionaries?.orgTree || []).find((n) => n.id === scope.nodeId);
+    return node ? `узел: ${node.label}` : 'узел оргструктуры';
+  }
+  if (scope.kind === 'tags') {
+    const tags = scope.tags || [];
+    if (tags.length === 0) return 'весь тенант';
+    const labelById = Object.fromEntries((dictionaries?.scopeTags || []).map((t) => [t.id, t.label]));
+    return tags.map((t) => labelById[t] || t).join(', ');
+  }
+  if (scope.kind === 'interval') return `диапазон ${scope.axis} ${scope.lo}–${scope.hi}`;
+  if (scope.kind === 'set') {
+    const members = scope.members || [];
+    if (members.length === 0) return 'весь тенант';
+    return members.map((m) => scopeText(m, dictionaries)).join('; ');
+  }
+  return 'особый охват';
+}
+
 // ---------------------------------------------------------------------------
 // "Кто что может" — секция роль-детали (FR-6). Показывает ДЕЙСТВУЮЩИЕ
 // assignments/grants (никогда pending — FR-5/AC-8) + отдельный pending-блок.
 // ---------------------------------------------------------------------------
 
 function WhoCanDoWhat({ role, canManage, dictionaries, onChanged }) {
+  // T-0608 (F-1 fix): ONE holder row per DISTINCT ASSIGNMENT (employee + scope
+  // + window), NOT per employee. dedupAssignments collapses only TRUE duplicates
+  // (identical scope+window) — a person назначенный на роль с ДВУМЯ разными
+  // охватами (отдел А / отдел Б) shows as TWO rows, each with its OWN scope
+  // label and its OWN «Отозвать» (targeting only that scope's ids). Revoking
+  // отдел-А never silently touches отдел-Б. Rows carry .ids = the ids of the
+  // TRUE duplicates only (identical scope), so «Отозвать» clears exactly one
+  // scope and, if the same scope was accidentally assigned twice, both those
+  // identical rows together (correct).
+  const holderAssignments = dedupAssignments(role.assignments);
   return (
     <section className="chs-section2">
       <div className="chs-section2__head">
@@ -167,21 +271,29 @@ function WhoCanDoWhat({ role, canManage, dictionaries, onChanged }) {
       </div>
 
       <div className="chs-ov-holders">
-        {role.assignments.length === 0 ? (
+        {holderAssignments.length === 0 ? (
           <span className="chs-derivedcol__empty">Роль пока никому не назначена</span>
         ) : (
-          role.assignments.map((a) => (
-            <div className="chs-ov-holder" key={a.id}>
-              <ExecutorBadge type={a.employee_kind} name={a.employee_display || a.employee_slug || a.employee_id} />
-              {canManage && (
-                <RevokeAssignmentButton
-                  id={a.id}
-                  subjectLabel={a.employee_display || a.employee_slug || ''}
-                  onDone={onChanged}
-                />
-              )}
-            </div>
-          ))
+          holderAssignments.map((a) => {
+            const name = a.employee_display || a.employee_slug || a.employee_id;
+            const scopeLabel = scopeText(a.org_scope, dictionaries);
+            return (
+              <div className="chs-ov-holder" key={assignmentIdentityKey(a)}>
+                <ExecutorBadge type={a.employee_kind} name={name} />
+                {/* T-0608 (F-1): show the assignment's OWN scope next to the
+                    holder so different scopes are visibly distinct, not hidden. */}
+                <span className="chs-ov-holder__scope"><ScopeSummary scope={a.org_scope} dictionaries={dictionaries} /></span>
+                {canManage && (
+                  <RevokeAssignmentButton
+                    ids={a.ids}
+                    subjectLabel={a.employee_display || a.employee_slug || ''}
+                    scopeLabel={scopeLabel}
+                    onDone={onChanged}
+                  />
+                )}
+              </div>
+            );
+          })
         )}
       </div>
 

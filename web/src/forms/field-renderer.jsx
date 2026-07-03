@@ -78,8 +78,14 @@ export { resolveFieldContract, resolveFieldMode };
 /**
  * Fetch human employees from GET /api/org and flatten to [{id, name}].
  * Returns a promise that resolves to the employee list or throws on error.
+ *
+ * Exported (T-0608, пункт г): screen-record-detail.jsx reuses this exact
+ * fetch to resolve a record's `created_by` (an employee SLUG — for a
+ * Keycloak-registered human, slug === the KC user UUID) into a display name,
+ * instead of rendering the raw slug/UUID. One source of truth for "slug → name
+ * via /api/org" rather than a second parallel fetcher.
  */
-async function fetchEmployees() {
+export async function fetchEmployees() {
   // Use the same auth headers pattern as the rest of the SPA: check for
   // the authHeaders helper; fall back to empty headers (dev-no-db path).
   // We can't import devHeaders/authHeaders from screen-app-records without

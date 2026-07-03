@@ -44,7 +44,12 @@ describe('screen-inbox — alert() replaced by pushToast (AC-1/AC-2)', () => {
   it('approveTask surfaces its catch via pushToast with tone error', () => {
     const idx = src.indexOf('const approveTask');
     expect(idx).toBeGreaterThan(-1);
-    const approveBody = src.slice(idx, idx + 1500);
+    // T-0608: slice to the next stable boundary (the comment right after
+    // approveTask's closing brace) rather than a fixed char count — a fixed
+    // window is brittle against comment growth inside the function body.
+    const endIdx = src.indexOf('// Re-fetch whenever the tab/filter/sort changes', idx);
+    expect(endIdx).toBeGreaterThan(idx);
+    const approveBody = src.slice(idx, endIdx);
     expect(approveBody).toMatch(/pushToast\(\{\s*tone:\s*'error'/);
     expect(approveBody).not.toMatch(/\balert\(/);
   });
@@ -57,7 +62,11 @@ describe('screen-inbox — alert() replaced by pushToast (AC-1/AC-2)', () => {
     expect(src).toContain('ALREADY_CLAIMED: "Задача уже взята другим пользователем"');
   });
   it('preserves the NOT_ELIGIBLE fallback used elsewhere on the screen', () => {
-    expect(src).toContain("'Нет права на выполнение этого шага'");
+    // T-0608 (пункт в): the inline NOT_ELIGIBLE ternary in handleComplete was
+    // consolidated into the ACTION_ERROR_MESSAGE map (double-quoted, matching
+    // the neighboring CLAIM_ERROR_MESSAGE style) — the WORDING is unchanged,
+    // only its quoting/location moved as part of that refactor.
+    expect(src).toContain('Нет права на выполнение этого шага');
   });
 });
 
@@ -82,6 +91,65 @@ describe('screen-inbox — T-0605 claim errors are human-readable, never silent'
   it('claimErrorMessage falls back to a human sentence (still surfaces, not silent)', () => {
     // Even an unmapped code yields a sentence, never an empty/silent toast.
     expect(src).toContain('Не удалось взять задачу:');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0608 (пункт в) — живой факт приёмки: «Ошибка: NOT_ELIGIBLE» тостом на
+// approve/complete (T-0605 only fixed CLAIM errors — the approve/complete
+// action route's OWN codes, e.g. NOT_ELIGIBLE/NOT_FOUND/VALIDATION, still hit
+// a bare `Ошибка: ${code}` fallback via approveTask, and handleComplete had
+// only a one-off NOT_ELIGIBLE special case). Extends the SAME
+// human-readable-always principle T-0605 established for claim errors.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0608 пункт в: approve/complete errors are human-readable, never a raw code', () => {
+  it('defines an ACTION_ERROR_MESSAGE map with human sentences for NOT_ELIGIBLE/NOT_FOUND/VALIDATION/FORM_VALIDATION', () => {
+    expect(src).toContain('ACTION_ERROR_MESSAGE');
+    expect(src).toContain('Нет права на выполнение этого шага');
+    expect(src).toContain('Форма заполнена некорректно');
+  });
+  it('actionErrorMessage checks ENGINE_DRIVE_ERROR_MESSAGE first, then ACTION_ERROR_MESSAGE, then a still-human fallback (never a bare code alone)', () => {
+    const idx = src.indexOf('function actionErrorMessage');
+    expect(idx).toBeGreaterThan(-1);
+    const body = src.slice(idx, idx + 400);
+    expect(body).toContain('ENGINE_DRIVE_ERROR_MESSAGE[code]');
+    expect(body).toContain('ACTION_ERROR_MESSAGE[code]');
+    expect(body).not.toMatch(/`Ошибка: \$\{code\}`$/m);
+  });
+  it('handleComplete uses actionErrorMessage (the one-off NOT_ELIGIBLE ternary is gone)', () => {
+    const idx = src.indexOf('const handleComplete');
+    const endIdx = src.indexOf('if (!taskId) return null;', idx);
+    const body = src.slice(idx, endIdx);
+    expect(body).toContain('actionErrorMessage(code)');
+    expect(body).not.toMatch(/code === 'NOT_ELIGIBLE' \?/);
+  });
+  it('approveTask (table-row quick-approve) uses actionErrorMessage — no raw `Ошибка: ${code}` fallback remains', () => {
+    const idx = src.indexOf('const approveTask');
+    const endIdx = src.indexOf('// Re-fetch whenever the tab/filter/sort changes', idx);
+    const body = src.slice(idx, endIdx);
+    expect(body).toContain('actionErrorMessage(code)');
+    // No CODE (not just no mention in a comment) throws the bare fallback.
+    expect(body).not.toMatch(/throw new Error\(`Ошибка: \$\{code\}`\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0608 (пункт е) — живой факт приёмки: a mid-session-expired access token
+// made every inbox fetch 401 with a dead "Повторить" (resends the same dead
+// token). Every fetch on this screen now goes through fetchWithAuthRetry
+// (refresh-once + retry-once + logout-redirect on failure — dev-auth.js).
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0608 пункт е: 401 self-heal via fetchWithAuthRetry', () => {
+  it('imports fetchWithAuthRetry from dev-auth.js', () => {
+    expect(src).toContain("import { fetchWithAuthRetry } from '../app-shell/dev-auth.js'");
+  });
+  it('uses fetchWithAuthRetry for every network call — no raw fetch( calls remain', () => {
+    // Every fetch on the screen must go through the retry-aware wrapper —
+    // a bare fetch(...) call would bypass the 401 self-heal entirely.
+    const rawFetchCalls = src.match(/[^.]\bfetch\(/g) || [];
+    expect(rawFetchCalls.length).toBe(0);
+    const wrappedCalls = src.match(/fetchWithAuthRetry\(/g) || [];
+    expect(wrappedCalls.length).toBeGreaterThanOrEqual(6); // binding, detail, complete, load, loadMore, claim, approve
   });
 });
 

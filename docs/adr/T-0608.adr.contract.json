@@ -1,0 +1,77 @@
+{
+  "task_id": "T-0608",
+  "status": "ready",
+  "decision": "Шесть точечных фиксов, единая для (а)/(б) точка изменения: listInstanceInboxTasks (src/http/process-projection.ts) прячет base process.started-строку ТАКЖЕ когда для её инстанса уже существует хотя бы одна process.next_task-строка (approved или нет) — это доказывает (по конструкции всех 4 эмит-сайтов appendNextTaskEvent: reconcileInstanceTimers/reconcileInstanceEngineDrive/deliverMessageEnvelope/surfaceMessageCatchWaits, каждый пишет next_task ТОЛЬКО после живого engine.getActiveUserTasks-подтверждения нового активного таска), что движок уже продвинулся мимо base-шага независимо от того, писал ли НАШ /action-эндпоинт task.approved для этой строки. (а) отдельного кода не требует — reconcileInboxEngineDriveOnRead (T-0522, существующий) уже самолечит 'закрыт в движке, наш approve никогда не писался' на следующем чтении; закреплено регресс-тестом. (в) ACTION_ERROR_MESSAGE map + actionErrorMessage(code) в screen-inbox.jsx — тот же принцип, что T-0605 установил для claim, теперь и для approve/complete (POST /api/inbox/:id/action). (г) display-фолбэк без миграции данных: formatPersonName (web/src/lib/format.js) — единый честный фолбэк; GET /api/org/tenant-state теперь селектит display_name (было id,slug only); screen-record-detail.jsx резолвит created_by через переиспользованный fetchEmployees (GET /api/org, экспортирован из field-renderer.jsx). (д, с F-1 fix review+ux blocking) holderCount = число различных ЛЮДЕЙ (distinct employee_id — человек с двумя охватами это один человек, честный ответ на 'сколько человек'). Секция держателей и Revoke — по КОМПОЗИТНОМУ ключу (employee_id + JSON(org_scope) + valid_from/valid_until): migrations/020_role_assignment.sql:29-32 (NO UNIQUE(employee_id,role_id)) — назначения одной (employee,role) пары с разным охватом/окном ЛЕГИТИМНО различны, НЕ дубли. dedupAssignments схлопывает ТОЛЬКО истинные дубли (идентичный охват+окно); различные охваты — отдельные holder-строки со scope-лейблом (ScopeSummary) и раздельным Отозвать (row.ids = только этого охвата, revoke-А не трогает-Б). RevokeAssignmentButton получил scopeLabel — ConfirmDialog называет охват и сообщает 'другие охваты этого человека сохранятся'. rights-overview.ts аддитивно surface valid_from/valid_until в OverviewAssignment (полный композитный ключ на клиенте), в остальном честно возвращает ВСЕ ряды. Ключ строго консервативен — false negative лишь показывает лишнюю строку, никогда не over-collapse ⇒ никогда не over-revoke. (е) fetchWithAuthRetry (dev-auth.js) — opt-in fetch-обёртка: 401 в keycloak mode → один tryRefresh → один ретрай → на неудаче login()-редирект; dev mode — passthrough; применена только к screen-inbox.jsx (живой факт наблюдался там), не глобальный monkey-patch.",
+  "rejected_alternatives": [
+    {
+      "option": "(б) Гейтить эскалацию по совпадению роли строже внутри reconcileInstanceTimers вместо единой точки в listInstanceInboxTasks.",
+      "why_not": "Причина дубля — не в эмите next_task (корректен: эскалация должна идти на другую роль), а в том, что base-строка не знает о существовании альтернативы. Фикс в источнике эмита не покрыл бы остальные 3 эмит-сайта (engine-drive/message-delivery/message-catch) — пришлось бы патчить 4 места по отдельности вместо одного условия на чтении."
+    },
+    {
+      "option": "(а) Явный TTL/cron, скрывающий pool-задачи старше N часов.",
+      "why_not": "Угадывает симптом (возраст) вместо причины (движок закрыл, мы не узнали); скрыл бы легитимную pool-задачу, которая просто долго висит (SLA просрочен, но задача жива и требует внимания)."
+    },
+    {
+      "option": "(г) Миграция данных: UPDATE choros.employee SET display_name=... для существующих пустых рядов.",
+      "why_not": "Генезис (register.ts:298-303) УЖЕ заполняет display_name=email для новых тенантов; все остальные write-пути валидируют display_name как required. Наблюдаемая пустота — легаси/ручная SQL-вставка неизвестного происхождения; backfill угадывал бы имя без надёжного источника — риск неверной атрибуции перевешивает косметическую выгоду для P2."
+    },
+    {
+      "option": "(д) Write-side идемпотентность на POST /api/role-assignments (409 при повторном назначении).",
+      "why_not": "Тянет глубже рамок P2-гигиены; затрагивает T-0044 дуал-контроль-флоу. Семантика 'то же самое' теперь ОПРЕДЕЛЕНА (композитный ключ employee+role+scope+window), так что follow-up имеет чёткий контракт. Read-side дедуп ИСТИННЫХ дублей + раздельный per-scope отзыв — честный минимум."
+    },
+    {
+      "option": "(д, F-1) Дедуп держателей по employee_id одному (первая версия T-0608).",
+      "why_not": "REFUTED review+ux как blocking: нарушает инвариант migrations/020:29-32 (разные охваты одного человека — легитимно разные назначения, не дубли), схлопывает охваты в один бейдж (потеря инфо) и отзывает ВСЕ охваты одним кликом (отзыв лишнего гранта). Композитный ключ (employee+scope+window) — единственно корректная модель."
+    },
+    {
+      "option": "(е) Глобальный monkey-patch window.fetch вместо opt-in обёртки.",
+      "why_not": "Слишком широкий blast radius для точечного P2-фикса — затронул бы непредвиденные fetch-вызовы по всему приложению. Opt-in fetchWithAuthRetry безопаснее, тестируемее, соответствует духу 'минимальный скоуп' задачи."
+    }
+  ],
+  "object_model": [],
+  "contracts": [
+    "src/http/process-projection.ts::listInstanceInboxTasks — третье условие прятать base-строку: instancesWithNextTask.has(inst) (вычислено из nextTaskRows перед основным циклом).",
+    "src/http/seed-write.ts::GET /api/org/tenant-state — SELECT employee расширен на display_name (аддитивно, обратно совместимо).",
+    "src/http/rights-overview.ts::OverviewAssignment — surface valid_from/valid_until (epoch-ms, null=open) в wire (F-1: полный композитный ключ дедупа на клиенте); аддитивно, read DAO в остальном без изменений.",
+    "web/src/lib/format.js::formatPersonName(name, secondaryId) — новая чистая функция, экспортирована.",
+    "web/src/forms/field-renderer.jsx::fetchEmployees — экспортирована (была private), переиспользуется screen-record-detail.jsx.",
+    "web/src/screens/screen-record-detail.jsx — authorNames map (fetchEmployees on mount) + formatPersonName(authorNames.get(created_by)) || created_by рендер.",
+    "web/src/screens/rights/screen-rights.jsx (F-1)::holderCount (distinct employee_id), dedupAssignments (композитный ключ employee_id+JSON(org_scope)+window), scopeText — экспортированы; WhoCanDoWhat рендерит per-scope holder-строки со ScopeSummary-лейблом; RoleRailItem — distinct-people бейджи; holderCount заменяет grantCount в rail-счётчике.",
+    "web/src/screens/rights/ra-overview-forms.jsx (F-1)::RevokeAssignmentButton — принимает ids (id-ы одного охвата) + scopeLabel, ConfirmDialog называет охват и сообщает 'другие охваты сохранятся'; дропдаун использует formatPersonName(e.display_name) || e.slug.",
+    "web/src/app-shell/app.css::.chs-ov-holder__scope — вторичный scope-лейбл держателя (токены темы).",
+    "web/src/app-shell/dev-auth.js::fetchWithAuthRetry(url, init) — новая функция, использует authHeaders() + keycloak-auth.js's tryRefresh/login.",
+    "web/src/screens/screen-inbox.jsx::ACTION_ERROR_MESSAGE, actionErrorMessage(code) — новый маппинг, используется approveTask + TaskDetailPanel.handleComplete; все fetch-вызовы экрана переведены на fetchWithAuthRetry.",
+    "docs/handoff/T-0608.pr-handoff.json — BUILD-фаза."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "(б) AC-1: неапрувнутый base + существующий next_task → только next_task-ряд. (а) AC-3: base никогда не approved нашим путём + isInstanceEnded=true → instance.ended эмитится, base пропадает.", "ci_check": "npx vitest run src/__tests__/inbox-engine-drive.test.ts (root, 2 новых теста «T-0608 а»/«T-0608 б»)"},
+    {"id": "FF-2", "rule": "(б) AC-2: AND-split/6M regress — существующие тесты 9a/9b/9c остаются зелёными без изменений.", "ci_check": "npx vitest run src/__tests__/inbox-engine-drive.test.ts (48 тестов, было 46)"},
+    {"id": "FF-3", "rule": "(в) AC-4: actionErrorMessage покрывает NOT_ELIGIBLE/NOT_FOUND/VALIDATION/FORM_VALIDATION; ни approveTask, ни handleComplete не throw'ят сырой `Ошибка: ${code}`.", "ci_check": "cd web && npx vitest run src/screens/screen-inbox.test.jsx"},
+    {"id": "FF-4", "rule": "(г) AC-5/AC-6/AC-7/AC-8: display_name в /api/org/tenant-state; formatPersonName фолбэк-логика; created_by резолвится с graceful degrade.", "ci_check": "npm run fitness:db (ci/checks/db/seed-pack.test.ts) + cd web && npx vitest run (src/lib/format.test.js, src/screens/screen-record-detail.test.jsx, src/screens/rights/screen-rights.test.jsx)"},
+    {"id": "FF-5", "rule": "(д, F-1) AC-9: holderCount = distinct employee_id (не grants.length). AC-10: dedupAssignments по композитному ключу — разный org_scope → 2 строки, истинный дубль → 1 строка с обоими id, разное окно → раздельно. AC-11: revoke-А не трогает-Б (row.ids per-scope), ConfirmDialog называет охват; GET /api/rights/tenant-state отдаёт org_scope+window per-assignment.", "ci_check": "cd web && npx vitest run src/screens/rights/screen-rights.test.jsx + npm run fitness:db (ci/checks/db/rights-overview.db.test.ts)"},
+    {"id": "FF-6", "rule": "(е) AC-12/AC-13/AC-14: fetchWithAuthRetry refresh-once/retry-once/login-redirect в keycloak mode, passthrough в dev mode; screen-inbox.jsx без сырых fetch().", "ci_check": "cd web && npx vitest run src/app-shell/fetch-with-auth-retry.test.js src/screens/screen-inbox.test.jsx"},
+    {"id": "FF-7", "rule": "AC-15: без кейс-литералов.", "ci_check": "bash ci/checks/anti-case-lock.sh && bash ci/checks/anti-case-lock.sh --self-test"},
+    {"id": "FF-8", "rule": "AC-16 (часть): полный root+web unit/build.", "ci_check": "npm test && npm run build && cd web && npx vitest run && npm run build"},
+    {"id": "FF-9", "rule": "AC-16 (часть): db fitness + tier-isolation.", "ci_check": "DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npm run fitness:db && bash ci/checks/tier-isolation.sh"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-2"},
+    {"ac": "AC-3", "covered_by": "FF-1"},
+    {"ac": "AC-4", "covered_by": "FF-3"},
+    {"ac": "AC-5", "covered_by": "FF-4"},
+    {"ac": "AC-6", "covered_by": "FF-4"},
+    {"ac": "AC-7", "covered_by": "FF-4"},
+    {"ac": "AC-8", "covered_by": "FF-4"},
+    {"ac": "AC-9", "covered_by": "FF-5"},
+    {"ac": "AC-10", "covered_by": "FF-5"},
+    {"ac": "AC-11", "covered_by": "FF-5"},
+    {"ac": "AC-12", "covered_by": "FF-6"},
+    {"ac": "AC-13", "covered_by": "FF-6"},
+    {"ac": "AC-14", "covered_by": "FF-6"},
+    {"ac": "AC-15", "covered_by": "FF-7"},
+    {"ac": "AC-16", "covered_by": "FF-8"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0608-inbox-identity-hygiene.md",
+  "escalation": "Нет. Шесть точечных read/render-слой фиксов; ни один не вводит новый authority-путь, не расширяет права, не трогает секреты/деньги/необратимые операции. Миграции БД нет. Follow-ups (write-side идемпотентность назначений, fetchWithAuthRetry для остальных экранов, employee display_name backfill/edit-UI) честно зафиксированы в ADR §5, не скрыты."
+}
