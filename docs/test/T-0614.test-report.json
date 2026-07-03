@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0614",
+  "verdict": "pass",
+  "_verdict_history": "pass @e2cb4c6. Независимый судья (D-007) перегнал build/test/fitness:db/именованные-гейты на дельте 6fe5d7b..e2cb4c6, поставил 3 мутпробы (name-литерал / progress-{2,3} / снятие tenant-scope), все откачены. Ноль падений. Одна coverage-gap-находка (nit, не blocking) — снятие WHERE tenant_id в resolveDefinitionNames не краснит ни один тест (рантайм защищён RLS+WHERE, но тест-пин отсутствует).",
+  "deterministic": {
+    "total": 6112,
+    "passed": 6112,
+    "failed": 0,
+    "_note": "root vitest 4985 passed + fitness:db 1127 passed = 6112 passed; 10 skipped (не в total). Флейков в этом прогоне НЕ наблюдалось (doc-*/forms-from-schema прошли в общем прогоне; изоляции не потребовалось). Целевой файл processes-live-instances.test.ts: 18/18 passed (в т.ч. новые AC-1..AC-6)."
+  },
+  "_env": {
+    "delta": "6fe5d7b..e2cb4c6",
+    "base": "6fe5d7b (dev)",
+    "head": "e2cb4c6",
+    "branch": "task/T-0614-instance-name-detel",
+    "database_url": "postgres://choros_migrator:***@localhost:55432/choros",
+    "db_template": "choros_test_template_39b70d37",
+    "flowable_live": "не требуется (read-path GET /api/processes; движок не задействован)"
+  },
+  "verdict_reason": "Все AC покрыты живыми тестами (AC-1..AC-6 в processes-live-instances.test.ts + конструктивная проверка судьёй honesty-инвариантов progress/tenant-scope/determinizm). Кейс-литералы 'Канонический линейный ТЭЛ' / {2,3}|{3,3} / ['human','agent'] сняты и заменены honest-резолвом; мутпробы A/C краснят соответствующие AC. Ложно-полный прогресс НЕДОСТИЖИМ (для waiting concurrentSteps.length>=1 ⇒ total>done ⇒ fraction<1). Кросс-тенант утечка имени не достижима в рантайме (RLS+WHERE double-barrier, детерминированный latest-version через UNIQUE(tenant_id,process_key,version)). Blocking-условия брифа (кросс-тенант утечка ИЛИ ложно-полный прогресс) — ОБА НЕ материализуются. Единственная nit: отсутствует тест-пин на tenant-scope resolveDefinitionNames (F-1 в review) — follow-up, не блокер.",
+  "gates": {
+    "npm_run_build": {"result": "pass", "detail": "tsc && seed/tsconfig — exit 0"},
+    "npm_test_root": {"result": "pass", "detail": "258 files passed | 2 skipped (260); 4985 passed | 10 skipped; exit 0"},
+    "npm_run_fitness_db": {"result": "pass", "detail": "113 files passed (113); 1127 passed (1127); exit 0 на template 39b70d37. Без флейков в этом прогоне. ci/checks/db/process-projection.test.ts 6/6 green (T-0282 RLS-изоляция инстансов держится)."},
+    "anti_case_lock_sh": {"result": "pass", "detail": "exit 0; aggregate 19 (baseline 24 — эрозия, не рост); telLinear 3 (baseline 8 — консолидация 5 инлайн-литералов в DEFAULT_PROC_KEY); ни один литерал не регрессировал"},
+    "anti_case_lock_self_test": {"result": "pass", "detail": "exit 0; все детекторы функциональны (telLinear/e-larina/approvalRequired/quote-agnostic/rc>=2-fatal) — счётчик 19 достоверен"},
+    "detel_literal_baseline_sh": {"result": "pass", "detail": "exit 0; aggregate 5<7; role-approver 2/3, soglasovanie 2/3, tel-approval 1/1 — ни один не регрессировал"},
+    "display_plane_purity": {"result": "pass", "detail": "src/http/processes.ts не импортит pg/../db/*/message-correlation (grep пуст) — только тип InstanceProjection + listInstanceProjections из process-projection.ts (санкционированный pg-шов ADR §3). pg-логика вся в process-projection.ts."},
+    "contracts_validate": {"result": "pass", "detail": "schemas/validate.py::validate_file: T-0614.spec.contract.json vs spec.schema, T-0614.adr.contract.json vs adr.schema, T-0614.pr-handoff.json vs pr-handoff.schema — все VALID (0 ошибок)"}
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1 name из реального определения (два процесса → два разных имени, не единый литерал)", "test": "processes-live-instances.test.ts AC-1 + мутпроба A", "result": "pass", "_how": "proc-vendor-invoice≠proc-onboarding-demo, оба≠старый литерал; мутпроба A (вернуть литерал) краснит"},
+    {"ac": "AC-2 engine-only key → honest fallbackDefinitionName, не blank/500", "test": "processes-live-instances.test.ts AC-2", "result": "pass", "_how": "telLinear без modeler-row → 'Канонический линейный ТЭЛ', 200; REUSE process-catalog-view.fallbackDefinitionName"},
+    {"ac": "AC-3 progress = реальный step-count (не hardcoded {2,3})", "test": "processes-live-instances.test.ts AC-3 + мутпроба C", "result": "pass", "_how": "waiting fresh → {0,1}; мутпроба C (вернуть {2,3}) краснит"},
+    {"ac": "AC-4 approved next_task поднимает stepsDone (прогресс растёт)", "test": "processes-live-instances.test.ts AC-4", "result": "pass", "_how": "base+approved-next=2, +pending=total 3, status waiting; деривировано из fold"},
+    {"ac": "AC-5 execs из реального employee.kind (agent → ['agent'])", "test": "processes-live-instances.test.ts AC-5", "result": "pass", "_how": "kind=agent → ['agent'] через findEmployeeById"},
+    {"ac": "AC-6 стартер не найден → execs degrade ['human'], не 500", "test": "processes-live-instances.test.ts AC-6", "result": "pass", "_how": "employeeRows=[] → ['human'], 200 (honest-degrade)"},
+    {"ac": "AC-honesty progress waiting НИКОГДА не 100%", "test": "конструктивная проверка судьёй (process-projection.ts:1030-1047 + web progressFraction:76)", "result": "pass", "_how": "!done ⇒ concurrentSteps.length>=1 (defensive push :1037) ⇒ total>done ⇒ fraction<1 всегда. Ложно-полный прогресс недостижим."},
+    {"ac": "AC-tenant-scope definitionName не утечёт из чужого тенанта", "test": "рантайм-анализ судьёй (withTenant+WHERE) — ТЕСТ-ПИН ОТСУТСТВУЕТ (F-1 nit)", "result": "pass", "_how": "РАНТАЙМ безопасен: RLS (FORCE 074) + WHERE tenant_id=$1 double-barrier; латест-версия детерминирована UNIQUE(tenant_id,process_key,version). НО мутпроба B показала: снятие WHERE не краснит ни unit ни db — coverage-gap, follow-up в review F-1."}
+  ],
+  "failures": [],
+  "mutation_probes": [
+    {"probe": "A / name-литерал", "mutation": "processes.ts: name: p.definitionName → name: \"Канонический линейный ТЭЛ\"", "expected": "AC-1 red", "observed": "AC-1 RED (два имени совпали / ≠ вернулся false); 17/18 green", "reverted": true},
+    {"probe": "C / hardcoded progress", "mutation": "processes.ts: {done:p.stepsDone,total:p.stepsKnownTotal} → status==='done'?{3,3}:{2,3}", "expected": "AC-3 red", "observed": "AC-3 RED ({2,3}≠{0,1}); AC-4 остался green (его honest-число совпадает с 2/3 — AC-3 waiting есть истинный пин)", "reverted": true},
+    {"probe": "B / снятие tenant-scope", "mutation": "process-projection.ts resolveDefinitionNames: убрать 'WHERE tenant_id=$1 AND'", "expected": "тест на изоляцию red", "observed": "НИ ОДИН тест не покраснел — unit 18/18 green (фейк-пул игнорит WHERE), db process-projection.test.ts 6/6 green (T-0282 не сеет process_definition-row). COVERAGE-GAP подтверждён (review F-1 nit). Рантайм остаётся защищён RLS.", "reverted": true}
+  ],
+  "flakes_isolated": {
+    "note": "В этом прогоне флейков не наблюдалось. Бриф предупреждал о doc-*/forms-from-schema под параллельной нагрузкой; они прошли в общем fitness:db-прогоне (1127/1127), изоляция не потребовалась."
+  }
+}
