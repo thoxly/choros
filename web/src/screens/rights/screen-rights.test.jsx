@@ -217,3 +217,28 @@ describe('T-0597 — actionable hint on empty employees list (AC-4/AC-5)', () =>
     expect(before).not.toMatch(/<div\b[^>]*onClick/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0609 — honest resources: GrantRightForm's «Ресурс» selector must be able to
+// carry REAL tenant applications/registries, not only the demo dictionary
+// (live acceptance finding, 2026-07-03: only DICT_RESOURCES was ever reachable).
+// ---------------------------------------------------------------------------
+describe('T-0609 — real resources merged into the grant form dictionary', () => {
+  it('screen-rights.jsx fetches the new GET /api/rights/resources endpoint', () => {
+    expect(screenSrc).toContain('/api/rights/resources');
+  });
+  it('screen-rights.jsx still fetches /api/rights/dictionaries (demo dictionary NOT removed)', () => {
+    expect(screenSrc).toContain('/api/rights/dictionaries');
+  });
+  it('real resources are merged into dictionaries.resources BEFORE the demo entries', () => {
+    expect(screenSrc).toMatch(/\[\.\.\.realResources,\s*\.\.\.\(dicts\?\.resources\s*\?\?\s*\[\]\)\]/);
+  });
+  it('fetchRealResources degrades to [] on any failure (best-effort, never blocks the form)', () => {
+    const idx = screenSrc.indexOf('async function fetchRealResources');
+    const body = screenSrc.slice(idx, idx + 400);
+    expect(body).toMatch(/catch\s*\{\s*return \[\];\s*\}/);
+  });
+  it('GrantRightForm resource <Select> is unchanged structurally (still maps {uri,name})', () => {
+    expect(formsSrc).toMatch(/resources\.map\(\(r\)\s*=>\s*\(\{\s*value:\s*r\.uri,\s*label:\s*r\.name\s*\}\)\)/);
+  });
+});

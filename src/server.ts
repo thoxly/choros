@@ -30,6 +30,7 @@ import { registerProcessCatalogRoutes } from "./http/process-catalog.js";
 import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
 import { registerApplicationRoutes } from "./http/applications.js";
+import { registerRightsResourcesRoute } from "./http/rights-resources.js";
 import { registerSolutionPublishRoutes } from "./http/solution-publish.js";
 import { registerSectionRoutes } from "./http/sections.js";
 import { registerRecordRoutes } from "./http/records.js";
@@ -740,6 +741,21 @@ function buildRouter(
   // Siblings T-0263 (registry_def) and T-0264 (record) add their own blocks below.
   if (grantsPool) {
     registerApplicationRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0609: GET /api/rights/resources — the tenant's REAL application/registry
+  // dictionary for the «Дать роли право» grant form's resource selector (live
+  // acceptance finding: only the demo DICT_RESOURCES seed was reachable there).
+  // Additive read-only endpoint; does NOT replace or touch
+  // registerDictionariesRoute (grants.ts, byte-frozen — ci/checks/
+  // rights-ui-frozen-write.sh). Absent when no DB (honest no-DB degrade, mirrors
+  // registerApplicationRoutes above).
+  if (grantsPool) {
+    registerRightsResourcesRoute(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),

@@ -221,6 +221,58 @@ export type GetMessageCatchWaitsResult =
   | { ok: false; code: FlowableErrorCode };
 
 /**
+ * T-0609: a single process-instance variable from the engine's historic
+ * variable store (survives both running AND completed instances — unlike the
+ * runtime-only variable views used elsewhere in this client).
+ */
+export interface HistoricVariable {
+  readonly name: string;
+  readonly value: unknown;
+}
+
+/**
+ * T-0609: result of getHistoricVariableInstances — the full variable set of a
+ * process instance (running or completed), read from Flowable's HISTORY
+ * servlet (which retains variables after the instance ends, unlike
+ * /runtime/*). `{ ok: false }` on engine error so the read-only detail page
+ * can honest-degrade (empty variables list) rather than fail the whole
+ * instance-detail response.
+ */
+export type GetHistoricVariablesResult =
+  | { ok: true; variables: HistoricVariable[] }
+  | { ok: false; code: FlowableErrorCode };
+
+/**
+ * T-0609: a single completed-or-in-progress BPMN activity (startEvent /
+ * userTask / gateway / endEvent / ...) from the engine's historic activity
+ * log — the ONLY engine-native source of "which branch did this instance
+ * take, and when" (this is what previously required raw SQL against the
+ * Flowable tables during live acceptance diagnosis of a gateway branch).
+ * `startTime`/`endTime` are ISO-8601 strings as returned by Flowable;
+ * `endTime` is null for the activity the token is currently sitting on.
+ * `assignee` is the user/agent who completed a userTask, null otherwise.
+ */
+export interface HistoricActivity {
+  readonly activityId: string;
+  readonly activityName: string;
+  readonly activityType: string;
+  readonly startTime: string | null;
+  readonly endTime: string | null;
+  readonly assignee: string | null;
+}
+
+/**
+ * T-0609: result of getHistoricActivityInstances — the ordered (by startTime)
+ * list of BPMN activities this instance has passed through or is currently
+ * on. `{ ok: false }` on engine error so the caller can honest-degrade
+ * (historyAvailable: false) rather than fail the whole instance-detail
+ * response.
+ */
+export type GetHistoricActivitiesResult =
+  | { ok: true; activities: HistoricActivity[] }
+  | { ok: false; code: FlowableErrorCode };
+
+/**
  * T-0443: result of isInstanceEnded — whether the given process instance has
  * ended (all paths reached endEvent). Returns { ok: true, ended: true } when
  * the instance is gone from runtime (404 on runtime endpoint) or its history
@@ -338,6 +390,39 @@ export interface FlowableClient {
    * Maps each subscription to { messageName (eventName), eventType }.
    */
   getMessageCatchWaits(instanceId: string): Promise<GetMessageCatchWaitsResult>;
+  /**
+   * T-0609: Get the FULL variable set of a process instance (running or
+   * completed) from the engine's HISTORY store. Unlike the runtime task
+   * variable views used elsewhere in this client, this survives after the
+   * instance ends — this is the read the process-instance detail page needs
+   * to show "what values did this run take" without a direct SQL query
+   * against the Flowable schema.
+   *
+   * Flowable endpoint: GET {baseUrl}/history/historic-variable-instances?processInstanceId={id}
+   * Maps each entry to { name, value }.
+   *
+   * OPTIONAL on the interface (mirrors pingEngine below) so the dozens of existing
+   * partial FlowableClient test stubs across src/__tests__/ need no change — a caller
+   * that needs this method (the process-instance detail route) checks for its presence
+   * and honest-degrades (empty variables) when absent. The real makeFlowableClient
+   * factory always provides it.
+   */
+  getHistoricVariableInstances?(instanceId: string): Promise<GetHistoricVariablesResult>;
+  /**
+   * T-0609: Get the ordered (by startTime) BPMN activity history of a process
+   * instance (running or completed) — startEvent/userTask/gateway/endEvent
+   * entries with start/end times and (for userTasks) the completing assignee.
+   * This is the engine-native source of "which branch did this instance take
+   * and when" that previously required raw SQL against the Flowable tables
+   * during live acceptance diagnosis of a gateway branch.
+   *
+   * Flowable endpoint: GET {baseUrl}/history/historic-activity-instances?processInstanceId={id}&sort=startTime
+   * Maps each entry to { activityId, activityName, activityType, startTime, endTime, assignee }.
+   *
+   * OPTIONAL on the interface — see getHistoricVariableInstances doc-comment above for
+   * the identical rationale (existing partial test stubs, honest-degrade at the caller).
+   */
+  getHistoricActivityInstances?(instanceId: string): Promise<GetHistoricActivitiesResult>;
   /**
    * T-0536 [D8-R4 delivery]: deliver a correlated message into a specific process
    * instance — fire the parked message-catch (receiveTask / intermediateCatchEvent /
@@ -985,6 +1070,82 @@ export function makeFlowableClient(
   }
 
   // -------------------------------------------------------------------------
+  // T-0609: getHistoricVariableInstances — full variable set of a process
+  // instance (running or completed), read from the engine's HISTORY store
+  // (NOT the runtime-only variable views used by startInstance/completeTask).
+  //
+  // GET {baseUrl}/history/historic-variable-instances?processInstanceId={id}
+  // Response: { data: [{ variableName, value, ... }] } (Flowable list-endpoint
+  // envelope, same shape family as /runtime/tasks — data-wrapped array).
+  // -------------------------------------------------------------------------
+  async function getHistoricVariableInstances(
+    instanceId: string,
+  ): Promise<GetHistoricVariablesResult> {
+    return withRetry(async () => {
+      const url = `${resolved.baseUrl}/history/historic-variable-instances?processInstanceId=${encodeURIComponent(instanceId)}`;
+      const resp = await globalThis.fetch(url, {
+        method: "GET",
+        headers: { Authorization: auth },
+      });
+      if (resp.status === 200) {
+        const data = (await resp.json()) as Record<string, unknown>;
+        const items = data["data"] as Array<Record<string, unknown>> | undefined;
+        if (!Array.isArray(items)) {
+          return { ok: true as const, variables: [] };
+        }
+        const variables: HistoricVariable[] = items.map((v) => ({
+          name: String(v["variableName"] ?? ""),
+          value: v["value"],
+        }));
+        return { ok: true as const, variables };
+      }
+      return { ok: false, code: httpStatusToCode(resp.status) };
+    }, resolved) as Promise<GetHistoricVariablesResult>;
+  }
+
+  // -------------------------------------------------------------------------
+  // T-0609: getHistoricActivityInstances — ordered BPMN activity history of a
+  // process instance (running or completed): startEvent/userTask/gateway/
+  // endEvent entries with start/end times and (for userTasks) the completing
+  // assignee. This is the engine-native replacement for the raw-SQL query
+  // that live acceptance diagnosis of a gateway branch previously required
+  // (no product surface showed which branch an instance took, or when).
+  //
+  // GET {baseUrl}/history/historic-activity-instances?processInstanceId={id}&sort=startTime
+  // Response: { data: [{ activityId, activityName, activityType, startTime,
+  //   endTime, assignee }] }. `sort=startTime` is honored by the engine —
+  // the client does not re-sort.
+  // -------------------------------------------------------------------------
+  async function getHistoricActivityInstances(
+    instanceId: string,
+  ): Promise<GetHistoricActivitiesResult> {
+    return withRetry(async () => {
+      const url = `${resolved.baseUrl}/history/historic-activity-instances?processInstanceId=${encodeURIComponent(instanceId)}&sort=startTime`;
+      const resp = await globalThis.fetch(url, {
+        method: "GET",
+        headers: { Authorization: auth },
+      });
+      if (resp.status === 200) {
+        const data = (await resp.json()) as Record<string, unknown>;
+        const items = data["data"] as Array<Record<string, unknown>> | undefined;
+        if (!Array.isArray(items)) {
+          return { ok: true as const, activities: [] };
+        }
+        const activities: HistoricActivity[] = items.map((a) => ({
+          activityId: String(a["activityId"] ?? ""),
+          activityName: String(a["activityName"] ?? ""),
+          activityType: String(a["activityType"] ?? ""),
+          startTime: typeof a["startTime"] === "string" ? a["startTime"] : null,
+          endTime: typeof a["endTime"] === "string" ? a["endTime"] : null,
+          assignee: typeof a["assignee"] === "string" ? a["assignee"] : null,
+        }));
+        return { ok: true as const, activities };
+      }
+      return { ok: false, code: httpStatusToCode(resp.status) };
+    }, resolved) as Promise<GetHistoricActivitiesResult>;
+  }
+
+  // -------------------------------------------------------------------------
   // T-0536 [D8-R4 delivery]: correlateMessage — fire a parked message-catch.
   //
   // PUT {baseUrl}/runtime/process-instances/{id}
@@ -1117,6 +1278,8 @@ export function makeFlowableClient(
     completeUserTask,
     getActiveUserTasks,
     getMessageCatchWaits,
+    getHistoricVariableInstances,
+    getHistoricActivityInstances,
     correlateMessage,
     isInstanceEnded,
     pingEngine,

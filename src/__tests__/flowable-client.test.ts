@@ -371,3 +371,122 @@ describe("T-0536 correlateMessage", () => {
     expect(result.ok).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0609 getHistoricVariableInstances — full variable set from the engine's
+// HISTORY store (survives after the instance ends), read by the
+// process-instance detail page.
+// ---------------------------------------------------------------------------
+
+describe("T-0609 getHistoricVariableInstances", () => {
+  it("maps { data: [{variableName, value}] } to { name, value } on HTTP 200", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      mockResponse(200, {
+        data: [
+          { variableName: "amount", value: 42000 },
+          { variableName: "approver", value: "e-test-approver" },
+        ],
+      }),
+    );
+    const client = testConfig();
+    const result = await client.getHistoricVariableInstances!("inst-1");
+    expect(result).toEqual({
+      ok: true,
+      variables: [
+        { name: "amount", value: 42000 },
+        { name: "approver", value: "e-test-approver" },
+      ],
+    });
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0] as [string];
+    expect(url).toContain("/history/historic-variable-instances");
+    expect(url).toContain("processInstanceId=inst-1");
+  });
+
+  it("returns { ok: true, variables: [] } when data is absent/not an array", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(200, {}));
+    const client = testConfig();
+    const result = await client.getHistoricVariableInstances!("inst-1");
+    expect(result).toEqual({ ok: true, variables: [] });
+  });
+
+  it("maps a non-2xx to { ok: false, code } (never throws)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(500));
+    const client = testConfig();
+    const result = await client.getHistoricVariableInstances!("inst-1");
+    expect(result).toEqual({ ok: false, code: "ENGINE_UNAVAILABLE" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0609 getHistoricActivityInstances — ordered BPMN activity history
+// (startEvent/userTask/gateway/endEvent), the engine-native replacement for
+// the raw SQL a P0 gateway-branch diagnosis previously required.
+// ---------------------------------------------------------------------------
+
+describe("T-0609 getHistoricActivityInstances", () => {
+  it("maps { data: [...] } to HistoricActivity[] on HTTP 200, sort=startTime in the URL", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      mockResponse(200, {
+        data: [
+          {
+            activityId: "start1",
+            activityName: "Начало",
+            activityType: "startEvent",
+            startTime: "2026-07-03T10:00:00.000+0000",
+            endTime: "2026-07-03T10:00:00.000+0000",
+            assignee: null,
+          },
+          {
+            activityId: "task-approve",
+            activityName: "Утверждение",
+            activityType: "userTask",
+            startTime: "2026-07-03T10:00:01.000+0000",
+            endTime: null,
+            assignee: "e-test-approver",
+          },
+        ],
+      }),
+    );
+    const client = testConfig();
+    const result = await client.getHistoricActivityInstances!("inst-1");
+    expect(result).toEqual({
+      ok: true,
+      activities: [
+        {
+          activityId: "start1",
+          activityName: "Начало",
+          activityType: "startEvent",
+          startTime: "2026-07-03T10:00:00.000+0000",
+          endTime: "2026-07-03T10:00:00.000+0000",
+          assignee: null,
+        },
+        {
+          activityId: "task-approve",
+          activityName: "Утверждение",
+          activityType: "userTask",
+          startTime: "2026-07-03T10:00:01.000+0000",
+          endTime: null,
+          assignee: "e-test-approver",
+        },
+      ],
+    });
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0] as [string];
+    expect(url).toContain("/history/historic-activity-instances");
+    expect(url).toContain("processInstanceId=inst-1");
+    expect(url).toContain("sort=startTime");
+  });
+
+  it("returns { ok: true, activities: [] } when data is absent/not an array", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(200, {}));
+    const client = testConfig();
+    const result = await client.getHistoricActivityInstances!("inst-1");
+    expect(result).toEqual({ ok: true, activities: [] });
+  });
+
+  it("maps a non-2xx to { ok: false, code } (never throws)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(404));
+    const client = testConfig();
+    const result = await client.getHistoricActivityInstances!("inst-gone");
+    expect(result).toEqual({ ok: false, code: "NOT_FOUND" });
+  });
+});
