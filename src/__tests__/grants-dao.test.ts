@@ -513,15 +513,24 @@ describe("getRoleSlugsForActor — T-0366 KC seed persona fallback", () => {
 // .db.test.ts (review B2 — that is what closes the test-theater). The mirror is
 // kept in sync with the SQL over all four axes so it is not actively misleading.
 //
-// A CRITICAL grant/assignment is PDP-active only when its SECOND distinct
-// approver is present (confirmed2_by IS NOT NULL); the grant query also honors
-// valid_until (previously ignored for grants). "Critical" = the full escalation
+// A CRITICAL GRANT is PDP-active only when its SECOND distinct approver is
+// present (confirmed2_by IS NOT NULL); the grant query also honors valid_until
+// (previously ignored for grants). "Critical" = the full escalation
 // classification (criticalGrantPredicate):
 //   axis a — operation IN ('approve','transition')
 //   axis b — resource_type = 'effect_resource' AND operation = 'invoke'
 //   axis c — operation = 'read' with a sensitive clearance marker (confidential|restricted)
 //   Q-2   — operation = 'read' with a present-but-garbage clearance token
-// An assignment is critical iff the role it binds holds any such grant.
+//
+// T-0605 — ASSIGNMENT activation is the CANONICAL predicate (single source with
+// rights-overview.ts and the write side), NOT the role's absolute criticality:
+//   confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)
+//   AND in-window.
+// A routine assignment (proposed_by NULL, one confirm) is active EVEN to a
+// critical role — the prior "role-critical ⇒ assignment needs confirmed2_by"
+// gate was a self-lock (holder shown on the card, invisible to the PDP → 403).
+// A genuinely-ESCALATING (semi-confirmed) assignment carries proposed_by (set)
+// with confirmed2_by NULL and stays inactive until the second approver confirms.
 // ---------------------------------------------------------------------------
 
 interface T0397Grant {
@@ -538,6 +547,10 @@ interface T0397Grant {
 }
 interface T0397Assignment {
   role_id: string;
+  // T-0605: proposed_by carries the write-side ROUTINE-vs-ESCALATING signal.
+  // Routine assignment → proposed_by = null (active on one confirm). Escalating
+  // (semi-confirmed) assignment → proposed_by = actor (pending until confirmed2_by).
+  proposed_by: string | null;
   confirmed_by: string | null;
   confirmed2_by: string | null;
   valid_from: number | null;
@@ -572,10 +585,11 @@ function isCriticalGrant(g: {
   return false;
 }
 
-/** Does this role hold ANY confirmed critical grant? (assignment criticality) */
-function roleHoldsCriticalGrant(grants: T0397Grant[]): boolean {
-  return grants.some((g) => g.confirmed_by !== null && isCriticalGrant(g));
-}
+// T-0605: `roleHoldsCriticalGrant` removed — the assignment-active predicate no
+// longer depends on the role's absolute criticality (only on the assignment's own
+// confirmed/semi-confirmed state). `isCriticalGrant` remains: it still gates the
+// GRANT-level dual-control in the grant-query mirror below (getGrantsForSubject
+// step 3), which is where authority for critical rights actually lives.
 
 const T0397_NOW = 10_000;
 
@@ -588,6 +602,10 @@ const T0397_EMP: Record<string, string> = {
   "e-axisc": "d0000000-0000-0000-0000-0000000003a5",
   "e-q2": "d0000000-0000-0000-0000-0000000003a6",
   "e-read-internal": "d0000000-0000-0000-0000-0000000003a7",
+  // T-0605: ROUTINE assignment (proposed_by NULL) to a CRITICAL role — the
+  // exact live-факт shape: an owner self-assigns a workflow role and must get
+  // eligibility on ONE confirm (no second approver needed for a routine assign).
+  "e-crit-routine": "d0000000-0000-0000-0000-0000000003a8",
 };
 
 // Roles: id → { slug, grants }.
@@ -669,36 +687,44 @@ const T0397_ASSIGN: Record<string, T0397Assignment[]> = {
   // assignment itself dual-confirmed so the assignment gate passes — this isolates
   // the GRANT-level confirmed2_by gate.
   [T0397_EMP["e-approver"]!]: [
-    { role_id: "r-crit-single", confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
-    { role_id: "r-crit-dual",   confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+    { role_id: "r-crit-single", proposed_by: null, confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+    { role_id: "r-crit-dual",   proposed_by: null, confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
   ],
-  // e-reader: non-critical role, single-confirm assignment → active.
+  // e-reader: non-critical role, routine single-confirm assignment → active.
   [T0397_EMP["e-reader"]!]: [
-    { role_id: "r-noncrit", confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
+    { role_id: "r-noncrit", proposed_by: null, confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
   ],
-  // e-expired: critical role with EXPIRED grant (assignment itself fine).
+  // e-expired: critical role with EXPIRED grant; routine assignment → active.
   [T0397_EMP["e-expired"]!]: [
-    { role_id: "r-crit-expired", confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+    { role_id: "r-crit-expired", proposed_by: null, confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
   ],
-  // e-ra-critical: assigned to a CRITICAL role (crit-dual holds an active approve
-  // grant) but the ASSIGNMENT has confirmed2_by NULL → assignment-level gate
-  // excludes it (this is the role_assignment confirmed2_by test, deliverable (e)).
+  // e-ra-critical: a genuinely ESCALATING (semi-confirmed) assignment to crit-dual
+  // — proposed_by SET, confirmed2_by NULL → the assignment is pending a distinct
+  // second approver and is NOT active (deliverable (e), T-0605 re-framing: the
+  // gate is the assignment's OWN semi-confirmed state, not the role's criticality).
   [T0397_EMP["e-ra-critical"]!]: [
-    { role_id: "r-crit-dual", confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
+    { role_id: "r-crit-dual", proposed_by: "seed", confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
   ],
   // e-axisc: holds BOTH axisc-single (read+confidential, no #2) and axisc-dual (#2),
-  // each assignment dual-confirmed to isolate the GRANT-level axis-c gate.
+  // each assignment routine to isolate the GRANT-level axis-c gate.
   [T0397_EMP["e-axisc"]!]: [
-    { role_id: "r-axisc-single", confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
-    { role_id: "r-axisc-dual",   confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+    { role_id: "r-axisc-single", proposed_by: null, confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+    { role_id: "r-axisc-dual",   proposed_by: null, confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
   ],
-  // e-q2: Q-2 garbage-clearance read grant, assignment dual-confirmed.
+  // e-q2: Q-2 garbage-clearance read grant, routine assignment.
   [T0397_EMP["e-q2"]!]: [
-    { role_id: "r-q2-single", confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+    { role_id: "r-q2-single", proposed_by: null, confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
   ],
-  // e-read-internal: valid non-sensitive clearance read grant, assignment single-confirm.
+  // e-read-internal: valid non-sensitive clearance read grant, routine assignment.
   [T0397_EMP["e-read-internal"]!]: [
-    { role_id: "r-read-internal", confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
+    { role_id: "r-read-internal", proposed_by: null, confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
+  ],
+  // e-crit-routine (T-0605): ROUTINE assignment (proposed_by NULL, confirmed2_by
+  // NULL) to crit-dual (a CRITICAL role holding an active approve grant). Under
+  // the canonical predicate this assignment is ACTIVE on one confirm → its role
+  // slug IS returned (the fix for the 403-eligibility self-lock).
+  [T0397_EMP["e-crit-routine"]!]: [
+    { role_id: "r-crit-dual", proposed_by: null, confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
   ],
 };
 
@@ -708,14 +734,16 @@ function makeT0397Pool(nowMs: number): import("pg").Pool {
     if (vu !== null && vu <= nowMs) return false;
     return true;
   };
-  // Assignment passes its own gate: confirmed, in-window, AND
-  // (confirmed2_by set OR role holds no critical grant).
+  // T-0605 CANONICAL assignment-active predicate (mirror of grants-dao.ts and
+  // rights-overview.ts): confirmed, in-window, AND (confirmed2_by set OR
+  // proposed_by NULL). Independent of the role's absolute criticality — that was
+  // the self-lock. A routine assignment (proposed_by NULL) is active on one
+  // confirm even to a critical role; a semi-confirmed one (proposed_by set,
+  // confirmed2_by NULL) stays pending.
   const assignmentActive = (ra: T0397Assignment): boolean => {
     if (!ra.confirmed_by) return false;
     if (!inWindow(ra.valid_from, ra.valid_until)) return false;
-    const role = T0397_ROLES[ra.role_id];
-    const roleCritical = role ? roleHoldsCriticalGrant(role.grants) : false;
-    if (roleCritical && ra.confirmed2_by === null) return false;
+    if (ra.confirmed2_by === null && ra.proposed_by !== null) return false;
     return true;
   };
 
@@ -849,28 +877,49 @@ describe("getGrantsForSubject — T-0397 dual-control grant gate", () => {
   });
 });
 
-describe("getRoleSlugsForActor / getGrantsForSubject — T-0397 role_assignment confirmed2_by gate", () => {
-  it("(e) assignment to a critical role with confirmed2_by NULL → role slug excluded", async () => {
+describe("getRoleSlugsForActor / getGrantsForSubject — T-0605 canonical assignment-active gate", () => {
+  it("(e) SEMI-CONFIRMED assignment (proposed_by set, confirmed2_by NULL) → role slug excluded", async () => {
     const pool = makeT0397Pool(T0397_NOW);
-    // e-ra-critical: assigned to crit-dual (a critical role), but the ASSIGNMENT
-    // has confirmed2_by NULL → the assignment-level dual-control gate drops it.
+    // e-ra-critical: an ESCALATING assignment to crit-dual — proposed_by set,
+    // confirmed2_by NULL → pending a distinct second approver → NOT active.
+    // (T-0605: the gate is the assignment's OWN semi-confirmed state, not the
+    // role's criticality.)
     const slugs = await getRoleSlugsForActor(pool, TENANT_ID, "e-ra-critical", T0397_NOW);
     expect(slugs).not.toContain("crit-dual");
     expect(slugs).toEqual([]);
   });
 
-  it("(e') same critical assignment also contributes ZERO grants (PDP path)", async () => {
+  it("(e') same semi-confirmed assignment also contributes ZERO grants (PDP path)", async () => {
     const pool = makeT0397Pool(T0397_NOW);
     // Step 2 (assignment) drops the role before step 3 (grants) runs → no grants.
     const grants = await getGrantsForSubject(pool, TENANT_ID, "e-ra-critical", T0397_NOW);
     expect(grants).toEqual([]);
   });
 
-  it("(e'') non-critical assignment with confirmed2_by NULL → role slug INCLUDED (no regression)", async () => {
+  it("(e'') non-critical routine assignment (proposed_by NULL) → role slug INCLUDED (no regression)", async () => {
     const pool = makeT0397Pool(T0397_NOW);
-    // e-reader: assigned to noncrit role (no critical grant) with confirmed2_by
-    // NULL → assignment gate passes (role not critical).
+    // e-reader: routine assignment to a non-critical role → active.
     const slugs = await getRoleSlugsForActor(pool, TENANT_ID, "e-reader", T0397_NOW);
     expect(slugs).toContain("noncrit");
+  });
+
+  it("(e''') T-0605 FIX — ROUTINE assignment (proposed_by NULL) to a CRITICAL role → role slug INCLUDED", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    // e-crit-routine: routine one-confirm assignment (proposed_by NULL,
+    // confirmed2_by NULL) to crit-dual (holds an active approve grant). Under the
+    // canonical predicate the assignment is ACTIVE → slug returned. This is the
+    // exact eligibility the prior T-0397 gate wrongly withheld (403 self-lock).
+    const slugs = await getRoleSlugsForActor(pool, TENANT_ID, "e-crit-routine", T0397_NOW);
+    expect(slugs).toContain("crit-dual");
+  });
+
+  it("(e'''') T-0605 FIX — routine assignment to a critical role ALSO yields the role's active grants", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    // The assignment activates (step 2), so step 3 loads crit-dual's grants; the
+    // approve grant is itself dual-confirmed (confirmed2_by set) → PDP-active.
+    // GRANT-level dual-control is untouched: had the grant been semi-confirmed it
+    // would still be withheld here.
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-crit-routine", T0397_NOW);
+    expect(grants.map((g) => g.id)).toContain("g-crit-dual");
   });
 });

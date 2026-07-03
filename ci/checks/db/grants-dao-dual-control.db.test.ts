@@ -68,6 +68,8 @@ const fx: {
   empReadInternal: EmpFx;
   empExpiredCrit: EmpFx;
   empAsgAxisC: EmpFx;
+  empCritRoutine: EmpFx;
+  critRoutineSlug: string;
 } = {
   empAxisCSingle: EMPTY_EMP,  // holds a role with a read+confidential grant, confirmed2_by NULL
   empAxisCDual: EMPTY_EMP,    // same but confirmed2_by set
@@ -76,7 +78,9 @@ const fx: {
   empReadPlain: EMPTY_EMP,    // plain read grant (no clearance), no #2 → active
   empReadInternal: EMPTY_EMP, // read + internal clearance (valid non-sensitive), no #2 → active
   empExpiredCrit: EMPTY_EMP,  // role's ONLY critical grant is expired → assignment active
-  empAsgAxisC: EMPTY_EMP,     // assignment to an axis-c critical role, assignment confirmed2_by NULL
+  empAsgAxisC: EMPTY_EMP,     // T-0605: SEMI-CONFIRMED assignment (proposed_by set) → excluded
+  empCritRoutine: EMPTY_EMP,  // T-0605 FIX: ROUTINE assignment to a critical (approve) role → slug INCLUDED
+  critRoutineSlug: '',        // slug of the approve-role empCritRoutine is assigned to
 };
 
 async function seedEmployee(c: pg.Client, slug: string): Promise<EmpFx> {
@@ -146,9 +150,14 @@ async function seedGrant(
   return id;
 }
 
+// T-0605: `proposed` controls the write-side ROUTINE-vs-ESCALATING signal that
+// the canonical assignment-active predicate keys on. Default (proposed=false) =
+// ROUTINE (proposed_by NULL) — active on one confirm, mirroring the real write
+// path (grants.ts / rights-intents.ts hire). proposed=true = ESCALATING /
+// semi-confirmed (proposed_by set) — pending until confirmed2_by.
 async function seedAssignment(
   c: pg.Client,
-  args: { empId: string; roleId: string; confirmed2: boolean },
+  args: { empId: string; roleId: string; confirmed2: boolean; proposed?: boolean },
 ): Promise<void> {
   await c.query(
     `INSERT INTO choros.role_assignment
@@ -157,10 +166,11 @@ async function seedAssignment(
         proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5::jsonb,
              NULL, NULL, 'seed', 'seed',
-             'seed', 'seed', $6, 0, 0)`,
+             $6, 'seed', $7, 0, 0)`,
     [
       TENANT, uuid(), args.empId, args.roleId,
       JSON.stringify({ kind: 'node', hierarchy: 'org', nodeId: 'x', nodeLevel: 'department' }),
+      args.proposed ? 'seed' : null,
       args.confirmed2 ? 'seed2' : null,
     ],
   );
@@ -223,13 +233,24 @@ beforeAll(async () => {
     await seedGrant(c, { roleId: rExpiredCrit, operation: 'approve', confirmed2: true, validUntil: EXPIRED_UNTIL });
     await seedAssignment(c, { empId: fx.empExpiredCrit.id, roleId: rExpiredCrit, confirmed2: false });
 
-    // assignment-axis-c: role holds an ACTIVE axis-c critical grant (dual-confirmed
-    // so the GRANT itself is active), but the ASSIGNMENT has confirmed2_by NULL →
-    // the assignment-level gate must exclude the role slug.
+    // assignment SEMI-CONFIRMED (T-0605): role holds an ACTIVE axis-c critical
+    // grant, but the ASSIGNMENT is ESCALATING (proposed_by set, confirmed2_by
+    // NULL) → pending a distinct second approver → excluded. The gate is the
+    // assignment's OWN semi-confirmed state, NOT the role's criticality.
     fx.empAsgAxisC = await seedEmployee(c, `dc-asg-axisc-${uuid().slice(0, 6)}`);
     const rAsgAxisC = await seedRole(c, `dc-r-asg-axisc-${uuid().slice(0, 6)}`);
     await seedGrant(c, { roleId: rAsgAxisC, operation: 'read', constraint: { clearance: 'restricted' }, confirmed2: true });
-    await seedAssignment(c, { empId: fx.empAsgAxisC.id, roleId: rAsgAxisC, confirmed2: false });
+    await seedAssignment(c, { empId: fx.empAsgAxisC.id, roleId: rAsgAxisC, confirmed2: false, proposed: true });
+
+    // T-0605 FIX: ROUTINE assignment (proposed_by NULL, confirmed2_by NULL) to an
+    // approve-role (axis-a critical). Under the canonical predicate this assignment
+    // is ACTIVE on one confirm → role slug INCLUDED. This is the exact live-факт
+    // shape (owner self-assigns a workflow role) the prior gate wrongly blocked.
+    fx.empCritRoutine = await seedEmployee(c, `dc-crit-routine-${uuid().slice(0, 6)}`);
+    fx.critRoutineSlug = `dc-r-crit-routine-${uuid().slice(0, 6)}`;
+    const rCritRoutine = await seedRole(c, fx.critRoutineSlug);
+    await seedGrant(c, { roleId: rCritRoutine, operation: 'approve', confirmed2: false });
+    await seedAssignment(c, { empId: fx.empCritRoutine.id, roleId: rCritRoutine, confirmed2: false });
 
     await c.query('COMMIT');
   } finally {
@@ -309,16 +330,36 @@ describe('T-0397 M1 — expired critical grant does not criticize the assignment
 });
 
 // ---------------------------------------------------------------------------
-// assignment-level axis-c gate — confirmed2_by NULL excludes the role slug
+// T-0605 — CANONICAL assignment-active gate: a SEMI-CONFIRMED assignment
+// (proposed_by set, confirmed2_by NULL) is pending and excluded; a ROUTINE
+// assignment (proposed_by NULL) to a critical role is ACTIVE on one confirm.
 // ---------------------------------------------------------------------------
-describe('T-0397 — assignment dual-control gate over axis-c critical role', () => {
-  it('assignment (confirmed2_by NULL) to an axis-c critical role → role slug excluded', async () => {
+describe('T-0605 — semi-confirmed assignment is excluded (its OWN pending state)', () => {
+  it('SEMI-CONFIRMED assignment (proposed_by set, confirmed2_by NULL) → role slug excluded', async () => {
     const slugs = await getRoleSlugsForActor(getPool(), TENANT, fx.empAsgAxisC.slug, NOW);
     expect(slugs).toEqual([]);
   });
 
-  it('same assignment contributes ZERO grants on the PDP path', async () => {
+  it('same semi-confirmed assignment contributes ZERO grants on the PDP path', async () => {
     const grants = await getGrantsForSubject(getPool(), TENANT, fx.empAsgAxisC.slug, NOW);
+    expect(grants).toEqual([]);
+  });
+});
+
+describe('T-0605 FIX — routine assignment to a CRITICAL role is active on one confirm', () => {
+  it('ROUTINE assignment (proposed_by NULL, confirmed2_by NULL) to an approve-role → role slug INCLUDED', async () => {
+    // The self-lock: prior T-0397 gate withheld this slug because the role holds
+    // an approve grant. The canonical predicate returns it (one confirm suffices).
+    const slugs = await getRoleSlugsForActor(getPool(), TENANT, fx.empCritRoutine.slug, NOW);
+    expect(slugs).toContain(fx.critRoutineSlug);
+  });
+
+  it('routine assignment to a critical role also yields the role grants that ARE grant-active', async () => {
+    // The assignment activates (step 2). The approve grant here is single-confirm
+    // (confirmed2_by NULL) so the GRANT-level dual-control still withholds it —
+    // proving grant authority is untouched: the assignment activated, but the
+    // critical GRANT still needs its own second approver.
+    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empCritRoutine.slug, NOW);
     expect(grants).toEqual([]);
   });
 });

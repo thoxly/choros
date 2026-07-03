@@ -93,13 +93,20 @@ function assertUuid(value: string, label: string): void {
 // second approver, never silently activate an escalating grant on one approver.
 //
 // SINGLE SOURCE / NO DRIFT: this fragment is defined ONCE and interpolated into
-// all three read predicates (grant query, both assignment EXISTS clauses + the
-// role-slug JOIN). A db-integration test (grants-dao.integration.test.ts) pins the
-// predicate against a REAL Postgres so it cannot silently diverge from the TS
-// criticality axes. The fragment references the bare column names (operation,
-// resource_type, "constraint", resource_facet) so it is valid both as a top-level
-// WHERE clause (grant query) and inside the `g.`-aliased EXISTS sub-queries via a
-// parametric alias.
+// the GRANT read predicate (getGrantsForSubject step 3): a CRITICAL grant is
+// PDP-active only with confirmed2_by. A db-integration test
+// (grants-dao-dual-control.db.test.ts) pins the predicate against a REAL Postgres
+// so it cannot silently diverge from the TS criticality axes. The fragment
+// references the bare column names (operation, resource_type, "constraint",
+// resource_facet) so it is valid as the grant query's top-level WHERE clause.
+//
+// T-0605 NOTE: the fragment is NO LONGER used to gate ASSIGNMENT activation. The
+// assignment-active predicate is the canonical
+//   confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)
+// (single source with rights-overview.ts + the write side). Assignment activation
+// keyed on the role's absolute criticality was a self-lock (see the two
+// role_assignment queries below and ADR-T0605). Dual-control for critical RIGHTS
+// stays entirely on the grant (step 3), which is where authority actually lives.
 // ---------------------------------------------------------------------------
 
 /**
@@ -151,10 +158,10 @@ function criticalGrantPredicate(alias: string): string {
       )`;
 }
 
-// The bare-column form (grant query top-level WHERE) and the g-aliased form
-// (assignment EXISTS sub-queries) — built once, reused everywhere (no drift).
+// The bare-column form is the grant query's top-level WHERE (getGrantsForSubject
+// step 3). T-0605: the g-aliased form (assignment EXISTS sub-query) is gone — the
+// assignment-active predicate no longer depends on the role's absolute criticality.
 const CRITICAL_GRANT_PREDICATE_BARE = criticalGrantPredicate("");
-const CRITICAL_GRANT_PREDICATE_G = criticalGrantPredicate("g");
 
 // ---------------------------------------------------------------------------
 // withTenantReadTx — tenant-scoped read transaction (mirrors org.ts withTenant)
@@ -221,14 +228,28 @@ export async function getGrantsForSubject(
     // confirmed_by IS NOT NULL = confirmed (NF per migration 020 contract).
     // valid_from/until window: NULL = unbounded on that side.
     //
-    // T-0397 — dual-control on the assignment too: an assignment is CRITICAL iff
-    // the role it binds holds any EFFECTIVE critical grant (all four axes, same
-    // criticalGrantPredicate as the grant query). A critical assignment is
-    // PDP-active only when its second approver is present (confirmed2_by IS NOT
-    // NULL). Non-critical assignments keep single-confirm. The criticality EXISTS
-    // is tenant-scoped on BOTH sides (g.tenant_id = ra.tenant_id) — no cross-tenant
-    // edge (NF-2) — AND window-scoped on the grant (M1 review fix): an expired
-    // critical grant confers no capability, so it must not criticize the assignment.
+    // T-0605 — CANONICAL assignment-active predicate (single source of truth).
+    // The assignment's activation is gated on the SAME predicate the role-card
+    // read (rights-overview.ts:34-42/295-298) and the write side (grants.ts,
+    // rights-intents.ts hire) use:
+    //     confirmed_by IS NOT NULL
+    //     AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)
+    //     AND in-window
+    // Rationale (ADR-T0605 §2): dual-control (T-0044) requires a SECOND approver
+    // when criticality ESCALATES, not for every assignment to an already-critical
+    // role. A role assignment never changes the role's grant set (from ≡ to ⇒
+    // criticalityDiff.escalates=false), so the write side lands it ROUTINE
+    // (proposed_by=NULL, confirmed_by=actor, confirmed2_by=NULL) and reports "role
+    // assigned". A genuinely-ESCALATING assignment is recorded as semi-confirmed
+    // (proposed_by=actor, confirmed2_by=NULL) and stays inactive until a distinct
+    // second approver sets confirmed2_by — the `proposed_by IS NULL` disjunct
+    // tracks exactly that. The PRIOR T-0397 predicate keyed assignment activation
+    // on the role's ABSOLUTE criticality (holds any approve/transition grant),
+    // which the write side never satisfies for a routine assignment — a self-lock
+    // (holder visible on the card, invisible to the PDP → 403 NOT_ELIGIBLE).
+    // GRANT-level dual-control (step 3 below: a CRITICAL grant is PDP-active only
+    // with confirmed2_by) is the real authority gate for critical rights and is
+    // UNTOUCHED.
     const { rows: raRows } = await client.query<{ role_id: string }>(
       `SELECT ra.role_id
          FROM choros.role_assignment ra
@@ -237,22 +258,7 @@ export async function getGrantsForSubject(
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
-          AND (
-                ra.confirmed2_by IS NOT NULL
-                OR NOT EXISTS (
-                  SELECT 1 FROM choros."grant" g
-                   WHERE g.tenant_id = ra.tenant_id
-                     AND g.role_id   = ra.role_id
-                     AND g.confirmed_by IS NOT NULL
-                     -- M1: only an EFFECTIVE (in-window) critical grant criticizes
-                     -- the assignment; an expired critical grant confers zero
-                     -- capability (combineCriticality counts effective grants only),
-                     -- so it must not force the assignment's second-approver gate.
-                     AND (g.valid_from  IS NULL OR g.valid_from  <= $3)
-                     AND (g.valid_until IS NULL OR g.valid_until  > $3)
-                     AND ${CRITICAL_GRANT_PREDICATE_G}
-                )
-              )`,
+          AND (ra.confirmed2_by IS NOT NULL OR ra.proposed_by IS NULL)`,
       [tenantId, employeeId, nowMs],
     );
     if (raRows.length === 0) {
@@ -416,11 +422,16 @@ export async function getRoleSlugsForActor(
 
     // Confirmed, in-window assignments → role slugs in one join.
     //
-    // T-0397 — same dual-control gate as getGrantsForSubject step 2: a CRITICAL
-    // assignment (role holds an EFFECTIVE critical grant under any of the four
-    // axes, criticalGrantPredicate) contributes its role slug to the inbox
-    // eligibility set ONLY when confirmed2_by IS NOT NULL. This keeps the
-    // claim/approve eligibility gate consistent with the PDP grant read.
+    // T-0605 — CANONICAL assignment-active predicate (same as getGrantsForSubject
+    // step 2 and rights-overview.ts:295-298): the assignment is active on
+    //   confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)
+    //   AND in-window.
+    // This keeps the claim/approve eligibility gate consistent with the role-card
+    // read and the write side. The prior T-0397 predicate gated activation on the
+    // role's absolute criticality (holds any critical grant), which the write side
+    // never satisfies for a routine assignment (confirmed2_by=NULL) — the exact
+    // self-lock behind the 403 NOT_ELIGIBLE (holder shown on the card, invisible to
+    // the PDP). GRANT-level dual-control stays in getGrantsForSubject step 3.
     const { rows } = await client.query<{ slug: string }>(
       `SELECT DISTINCT r.slug
          FROM choros.role_assignment ra
@@ -431,19 +442,7 @@ export async function getRoleSlugsForActor(
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
-          AND (
-                ra.confirmed2_by IS NOT NULL
-                OR NOT EXISTS (
-                  SELECT 1 FROM choros."grant" g
-                   WHERE g.tenant_id = ra.tenant_id
-                     AND g.role_id   = ra.role_id
-                     AND g.confirmed_by IS NOT NULL
-                     -- M1: window-scope the criticizing grant (see getGrantsForSubject).
-                     AND (g.valid_from  IS NULL OR g.valid_from  <= $3)
-                     AND (g.valid_until IS NULL OR g.valid_until  > $3)
-                     AND ${CRITICAL_GRANT_PREDICATE_G}
-                )
-              )`,
+          AND (ra.confirmed2_by IS NOT NULL OR ra.proposed_by IS NULL)`,
       [tenantId, employeeId, nowMs],
     );
     return rows.map((r) => r.slug);
