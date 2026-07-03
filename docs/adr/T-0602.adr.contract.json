@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0602",
+  "status": "ready",
+  "decision": "Секрет-хэндл-поле («Секрет-хэндл (ссылка, не ключ)», плейсхолдер env://DEEPSEEK_API_KEY) УДАЛЯЕТСЯ из формы создания профиля целиком, не сворачивается в advanced-блок. Разведка кода подтвердила: env:// безусловно отклоняется в tenant-пути (src/server.ts:203-217, T-0413 — '[T-0413] env:// handles are system-only and may not be used as tenant secret handles'), vault:// объявлен, но резолвер никогда не реализован (Stage-2, src/http/secret-handle.ts:18). llm_connection.secret_handle — ЖИВОЙ путь до реального вызова (readConfiguredAgentLlmConfig резолвит COALESCE(lc.secret_handle, ac.llm_secret_handle) → makeLlmPortFactory → validateSecretHandleShape → тот же reject), т.е. поле не просто непонятно — оно структурно не может заработать для тенанта. Advanced-collapse отклонён: llm_connection — тенант-скоуп RLS таблица, оператор внутри тенантского UI попадает в тот же tenantSecretResolver reject — нет отдельного admin-пути, который advanced-блок открывал бы легитимно. Серверный контракт (secret_handle как опциональное поле POST /api/llm-connections) НЕ меняется — оставляет дверь для будущего admin-инструмента вне UI. Инструкция «Откуда взять ключ» становится динамической: PROVIDER_PRESETS получает поле consoleHint (URL+label по провайдеру, null для self-hosted/other), инструкция рендерит consoleHint ТЕКУЩЕГО выбранного provider с честным нейтральным фолбэком. Карточки: сырой secret_handle_redacted заменяется человеческой подписью по распарсенному префиксу схемы (app→«Ключ зашифрован и привязан», env→«Ключ сервера (настроен оператором)», vault→«Ключ из внешнего хранилища (настроено оператором)») — чисто клиентское форматирование существующих данных, без нового серверного поля.",
+  "rejected_alternatives": [
+    {
+      "option": "Свернуть секрет-хэндл-поле в collapsed advanced-блок «Дополнительно (для оператора сервера)» вместо удаления",
+      "why_not": "llm_connection — тенант-скоуп таблица (RLS, tenant_id в каждой строке), read/write всегда идёт через resolveActorTenant(actor) — даже оператор, зашедший как пользователь тенанта, попадает в тот же tenantSecretResolver reject для env://, и vault:// не резолвится ни для кого. Advanced-блок не открывал бы легитимный путь в ЭТОЙ форме — он лишь красивее прятал бы ту же нерабочую ловушку под ярлыком «для продвинутых», что хуже статус-кво (неявно повышает доверие к всё ещё нерабочей опции)."
+    },
+    {
+      "option": "Провайдер-agnostic статичный текст инструкции без конкретных URL вообще",
+      "why_not": "Конкретный URL/путь (когда он известен — 3 из 5 провайдеров) снижает трение сильнее общей фразы; T-0574 уже доказал ценность конкретики (console.anthropic.com + точный путь API Keys→Create Key). Честный нейтральный фолбэк остаётся ТОЛЬКО там, где URL реально неизвестен (self-hosted/другой), не заменяет всю инструкцию."
+    },
+    {
+      "option": "Новое серверное поле secret_handle_kind (enum схемы) вместо клиентского парсинга префикса",
+      "why_not": "Избыточно: redactHandle уже сохраняет префикс схемы как первые символы редактированной строки по существующей конвенции (T-0474/T-0476/T-0413 — все три схемы префиксные по построению); парсинг трёх строковых префиксов на клиенте — чисто текстовое форматирование существующих данных, не требует нового API-контракта (тот же принцип, что уже применён к secret_bound/chipStyle в T-0597)."
+    }
+  ],
+  "object_model": [],
+  "contracts": [
+    "web/src/screens/screen-llm-connections.jsx::PROVIDER_PRESETS — добавлено поле consoleHint (5 записей, null для self-hosted/other).",
+    "web/src/screens/screen-llm-connections.jsx — форма «Новый профиль»: убрано поле «Секрет-хэндл» (JSX + secretHandle/setSecretHandle state + client-валидация + POST-тело).",
+    "web/src/screens/screen-llm-connections.jsx — инструкция «Откуда взять ключ» рендерит consoleHint текущего выбранного provider, честный фолбэк для null.",
+    "web/src/screens/screen-llm-connections.jsx — новый экспортируемый helper humanizeSecretHandleScheme(redacted) для карточек, той же конвенции что mapTestResponse/resolveAssistantBinding.",
+    "web/src/screens/screen-llm-connections.jsx — успех-баннер: createOkNoKey веточное условие снимается (форма больше не передаёт ключ).",
+    "Серверные файлы (src/http/llm-connections.ts, src/core/secret-handle-validator.ts, src/db/llm-connection-dao.ts, migrations/*) — БЕЗ изменений.",
+    "docs/handoff/T-0602.pr-handoff.json — BUILD-фаза."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "Форма не содержит секрет-хэндл-поле/state/POST-тело.", "ci_check": "cd web && npx vitest run screen-llm-connections.test.jsx"},
+    {"id": "FF-2", "rule": "Успех-баннер всегда содержит honest next-step после создания через форму.", "ci_check": "cd web && npx vitest run screen-llm-connections.test.jsx"},
+    {"id": "FF-3", "rule": "Инструкция динамическая по provider, honest fallback для self-hosted/other.", "ci_check": "cd web && npx vitest run screen-llm-connections.test.jsx"},
+    {"id": "FF-4", "rule": "Карточка — человеческая подпись по схеме хэндла вместо сырого текста первой строкой.", "ci_check": "cd web && npx vitest run screen-llm-connections.test.jsx"},
+    {"id": "FF-5", "rule": "Жаргон-гейт: 0 новых находок в видимом тексте.", "ci_check": "bash ci/checks/ux/ux-g5-jargon-denylist.sh"},
+    {"id": "FF-6", "rule": "Scroll-гейт зелёный (не затронут).", "ci_check": "bash ci/checks/ux/ux-g8-scroll-reachable.sh"},
+    {"id": "FF-7", "rule": "Anti-case-lock зелёный.", "ci_check": "bash ci/checks/anti-case-lock.sh"},
+    {"id": "FF-8", "rule": "Полный web-прогон зелёный.", "ci_check": "cd web && npx vitest run"},
+    {"id": "FF-9", "rule": "Build зелёный (root + web).", "ci_check": "npm run build && (cd web && npm run build)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-1"},
+    {"ac": "AC-3", "covered_by": "FF-2"},
+    {"ac": "AC-4", "covered_by": "FF-1"},
+    {"ac": "AC-5", "covered_by": "FF-3"},
+    {"ac": "AC-6", "covered_by": "FF-3"},
+    {"ac": "AC-7", "covered_by": "FF-4"},
+    {"ac": "AC-8", "covered_by": "FF-5"},
+    {"ac": "AC-9", "covered_by": "FF-6"},
+    {"ac": "AC-10", "covered_by": "FF-7"},
+    {"ac": "AC-11", "covered_by": "FF-8"},
+    {"ac": "AC-12", "covered_by": "FF-9"},
+    {"ac": "AC-13", "covered_by": "FF-8"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0602-llm-form-no-jargon.md",
+  "escalation": "Нет. Изменение чисто клиентское (форма/тексты/один helper), не меняет серверный контракт, не расширяет права/данные/секреты. Решение убрать (а не свернуть) секрет-хэндл-поле опирается на код-факт (env:// категорически отклоняется T-0413, vault:// не реализован), задокументировано с точными путями/строками в ADR §1."
+}
