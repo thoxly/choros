@@ -1,0 +1,77 @@
+{
+  "task_id": "T-0602",
+  "verdict": "approved",
+  "reviewed_sha": "b8ba914ac6826a9b94a26acf5646bac43eaafe5f",
+  "base_sha": "bb67bf41714fbac7f86e31f98589325ad6313fdc",
+  "ci_seen": {
+    "green": true,
+    "_note": "Судья прогнал всё независимо, не доверяя handoff-числам. Дифф bb67bf4..HEAD — ровно 7 файлов (git diff --stat), скоуп: 2 файла экрана (screen-llm-connections.jsx +157/-71 функционально, screen-llm-connections.test.jsx) + 5 docs (spec.md/spec.contract.json/adr.md/adr.contract.json/pr-handoff.json). git diff --name-only bb67bf4..HEAD -- src/ = ПУСТО — серверный слой (src/) НЕ тронут, что и заявлено (O1/N5). Полный web-прогон cd web && npx vitest run: 60 files passed | 1653 tests passed | 0 failed (exit 0), в т.ч. screen-llm-connections.test.jsx 55 tests + .states.test.jsx 9 + .a11y.test.jsx 7. npm run build (root: tsc && seed tsconfig) exit 0. cd web && npm run build (vite) exit 0 (516 модулей; единственное предупреждение — pre-existing chunk-size >500kB, не связано). bash ci/checks/ux/ux-g5-jargon-denylist.sh → PASS (exit 0, информационный, 31 pre-existing finding — все в тест-файлах/других экранах, 0 в тексте формы T-0602). --self-test → PASS (4 фикстуры). bash ci/checks/ux/ux-g8-scroll-reachable.sh → PASS (exit 0). bash ci/checks/anti-case-lock.sh → PASS (exit 0, aggregate 24=24 baseline, delegates clean). Контракты spec/adr/pr-handoff валидны через demiurge/schemas/validate.py (все exit 0).",
+    "pre_existing_red_excluded": "FF-10 tier-isolation (src/db/registry-digest-dao.ts assigns tier='published' вне promote-модуля) красный на базе bb67bf4 — подтверждено: git diff --name-only bb67bf4..HEAD не содержит tier/isolation/rls/registry-digest поверхностей, T-0602 их не касается; уже починено на dev (a40fde3) по указанию задачи. В вердикт не вешается."
+  },
+  "claim_verifications": [
+    {
+      "claim": "T-0413: env:// безусловно отклоняется на tenant-пути",
+      "verdict": "verified_with_nuance",
+      "evidence": "src/server.ts:203-217 (tenantSecretResolver): decideEnvHandle(handle); if (decision.kind !== 'not_env') throw '[T-0413] env:// handles are system-only'. Это резолвер, используемый tenant LLM-портом (server.ts:277 secretResolver: tenantSecretResolver). Нюанс: на СОЗДАНИИ (POST /api/llm-connections, src/http/llm-connections.ts:294-317) env://-хэндл проходит validateSecretHandleShape (src/core/secret-handle-validator.ts:78-102 отклоняет только too_short/vendor-prefix/hex/JWT — НЕ env://) и СОХРАНЯЕТСЯ. Reject срабатывает ТОЛЬКО при резолве (при реальном вызове через ассистента). Итог: профиль с env:// создаётся, но структурно неработоспособен — ровно ловушка, описанная автором. Клейм верен; удаление поля обосновано."
+    },
+    {
+      "claim": "vault:// не резолвится ни для кого (Stage-2)",
+      "verdict": "verified",
+      "evidence": "src/http/secret-handle.ts:18 'resolveSecret port is declared (SecretResolverPort), NEVER invoked here (FR-6/Stage-2)'. grep vault:// по src/ (не test): ни одного production call-site, резолвящего vault://. server.ts:216 явно 'Other handle shapes (vault://…) are not resolvable at the env layer'. Единственное упоминание vault://demo/llm-key — в src/runtime/legal-precheck/demo-run.ts (демо-фикстура, не production-резолвер)."
+    },
+    {
+      "claim": "llm_connection.secret_handle — живой путь до реального вызова",
+      "verdict": "verified",
+      "evidence": "src/http/grant-propose.ts:360,387 SELECT ac.llm_secret_handle → handle = agent.llm_secret_handle; makeLlmPortFactory (server.ts:262-289) резолвит через validateSecretHandleShape → OpenAILlmPort(secretResolver: tenantSecretResolver) → тот самый T-0413 reject. Хэндл из этой формы реально доходит до вызова. Не мёртвая колонка — именно живой, но заблокированный env://-путь."
+    },
+    {
+      "claim": "серверный контракт POST /api/llm-connections не тронут (secret_handle остаётся валидным полем API)",
+      "verdict": "verified",
+      "evidence": "git diff --name-only bb67bf4..HEAD -- src/ пусто. src/http/llm-connections.ts:294-317 (обработка secret_handle) идентичен базе. Дверь для будущего admin-инструмента оставлена открытой корректно."
+    },
+    {
+      "claim": "existing env://-профили не сломаны — карточки живут и подписываются",
+      "verdict": "verified",
+      "evidence": "screen-llm-connections.jsx:953-958: карточка рендерит humanizeSecretHandleScheme(c.secret_handle_redacted) первой строкой ('env://…' → 'Ключ сервера (настроен оператором)') + сырой secret_handle_redacted вторичной мелкой строкой. Удаление затронуло ТОЛЬКО create-форму, не display существующих профилей. Профиль с env://-хэндлом деградирует в честную человекочитаемую карточку, а не в crash."
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/screen-llm-connections.jsx:816-826 (поле «Эндпойнт (base URL)»)",
+      "issue": "Поле «Эндпойнт (base URL)» остаётся в форме с хинтом 'OpenAI-совместимый https base URL' — это дев-жаргон (endpoint/base URL) для владельца-не-программиста. Для обычного провайдера предзаполнено из PROVIDER_PRESETS (напр. https://api.deepseek.com/v1) и валидно; для self-hosted нужно ручное. Задача T-0602 скоупнута на секрет-хэндл-поле + инструкцию + карточки — эндпойнт вне её AC. Не блокирует: предзаполнено и валидно; G5-тест намеренно скоупит жаргон-проверку на блок инструкции, эндпойнт-хинт легитимно вне scope.",
+      "suggestion": "Follow-up: скрыть/переименовать эндпойнт-поле за 'дополнительно' для стандартных провайдеров (показывать только для self-hosted/other), аналогично тому, как T-0602 убрало секрет-хэндл. Отдельная задача."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/screen-llm-connections.jsx:793 (описание формы «Новый профиль»)",
+      "issue": "Описание формы всё ещё содержит слово «эндпойнт» ('провайдер, эндпойнт, модель, цены'). Тот же жаргон-класс, что F-1. G5-денилист-тест на блок инструкции его не ловит (описание формы — отдельный блок ниже маркера 'Новый профиль'). Не дефект по букве задачи (скоуп — секрет-хэндл), но семантически тот же остаточный жаргон.",
+      "suggestion": "Follow-up вместе с F-1: при пересмотре эндпойнт-поля заодно вычистить слово из описания. Не блокирует T-0602."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1 (форма без секрет-хэндл-поля + state)", "covered": true},
+    {"ac": "AC-2 (onCreate не шлёт secret_handle)", "covered": true},
+    {"ac": "AC-3 (успех-баннер всегда честный next-step)", "covered": true},
+    {"ac": "AC-4 (описание формы без секрет-хэндл/env/vault)", "covered": true},
+    {"ac": "AC-5 (инструкция динамична по provider + fallback)", "covered": true},
+    {"ac": "AC-6 (PROVIDER_PRESETS.consoleHint для всех 5)", "covered": true},
+    {"ac": "AC-7 (карточка — человеческая подпись по схеме)", "covered": true},
+    {"ac": "AC-8 (g5-jargon — 0 новых находок)", "covered": true},
+    {"ac": "AC-9 (g8-scroll зелёный)", "covered": true},
+    {"ac": "AC-10 (anti-case-lock зелёный)", "covered": true},
+    {"ac": "AC-11 (существующие тесты без регресса, T-0574 instruction обновлён)", "covered": true},
+    {"ac": "AC-12 (build root+web зелёный)", "covered": true},
+    {"ac": "AC-13 (web vitest зелёный)", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Клейм T-0413 проверен независимым чтением src/server.ts:203-217 + src/http/llm-connections.ts:294-317 + src/core/secret-handle-validator.ts:78-102 — не из handoff/памяти. Установлен точный нюанс: env:// проходит shape-guard на создании (сохраняется), но безусловно reject-ится на резолве → структурная ловушка. Удаление обосновано.",
+    "vault://-клейм проверен grep-ом production call-sites (src/ без test) — ни одного резолва; демо-фикстура demo-run.ts исключена как не-production.",
+    "Обратная совместимость existing env://-профилей проверена чтением JSX-карточки (953-958): удаление затрагивает только create-форму, display существующих профилей честно деградирует через humanizeSecretHandleScheme.",
+    "Скоуп-крип отсутствует: git diff --name-only bb67bf4..HEAD -- src/ пусто, серверный контракт нетронут (заявлено O1/N5 — подтверждено)."
+  ]
+}
