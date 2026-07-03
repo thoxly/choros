@@ -45,6 +45,10 @@ import type {
   CycleTimeAnalytics,
   ActorTypeBreakdown,
 } from "../db/transition-journal.js";
+// T-0607 (а): the actor-rights registry digest — the analyst's honest view of
+// the entity data the asker may READ (счёт + примеры в правах), through the SAME
+// READ-PDP path the records LIST endpoint uses.
+import type { ReadableRegistryDigest } from "../db/registry-digest-dao.js";
 
 // ---------------------------------------------------------------------------
 // ReportDraft — ephemeral in-memory shape; never persisted here.
@@ -65,6 +69,21 @@ export interface ReportDraft {
   readonly cycleTime: CycleTimeAnalytics | null;
   /** Actor-type breakdown from the S3 journal (may be empty). */
   readonly actorBreakdown: readonly ActorTypeBreakdown[];
+  /**
+   * T-0607 (а): the actor-rights registry digest — readable registries with
+   * count + samples. `null` when the digest port is not wired (test/stub);
+   * `degraded:true` when the read failed (the context must NOT then claim
+   * «записей нет»). This is the ENTITY-data view the analyst was previously
+   * blind to (столп 6).
+   */
+  readonly registryDigest: ReadableRegistryDigest | null;
+  /**
+   * T-0607 (д): whether the user's query is explicitly about PROCESS analytics
+   * (cycle time / bottleneck / stages). Only then does the S3-journal telemetry
+   * enter the LLM context — internal telemetry is not offered to the user as an
+   * explanation for a plain data question.
+   */
+  readonly isProcessAnalytics: boolean;
   /** Tenant ID these results are scoped to. */
   readonly tenantId: string;
 }
@@ -101,6 +120,17 @@ export type CycleTimeLister = (tenantId: string) => Promise<CycleTimeAnalytics>;
 export type ActorBreakdownLister = (tenantId: string) => Promise<ActorTypeBreakdown[]>;
 
 /**
+ * T-0607 (а): actor-rights registry-digest loader. Returns the readable-registry
+ * digest for the asker (count + samples), through the READ-PDP path. `null` when
+ * not wired (test/stub → the analyst has no entity view, and must NOT claim
+ * «записей нет»). DB-wired in production to loadReadableRegistryDigest.
+ */
+export type RegistryDigestLister = (
+  tenantId: string,
+  actorSlug: string,
+) => Promise<ReadableRegistryDigest | null>;
+
+/**
  * Optional audit emitter. Called ONCE per analyst invocation with a structured
  * read-event payload. The same pattern as appendAuditEvent in assistant.ts:
  * callers supply the tx-aware writer; the pure core only calls the callback.
@@ -124,6 +154,12 @@ export interface AnalystPorts {
   loadCycleTime?: CycleTimeLister;
   /** Load actor-type breakdown. Default: returns []. */
   loadActorBreakdown?: ActorBreakdownLister;
+  /**
+   * T-0607 (а): load the actor-rights registry digest. Default: returns null
+   * (analyst has no entity view). Production wiring: assistant-analyst reads the
+   * READ-PDP-scoped digest via loadReadableRegistryDigest.
+   */
+  loadRegistryDigest?: RegistryDigestLister;
   /**
    * Emit an audit event for the analyst read. Default: no-op.
    * Production wiring: assistant.ts supplies the auditWriter.appendAuditEvent
@@ -153,6 +189,10 @@ const defaultLoadCycleTime: CycleTimeLister = async (tenantId) => ({
 });
 
 const defaultLoadActorBreakdown: ActorBreakdownLister = async () => [];
+
+// T-0607 (а): default digest port returns null → the analyst has NO entity view
+// and MUST NOT claim «записей нет» (buildDraftContext honours registryDigest===null).
+const defaultLoadRegistryDigest: RegistryDigestLister = async () => null;
 
 const defaultLoadSystemPrompt = async (_tenantId: string): Promise<string | null> => null;
 
@@ -212,16 +252,88 @@ function buildAnalystSystemPrompt(tenantId: string, override: string | null): st
 }
 
 // ---------------------------------------------------------------------------
+// isProcessAnalyticsQuery — T-0607 (д): gate S3-journal telemetry by INTENT.
+//
+// The S3 journal (cycle-time by activity, actor-type breakdown) is INTERNAL
+// telemetry. It must NOT be pasted into the user-facing LLM context — and thus
+// offered to the user as an explanation — for a plain data question («сколько
+// поставщиков заведено?»). It enters the context ONLY when the user explicitly
+// asks about PROCESS analytics (cycle time / bottleneck / stages / durations).
+// Generic keyword detector (no case literals — D-064).
+// ---------------------------------------------------------------------------
+
+export function isProcessAnalyticsQuery(userText: string): boolean {
+  const t = userText.toLowerCase();
+  const KEYWORDS = [
+    "цикл",          // цикловое время
+    "время",         // время выполнения
+    "узкое место",
+    "узкие места",
+    "этап",          // по этапам
+    "процесс",       // процессная аналитика
+    "длительност",   // длительность
+    "производительн", // производительность
+    "bottleneck",
+    "cycle",
+    "duration",
+    "throughput",
+    "stage",
+  ];
+  return KEYWORDS.some((k) => t.includes(k));
+}
+
+// ---------------------------------------------------------------------------
 // buildDraftContext — stringify the ReportDraft for the LLM context message.
+//
+// T-0607 (а): renders the actor-rights registry digest — the entity data the
+// analyst was previously blind to. «Записей нет» is asserted ONLY when the
+// digest is KNOWN and empty (not degraded, not unwired) — otherwise the analyst
+// must not claim absence as fact.
+// T-0607 (д): S3-journal telemetry sections are included ONLY when the query is
+// explicitly about process analytics (draft.isProcessAnalytics).
 // ---------------------------------------------------------------------------
 
 function buildDraftContext(draft: ReportDraft): string {
   const parts: string[] = [];
 
-  // Records section.
+  // ---- Entity data — the actor-rights registry digest (T-0607 а). -----------
+  const digest = draft.registryDigest;
+  if (digest === null) {
+    // Digest port not wired — the analyst has no entity view. Do NOT claim
+    // «записей нет»; state the honest limitation instead.
+    parts.push(
+      "=== Данные разделов недоступны для чтения в этом ответе (нет источника данных) ===",
+    );
+  } else if (digest.degraded) {
+    // Read failed — honest-degrade. Never claim absence as fact.
+    parts.push(
+      "=== Не удалось прочитать разделы (временная ошибка чтения). НЕ утверждай, что записей нет ===",
+    );
+  } else if (digest.registries.length === 0) {
+    parts.push("=== В доступных пользователю разделах нет ни одного раздела ===");
+  } else {
+    const totalVisible = digest.registries.reduce((s, r) => s + r.visibleCount, 0);
+    parts.push(
+      `=== Разделы и записи (в правах пользователя) — всего разделов: ${digest.registries.length}, ` +
+      `видимых записей суммарно: ${totalVisible} ===`,
+    );
+    for (const reg of digest.registries) {
+      const sampleStr =
+        reg.samples.length > 0 ? `; примеры: ${reg.samples.join(", ")}` : "";
+      parts.push(
+        `  • «${reg.displayName}» (${reg.slug}): записей — ${reg.visibleCount}${sampleStr}`,
+      );
+    }
+    if (totalVisible === 0) {
+      parts.push(
+        "  (в доступных разделах пока нет записей — это достоверный факт, а не ограничение прав)",
+      );
+    }
+  }
+
+  // ---- Ad-hoc records passed directly (legacy port, may be empty). ----------
   if (draft.records.length > 0) {
-    parts.push(`=== Записи (${draft.records.length} шт., видимые пользователю) ===`);
-    // Cap at 20 records to avoid token explosion; production may paginate.
+    parts.push(`\n=== Записи (${draft.records.length} шт., видимые пользователю) ===`);
     const visible = draft.records.slice(0, 20);
     for (const rec of visible) {
       parts.push(JSON.stringify(rec));
@@ -229,31 +341,32 @@ function buildDraftContext(draft: ReportDraft): string {
     if (draft.records.length > 20) {
       parts.push(`... ещё ${draft.records.length - 20} записей (не показаны)`);
     }
-  } else {
-    parts.push("=== Записей нет (либо доступ ограничен правами пользователя) ===");
   }
 
-  // Cycle-time analytics section.
-  if (draft.cycleTime && draft.cycleTime.rows.length > 0) {
-    parts.push("\n=== Цикловое время по активностям (S3 журнал) ===");
-    if (draft.cycleTime.bottleneck) {
-      parts.push(`Узкое место: ${draft.cycleTime.bottleneck}`);
+  // ---- S3-journal telemetry — ONLY for explicit process-analytics queries (д).
+  if (draft.isProcessAnalytics) {
+    // Cycle-time analytics section.
+    if (draft.cycleTime && draft.cycleTime.rows.length > 0) {
+      parts.push("\n=== Цикловое время по активностям (S3 журнал) ===");
+      if (draft.cycleTime.bottleneck) {
+        parts.push(`Узкое место: ${draft.cycleTime.bottleneck}`);
+      }
+      for (const row of draft.cycleTime.rows.slice(0, 10)) {
+        const avgMs =
+          row.avg_duration_ms != null ? `${Math.round(row.avg_duration_ms)} мс` : "нет данных";
+        parts.push(
+          `  ${row.activity}: avg=${avgMs}, всего=${row.count}, ` +
+          `человек=${row.human_count}, агент=${row.agent_count}, сервис=${row.service_count}`,
+        );
+      }
     }
-    for (const row of draft.cycleTime.rows.slice(0, 10)) {
-      const avgMs =
-        row.avg_duration_ms != null ? `${Math.round(row.avg_duration_ms)} мс` : "нет данных";
-      parts.push(
-        `  ${row.activity}: avg=${avgMs}, всего=${row.count}, ` +
-        `человек=${row.human_count}, агент=${row.agent_count}, сервис=${row.service_count}`,
-      );
-    }
-  }
 
-  // Actor-breakdown section.
-  if (draft.actorBreakdown.length > 0) {
-    parts.push("\n=== Разбивка по типу актора ===");
-    for (const row of draft.actorBreakdown.slice(0, 10)) {
-      parts.push(`  ${row.activity} / ${row.actor_type}: ${row.count}`);
+    // Actor-breakdown section.
+    if (draft.actorBreakdown.length > 0) {
+      parts.push("\n=== Разбивка по типу актора ===");
+      for (const row of draft.actorBreakdown.slice(0, 10)) {
+        parts.push(`  ${row.activity} / ${row.actor_type}: ${row.count}`);
+      }
     }
   }
 
@@ -278,6 +391,7 @@ const SAVE_HINT =
 //     - ports.listRecords()   — READ records (filtered by ACL)
 //     - ports.loadCycleTime() — READ S3 journal (no write)
 //     - ports.loadActorBreakdown() — READ S3 journal (no write)
+//     - ports.loadRegistryDigest() — READ registry digest (READ-PDP, no write)
 //     - ports.emitAudit()     — AUDIT write (metadata only, not business data)
 //   The ABSENCE of any record.create / record.update / record.delete / registry
 //   mutation call is the structural no-business-write enforcement.
@@ -291,10 +405,15 @@ export async function runAnalyst(
   const listRecords = ports.listRecords ?? defaultListRecords;
   const loadCycleTime = ports.loadCycleTime ?? defaultLoadCycleTime;
   const loadActorBreakdown = ports.loadActorBreakdown ?? defaultLoadActorBreakdown;
+  const loadRegistryDigest = ports.loadRegistryDigest ?? defaultLoadRegistryDigest;
   const emitAudit = ports.emitAudit ?? defaultEmitAudit;
   const loadSystemPrompt = ports.loadSystemPrompt ?? defaultLoadSystemPrompt;
 
   const nowMs = Date.now();
+
+  // T-0607 (д): decide ONCE whether the S3-journal telemetry is relevant to this
+  // query. Plain data questions never see internal process telemetry.
+  const isProcessAnalytics = isProcessAnalyticsQuery(userText);
 
   // -------------------------------------------------------------------------
   // 1. Read records within the asker's ACL (intersection grants ceiling).
@@ -309,13 +428,25 @@ export async function runAnalyst(
   );
 
   // -------------------------------------------------------------------------
-  // 2. Read S3 journal metrics (read-only, tenant-scoped).
-  //    These run in parallel for efficiency.
+  // 2a. Read the actor-rights registry digest (T-0607 а) — the entity data the
+  //     analyst was previously blind to. Honest-degrade to null on any failure.
   // -------------------------------------------------------------------------
-  const [cycleTime, actorBreakdown] = await Promise.all([
-    loadCycleTime(ctx.tenantId).catch(() => null),
-    loadActorBreakdown(ctx.tenantId).catch(() => []),
-  ]);
+  const registryDigest = await loadRegistryDigest(
+    ctx.tenantId,
+    ctx.userSubject.subjectId,
+  ).catch(() => null);
+
+  // -------------------------------------------------------------------------
+  // 2b. Read S3 journal metrics (read-only, tenant-scoped) — ONLY when the query
+  //     is about process analytics (T-0607 д). Plain data questions never load
+  //     internal telemetry (and thus never leak it into the answer).
+  // -------------------------------------------------------------------------
+  const [cycleTime, actorBreakdown] = isProcessAnalytics
+    ? await Promise.all([
+        loadCycleTime(ctx.tenantId).catch(() => null),
+        loadActorBreakdown(ctx.tenantId).catch(() => []),
+      ])
+    : [null, [] as ActorTypeBreakdown[]];
 
   // -------------------------------------------------------------------------
   // 3. Build the ephemeral ReportDraft (no DB write here).
@@ -325,6 +456,8 @@ export async function runAnalyst(
     records,
     cycleTime,
     actorBreakdown,
+    registryDigest,
+    isProcessAnalytics,
     tenantId: ctx.tenantId,
   };
 
@@ -361,6 +494,16 @@ export async function runAnalyst(
   const systemPrompt = buildAnalystSystemPrompt(ctx.tenantId, promptOverride);
   const draftContext = buildDraftContext(draft);
 
+  // T-0607 (г): the analyst does NOT swallow LLM errors here. Errors propagate
+  // to the assistant ROUTE, which guarantees every user message gets a reply IN
+  // THE THREAD without masking real bugs:
+  //   - LlmDormantError / LlmUnavailableError → route's honest-503 path
+  //     (respondLlmUnavailable — persists a thread message + canonical envelope);
+  //   - any OTHER error (a real bug / transport failure) → the route persists a
+  //     canonical in-thread reply AND still surfaces INTERNAL 500 (anti-mask,
+  //     T-0573 ADR §2.2) — the thread is never mute, the bug is never hidden.
+  // Swallowing here would either (a) mask a genuine bug as a friendly 200, or
+  // (b) bypass the richer 503 UX — both worse than a single, honest route seam.
   const llmResult = await (ctx.llm as LlmPort).chat({
     system: systemPrompt,
     messages: [

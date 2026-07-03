@@ -52,6 +52,17 @@ export interface HandlerContext {
   threadId: string;
   /** The message ID being replied to. */
   messageId: string;
+  /**
+   * T-0607 (б): OPTIONAL server-side owner predicate. Resolves whether the
+   * on-behalf-of user is the genesis owner of this tenant. The configurator
+   * grant gate (hasAuthoringDraftGrant) applies the owner short-circuit that
+   * `canOperateSystemAgent`'s contract assigns to the CALLER (capability-authz.ts
+   * §"owner short-circuit … applied by the caller"). The production composition
+   * root (assistant.ts) wires this to the EXISTING isGenesisOwnerForTenant
+   * resolver (the same one the honest-503 path uses). When undefined (tests /
+   * stub), the owner branch does NOT fire — fail-closed to the prior behaviour.
+   */
+  isTenantOwner?: () => Promise<boolean>;
 }
 
 /**

@@ -588,17 +588,40 @@ export function confirmsPlan(text: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Check whether the intersection grants authorize OPERATING the configurator
- * system agent (spec §6, T-0475). Authority = an effective authoring_draft grant
- * (create/update) OR an explicit system_agent:operate grant — encoded by the
- * shared canOperateSystemAgent predicate (capability-authz.ts), so the
- * configurator gate and any future operate-system-agent gate agree.
+ * Check whether the caller may OPERATE the configurator system agent (spec §6,
+ * T-0475). The decision is SERVER-SIDE and DETERMINISTIC — made here, BEFORE any
+ * LLM call — so the LLM never decides rights (T-0607 defect б).
  *
- * SECURITY: uses ctx.intersectionGrants which is already the INTERSECTION of
- * agent ∩ user — never wider. An agent cannot author on behalf of a user who
- * holds neither capability.
+ * Authority = EITHER:
+ *   1. the on-behalf-of user is the tenant OWNER — the owner short-circuit that
+ *      `canOperateSystemAgent`'s contract explicitly assigns to the CALLER
+ *      (capability-authz.ts: "The owner short-circuit (isGenesisOwner) is applied
+ *      by the caller"). Resolved via ctx.isTenantOwner (wired by the composition
+ *      root to the SAME isGenesisOwnerForTenant resolver the honest-503 path uses).
+ *      This closes the live defect: a genesis OWNER whose authority flows from
+ *      OWNERSHIP (not an explicit intersecting grant) was falsely refused, because
+ *      the OLD check looked ONLY at the agent∩user intersection — which could be
+ *      empty for the owner and flap by the seeded agent's grant scope; OR
+ *   2. an effective authoring_draft (create/update) / system_agent:operate grant
+ *      in the intersection — the SAME canOperateSystemAgent predicate.
+ *
+ * SECURITY: the owner short-circuit does NOT widen non-owners' rights (a
+ * non-owner without the capability still returns false). For non-owners the check
+ * uses ctx.intersectionGrants (agent ∩ user, never wider) — the agent still
+ * cannot author on behalf of a user who holds neither capability. When
+ * ctx.isTenantOwner is undefined (tests / stub) the owner branch does not fire —
+ * fail-closed to the prior behaviour.
  */
 async function hasAuthoringDraftGrant(ctx: HandlerContext): Promise<boolean> {
+  // 1) Owner short-circuit (deterministic, server-side) — the live defect (б).
+  if (ctx.isTenantOwner) {
+    try {
+      if (await ctx.isTenantOwner()) return true;
+    } catch {
+      // Owner resolution failed → fall through to the grant check (fail-closed).
+    }
+  }
+  // 2) Capability via the intersection grants (agent ∩ user, never wider).
   const nowMs = Date.now();
   const grants = await ctx.intersectionGrants.getGrants(ctx.userSubject, nowMs);
   return canOperateSystemAgent(grants);

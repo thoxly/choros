@@ -1,0 +1,97 @@
+{
+  "task_id": "T-0607",
+  "reviewer": "independent-judge (D-007: not the author)",
+  "reviewed_sha": "368cea3ce6fa3741abe37fd83d14e2a7d9f8ad2a",
+  "base_sha": "ff549341bac2c1ba8f1ac627ccfaa8dfadce4dd6",
+  "branch": "task/T-0607-assistant-truth",
+  "verdict": "approve",
+  "verdict_rationale": "Все пять дефектов честности закрыты минимально-инвазивно и БЕЗ новой лжи/утечки/PDP-дыры. (а) реестровый дайджест использует БАЙТ-В-БАЙТ тот же READ-PDP путь, что records LIST (getGrantsForSubject + loadTenantOrgAncestry + makeResourceAncestryOracle(orgOracle, emptyRowIndex) + isRecordReadable) — не обходит гейт; мутация «убрать грант-фильтр» делает AC-3 красным (утечка счётчиков чужого реестра поймана). (б) owner-short-circuit проверяет ВЛАДЕЛЬЦА (actorSlug=on-behalf-of user, не агента) через isGenesisOwnerForTenant, читающий role_assignment из БД (NF-3), fail-closed при undefined/throw — не расширяет права агенту; мутация «убрать short-circuit» делает unit AC-4 красным. (в) resolveIdBySlug параметризован ($1/$2), table — compile-time union из литералов (нет инъекции), не найдено → honest op-error не 500; buildHonestOpsReport честно рапортует провалы (мутация «вернуть оптимизм» → AC-7 красный). (г) reply-в-тред + видимый 500 реконсилирован с anti-mask T-0573 §2.2 — существующий anti-mask DB-тест остаётся зелёным, мутация «отключить persist» делает AC-9 красным. (д) телеметрия — не секрет (tenant-scoped process-метрики, уже видны через report-page), keyword-гейт корректно framed как relevance-гейт. Гейты зелёные (build/test/fitness:db/5 single-resolver&anti-case&jargon). Единственный флейк — doc-summary (таймаут под нагрузкой, зелёный изолированно, предупреждён в брифе). Блокирующих находок НЕТ. Замечания — только documentation-hygiene (contract-JSON отстали от BUILD-реконсиляции, но deviations честно задекларированы в pr-handoff) и одна latent within-tenant slug-ambiguity (medium, не security).",
+  "ci_seen": {
+    "npm_build": "PASS (tsc + seed/tsconfig, 0 errors)",
+    "npm_test": "PASS (258 files, 4957 passed | 10 skipped, 0 failed)",
+    "fitness_db": "PASS on all T-0607 ACs (AC-3/AC-5/AC-6/AC-9) + full non-regression; ONLY flake = doc-summary.db.test.ts (4 timeouts under parallel load, GREEN 5/5 isolated at 60s timeout — env flake, unrelated, pre-warned)",
+    "single_resolver_sh": "PASS",
+    "grant_resolver_isolation_sh": "PASS",
+    "registry_defs_pdp_isolation_sh": "PASS",
+    "assistant_llm_message_jargon_sh": "PASS (+ --self-test PASS)",
+    "anti_case_lock_sh": "PASS (Phase 1+2 within baseline, aggregate 24=24, 0 new D-064 literals)",
+    "anti_mask_db_test": "PASS (assistant-llm-unavailable anti-mask: plain error → 500 INTERNAL preserved after (г) reconciliation)"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "info",
+      "title": "(а) READ-PDP path is identical to the canonical LIST-records resolver — no bypass",
+      "file": "src/db/registry-digest-dao.ts:157-207",
+      "detail": "loadReadableRegistryDigest composes getGrantsForSubject + loadTenantOrgAncestry + makeResourceAncestryOracle(orgOracle, emptyRowIndex) and filters each row with isRecordReadable — the SAME four calls as server.ts::resolveReadVisibility (src/server.ts:819-829) used by LIST records. emptyRowIndex means ADR rule-3 (registry/app-scoped narrowing) does not fire — identical to production. Not wider than the actor's READ grants. Mutation proof: disabling the isRecordReadable filter turned AC-3 red at viewerEntry.visibleCount===0 (non-reader would see another registry's count) — the gate is genuinely load-bearing."
+    },
+    {
+      "id": "F2",
+      "severity": "info",
+      "title": "(б) owner short-circuit checks the USER (not the agent) and is fail-closed",
+      "file": "src/http/assistant.ts:2107-2124, src/core/assistant-configurator.ts:614-624, src/db/org.ts:634-660",
+      "detail": "ctx.isTenantOwner wires isGenesisOwnerForTenant(pool, tenantId, actorSlug, now); actorSlug = extractActorSlug(req) = the on-behalf-of USER. isGenesisOwnerForTenant reads role_assignment for role 'tenant-owner' from the DB (NF-3, never from JWT). The subject of the owner check is the user, so it CANNOT widen an agent's rights. try/catch + undefined → owner branch does NOT fire (fail-closed to prior grant check). AC-4 unit test isolates all four branches (owner-true admit, owner-false refuse, undefined refuse, throw refuse). Mutation proof: disabling the short-circuit turned AC-4 red."
+    },
+    {
+      "id": "F3",
+      "severity": "info",
+      "title": "(в1) resolveIdBySlug: no SQL injection, tenant-scoped",
+      "file": "src/http/assistant.ts:190-202",
+      "detail": "slug + tenantId parameterized ($1/$2); the interpolated `choros.${table}` is a compile-time union \"registry_def\"|\"application\" and all 5 call-sites pass string literals — no arbitrary-table surface. UUID passthrough via UUID_RE. Not found → null → honest op-error string (never a 500)."
+    },
+    {
+      "id": "F4",
+      "severity": "medium",
+      "title": "(в1) resolveIdBySlug for registry_def is slug-ambiguous across applications within one tenant",
+      "file": "src/http/assistant.ts:197-201; migrations/004_registry_def.sql:20",
+      "detail": "registry_def uniqueness is UNIQUE (tenant_id, application_id, slug) — the SAME registry slug can legitimately exist in two different applications in one tenant. resolveIdBySlug does `WHERE tenant_id=$1 AND slug=$2 LIMIT 1` with NO application_id filter and NO ORDER BY, so on a cross-app slug collision it resolves an ARBITRARY (non-deterministic) registry. The configurator could then edit the wrong registry's schema, and buildHonestOpsReport would still show it as ✓ (the op DID succeed — on the wrong target). Application resolution is safe (UNIQUE (tenant_id, slug)). NOT a security hole: strictly within-tenant, within-rights, RLS-enforced — no leak, no escalation. NON-BLOCKING because it requires the specific precondition of a duplicate registry slug across two apps. Follow-up: pass/resolve application_id context, or reject on >1 match rather than LIMIT 1."
+    },
+    {
+      "id": "F5",
+      "severity": "info",
+      "title": "(а) sample-value leakage into LLM context is bounded to READ-visible business data",
+      "file": "src/db/registry-digest-dao.ts:79-106,185-200",
+      "detail": "pickSampleValue reads only choros.record.data (user-authored business form values), only for PUBLISHED registries, only for rows passing isRecordReadable, truncated to 80 chars, <=3 samples/registry. Secrets (llm_connection credentials, app_secret) and employee PII live in separate tables — never in record.data. Worst case: the actor's own assistant sees field values the actor already may READ (and sees in the UI). Within the столп-6 envelope; not a leak."
+    },
+    {
+      "id": "F6",
+      "severity": "info",
+      "title": "(г) reply-in-thread does not introduce new duplicate-reply risk on client retry",
+      "file": "src/http/assistant.ts:2035-2044,1345-1405",
+      "detail": "The user message is persisted with a fresh randomUUID BEFORE dispatch (line 2035). On failure, persistAssistantFailureReply writes one canonical assistant message (fresh UUID) and returns 500. A client retry POSTs a NEW message (new UUID) — same at-least-once append semantics the whole route already has (no idempotency key exists on this route, pre-existing). No NEW dup risk introduced by the failure path."
+    },
+    {
+      "id": "F7",
+      "severity": "info",
+      "title": "(д) S3-telemetry is tenant-scoped operational data, not a secret — keyword gate is a relevance gate",
+      "file": "src/core/assistant-analyst.ts:263-283,428-448",
+      "detail": "cycle-time / actor-breakdown are tenant-scoped process metrics already surfaced tenant-wide via report-page-render.ts. No credentials, no cross-tenant data, no PII. isProcessAnalyticsQuery false-negative → telemetry omitted (graceful); false-positive → shows the tenant's own process metrics (mild noise, no confidentiality breach). Correctly framed as relevance, not a security boundary."
+    },
+    {
+      "id": "F8",
+      "severity": "low",
+      "title": "Contract-JSON artifacts (spec + adr) lag the BUILD-time (г)/(б) reconciliation",
+      "file": "docs/specs/T-0607.spec.contract.json (AC-8), docs/adr/T-0607.adr.contract.json (decision: Дельта (б)/(г))",
+      "detail": "spec.contract AC-8 still reads 'runAnalyst ... возвращает HandlerResult с каноническим текстом (без проброса)', but the shipped code and its unit test (assistant-analyst.test.ts:213-215) assert the OPPOSITE — the analyst PROPAGATES (rejects). ADR contract 'Дельта (г)(i)' likewise says runAnalyst 'не пробрасывает' and the route 'отвечает им' (friendly text) — code propagates and responds 500 INTERNAL. ADR 'Дельта (б)' says canOperateSystemAgent runs on 'userGrants на ctx.userSubject, не на пересечении' — code uses ctx.intersectionGrants. ALL THREE drifts are honestly declared in docs/handoff/T-0607.pr-handoff.json deviations_from_adr[0..2], so this is documentation-consistency, NOT deception. Non-blocking. Fix: regenerate the two contract JSONs to match the reconciled implementation."
+    },
+    {
+      "id": "F9",
+      "severity": "low",
+      "title": "AC-5 (DB) does not isolate the owner short-circuit — the seeded owner also holds authoring_draft",
+      "file": "ci/checks/db/configurator-owner-gate.test.ts:127-149",
+      "detail": "AC-5a's owner comes from registerTenant, which seeds the genesis owner with all 17 mgmt_object grants (incl. authoring_draft). So the owner is admitted via path 2 (canOperateSystemAgent) even with the short-circuit disabled — mutation 2 (disable short-circuit) left AC-5 GREEN while it turned unit AC-4 RED. The short-circuit IS covered (by AC-4 with an empty-intersection owner), so this is a redundant-assertion / test-isolation gap, NOT a coverage hole. Non-blocking. Optional: give AC-5a an owner whose intersection is empty to make the DB test also pin the short-circuit."
+    }
+  ],
+  "adversarial_mutations": [
+    {"id": "M1", "mutation": "disable isRecordReadable filter in loadReadableRegistryDigest", "expected": "AC-3 red (non-reader leaks count)", "observed": "AC-3 RED at viewerEntry.visibleCount===0", "result": "test catches the PDP hole"},
+    {"id": "M2", "mutation": "disable owner short-circuit in hasAuthoringDraftGrant", "expected": "AC-4/AC-5 red", "observed": "unit AC-4 RED (owner-empty-intersection admit); AC-5 (DB) STAYED GREEN — see F9", "result": "short-circuit pinned by AC-4; AC-5 isolation gap noted"},
+    {"id": "M3", "mutation": "buildHonestOpsReport returns optimistic text unconditionally", "expected": "AC-7 red", "observed": "4 report tests RED incl. AC-7 (✗ not shown, ✅ carried over failures)", "result": "honest report pinned"},
+    {"id": "M4", "mutation": "skip thread persist in persistAssistantFailureReply (keep 500)", "expected": "AC-9a red, AC-9b (500) intact", "observed": "AC-9 RED at assistantMsgs.length>=1 (thread mute)", "result": "in-thread reply guarantee pinned"}
+  ],
+  "acceptance_coverage": {
+    "total_acs": 13,
+    "covered_and_verified": 13,
+    "note": "AC-1/2/4/7/8/10 = unit (npm test green); AC-3/5/6/9/11/12/13 = fitness (fitness:db + CI gates green). AC-8 shipped as REFORMULATED (analyst propagates) per declared deviation; spec.contract text stale (F8). AC-5 DB does not isolate the short-circuit but AC-4 does (F9)."
+  },
+  "pillar_alignment": "Столпы 5-6: (а) closes analyst blindness to entity data (столп 6 — данные) через READ-PDP-scoped digest; (б) fixes the assistant refusing the OWNER (столп 5 — ассистент в контуре прав); (в/г/д) honesty of ops-report, reply-in-thread, and no internal-telemetry leak. No pillar regressed."
+}
