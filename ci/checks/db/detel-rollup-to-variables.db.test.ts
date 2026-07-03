@@ -328,6 +328,54 @@ async function seedParentRegistry(
   return id;
 }
 
+/**
+ * T-0603 — Parent registry whose `total` is an EMBEDDED x-rollup field
+ * (aggregate over an in-record `lines` collection array; NEUTRAL names — no
+ * product-case slugs, D-064 §5). `total` is NEVER stored in record.data.
+ */
+async function seedEmbeddedRollupRegistry(
+  c: pg.Client,
+  tenantId: string,
+  applicationId: string,
+  slug: string,
+): Promise<string> {
+  const id = uuid();
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      lines: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            price: { type: 'number', title: 'Price' },
+            qty: { type: 'number', title: 'Qty' },
+          },
+        },
+      },
+      total: {
+        type: 'number',
+        title: 'Total (embedded rollup)',
+        'x-rollup': { source: 'lines', op: 'sum', value_field: 'price', factor_field: 'qty' },
+      },
+    },
+    required: [],
+  };
+  await c.query('BEGIN');
+  await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+  await c.query(
+    `INSERT INTO choros.registry_def
+       (tenant_id, id, application_id, slug, display_name, description,
+        record_schema, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $4, NULL, $5::jsonb, 0, 0)`,
+    [tenantId, id, applicationId, slug, JSON.stringify(schema)],
+  );
+  await c.query('COMMIT');
+  return id;
+}
+
 async function seedOnCreateBinding(
   c: pg.Client,
   tenantId: string,
@@ -538,6 +586,124 @@ describe('T-0575 FF-3/AC-5/AC-3 — computed rollup reaches startInstance variab
 
       expect(defKeys).toContain('task-default');
       expect(defKeys).not.toContain('task-high-value');
+    }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// T-0603 — EMBEDDED rollup flavor (aggregate over an in-record collection array)
+// reaches startInstance variables AND the GET /api/records/:id derived map.
+//
+// This is the flavor the interface constructor actually authors and the flavor
+// live in production ("total = Σ line price × qty over an items collection inside
+// the record's own data"). The T-0575 tests above cover only the child-records
+// flavor — this block closes the coverage gap that let the acceptance bug ship.
+// NEUTRAL fixture names (lines / price / qty / a generic process key) — no
+// product-case slugs (D-064 §5). The collection is POSTed inline in `data`
+// (no pre-seeded child records, no deterministic-id mock needed).
+// ---------------------------------------------------------------------------
+describe('T-0603 — embedded rollup reaches startInstance variables + derived map (live Flowable+Postgres)', () => {
+  it(
+    'AC-9: on_create with an embedded >500000 rollup sum takes the HIGH-VALUE branch; <threshold/empty → default',
+    requireDbAndFlowable(async () => {
+      const processKey = `embeddedRollupGw${Date.now()}`;
+      const flowableClient = makeFlowableClient({
+        baseUrl: FLOWABLE_BASE_URL,
+        adminUser: FLOWABLE_ADMIN_USER,
+        adminPassword: FLOWABLE_ADMIN_PASSWORD,
+      });
+      const deployResult = await flowableClient.deployBpmn(rollupGatewayBpmn(processKey));
+      expect(deployResult.ok).toBe(true);
+
+      const applicationId = await withClient(migratorUrl(), (c) =>
+        seedApplication(c, TENANT_ID, `t0603-embedded-app-${Date.now()}`),
+      );
+      const registryId = await withClient(migratorUrl(), (c) =>
+        seedEmbeddedRollupRegistry(c, TENANT_ID, applicationId, 'embedded-rollup-parent'),
+      );
+      await withClient(migratorUrl(), (c) =>
+        seedOnCreateBinding(c, TENANT_ID, applicationId, processKey),
+      );
+
+      // HIGH-VALUE: Σ price×qty = 300000 + 250000 = 550000 > 500000.
+      const rHigh = await makeRequest(
+        baseUrl,
+        'POST',
+        '/api/records',
+        {
+          application_id: applicationId,
+          registry_def_id: registryId,
+          data: { lines: [{ price: 100000, qty: 3 }, { price: 250000, qty: 1 }] },
+        },
+        { 'x-dev-user': ACTOR },
+      );
+      expect(rHigh.statusCode).toBe(201);
+      const highId = (JSON.parse(rHigh.body) as { id: string }).id;
+
+      const highInstance = await resolveInstanceIdForRecord(TENANT_ID, highId);
+      let highKeys: string[] = [];
+      for (let attempt = 0; attempt < 10; attempt++) {
+        highKeys = await activeTaskDefKeys(highInstance);
+        if (highKeys.length > 0) break;
+        await new Promise((res) => setTimeout(res, 200));
+      }
+      expect(highKeys).toContain('task-high-value');
+      expect(highKeys).not.toContain('task-default');
+
+      // AC-10: GET /api/records/:id returns derived[total] = the same 550000 sum
+      // (server compute now matches the UI — closes the divergence).
+      const detail = await makeRequest(baseUrl, 'GET', `/api/records/${highId}`, undefined, {
+        'x-dev-user': ACTOR,
+      });
+      expect(detail.statusCode).toBe(200);
+      const detailBody = JSON.parse(detail.body) as { derived?: Record<string, unknown> };
+      expect(detailBody.derived).toBeDefined();
+      expect(detailBody.derived!['total']).toBe(550000);
+
+      // LOW: Σ = 10000 × 1 = 10000 < 500000 → default branch (proves the gate is
+      // not always-true and the embedded sum is really computed, not hardcoded).
+      const rLow = await makeRequest(
+        baseUrl,
+        'POST',
+        '/api/records',
+        {
+          application_id: applicationId,
+          registry_def_id: registryId,
+          data: { lines: [{ price: 10000, qty: 1 }] },
+        },
+        { 'x-dev-user': ACTOR },
+      );
+      expect(rLow.statusCode).toBe(201);
+      const lowId = (JSON.parse(rLow.body) as { id: string }).id;
+      const lowInstance = await resolveInstanceIdForRecord(TENANT_ID, lowId);
+      let lowKeys: string[] = [];
+      for (let attempt = 0; attempt < 10; attempt++) {
+        lowKeys = await activeTaskDefKeys(lowInstance);
+        if (lowKeys.length > 0) break;
+        await new Promise((res) => setTimeout(res, 200));
+      }
+      expect(lowKeys).toContain('task-default');
+      expect(lowKeys).not.toContain('task-high-value');
+
+      // EMPTY collection → total null → amount null → default branch (honest null).
+      const rEmpty = await makeRequest(
+        baseUrl,
+        'POST',
+        '/api/records',
+        { application_id: applicationId, registry_def_id: registryId, data: { lines: [] } },
+        { 'x-dev-user': ACTOR },
+      );
+      expect(rEmpty.statusCode).toBe(201);
+      const emptyId = (JSON.parse(rEmpty.body) as { id: string }).id;
+      const emptyInstance = await resolveInstanceIdForRecord(TENANT_ID, emptyId);
+      let emptyKeys: string[] = [];
+      for (let attempt = 0; attempt < 10; attempt++) {
+        emptyKeys = await activeTaskDefKeys(emptyInstance);
+        if (emptyKeys.length > 0) break;
+        await new Promise((res) => setTimeout(res, 200));
+      }
+      expect(emptyKeys).toContain('task-default');
+      expect(emptyKeys).not.toContain('task-high-value');
     }),
   );
 });

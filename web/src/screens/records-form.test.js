@@ -1319,6 +1319,31 @@ describe('T-0453: computeRollup — op sum', () => {
   });
 });
 
+// T-0603 AC-5: PARITY MIRROR — these exact fixtures & numbers are asserted
+// identically by the SERVER function src/core/rollup-contract.ts::
+// computeEmbeddedRollup (src/__tests__/rollup-contract.test.ts, tests T0603-19..21).
+// The two implementations must stay in lockstep: the client computes the total
+// for display, the server projects the same total into Flowable variables at
+// create=start. A divergence here is exactly the T-0603 bug (UI shows the sum,
+// engine gets NULL). If you change one, change the other and both fixtures.
+describe('T-0603 AC-5: computeRollup parity with server computeEmbeddedRollup', () => {
+  const field = { rollupSource: 'items', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: 'qty' };
+
+  it('sum+factor fixture → 550000 (>500000 live-proof case)', () => {
+    const data = { items: [{ price: 100000, qty: 3 }, { price: 250000, qty: 1 }] };
+    expect(computeRollup(field, data)).toBe(550000);
+  });
+
+  it('empty items fixture → null', () => {
+    expect(computeRollup(field, { items: [] })).toBeNull();
+  });
+
+  it('mixed fixture — blank price cell skipped → 230', () => {
+    const data = { items: [{ price: 100, qty: 2 }, { price: '', qty: 5 }, { price: 30, qty: 1 }] };
+    expect(computeRollup(field, data)).toBe(230);
+  });
+});
+
 describe('T-0453: computeRollup — op count', () => {
   const field = { rollupSource: 'lines', rollupOp: 'count', rollupValueField: '', rollupFactorField: '' };
 

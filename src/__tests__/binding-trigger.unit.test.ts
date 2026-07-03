@@ -58,12 +58,18 @@ function makeStubClient(opts: {
     field_mapping: Record<string, string> | null;
   } | null;
   trackRollback?: { called: boolean };
+  /**
+   * T-0603: optional record_schema override so a test can declare derived
+   * (x-rollup) fields and exercise the on_create derived-precompute overlay.
+   * Defaults to the schema-less object used by the original T-0351 tests.
+   */
+  recordSchema?: Record<string, unknown>;
 }) {
-  const { bindingRow, trackRollback } = opts;
+  const { bindingRow, trackRollback, recordSchema } = opts;
   const fakeRegistryDef = {
     id: "ae000000-0000-0000-0000-000000000001",
     application_id: "a0000000-0000-0000-0000-000000000001",
-    record_schema: { type: "object", properties: {}, additionalProperties: true },
+    record_schema: recordSchema ?? { type: "object", properties: {}, additionalProperties: true },
     record_schema_version: 1,
   };
   const fakeRecord = {
@@ -549,6 +555,126 @@ describe("T-0351 savepoint: projection failure does not lose the committed recor
 
       // startInstance was called (engine succeeded)
       expect(flowable.startInstance).toHaveBeenCalledOnce();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0603: embedded-rollup derived-precompute reaches startInstance variables
+// ---------------------------------------------------------------------------
+// The core defect (acceptance 2026-07-03): an on_create field_mapping entry that
+// points at an EMBEDDED-rollup field (aggregate over a collection array in the
+// record's own data) got projected as NULL, because rollup-contract.ts only
+// recognized the child-records rollup flavor. These tests drive the REAL on_create
+// route with a schema declaring an embedded x-rollup field and assert the computed
+// sum reaches flowable.startInstance's variables (not null).
+
+describe("T-0603 on_create: embedded-rollup field reaches startInstance variables", () => {
+  // A registry schema with an embedded-rollup 'total' field:
+  //   total = Σ(items[].price × items[].qty), never stored in record.data (PD-20).
+  const embeddedRollupSchema = {
+    type: "object",
+    additionalProperties: true,
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: { price: { type: "number" }, qty: { type: "number" } },
+        },
+      },
+      total: {
+        type: "number",
+        "x-rollup": { source: "items", op: "sum", value_field: "price", factor_field: "qty" },
+      },
+    },
+  };
+
+  const bindingRow = {
+    id: "bind-603",
+    process_key: "purchaseApprovalGeneric",
+    trigger_type: "on_create",
+    start_form_key: null,
+    // engine var 'amount' ← the DERIVED field 'total' (not a raw submitted field)
+    field_mapping: { amount: "total" } as Record<string, string>,
+  };
+
+  it("AC-7: non-empty collection → amount = computed sum (Σ price×qty), NOT null", async () => {
+    const flowable = makeStubFlowable({ ok: true, instanceId: "inst-603a" });
+    const pool = makeStubPool({ bindingRow, recordSchema: embeddedRollupSchema });
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => "a0000000-0000-0000-0000-000000000001",
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        {
+          application_id: "a0000000-0000-0000-0000-000000000001",
+          data: {
+            // 100000×3 + 250000×1 + 50000×5 = 300000 + 250000 + 250000 = 800000
+            items: [
+              { price: 100000, qty: 3 },
+              { price: 250000, qty: 1 },
+              { price: 50000, qty: 5 },
+            ],
+          },
+        },
+      );
+      expect(res.status).toBe(201);
+
+      expect(flowable.startInstance).toHaveBeenCalledOnce();
+      const [, calledVars] = (flowable.startInstance as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        Record<string, unknown> | undefined,
+      ];
+      expect(calledVars).toBeDefined();
+      // The overlaid embedded-rollup sum reached the engine as a NUMBER.
+      expect(calledVars!["amount"]).toBe(800000);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("AC-8: empty collection → amount = null (deterministic default-branch contract)", async () => {
+    const flowable = makeStubFlowable({ ok: true, instanceId: "inst-603b" });
+    const pool = makeStubPool({ bindingRow, recordSchema: embeddedRollupSchema });
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => "a0000000-0000-0000-0000-000000000001",
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        {
+          application_id: "a0000000-0000-0000-0000-000000000001",
+          data: { items: [] },
+        },
+      );
+      expect(res.status).toBe(201);
+
+      expect(flowable.startInstance).toHaveBeenCalledOnce();
+      const [, calledVars] = (flowable.startInstance as ReturnType<typeof vi.fn>).mock.calls[0] as [
+        string,
+        Record<string, unknown> | undefined,
+      ];
+      expect(calledVars).toBeDefined();
+      // Empty collection → honest null (never coerced to 0); ${amount>500000} is
+      // deterministically false → the gateway takes its default branch.
+      expect(calledVars!["amount"]).toBe(null);
     } finally {
       server.close();
     }

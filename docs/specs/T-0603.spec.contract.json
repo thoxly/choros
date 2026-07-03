@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0603",
+  "status": "ready",
+  "summary": "Ветвление >500к в on_create-старте не работает через продукт: переменная amount уходит в Flowable как NULL, эксклюзивный гейтвей берёт default-ветку (приёмка 2026-07-03: инстансы 600000/700000 прошли малой веткой; корректно ветвился только стартованный через API с явными vars). Корень доказан: два несовместимых флейвора роллапа под одним ключом x-rollup. UI-конструктор (web/src/screens/apps-schema.js:452-463) пишет EMBEDDED-флейвор {source, op, value_field, factor_field?} — агрегат Σ(value×factor) по массиву-коллекции внутри record.data (семантика web/src/screens/records-form.js::computeRollup). Серверный контракт (src/core/rollup-contract.ts::validateRollupFieldDef) распознаёт ТОЛЬКО child-records-флейвор {source_registry_id, ref_field, aggregate, value_field}; у embedded-схемы нет source_registry_id → validateRollupFieldDef отвергает → extractDerivedFields молча пропускает поле → на create=start (records.ts:838-869) derived-overlay пуст → projectEngineVariables читает undefined → vars['amount']=undefined??null=null → в Flowable уходит NULL, условие ${amount>500000} детерминированно ложно. То же на READ-пути (records.ts:1683): серверный derived-map пуст, UI показывает сумму только потому что считает computeRollup сам. LIVE_PROOF T-0575 это не поймал, т.к. ci/checks/db/detel-rollup-to-variables.db.test.ts сеет child-флейвор (поддерживаемый), не embedded (реально авторимый UI и живущий в проде). Гипотеза №2 (позиции=дочерние записи) опровергнута: items — collection-под-поле в record.data, создаётся атомарно с родителем. Фикс: rollup-contract.ts распознаёт ОБА флейвора (явный дискриминатор source_registry_id), embedded считается чисто in-memory из record.data (как matrix-lookup читает оси), DAO маршрутизирует по kind. Механизм генерический (D-064): работает для любого embedded-роллапа, кейс живёт в данных.",
+  "functional": [
+    "F1. rollup-contract.ts распознаёт embedded-флейвор x-rollup {source, op, value_field?, factor_field?} (без source_registry_id) в новый EmbeddedRollupFieldDef; дискриминатор явный (source_registry_id → child; его отсутствие + source → embedded), без угадывания; child-флейвор не меняется.",
+    "F2. extractDerivedFields возвращает DerivedFieldSpec для обоих флейворов роллапа (child + embedded) и matrix-lookup; kind-дискриминатор различает их для DAO.",
+    "F3. Вычисление embedded-роллапа — чистое, из record.data в памяти (без запроса к БД). Семантика та же, что клиентский эталон records-form.js::computeRollup: sum = Σ(value_field × factor_field), count = число строк, avg/min/max по числовым value_field-ячейкам, factor по умолчанию 1, нечисловые/пустые ячейки пропускаются, пустой массив/все нечисловые → null (не 0).",
+    "F4. computeAllDerivedFields маршрутизирует по kind: embedded → in-memory компьют из recordData; child → существующий SQL по детям; matrix-lookup → существующий PK-скан.",
+    "F5. На create=start (records.ts:838-869) embedded-роллап-поле из field_mapping получает вычисленное значение в overlay ДО projectEngineVariables → amount уходит в Flowable числом при непустой коллекции; пустая коллекция → честный null (детерминированный контракт).",
+    "F6. На READ-пути (records.ts:1683) embedded-роллап-поле попадает в серверный derived-map с тем же значением (единое распознавание закрывает расхождение UI↔сервер).",
+    "F7. SAVEPOINT-изоляция derived-precompute на create=start не ослабляется; embedded-компьют чист (деградирует в null, не бросает на мусоре)."
+  ],
+  "non_functional": [
+    "N1. Закон границы D-064 §5: ноль кейс-литералов в src/ (purchaseApproval, «Заявка», 500000, items, слаги тенанта). Механизм генерический для любого embedded-роллапа; кейс живёт в данных. anti-case-lock.sh не растёт от baseline.",
+    "N2. Единый источник семантики: серверный embedded-компьют и клиентский computeRollup дают одинаковый результат на одних данных (зеркальные тест-кейсы фиксируют).",
+    "N3. Child-флейвор не регрессирует: computeRollupValue (SQL по детям) и его тесты/контракт не меняются; detel-rollup-to-variables.db.test.ts (child) остаётся зелёным.",
+    "N4. Без storage-мутации: роллап не пишется в record.data (PD-20 — transient overlay); ни один insert/update не меняется.",
+    "N5. Без новых зависимостей / HTTP-маршрутов: правка чистого контракта + DAO-роутинг + переиспользование существующего overlay-контура.",
+    "N6. Детерминизм гейта на NULL: пустая коллекция → amount:null → ${amount>500000} ложно детерминированно (не throw) — явный контракт (ADR-T0575 §2.4)."
+  ],
+  "out_of_scope": [
+    "O1. Изменение child-records-флейвора роллапа (SQL-агрегат по дочерним записям).",
+    "O2. Изменение matrix-lookup.",
+    "O3. Изменение UI-конструктора / records-form.js::computeRollup — клиентская семантика уже эталонная.",
+    "O4. Rollup-of-rollup / агрегаты глубже 1 уровня.",
+    "O5. Изменение честного 503-пути / DMN-precompute.",
+    "O6. Хранение derived-значения в record.data (запрещено PD-20)."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "Парсер флейвора: аннотация {source, op:sum, value_field, factor_field} (без source_registry_id) парсится как embedded-роллап; с source_registry_id — как child-роллап; невалидная (ни того, ни другого) → отвергается.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "Чистый embedded-компьют: op:sum даёт Σ(value_field × factor_field) на ≥2 строках; factor по умолчанию 1 при отсутствии factor_field.", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "Чистый embedded-компьют: пустой массив → null; все нечисловые value-ячейки → null; смешанные ячейки → сумма только числовых.", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "Чистый embedded-компьют: count = число строк (пустой → null); avg/min/max по числовым value-ячейкам.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Серверный embedded-компьют и клиентский records-form.js::computeRollup дают идентичный результат на ≥3 общих фикстурах (sum+factor, пустой, смешанный).", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "extractDerivedFields: схема с embedded-x-rollup → spec kind=embedded; child-x-rollup → child-kind; смешанная → оба.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "Интеграционно (стаб-pool/стаб-flowable, паттерн binding-trigger.unit.test.ts): on_create с embedded-роллап-полем в field_mapping над непустой коллекцией → startInstance получает amount = вычисленную сумму (число), не null.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "Тот же путь при пустой коллекции → amount = null (детерминированный default-контракт).", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "Живой DB+Flowable: on_create над embedded-роллап-схемой (source=items, sum(price×qty)) сумма >500000 → HIGH-VALUE ветка; <порога/пустая → default. Skip graceful без Flowable.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "READ-путь GET /api/records/:id над embedded-роллап-схемой возвращает derived[fieldKey] = ту же сумму, что клиентский computeRollup (закрытие расхождения UI↔сервер).", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "npm test (root vitest), npm run build (tsc), npm run fitness:db — зелёные; счётчики в handoff.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "bash ci/checks/anti-case-lock.sh — exit 0, denylist не вырос от baseline (ноль кейс-литералов в src/).", "verifiable_as": "fitness"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0603-rollup-vars-at-start.spec.md"
+}

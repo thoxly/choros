@@ -120,6 +120,60 @@ export interface RollupFieldDef {
 }
 
 // ---------------------------------------------------------------------------
+// EmbeddedRollupFieldDef — the x-rollup annotation over an in-record collection
+// ---------------------------------------------------------------------------
+
+/**
+ * The SECOND flavor of `x-rollup` — an aggregate over a collection ARRAY that
+ * lives INSIDE this record's own `data` (an embedded line-items sub-field),
+ * NOT over child records in another registry.
+ *
+ * This is the shape the interface constructor authors (a `computed` field over a
+ * `collection` sub-field): `x-rollup: { source, op, value_field?, factor_field? }`.
+ * `source` names a collection property key on THIS record whose value is an array
+ * of row objects; each row carries the `value_field` (and optional `factor_field`)
+ * scalars. The aggregate is computed PURELY IN MEMORY from `record.data[source]`
+ * — no DB query (the rows are already in `data`, unlike child-record rollup).
+ *
+ * The two flavors are distinguished by an EXPLICIT discriminator (never guessed):
+ * an `x-rollup` object carrying `source_registry_id` is the child-records flavor
+ * (RollupFieldDef); one carrying `source` (and no `source_registry_id`) is this
+ * embedded flavor. See extractDerivedFields / dispatchRollupFlavor.
+ *
+ * Invariants (enforced by validateEmbeddedRollupFieldDef):
+ *   - source is a non-empty string (a JUEL-name key of an array sub-field)
+ *   - op is in ROLLUP_AGGREGATES
+ *   - value_field must be present (non-empty) when op != "count"
+ *   - value_field must be absent / undefined when op === "count"
+ *   - factor_field, when present, is a non-empty string; it is only meaningful for
+ *     op === "sum" (mirrors records-form.js::computeRollup, which reads the factor
+ *     only in the sum branch); the compute silently ignores it for other ops.
+ *
+ * SEMANTICS (compute): see computeEmbeddedRollup — a DELIBERATE mirror of the
+ * client-side authoring reference web/src/screens/records-form.js::computeRollup,
+ * so the server-projected value (at create=start and on READ) equals what the UI
+ * displays for the same data. This closes the UI↔engine divergence that let a
+ * rollup sum render in the browser yet reach Flowable as NULL.
+ */
+export interface EmbeddedRollupFieldDef {
+  /** The JSONB key on THIS record whose value is the collection array to aggregate. */
+  readonly source: string;
+  /** The aggregate function to apply. */
+  readonly op: RollupAggregate;
+  /**
+   * The row-object key whose value is aggregated.
+   * Required when op ∈ {sum, avg, min, max}; absent for count.
+   * Row cells are coerced via Number(); non-numeric/blank cells are skipped.
+   */
+  readonly value_field?: string;
+  /**
+   * The row-object key whose value multiplies value_field, ONLY for op === "sum"
+   * (e.g. quantity × price). Defaults to 1 when absent or non-numeric. Optional.
+   */
+  readonly factor_field?: string;
+}
+
+// ---------------------------------------------------------------------------
 // MatrixLookupFieldDef — the x-matrix-lookup annotation on a property
 // ---------------------------------------------------------------------------
 
@@ -159,6 +213,7 @@ export interface MatrixLookupFieldDef {
  */
 export type DerivedFieldSpec =
   | { readonly kind: "rollup"; readonly fieldKey: string; readonly def: RollupFieldDef }
+  | { readonly kind: "rollup-embedded"; readonly fieldKey: string; readonly def: EmbeddedRollupFieldDef }
   | { readonly kind: "matrix-lookup"; readonly fieldKey: string; readonly def: MatrixLookupFieldDef };
 
 // ---------------------------------------------------------------------------
@@ -259,6 +314,191 @@ export function validateRollupFieldDef(raw: unknown): RollupFieldDefResult {
   const value_field = obj["value_field"] as string;
 
   return { ok: true, def: { source_registry_id, ref_field, aggregate, value_field } };
+}
+
+export type EmbeddedRollupFieldDefError =
+  | "source_missing_or_empty"
+  | "op_missing_or_invalid"
+  | "value_field_required_for_op"
+  | "value_field_must_be_absent_for_count"
+  | "factor_field_must_be_non_empty_string";
+
+export type EmbeddedRollupFieldDefResult =
+  | { ok: true; def: EmbeddedRollupFieldDef }
+  | { ok: false; error: EmbeddedRollupFieldDefError; message: string };
+
+/**
+ * Validate and parse an EMBEDDED `x-rollup` annotation (aggregate over an
+ * in-record collection array) from a raw property definition. Returns the parsed
+ * EmbeddedRollupFieldDef or a typed error.
+ *
+ * Pure — no I/O.
+ *
+ * @param raw   the raw `x-rollup` value from a JSON Schema property definition.
+ */
+export function validateEmbeddedRollupFieldDef(raw: unknown): EmbeddedRollupFieldDefResult {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      ok: false,
+      error: "source_missing_or_empty",
+      message: "x-rollup must be a plain object",
+    };
+  }
+  const obj = raw as Record<string, unknown>;
+
+  // source — the collection sub-field key on THIS record
+  if (!isNonEmptyString(obj["source"])) {
+    return {
+      ok: false,
+      error: "source_missing_or_empty",
+      message: "x-rollup.source must be a non-empty string",
+    };
+  }
+  const source = obj["source"] as string;
+
+  // op — the same closed aggregate set as the child flavor
+  if (!isRollupAggregate(obj["op"])) {
+    return {
+      ok: false,
+      error: "op_missing_or_invalid",
+      message: `x-rollup.op must be one of: ${ROLLUP_AGGREGATES.join(", ")}`,
+    };
+  }
+  const op = obj["op"] as RollupAggregate;
+
+  // factor_field — optional, but when present must be a non-empty string.
+  // (Only meaningful for op === "sum"; the compute ignores it for other ops,
+  //  mirroring records-form.js::computeRollup — but the shape is still validated
+  //  so a corrupt non-string factor_field is rejected rather than silently used.)
+  const rawFactor = obj["factor_field"];
+  if (rawFactor !== undefined && rawFactor !== null && !isNonEmptyString(rawFactor)) {
+    return {
+      ok: false,
+      error: "factor_field_must_be_non_empty_string",
+      message: "x-rollup.factor_field, when present, must be a non-empty string",
+    };
+  }
+  const factor_field = isNonEmptyString(rawFactor) ? rawFactor : undefined;
+
+  // value_field — required for sum/avg/min/max, must be absent for count.
+  if (op === "count") {
+    if (obj["value_field"] !== undefined && obj["value_field"] !== null) {
+      return {
+        ok: false,
+        error: "value_field_must_be_absent_for_count",
+        message: "x-rollup.value_field must not be set when op is 'count'",
+      };
+    }
+    return factor_field !== undefined
+      ? { ok: true, def: { source, op, factor_field } }
+      : { ok: true, def: { source, op } };
+  }
+
+  if (!isNonEmptyString(obj["value_field"])) {
+    return {
+      ok: false,
+      error: "value_field_required_for_op",
+      message: `x-rollup.value_field is required when op is '${op}'`,
+    };
+  }
+  const value_field = obj["value_field"] as string;
+
+  return factor_field !== undefined
+    ? { ok: true, def: { source, op, value_field, factor_field } }
+    : { ok: true, def: { source, op, value_field } };
+}
+
+// ---------------------------------------------------------------------------
+// computeEmbeddedRollup — PURE in-memory aggregate over a record's own collection
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute an embedded-rollup value from a record's `data` — PURELY in memory,
+ * no DB access (the collection array is already in record.data).
+ *
+ * This is a DELIBERATE mirror of the client-side authoring reference
+ * `web/src/screens/records-form.js::computeRollup`, so the server-projected value
+ * (at create=start and on GET) equals what the UI computes and displays for the
+ * same data. Keep the two in lockstep: any change to the client semantics must be
+ * reflected here (and vice-versa) — the tests assert identical results on shared
+ * fixtures (AC-5).
+ *
+ * Semantics:
+ *   - recordData[def.source] must be an array of row objects; else → null.
+ *   - count: null when 0 rows, otherwise the row count (value_field irrelevant).
+ *   - sum/avg/min/max: collect numeric value_field cells (Number()-coerced;
+ *     non-numeric/blank/NaN cells skipped). For sum with a factor_field, each
+ *     value is multiplied by the row's factor (default 1 when absent/non-numeric).
+ *     Empty collected list → null (never coerced to 0).
+ *   - sum = Σ; avg = mean; min/max = extrema of the collected values.
+ *
+ * @param def         parsed EmbeddedRollupFieldDef.
+ * @param recordData  the record's `data` object (already in memory).
+ * @returns number | null
+ */
+export function computeEmbeddedRollup(
+  def: EmbeddedRollupFieldDef,
+  recordData: unknown,
+): number | null {
+  if (recordData === null || typeof recordData !== "object" || Array.isArray(recordData)) {
+    return null;
+  }
+  const rows = (recordData as Record<string, unknown>)[def.source];
+  if (!Array.isArray(rows)) return null;
+
+  // count: just the row count; value_field/factor_field irrelevant.
+  if (def.op === "count") {
+    return rows.length === 0 ? null : rows.length;
+  }
+
+  const valueField = def.value_field ?? "";
+  const factorField = def.factor_field ?? "";
+  const values: number[] = [];
+
+  for (const row of rows) {
+    const rowObj = row !== null && typeof row === "object" ? (row as Record<string, unknown>) : {};
+    const num = toFiniteNumber(rowObj[valueField]);
+    if (num === null) continue;
+
+    if (def.op === "sum" && factorField.length > 0) {
+      const f = toFiniteNumber(rowObj[factorField]);
+      const factor = f === null ? 1 : f;
+      values.push(num * factor);
+    } else {
+      values.push(num);
+    }
+  }
+
+  if (values.length === 0) return null;
+
+  switch (def.op) {
+    case "sum":
+      return values.reduce((acc, x) => acc + x, 0);
+    case "avg":
+      return values.reduce((acc, x) => acc + x, 0) / values.length;
+    case "min":
+      return Math.min(...values);
+    case "max":
+      return Math.max(...values);
+    default:
+      return null; // unreachable (op validated), defensive
+  }
+}
+
+/**
+ * Coerce a raw cell value to a finite JS number, or null when it is not a usable
+ * numeric (blank string, non-numeric string, boolean, object, NaN, ±Infinity).
+ * Mirrors the numeric-cell handling in records-form.js::computeRollup.
+ */
+function toFiniteNumber(raw: unknown): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed === "") return null;
+    const v = Number(trimmed);
+    return Number.isFinite(v) ? v : null;
+  }
+  return null;
 }
 
 export type MatrixLookupFieldDefError =
@@ -368,13 +608,32 @@ export function extractDerivedFields(schema: unknown): DerivedFieldSpec[] {
     }
     const pd = propDef as Record<string, unknown>;
 
-    // x-rollup annotation
-    if (pd["x-rollup"] !== undefined) {
-      const parsed = validateRollupFieldDef(pd["x-rollup"]);
-      if (parsed.ok) {
-        result.push({ kind: "rollup", fieldKey, def: parsed.def });
+    // x-rollup annotation — TWO flavors share this key, distinguished by an
+    // EXPLICIT discriminator (never a try-one-then-the-other fallback):
+    //   - carries `source_registry_id` → child-records flavor (RollupFieldDef,
+    //     aggregated by the DB over another registry's rows).
+    //   - otherwise → embedded flavor (EmbeddedRollupFieldDef, aggregated purely
+    //     in memory over a collection array inside THIS record's data).
+    const xRollup = pd["x-rollup"];
+    if (xRollup !== undefined) {
+      if (
+        xRollup !== null &&
+        typeof xRollup === "object" &&
+        !Array.isArray(xRollup) &&
+        (xRollup as Record<string, unknown>)["source_registry_id"] !== undefined
+      ) {
+        const parsed = validateRollupFieldDef(xRollup);
+        if (parsed.ok) {
+          result.push({ kind: "rollup", fieldKey, def: parsed.def });
+        }
+        // silently skip invalid (corrupt stored schema — defensive)
+      } else {
+        const parsed = validateEmbeddedRollupFieldDef(xRollup);
+        if (parsed.ok) {
+          result.push({ kind: "rollup-embedded", fieldKey, def: parsed.def });
+        }
+        // silently skip invalid (corrupt stored schema — defensive)
       }
-      // silently skip invalid (corrupt stored schema — defensive)
     }
 
     // x-matrix-lookup annotation
