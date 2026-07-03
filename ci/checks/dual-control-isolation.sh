@@ -194,6 +194,7 @@ _dc_mig117_failed=0                                                             
 _dc_mig118_failed=0                                                                # T0573-DC-MIG118-GUARD track when 118 triggers the FF-DC7 fail
 _dc_mig119_failed=0                                                                # T0575-DC-MIG119-GUARD track when 119 triggers the FF-DC7 fail
 _dc_mig120_failed=0                                                                # T0594-DC-MIG120-GUARD track when 120 triggers the FF-DC7 fail
+_dc_mig121_failed=0                                                                # T0604-DC-MIG121-GUARD track when 121 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -266,6 +267,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/120_ownerless_tenant_zero_unarm.sql" ]]; then # T0594-DC-MIG120-GUARD
       _dc_mig120_failed=1                                                     # T0594-DC-MIG120-GUARD
     fi                                                                        # T0594-DC-MIG120-GUARD
+    # Track specifically when 121 triggers this FAIL (and nothing else).     # T0604-DC-MIG121-GUARD
+    if [[ "${m}" == "migrations/121_process_app_binding_submit_task_key.sql" ]]; then # T0604-DC-MIG121-GUARD
+      _dc_mig121_failed=1                                                     # T0604-DC-MIG121-GUARD
+    fi                                                                        # T0604-DC-MIG121-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -725,6 +730,29 @@ if [[ "${_dc_mig120_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0594-ownerless-tenant-zero-unarm]: migration 120_ownerless_tenant_zero_unarm.sql is a pure DELETE (removes backfill-marked role_assignment/grant rows on role-configurator for tenants without a confirmed tenant-owner) — NO CREATE/ALTER/DROP TABLE, NO ADD/DROP COLUMN, NO RLS/POLICY, does NOT touch confirmed2_by/dual-control authority machinery — relief granted" # T0594-DC-MIG120-GUARD
   fi                                                                           # T0594-DC-MIG120-GUARD
 fi                                                                             # T0594-DC-MIG120-GUARD
+# T-0604: additive relief for migration 121_process_app_binding_submit_task_key.sql. # T0604-DC-MIG121-GUARD
+# 121 ALTERs the EXISTING process_app_binding table (075/082/119 precedent),   # T0604-DC-MIG121-GUARD
+# adding ONE nullable column (submit_task_key) + a keyed, idempotent UPDATE    # T0604-DC-MIG121-GUARD
+# completing the ТЭЛ binding row's data (submit_task_key='task-submit', the    # T0604-DC-MIG121-GUARD
+# real first userTask of tel-linear.bpmn20.xml). No new TABLE, no new RLS     # T0604-DC-MIG121-GUARD
+# policy, no confirmed2_by touch — UNRELATED to the dual-control authority    # T0604-DC-MIG121-GUARD
+# domain (grant/confirmation/confirmed2_by). Same class as the 119 relief.    # T0604-DC-MIG121-GUARD
+_dc_mig121_stem="migrations/121_process_app_binding_submit_task_key.sql"          # T0604-DC-MIG121-GUARD
+if [[ "${_dc_mig121_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig121_stem}"; then # T0604-DC-MIG121-GUARD
+  _dc_mig121_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig121_stem}" 2>/dev/null || true)"  # T0604-DC-MIG121-GUARD
+  _dc_mig121_bad=0                                                             # T0604-DC-MIG121-GUARD
+  if echo "${_dc_mig121_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0604-DC-MIG121-GUARD
+    _dc_mig121_bad=1                                                           # T0604-DC-MIG121-GUARD introduces DDL/RLS
+  fi                                                                           # T0604-DC-MIG121-GUARD
+  if echo "${_dc_mig121_content}" | grep -iqE "confirmed2_by"; then           # T0604-DC-MIG121-GUARD
+    _dc_mig121_bad=1                                                           # T0604-DC-MIG121-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0604-DC-MIG121-GUARD
+  if [[ "${_dc_mig121_bad}" -eq 0 ]]; then                                    # T0604-DC-MIG121-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0604-DC-MIG121-GUARD cancel false-red
+    _dc_mig121_failed=0                                                        # T0604-DC-MIG121-GUARD
+    echo "PASS [FF-DC7-T0604-submit-task-key]: migration 121_process_app_binding_submit_task_key.sql adds ONE nullable column to process_app_binding + a keyed data-completion UPDATE — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0604-DC-MIG121-GUARD
+  fi                                                                           # T0604-DC-MIG121-GUARD
+fi                                                                             # T0604-DC-MIG121-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

@@ -1,0 +1,108 @@
+-- 121 · process_app_binding.submit_task_key (T-0604 [P0/целостность согласований])
+--
+-- LIVE FACT (приёмка 2026-07-03): the T-0368 on_create «skip-submit» auto-complete
+-- (src/http/records.ts, block after startInstance: getFirstActiveUserTask →
+-- completeUserTask) blindly completes the FIRST active userTask of a freshly
+-- started instance, assuming it is always the «Подача заявки» (task-submit) step.
+-- After T-0571 fixed completeUserTask's HTTP verb (PUT→POST — it was a silent
+-- no-op before), this assumption stopped being harmless: in the purchaseApproval
+-- process (a tenant-authored, DATA-defined process — not the ТЭЛ fixture) the
+-- FIRST active userTask is «Проверка руководителем» (defKey task-review), not a
+-- submit step. The auto-complete swallowed this real approval step in ~35ms with
+-- no human involved (engine facts: instances 5cf10788/1aecce4e, task-review
+-- start→end 32-37ms, assignee empty; a control instance dafc9b66 BEFORE the
+-- T-0571 fix — when completeUserTask was still a no-op — had the SAME task
+-- correctly closed by a human after 6 minutes).
+--
+-- WHAT THIS ADDS (pure ALTER + DATA UPDATE, zero new tables, zero new RLS):
+--   process_app_binding.submit_task_key text NULL — the BPMN taskDefinitionKey
+--   that is legitimately auto-completable for THIS (process, application)
+--   binding's on_create path.
+--
+-- NULL-SEMANTICS (additive, backward-compatible, but DELIBERATELY DIFFERENT
+-- from the 119/target_registry_slug precedent — see ADR-T0604 §1.1):
+--   NULL      = auto-complete is NOT engaged for this binding. The first
+--               active user-task of a freshly started instance is left ALONE
+--               (waiting for a human). This is the ONLY safe default — unlike
+--               119's target_registry_slug (where NULL falls back to a NAMED
+--               config-primitive default, safe because it only addresses WHERE
+--               an ALREADY-DECIDED step's result is written), a guessed literal
+--               default here (e.g. hardcoding "task-submit" as the fallback)
+--               would decide WHETHER TO SKIP A HUMAN on an irreversible engine
+--               action — the exact class of bug this migration fixes, just one
+--               configuration layer deeper. EVERY row that existed before this
+--               migration is NULL — zero behavior change for bindings that
+--               never declare a submit key (e.g. purchaseApproval, a live
+--               tenant-authored binding that is NOT seeded by any migration —
+--               its NULL means the fix applies automatically: "Проверка
+--               руководителем" now stays with the human, no data change
+--               needed for that binding at all).
+--   non-NULL  = the BPMN taskDefinitionKey legitimately auto-completable on
+--               on_create for this binding. records.ts gates the existing
+--               auto-complete call on an EXACT match against the LIVE engine's
+--               first active user-task's taskDefinitionKey (never a code
+--               literal — see src/http/records.ts + ci/checks/
+--               engine-drive-no-literal-defkey.sh, which this migration's
+--               consuming code passes).
+--
+-- WHY process_app_binding (not a new table): 075 already owns the
+-- (process_key, application_id) relationship and already carries a sibling
+-- per-binding configuration attribute of the SAME shape (target_registry_slug,
+-- migration 119). A new dedicated table for one more scalar attribute of an
+-- existing owning row would be disproportionate (same reasoning as 119's own
+-- header; D-056 additive discipline).
+--
+-- ADDITIVE ONLY: ALTER TABLE ... ADD COLUMN IF NOT EXISTS on the EXISTING
+-- tenant table choros.process_app_binding (075). No new table, no new RLS
+-- policy, no row touched by the DDL itself. The existing RLS predicate
+-- (process_app_binding_tenant_isolation) is NOT modified.
+--
+-- known_tenant_tables.txt: NOT modified (process_app_binding already listed).
+--
+-- FROZEN-CHECK SANCTION:
+--   dual-control-isolation.sh (FF-DC7): this ALTERs a known tenant table,
+--   mirroring the 082/109/115/116/117/119 precedent (ADD COLUMN on an existing
+--   table, no dual-control authority domain touched — no grant/confirmation/
+--   confirmed2_by column involved). Additive relief applies by the SAME
+--   reasoning as those prior migrations; no separate append needed if the
+--   check's existing relief clause matches ADD COLUMN IF NOT EXISTS shape
+--   (verify at gate time — append only if the check actually flags this file).
+--   defer-no-new-table.sh Check-2: no CREATE TABLE statement here — only ADD
+--   COLUMN — so Check-2 does not apply, no relief needed.
+--   Check-1 also does not apply: known_tenant_tables.txt is unchanged.
+--
+-- TEL DATA (not code): the second statement below sets the ТЭЛ
+-- process_app_binding row (085 seed, telLinear → tel-approval, flipped to
+-- on_create by 087) to the explicit literal 'task-submit' — the REAL first
+-- userTask id in config/flowable/processes/tel-linear.bpmn20.xml:52
+-- (<userTask id="task-submit" ...>, the sole outgoing target of the
+-- startEvent). This is NOT a behavior change for the ТЭЛ fixture: before this
+-- migration, the unconditional (buggy) auto-complete ALREADY completed
+-- task-submit for telLinear instances (the assumption happened to be correct
+-- for THIS one BPMN). After this migration, the SAME outcome is achieved
+-- through EXPLICIT, DATA-DRIVEN configuration instead of an unconditional
+-- code assumption — the ТЭЛ scenario (double-submit dissolves) does not
+-- regress. Idempotent (plain UPDATE, no-op if the 085 seed row is absent,
+-- e.g. CHOROS_SEED_DEMO=off).
+--
+-- @demo-seed (T-0549): the UPDATE below touches only demo/reference seed
+-- content; skipped harmlessly when CHOROS_SEED_DEMO=off (no-op, zero rows
+-- touched) because the 085 seed row never exists in that mode.
+--
+-- Idempotency (NF-1): ADD COLUMN IF NOT EXISTS; the UPDATE is a no-op re-apply.
+-- Migration slot: 121 (120 is the highest occupied slot at authoring time).
+
+ALTER TABLE choros.process_app_binding
+  ADD COLUMN IF NOT EXISTS submit_task_key text NULL;
+
+-- @demo-seed-adjacent data completion (non-DDL, no-op when the 085 seed row is
+-- absent): make the ТЭЛ binding's legitimate submit-task explicit as DATA,
+-- preserving its existing (correct) auto-complete scenario under the new
+-- gated mechanism. Safe under CHOROS_SEED_DEMO=off (no-op UPDATE touching
+-- zero rows when 085 never ran).
+UPDATE choros.process_app_binding
+   SET submit_task_key = 'task-submit'
+ WHERE tenant_id = 'a0000000-0000-0000-0000-000000000001'
+   AND process_key = 'telLinear'
+   AND application_id = 'a7000000-0000-0000-0000-000000000001'
+   AND submit_task_key IS NULL;

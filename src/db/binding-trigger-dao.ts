@@ -48,6 +48,21 @@ export interface OnCreateBindingRow {
    * the engine. Object { [varName]: fieldPath }.
    */
   field_mapping: Record<string, string>;
+  /**
+   * T-0604 (migration 121): the BPMN taskDefinitionKey legitimately
+   * auto-completable on the on_create «skip-submit» path (T-0368). NULL
+   * (the default for every row that existed before migration 121, and for
+   * any binding that never sets it explicitly) means auto-complete is NOT
+   * engaged for this binding — the first active user-task of a freshly
+   * started instance is left waiting for a human. This is the SAFE default:
+   * unlike target_registry_slug (migration 119), where NULL falls back to a
+   * named config-primitive default (safe — it only addresses WHERE an
+   * ALREADY-DECIDED step's result is written), a guessed literal default here
+   * would decide WHETHER TO SKIP A HUMAN on an irreversible engine action —
+   * so there is no fallback constant, only NULL="do nothing" or an explicit,
+   * data-configured key. See ADR-T0604-skip-submit-defkey.md §1.1.
+   */
+  submit_task_key: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,8 +97,9 @@ export async function getOnCreateBinding(
     trigger_type: string;
     start_form_key: string | null;
     field_mapping: Record<string, string> | null;
+    submit_task_key: string | null;
   }>(
-    `SELECT id, process_key, trigger_type, start_form_key, field_mapping
+    `SELECT id, process_key, trigger_type, start_form_key, field_mapping, submit_task_key
        FROM choros.process_app_binding
       WHERE tenant_id = $1
         AND application_id = $2
@@ -107,5 +123,8 @@ export async function getOnCreateBinding(
       row.field_mapping !== null && typeof row.field_mapping === "object"
         ? (row.field_mapping as Record<string, string>)
         : {},
+    // T-0604: pass through verbatim — null is the meaningful safe-default
+    // value (not coerced to a fallback string), see OnCreateBindingRow doc.
+    submit_task_key: row.submit_task_key,
   };
 }
