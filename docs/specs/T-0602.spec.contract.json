@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0602",
+  "status": "ready",
+  "summary": "Живой фидбек владельца тенанта: форма «Новый профиль» на /llm-connections выпячивает поле «Секрет-хэндл (ссылка, не ключ)» с плейсхолдером env://DEEPSEEK_API_KEY — операторский механизм сервера, недоступный владельцу тенанта. Разведка (src/server.ts:203-217, T-0413/T-0600) подтвердила: env:// безусловно отклоняется в тенантском пути ('[T-0413] env:// handles are system-only'), vault:// объявлен, но резолвер никогда не реализован (Stage-2, src/http/secret-handle.ts). Единственный живой путь ключа — app:// через «Вставить API-ключ» (ConnectionKeyBinder, T-0476), уже существующий на карточке, но форма создания на него не указывает. Решение: убрать секрет-хэндл-поле из формы создания целиком (не просто свернуть — оно структурно не может заработать для тенанта), переписать инструкцию провайдер-нейтрально/динамически (consoleHint per provider), заменить сырое app://... на карточках человеческой подписью по схеме.",
+  "functional": [
+    "F1. Форма «Новый профиль» больше не содержит поле секрет-хэндла (JSX + state + client-валидация + POST-тело).",
+    "F2. Успех-баннер после создания профиля через эту форму всегда содержит честный next-step («вставьте API-ключ»).",
+    "F3. Инструкция «Откуда взять ключ» динамическая — зависит от выбранного в форме провайдера (PROVIDER_PRESETS.consoleHint), с нейтральным фолбэком для self-hosted/other.",
+    "F4. Карточки профилей: человеческая подпись по схеме хэндла (app:// / env:// / vault://) вместо сырого secret_handle_redacted как первой строки; сырой хэндл может остаться вторичной мелкой строкой.",
+    "F5. Дефолты provider↔endpoint↔model↔price консистентны (разведка подтвердила: уже так через единый PROVIDER_PRESETS источник — без изменений)."
+  ],
+  "non_functional": [
+    "N1. Серверный контракт POST /api/llm-connections (включая опциональный secret_handle, shape-guard, DAO) не меняется — обратная совместимость сохранена для любых нефронтовых вызывающих сторон.",
+    "N2. Жаргон-гейт (ux-g5-jargon-denylist.sh): новый пользовательский текст не вводит env/vault/handle/хэндл в видимый слой.",
+    "N3. ux-g8-scroll-reachable.sh остаётся зелёным (не затрагивается).",
+    "N4. Без новых кейс-литералов (anti-case-lock.sh).",
+    "N5. Только web/ + тексты — серверные файлы (src/http/llm-connections.ts, secret-handle-validator.ts, llm-connection-dao.ts и т.д.) не трогаются."
+  ],
+  "out_of_scope": [
+    "O1. Серверная валидация/DAO/миграция для secret_handle на llm_connection — не меняется.",
+    "O2. agent_card.llm_secret_handle / /api/agents/:id/secret-handle (screen-agents.jsx, T-0025) — отдельный контур, не трогается.",
+    "O3. screen-llm-config.jsx (T-0382) — отдельный устаревший экран, вне периметра задачи.",
+    "O4. sanitizeProviderError / серверные тексты классификации ошибок теста подключения — не меняются.",
+    "O5. ConnectionKeyBinder (форма «Вставить API-ключ») логика — не меняется, уже честная (T-0476/T-0597)."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "Форма «Новый профиль» не содержит JSX-поля с меткой «Секрет-хэндл» и связанного secretHandle/setSecretHandle state в create-форме.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "onCreate не отправляет secret_handle в теле POST-запроса.", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "Успех-баннер после создания профиля через форму всегда включает честный next-step («Теперь вставьте API-ключ, чтобы он заработал.»).", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "Описание формы не упоминает «секрет-хэндл»/«ссылку на секрет»/env://vault://.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Инструкция «Откуда взять ключ» отображает подсказку, зависящую от выбранного провайдера (меняется при смене provider), с нейтральным текстом для self-hosted/другой.", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "PROVIDER_PRESETS расширен полем consoleHint для всех провайдеров (null для self-hosted/other).", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "Карточка профиля рендерит человеческую подпись по схеме хэндла (app/env/vault) вместо сырого secret_handle_redacted как первой строки.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "ux-g5-jargon-denylist.sh не даёт новых находок в видимом тексте формы/карточки/инструкции.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "ux-g8-scroll-reachable.sh зелёный.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "anti-case-lock.sh зелёный, без новых кейс-литералов.", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "Существующие тесты экрана (screen-llm-connections.test.jsx / .states.test.jsx / .a11y.test.jsx), не относящиеся к убранному полю, проходят без регресса; T-0574 instruction-block тест обновлён под провайдер-нейтральный/динамический текст.", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "npm run build (root) и cd web && npm run build зелёные.", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "cd web && npx vitest run зелёный, без новых упавших тестов.", "verifiable_as": "fitness"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0602-llm-form-no-jargon.spec.md"
+}
