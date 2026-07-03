@@ -1,0 +1,82 @@
+{
+  "task_id": "T-0606",
+  "status": "ready",
+  "decision": "process_app_binding.target_registry_slug (миграция 119) НЕ переиспользован для триггер-скоупа: он исключительно таргет ЗАПИСИ РЕЗУЛЬТАТА уже-завершённого шага (step-applier.ts::applyStepResult резолвит его через resolveDefaultStepResultSlug()-фоллбек), а не что запускает старт процесса на create — переиспользование смешало бы два несовместимых NULL-фоллбека. Вместо этого: process_app_binding получает НОВУЮ NULLABLE колонку trigger_registry_id uuid (не text-slug — вызывающий код в records.ts уже держит reg.id в руках, id строже slug и избегает лишнего join/lookup). NULL = биндинг срабатывает на create в PRIMARY реестре приложения (первый is_system=false реестр по created_at ASC — ТА ЖЕ формула, что process-instance-resolver.ts's Step 3 уже использует для outbound-направления; переиспользование существующего примитива, не изобретение нового). Non-NULL = только для этого конкретного registry_def.id. Верифицировано против ТЭЛ-сидов (076/086): под tel-approval существует РОВНО ОДИН is_system=false реестр (purchases/«Заявки») — формула тривиально и корректно резолвится в него, telLinear-биндинг не требует изменения данных. registry_def получает engine_managed boolean NOT NULL DEFAULT false — первоклассная колонка (не jsonb-конвенция внутри record_schema), мирроящая форму существующей is_system колонки (миграция 004): консистентность с прецедентом, лучшая query/index-эргономика, отсутствие конфлейта схемы-данных с governance-метаданными. records.ts::createRecord/updateRecord/deleteRecord вызывают новую assertNotEngineManaged(reg) ДО любой мутации — 403 REGISTRY_ENGINE_MANAGED с честным сообщением. step-applier.ts::applyStepResult структурно НЕ затронут: его resolveApprovalsRegistry SELECT (id, application_id FROM registry_def WHERE ... AND slug = $3) физически никогда не селектит engine_managed — изоляция доказана чтением кода, не только процедурно (гейт живёт исключительно в records.ts).",
+  "rejected_alternatives": [
+    {
+      "option": "Реиспользовать target_registry_slug (миграция 119) для триггер-скоупа вместо новой колонки",
+      "why_not": "Категориальная путаница двух NULL-семантик: 119's NULL = 'используй именованный config-primitive дефолт для КУДА писать результат УЖЕ решённого шага' (outbound, безопасно угадать — адресует уже-случившееся событие); новая забота — 'какое create-событие ЗАПУСКАЕТ процесс вообще' (inbound, до любого решения). Одна колонка не может нести два несовместимых фоллбека без путаницы для будущих читателей кода."
+    },
+    {
+      "option": "trigger_registry_slug text вместо trigger_registry_id uuid",
+      "why_not": "Вызывающий код (records.ts::createRecord) уже держит reg (governing registry_def) в руках на месте вызова getOnCreateBinding — reg.id доступен без доп. лукапа. reg.slug ТОЖЕ доступен, но id строже (immutable identity; slug можно переименовать без нарушения FK-семантики id, но с риском рассинхронизации text-конфигурации)."
+    },
+    {
+      "option": "jsonb-convention (например 'x-write-protected': 'engine' внутри record_schema) вместо первоклассной колонки engine_managed",
+      "why_not": "Конфлейт ФОРМЫ данных записи (record_schema) с GOVERNANCE-метаданными (кто может писать) — разные заботы. Первоклассная колонка queryable/indexable напрямую (WHERE engine_managed = true); jsonb-конвенция требует парсинга record_schema->>'x-write-protected' на каждый чек. Расходится с существующим прецедентом is_system (первоклассная колонка той же категории метаданных, migration 004) без сильной причины."
+    },
+    {
+      "option": "Изобрести НОВОЕ определение 'primary registry' для триггер-скоупа вместо переиспользования формулы process-instance-resolver.ts",
+      "why_not": "process-instance-resolver.ts's Step 3 уже вычисляет 'первый is_system=false реестр по created_at ASC' для OUTBOUND-направления. Изобретение отдельного определения для INBOUND создало бы расхождение: реестр, не пригодный быть step-result-таргетом по умолчанию (is_system=true), мог бы стать триггер-источником по умолчанию (или наоборот) — несогласованность, а не упрощение. Переиспользование ОДНОЙ формулы для обоих направлений структурно гарантирует: engine_managed-реестр (всегда is_system=true в сидах) никогда не может стать NULL-фоллбек-триггером."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "process_app_binding (существующая таблица, миграция 075, расширяется миграцией 122)",
+      "fields": [
+        {"name": "trigger_registry_id", "type": "uuid NULL — новый (T-0606). NULL = биндинг срабатывает на create в PRIMARY реестре приложения; non-NULL = только для этого конкретного registry_def.id"}
+      ]
+    },
+    {
+      "entity": "registry_def (существующая таблица, миграция 004, расширяется миграцией 122)",
+      "fields": [
+        {"name": "engine_managed", "type": "boolean NOT NULL DEFAULT false — новый (T-0606). true = реестр движковый/write-protected; generic CRUD create/update/delete через /api/records отклоняется 403"}
+      ]
+    },
+    {
+      "entity": "OnCreateBindingRow (расширяется, src/db/binding-trigger-dao.ts)",
+      "fields": [
+        {"name": "trigger_registry_id", "type": "string | null — прокинуто из process_app_binding.trigger_registry_id"}
+      ]
+    },
+    {
+      "entity": "GoverningRegistryDef (расширяется, src/http/records.ts)",
+      "fields": [
+        {"name": "engine_managed", "type": "boolean — прокинуто из registry_def.engine_managed, проверяется assertNotEngineManaged перед мутацией"}
+      ]
+    }
+  ],
+  "contracts": [
+    "migrations/122_approval_registry_guard.sql — ADD COLUMN IF NOT EXISTS на process_app_binding (trigger_registry_id) и registry_def (engine_managed) + ТЭЛ «Согласование» seed UPDATE (данные)",
+    "src/db/binding-trigger-dao.ts::getOnCreateBinding — новый параметр registryId, SQL фильтрует по trigger_registry_id с NULL-primary-фоллбек подзапросом",
+    "src/http/records.ts — assertNotEngineManaged(reg) вызывается из createRecord/updateRecord/deleteRecord; createRecord передаёт reg.id в getOnCreateBinding",
+    "src/__tests__/binding-trigger.unit.test.ts — Part A (trigger-scope, 4 теста) + Part C (T-0604 reviewer AC-3b бонус-тест)",
+    "src/__tests__/step-applier.test.ts — SA-11 (структурная изоляция applyStepResult от engine_managed)",
+    "ci/checks/db/approval-registry-guard.db.test.ts — 6 живых Postgres-тестов (Part A + Part B)",
+    "docs/handoff/T-0606.pr-handoff.json — BUILD-фаза"
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1: миграция 122 добавляет trigger_registry_id + engine_managed, существующие строки не меняются семантически.", "ci_check": "npm run fitness:db (migration runner применяет 122_*.sql на чистой БД)"},
+    {"id": "FF-2", "rule": "AC-2: getOnCreateBinding принимает registryId и возвращает биндинг только при совпадении/NULL-primary-фоллбеке.", "ci_check": "vitest run src/__tests__/binding-trigger.unit.test.ts + ci/checks/db/approval-registry-guard.db.test.ts"},
+    {"id": "FF-3", "rule": "AC-3/AC-4: create в НЕ-primary реестре не стартует процесс; create в primary — стартует.", "ci_check": "те же файлы"},
+    {"id": "FF-4", "rule": "AC-5: create/update/delete против engine_managed=true реестра → 403 REGISTRY_ENGINE_MANAGED.", "ci_check": "ci/checks/db/approval-registry-guard.db.test.ts"},
+    {"id": "FF-5", "rule": "AC-6: applyStepResult продолжает писать в engine_managed реестр — структурно и живым тестом.", "ci_check": "src/__tests__/step-applier.test.ts SA-11 + ci/checks/db/approval-registry-guard.db.test.ts"},
+    {"id": "FF-6", "rule": "AC-8: ноль новых слаг-литералов в src/.", "ci_check": "bash ci/checks/detel-literal-baseline.sh && bash ci/checks/anti-case-lock.sh"},
+    {"id": "FF-7", "rule": "AC-9: полный гейт-набор зелёный.", "ci_check": "npm test && npm run build && npm run fitness:db && bash ci/checks/dual-control-isolation.sh && bash ci/checks/anti-case-lock.sh"},
+    {"id": "FF-8", "rule": "AC-10 (Part C): submit_task_key=NULL + первый живой таск 'task-submit' → completeUserTask не вызван.", "ci_check": "vitest run src/__tests__/binding-trigger.unit.test.ts"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-2"},
+    {"ac": "AC-3", "covered_by": "FF-3"},
+    {"ac": "AC-4", "covered_by": "FF-3"},
+    {"ac": "AC-5", "covered_by": "FF-4"},
+    {"ac": "AC-6", "covered_by": "FF-5"},
+    {"ac": "AC-7", "covered_by": "FF-1"},
+    {"ac": "AC-8", "covered_by": "FF-6"},
+    {"ac": "AC-9", "covered_by": "FF-7"},
+    {"ac": "AC-10", "covered_by": "FF-8"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0606-approval-registry-guard.md",
+  "escalation": "Нет. Механизм additive (две nullable/boolean-default колонки на существующих tenant-таблицах, мирроит миграции 004/119/121 буквально), не вводит новый слаг-литерал в src/, не меняет BPMN. purchaseApproval (живой тенантский binding) не тронут кодом/миграцией — NULL-safe-default решает bug #2 автоматически без ретроактивных данных. Founder-класса решений (деньги/секреты/необратимое вовне продукта) нет."
+}

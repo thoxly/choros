@@ -63,6 +63,26 @@ export interface OnCreateBindingRow {
    * data-configured key. See ADR-T0604-skip-submit-defkey.md §1.1.
    */
   submit_task_key: string | null;
+  /**
+   * T-0606 (migration 122): the registry_def.id this on_create binding is
+   * SCOPED to. NOT the same concern as target_registry_slug (migration 119,
+   * step-applier.ts's step-RESULT WRITE target) — this column governs which
+   * registry's record.create EVENT is allowed to fire this binding's process
+   * start in the first place (inbound trigger-scope), a distinct concern
+   * from where an already-started process's step result later lands
+   * (outbound write-target). NULL (the default for every row that existed
+   * before migration 122) means the binding fires on create in the
+   * application's PRIMARY registry — defined identically to the "primary
+   * registry" notion process-instance-resolver.ts's Step 3 already uses
+   * (first non-system registry by created_at ASC) — and NOT on any other
+   * registry_def under the same application_id (in particular never on an
+   * engine_managed registry, which by construction cannot be a legitimate
+   * trigger source). Non-NULL pins the binding to that EXACT registry_def
+   * id, ignoring the primary-registry fallback entirely. See
+   * ADR-T0606-approval-registry-guard.md §2 for the full NULL-semantics
+   * investigation and its verification against the ТЭЛ seed data.
+   */
+  trigger_registry_id: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,25 +91,62 @@ export interface OnCreateBindingRow {
 
 /**
  * Look up an on_create trigger binding for the given application (by
- * `application_id`) inside an already-open tenant-scoped client.
+ * `application_id`) AND registry (by `registryId`) inside an already-open
+ * tenant-scoped client.
  *
- * Returns the first on_create binding row for the application, or null if no
- * such binding exists. "First" is ordered by created_at ASC, process_key ASC
- * (stable, deterministic for the common single-binding case).
+ * T-0606 [approval-registry-guard]: prior to this task, the lookup matched
+ * ONLY on `application_id` — ANY registry_def belonging to the same
+ * application (e.g. an engine-managed "Согласование" approvals-projection
+ * registry seeded alongside the application's primary "Заявки" registry)
+ * fired the SAME on_create binding as the primary registry itself, causing a
+ * phantom process start whenever a record was created in the projection
+ * registry. The lookup is now SCOPED to the specific registry the caller is
+ * writing into, via `trigger_registry_id` (migration 122):
+ *   - binding.trigger_registry_id IS NULL → the binding fires when
+ *     `registryId` is the application's PRIMARY registry — the first
+ *     non-system (`is_system = false`) registry_def under `applicationId` by
+ *     `created_at ASC` (id ASC as a deterministic tiebreak for rows sharing
+ *     the same created_at, e.g. seed rows inserted in the same migration
+ *     with created_at=0). This reuses the SAME SEMANTICS as the "primary
+ *     registry" resolution process-instance-resolver.ts's Step 3 already
+ *     uses for the OUTBOUND (step-result) direction — see that module's
+ *     `is_system = false ORDER BY created_at ASC LIMIT 1` query — with ONE
+ *     deliberate strengthening (review T-0606 F-2): this subquery adds the
+ *     `id ASC` tie-breaker that the resolver's Step 3 does NOT have, so THIS
+ *     query is deterministic when two non-system registries share a
+ *     created_at while the resolver relies on the absence of such ties (true
+ *     for all current seeds — verified against 076/086). If the two paths
+ *     are ever synchronized, align the resolver by ADDING id ASC there, not
+ *     by removing it here. Reusing the SAME definition for the INBOUND
+ *     (trigger-scope) direction means a
+ *     registry that is not eligible to be the step-result target (e.g.
+ *     because it is_system=true) is likewise never an eligible NULL-fallback
+ *     trigger source — an engine_managed registry (migration 122, Part B)
+ *     is is_system=true in every case seeded so far and therefore can never
+ *     satisfy this NULL fallback either.
+ *   - binding.trigger_registry_id IS NOT NULL → the binding fires ONLY when
+ *     `registryId` equals that exact registry_def id; no other registry
+ *     (primary or not) triggers it.
  *
- * REGISTRY-DEF LEVEL: the binding is on the APPLICATION, not the individual
- * registry_def. This matches the 075 schema (process_app_binding.application_id).
- * A future on_create-per-registry-def binding would require a schema change.
+ * Returns the first on_create binding row matching the resolved scope, or
+ * null if no such binding exists. "First" is ordered by created_at ASC,
+ * process_key ASC (stable, deterministic for the common single-binding
+ * case).
  *
  * @param client  Open pg PoolClient with choros.tenant_id SET LOCAL (FORCE RLS).
  * @param tenantId  The caller's tenant UUID (used for explicit WHERE guard;
  *                  belt-and-suspenders alongside RLS).
  * @param applicationId  The application whose record was just created.
+ * @param registryId  The registry_def.id of the registry the record was just
+ *                     created in (the caller already holds this row — see
+ *                     records.ts's createRecord, which resolves `reg` before
+ *                     calling this function).
  */
 export async function getOnCreateBinding(
   client: PoolClient,
   tenantId: string,
   applicationId: string,
+  registryId: string,
 ): Promise<OnCreateBindingRow | null> {
   const { rows } = await client.query<{
     id: string;
@@ -98,15 +155,32 @@ export async function getOnCreateBinding(
     start_form_key: string | null;
     field_mapping: Record<string, string> | null;
     submit_task_key: string | null;
+    trigger_registry_id: string | null;
   }>(
-    `SELECT id, process_key, trigger_type, start_form_key, field_mapping, submit_task_key
-       FROM choros.process_app_binding
-      WHERE tenant_id = $1
-        AND application_id = $2
-        AND trigger_type = 'on_create'
-      ORDER BY created_at ASC, process_key ASC
+    `SELECT pab.id, pab.process_key, pab.trigger_type, pab.start_form_key,
+            pab.field_mapping, pab.submit_task_key, pab.trigger_registry_id
+       FROM choros.process_app_binding pab
+      WHERE pab.tenant_id = $1
+        AND pab.application_id = $2
+        AND pab.trigger_type = 'on_create'
+        AND (
+          pab.trigger_registry_id = $3
+          OR (
+            pab.trigger_registry_id IS NULL
+            AND $3 = (
+              SELECT rd.id
+                FROM choros.registry_def rd
+               WHERE rd.tenant_id = $1
+                 AND rd.application_id = $2
+                 AND rd.is_system = false
+               ORDER BY rd.created_at ASC, rd.id ASC
+               LIMIT 1
+            )
+          )
+        )
+      ORDER BY pab.created_at ASC, pab.process_key ASC
       LIMIT 1`,
-    [tenantId, applicationId],
+    [tenantId, applicationId, registryId],
   );
 
   if (rows.length === 0) return null;
@@ -126,5 +200,8 @@ export async function getOnCreateBinding(
     // T-0604: pass through verbatim — null is the meaningful safe-default
     // value (not coerced to a fallback string), see OnCreateBindingRow doc.
     submit_task_key: row.submit_task_key,
+    // T-0606: pass through verbatim — null means "primary registry" (already
+    // resolved by the SQL's own WHERE clause above), never coerced.
+    trigger_registry_id: row.trigger_registry_id,
   };
 }

@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0606",
+  "verdict": "pass",
+  "_verdict_history": "fail @5de1d42 (blocking F-1: form-submit обходил engine_managed гейт) → pass @de31974 после фикса F-1. Дельта доверифицирована.",
+  "deterministic": {"total": 6072, "passed": 6062, "failed": 0, "_note": "root vitest 4947 passed + fitness:db 1115 passed = 6062 passed; 10 skipped. fitness:db дал 1 транзиентный timeout (doc-reconcile.db.test.ts F-3) в первом полном прогоне под параллельной нагрузкой — изолирован (15/15 green соло) и не воспроизвёлся на повторном полном прогоне (1115/1115), классифицирован как известный doc-*/parallel-load флейк per бриф, НЕ регрессия и НЕ продукт-дефект."},
+  "_env": {
+    "delta": "5de1d42..de31974",
+    "base": "da28079",
+    "head": "de31974",
+    "branch": "task/T-0606-approval-registry-guard",
+    "node": "v23.7.0",
+    "database_url": "postgres://choros_migrator:***@localhost:55432/choros",
+    "db_template": "choros_test_template_39b70d37 (migrations hash includes 122)",
+    "flowable_live": "UNAVAILABLE (dev-среда — live_proof за оркестратором, согласовано с handoff)"
+  },
+  "verdict_reason": "Blocking F-1 (form-submit обход engine_managed гейта) устранён @de31974. Судья доверифицировал дельту: (1) исходная bypass-проба на template-БД теперь 403+rowCount=0; (2) мутация (снять guard в form-record-persister) → новый DB-тест Part B-bis красный; (3) карта write-поверхности §4-bis независимо сверена grep-ом (полна, оба не-гейтнутых пути безопасны); (4) все гейты green (doc-reconcile флейк изолирован). Nits F-2/F-3 тоже устранены.",
+  "gates": {
+    "npm_run_build": {"result": "pass", "detail": "tsc && seed/tsconfig — exit 0"},
+    "npm_test_root": {"result": "pass", "detail": "255 files passed | 2 skipped (257); 4947 passed | 10 skipped; exit 0"},
+    "npm_run_fitness_db": {"result": "pass", "detail": "107 files passed (107); 1115 passed (1115); exit 0 — включая новый Part B-bis (form-submit path, +2 vs 1113). Первый прогон: 1 timeout doc-reconcile.db.test.ts F-3 (файл вне дифа); изолированно 15/15 green + повторный полный 1115/1115 green = детерминизм подтверждён, флейк не связан с диффом."},
+    "dual_control_isolation_sh": {"result": "pass", "detail": "exit 0; FF-DC7 relief T0606-DC-MIG122-GUARD"},
+    "substitution_isolation_sh": {"result": "pass", "detail": "exit 0"},
+    "anti_case_lock_sh": {"result": "pass", "detail": "exit 0; аггрегат 24/24 baseline"},
+    "anti_case_lock_self_test": {"result": "pass", "detail": "exit 0"},
+    "tier_isolation_sh": {"result": "pass", "detail": "exit 0"},
+    "tier_isolation_self_test": {"result": "pass", "detail": "exit 0"},
+    "detel_literal_baseline_sh": {"result": "pass", "detail": "exit 0; soglasovanie не растёт (новые упоминания — тест-фикстуры Part B-bis, .test.ts вне скана)"},
+    "contracts_validate": {"result": "pass", "detail": "schemas/validate.py::validate_file: adr/spec/pr-handoff — все OK"}
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1 migration 122 columns", "test": "live PG information_schema + fitness:db template 39b70d37", "result": "pass", "_how": "обе колонки; 122 в schema_migrations; идемпотентно"},
+    {"ac": "AC-2 getOnCreateBinding SQL-скоуп", "test": "approval-registry-guard.db.test.ts Part A + мутпроба A", "result": "pass", "_how": "мутпроба A краснит"},
+    {"ac": "AC-3 createRecord передаёт reg.id", "test": "approval-registry-guard.db.test.ts Part A", "result": "pass", "_how": "primary стартует, secondary нет"},
+    {"ac": "AC-3b NULL submit_task_key + 'task-submit' → no complete", "test": "binding-trigger.unit.test.ts Part C + мутпроба D", "result": "pass", "_how": "мутпроба D краснит"},
+    {"ac": "AC-4 engine_managed create → 403 на ВСЕХ живых write-путях", "test": "approval-registry-guard.db.test.ts Part B (/api/records) + Part B-bis (form-submit)", "result": "pass", "_how": "оба пути 403+rowCount=0; исходный bypass судьи закрыт (воспроизведён → 403); мутации в records.ts И в form-persister обе краснят соответствующие тесты"},
+    {"ac": "AC-5 engine_managed update/delete → 403", "test": "approval-registry-guard.db.test.ts Part B PUT/DELETE + §4-bis write-map", "result": "pass", "_how": "records.ts гейтнут; applications.ts cascade за owner-authz (lifecycle, не CRUD-класс)"},
+    {"ac": "AC-6 applyStepResult структурно не задет", "test": "step-applier.test.ts SA-11 + DB Part B live applyStepResult", "result": "pass", "_how": "движок пишет в engine_managed реестр успешно"},
+    {"ac": "AC-7 миграция помечает Согласование; telLinear NULL, ТЭЛ не регрессирует", "test": "migration 122 + 076/086 cross-check + Part B-bis purchase→200", "result": "pass", "_how": "тройной-ключ demo-tenant; purchase-форма не задета"},
+    {"ac": "AC-8 D-064 ноль новых слаг-литералов; detel/anti-case не растут", "test": "detel-literal-baseline.sh + anti-case-lock.sh", "result": "pass", "_how": "продукт-механизм колоночный; soglasovanie в Part B-bis — тест-фикстуры"},
+    {"ac": "AC-9 build/test/fitness:db/гейты зелёные", "test": "judge rerun всех гейтов на дельте", "result": "pass", "_how": "build 0, test 4947, fitness:db 1115"}
+  ],
+  "failures": [],
+  "flakes_isolated": {
+    "note": "doc-reconcile.db.test.ts F-3 ('≥1 doc_log row op=reconciled after RECONCILE') — timeout 5000ms в ПЕРВОМ полном прогоне fitness:db под параллельной нагрузкой (файл вне дифа T-0606). Изолированный прогон: 15/15 green (F-3 за 737ms). Повторный полный прогон: 1115/1115 green (не воспроизвёлся). Классификация: известный doc-*/parallel-load флейк (бриф предупреждает 'Флейки doc-*/seed-pack — изолированно'), НЕ регрессия, НЕ продукт-дефект T-0606."
+  },
+  "delta_reverify": {
+    "bypass_probe_rerun": {
+      "route": "makeFormRecordPersister('approval',{decision:'approve'}) на template-БД (миграция 122), сид tel-approval + 'soglasovanie' engine_managed=true — точная исходная проба судьи",
+      "result_pre_fix": "persist вернул recordId, rowCount=1 (фантомная запись) — BLOCKING F-1",
+      "result_post_fix": "persist БРОСИЛ HttpError status=403 code=REGISTRY_ENGINE_MANAGED, message='Записи этого раздела создаёт процесс...', recordId=none, rowCount=0",
+      "verdict": "FIX CONFIRMED"
+    },
+    "mutation": {
+      "id": "form-persister-guard-removal",
+      "mutation": "снять весь блок `if (reg.engine_managed) throw HttpError(403,...)` в form-record-persister.ts",
+      "expected": "Part B-bis form-submit-403 тест красный",
+      "observed": "Part B-bis FAILED: 'expected 200 to be 403' (вернулся ok:true + фантомный recordId); второй Part B-bis (purchase→200 регрессия) остался green",
+      "caught": true
+    },
+    "write_surface_map_independent": "grep 'INSERT INTO choros.record'/'UPDATE choros.record'/'DELETE FROM choros.record' (не-тест) судьёй = records.ts (все CRUD гейтнуты), form-record-persister.ts (гейт добавлен), step-applier.ts (легитимный движок), external-participant.ts (фиксированный код-таргет), applications.ts cascade (lifecycle за owner-authz). Совпадает с ADR §4-bis точка-в-точку. Ни один путь не пропущен; shared DAO-хелпера нет."
+  },
+  "recheck_independence": "Дельта 5de1d42..de31974 перегнана судьёй с чистого запуска на живом PG (template 39b70d37). bypass-проба и мутация выполнены standalone/через Edit, откачены; git status пуст после каждого отката (working tree clean vs HEAD подтверждён)."
+}

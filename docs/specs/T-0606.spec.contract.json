@@ -1,0 +1,40 @@
+{
+  "task_id": "T-0606",
+  "status": "ready",
+  "summary": "Два независимых живых бага в choros.process_app_binding/registry_def: (1) getOnCreateBinding матчит on_create-биндинг ТОЛЬКО по application_id — любой registry_def того же приложения (включая engine-managed «Согласование»-проекцию, посеянную рядом с primary «Заявки») запускает ОДИН И ТОТ ЖЕ биндинг, порождая фантомный процесс при ручном создании записи в проекции; (2) реестры-проекции решений (куда step-applier.ts пишет акты согласования) принимают обычный CRUD create/update/delete через /api/records наравне с пользовательскими реестрами — можно вручную сфабриковать или удалить акт согласования. Фикс: process_app_binding получает NULLABLE trigger_registry_id uuid (NULL = биндинг срабатывает на create в PRIMARY реестре приложения — первый is_system=false по created_at ASC, ТА ЖЕ формула, что process-instance-resolver.ts уже использует; non-NULL = только для этого конкретного registry_def.id); registry_def получает engine_managed boolean NOT NULL DEFAULT false (мирроит форму is_system, migration 004) — create/update/delete через records.ts проверяют его и 403'ят с REGISTRY_ENGINE_MANAGED. target_registry_slug (migration 119) НЕ переиспользован: это отдельная забота (куда писать результат УЖЕ решённого шага, outbound), а не что запускает старт (inbound) — переиспользование смешало бы два несовместимых NULL-фоллбека. step-applier.ts's applyStepResult не затронут: его прямой INSERT никогда не селектит engine_managed (структурная, не только процедурная изоляция).",
+  "functional": [
+    "F1 (Part A). process_app_binding получает NULLABLE trigger_registry_id uuid (миграция 122, additive). NULL (дефолт для всех существующих строк) = биндинг срабатывает на create в PRIMARY реестре приложения (первый is_system=false по created_at ASC — формула process-instance-resolver.ts). Non-NULL = только для этого конкретного registry_def.id.",
+    "F2. getOnCreateBinding принимает registryId и фильтрует в SQL (не JS-постфильтр).",
+    "F3. src/http/records.ts (~813) передаёт reg.id как registryId в getOnCreateBinding.",
+    "F4 (Part B). registry_def получает engine_managed boolean NOT NULL DEFAULT false (мирроит форму is_system, migration 004).",
+    "F5. createRecord/updateRecord/deleteRecord проверяют engine_managed ПЕРЕД любой мутацией; true → 403 REGISTRY_ENGINE_MANAGED с честным русским сообщением, конверт {error:{code,message}}.",
+    "F6. step-applier.ts::applyStepResult не затронут: прямой INSERT — отдельный DAO-путь, не вызывающий ни одну функцию records.ts; гейт F5 живёт исключительно внутри HTTP-хендлеров.",
+    "F7 (данные). Миграция 122 идемпотентным UPDATE помечает существующую ТЭЛ «Согласование» строку (076, a7000000-…-0003) engine_managed=true. trigger_registry_id telLinear-биндинга (085) не меняется (остаётся NULL) — уже корректно резолвится в «Заявки» (единственный is_system=false реестр под tel-approval после 086)."
+  ],
+  "non_functional": [
+    "N1. Закон границы (D-064 §5): ноль новых слаг-литералов в src/. Механизм колоночный/data-driven; литерал registry-id встречается только в SQL data-completion UPDATE миграции 122 (тот же прецедент, что 119/121). anti-case aggregate (soglasovanie: 2) не растёт.",
+    "N2. Safe NULL-фоллбек (Part A): переиспользует УЖЕ существующее определение primary registry (process-instance-resolver.ts), не изобретает новое — engine_managed реестр структурно не может быть primary-фоллбеком (всегда is_system=true в сидах, которое само исключено из PRIMARY-формулы).",
+    "N3. Без новых таблиц/RLS-периметров: ALTER TABLE ADD COLUMN IF NOT EXISTS на ДВУХ существующих tenant-таблицах (process_app_binding, registry_def).",
+    "N4. Изоляция step-applier.ts (Part B): гейт живёт строго внутри records.ts create/update/delete, не в общей DAO. Явный тест доказывает applyStepResult продолжает писать в engine_managed=true реестр без изменений — и структурно (SQL никогда не селектит engine_managed), и живым Postgres-тестом.",
+    "N5. Честное 403-сообщение на русском, тон существующих сообщений (FIELD_WRITE_FORBIDDEN прецедент того же файла)."
+  ],
+  "out_of_scope": [
+    "O1. UI для редактирования trigger_registry_id/engine_managed — колонки задаются данными/SQL сейчас.",
+    "O2. Ретроактивная маркировка ЛЮБОГО другого реестра (кроме ТЭЛ «Согласование») как engine_managed — данные тенанта вне периметра этой задачи.",
+    "O3. Изменение семантики target_registry_slug (T-0575/119) или submit_task_key (T-0604/121) — независимые конфигурации того же binding-ряда (за исключением Part C бонус-теста).",
+    "O4. GET-чтение engine_managed-реестров — write-protection касается только create/update/delete."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "Миграция 122 добавляет process_app_binding.trigger_registry_id uuid NULL и registry_def.engine_managed boolean NOT NULL DEFAULT false (оба ADD COLUMN IF NOT EXISTS), существующие строки семантически не меняются.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "getOnCreateBinding принимает registryId и возвращает биндинг ТОЛЬКО когда trigger_registry_id совпадает с ним ИЛИ (NULL И registryId == PRIMARY реестр приложения).", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "Create в НЕ-primary реестре того же приложения → процесс НЕ стартует (bug #2 исправлен).", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "Create в primary/единственном реестре приложения → процесс СТАРТУЕТ (регрессия ТЭЛ/purchaseApproval не сломана).", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Create/update/delete через HTTP-роут против engine_managed=true реестра → 403 REGISTRY_ENGINE_MANAGED с честным сообщением; строка не изменена/не создана/не удалена.", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "applyStepResult продолжает успешно писать в engine_managed=true реестр — структурно (SQL никогда не селектит engine_managed) и живым Postgres-тестом.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "Миграция 122 помечает ТЭЛ «Согласование» engine_managed=true идемпотентным UPDATE; trigger_registry_id telLinear-биндинга остаётся NULL и резолвится в «Заявки» (verified against seed 076/086).", "verifiable_as": "manual"},
+    {"id": "AC-8", "text": "Ноль новых слаг-литералов в src/: detel-literal-baseline.sh exit 0, агрегат soglasovanie не растёт.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "npm test, npm run build, npm run fitness:db, dual-control-isolation.sh, anti-case-lock.sh — зелёные; счётчики в handoff.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "T-0604 reviewer AC-3b (Part C): submit_task_key=NULL + первый живой активный таск с taskDefinitionKey='task-submit' → auto-complete НЕ срабатывает (NULL = выключено, без фоллбек-угадывания).", "verifiable_as": "test"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0606-approval-registry-guard.spec.md"
+}

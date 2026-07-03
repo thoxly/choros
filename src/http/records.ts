@@ -468,6 +468,17 @@ interface GoverningRegistryDef {
   application_id: string;
   record_schema: unknown;
   record_schema_version: number;
+  /**
+   * T-0606 [approval-registry-guard] (migration 122): true for a registry
+   * that is engine-managed / write-protected (e.g. the "Согласование"
+   * step-result projection registry step-applier.ts writes decision
+   * records into). Generic CRUD create/update/delete via THIS HTTP route
+   * must reject a request against such a registry — see
+   * assertNotEngineManaged below. step-applier.ts's own direct DAO insert
+   * does NOT go through this route at all, so it is unaffected by this
+   * guard (see ADR-T0606-approval-registry-guard.md §5).
+   */
+  engine_managed: boolean;
 }
 
 /**
@@ -488,7 +499,7 @@ async function resolveGoverningRegistryDef(
 ): Promise<GoverningRegistryDef> {
   if (registryDefId !== null) {
     const res = await client.query<GoverningRegistryDef>(
-      `SELECT id, application_id, record_schema, record_schema_version
+      `SELECT id, application_id, record_schema, record_schema_version, engine_managed
          FROM choros.registry_def
         WHERE tenant_id = $1 AND id = $2 AND application_id = $3`,
       [tenantId, registryDefId, applicationId],
@@ -505,7 +516,7 @@ async function resolveGoverningRegistryDef(
 
   // No registry_def_id given: the application must have exactly one registry_def.
   const res = await client.query<GoverningRegistryDef>(
-    `SELECT id, application_id, record_schema, record_schema_version
+    `SELECT id, application_id, record_schema, record_schema_version, engine_managed
        FROM choros.registry_def
       WHERE tenant_id = $1 AND application_id = $2
       ORDER BY created_at ASC, slug ASC`,
@@ -539,7 +550,7 @@ async function loadRegistryDefById(
   registryDefId: string,
 ): Promise<GoverningRegistryDef> {
   const res = await client.query<GoverningRegistryDef>(
-    `SELECT id, application_id, record_schema, record_schema_version
+    `SELECT id, application_id, record_schema, record_schema_version, engine_managed
        FROM choros.registry_def
       WHERE tenant_id = $1 AND id = $2`,
     [tenantId, registryDefId],
@@ -549,6 +560,39 @@ async function loadRegistryDefById(
     throw new HttpError(404, "NOT_FOUND", "governing registry_def not found");
   }
   return res.rows[0]!;
+}
+
+// ---------------------------------------------------------------------------
+// T-0606 [approval-registry-guard]: engine-managed write-protection guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Reject a generic CRUD create/update/delete against an engine-managed
+ * (write-protected) registry_def with an honest 403. Called from
+ * createRecord/updateRecord/deleteRecord in THIS file. The SAME check
+ * (same 403 code, same message) is enforced on the OTHER live HTTP write
+ * path — form submits — inside src/http/form-record-persister.ts's
+ * makeFormRecordPersister (review T-0606 F-1: that path bypassed this
+ * guard until it got its own check). The complete write-surface map with a
+ * per-INSERT verdict lives in ADR-T0606-approval-registry-guard.md §4-bis.
+ *
+ * step-applier.ts's applyStepResult writes decision records via its OWN
+ * direct `INSERT INTO choros.record` inside binding-trigger-dao.ts's sibling
+ * module — it never calls this function or any function in this file, so it
+ * is structurally unaffected by this guard (see
+ * ADR-T0606-approval-registry-guard.md §5 for the isolation argument, and
+ * src/__tests__/step-applier.test.ts / the write-protection DB test for a
+ * live proof that applyStepResult still writes into an engine_managed
+ * registry after this guard lands).
+ */
+function assertNotEngineManaged(reg: { engine_managed: boolean }): void {
+  if (reg.engine_managed) {
+    throw new HttpError(
+      403,
+      "REGISTRY_ENGINE_MANAGED",
+      "Записи этого раздела создаёт процесс — согласуйте через задачу в Моих задачах",
+    );
+  }
 }
 
 /**
@@ -752,6 +796,12 @@ async function createRecord(args: {
       registryDefId,
     );
 
+    // 1b. T-0606 [approval-registry-guard]: reject generic create against an
+    // engine-managed registry (e.g. "Согласование") BEFORE any validation or
+    // write — this HTTP route is not a legitimate writer for such a registry
+    // at all (step-applier.ts writes it via a separate, unaffected DAO path).
+    assertNotEngineManaged(reg);
+
     // 2. Validate data against the governing schema (400 on mismatch).
     assertDataValid(data, reg);
 
@@ -810,7 +860,11 @@ async function createRecord(args: {
     //        must NOT roll back the record — mirrors process-start.ts §T-0282).
     //    If flowable is not configured, skip silently (honest-degrade).
     if (flowable !== undefined) {
-      const binding = await getOnCreateBinding(client, tenantId, reg.application_id);
+      // T-0606: scope the lookup to THIS registry (reg.id) — not just the
+      // application — so an on_create binding fires only for its declared
+      // trigger registry (NULL = the application's primary registry), never
+      // for every registry_def sharing the same application_id.
+      const binding = await getOnCreateBinding(client, tenantId, reg.application_id, reg.id);
       if (binding !== null) {
         // T-0575 [W1/деТЭЛ] BUG-016: compute derived (rollup / matrix-lookup)
         // fields of THIS registry BEFORE projecting engine variables, and overlay
@@ -1218,6 +1272,11 @@ async function updateRecord(args: {
 
     // 2. Re-validate the new data against the governing registry_def schema.
     const reg = await loadRegistryDefById(client, tenantId, registryId);
+
+    // 2a. T-0606 [approval-registry-guard]: reject generic update against an
+    // engine-managed registry (e.g. "Согласование") before any further work.
+    assertNotEngineManaged(reg);
+
     assertDataValid(data, reg);
 
     // 2b. FIELD-MASK WRITE GUARD (FF-10 / AC-10 / B-11): before any field write,
@@ -1319,6 +1378,16 @@ async function deleteRecord(args: {
         return { kind: "not_found" as const };
       }
       const registryId = cur.rows[0]!.registry_id;
+
+      // 1b. T-0606 [approval-registry-guard]: reject delete of a record that
+      // belongs to an engine-managed registry (e.g. a "Согласование" decision
+      // record) before touching any owned files or the record row itself.
+      const engineManagedRes = await client.query<{ engine_managed: boolean }>(
+        `SELECT engine_managed FROM choros.registry_def
+          WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, registryId],
+      );
+      assertNotEngineManaged({ engine_managed: engineManagedRes.rows[0]?.engine_managed === true });
 
       // 2. Delete owned files + file_versions (FK: file → record; file_version →
       //    file; neither ON DELETE CASCADE) so the record delete is not FK-blocked.
