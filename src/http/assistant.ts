@@ -84,7 +84,14 @@ import {
   ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN,
   ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN,
 } from "../core/assistant-messages.js";
-import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
+import { loadAdminContext, resolveActorSlugFromAuth, isGenesisOwnerForTenant } from "../db/org.js";
+// T-0607 (в2/г): pure honest-reporting helpers — reconcile the assistant text
+// with the REAL op outcomes, and the canonical in-thread dispatch-failure reply.
+import {
+  buildHonestOpsReport,
+  buildDispatchFailureReply,
+  type OpResult,
+} from "../core/assistant-report.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 // T-0477 [E-AGENTS L5]: spend-tracking port wrapper (non-fatal ledger write on chat()).
@@ -163,6 +170,35 @@ function assertUuidShape(value: string, label: string): void {
   if (!UUID_RE.test(value)) {
     throw new HttpError(400, "VALIDATION", `${label} must be a valid UUID`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// T-0607 (в1): identifier resolution for DRAFT ops.
+//
+// THE DEFECT (live acceptance): the configurator LLM has no id↔slug↔name
+// catalogue, so it passes a SLUG where the executor's SQL requires a raw UUID
+// (registry_def.id / application.id are uuid columns) → «invalid input syntax
+// for type uuid: "<slug>"» — 4/4 ops silently failed while the report said
+// «Все поля добавлены ✅». The executor must accept the identification the LLM
+// actually knows (slug OR uuid) and resolve it in the tenant's own rights.
+//
+// Resolve rule: a valid UUID passes through unchanged; otherwise SELECT the id
+// by slug (RLS-scoped). Not found → null → the caller returns an HONEST op-error
+// string (surfaced in the changelog), never a 500.
+// ---------------------------------------------------------------------------
+
+export async function resolveIdBySlug(
+  client: pg.PoolClient,
+  tenantId: string,
+  table: "registry_def" | "application",
+  idOrSlug: string,
+): Promise<string | null> {
+  if (UUID_RE.test(idOrSlug)) return idOrSlug;
+  const res = await client.query<{ id: string }>(
+    `SELECT id FROM choros.${table} WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+    [tenantId, idOrSlug],
+  );
+  return res.rows.length > 0 ? res.rows[0]!.id : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,8 +423,12 @@ interface GenExecContext {
   readonly systemPrompt: string;
 }
 
-/** Execute a single ApprovedOp as a DRAFT DB write. Returns null on success, error message on failure. */
-async function executeApprovedOpAsDraft(
+/**
+ * Execute a single ApprovedOp as a DRAFT DB write. Returns null on success, an
+ * honest error message on failure (a "DUPLICATE:"-prefixed string marks a benign
+ * already-exists outcome). Exported for T-0607 (в1/в2) live DB tests.
+ */
+export async function executeApprovedOpAsDraft(
   pool: pg.Pool,
   tenantId: string,
   op: ApprovedOp,
@@ -466,7 +506,9 @@ async function executeApprovedOpAsDraft(
           // 23505 = unique_violation → app/section slug already taken in this tenant.
           // Honest error string (NOT a 500) — surfaced in the changelog, not thrown.
           if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23505") {
-            return `create_application: slug '${appSlug}' already exists in this tenant`;
+            // T-0607 (в2): a DUPLICATE outcome — the app/section already exists.
+            // Prefixed so the honest ops report shows «уже было», not «не создано».
+            return `DUPLICATE:create_application: приложение со slug «${appSlug}» уже есть в этом пространстве`;
           }
           throw err;
         } finally {
@@ -504,17 +546,35 @@ async function executeApprovedOpAsDraft(
           await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
           await client.query("SET LOCAL search_path TO choros");
 
+          // T-0607 (в1): accept slug OR uuid for the source registry_def.
+          const resolvedSourceId = await resolveIdBySlug(
+            client, tenantId, "registry_def", sourceRegistryDefId,
+          );
+          if (resolvedSourceId === null) {
+            await client.query("ROLLBACK");
+            return `relate_application: исходный реестр «${sourceRegistryDefId}» не найден в этом пространстве`;
+          }
+
           // 1) Resolve the target registry_def id.
           //    LINK → use the existing id directly.
           //    CREATE → create the related app + section (tier='draft'), use its id.
           let targetRegistryId: string;
           if (mode === "link") {
-            targetRegistryId = typeof cascade["targetRegistryId"] === "string"
+            const rawTarget = typeof cascade["targetRegistryId"] === "string"
               ? cascade["targetRegistryId"] : "";
-            if (!targetRegistryId) {
+            if (!rawTarget) {
               await client.query("ROLLBACK");
               return `relate_application(link): missing targetRegistryId`;
             }
+            // T-0607 (в1): accept slug OR uuid for the link target too.
+            const resolvedTarget = await resolveIdBySlug(
+              client, tenantId, "registry_def", rawTarget,
+            );
+            if (resolvedTarget === null) {
+              await client.query("ROLLBACK");
+              return `relate_application(link): целевой реестр «${rawTarget}» не найден в этом пространстве`;
+            }
+            targetRegistryId = resolvedTarget;
           } else {
             const appSlug = typeof cascade["appSlug"] === "string" ? cascade["appSlug"] : null;
             const appDisplayName =
@@ -547,7 +607,7 @@ async function executeApprovedOpAsDraft(
           // 2) Read the source schema, add the relation field (additive), write back.
           const srcRes = await client.query<{ record_schema: Record<string, unknown> | null }>(
             `SELECT record_schema FROM choros.registry_def WHERE tenant_id = $1 AND id = $2`,
-            [tenantId, sourceRegistryDefId],
+            [tenantId, resolvedSourceId],
           );
           if (srcRes.rows.length === 0) {
             await client.query("ROLLBACK");
@@ -571,12 +631,12 @@ async function executeApprovedOpAsDraft(
                 updated_at = $4
               WHERE tenant_id = $1 AND id = $5
               RETURNING record_schema`,
-            [tenantId, relationFieldKey, JSON.stringify(relationFieldSchema), nowMs, sourceRegistryDefId],
+            [tenantId, relationFieldKey, JSON.stringify(relationFieldSchema), nowMs, resolvedSourceId],
           );
           const newSchema = updRes.rows[0]?.record_schema ?? oldSchema;
 
           // 3) Reconcile cross_app_ref from the x-relation fields (same tx, atomic).
-          await reconcileCrossAppRefs(client, tenantId, sourceRegistryDefId, oldSchema, newSchema);
+          await reconcileCrossAppRefs(client, tenantId, resolvedSourceId, oldSchema, newSchema);
 
           await client.query("COMMIT");
         } catch (err) {
@@ -614,6 +674,12 @@ async function executeApprovedOpAsDraft(
           await client.query("BEGIN");
           await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
           await client.query("SET LOCAL search_path TO choros");
+          // T-0607 (в1): accept slug OR uuid for the application id.
+          const resolvedAppId = await resolveIdBySlug(client, tenantId, "application", applicationId);
+          if (resolvedAppId === null) {
+            await client.query("ROLLBACK");
+            return `author_binding: приложение «${applicationId}» не найдено в этом пространстве`;
+          }
           await client.query(
             `INSERT INTO choros.process_app_binding
                (tenant_id, id, process_key, application_id, form_key,
@@ -626,7 +692,7 @@ async function executeApprovedOpAsDraft(
                start_form_key = EXCLUDED.start_form_key,
                field_mapping  = EXCLUDED.field_mapping,
                updated_at     = EXCLUDED.updated_at`,
-            [tenantId, randomUUID(), processKey, applicationId, startFormKey,
+            [tenantId, randomUUID(), processKey, resolvedAppId, startFormKey,
              triggerType, startFormKey, JSON.stringify(fieldMapping), nowMs],
           );
           await client.query("COMMIT");
@@ -672,8 +738,30 @@ async function executeApprovedOpAsDraft(
           await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
           await client.query("SET LOCAL search_path TO choros");
 
+          // T-0607 (в1): accept slug OR uuid — resolve to the real registry_def id.
+          const resolvedRegistryId = await resolveIdBySlug(
+            client, tenantId, "registry_def", registryDefId,
+          );
+          if (resolvedRegistryId === null) {
+            await client.query("ROLLBACK");
+            return `edit_jsonschema_non_destructive: реестр «${registryDefId}» не найден в этом пространстве`;
+          }
+
           // Merge the field into the existing record_schema using jsonb path operations.
           // For add_field: set properties[fieldKey] = fieldSchema (additive only).
+          // T-0607 (в2): report a DUPLICATE distinctly — if the field already
+          // exists, this is a no-op the report must show as «уже было», not «added».
+          const dupRes = await client.query<{ exists: boolean }>(
+            `SELECT (record_schema #> ARRAY['properties', $2]) IS NOT NULL AS exists
+               FROM choros.registry_def WHERE tenant_id = $1 AND id = $3`,
+            [tenantId, fieldKey, resolvedRegistryId],
+          );
+          const alreadyExists = dupRes.rows[0]?.exists === true;
+          if (alreadyExists) {
+            await client.query("ROLLBACK");
+            return `DUPLICATE:edit_jsonschema_non_destructive: поле «${fieldKey}» уже есть в реестре`;
+          }
+
           await client.query(
             `UPDATE choros.registry_def
                 SET record_schema = jsonb_set(
@@ -684,7 +772,7 @@ async function executeApprovedOpAsDraft(
                 ),
                 updated_at = $4
               WHERE tenant_id = $1 AND id = $5`,
-            [tenantId, fieldKey, JSON.stringify(fieldSchema), nowMs, registryDefId],
+            [tenantId, fieldKey, JSON.stringify(fieldSchema), nowMs, resolvedRegistryId],
           );
           await client.query("COMMIT");
         } catch (err) {
@@ -833,8 +921,28 @@ async function executeApprovedOpAsDraft(
               }
             });
 
+        // T-0607 (в1): accept slug OR uuid for applicationId. A non-resolvable
+        // slug degrades to null grounding (the loop asks) rather than crashing the
+        // WHERE application_id = <uuid> query with «invalid input syntax».
+        let groundingAppId: string | null = null;
+        if (applicationId) {
+          const gc = await pool.connect();
+          try {
+            await gc.query("BEGIN");
+            await gc.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+            await gc.query("SET LOCAL search_path TO choros");
+            groundingAppId = await resolveIdBySlug(gc, tenantId, "application", applicationId);
+            await gc.query("COMMIT");
+          } catch {
+            await gc.query("ROLLBACK").catch(() => {});
+            groundingAppId = null;
+          } finally {
+            gc.release();
+          }
+        }
+
         // Grounding: real field keys + role slugs (cascade/ask when a reference misses).
-        const grounding = await fetchGroundingContext(pool, tenantId, applicationId || null);
+        const grounding = await fetchGroundingContext(pool, tenantId, groundingAppId);
 
         // Run the loop. PURE core decides draft_ready / needs_grounding / exhausted.
         const outcome = await runProcessGenLoop({
@@ -1235,6 +1343,68 @@ async function respondLlmUnavailable(
   }
 
   sendErrorEnvelope(res, 503, "LLM_UNAVAILABLE", text);
+}
+
+// ---------------------------------------------------------------------------
+// T-0607 (г): persist an honest in-thread reply for a NON-LLM-unavailable
+// dispatch failure, then respond with the same canonical text.
+//
+// Guarantees a user message never stays silent behind a bare 500: the thread
+// gets a real assistant message (canonical, jargon-free — buildDispatchFailureReply),
+// and the HTTP response carries that same text at 200 so the web chat renders a
+// reply bubble rather than swallowing a 500 with no thread update. The raw error
+// is the CALLER's responsibility to log (already done at the call site).
+// ---------------------------------------------------------------------------
+async function persistAssistantFailureReply(
+  pool: pg.Pool,
+  tenantId: string,
+  threadId: string,
+  actorSlug: string,
+  agentSlug: string,
+  res: ServerResponse,
+): Promise<void> {
+  const text = buildDispatchFailureReply();
+  const msgId = randomUUID();
+  const ts = Date.now();
+  try {
+    await withTenantTx(pool, tenantId, async (client) => {
+      const payload: MessagePayload = {
+        thread_id: threadId,
+        role: "assistant",
+        text,
+        context_ref: null,
+        intent: "unknown",
+        streaming_done: true,
+      };
+      await auditWriter.appendAuditEvent(client, {
+        id: msgId,
+        type: "assistant.message",
+        actor: agentSlug,
+        subject: actorSlug,
+        scope: null,
+        via: null,
+        proposed_by: null,
+        confirmed_by: null,
+        payload,
+        occurred_at: ts,
+      });
+    });
+  } catch (persistErr) {
+    // Even the persist failed — still answer honestly (do not mask with 500).
+    console.error(`[T-0607] failed to persist dispatch-failure reply: ${String(persistErr)}`);
+  }
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(
+    JSON.stringify({
+      id: msgId,
+      role: "assistant",
+      text,
+      ts: new Date(ts).toISOString(),
+      intent: "unknown",
+      streaming_done: true,
+    }),
+  );
 }
 
 interface ThreadRow {
@@ -1939,6 +2109,21 @@ export function registerAssistantRoutes(
         llm,
         threadId,
         messageId: userMsgId,
+        // T-0607 (б): server-side owner predicate for the deterministic rights
+        // gate — the SAME isGenesisOwnerForTenant resolver the honest-503 path
+        // uses. Memoised per request. The configurator gate applies the owner
+        // short-circuit so a genesis OWNER is never falsely refused.
+        isTenantOwner: (() => {
+          let cached: Promise<boolean> | null = null;
+          return () => {
+            if (cached === null) {
+              cached = isGenesisOwnerForTenant(pool, tenantId, actorSlug, Date.now()).catch(
+                () => false,
+              );
+            }
+            return cached;
+          };
+        })(),
       };
 
       // -----------------------------------------------------------------------
@@ -2012,7 +2197,10 @@ export function registerAssistantRoutes(
           const hasBundleOps = cfgResult.approvedOps.some((o) => BUNDLE_OP_KINDS.has(o.kind));
           const bundleId = hasBundleOps ? randomUUID() : undefined;
 
-          const opErrors: string[] = [];
+          // T-0607 (в2): collect the REAL per-op outcome (ok / fail / duplicate)
+          // so the final report reflects what actually happened — not the LLM's
+          // optimistic «✅» nor the pure-planner's pre-execution changelog.
+          const opResults: OpResult[] = [];
           for (const op of cfgResult.approvedOps) {
             const err = await executeApprovedOpAsDraft(
               pool,
@@ -2022,9 +2210,20 @@ export function registerAssistantRoutes(
               // Tag bundle-worthy ops with the shared id; others stay un-bundled.
               BUNDLE_OP_KINDS.has(op.kind) ? bundleId : undefined,
             );
-            if (err !== null) {
-              opErrors.push(err);
+            if (err === null) {
+              opResults.push({ description: op.description, ok: true });
+            } else {
               console.error(`[T-0363] draft op failed (${op.kind}): ${err}`);
+              // A "DUPLICATE:" prefix marks a benign already-exists outcome that
+              // the report shows as «уже было», not «не создано».
+              const isDup = err.startsWith("DUPLICATE:");
+              const reason = isDup ? err.slice("DUPLICATE:".length).trim() : err;
+              opResults.push({
+                description: op.description,
+                ok: false,
+                error: reason,
+                duplicate: isDup,
+              });
             }
           }
 
@@ -2049,12 +2248,17 @@ export function registerAssistantRoutes(
             }
           }
 
-          if (opErrors.length > 0) {
-            // Append error summary to text (non-fatal — user sees partial result).
-            // Preserve any deep-links/bundle-promote already attached this turn.
+          // T-0607 (в2): reconcile the reply with the REAL op outcomes. When any
+          // op failed, the honest report replaces the optimistic «✅»-style text
+          // with a truthful partial-result summary (failed ops shown as failed,
+          // duplicates shown as «уже было»). When everything succeeded the text
+          // is unchanged. This is the fix for «Все поля добавлены ✅» over 4/4
+          // FAILED ops.
+          const honestText = buildHonestOpsReport(handlerResult.text, opResults);
+          if (honestText !== handlerResult.text) {
             handlerResult = {
               ...handlerResult,
-              text: handlerResult.text + `\n\n⚠ Ошибки при сохранении ${opErrors.length} операций в DRAFT: ${opErrors.join("; ")}`,
+              text: honestText,
               intent: "configurator" as const,
             };
           }
@@ -2064,14 +2268,24 @@ export function registerAssistantRoutes(
       } catch (err) {
         // T-0573 (ADR-T0573 §2.2 B2, F5/AC-5): classify by TYPE — dormant (no
         // config) AND adapter-failure (config exists, call failed) both answer
-        // with the SAME honest 503. Any OTHER error (a real bug) is NOT
-        // masked — it falls through to `throw err` → router's INTERNAL 500,
-        // exactly as before this task.
+        // with the SAME honest 503 (respondLlmUnavailable persists a thread
+        // message AND returns the canonical envelope).
         if (classifyLlmUnavailability(err) === "unavailable") {
           await respondLlmUnavailable(pool, tenantId, threadId, actorSlug, agentSlug, res);
           return;
         }
-        throw err;
+        // T-0607 (г): every user message must get an answer OR an honest error
+        // IN THE THREAD. Previously any OTHER error fell through to `throw err`,
+        // which the router turned into a bare 500 WITHOUT persisting any assistant
+        // message — the thread stayed silent (user message with no reply, no
+        // error bubble). Now we persist a canonical, jargon-free assistant reply
+        // into the thread (raw err logged server-side only) and respond with the
+        // same honest text. The thread is never left mute.
+        console.error(`[T-0607] assistant dispatch failed (non-LLM): ${String(err)}`);
+        await persistAssistantFailureReply(
+          pool, tenantId, threadId, actorSlug, agentSlug, res,
+        );
+        return;
       }
 
       // -----------------------------------------------------------------------

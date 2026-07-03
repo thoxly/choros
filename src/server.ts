@@ -76,6 +76,8 @@ import { type PgClientLike } from "./db/audit-writer.js";
 // T-0363 (E17): Analyst production ports.
 import { setAnalystPorts } from "./core/assistant-analyst.js";
 import { loadCycleTimeByActivity, loadActorTypeBreakdown } from "./db/transition-journal.js";
+// T-0607 (а): READ-PDP-scoped registry digest for the analyst (entity-data view).
+import { loadReadableRegistryDigest } from "./db/registry-digest-dao.js";
 // T-0382 (D5): per-tenant LLM config (BYO) — read from agent_card at call time.
 import { loadTenantLlmConfig } from "./db/agent-card-llm.js";
 // T-0382: LLM-config HTTP routes (tenant LLM connection screen backend).
@@ -1005,8 +1007,14 @@ function buildRouter(
         loadCycleTimeByActivity(grantsPool, tenantId),
       loadActorBreakdown: (tenantId: string) =>
         loadActorTypeBreakdown(grantsPool, tenantId),
-      // listRecords: not wired here (requires ACL-filter factory integration with
-      // intersectionGrants at call-time — T-0360 follow-up). Defaults to [].
+      // T-0607 (а): registry-digest port — the analyst's honest, READ-PDP-scoped
+      // view of the entity data the asker may read (счёт + примеры в правах).
+      // Closes the столп-6 blindness: the analyst previously read only the S3
+      // journal (listRecords was never wired), so «сколько заведено?» answered
+      // «записей нет» while the user SEES the section. MVP digest (not a full
+      // record-lister — ADR-T0607 §1.1 / O1), enough for the honest answer.
+      loadRegistryDigest: (tenantId: string, actorSlug: string) =>
+        loadReadableRegistryDigest(grantsPool, tenantId, actorSlug, Date.now()),
       // T-0383: per-tenant analyst system prompt (reads published instruction_meta).
       loadSystemPrompt: (tenantId: string) =>
         readPublishedAssistantPrompt(grantsPool, tenantId, "analyst"),
