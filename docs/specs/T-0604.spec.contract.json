@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0604",
+  "status": "ready",
+  "summary": "Авто-комплит T-0368 «растворение двойной подачи» в on_create-пути (src/http/records.ts, блок после startInstance: getFirstActiveUserTask → completeUserTask) слепо завершает ПЕРВЫЙ активный userTask, предполагая «это task-submit». После T-0571 (PUT→POST починил completeUserTask, раньше был no-op) это раскрыло реальный баг: в процессе purchaseApproval первый userTask — «Проверка руководителем» (task-review), и авто-комплит съедает реальный шаг согласования за ~35мс без человека (движковые факты: инстансы 5cf10788/1aecce4e, task-review start→end 32-37мс, assignee пуст; контрольный dafc9b66 до фикса — человек закрывал 6 минут). Фикс: process_app_binding получает NULLABLE колонку submit_task_key; NULL (safe default для всех существующих строк) = авто-комплит НЕ включён; non-NULL = авто-комплит срабатывает ТОЛЬКО если taskDefinitionKey первого активного userTask-а РАВЕН этому значению. Для purchaseApproval (живой тенантский binding, NULL) — авто-комплит просто не срабатывает, «Проверка руководителем» остаётся человеку (желаемое). Для telLinear (085/087 seed, реальный первый userTask = 'task-submit' в tel-linear.bpmn20.xml:52) — миграция дополняет seed-ряд submit_task_key='task-submit' данными, сохраняя существующий ТЭЛ-сценарий без регрессии. Механизм читает getActiveUserTasks (уже вызывается чуть ниже для BUG-015) вместо отдельного getFirstActiveUserTask — переиспользование, не второй движковый вызов. Ноль литеральных defKey-сравнений в src/ (гейты engine-drive-no-literal-defkey.sh / detel-literal-baseline.sh).",
+  "functional": [
+    "F1. process_app_binding получает NULLABLE колонку submit_task_key text (миграция, следующий свободный слот). NULL (дефолт для всех существующих/будущих строк) = авто-комплит не включён — первый активный таск остаётся живым. Non-NULL '<key>' = авто-комплит включён УСЛОВНО: срабатывает только если taskDefinitionKey первого активного userTask инстанса равен '<key>'; иначе не срабатывает (не ошибка).",
+    "F2. getOnCreateBinding (binding-trigger-dao.ts) возвращает submit_task_key: string|null как часть OnCreateBindingRow.",
+    "F3. records.ts on_create-блок: решение об авто-комплите переезжает с 'есть активный userTask' на 'первый активный userTask имеет ЗАДЕКЛАРИРОВАННЫЙ defKey'. Один вызов getActiveUserTasks (уже существующий для BUG-015 projection) используется И для defKey-гейта, И для BUG-015; getFirstActiveUserTask больше не вызывается в этом блоке (остаётся в клиенте как публичный метод).",
+    "F4. Идемпотентность/resume: движковая ошибка деградирует best-effort (лог, не блокирует уже закоммиченную запись) — контракт T-0368/T-0575 не меняется.",
+    "F5. Данные: purchaseApproval (живой UI-binding, вне migrations/) не получает submit_task_key этой задачей — NULL-default даёт желаемое поведение автоматически. telLinear seed (085/087) дополняется submit_task_key='task-submit' (данные, не код) — существующий ТЭЛ-сценарий сохраняется без регрессии."
+  ],
+  "non_functional": [
+    "N1. Закон границы (D-064 §5 / анти-ТЭЛ гейты): ноль литеральных defKey-сравнений в src/. submit_task_key читается ИЗ binding, никогда не сравнивается с зашитой строкой в коде. engine-drive-no-literal-defkey.sh и detel-literal-baseline.sh — exit 0, агрегат не растёт.",
+    "N2. Safe default: NULL = 'не трогай человеческий шаг', НЕ 'угадай литеральный дефолт' — единственный безопасный выбор для необратимого движкового действия.",
+    "N3. Без новых таблиц/RLS-периметров: ALTER TABLE ... ADD COLUMN IF NOT EXISTS на существующей tenant-таблице process_app_binding (уже в known_tenant_tables.txt), мирроит миграцию 119 буквально.",
+    "N4. Без удвоения движкового вызова: F3 переиспользует getActiveUserTasks вместо нового клиентского метода/round-trip.",
+    "N5. Регрессия T-0368 переосмыслена, не удалена: существующие тесты binding-trigger.unit.test.ts приводятся к новой семантике (getActiveUserTasks стаб) без потери покрытия; добавляется прежде отсутствовавший позитивный путь (комплит действительно вызван)."
+  ],
+  "out_of_scope": [
+    "O1. Изменение семантики target_registry_slug (T-0575/119) — отдельная конфигурация того же binding-ряда.",
+    "O2. UI для редактирования submit_task_key — колонка задаётся данными/SQL сейчас.",
+    "O3. Изменение BPMN-файлов — только SQL-данные (seed) и код чтения/гейта.",
+    "O4. Расширение getFirstActiveUserTask полем taskDefinitionKey — не нужно, переиспользуем getActiveUserTasks.",
+    "O5. Ретроактивная простановка submit_task_key для любого ДРУГОГО живого тенантского binding кроме telLinear — данные тенанта, вне периметра этой задачи."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "Миграция добавляет process_app_binding.submit_task_key text NULL (ADD COLUMN IF NOT EXISTS), существующие строки получают NULL.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "getOnCreateBinding возвращает submit_task_key: string|null как часть OnCreateBindingRow.", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "binding без submit_task_key (NULL) → авто-комплит не вызывается: первый активный таск остаётся живым, даже если у инстанса есть активный userTask.", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "binding с submit_task_key='X', первый активный таск имеет taskDefinitionKey==='X' → авто-комплит вызывается (completeUserTask с этим taskId).", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "binding с submit_task_key='X', первый активный таск имеет ДРУГОЙ defKey → авто-комплит не вызывается (не ошибка).", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "Существующие тесты binding-trigger.unit.test.ts приведены к новой семантике (getActiveUserTasks) без потери покрытия; добавлен прежде отсутствовавший позитивный путь.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "telLinear seed-binding (085/087) дополнен submit_task_key='task-submit' данными — существующий ТЭЛ-сценарий не регрессирует.", "verifiable_as": "manual"},
+    {"id": "AC-8", "text": "Ноль литеральных defKey-сравнений в новом коде src/: engine-drive-no-literal-defkey.sh и detel-literal-baseline.sh — exit 0, агрегат не растёт.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "npm test, npm run build, npm run fitness:db, anti-case-lock.sh — зелёные; счётчики в handoff.", "verifiable_as": "fitness"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0604-skip-submit-defkey.spec.md"
+}
