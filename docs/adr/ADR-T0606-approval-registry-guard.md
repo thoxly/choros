@@ -158,7 +158,7 @@ ASC LIMIT 1` в подзапрос — та же стабильная tie-break 
    существующим прецедентом сильнее, чем гипотетическая экономия одной
    миграции.
 
-### 3.2 Гейт (Part B, records.ts)
+### 3.2 Гейт (Part B): records.ts + form-record-persister.ts (review F-1)
 
 `assertNotEngineManaged(reg)` — новая функция в `src/http/records.ts`,
 вызываемая из `createRecord`, `updateRecord`, `deleteRecord` СРАЗУ после
@@ -168,6 +168,19 @@ ASC LIMIT 1` в подзапрос — та же стабильная tie-break 
 процесс — согласуйте через задачу в Моих задачах")`, следуя существующему
 конверту `{error:{code,message}}` (тот же паттерн, что `denialError` для
 `FIELD_WRITE_FORBIDDEN` в этом же файле).
+
+**Review F-1 (blocking) remediation:** первая реализация ставила гейт
+ТОЛЬКО в `records.ts` — ревью доказало живьём второй HTTP write-path
+(`POST /api/forms/:formId/submit` → `form-record-persister.ts::
+makeFormRecordPersister` → прямой INSERT), обходивший гейт. Та же проверка
+(тот же 403-код, то же честное сообщение) теперь стоит в
+`makeFormRecordPersister` ДО INSERT: `engine_managed` селектится тем же
+запросом, что резолвит реестр по слагу формы. Проверка — PROPERTY-driven
+(по флагу целевого реестра), не form-id-driven: форма, чей целевой реестр
+НЕ engine_managed (например `purchase` → `purchases`), полностью не
+затронута; если оператор перенастроит `CHOROS_DEFAULT_STEP_RESULT_SLUG` на
+незащищённый реестр, форма `approval` снова легитимно работает без
+изменения кода. Полная карта write-поверхности — §4-bis.
 
 ### 3.3 Данные
 
@@ -190,16 +203,66 @@ SELECT id, application_id FROM choros.registry_def
 
 Эта SELECT НИКОГДА не выбирает `engine_managed` — колонка ей физически
 невидима. Прямой `INSERT INTO choros.record` (~line 700) идёт СРАЗУ вслед,
-без какой-либо проверки на write-protection. Гейт Part B живёт
-ИСКЛЮЧИТЕЛЬНО внутри `src/http/records.ts`'s HTTP create/update/delete
-хендлеров — `step-applier.ts` НЕ импортирует и не вызывает ни одну функцию
-из `records.ts`. Изоляция доказана И статически (чтением обоих модулей —
-ноль общих функций между HTTP-роутом и DAO-путём step-applier), И тестом
-(`src/__tests__/step-applier.test.ts::SA-11` — юнит, проверяющий, что ни
-один SQL-запрос этого пути не упоминает `engine_managed`, + живой
+без какой-либо проверки на write-protection. Гейт Part B живёт внутри
+HTTP-слоёв (`records.ts` create/update/delete + `form-record-persister.ts`
+form-submit, review F-1) — `step-applier.ts` НЕ импортирует и не вызывает
+ни одну функцию из этих модулей. Изоляция доказана И статически (чтением
+модулей — ноль общих функций между HTTP-путями и DAO-путём step-applier),
+И тестом (`src/__tests__/step-applier.test.ts::SA-11` — юнит, проверяющий,
+что ни один SQL-запрос этого пути не упоминает `engine_managed`, + живой
 Postgres-тест `ci/checks/db/approval-registry-guard.db.test.ts`,
 вызывающий `applyStepResult` напрямую против реального
 `engine_managed=true` реестра и подтверждающий успешную запись).
+
+## 4-bis. Полная карта write-поверхности `choros.record` (review F-1 remediation)
+
+Ревью T-0606 (F-1, blocking) доказало живьём: гейт Part B, реализованный
+только в `records.ts`, обходился ВТОРЫМ живым HTTP-путём. Урок: гейт по
+свойству реестра обязан быть сверен с КАЖДОЙ точкой записи, не одним
+роутом. Ниже — исчерпывающая карта (`grep -rn "INSERT INTO choros.record"
+src/ --include='*.ts'` минус `__tests__`; UPDATE/DELETE аналогично), с
+вердиктом по каждой точке.
+
+### INSERT INTO choros.record
+
+| # | Точка | Путь вызова | Вердикт | Почему |
+|---|---|---|---|---|
+| 1 | `src/http/records.ts` ~:821 (createRecord) | HTTP `POST /api/records` | **ГЕЙТ ЕСТЬ** | `assertNotEngineManaged(reg)` сразу после резолюции governing registry_def, до валидации/вставки. |
+| 2 | `src/http/form-record-persister.ts` ~:295 (makeFormRecordPersister) | HTTP `POST /api/forms/:formId/submit` → `forms.ts::persist()` | **ГЕЙТ ДОБАВЛЕН (fix F-1)** | Реестр резолвится по слагу формы; `engine_managed` селектится тем же запросом, 403 `REGISTRY_ENGINE_MANAGED` ДО INSERT. Property-driven (не form-id-driven): форма с незащищённым целевым реестром не затронута — регрессия запинена DB-тестом (Part B-bis). |
+| 3 | `src/db/step-applier.ts` ~:701 (applyStepResult) | Движковый approve-путь (inbox), не HTTP-CRUD | **ГЕЙТ НЕ НУЖЕН — легитимный писатель** | Единственный санкционированный писатель актов решений — сам смысл engine_managed («записи создаёт процесс»). Его SQL физически не селектит engine_managed (§4/§5); запинено SA-11 + живым DB-тестом. |
+| 4 | `src/db/external-participant.ts` ~:216 (createExternalParticipant) | HTTP-каталог внешних участников | **ГЕЙТ НЕ НУЖЕН — фиксированный системный таргет** | Пишет исключительно в код-пиненный `EXTERNAL_PARTICIPANT_REGISTRY_ID` (`a5000000-…-0002`, системный справочник, migration 056). Вызывающий не может направить эту вставку в произвольный/engine_managed реестр — таргет константа уровня кода, не пользовательский ввод; отдельный справочник, не проекция решений. |
+
+### UPDATE choros.record
+
+| # | Точка | Путь вызова | Вердикт | Почему |
+|---|---|---|---|---|
+| 1 | `src/http/records.ts` ~:1296 (updateRecord) | HTTP `PUT /api/records/:id` | **ГЕЙТ ЕСТЬ** | `assertNotEngineManaged(reg)` после `loadRegistryDefById`, до валидации/апдейта. Других UPDATE-точек данных записи в src/ нет. |
+
+### DELETE FROM choros.record
+
+| # | Точка | Путь вызова | Вердикт | Почему |
+|---|---|---|---|---|
+| 1 | `src/http/records.ts` ~:1403 (deleteRecord) | HTTP `DELETE /api/records/:id` | **ГЕЙТ ЕСТЬ** | SELECT `engine_managed` реестра записи → `assertNotEngineManaged` до удаления файлов/записи. |
+| 2 | `src/http/applications.ts` ~:407 (deleteApplication cascade) | HTTP delete-application (lifecycle) | **ГЕЙТ НЕ НУЖЕН — lifecycle-операция другого уровня** | Каскад удаляет ВСЕ записи ВСЕХ реестров удаляемого приложения ВМЕСТЕ с самими registry_def-строками — приложение перестаёт существовать целиком. Это не «CRUD над отдельным актом решения» (класс бага #1), а санкционированная владельческая lifecycle-операция за собственным authz-гейтом (owner/admin, иначе 403 FORBIDDEN). Блокировать её значило бы сделать приложение с engine_managed реестром неудаляемым. |
+
+### Не-векторы (сверено с ревью)
+
+- Assistant draft-ops (T-0607 `edit_jsonschema`/`create_application`) —
+  прямых record-инсертов не делают (grep пуст; подтверждено ревьюером).
+- Отдельного bulk-import роута с прямым инсертом в `choros.record` в src/
+  нет (подтверждено ревьюером).
+
+### Форма `approval` — остаточное решение (осознанное)
+
+`makeFormDefResolver` ПО-ПРЕЖНЕМУ резолвит форму `approval` (GET вернёт
+FormDef) — UI может показать форму, чей submit теперь честно 403-ится.
+Ревьюер пометил закрытие резолвера как ОПЦИОНАЛЬНОЕ; осознанно оставлено:
+(а) 403 с честным русским сообщением на submit — объяснение, не тупик;
+(б) форма `approval` — реликт ТЭЛ-демо E15-S4, её полное закрытие/удаление
+— отдельное продуктовое решение (кандидат на follow-up), не минимальный
+фикс blocking-F-1; (в) property-driven гейт остаётся согласован с
+резолвером автоматически: перенастройка `CHOROS_DEFAULT_STEP_RESULT_SLUG`
+на незащищённый реестр возвращает форме работоспособность без кода.
 
 ## 5. Риски и остаточные пробелы
 

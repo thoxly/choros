@@ -107,11 +107,18 @@ export interface OnCreateBindingRow {
  *     non-system (`is_system = false`) registry_def under `applicationId` by
  *     `created_at ASC` (id ASC as a deterministic tiebreak for rows sharing
  *     the same created_at, e.g. seed rows inserted in the same migration
- *     with created_at=0). This mirrors, byte-for-byte, the "primary
+ *     with created_at=0). This reuses the SAME SEMANTICS as the "primary
  *     registry" resolution process-instance-resolver.ts's Step 3 already
  *     uses for the OUTBOUND (step-result) direction — see that module's
- *     `is_system = false ORDER BY created_at ASC LIMIT 1` query. Reusing the
- *     SAME definition for the INBOUND (trigger-scope) direction means a
+ *     `is_system = false ORDER BY created_at ASC LIMIT 1` query — with ONE
+ *     deliberate strengthening (review T-0606 F-2): this subquery adds the
+ *     `id ASC` tie-breaker that the resolver's Step 3 does NOT have, so THIS
+ *     query is deterministic when two non-system registries share a
+ *     created_at while the resolver relies on the absence of such ties (true
+ *     for all current seeds — verified against 076/086). If the two paths
+ *     are ever synchronized, align the resolver by ADDING id ASC there, not
+ *     by removing it here. Reusing the SAME definition for the INBOUND
+ *     (trigger-scope) direction means a
  *     registry that is not eligible to be the step-result target (e.g.
  *     because it is_system=true) is likewise never an eligible NULL-fallback
  *     trigger source — an engine_managed registry (migration 122, Part B)

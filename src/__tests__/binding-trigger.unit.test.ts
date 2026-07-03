@@ -899,6 +899,16 @@ describe("T-0603 on_create: embedded-rollup field reaches startInstance variable
 // registry (is_system=true, later created_at) — mirroring the real ТЭЛ seed
 // shape (076/086: purchases is_system=false, soglasovanie stays
 // is_system=true).
+//
+// COVERAGE HONESTY (review T-0606 F-3): the stub client below REIMPLEMENTS
+// the trigger-scope match predicate in JS (a stub cannot evaluate the DAO's
+// SQL text), so these unit tests pin the CALLER's plumbing (records.ts
+// passes reg.id; a match/no-match verdict propagates to startInstance) and
+// the OnCreateBindingRow shape — they do NOT pin the real SQL WHERE clause:
+// a mutation that guts the DAO's SQL scope filter leaves them green. The
+// REAL trigger-scope guarantee is pinned by the live-Postgres test
+// (ci/checks/db/approval-registry-guard.db.test.ts Part A), which the
+// T-0606 judge's mutation probes A and C both turn red.
 // ---------------------------------------------------------------------------
 
 const PRIMARY_REGISTRY_ID = "a7000000-0000-0000-0000-000000000002"; // mirrors ТЭЛ "purchases"

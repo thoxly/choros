@@ -569,7 +569,12 @@ async function loadRegistryDefById(
 /**
  * Reject a generic CRUD create/update/delete against an engine-managed
  * (write-protected) registry_def with an honest 403. Called from
- * createRecord/updateRecord/deleteRecord — i.e. from THIS HTTP route only.
+ * createRecord/updateRecord/deleteRecord in THIS file. The SAME check
+ * (same 403 code, same message) is enforced on the OTHER live HTTP write
+ * path — form submits — inside src/http/form-record-persister.ts's
+ * makeFormRecordPersister (review T-0606 F-1: that path bypassed this
+ * guard until it got its own check). The complete write-surface map with a
+ * per-INSERT verdict lives in ADR-T0606-approval-registry-guard.md §4-bis.
  *
  * step-applier.ts's applyStepResult writes decision records via its OWN
  * direct `INSERT INTO choros.record` inside binding-trigger-dao.ts's sibling

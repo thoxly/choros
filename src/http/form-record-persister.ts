@@ -74,6 +74,15 @@ interface RegistryDefRow {
   /** The authoritative JSON Schema governing this registry's records. */
   record_schema: unknown;
   record_schema_version: number | string;
+  /**
+   * T-0606 [approval-registry-guard] review F-1 (migration 122): true for an
+   * engine-managed / write-protected registry (e.g. the «Согласование»
+   * step-result projection step-applier.ts writes decision records into).
+   * A form submit targeting such a registry is a generic user-facing CRUD
+   * write and MUST be rejected — this path (POST /api/forms/:formId/submit)
+   * was the live bypass the T-0606 review proved against records.ts's guard.
+   */
+  engine_managed: boolean;
 }
 
 /** Minimal application shape needed to look up the application by slug. */
@@ -244,9 +253,10 @@ export function makeFormRecordPersister(
 
       // 3b. Resolve the governing registry_def by slug under the application.
       //     record_schema is fetched here (T-0345) to derive the authoritative
-      //     FormDef for schema validation before persisting.
+      //     FormDef for schema validation before persisting. engine_managed
+      //     (migration 122) is fetched for the write-protection guard below.
       const regRes = await client.query<RegistryDefRow>(
-        `SELECT id, application_id, record_schema, record_schema_version
+        `SELECT id, application_id, record_schema, record_schema_version, engine_managed
            FROM choros.registry_def
           WHERE tenant_id = $1
             AND application_id = $2
@@ -261,6 +271,29 @@ export function makeFormRecordPersister(
           "NOT_FOUND",
           `form-record-persister: registry_def slug='${registrySlug}' not found ` +
           `under application '${applicationSlug}' for tenant ${tenantId}`,
+        );
+      }
+
+      // 3b-bis. T-0606 [approval-registry-guard] review F-1: reject a form
+      // submit whose TARGET registry is engine-managed / write-protected —
+      // BEFORE any validation or write. This is the SAME invariant records.ts
+      // enforces via assertNotEngineManaged (same code, same honest message):
+      // a form submit is a generic user-facing CRUD create, and an
+      // engine-managed registry (e.g. the «Согласование» decision projection)
+      // accepts writes ONLY from the engine's own step-applier DAO path.
+      // The check is registry-property-driven (engine_managed boolean), NOT
+      // form-id-driven — a form whose target registry is NOT engine-managed
+      // (e.g. "purchase" → a primary business registry) is entirely
+      // unaffected; and if an operator ever re-points the "approval" form at
+      // a non-protected registry (CHOROS_DEFAULT_STEP_RESULT_SLUG), the
+      // submit works again without a code change. The route (forms.ts) lets
+      // this HttpError propagate to the router's {error:{code,message}}
+      // envelope — the same 403 shape /api/records returns.
+      if (reg.engine_managed) {
+        throw new HttpError(
+          403,
+          "REGISTRY_ENGINE_MANAGED",
+          "Записи этого раздела создаёт процесс — согласуйте через задачу в Моих задачах",
         );
       }
 
