@@ -1,0 +1,33 @@
+{
+  "task_id": "T-0615",
+  "verdict": "pass",
+  "reviewed_sha": "d9fc200",
+  "deterministic": {
+    "total": 1694,
+    "passed": 1694,
+    "failed": 0,
+    "skipped": 0,
+    "_note": "cd web && npm ci (exit 0, bpmn-auto-layout@1.3.0 installed) → npx vitest run: 62 files, 1694/1694 PASS (было 1682; +12 новых в bpmn-ensure-layout.test.js). Существующие тесты модельера (screen-process-editor, canvas/*) зелёные — интеграция ensureLayout→importXML не сломала модельер. npm run build root (tsc ×2) exit 0; cd web && npm run build exit 0 (523 modules, +bpmn-auto-layout забандлен; chunk-size WARN на bpmn-js пре-существующий). Гейты: anti-case-lock.sh PASS + --self-test PASS (aggregate 24=24 baseline); bpmn-linter-isolation.sh PASS (frozen files unmodified, bpmn-auto-layout не в бэкенд package.json). Контракты spec/adr/handoff валидны (validate_file → []). Судья независимый (D-007, не автор)."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1 DI-less → layoutApplied=true + выход несёт BPMNDiagram+BPMNShape+Bounds, узлы сохранены", "test": "web/src/canvas/bpmn-ensure-layout.test.js «AC-1: a DI-less definition gets diagram interchange computed» + судейский node-probe (реальный layoutProcess → BPMNDiagram/BPMNShape/BPMNEdge/Bounds/waypoint/userTask)", "result": "pass"},
+    {"ac": "AC-2 DI есть → байт-в-байт (layoutApplied=false, x=4242 сохранён)", "test": "«AC-2: returned verbatim» + «AC-2 isolation» + «large inputs verbatim»", "result": "pass"},
+    {"ac": "AC-3 hasDiagramInterchange prefix-agnostic / no-false-positive / defensive", "test": "«prefix-agnostic», «does NOT false-positive», «FALSE for empty/non-string» + судейский edge-probe 12/12 (пустой DI-блок, CDATA, BPMNDiagramFoo, fooBPMNDiagram, null/number)", "result": "pass"},
+    {"ac": "AC-4 честная деградация: malformed без DI → throw /auto-layout/i; пусто/не-строка → /non-empty string/i", "test": "«honest degradation: malformed BPMN → throws» + «rejects empty/non-string»", "result": "pass"},
+    {"ac": "AC-5 wrapper: ensureLayout ДО importXML, .catch→onError (T-0484 сохранён)", "test": "grep-контракт FF-5 (ensureLayout@205 перед importXML@206; .catch@240 различает /auto-layout/i vs importXML; onError@254). Live-proof рендера на стенде — pending orchestrator", "result": "pass"},
+    {"ac": "AC-6 D-064: anti-case-lock зелёный, ноль кейс-литералов в src/web/src", "test": "bash ci/checks/anti-case-lock.sh (aggregate 24=24) + grep кейс-литералов в 3 изменённых файлах = CLEAN", "result": "pass"},
+    {"ac": "Новый-процесс путь (DEFAULT_DIAGRAM_XML) не затронут ensureLayout", "test": "судейский probe: детектор(DEFAULT)=true → layoutApplied=false → байт-в-байт", "result": "pass"},
+    {"ac": "O2 частичный рендер (под-процесс) → канвас НЕ пустой", "test": "судейский probe: subProcess → layoutApplied=true, выход c BPMNShape+Bounds", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "Честная деградация T-0484 сохранена — провал раскладки/реджект importXML показываются баннером, не немым пустым канвасом", "result": "pass", "note": "wrapper .catch различает 'Не удалось построить схему автоматически…' (/auto-layout/i) от 'Не удалось открыть диаграмму…' (реджект importXML), оба через onError"},
+    {"check": "Авторская раскладка (hand-placed DI) не перетирается", "result": "pass", "note": "ensureLayout байт-в-байт при наличии DI; MUT-2 доказывает, что перетирание было бы поймано тестом"},
+    {"check": "Определения без DI теперь рисуются (боевой процесс закупок волны 1)", "result": "pass", "note": "механизм доказан детерминированно + живой layoutProcess; финальный live-proof на стенде pending orchestrator"}
+  ],
+  "mutation_probes": [
+    {"id": "MUT-1", "target": "bpmn-ensure-layout.js hasDiagramInterchange → всегда true", "expected_killer": "AC-1 (DI-less получает раскладку) + prefix-FALSE + no-false-positive + honest-degradation", "result": "KILLED", "detail": "4 теста failed; дерево восстановлено"},
+    {"id": "MUT-2", "target": "bpmn-ensure-layout.js hasDiagramInterchange → всегда false (перетёр бы авторскую раскладку)", "expected_killer": "AC-2 байт-в-байт / x=4242 / layoutApplied=false + isolation + large-input", "result": "KILLED", "detail": "6 тестов failed — blocking-сценарий потери авторской раскладки ловится; восстановлено"},
+    {"id": "MUT-3", "target": "bpmn-ensure-layout.js catch деградации → return {xml, layoutApplied:false} (немой DI-less возврат)", "expected_killer": "«honest degradation: malformed → throws /auto-layout/i»", "result": "KILLED", "detail": "1 тест failed — blocking-сценарий немого пустого канваса ловится; восстановлено байт-в-байт (diff -q verified)"}
+  ],
+  "failures": []
+}
