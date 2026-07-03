@@ -1,64 +1,76 @@
 {
   "task_id": "T-0608",
-  "verdict": "pass-with-gap",
-  "reviewed_sha": "fd96ae2",
+  "verdict": "pass",
+  "reviewed_sha": "f7a8995",
+  "prior_reviewed_sha": "fd96ae2",
   "base_sha": "6ae4299a6560e2850fbcafb74a3956a1a2dc691f",
+  "review_rounds": [
+    {"round": 1, "sha": "fd96ae2", "verdict": "pass-with-gap", "reason": "гейты зелёные, но покрытие (д) не покрывало различный-охват-кейс (F-2), совпадало с blocking F-1"},
+    {"round": 2, "sha": "f7a8995", "verdict": "pass", "reason": "F-2 gap закрыт регресс-тестами (а)/(б)+window+true-dupe; мутация воспроизводит over-revoke; все гейты зелёные соло"}
+  ],
   "deterministic": {
-    "backend_npm_test": {"total": 4975, "passed": 4965, "skipped": 10, "failed": 0, "files": 260, "exit": 0},
-    "web_vitest": {"total": 1684, "passed": 1684, "failed": 0, "files": 62, "exit": 0},
-    "fitness_db": {"total": 1111, "passed": 1111, "failed": 0, "files": 110, "exit": 0, "db": "postgres://…:55432/choros"},
-    "build": {"exit": 0, "note": "tsc + seed/tsconfig, чисто"},
-    "_note": "Все тест-гейты зелёные. ВАЖНО: зелёные тесты (д) пинят НЕВЕРНУЮ модель дедупа — фикстура screen-rights.test.jsx использует employee-дубли без различного org_scope, поэтому не покрывает единственный кейс, где дедуп ломается (различный охват). Verdict pass-with-gap: тесты проходят, но покрытие имеет дыру, совпадающую с blocking-дефектом review F-1."
+    "backend_npm_test": {"total": 4975, "passed": 4965, "skipped": 10, "failed": 0, "files": 260, "exit": 0, "run": "solo, sequential"},
+    "web_vitest": {"total": 1690, "passed": 1690, "failed": 0, "files": 62, "exit": 0, "run": "solo", "_note": "+6 к раунду-1 (1684): composite-key/scopeText/window тесты"},
+    "fitness_db": {"total": 1111, "passed": 1110, "failed": 1, "files": 110, "exit_nonzero": true, "run": "solo", "_note": "единственный failed = doc-reconcile.db.test.ts (4 таймаута @5000ms). НЕ тронут T-0608 (git diff 6ae4299..f7a8995 без doc-reconcile/doc-regen); в ИЗОЛЯЦИИ зелёный → pre-existing timing-флейк класса doc-*, брифом велено изолировать. Тронутый fitness-файл rights-overview.db.test.ts в изоляции ЗЕЛЁНЫЙ (2 passed)."},
+    "build": {"exit": 0, "note": "tsc + seed/tsconfig, чисто — новые типы valid_from/valid_until:number|null компилируются"},
+    "_race_note": "ПЕРВЫЙ прогон раунда-2 шёл ПАРАЛЛЕЛЬНО (web+root+fitness одновременно) И перекрылся с моей мутацией screen-rights.jsx → дал ложные красные (web 4 failed = гонка чтения мутированного файла; fitness 13 failed / root 1 failed = DB-pollution двух suite на :55432). pipe глотает exit-код. Все гейты ПЕРЕПРОГНАНЫ СОЛО и ПОСЛЕДОВАТЕЛЬНО — числа выше именно от них."
   },
   "gates": [
-    {"gate": "npm test (backend)", "result": "pass", "detail": "4965 passed | 10 skipped, exit 0"},
-    {"gate": "cd web && npx vitest run", "result": "pass", "detail": "1684 passed, exit 0"},
+    {"gate": "npm test (backend, solo)", "result": "pass", "detail": "4965 passed | 10 skipped, exit 0"},
+    {"gate": "cd web && npx vitest run (solo)", "result": "pass", "detail": "1690 passed, exit 0"},
     {"gate": "npm run build", "result": "pass", "detail": "exit 0"},
-    {"gate": "fitness:db (:55432)", "result": "pass", "detail": "1111 passed, exit 0; role-assignment-scope.test.ts зелёный (бэкенд-контракт scoped-назначений цел)"},
-    {"gate": "ci/checks/tier-isolation.sh", "result": "pass", "detail": "FF-1..FF-11 green, exit 0"},
-    {"gate": "ci/checks/anti-case-lock.sh", "result": "pass", "detail": "aggregate 24=24 baseline, delegates clean, exit 0"}
+    {"gate": "fitness:db (:55432, solo)", "result": "pass-with-isolated-flake", "detail": "1110 passed; 1 failed = doc-reconcile timeout (не тронут T-0608, в изоляции зелёный); rights-overview.db.test.ts (тронутый) зелёный в изоляции"},
+    {"gate": "ci/checks/tier-isolation.sh", "result": "pass", "detail": "FF-1..FF-11 green"},
+    {"gate": "ci/checks/anti-case-lock.sh", "result": "pass", "detail": "aggregate 24=24 baseline, delegates clean"}
   ],
   "coverage_by_point": [
-    {"point": "(а) стейл-задача самолечится", "test": "src/__tests__/inbox-engine-drive.test.ts 'T-0608 а: base row NEVER approved… disappears once engine reports instance ended'", "result": "pass"},
-    {"point": "(б) base-дубль скрыт на наличие next_task", "test": "inbox-engine-drive.test.ts 'T-0608 б: base row hidden once UNAPPROVED next_task exists (escalation path)'", "result": "pass"},
-    {"point": "(в) человеческие тексты approve/complete", "test": "screen-inbox.test.jsx describe 'T-0608 пункт в' (ACTION_ERROR_MESSAGE map, actionErrorMessage порядок, handleComplete+approveTask без голого кода)", "result": "pass"},
-    {"point": "(г) formatPersonName + display_name", "test": "format.test.js (5 unit) + screen-record-detail.test.jsx (author name via fetchEmployees + fallback + non-fatal catch) + screen-rights.test.jsx (picker formatPersonName(e.display_name)||e.slug)", "result": "pass"},
-    {"point": "(д) holderCount вместо grantCount", "test": "screen-rights.test.jsx 'holderCount counts DISTINCT employees' + 'grants-but-zero-holders reports 0' + 'holders-but-zero-grants reports count'", "result": "pass"},
-    {"point": "(д) dedupHolders для РАЗНОГО охвата", "test": "ОТСУТСТВУЕТ — фикстура roleAssignmentsWithDuplicate не имеет org_scope; кейс различного охвата не покрыт", "result": "gap"},
-    {"point": "(е) fetchWithAuthRetry", "test": "fetch-with-auth-retry.test.js (7 тестов: dev passthrough ×2, keycloak non-401, refresh+retry success, refresh-fail→login, revoked→login never-loops, header-merge) + screen-inbox.test.jsx '7 fetch-сайтов, 0 raw fetch'", "result": "pass"}
+    {"point": "(а) стейл-задача самолечится", "test": "inbox-engine-drive.test.ts 'T-0608 а'", "result": "pass"},
+    {"point": "(б) base-дубль скрыт на наличие next_task", "test": "inbox-engine-drive.test.ts 'T-0608 б'", "result": "pass"},
+    {"point": "(в) человеческие тексты approve/complete", "test": "screen-inbox.test.jsx 'T-0608 пункт в'", "result": "pass"},
+    {"point": "(г) formatPersonName + display_name", "test": "format.test.js + screen-record-detail.test.jsx + screen-rights.test.jsx (picker)", "result": "pass"},
+    {"point": "(д) holderCount = distinct people", "test": "screen-rights.test.jsx 'counts DISTINCT employees'", "result": "pass"},
+    {"point": "(д) dedupAssignments композит: разные охваты отдельны", "test": "screen-rights.test.jsx '(а) one person TWO scopes → TWO rows' + 'different validity WINDOW keeps separate' + 'TRUE duplicates collapse'", "result": "pass"},
+    {"point": "(д) revoke таргетит один охват", "test": "screen-rights.test.jsx '(б) revoking one scope does NOT drag the other' + 'ConfirmDialog names SCOPE + другие охваты сохранятся' + 'ids={a.ids}+scopeLabel'", "result": "pass"},
+    {"point": "(д) scope-string для ConfirmDialog не JSON", "test": "screen-rights.test.jsx 'scopeText names node via dictionary, never raw JSON'", "result": "pass"},
+    {"point": "(д) backend surfaces window", "test": "rights-overview.db.test.ts (toHaveProperty org_scope/valid_from/valid_until)", "result": "pass"},
+    {"point": "(е) fetchWithAuthRetry", "test": "fetch-with-auth-retry.test.js (7) + screen-inbox.test.jsx '7 сайтов, 0 raw fetch'", "result": "pass"}
   ],
   "mutation_probes": [
     {
       "id": "MUT-1",
       "point": "(б)",
-      "description": "Отключил строку hide base-on-next_task (process-projection.ts:951 → комментарий), вернув старое условие",
-      "expectation": "дубль-тест 'T-0608 б' должен покраснеть",
-      "result": "RED (ожидаемо): ровно 1 тест упал — 'T-0608 б: base row hidden once UNAPPROVED next_task exists'; 47/48 остались зелёными. Файл восстановлен."
+      "description": "[раунд 1] Отключил hide base-on-next_task (process-projection.ts:951)",
+      "expectation": "тест 'T-0608 б' красный",
+      "result": "RED (1/48). Восстановлено."
     },
     {
       "id": "MUT-2",
       "point": "(д)",
-      "description": "Вернул holderCount = r.grants.length (старая grantCount-семантика)",
-      "expectation": "тесты honest-holder-count должны покраснеть",
-      "result": "RED (ожидаемо): 3 теста упали — 'holderCount counts DISTINCT employees', 'grants-but-zero-holders reports 0', 'holders-but-zero-grants reports count'. dedup-тесты остались зелёными (они не про счётчик). Файл восстановлен."
+      "description": "[раунд 1] Вернул holderCount = r.grants.length",
+      "expectation": "тесты honest-holder-count красные",
+      "result": "RED (3). Восстановлено."
     },
     {
       "id": "MUT-3",
       "point": "(е)",
-      "description": "Убрал retry-once ceiling — рекурсия fetchWithAuthRetry(url,init) вместо login при повторном 401",
-      "expectation": "тест 'never loops' (revoked session) должен покраснеть",
-      "result": "RED (ожидаемо, testTimeout=8000): тест 'refresh succeeds but retry STILL 401s (revoked) → redirects to login (never loops)' упал (ассерт fetchCallCount===3 нарушен рекурсией). Подтверждает, что retry-once реально пинится. Файл восстановлен."
+      "description": "[раунд 1] Убрал retry-once ceiling (рекурсия)",
+      "expectation": "тест 'never loops' красный",
+      "result": "RED (testTimeout=8000). Восстановлено."
+    },
+    {
+      "id": "MUT-4",
+      "point": "(д, F-1 fix)",
+      "description": "[раунд 2] Вернул assignmentIdentityKey к employee_id-only (over-collapse)",
+      "expectation": "тесты различного охвата + over-revoke красные",
+      "result": "RED (4 теста): '(а) one person TWO scopes → TWO rows', '(б) revoking one scope does NOT drag the other', 'TRUE duplicates collapse', 'different validity WINDOW keeps separate'. Over-revoke воспроизводится точно — ключ реально пинит фикс. Восстановлено, tree clean."
     }
   ],
   "adversarial_notes": [
-    "(б) риск потери реальной задачи в AND-split/6M опровергнут через инвариант T-0571 §2.1 (base-строка не бывает конкурентной веткой) + emit-guard reconcileInboxEngineDriveOnRead:1149-1154 (не эмитит next_task пока base активна). Тесты T-0443 (2-step, pending next_task) зелёные — живая задача не теряется.",
-    "(д) КРИТИЧЕСКАЯ дыра покрытия: единственный тест-кейс, где dedupHolders должен различать назначения (разный org_scope), отсутствует. Существующие тесты закрепляют дефект (см. review F-1/F-2). Это не тест-баг сам по себе, а следствие неверной модели — исправление review F-1 повлечёт добавление теста 'разный охват → два держателя, раздельный revoke'.",
-    "(е) dev-режим passthrough и не-зацикливание проверены и тестами, и чтением кода (isKeycloakMode-гард, tryRefresh clearSession, one-way login.assign)."
-  ],
-  "recommended_additional_tests": [
-    "(д) dedupHolders: два role_assignment одного employee_id с РАЗНЫМ org_scope → должны остаться ДВА держателя (или один бейдж, но с раздельными Отозвать по своим id), инфо об охватах не теряется.",
-    "(д) RevokeAssignmentButton: клик Отозвать на назначении с охватом-А НЕ должен отзывать назначение с охватом-Б того же employee+role."
+    "(F-1 fix) композитный ключ реально включает scope+window (не только employee_id) — прочитан independentlyы; мутация MUT-4 воспроизводит blocking over-revoke → тест защищает.",
+    "(б) риск потери задачи в AND-split/6M опровергнут инвариантом T-0571 §2.1 (раунд 1) — F-1-фикс не тронул process-projection.ts, инвариант в силе.",
+    "Ложные красные первого параллельного прогона раунда-2 диагностированы (гонка мутации + DB-pollution) и опровергнуты соло-прогонами — числам параллельных запусков на общем DB не верить (durable-грабли).",
+    "doc-reconcile-таймаут: НЕ тронут T-0608, в изоляции зелёный, класс doc-* — изолирован по инструкции."
   ],
   "failures": [],
-  "gap": "coverage для (д) не покрывает различный-охват-кейс — совпадает с blocking review F-1"
+  "gap": "closed (F-2): различный-охват-кейс покрыт регресс-тестами (а)/(б)+window; мутация MUT-4 подтверждает"
 }
