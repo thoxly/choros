@@ -1,0 +1,43 @@
+{
+  "task_id": "T-0601",
+  "status": "pr_open",
+  "branch": "task/T-0601-screen-scroll-unlock",
+  "pr_url": "local:task/T-0601-screen-scroll-unlock",
+  "live_proof": "pending orchestrator",
+  "summary": "Живой факт приёмки: владелец пожаловался «не прокручивается» на реальном стенде (диагноз JS: .chs-screen height=591px, scrollHeight=1498px). .chs-screen (web/src/app-shell/app.css) имел overflow:hidden при контенте выше вьюпорта; .chs-main/.chs-shell тоже overflow:hidden (фиксированная рамка вьюпорта, так и должно быть); единственный реально скроллящийся элемент страницы — левый нав (.chs-nav__scroll). Полная инвентаризация 26 экранов, рендерящихся внутри .chs-screen, нашла 9 БЕЗ какого-либо внутреннего scroll-контейнера (голый div/layoutStyle без height/overflow): screen-llm-connections (живой факт приёмки — поле ключа, «Проверить подключение», «Назначить ассистенту» недостижимы), screen-agents, screen-llm-config, screen-spend, screen-reports, screen-process-analytics, screen-ops-overview, screen-operational-analytics, screen-assistant-prompt. Остальные 16 уже несут собственный bounded-height внутренний скроллер (паттерн .chs-inbox+.chs-inbox__scroll и аналоги .chs-org/.chs-audit-screen/.chs-notif-screen/.chs-asst/.chs-editor/.chs-forms-screen) — им шелл-уровневый фикс НЕ создаёт двойного скролла, т.к. их обёртка height:100% (не min-height) заполняет, но никогда не превышает, уже ограниченную flex-высоту .chs-screen. Решение: .chs-screen становится единственным легитимным владельцем скролла — overflow-y:auto (вместо overflow:hidden), .chs-main/.chs-shell не меняются. Плюс детерминированный статический гейт ci/checks/ux/ux-g8-scroll-reachable.sh (парсит app.css напрямую — web vitest-тир работает в environment:'node', без DOM/CSSOM, поэтому jsdom рендер-тест не применим) — проверяет .chs-screen на отсутствие overflow(-y):hidden и наличие overflow(-y):auto, STRICT, --self-test (4 фикстуры). Вписан в npm run fitness аддитивно рядом с ux-g5/ux-g6/ux-g2.",
+  "mechanism": {
+    "root_cause": ".chs-screen (web/src/app-shell/app.css:186 до фикса) — flex:1;min-height:0;overflow:hidden. Единственный legitimate scroller на всей странице был .chs-nav__scroll (левый нав) — .chs-main/.chs-shell тоже overflow:hidden (фиксированная рамка вьюпорта). Любой экран с контентом выше вьюпорта имел физически недостижимый хвост колесом/тачпадом. Клики через ref/scrollIntoView в тестах двигают даже hidden-контейнер программно — поэтому баг не был пойман тестами/кликами, только ручной живой проверкой владельца.",
+    "fix": ".chs-screen: overflow:hidden → overflow-y:auto; overflow-x:hidden. Единственная тронутая строка CSS. .chs-main/.chs-shell не изменены.",
+    "double_scroll_analysis": "16 экранов группы (A) с паттерном height:100%+min-height:0 обёртка → flex:1+min-height:0+overflow(-y):auto внутренний узел (.chs-inbox/.chs-inbox__scroll и аналоги .chs-org/.chs-audit-screen/.chs-notif-screen/.chs-asst/.chs-editor BPMN-канвас/.chs-forms-screen канвас форм) — их height:100% ЗАПОЛНЯЕТ, никогда не превышает, ограниченную flex-высоту .chs-screen; новый overflow-y:auto у .chs-screen остаётся бездействующим (scrollHeight===clientHeight), внутренний __scroll-узел продолжает делать всю реальную прокрутку как раньше — регрессии нет. 9 экранов группы (B) без внутреннего скроллера — их контент теперь физически переполняет .chs-screen, браузер рисует реальный ранее отсутствовавший scrollbar — это и есть исправление. screen-login/screen-register (группа C) рендерятся ДО .chs-shell (auth-гейт shell.jsx:952-962), не затронуты; apps-publish-dialog — суб-компонент Modal, не маршрут.",
+    "gate": "ci/checks/ux/ux-g8-scroll-reachable.sh — по образцу ux-g2-theme-pairing.sh: парсит правило .chs-screen из app.css через awk-экстрактор тела блока (с guard против selector-prefix коллизии типа .chs-screen-foo), проверяет A1 (нет overflow(-y):hidden) и A2 (есть overflow(-y):auto). STRICT, exit 1 при нарушении — регресс-лок, не фазовый rollout-гейт (баг уже исправлен, должен оставаться исправленным). --self-test: 4 фикстуры (исходный баг с overflow:hidden / overflow:visible — половинчатый случай без активного фикса / исправленное правило / selector-prefix collision guard)."
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npm run build (root, tsc ×2) — 0 ошибок. cd web && npm run build (vite) — успешно, 516 модулей, dist/ собран (единственное предупреждение — pre-existing chunk-size warning >500kB, не связано с этой правкой).",
+    "lint": true,
+    "lint_result": "Изменение — чистый CSS + новый bash-скрипт + package.json; TS/JS-слой не тронут. root eslint покрыт через npm run build/fitness цепочку (tsc --noEmit эквивалент в build script).",
+    "types": true,
+    "types_result": "tsc (root build) — 0 ошибок, JSX/TS не тронуты этой правкой.",
+    "tests": true,
+    "tests_result": "cd web && npx vitest run — 60 файлов passed (60), 1634 тестов passed (1634), exit 0. Без изменений в наборе тестов и без новых упавших — правка CSS-only, не затрагивает JSX/логику экранов, поэтому существующий набор служит прямым регресс-guard.",
+    "fitness": true,
+    "fitness_result": "npm run fitness (полная цепочка ~250+ проверок, оканчивающаяся на bash ci/checks/anti-case-lock.sh --self-test) — прогнана полностью до последнего элемента &&-цепи без короткого замыкания (лог доходит до финального 'PASS self-test: all anti-case-lock detectors functional across literal families'); все встреченные строки 'FAIL' — исключительно внутри --self-test блоков других гейтов (синтетические плохие фикстуры, каждая немедленно подтверждена соответствующим 'PASS [self-test]'/'SELF-TEST PASS' — ожидаемое поведение, не реальные нарушения). Точечно: bash ci/checks/ux/ux-g8-scroll-reachable.sh → PASS; bash ci/checks/ux/ux-g8-scroll-reachable.sh --self-test → PASS (все 4 фикстуры); bash ci/checks/ux/ux-g5-jargon-denylist.sh → PASS, 28 pre-existing findings (тот же baseline, что T-0599/T-0597, 0 новых); bash ci/checks/ux/ux-g6-no-new-hardcode.sh → PASS, 0 новых hardcode-находок; bash ci/checks/ux/ux-g2-theme-pairing.sh → PASS; bash ci/checks/anti-case-lock.sh (отдельно) → PASS."
+  },
+  "files_changed": [
+    "docs/specs/T-0601-screen-scroll-unlock.spec.md",
+    "docs/specs/T-0601.spec.contract.json",
+    "docs/adr/ADR-T0601-screen-scroll-unlock.md",
+    "docs/adr/T-0601.adr.contract.json",
+    "web/src/app-shell/app.css",
+    "ci/checks/ux/ux-g8-scroll-reachable.sh",
+    "package.json",
+    "docs/handoff/T-0601.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "Нет отклонений от ADR-T0601. Реализация соответствует §1/§4 дословно: единственная тронутая строка CSS (.chs-screen), новый гейт по указанному образцу (ux-g2-theme-pairing.sh), вписан в fitness-цепь на указанном месте."
+  ],
+  "friction_events": [
+    "Worktree был provisioned без node_modules (root и web) — npm ci --maxsockets=3 в обоих перед первым build/vitest прогоном (тот же паттерн, что T-0595/T-0597/T-0599 friction notes); оба установились быстро (187 и 127 пакетов соответственно, без сетевых проблем в этот раз).",
+    "Фоновый sub-agent, запущенный для независимой инвентаризации 26 экранов (перекрёстная проверка моей собственной прямой разведки), вернул результат почти идентичный моему прямому анализу — единственное расхождение: он поймал screen-reports.jsx как сломанный (тот же bare-layoutStyle паттерн), который я изначально пропустил при первом беглом греппинге из-за ложного срабатывания на inline overflowX:auto в SVG-обёртке дочернего компонента, не в самом top-level возврате экрана. Учтён в финальном списке 9 сломанных экранов."
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0601",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1634,
+    "passed": 1634,
+    "failed": 0,
+    "_note": "cd web && npx vitest run — 60 files passed (60), 1634 tests passed (1634), exit 0, duration ~20.5s. Строка 'invalid hook call' в выводе — внутри теста error-envelope-пути ассистента (screen-assistant.error-envelope), ожидаемая ассертируемая ветка ошибки, соответствующий файл помечен ✓. Root npm run build (tsc && seed/tsconfig): exit 0."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1 (.chs-screen без overflow(-y):hidden)", "test": "bash ci/checks/ux/ux-g8-scroll-reachable.sh (A1)", "result": "pass"},
+    {"ac": "AC-2 (.chs-screen overflow-y:auto)", "test": "bash ci/checks/ux/ux-g8-scroll-reachable.sh (A2)", "result": "pass"},
+    {"ac": "AC-3 (.chs-main/.chs-shell остаются overflow:hidden)", "test": "git diff c6db7b8..HEAD -- app.css (тронута только строка .chs-screen)", "result": "pass"},
+    {"ac": "AC-4 (гейт PASS сейчас, FAIL на overflow:hidden)", "test": "bash ux-g8 (PASS) + мутационная проба overflow:hidden (exit 1)", "result": "pass"},
+    {"ac": "AC-5 (--self-test)", "test": "bash ci/checks/ux/ux-g8-scroll-reachable.sh --self-test (4 фикстуры)", "result": "pass"},
+    {"ac": "AC-6 (fitness-вставка, &&-цепь цела)", "test": "&&-count 333→335, g8×2, вставка после ux-g2 и его --self-test", "result": "pass"},
+    {"ac": "AC-7 (web vitest 100%)", "test": "cd web && npx vitest run", "result": "pass"},
+    {"ac": "AC-8 (build)", "test": "npm run build (root)", "result": "pass"},
+    {"ac": "AC-9 (anti-case-lock)", "test": "bash ci/checks/anti-case-lock.sh", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "ux-g8-scroll-reachable.sh (main)", "result": "pass", "note": "PASS [G8]: .chs-screen — single reachable scroll owner (not hidden, overflow-y:auto active), exit 0"},
+    {"check": "ux-g8-scroll-reachable.sh --self-test", "result": "pass", "note": "4 фикстуры: overflow:hidden→fail A1, overflow:visible→pass A1/fail A2, overflow-y:auto→pass оба, .chs-screen-foo prefix guard→pass. exit 0"},
+    {"check": "anti-case-lock.sh", "result": "pass", "note": "delegates clean (read-pdp/rights-ui/detel) + full D-064 §5 denylist within baseline (aggregate 24=24). Новый .sh-гейт кейс-литералов не добавил."},
+    {"check": "ux-g6-no-new-hardcode (косвенно через дифф)", "result": "pass", "note": "изменение только overflow-свойства, новых hardcode цветов/отступов нет"}
+  ],
+  "mutation_probes": [
+    {"probe": "plant '.chs-screen { ... overflow-y: hidden; overflow-x: hidden; }'", "expected": "gate RED", "observed": "exit 1, FAIL G8/A1 + G8/A2", "verdict": "gate correctly fails"},
+    {"probe": "plant '.chs-screen { ... overflow: hidden; }' (короткая форма = исходный live-proof баг)", "expected": "gate RED", "observed": "exit 1, FAIL G8/A1 + G8/A2", "verdict": "gate ловит и short-form, не только -y-форму — дыры нет"},
+    {"probe": "plant '.chs-screen { overflow: hidden; overflow-y: auto; }' (каскад: auto побеждает, скролл работает)", "expected": "исследовательская", "observed": "exit 1, FAIL G8/A1 (over-strict)", "verdict": "консервативно валит рабочий кейс — безопасное направление, не ложно-мягко"},
+    {"probe": "восстановление app.css к исходному SHA", "expected": "gate GREEN, git clean", "observed": "shasum=734b76cf (совпал), git status пуст, gate exit 0", "verdict": "no residue"}
+  ],
+  "failures": []
+}

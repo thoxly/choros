@@ -183,7 +183,25 @@
 .chs-theme-toggle button:not([aria-pressed="true"]):hover { color: var(--chs-color-text); }
 .chs-theme-toggle svg { width: 13px; height: 13px; display: block; }
 
-.chs-screen { flex: 1; min-height: 0; overflow: hidden; }
+/* T-0601: single scroll owner for the shell's content pane. Screens taller than
+   the viewport (e.g. /llm-connections, /agents, /spend — bare-div screens with
+   no internal scroll wrapper of their own) were physically unreachable below the
+   fold: .chs-screen, .chs-main and .chs-shell were ALL overflow:hidden, and the
+   only scrollable element on the page was the left nav (.chs-nav__scroll). Flipping
+   to overflow-y:auto here makes .chs-screen the one legitimate scroller for
+   shell-routed content. This does NOT introduce nested/double scrollbars for the
+   many screens that already carry their own internal scroll container (the
+   .chs-inbox → .chs-inbox__scroll pattern, .chs-org → .chs-org__detail,
+   .chs-audit-screen, .chs-notif-screen → .chs-notif__scroll, .chs-asst, .chs-editor
+   canvas, .chs-forms-screen canvas): those wrappers are sized height:100% / flex:1
+   with min-height:0, so they fill — never exceed — the bounded height .chs-screen
+   already had from the flex layout above (.chs-shell/.chs-main). overflow-y:auto
+   only changes what happens if content DOES overflow the box; it does not change
+   the box's own height. For those screens the inner scroller keeps doing the
+   scrolling and .chs-screen's own scrollbar never engages (content fits exactly).
+   For bare-div screens with no internal wrapper, .chs-screen's scrollbar is now
+   the ONLY one and makes the previously-dead tail of the screen reachable. */
+.chs-screen { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 
 /* small inline icon button */
 .chs-iconbtn {

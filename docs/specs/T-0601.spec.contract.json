@@ -1,0 +1,37 @@
+{
+  "task_id": "T-0601",
+  "status": "ready",
+  "summary": "Живой факт приёмки: владелец пожаловался «не прокручивается» на реальном стенде. Диагноз JS подтвердил — div.chs-screen (web/src/app-shell/app.css) имел overflow:hidden при контенте выше вьюпорта (height=591px, scrollHeight=1498px); родители .chs-main/.chs-shell тоже overflow:hidden (фиксированная рамка вьюпорта, так и должно быть); единственный реально скроллящийся элемент страницы — левый нав (.chs-nav__scroll). Низ ЛЮБОГО экрана выше вьюпорта был физически недостижим колесом/тачпадом (на /llm-connections — поле ключа, «Проверить подключение», «Назначить ассистенту»). Полная инвентаризация web/src/screens/*.jsx нашла 9 экранов БЕЗ какого-либо внутреннего scroll-контейнера (голый div или layoutStyle без height/overflow): screen-llm-connections, screen-agents, screen-llm-config, screen-spend, screen-reports, screen-process-analytics, screen-ops-overview, screen-operational-analytics, screen-assistant-prompt — подтверждённо сломаны. 16 других экранов уже несут собственный bounded-height внутренний скроллер (паттерн .chs-inbox+.chs-inbox__scroll и аналоги .chs-org/.chs-audit-screen/.chs-notif-screen/.chs-asst/.chs-editor/.chs-forms-screen) — им шелл-уровневый фикс не создаёт двойного скролла, т.к. их обёртка height:100% (не min-height) заполняет, но никогда не превышает, уже ограниченную высоту .chs-screen. Решение: .chs-screen становится единственным легитимным владельцем скролла (overflow-y:auto вместо overflow:hidden) — чинит все 9 сломанных экранов одним изменением, без задевания 16 самостоятельно-скроллящихся. Плюс детерминированный статический гейт ci/checks/ux/ux-g8-scroll-reachable.sh (+ --self-test), вписанный в npm run fitness рядом с ux-g5/ux-g6/ux-g2.",
+  "functional": [
+    "F1. .chs-screen (web/src/app-shell/app.css) устанавливает overflow-y:auto (не overflow:hidden/overflow-y:hidden).",
+    "F2. .chs-main/.chs-shell НЕ меняются — остаются overflow:hidden (фиксированная рамка вьюпорта).",
+    "F3. Экраны с собственным bounded-height внутренним скроллером продолжают работать без визуальной регрессии, двойной скролл не появляется.",
+    "F4. Голые <div>-экраны (9 штук) становятся прокручиваемыми целиком через новый скролл .chs-screen.",
+    "F5. Новый детерминированный статический гейт ci/checks/ux/ux-g8-scroll-reachable.sh (+ --self-test) фиксирует регрессию: парсит app.css, проверяет .chs-screen на отсутствие overflow(-y):hidden и наличие overflow(-y):auto. STRICT, без --required.",
+    "F6. Гейт вписан в npm run fitness аддитивно, рядом с существующей парой ux-g5/ux-g6/ux-g2 (и их --self-test), без нарушения структуры &&-цепи."
+  ],
+  "non_functional": [
+    "N1. Нет двойного скролла — ни один существующий экран не получает вложенную полосу прокрутки поверх своей уже существующей.",
+    "N2. Без кейс-литералов (D-064) — изменение CSS-уровня, никаких новых кейс-специфичных литералов.",
+    "N3. Токены — изменение не вводит новых hardcoded цветов/отступов, затрагивает только overflow-свойство.",
+    "N4. Регресс-safety — существующие web-тесты (60 файлов/1634 теста) проходят без изменений."
+  ],
+  "out_of_scope": [
+    "O1. Индивидуальная правка каждого голого <div>-экрана (добавление .chs-inbox-обёртки) — не требуется, шелл-уровневый фикс уже делает их прокручиваемыми.",
+    "O2. .chs-forms-screen__canvas (overflow-y:auto без явного min-height:0 на этой строке) — отдельный узкий flex-min-height edge-case, не тот баг, вне рамки задачи.",
+    "O3. BPMN-канвас (.chs-editor) и канвас форм (.chs-forms-screen) — не документ-скролл инструменты, не переводятся на паттерн .chs-inbox.",
+    "O4. jsdom-раннер для рендер-теста скролла — web vitest работает в environment:'node' (без DOM/CSSOM); статический CSS-гейт достаточен и детерминирован."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": ".chs-screen в web/src/app-shell/app.css НЕ имеет overflow(-y):hidden.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": ".chs-screen имеет overflow-y:auto (активный скролл-owner).", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": ".chs-main/.chs-shell остаются overflow:hidden (рамка вьюпорта не меняется).", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "ci/checks/ux/ux-g8-scroll-reachable.sh — новый детерминированный гейт, PASS на текущем app.css, FAIL на фикстуре с overflow:hidden.", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "ci/checks/ux/ux-g8-scroll-reachable.sh --self-test проходит.", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "Гейт вписан в npm run fitness рядом с ux-g5/ux-g6/ux-g2, структура &&-цепи не нарушена.", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "cd web && npx vitest run — 100% существующих тестов проходят без изменений.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "npm run build (root) и cd web && npm run build (vite) — зелёные.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "bash ci/checks/anti-case-lock.sh — зелёный.", "verifiable_as": "fitness"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0601-screen-scroll-unlock.spec.md"
+}
