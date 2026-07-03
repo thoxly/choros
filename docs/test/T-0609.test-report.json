@@ -1,40 +1,44 @@
 {
   "task_id": "T-0609",
   "verdict": "pass",
-  "reviewed_sha": "159bbfc467466ea5b018ea3e45565ee8d6afa5a4",
+  "reviewed_sha": "6620d43",
+  "previous_round": {"sha": "159bbfc", "verdict": "pass (с блокирующей дырой покрытия — EFFECT гранта не покрыт)", "note": "дыра закрыта в раунде 2: рекомендованный review-ом тест реализован строителем ДОСЛОВНО и зелёный"},
   "deterministic": {
-    "total": 6619,
-    "passed": 6609,
+    "total": 6626,
+    "passed": 6616,
     "failed": 0,
     "skipped": 10,
-    "_note": "Сумма прогонов: root npm test 4957 (4947 pass|10 skip) + web vitest 1662 (1662 pass). Оба exit 0. Отдельно fitness:db (--dir ci/checks/db, DATABASE_URL :55432, -t T-0609): новый ci/checks/db/rights-resources.test.ts 4/4 PASS живьём на PG (не сложены в total — отдельный тир). npm run build (root tsc && seed/tsconfig): exit 0. ВЕРДИКТ pass относится к ИСПОЛНЕНИЮ тестов (детерминированно зелено, мутации убивают цель). Блокирующий РАЗРЫВ ПОКРЫТИЯ — в review.json F-1 (грант не резолвится PDP; нет и не может быть зелёного теста на EFFECT гранта) — см. поле blocking_gap ниже и вердикт review=changes_requested."
+    "_note": "Раунд 2 (дельта 839a53e..6620d43): root npm test 4957 (4947 pass|10 skip, раунд 1, дельта root-код не трогала кроме rights-resources.ts — build exit 0 подтверждает типы) + web vitest 1669/1669 pass (полный прогон раунда 2, +7 F-1-тестов). fitness:db таргетно (-t T-0609, DATABASE_URL :55432, --no-file-parallelism): 8/8 PASS — НОВЫЙ ci/checks/db/rights-resource-grant-resolve.db.test.ts 4/4 (RESOLVE-1 ALLOW живьём, RESOLVE-2 no_grant, RESOLVE-3 cross_tenant, RESOLVE-4 пин org-shape) + обновлённый rights-resources.test.ts 4/4 (id+node_level ассертятся). npm run build exit 0. Гейты: rights-ui-frozen-write/no-new-write/anti-case + anti-case-lock — PASS. Контракты spec/adr/handoff валидны после правки."
   },
   "coverage_by_ac": [
-    {"ac": "AC-1 реальные ресурсы из DB как {uri,name}", "test": "ci/checks/db/rights-resources.test.ts (live PG)", "result": "pass"},
+    {"ac": "AC-1 реальные ресурсы из DB как {uri,name,id,node_level}", "test": "ci/checks/db/rights-resources.test.ts (live PG)", "result": "pass"},
     {"ac": "AC-1 tenant-изоляция (актор A не видит B)", "test": "ci/checks/db/rights-resources.test.ts isolation", "result": "pass"},
     {"ac": "AC-2 пустой тенант → []", "test": "ci/checks/db/rights-resources.test.ts empty-tenant", "result": "pass"},
     {"ac": "401 без x-dev-user", "test": "ci/checks/db/rights-resources.test.ts unauth", "result": "pass"},
-    {"ac": "web merge real-first+demo-after, best-effort []", "test": "web/src/screens/rights/screen-rights.test.jsx (+5)", "result": "pass"},
+    {"ac": "web merge real-first+demo-after + demoSeed-тегирование", "test": "web/src/screens/rights/screen-rights.test.jsx", "result": "pass"},
+    {"ac": "Форма эмитит resource-hierarchy scope для реального ресурса", "test": "screen-rights.test.jsx (F-1 describe, 7 тестов)", "result": "pass"},
     {"ac": "AC-7 variables/history/historyAvailable в ответе", "test": "src/__tests__/processes-live-instances.test.ts AC-7", "result": "pass"},
     {"ac": "AC-8 honest degrade engine-error (200, historyAvailable:false)", "test": "src/__tests__/processes-live-instances.test.ts AC-8", "result": "pass"},
-    {"ac": "AC-9 гейт tenant-membership не расширен, bare-стаб деградирует", "test": "src/__tests__/processes-live-instances.test.ts AC-9", "result": "pass"},
-    {"ac": "AC-9 не-член тенанта всё ещё 404 (видимость не расширена)", "test": "src/__tests__/processes-live-instances.test.ts AC-9 non-member", "result": "pass"},
-    {"ac": "PDP резолвит грант на реальный ресурс (EFFECT гранта, не только наполнение dropdown)", "test": "живой probe dist/core/grant-lattice.js isNarrowerOrEqual — НЕТ покрывающего теста; probe показал НЕрезолвимость", "result": "fail"}
+    {"ac": "AC-9 гейт tenant-membership не расширен, bare-стаб деградирует, не-член 404", "test": "src/__tests__/processes-live-instances.test.ts AC-9", "result": "pass"},
+    {"ac": "PDP резолвит грант на реальный ресурс (EFFECT гранта — сквозняк UI-тело→POST /api/grants→resolveFor)", "test": "ci/checks/db/rights-resource-grant-resolve.db.test.ts RESOLVE-1 (live PG, production wiring: createServer + makeDbGrantSource + composite ancestry oracle + frozen resolveFor)", "result": "pass"},
+    {"ac": "Негатив: чужой реестр / чужой тенант / до-фиксный org-shape НЕ покрывают", "test": "RESOLVE-2 (no_grant) + RESOLVE-3 (cross_tenant) + RESOLVE-4 (F-1 пин, no_grant)", "result": "pass"}
   ],
   "secondary_ux": [
-    {"check": "Страница инстанса — честные состояния (переменные при непустом наборе; история детальная при historyAvailable, честный audit-fallback иначе, честная фраза при пустой-но-доступной; ru-RU времена, null→«—»; read-only без POST/PUT/PATCH)", "result": "pass"},
-    {"check": "Форма грантов — реальные ресурсы выбираемы", "result": "pass", "note": "но real vs demo не различимы и демо подмешаны на реальном тенанте (ux-review UX-2)"},
-    {"check": "Обещание=действию: успешный тост «Право выдано» соответствует эффекту гранта", "result": "fail", "note": "ux-review UX-1 / review F-1: грант инертен на PDP — ложное обещание"}
+    {"check": "Страница инстанса — честные состояния (без изменений в раунде 2)", "result": "pass"},
+    {"check": "Форма грантов — реальные ресурсы выбираемы, охват честной строкой", "result": "pass"},
+    {"check": "Real vs demo различимы («· демо» + подсказка при выборе демо)", "result": "pass"},
+    {"check": "Обещание=действию: тост соответствует эффекту гранта", "result": "pass", "note": "реальный ресурс — грант резолвится (RESOLVE-1); демо — квалифицированный тост без ложного успеха"}
   ],
   "mutation_probes": [
-    {"id": "MUT-A", "target": "src/http/rights-resources.ts buildRightsResources → return []", "expected_killer": "ci/checks/db/rights-resources.test.ts AC-1", "result": "KILLED", "detail": "AC-1 RED (real tenant rows не появляются). Дерево восстановлено."},
-    {"id": "MUT-B", "target": "src/http/processes.ts fetchInstanceHistoryDetail — снять optional-guard (метод!() без ?)", "expected_killer": "processes-live-instances.test.ts AC-9 (bare-стаб)", "result": "KILLED", "detail": "AC-9 RED (bare-стаб бросил бы вместо честной деградации). Восстановлено."},
-    {"id": "MUT-C", "target": "src/http/processes.ts — historyAvailable: true жёстко", "expected_killer": "processes-live-instances.test.ts AC-8 + AC-9", "result": "KILLED", "detail": "AC-8 и AC-9 RED (нечестный historyAvailable пойман). Восстановлено; git status clean на 159bbfc."}
+    {"id": "MUT-A", "round": 1, "target": "rights-resources.ts buildRightsResources → []", "expected_killer": "rights-resources.test.ts AC-1", "result": "KILLED"},
+    {"id": "MUT-B", "round": 1, "target": "processes.ts fetchInstanceHistoryDetail — снять optional-guard", "expected_killer": "processes-live-instances AC-9 (bare-стаб)", "result": "KILLED"},
+    {"id": "MUT-C", "round": 1, "target": "processes.ts — historyAvailable:true жёстко", "expected_killer": "AC-8 + AC-9", "result": "KILLED"},
+    {"id": "MUT-D", "round": 2, "target": "ra-overview-forms.jsx — регресс effectiveScope к hierarchy:'org' (до-фиксная эмиссия)", "expected_killer": "screen-rights.test.jsx «emits scope {hierarchy:'resource',...}»", "result": "KILLED", "detail": "web F-1-тест RED; дерево восстановлено, git clean. RESOLVE-4 — серверный пин той же семантики (org-shape → no_grant), форм-регресс ловит web-слой, резолв-семантику — DB-слой: двухслойная сеть против регресса F-1."}
   ],
   "failures": [],
   "blocking_gap": {
-    "id": "F-1 (см. review.json)",
-    "summary": "Тесты доказывают НАПОЛНЕНИЕ формы реальными ресурсами и честную деградацию variables/history — но НЕ EFFECT выданного гранта. Живой probe (dist/core/grant-lattice.js, permissive oracle): грант hierarchy:'org' из формы не покрывает handle hierarchy:'resource' реального запроса (isNarrowerOrEqual=false); resolveFor вообще не читает resource_type. Экран остаётся декоративным на enforcement-пути — блокирующая директива запуска сработала. Test-execution зелёный (verdict=pass), но покрытие имеет блокирующую дыру — итоговый вердикт задачи держит review=changes_requested.",
-    "recommended_test_after_fix": "После варианта A (форма эмитит scope hierarchy:'resource' с реальным registry/application UUID): live-PG тест по UI-пути POST /api/grants → resolveFor/resolveRecordOp над handle того же ресурса → ожидать denied:false. Сегодня был бы КРАСНЫМ — доказательство декоративности."
+    "id": "F-1 (раунд 1)",
+    "status": "CLOSED (6620d43)",
+    "summary": "Раунд 1: покрытие доказывало наполнение формы, но не EFFECT гранта; живой probe показал нерезолвимость org-scope гранта. Раунд 2: рекомендованный тест реализован дословно (live-PG: UI-тело → POST /api/grants → resolveFor → denied:false) и зелёный; негативы герметичны; старый shape запинен как no_grant (RESOLVE-4). Дыра закрыта."
   }
 }
