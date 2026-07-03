@@ -1,0 +1,91 @@
+{
+  "task_id": "T-0600",
+  "status": "ready",
+  "decision": "Дельта A: src/server.ts::makeLlmPortFactory удаляет env-fallback шаг (DEEPSEEK_API_KEY) из tenant-resolution — при loadTenantLlmConfig()===null (или невалидной форме хендла) возвращает dormantLlmPort напрямую, активируя честный T-0573 503-путь вместо молчаливого использования глобального серверного ключа. Разведка подтвердила единственный consumer DEEPSEEK_API_KEY/DEEPSEEK_HANDLE/deepseekSecretResolver — сам makeLlmPortFactory шаг 2 — поэтому эти константы/резолвер УДАЛЯЮТСЯ целиком (не оставляются мёртвым кодом: недостижимый код, выглядящий живым, повторяет тот же класс дефекта честности на уровне кода). tenantSecretResolver (T-0413, env://-reject для tenant-хендлов) не трогается — независимый resolver. grantsPool===null ветка (dev без DB) не затронута — роут не регистрируется вовсе. Дельта B: новые чистые функции в src/core/llm-port.ts — isProviderAuthFailure(err) классифицирует LlmUnavailableError по message-префиксу адаптера ('OpenAI API error 401|403:') БЕЗ парсинга сырого provider-тела; canonicalizeLlmError(err) возвращает канонический русский текст без жаргона для трёх случаев (provider-auth-fail: 'Ключ LLM отклонён провайдером...'; dormant; generic adapter failure), НИКОГДА не включая сырое provider-тело. classifyLlmUnavailability сама не меняется (F6) — новые функции ДОПОЛНЯЮТ, используются только в местах утечки. Дельта C: два catch-места, которые СЕЙЧАС печатают err.message напрямую в пользовательский текст — src/core/assistant-configurator.ts::runConfiguratorLoop (:1194-1205) и src/core/process-gen-loop.ts::runProcessGenLoop (:230-250) — переписаны на canonicalizeLlmError(err) для user-facing текста + console.error(String(err)) для полного серверного лога. ProcessGenOutcome's status/cause union не меняется (существующий тест 'error port → cause=error' проходит без изменений). src/http/assistant.ts:851 (generate_process[status]: message) автоматически перестаёт нести сырое тело, т.к. outcome.message теперь канонический по построению — вызывающий код не меняется.",
+  "rejected_alternatives": [
+    {
+      "option": "Оставить DEEPSEEK_API_KEY/deepseekSecretResolver как мёртвый код с комментарием 'не используется'",
+      "why_not": "Недостижимый код, выглядящий живым (валидная константа + resolver + startup-проверка), лжёт следующему читателю о своём статусе — тот же класс дефекта честности, который T-0600 чинит на уровне поведения. Единственный consumer подтверждён разведкой — безопасно удалить целиком."
+    },
+    {
+      "option": "Держать env-fallback за флагом ALLOW_ENV_LLM_FALLBACK=true",
+      "why_not": "Плодит вторую конфигурационную развилку ради поведения, которое должно быть выключено по умолчанию (BYO); флаг легко забыть включённым в проде — тот же класс риска на уровень выше. Полное удаление проще и честнее."
+    },
+    {
+      "option": "Классифицировать полный спектр HTTP-кодов провайдера (429/500/503) отдельными каноническими текстами",
+      "why_not": "Единственный живой факт приёмки — 401. Расширение без живого кейса — преждевременная спецификация (O3); generic-ветка canonicalizeLlmError уже покрывает остальные коды честно, просто без дифференцированного текста."
+    },
+    {
+      "option": "Sniff-парсинг сырого provider JSON внутри canonicalizeLlmError, чтобы извлечь обезличенное 'message'-поле провайдера",
+      "why_not": "Провайдерский JSON-шейп не стандартизован между OpenAI/DeepSeek/Anthropic-совместимыми endpoint'ами — парсинг чужого формата вносит хрупкость. Классификация строго по префиксу, контролируемому НАШИМ адаптером, надёжнее."
+    },
+    {
+      "option": "Переносить isProviderAuthFailure/canonicalizeLlmError в assistant-messages.ts",
+      "why_not": "assistant-messages.ts — дом готовых строковых констант (ADMIN/NON_ADMIN), не классификаторов; llm-port.ts уже дом classifyLlmUnavailability/LlmUnavailableError/LlmDormantError — логически тот же файл, меньше кросс-импортов."
+    },
+    {
+      "option": "Менять respondLlmUnavailable/honest-503 путь, чтобы тоже текстово различать auth-fail",
+      "why_not": "F6/N6 — тот путь уже честен, покрыт T-0573/T-0595 тестами безусловно. Расширение туда — increase surface без живого требования; задача просит различение именно в catch-местах, где сейчас утечка."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "makeLlmPortFactory (существующая, src/server.ts)",
+      "fields": [
+        {"name": "signature", "type": "(tenantId: string, grantsPool: pg.Pool | null) => Promise<LlmPort> — не меняется"},
+        {"name": "body", "type": "env-fallback шаг удалён; null/invalid-handle → dormantLlmPort напрямую"}
+      ]
+    },
+    {
+      "entity": "isProviderAuthFailure (новая, src/core/llm-port.ts)",
+      "fields": [
+        {"name": "signature", "type": "(err: unknown) => boolean — pure, классифицирует по message-префиксу адаптера, не парсит provider body"}
+      ]
+    },
+    {
+      "entity": "canonicalizeLlmError (новая, src/core/llm-port.ts)",
+      "fields": [
+        {"name": "signature", "type": "(err: unknown) => string — pure, канонический русский текст, никогда сырое provider-тело"}
+      ]
+    }
+  ],
+  "contracts": [
+    "src/server.ts — удалить DEEPSEEK_API_KEY/DEEPSEEK_BASE_URL/DEEPSEEK_MODEL/DEEPSEEK_HANDLE/_handleVerdict/deepseekSecretResolver + шаг 2 в makeLlmPortFactory (ADR §1.1)",
+    "src/db/agent-card-llm.ts — комментарий на :124 правится (env fallback описание устарело), тело функции не меняется",
+    "src/core/llm-port.ts — isProviderAuthFailure, canonicalizeLlmError (ADR §1.2), экспортированы рядом с classifyLlmUnavailability",
+    "src/core/assistant-configurator.ts::runConfiguratorLoop — catch-блок на canonicalizeLlmError + console.error (ADR §1.3)",
+    "src/core/process-gen-loop.ts::runProcessGenLoop — catch-блок аналогично (ADR §1.3)",
+    "новые unit-тесты: isProviderAuthFailure/canonicalizeLlmError (401/403/generic/dormant), assistant-configurator.test.ts расширение, process-gen-loop.test.ts расширение",
+    "живой DB-тест: расширение ci/checks/db/assistant-llm-unavailable.test.ts или новый файл — AC-1/AC-2 (env-fallback отсутствует для реального tenantId)",
+    "docs/handoff/T-0600.pr-handoff.json — BUILD-фаза"
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1: makeLlmPortFactory без per-tenant конфига возвращает dormantLlmPort даже с DEEPSEEK_API_KEY в env.", "ci_check": "unit test"},
+    {"id": "FF-2", "rule": "AC-2: живой DB-тест — реальный тенант, DEEPSEEK_API_KEY в env процесса теста, POST сообщения → 503, не сетевой вызов.", "ci_check": "ci/checks/db/* живой Postgres"},
+    {"id": "FF-3", "rule": "AC-3: ci/checks/db/assistant-llm-binding.test.ts (C4/3f-bis) не регрессирует.", "ci_check": "npm run fitness:db"},
+    {"id": "FF-4", "rule": "AC-4: ci/checks/db/assistant-llm-unavailable.test.ts (FF-5/FF-6/FF-1/FF-2/anti-mask) не регрессирует.", "ci_check": "npm run fitness:db"},
+    {"id": "FF-5", "rule": "AC-5/AC-6: isProviderAuthFailure/canonicalizeLlmError 401/403 unit-покрытие, без фрагментов provider-JSON.", "ci_check": "vitest run (root)"},
+    {"id": "FF-6", "rule": "AC-7: runConfiguratorLoop catch — finalText не содержит provider-JSON фрагментов.", "ci_check": "vitest run src/__tests__/assistant-configurator.test.ts"},
+    {"id": "FF-7", "rule": "AC-8: runProcessGenLoop catch — outcome.message не содержит provider-JSON фрагментов.", "ci_check": "vitest run src/core/__tests__/process-gen-loop.test.ts"},
+    {"id": "FF-8", "rule": "AC-9: существующий 'error port' тест проходит без изменений сигнатуры.", "ci_check": "тот же файл"},
+    {"id": "FF-9", "rule": "AC-10: жаргон-гейт зелёный.", "ci_check": "bash ci/checks/ux/assistant-llm-message-jargon.sh && bash ci/checks/ux/assistant-llm-message-jargon.sh --self-test"},
+    {"id": "FF-10", "rule": "AC-11: анти-кейс-замок зелёный.", "ci_check": "bash ci/checks/anti-case-lock.sh"},
+    {"id": "FF-11", "rule": "AC-12: полный локальный CI зелёный.", "ci_check": "npm test && npm run build && npm run fitness:db"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-2"},
+    {"ac": "AC-3", "covered_by": "FF-3"},
+    {"ac": "AC-4", "covered_by": "FF-4"},
+    {"ac": "AC-5", "covered_by": "FF-5"},
+    {"ac": "AC-6", "covered_by": "FF-5"},
+    {"ac": "AC-7", "covered_by": "FF-6"},
+    {"ac": "AC-8", "covered_by": "FF-7"},
+    {"ac": "AC-9", "covered_by": "FF-8"},
+    {"ac": "AC-10", "covered_by": "FF-9"},
+    {"ac": "AC-11", "covered_by": "FF-10"},
+    {"ac": "AC-12", "covered_by": "FF-11"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0600-llm-fallback-honesty.md",
+  "escalation": "Нет. Обе дельты — коррекция дефектов честности в уже существующем контракте (BYO-доктрина + T-0573 honest-503 механизм), не новая архитектура. Удаление DEEPSEEK_API_KEY-механизма — устранение единственного, отныне-недостижимого consumer'а после поведенческого фикса, не решение, требующее founder-гейта."
+}
