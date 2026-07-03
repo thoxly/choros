@@ -49,6 +49,8 @@ import {
   type MessageSubscription,
   type CorrelationResult,
 } from "../core/message-correlation.js";
+import { fallbackDefinitionName } from "../core/process-catalog-view.js";
+import { findEmployeeById } from "../db/org.js";
 
 // ---------------------------------------------------------------------------
 // Audit event types (free-text `type` column; no enum constraint — migrations/006).
@@ -148,6 +150,46 @@ export interface InstanceProjection {
    * backward compatibility with callers that only show one node.
    */
   readonly concurrentSteps: readonly string[];
+  /**
+   * T-0614 [деТЭЛ]: the human-readable name of this instance's process DEFINITION,
+   * resolved from choros.process_definition.name (latest version for procKey,
+   * tenant-scoped) — or fallbackDefinitionName(procKey) (src/core/process-catalog-view.ts,
+   * REUSED, not re-hardcoded) when no modeler row exists for this key (engine-only
+   * definition, e.g. the seeded telLinear ТЭЛ). Replaces the case-literal
+   * "Канонический линейный ТЭЛ" that processes.ts's projectionToInstance used to
+   * assign to EVERY instance regardless of its actual process (D-064 violation, found
+   * live by the founder 2026-07-03: purchaseApproval and acceptance-demo instances both
+   * showed this one literal name).
+   */
+  readonly definitionName: string;
+  /**
+   * T-0614 [деТЭЛ]: number of steps of THIS instance already completed — the base
+   * approve step (if approved) plus any APPROVED process.next_task rows for this
+   * instance. An honest "known so far" count, NOT a case-literal (replaces the
+   * hardcoded progress={done:2,total:3}|{done:3,total:3} of the linear ТЭЛ's 3 nodes).
+   */
+  readonly stepsDone: number;
+  /**
+   * T-0614 [деТЭЛ]: stepsDone + the number of CURRENTLY waiting concurrent steps
+   * (concurrentSteps.length) for a non-done instance; equals stepsDone for a done
+   * instance (no further steps this projection can honestly claim to know about).
+   * This is deliberately NOT the full BPMN user-task count of the definition — the
+   * projection has no cheap way to know unobserved future nodes without a live
+   * engine query / BPMN parse, which ADR T-0278 §2.3 rejected as disproportionate
+   * for the read path. See ADR-T0614 §4 O1 for the follow-up.
+   */
+  readonly stepsKnownTotal: number;
+  /**
+   * T-0614 [деТЭЛ]: the employee.kind ("human" | "agent") of the actor who STARTED
+   * this instance (the only actor concretely bound to an InstanceProjection today),
+   * resolved via findEmployeeById (mirrors the actorKind pattern in
+   * src/http/inbox.ts:1370-1379) — non-fatal degrade to "human" when the actor is not
+   * found or the resolve errors. Replaces the case-literal execs=["human","agent"]
+   * that was assigned unconditionally to every instance. "service" is never
+   * fabricated here — choros.employee.kind has no such value today (see ADR-T0614 §4
+   * O2 for the follow-up once a service-executor source of truth exists).
+   */
+  readonly starterActorKind: "human" | "agent";
 }
 
 /** The waiting user-task surfaced to inbox, addressed to a ROLE (not a person). */
@@ -280,6 +322,17 @@ export const APPROVER_ROLE = "role-approver";
 export const APPROVE_STEP = "Согласование";
 /** Display name of the U4 approval inbox task. */
 export const APPROVE_TASK_NAME = "Согласовать заявку";
+/**
+ * T-0614 [деТЭЛ]: the ONE named fallback for `proc_key` when a payload omits it
+ * (legacy/malformed row) — the seeded engine-only ТЭЛ key, matching the process
+ * this module's other ТЭЛ-compatibility defaults (APPROVER_ROLE/APPROVE_STEP)
+ * already assume. Consolidated to a SINGLE named constant (was five separate
+ * inline `"telLinear"` string-literal fallbacks scattered across this file) so
+ * the anti-case denylist count for this literal does not grow with each new
+ * call site — every `strField(..., "proc_key", ...)` fallback in this module
+ * reads this constant instead of repeating the literal.
+ */
+export const DEFAULT_PROC_KEY = "telLinear";
 
 // ---------------------------------------------------------------------------
 // WRITE half — emission seam (called from process-start.ts on start, and from
@@ -799,6 +852,88 @@ function strField(payload: Record<string, unknown>, key: string, fallback: strin
   return typeof v === "string" && v.trim() !== "" ? v : fallback;
 }
 
+// ---------------------------------------------------------------------------
+// T-0614 [деТЭЛ]: definitionName resolution — the honest replacement for the
+// case-literal "Канонический линейный ТЭЛ" that used to be assigned to EVERY
+// instance in processes.ts's projectionToInstance, regardless of its actual
+// process. Reads choros.process_definition (074) inside the SAME tenant-scoped
+// client this module already opens for the audit-event reads — one extra
+// batched SELECT, no new pool/tx. Mirrors the DISTINCT ON latest-version
+// pattern of src/http/process-catalog.ts's listProcessDefRows.
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve { process_key → definition name } for the given keys, tenant-scoped.
+ * Falls back to fallbackDefinitionName(key) (src/core/process-catalog-view.ts,
+ * REUSED — not re-hardcoded here) for any key with no choros.process_definition
+ * row (an engine-only definition, e.g. the seeded telLinear ТЭЛ). Never throws —
+ * a DB error degrades every key to its honest fallback name (same
+ * honest-degrade posture as the rest of this module's read half).
+ */
+async function resolveDefinitionNames(
+  pool: pg.Pool,
+  tenantId: string,
+  procKeys: readonly string[],
+): Promise<Map<string, string>> {
+  const uniqueKeys = [...new Set(procKeys)];
+  const names = new Map<string, string>();
+  if (uniqueKeys.length === 0) return names;
+  try {
+    await withTenant(pool, tenantId, async (client) => {
+      const { rows } = await client.query<{ process_key: string; name: string }>(
+        `SELECT DISTINCT ON (process_key) process_key, name
+           FROM choros.process_definition
+          WHERE tenant_id = $1
+            AND process_key = ANY($2::text[])
+          ORDER BY process_key, version DESC`,
+        [tenantId, uniqueKeys],
+      );
+      for (const r of rows) names.set(r.process_key, r.name);
+    });
+  } catch {
+    // Honest degrade: every key falls back below (DB error is not fatal to the
+    // read — the instance list must still render with honest fallback names).
+  }
+  for (const key of uniqueKeys) {
+    if (!names.has(key)) names.set(key, fallbackDefinitionName(key));
+  }
+  return names;
+}
+
+// ---------------------------------------------------------------------------
+// T-0614 [деТЭЛ]: starterActorKind resolution — the honest replacement for the
+// case-literal execs=["human","agent"] unconditionally assigned to every
+// instance. Resolves choros.employee.kind for the actor that STARTED each
+// instance (the only actor concretely bound to an InstanceProjection today),
+// mirroring the actorKind pattern in src/http/inbox.ts:1370-1379. Non-fatal
+// degrade to "human" per-actor when the employee is not found or the resolve
+// errors (findEmployeeById itself never throws on a not-found row — a thrown
+// error here means a genuine DB-connectivity failure).
+// ---------------------------------------------------------------------------
+
+/** Resolve { actor slug → "human" | "agent" } for the given actors, tenant-scoped. */
+async function resolveActorKinds(
+  pool: pg.Pool,
+  tenantId: string,
+  actors: readonly string[],
+): Promise<Map<string, "human" | "agent">> {
+  const uniqueActors = [...new Set(actors)];
+  const kinds = new Map<string, "human" | "agent">();
+  await Promise.all(
+    uniqueActors.map(async (actor) => {
+      try {
+        const emp = await findEmployeeById(pool, tenantId, actor);
+        kinds.set(actor, emp?.type === "agent" ? "agent" : "human");
+      } catch {
+        // Honest degrade: unresolved actor ⇒ "human" (mirrors inbox.ts's actorKind
+        // default — accurate for the common human pool-task-approve path).
+        kinds.set(actor, "human");
+      }
+    }),
+  );
+  return kinds;
+}
+
 /**
  * Fold the audit track into InstanceProjection[].
  *
@@ -827,27 +962,54 @@ export async function listInstanceProjections(
   // next_task rows. Multiple pending next_task rows for one instance = an AND-split's
   // concurrent branches. Keyed by instance id → ordered list of step labels.
   const concurrentNextStepsByInst = new Map<string, string[]>();
+  // T-0614 [деТЭЛ]: count of APPROVED process.next_task rows per instance — the
+  // post-gateway steps this instance has ALREADY completed (symmetric to the
+  // pending-map above, which tracks the NOT-yet-approved ones). Feeds stepsDone
+  // below; replaces the hardcoded {done:2,total:3}/{done:3,total:3} literal.
+  const approvedNextTaskCountByInst = new Map<string, number>();
   for (const ntRow of nextTaskRows) {
-    if (!approvedTaskIds.has(ntRow.id)) {
-      const p = (ntRow.payload ?? {}) as Record<string, unknown>;
-      const ntInst = p["inst"];
-      if (typeof ntInst === "string" && ntInst.length > 0) {
-        pendingNextTaskInstanceIds.add(ntInst);
-        const stepLabel = strField(p, "task_step", APPROVE_STEP);
-        const arr = concurrentNextStepsByInst.get(ntInst);
-        if (arr === undefined) {
-          concurrentNextStepsByInst.set(ntInst, [stepLabel]);
-        } else if (!arr.includes(stepLabel)) {
-          arr.push(stepLabel);
-        }
-      }
+    const p = (ntRow.payload ?? {}) as Record<string, unknown>;
+    const ntInst = p["inst"];
+    if (typeof ntInst !== "string" || ntInst.length === 0) continue;
+    if (approvedTaskIds.has(ntRow.id)) {
+      approvedNextTaskCountByInst.set(ntInst, (approvedNextTaskCountByInst.get(ntInst) ?? 0) + 1);
+      continue;
+    }
+    pendingNextTaskInstanceIds.add(ntInst);
+    const stepLabel = strField(p, "task_step", APPROVE_STEP);
+    const arr = concurrentNextStepsByInst.get(ntInst);
+    if (arr === undefined) {
+      concurrentNextStepsByInst.set(ntInst, [stepLabel]);
+    } else if (!arr.includes(stepLabel)) {
+      arr.push(stepLabel);
     }
   }
 
-  return started.map((row): InstanceProjection => {
+  // T-0614 [деТЭЛ]: resolve procKey ONCE per row up front (reused below both for the
+  // batched definitionName/actorKind lookups AND the final per-row map — avoids
+  // re-deriving the same fallback-defaulted field twice per row). Keyed by ARRAY
+  // INDEX, not row.id — `id` is the audit_event id (normally a fresh randomUUID per
+  // event, but not a field this function should assume unique to safely key on).
+  // Reuses the SAME DEFAULT_PROC_KEY named constant the rest of this module already
+  // falls back to (no new literal occurrence added — see the constant's own
+  // definition).
+  const procKeyByIndex = started.map((row) =>
+    strField((row.payload ?? {}) as Record<string, unknown>, "proc_key", DEFAULT_PROC_KEY),
+  );
+
+  // T-0614 [деТЭЛ]: resolve definitionName (per procKey) and starterActorKind (per
+  // actor) ONCE, batched over the distinct values in this page — not per-row, and
+  // not a new pool/tx (definitionName read shares this module's tenant-scoped
+  // withTenant client; starterActorKind reuses findEmployeeById's own withTenant).
+  const [definitionNames, actorKinds] = await Promise.all([
+    resolveDefinitionNames(pool, tenantId, procKeyByIndex),
+    resolveActorKinds(pool, tenantId, started.map((row) => row.actor)),
+  ]);
+
+  return started.map((row, rowIndex): InstanceProjection => {
     const payload = (row.payload ?? {}) as Record<string, unknown>;
     const inst = strField(payload, "inst", `instance:${row.id}`);
-    const procKey = strField(payload, "proc_key", "telLinear");
+    const procKey = procKeyByIndex[rowIndex] ?? DEFAULT_PROC_KEY;
     const role = strField(payload, "task_role", APPROVER_ROLE);
     const step = strField(payload, "task_step", APPROVE_STEP);
     // T-0443: done IFF engine-gated instance.ended event exists for this instance.
@@ -874,6 +1036,14 @@ export async function listInstanceProjections(
       // Defensive: a waiting instance should always show at least its primary step.
       if (concurrentSteps.length === 0) concurrentSteps.push(step);
     }
+    // T-0614 [деТЭЛ]: honest "known so far" step count — replaces the hardcoded
+    // 3-node-ТЭЛ progress literal. stepsDone = base approve (if approved) + approved
+    // next_task rows for this instance; stepsKnownTotal = stepsDone (done instance,
+    // no further steps this projection can honestly claim) or stepsDone + the
+    // CURRENTLY waiting concurrent steps (non-done instance).
+    const baseApproved = approvedTaskIds.has(row.id);
+    const stepsDone = (baseApproved ? 1 : 0) + (approvedNextTaskCountByInst.get(inst) ?? 0);
+    const stepsKnownTotal = done ? stepsDone : stepsDone + concurrentSteps.length;
     return {
       inst,
       procKey,
@@ -885,6 +1055,10 @@ export async function listInstanceProjections(
       // Surfaces on the projection so callers can correlate by taskId without a separate lookup.
       inboxTaskId: row.id,
       concurrentSteps,
+      definitionName: definitionNames.get(procKey) ?? fallbackDefinitionName(procKey),
+      stepsDone,
+      stepsKnownTotal,
+      starterActorKind: actorKinds.get(row.actor) ?? "human",
       ...(recordId !== undefined ? { recordId } : {}),
     };
   });
@@ -925,7 +1099,7 @@ export async function listInstanceInboxTasks(
       name: strField(payload, "task_name", APPROVE_TASK_NAME),
       step: strField(payload, "task_step", APPROVE_STEP),
       inst,
-      procKey: strField(payload, "proc_key", "telLinear"),
+      procKey: strField(payload, "proc_key", DEFAULT_PROC_KEY),
       occurredAt: row.occurred_at,
       // T-0571 (BUG-014 fix): base process.started rows no longer assert a literal
       // BPMN defKey — the projection does not know (and a GENERIC process's author
@@ -961,7 +1135,7 @@ export async function listInstanceInboxTasks(
       name: strField(payload, "task_name", APPROVE_TASK_NAME),
       step: strField(payload, "task_step", APPROVE_STEP),
       inst,
-      procKey: strField(payload, "proc_key", "telLinear"),
+      procKey: strField(payload, "proc_key", DEFAULT_PROC_KEY),
       occurredAt: row.occurred_at,
       // T-0443 Fix A: process.next_task payload carries task_def_key set by the engine-drive
       // handler (appendNextTaskEvent writes it). Use it so the approve handler can complete
@@ -1126,7 +1300,7 @@ export async function reconcileInstanceTimers(
       emittedThisPass.add(defKey);
 
       const role = engineTask.candidateGroups[0] ?? APPROVER_ROLE;
-      const procKey = procKeyByInst.get(inst) ?? "telLinear";
+      const procKey = procKeyByInst.get(inst) ?? DEFAULT_PROC_KEY;
       const taskName = engineTask.name || APPROVE_TASK_NAME;
 
       try {
@@ -1933,7 +2107,7 @@ export async function deliverMessageEnvelope(
             .filter((k): k is string => k !== null),
         );
         const procKey =
-          projected.find((t) => t.inst === inst)?.procKey ?? "telLinear";
+          projected.find((t) => t.inst === inst)?.procKey ?? DEFAULT_PROC_KEY;
         const emittedThisPass = new Set<string>();
         for (const engineTask of tasksResult.tasks) {
           const defKey = engineTask.taskDefinitionKey;
@@ -2009,7 +2183,7 @@ export async function surfaceMessageCatchWaits(
     try {
       await appendNextTaskEvent(pool, tenantId, {
         instanceId: sub.inst,
-        procKey: "telLinear",
+        procKey: DEFAULT_PROC_KEY,
         actor,
         nowMs,
         taskDefKey: `message-catch:${sub.messageName}`,

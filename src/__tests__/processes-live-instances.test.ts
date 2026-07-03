@@ -34,21 +34,49 @@ import {
 // A fake pg pool whose SELECTs return the audit rows for ONE started instance.
 // readEvents() (process-projection.ts) issues 4 SELECTs (started / instance.ended /
 // task.approved / process.next_task) inside a tenant tx; we route by the $1 type arg.
+//
+// T-0614 [деТЭЛ]: the projection ALSO issues two additional read-only SELECTs —
+// choros.process_definition (definitionName resolve) and choros.employee
+// (findEmployeeById, starterActorKind resolve). Both are routed here by matching the
+// query TEXT (they don't carry the audit `type` constant as $1) so tests can assert
+// on the honest-resolved name/execs instead of the old case-literals.
 // ---------------------------------------------------------------------------
 
 const LIVE_INST = "eng-inst-9f2a";
 const LIVE_PROC = "telLinear";
 
-function makeProjectionPool(startedRows: Array<Record<string, unknown>>): import("pg").Pool {
+function makeProjectionPool(
+  startedRows: Array<Record<string, unknown>>,
+  opts?: {
+    /** process_key → name rows for choros.process_definition (T-0614). */
+    definitionRows?: Array<{ process_key: string; name: string }>;
+    /** slug → employee.kind rows for choros.employee (T-0614, findEmployeeById). */
+    employeeRows?: Array<{ slug: string; display_name: string; kind: string }>;
+    /** task.approved rows (T-0614 AC-4: an approved process.next_task raises stepsDone). */
+    approvedTaskRows?: Array<Record<string, unknown>>;
+    /** process.next_task rows. */
+    nextTaskRows?: Array<Record<string, unknown>>;
+  },
+): import("pg").Pool {
   const fakeClient = {
     query: async (text: string, values?: unknown[]) => {
       // BEGIN / COMMIT / SET LOCAL / search_path — no-ops.
       if (!/^\s*SELECT/i.test(text)) return { rows: [] };
+      // T-0614: definitionName batch resolve (process-projection.ts resolveDefinitionNames).
+      if (/FROM\s+choros\.process_definition/i.test(text)) {
+        return { rows: opts?.definitionRows ?? [] };
+      }
+      // T-0614: findEmployeeById (src/db/org.ts) — starterActorKind resolve.
+      if (/FROM\s+choros\.employee/i.test(text)) {
+        const slug = Array.isArray(values) ? values[1] : undefined;
+        const row = (opts?.employeeRows ?? []).find((r) => r.slug === slug);
+        return { rows: row ? [{ ...row, position_title: "", department_name: "" }] : [] };
+      }
       const type = Array.isArray(values) ? values[0] : undefined;
       if (type === PROCESS_STARTED_TYPE) return { rows: startedRows };
       if (type === INSTANCE_ENDED_TYPE) return { rows: [] };
-      if (type === TASK_APPROVED_TYPE) return { rows: [] };
-      if (type === NEXT_TASK_TYPE) return { rows: [] };
+      if (type === TASK_APPROVED_TYPE) return { rows: opts?.approvedTaskRows ?? [] };
+      if (type === NEXT_TASK_TYPE) return { rows: opts?.nextTaskRows ?? [] };
       return { rows: [] };
     },
     release: () => {},
@@ -77,9 +105,12 @@ function startedRow(inst: string): Record<string, unknown> {
   };
 }
 
-function makeDeps(startedRows: Array<Record<string, unknown>>): StartInstanceDeps {
+function makeDeps(
+  startedRows: Array<Record<string, unknown>>,
+  projectionOpts?: Parameters<typeof makeProjectionPool>[1],
+): StartInstanceDeps {
   return {
-    pool: makeProjectionPool(startedRows),
+    pool: makeProjectionPool(startedRows, projectionOpts),
     // FlowableClient is not exercised by the read GETs — a bare stub suffices.
     flowable: {} as unknown as StartInstanceDeps["flowable"],
     resolveActorTenant: async () => TENANT_ID,
@@ -217,6 +248,165 @@ describe("T-0564 · /api/processes DB-mode live projection", () => {
       { "x-dev-user": ACTOR },
     );
     expect(status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0614 [деТЭЛ] — projectionToInstance no longer assigns the case-literals
+// "Канонический линейный ТЭЛ" / {done:2,total:3}|{done:3,total:3} / ["human","agent"]
+// to EVERY instance. name/progress/execs are honest-resolved by the projection
+// (definitionName from choros.process_definition, stepsDone/stepsKnownTotal from
+// the audit fold, starterActorKind from choros.employee via findEmployeeById).
+// ---------------------------------------------------------------------------
+
+describe("T-0614 [деТЭЛ] · /api/processes name/progress/execs are honestly resolved, not case-literals", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+
+  afterAll(() => {
+    if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = prevDbUrl;
+  });
+
+  async function withHarness(
+    deps: StartInstanceDeps,
+    fn: (baseUrl: string) => Promise<void>,
+  ): Promise<void> {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0614";
+    const harness = buildServer(deps);
+    await new Promise<void>((resolve) => harness.server.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      await fn(harness.baseUrl());
+    } finally {
+      await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    }
+  }
+
+  it("AC-1: two instances of DIFFERENT processes (each with a modeler process_definition row) get DIFFERENT honest names — not the same literal", async () => {
+    const procAKey = "proc-vendor-invoice";
+    const procBKey = "proc-onboarding-demo";
+    const rowA = startedRow("inst-proc-a-1");
+    rowA["payload"] = { ...(rowA["payload"] as object), proc_key: procAKey };
+    const rowB = startedRow("inst-proc-b-1");
+    rowB["payload"] = { ...(rowB["payload"] as object), proc_key: procBKey };
+
+    const deps = makeDeps([rowA, rowB], {
+      definitionRows: [
+        { process_key: procAKey, name: "Проверка счёта поставщика" },
+        { process_key: procBKey, name: "Приёмка демо" },
+      ],
+    });
+
+    await withHarness(deps, async (baseUrl) => {
+      const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, { "x-dev-user": ACTOR });
+      expect(status).toBe(200);
+      const data = json as { instances: Array<Record<string, unknown>> };
+      const a = data.instances.find((i) => i.id === "inst-proc-a-1");
+      const b = data.instances.find((i) => i.id === "inst-proc-b-1");
+      expect(a?.name).toBe("Проверка счёта поставщика");
+      expect(b?.name).toBe("Приёмка демо");
+      // The old bug: both would show the SAME literal regardless of process.
+      expect(a?.name).not.toBe(b?.name);
+      expect(a?.name).not.toBe("Канонический линейный ТЭЛ");
+      expect(b?.name).not.toBe("Канонический линейный ТЭЛ");
+    });
+  });
+
+  it("AC-2: an engine-only process_key (no choros.process_definition row) falls back to fallbackDefinitionName honestly, not a blank/500", async () => {
+    const deps = makeDeps([startedRow(LIVE_INST)], { definitionRows: [] });
+    await withHarness(deps, async (baseUrl) => {
+      const { status, json } = await httpReq(
+        "GET",
+        `${baseUrl}/api/processes/${LIVE_INST}`,
+        { "x-dev-user": ACTOR },
+      );
+      expect(status).toBe(200);
+      const data = json as Record<string, unknown>;
+      // LIVE_PROC's honest engine-only fallback (fallbackDefinitionName), not empty/undefined.
+      expect(data.name).toBe("Канонический линейный ТЭЛ");
+    });
+  });
+
+  it("AC-3: progress reflects the ACTUAL step count of this instance, not a hardcoded {2,3}/{3,3}", async () => {
+    // A freshly-started, still-waiting instance: 0 steps done, 1 known step (the base).
+    const deps = makeDeps([startedRow(LIVE_INST)]);
+    await withHarness(deps, async (baseUrl) => {
+      const { json } = await httpReq(
+        "GET",
+        `${baseUrl}/api/processes/${LIVE_INST}`,
+        { "x-dev-user": ACTOR },
+      );
+      const data = json as Record<string, unknown>;
+      // Not the old unconditional {done:2,total:3} for a waiting instance.
+      expect(data.progress).toEqual({ done: 0, total: 1 });
+    });
+  });
+
+  it("AC-4: an APPROVED post-gateway next_task raises stepsDone — progress grows with real completed steps, not frozen at 2/3", async () => {
+    // Base task approved, plus one APPROVED process.next_task (a post-gateway step
+    // this instance already completed) — the instance is still waiting on a SECOND
+    // concurrent next_task (pending), so status stays "waiting" but stepsDone must
+    // reflect the ALREADY-completed base + first next_task.
+    const base = startedRow(LIVE_INST);
+    const approvedNextTaskRow = {
+      id: "next-task-approved-1",
+      payload: { inst: LIVE_INST, task_step: "Проверка" },
+      occurred_at: Date.parse("2026-06-30T11:00:00Z"),
+    };
+    const pendingNextTaskRow = {
+      id: "next-task-pending-1",
+      payload: { inst: LIVE_INST, task_step: "Второе согласование" },
+      occurred_at: Date.parse("2026-06-30T12:00:00Z"),
+    };
+    const deps = makeDeps([base], {
+      approvedTaskRows: [
+        { payload: { inbox_task_id: "audit-evt-1" } }, // base approved
+        { payload: { inbox_task_id: "next-task-approved-1" } }, // next_task #1 approved
+      ],
+      nextTaskRows: [approvedNextTaskRow, pendingNextTaskRow],
+    });
+    await withHarness(deps, async (baseUrl) => {
+      const { json } = await httpReq(
+        "GET",
+        `${baseUrl}/api/processes/${LIVE_INST}`,
+        { "x-dev-user": ACTOR },
+      );
+      const data = json as Record<string, unknown>;
+      // stepsDone = base(1) + approved next_task(1) = 2; stepsKnownTotal = done(2) +
+      // the ONE still-pending concurrent step = 3. NOT the old hardcoded {2,3} — this
+      // time the numbers happen to coincide, but they are DERIVED from the actual
+      // fold, not asserted unconditionally (AC-1/AC-3 above prove the general case).
+      expect(data.progress).toEqual({ done: 2, total: 3 });
+      expect(data.status).toBe("waiting");
+    });
+  });
+
+  it("AC-5: execs reflects the starting actor's REAL employee.kind — an agent-employee starter yields ['agent'], not ['human','agent']", async () => {
+    const deps = makeDeps([startedRow(LIVE_INST)], {
+      employeeRows: [{ slug: ACTOR, display_name: "Test Agent", kind: "agent" }],
+    });
+    await withHarness(deps, async (baseUrl) => {
+      const { json } = await httpReq(
+        "GET",
+        `${baseUrl}/api/processes/${LIVE_INST}`,
+        { "x-dev-user": ACTOR },
+      );
+      const data = json as Record<string, unknown>;
+      expect(data.execs).toEqual(["agent"]);
+    });
+  });
+
+  it("AC-6: starting actor not found in choros.employee → execs honestly degrades to ['human'], never 500", async () => {
+    const deps = makeDeps([startedRow(LIVE_INST)], { employeeRows: [] });
+    await withHarness(deps, async (baseUrl) => {
+      const { status, json } = await httpReq(
+        "GET",
+        `${baseUrl}/api/processes/${LIVE_INST}`,
+        { "x-dev-user": ACTOR },
+      );
+      expect(status).toBe(200);
+      const data = json as Record<string, unknown>;
+      expect(data.execs).toEqual(["human"]);
+    });
   });
 });
 
