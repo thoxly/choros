@@ -207,15 +207,25 @@ function projectionToInstance(p: InstanceProjection): ProcessInstance {
     minute: "2-digit",
     second: "2-digit",
   });
-  // Linear ТЭЛ progress: waiting at U4 ⇒ 2/3 nodes done; done ⇒ 3/3.
-  const progress = p.status === "done" ? { done: 3, total: 3 } : { done: 2, total: 3 };
+  // T-0614 [деТЭЛ]: honest "known so far" step count, resolved by the projection
+  // (process-projection.ts) from the actual audit fold for THIS instance — replaces
+  // the case-literal {done:2,total:3}/{done:3,total:3} of the linear ТЭЛ's 3 nodes
+  // that used to be assigned unconditionally to every instance regardless of its
+  // real process (D-064 violation, found live by the founder 2026-07-03). NOT the
+  // full BPMN user-task count of the definition (see ADR-T0614 §4 O1 follow-up).
+  const progress = { done: p.stepsDone, total: p.stepsKnownTotal };
   // T-0456 [D8-R1]: surface concurrent branches. `node` stays the primary step for
   // back-compat; `nodes` carries every concurrent waiting step so the card can render
   // an AND-split's parallel branches. A done instance has no waiting nodes.
   const nodes = p.concurrentSteps.length > 0 ? [...p.concurrentSteps] : [p.step];
   return {
     id: p.inst,
-    name: "Канонический линейный ТЭЛ",
+    // T-0614 [деТЭЛ]: the REAL process-definition name (choros.process_definition,
+    // or the honest fallbackDefinitionName(procKey) for an engine-only key) —
+    // replaces the case-literal "Канонический линейный ТЭЛ" that used to be
+    // assigned to EVERY instance (purchaseApproval and acceptance-demo instances
+    // both showed this one literal name — the live fact that surfaced this bug).
+    name: p.definitionName,
     procId: p.procKey,
     status: p.status === "running" ? "running" : p.status, // running|waiting|done
     node: p.step,
@@ -223,7 +233,11 @@ function projectionToInstance(p: InstanceProjection): ProcessInstance {
     started,
     elapsed: "—",
     progress,
-    execs: ["human", "agent"],
+    // T-0614 [деТЭЛ]: the one concretely-known executor kind (the actor who
+    // STARTED this instance, resolved via choros.employee.kind by the projection)
+    // — replaces the case-literal ["human","agent"] assigned unconditionally to
+    // every instance. "service" is never fabricated (see ADR-T0614 §4 O2).
+    execs: [p.starterActorKind],
     // T-0414 / T-0356: pass through the originating record id for on_create instances
     // so the e2e spec can correlate by recordId without a separate lookup.
     ...(p.recordId !== undefined ? { recordId: p.recordId } : {}),
