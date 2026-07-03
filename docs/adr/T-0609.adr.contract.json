@@ -1,0 +1,67 @@
+{
+  "task_id": "T-0609",
+  "status": "ready",
+  "decision": "Ресурсы: НОВЫЙ read-only эндпоинт GET /api/rights/resources (новый файл src/http/rights-resources.ts) — НЕ трогает замороженный src/http/grants.ts. Возвращает {resources:[{uri,name}]} из РЕАЛЬНЫХ application/registry_def строк тенанта (переиспользует listApplications/listRegistryDefs DAO), tenant-scoped через resolveActorTenant+RLS. uri-формат: 'registry:<application_slug>' (уровень приложения) и 'registry:<application_slug>.<registry_slug>' (уровень реестра) — СВОБОДНАЯ ИМЕНУЮЩАЯ строка, ТОТ ЖЕ класс значения что уже несёт resource_type во всей форме (mcp://ledger.invoices не более 'формат', чем registry:zakupki.zayavki — ни один парсится структурно как URL нигде в коде). screen-rights.jsx подгружает новый эндпоинт наряду с /api/rights/dictionaries (fetchRealResources(), best-effort []), передаёт GrantRightForm ОБЪЕДИНЁННЫЙ список (реальные первыми, демо следом) — GrantRightForm НЕ меняется структурно (уже принимает любой {uri,name}[] массив). Осознанно НЕ переключаем resource_type на T-0570 READ-PDP resource-hierarchy формат (scope.nodeId=uuid) — тот формат обслуживает ДРУГОЙ, тоже легитимный паттерн (default-open READ grant), а GrantRightForm/DICT_PRESETS/ScopePicker/axesFromGrants/критичность-оси/14-пресетов целиком спроектированы вокруг именующей-строки+org-scope паттерна; переключение — отдельный большой рефактор (follow-up O2), не 'источник ресурсов в существующей форме'. Узлы охвата (ScopePicker→DICT_ORG_TREE) остаются демо-деревом (НЕ реальная choros.department/GET-api-org оргструктура — структурно другая модель) — follow-up O1, как прямо разрешено формулировкой задачи. История/переменные: два новых read-only метода FlowableClient (getHistoricVariableInstances, getHistoricActivityInstances — /history/historic-variable-instances и /history/historic-activity-instances REST, тот же withRetry/httpStatusToCode паттерн что getFirstActiveUserTask), вызываются из ТОГО ЖЕ хендлера GET /api/processes/:id (src/http/processes.ts) ВНУТРИ существующей tenant-membership-гейтованной ветки (resolveActorTenant) — гейт НЕ меняется, никакой новый PDP/capability путь не вводится. Ответ добавляет variables[]/history[]/historyAvailable:boolean; движок недоступен → пустые массивы + historyAvailable:false, ответ всё равно 200 (честная деградация). screen-process-instance.jsx рендерит переменные (имя/значение) и детальную историю (шаг/тип/начало/конец/кто закрыл) когда historyAvailable===true; иначе — прежний best-effort audit-фильтр без изменений (regression-safety для no-DB/no-engine путей).",
+  "rejected_alternatives": [
+    {
+      "option": "Править src/http/grants.ts (DICT_RESOURCES) напрямую, добавив DB-чтение внутрь registerDictionariesRoute.",
+      "why_not": "Файл заморожен байт-в-байт (ci/checks/rights-ui-frozen-write.sh, T-0572 FF-T0572-FROZEN) — любая правка красит CI. registerDictionariesRoute регистрируется БЕЗ pool вообще (server.ts:587) — смешивать сид-словарь с живым DB-запросом в одном хендлере ещё более инвазивно, чем отдельный новый эндпоинт."
+    },
+    {
+      "option": "Полное переключение resource_type на T-0570 resource-hierarchy формат (scope.nodeId=registry/application UUID) для ВСЕЙ формы «Дать роли право».",
+      "why_not": "Требует переписать ScopePicker (org-hierarchy → resource-hierarchy для этой формы, но не для AssignRoleForm), axesFromGrants/критичность-оси (сегодня читают признаки ресурса ПО ИМЕНИ resource_type-строки — в hierarchy-формате эта информация должна жить где-то ещё, не определено), и 14 DICT_PRESETS (ЗАМОРОЖЕНЫ в grants.ts — физически невозможно без нарушения freeze). Это построение нового экрана прав по факту — задача прямо это запрещает. Follow-up O2."
+    },
+    {
+      "option": "Слить ScopePicker-оргдерево с реальной /api/org оргструктурой в этой же задаче.",
+      "why_not": "Структурно другая модель (department/position/employee vs лестница охвата гранта nodeLevel) — нужно сначала решить продуктовую семантику «узел охвата» как понятие. Follow-up O1, как прямо разрешено формулировкой задачи («если список НЕ реальный orgstructure — зафиксируй в ADR»)."
+    },
+    {
+      "option": "Проксировать переменные/историю инстанса через GET /api/audit (owner-only гейт) вместо расширения GET /api/processes/:id.",
+      "why_not": "/api/audit гейтится строже (holdsAuditRead=isGenesisOwner) чем текущая страница инстанса (tenant-membership only, resolveActorTenant). Это сузило бы видимость СУЩЕСТВУЮЩИХ полей страницы до owner-only — прямое нарушение директивы «не расширяй/не сужай видимость сверх текущей» (регрессия для не-owner тенант-мемберов, уже открывающих страницу сегодня)."
+    },
+    {
+      "option": "Не подключать Flowable history вообще — ограничиться улучшением текста заметки.",
+      "why_not": "Не решает живой факт приёмки: диагностика P0-ветвления требовала прямого SQL именно потому, что НИ ОДИН UI-путь не показывает activity-историю движка. Задача прямо требует минимума «переменные + пройденные шаги с временами»."
+    }
+  ],
+  "object_model": [],
+  "contracts": [
+    "src/http/rights-resources.ts (НОВЫЙ файл) — registerRightsResourcesRoute(router, pool, resolveActorTenant): GET /api/rights/resources → {resources:[{uri,name}]}, переиспользует listApplications (src/http/applications.ts) + listRegistryDefs (src/http/registry-defs.ts).",
+    "src/server.ts — вызов registerRightsResourcesRoute рядом с registerApplicationRoutes/registerRegistryDefRoutes (DB-режим, grantsPool присутствует); registerDictionariesRoute(router) остаётся БЕЗ ИЗМЕНЕНИЙ.",
+    "web/src/screens/rights/screen-rights.jsx — новая fetchRealResources() (best-effort, [] на ошибку), Promise.all с fetchDictionaries(); dictionaries.resources переданный в формы = [...real, ...(dicts?.resources ?? [])].",
+    "web/src/screens/rights/ra-overview-forms.jsx — GrantRightForm БЕЗ структурных изменений (уже принимает произвольный dictionaries.resources массив).",
+    "src/core/flowable-client.ts — добавлены getHistoricVariableInstances(instanceId): Promise<GetHistoricVariablesResult> и getHistoricActivityInstances(instanceId): Promise<GetHistoricActivitiesResult>; экспортированы типы HistoricVariable/HistoricActivity/оба Result; добавлены в FlowableClient interface + factory return.",
+    "src/http/processes.ts — GET /api/processes/:id (ветка hasDb()&&startDeps, ПОСЛЕ нахождения match): Promise.all([getHistoricVariableInstances, getHistoricActivityInstances]) → variables[]/history[]/historyAvailable:boolean добавлены к JSON-ответу; существующие поля projectionToInstance(match) не изменены.",
+    "web/src/screens/screen-process-instance.jsx — новая секция «Переменные процесса» (условный рендер instance.variables?.length>0); секция «История переходов» переключается на instance.history когда instance.historyAvailable===true, иначе прежний best-effort audit-фильтр БЕЗ ИЗМЕНЕНИЙ.",
+    "web/src/screens/process-instance.logic.js — новые чистые функции formatHistoryStep(activity) и hasVariables(instance), тестируемые в node-vitest tier.",
+    "docs/handoff/T-0609.pr-handoff.json — BUILD-фаза."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1/AC-2: GET /api/rights/resources возвращает реальные application/registry_def тенанта, tenant-scoped (RLS), честный пустой список для тенанта без ресурсов.", "ci_check": "npm run fitness:db (новый db-тест rights-resources)"},
+    {"id": "FF-2", "rule": "AC-3: GrantRightForm получает объединённый список реальных+демо ресурсов; выбор реального ресурса формирует валидный POST /api/grants body.", "ci_check": "cd web && npx vitest run (screen-rights/ra-overview-forms source-presence тесты)"},
+    {"id": "FF-3", "rule": "AC-4: замороженные write-core файлы не тронуты; новый write-эндпоинт не введён.", "ci_check": "bash ci/checks/rights-ui-frozen-write.sh && bash ci/checks/rights-ui-no-new-write.sh"},
+    {"id": "FF-4", "rule": "AC-5/AC-6: FlowableClient новые методы возвращают переменные/историю на live-подобный мок, {ok:false} на ошибку движка (никогда throw).", "ci_check": "npm test (flowable-client.test.ts)"},
+    {"id": "FF-5", "rule": "AC-7/AC-8/AC-9: GET /api/processes/:id добавляет variables/history без регрессии существующих полей; честная деградация при недоступном движке (200, не 500); tenant-scope гейт не расширен/не сужен.", "ci_check": "npm test (processes.test.ts) + npm run fitness:db при наличии live-engine теста"},
+    {"id": "FF-6", "rule": "AC-10: screen-process-instance.jsx рендерит переменные/детальную историю по новым полям, сохраняя прежний путь при historyAvailable отсутствует/false.", "ci_check": "node vitest (process-instance.logic.test.js) + source-presence тест на screen-process-instance.jsx"},
+    {"id": "FF-7", "rule": "AC-11: без кейс-литералов.", "ci_check": "bash ci/checks/anti-case-lock.sh"},
+    {"id": "FF-8", "rule": "AC-12/AC-13/AC-14: полный тестовый набор + build + fitness:db + web vitest зелёные.", "ci_check": "npm test && npm run build && (cd web && npm run build) && npm run fitness:db && (cd web && npx vitest run)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-1"},
+    {"ac": "AC-3", "covered_by": "FF-2"},
+    {"ac": "AC-4", "covered_by": "FF-3"},
+    {"ac": "AC-5", "covered_by": "FF-4"},
+    {"ac": "AC-6", "covered_by": "FF-4"},
+    {"ac": "AC-7", "covered_by": "FF-5"},
+    {"ac": "AC-8", "covered_by": "FF-5"},
+    {"ac": "AC-9", "covered_by": "FF-5"},
+    {"ac": "AC-10", "covered_by": "FF-6"},
+    {"ac": "AC-11", "covered_by": "FF-7"},
+    {"ac": "AC-12", "covered_by": "FF-8"},
+    {"ac": "AC-13", "covered_by": "FF-8"},
+    {"ac": "AC-14", "covered_by": "FF-8"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0609-rights-real-resources.md",
+  "escalation": "Нет. Оба решения — READ-only расширения (новый GET-эндпоинт, два новых read-метода FlowableClient), не вводят новых прав/authority-путей, не трогают замороженные write-core файлы (rights-ui-frozen-write.sh), не расширяют видимость сверх текущего tenant-membership гейта GET /api/processes/:id. Узлы охвата (O1) и полное resource-hierarchy переключение (O2) — сознательно вынесены в follow-up, как разрешено формулировкой задачи для узлов охвата и по аналогии для resource-hierarchy (тот же класс «отдельная архитектурная работа вне периметра существующей формы»)."
+}
