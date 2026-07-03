@@ -1,0 +1,71 @@
+{
+  "task_id": "T-0606",
+  "verdict": "fail",
+  "deterministic": {"total": 6070, "passed": 6060, "failed": 0, "_note": "root vitest 4947 passed + fitness:db 1113 passed = 6060 passed; 10 skipped не считаются в failed; total 6070 = 6060 + 10 skipped. Гейты детерминированы (перегнаны дважды). verdict=fail НЕ из-за упавшего теста, а из-за незакрытого P1 (form-submit обход гейта), который ни один тест автора не пинит — см. bypass_probe."},
+  "_env": {
+    "base": "da28079",
+    "head": "06cf934",
+    "branch": "task/T-0606-approval-registry-guard",
+    "node": "v23.7.0",
+    "database_url": "postgres://choros_migrator:***@localhost:55432/choros",
+    "db_template": "choros_test_template_39b70d37 (migrations hash includes 122)",
+    "flowable_live": "UNAVAILABLE (dev-среда без Flowable/deployed-стенда — live_proof остаётся за оркестратором, согласовано с handoff)"
+  },
+  "verdict_reason": "Все CI-гейты ЗЕЛЁНЫЕ и совпадают с handoff-числами, и 4/4 мут-пробы ловятся. НО P1 BUG #1 ('вручную сфабриковать/удалить акт согласования') закрыт ТОЛЬКО на маршруте /api/records; параллельный живой HTTP-путь POST /api/forms/approval/submit → form-record-persister.ts пишет фантомную decision-запись в тот же engine_managed реестр 'soglasovanie' В ОБХОД гейта — ДОКАЗАНО живьём на template-БД. Per критерий задания «Обход guard-а живым путём = blocking» → verdict=fail. Детали в review F-1.",
+  "gates": {
+    "npm_run_build": {"result": "pass", "detail": "tsc && seed/tsconfig — exit 0"},
+    "npm_test_root": {"result": "pass", "detail": "255 files passed | 2 skipped (257); 4947 tests passed | 10 skipped (4957); exit 0; duration ~43s"},
+    "npm_run_fitness_db": {"result": "pass", "detail": "107 files passed (107); 1113 tests passed (1113); exit 0; template пересобран под миграцию 122 через fitness:db:setup-template (trigger_registry_id + engine_managed колонки проверены на живом PG); включает новый ci/checks/db/approval-registry-guard.db.test.ts Part A + Part B (6/6)"},
+    "dual_control_isolation_sh": {"result": "pass", "detail": "exit 0; FF-DC7 relief T0606-DC-MIG122-GUARD сработал (прецедент 119/120/121)"},
+    "substitution_isolation_sh": {"result": "pass", "detail": "exit 0; FF-SUB1..6 (миграция 122 закоммичена, известный working-tree-vs-HEAD флейк не воспроизвёлся)"},
+    "anti_case_lock_sh": {"result": "pass", "detail": "exit 0; Phase2 денилист аггрегат 24/24 baseline (soglasovanie 2/2 не растёт)"},
+    "anti_case_lock_self_test": {"result": "pass", "detail": "exit 0; все детекторы функциональны"},
+    "detel_literal_baseline_sh": {"result": "pass", "detail": "exit 0; аггрегат 5 <= baseline 7 (не регрессировал, унаследован с базы; soglasovanie не рос этой задачей)"},
+    "detel_literal_baseline_self_test": {"result": "pass", "detail": "exit 0; got 1 expected 1 (комментарии/тест-файлы корректно исключены)"},
+    "contracts_validate": {"result": "pass", "detail": "schemas/validate.py::validate_file: adr.contract.json vs adr.schema.json OK; spec.contract.json vs spec.schema.json OK; pr-handoff.json vs pr-handoff.schema.json OK (0 ошибок)"}
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1 migration 122 ADD COLUMN trigger_registry_id uuid NULL + engine_managed boolean NOT NULL DEFAULT false", "test": "live PG information_schema (judge) + fitness:db template rebuild 39b70d37", "result": "pass", "_how": "обе колонки созданы с нужными типами/nullability; 122 в schema_migrations; re-run setup-template no-op (идемпотентность)"},
+    {"ac": "AC-2 getOnCreateBinding SQL-скоуп (trigger_registry_id=$3 OR NULL→primary)", "test": "ci/checks/db/approval-registry-guard.db.test.ts Part A + мутпроба A", "result": "pass", "_how": "DB Part A green; мутпроба A (снять фильтр) краснит DB Part A"},
+    {"ac": "AC-3 createRecord передаёт reg.id; trigger только для scoped реестра", "test": "ci/checks/db/approval-registry-guard.db.test.ts Part A (primary starts, secondary does not)", "result": "pass", "_how": "records.ts:862; DB Part A: primary стартует, secondary НЕ стартует"},
+    {"ac": "AC-3b NULL submit_task_key + живой первый таск 'task-submit' → completeUserTask НЕ вызван (T-0604 F-2 пин)", "test": "src/__tests__/binding-trigger.unit.test.ts Part C + мутпроба D", "result": "pass", "_how": "unit Part C green; мутпроба D краснит — центральный T-0604 §1.1 инвариант залочен"},
+    {"ac": "AC-4 engine_managed create → 403 на ВСЕХ живых write-путях", "test": "DB Part B (/api/records) green; bypass_probe (POST /api/forms/approval/submit) на template-БД", "result": "fail", "_how": "DB Part B green ТОЛЬКО для /api/records; мутпроба B краснит. НО bypass_probe: form-submit пишет фантомную запись в engine_managed реестр в ОБХОД гейта (rowCount=1) → инвариант в целом НЕ держится → result=fail (blocking F-1)"},
+    {"ac": "AC-5 engine_managed update/delete → 403 на ВСЕХ живых write-путях", "test": "DB Part B (/api/records) PUT/DELETE green; form-submit update-путь НЕ проверен", "result": "fail", "_how": "DB Part B green для /api/records (ряд цел); второй write-path (form-submit) обходит create-гейт → result=fail до фикса F-1"},
+    {"ac": "AC-6 applyStepResult структурно не задет (движок пишет в защищённый реестр)", "test": "src/__tests__/step-applier.test.ts SA-11 + DB Part B live applyStepResult", "result": "pass", "_how": "SA-11: SELECT не селектит engine_managed; DB Part B live: applyStepResult прямым DAO пишет в engine_managed реестр успешно"},
+    {"ac": "AC-7 миграция помечает ТЭЛ Согласование engine_managed=true; telLinear trigger_registry_id NULL, ТЭЛ не регрессирует", "test": "migration 122 read + 076/086 seed cross-check + fitness:db", "result": "pass", "_how": "UPDATE идемпотентный тройной-ключ demo-tenant; NULL резолвится в единственный is_system=false 'purchases' (verified 076/086)"},
+    {"ac": "AC-8 D-064 ноль новых слаг-литералов; detel/anti-case не растут", "test": "detel-literal-baseline.sh + anti-case-lock.sh + grep soglasovanie", "result": "pass", "_how": "detel exit 0 (soglasovanie 2/2, ни одного нового), anti-case 24/24; механизм колоночный"},
+    {"ac": "AC-9 build/test/fitness:db/гейты зелёные, счётчики в handoff", "test": "npm run build + npm test + npm run fitness:db (judge rerun)", "result": "pass", "_how": "перегнано судьёй, числа совпадают: build 0, test 4947, db 1113"}
+  ],
+  "adversarial": {
+    "mutation_probes": [
+      {"id": "A", "mutation": "снять trigger-scope SQL-фильтр в binding-trigger-dao.ts (`AND $3 = $3` вместо trigger_registry_id=$3 OR NULL→primary-подзапрос)", "expected": "DB Part A красный (secondary-реестр стартует процесс)", "observed": "DB Part A FAILED: 'process must NOT have started for a create in the SECONDARY registry — bug #2': expected 1 to be 0. ПРИМЕЧАНИЕ: unit Part A остались ЗЕЛЁНЫМИ (стаб реимплементирует SQL на JS — review F-3)", "caught": true},
+      {"id": "B", "mutation": "снять assertNotEngineManaged из createRecord (records.ts)", "expected": "DB Part B create-403 красный", "observed": "DB Part B FAILED: 'expected 201 to be 403'; запись РЕАЛЬНО записалась в engine_managed реестр (id вернулся) — подтверждает и что гейт работает, и что путь writable", "caught": true},
+      {"id": "C", "mutation": "сломать primary-формулу (ORDER BY created_at DESC + убрать is_system=false в NULL-fallback подзапросе)", "expected": "DB Part A красный (primary-create не стартует)", "observed": "DB Part A FAILED: 'process must have started for the PRIMARY registry create': expected 0 to be 1 — формула резолвит не тот реестр", "caught": true},
+      {"id": "D", "mutation": "вернуть fallback 'task-submit' при NULL submit_task_key (records.ts, `binding.submit_task_key ?? 'task-submit'`)", "expected": "unit AC-3b (Part C) красный", "observed": "Part C FAILED: 'expected spy to not be called at all, but actually been called 1 times' — completeUserTask вызван при NULL. T-0604 §1.1 инвариант надёжно залочен (закрывает дыру F-2 из T-0604-review)", "caught": true}
+    ],
+    "_summary": "4 из 4 мутаций пойманы соответствующими тестами (A/C — DB Part A trigger-scope; B — DB Part B guard; D — unit AC-3b). Продукт-инварианты на DB-уровне надёжно покрыты. НО покрытие полноты ПОВЕРХНОСТИ (второй write-path) отсутствует — см. bypass_probe."
+  },
+  "failures": [
+    {"test": "bypass_probe: POST /api/forms/approval/submit → form-record-persister.ts against engine_managed 'soglasovanie' registry (нет теста автора — судья сконструировал)", "is_product_defect": true, "root_class": "product-defect", "_detail": "Гейт assertNotEngineManaged покрывает только /api/records; второй живой write-path (form-submit) пишет фантомную decision-запись в engine_managed реестр в обход гейта. BUG #1 не закрыт полностью. Blocking F-1."}
+  ],
+  "bypass_probe": {
+    "finding": "F-1 (blocking)",
+    "route": "POST /api/forms/approval/submit → src/http/forms.ts:361 persist → src/http/form-record-persister.ts makeFormRecordPersister",
+    "method": "standalone tsx-скрипт против template-БД (миграция 122): сид tenant + application 'tel-approval' + registry 'purchases' (is_system=false) + registry 'soglasovanie' (is_system=true, engine_managed=true, record_schema={decision:string required}); вызов makeFormRecordPersister(actor,'approval',{decision:'approve'}) — точная цепочка за form-submit роутом.",
+    "result": "persist НЕ бросил ошибку; вернул recordId c8e07c95-...; SELECT из engine_managed реестра 'soglasovanie' → rowCount=1, data={decision:'approve'}. ГЕЙТ assertNotEngineManaged НЕ ВЫЗВАН на этом пути (form-record-persister.ts делает прямой INSERT INTO choros.record :295-300 без проверки engine_managed).",
+    "impact": "BUG #1 ('вручную сфабриковать акт согласования') остаётся эксплуатируемым через живой пользовательский submit-роут. Форма 'approval' — первоклассная (form-schema.ts:132/159 APPROVAL), достижима в memory- и DB-режиме; makeFormDefResolver резолвит slug 'soglasovanie' и возвращает валидный FormDef. Гейт покрывает только /api/records. Per задание: живой обход guard = blocking.",
+    "required_fix": "Добавить engine_managed-проверку (SELECT + HttpError 403 REGISTRY_ENGINE_MANAGED) в makeFormRecordPersister ДО INSERT (после резолюции reg на :257), + DB-тест на POST /api/forms/approval/submit против engine_managed реестра. Опционально закрыть 'approval'-форму в makeFormDefResolver."
+  },
+  "primary_formula_analysis": {
+    "finding": "F-2 (nit)",
+    "detail": "NULL-fallback подзапрос DAO: `is_system=false ORDER BY rd.created_at ASC, rd.id ASC LIMIT 1` — ЕСТЬ id-tie-breaker → детерминирован при равных created_at (важно: сид может ставить оба ряда с created_at=0). Резолвер Step 3 (process-instance-resolver.ts:357-359): `is_system=false ORDER BY created_at ASC LIMIT 1` — БЕЗ id ASC. То есть doc-claim 'byte-for-byte / та же формула' буквально неверен: DAO СТРОЖЕ (безопаснее). Функционально это улучшение, риск равных created_at закрыт. Для ТЭЛ-сида неоднозначности нет (единственный is_system=false реестр). Не блокирует."
+  },
+  "migration_122_analysis": {
+    "idempotent": true,
+    "detail": "ADD COLUMN IF NOT EXISTS ×2 (process_app_binding.trigger_registry_id, registry_def.engine_managed) + UPDATE с `engine_managed IS DISTINCT FROM true`-guard. Повторный fitness:db:setup-template = no-op. Data-completion UPDATE таргетит тройной ключ demo-tenant (a0000000-...001 / id a7000000-...0003 / application_id a7000000-...0001) — чужие тенанты НЕ задеты, @demo-seed no-op при отсутствии 076-ряда. FF-DC7 relief аддитивный (прецедент 082/109/115/116/117/119/120/121); role-criticality-migration-excludes.txt дополнена штатно. Не самовольная правка frozen-зоны."
+  },
+  "flakes_isolated": {
+    "note": "Отдельных флейков в этом прогоне у судьи не воспроизведено. fitness:db 1113/1113 зелёный с первого прогона (одиночный, без параллельной нагрузки). doc-*/seed-pack флейки (упомянутые в задании и handoff friction_events) не проявились. FF-SUB5 working-tree-vs-HEAD флейк не воспроизвёлся (миграция 122 закоммичена)."
+  },
+  "recheck_independence": "Все гейты перегнаны судьёй с чистого запуска (не доверие handoff-числам), база da28079, HEAD 06cf934. 4 мут-пробы применены через Edit, откачены через backup-restore; git status пуст (working tree clean vs HEAD подтверждён после каждого отката). Bypass-proof выполнен отдельным standalone tsx-скриптом против template-БД, temp-файл удалён, tree чист."
+}
