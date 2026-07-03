@@ -1,0 +1,49 @@
+{
+  "task_id": "T-0607",
+  "tester": "independent-judge (D-007: not the author)",
+  "tested_sha": "368cea3ce6fa3741abe37fd83d14e2a7d9f8ad2a",
+  "base_sha": "ff549341bac2c1ba8f1ac627ccfaa8dfadce4dd6",
+  "verdict": "pass",
+  "deterministic": true,
+  "verdict_rationale": "Все заявленные гейты зелёные на HEAD; каждый из 5 фиксов пробит мутацией с возвратом — соответствующий AC краснеет (кроме AC-5 DB, где short-circuit пинится через AC-4, см. F9 в review). Единственный флейк — doc-summary (env-таймаут, зелёный изолированно). Блокирующих провалов нет.",
+  "gates": {
+    "npm_build": {"cmd": "npm run build", "result": "PASS", "detail": "tsc + node_modules/.bin/tsc --project seed/tsconfig.json, 0 errors"},
+    "npm_test": {"cmd": "vitest run", "result": "PASS", "detail": "258 files passed | 2 skipped (260); 4957 tests passed | 10 skipped (4967); 0 failed; 43.7s"},
+    "fitness_db": {"cmd": "DATABASE_URL=postgres://choros_migrator:...@localhost:55432/choros npm run fitness:db", "result": "PASS_WITH_ISOLATED_FLAKE", "detail": "108/109 files pass, 1101 tests pass. ONLY failure = doc-summary.db.test.ts (4 tests, 5000ms timeout under parallel load). Re-run isolated at 60s timeout → 5/5 PASS. Env flake, unrelated to T-0607, pre-warned in brief. All T-0607 DB tests PASS: AC-3 registry-digest, AC-5 configurator-owner-gate, AC-6 edit-jsonschema-slug-resolve, AC-9 assistant-dispatch-failure."},
+    "single_resolver_sh": {"cmd": "bash ci/checks/single-resolver.sh", "result": "PASS"},
+    "grant_resolver_isolation_sh": {"cmd": "bash ci/checks/grant-resolver-isolation.sh", "result": "PASS"},
+    "registry_defs_pdp_isolation_sh": {"cmd": "bash ci/checks/registry-defs-pdp-isolation.sh", "result": "PASS", "detail": "FF-RDP1..7 all green"},
+    "assistant_llm_message_jargon_sh": {"cmd": "bash ci/checks/ux/assistant-llm-message-jargon.sh [+ --self-test]", "result": "PASS", "detail": "both ADMIN/NON_ADMIN clean; self-test: good fixture rc=0, bad fixture rc=14"},
+    "anti_case_lock_sh": {"cmd": "bash ci/checks/anti-case-lock.sh", "result": "PASS", "detail": "Phase 1 delegates clean; Phase 2 full D-064 denylist aggregate 24=24, 0 new anti-case literals under src/ or web/src/"}
+  },
+  "coverage_by_ac": {
+    "AC-1": {"kind": "unit", "status": "pass", "where": "src/__tests__/assistant-analyst-digest.test.ts"},
+    "AC-2": {"kind": "unit", "status": "pass", "where": "src/__tests__/assistant-analyst-digest.test.ts"},
+    "AC-3": {"kind": "fitness", "status": "pass", "where": "ci/checks/db/registry-digest.test.ts", "note": "owner READ grant → count>=1 + sample; non-reader → 0"},
+    "AC-4": {"kind": "unit", "status": "pass", "where": "src/__tests__/assistant-configurator-owner.test.ts", "note": "isolates owner short-circuit with empty intersection; 4 branches incl. fail-closed"},
+    "AC-5": {"kind": "fitness", "status": "pass", "where": "ci/checks/db/configurator-owner-gate.test.ts", "note": "GREEN but does not isolate the short-circuit — seeded owner also holds authoring_draft; see review F9"},
+    "AC-6": {"kind": "fitness", "status": "pass", "where": "ci/checks/db/edit-jsonschema-slug-resolve.test.ts", "note": "slug resolves; unknown slug → honest error; duplicate field → DUPLICATE"},
+    "AC-7": {"kind": "unit", "status": "pass", "where": "src/__tests__/assistant-report.test.ts"},
+    "AC-8": {"kind": "unit", "status": "pass_reformulated", "where": "src/core/__tests__/assistant-analyst.test.ts:213", "note": "REFORMULATED per declared deviation: analyst PROPAGATES (rejects) rather than returns canonical; reply guarantee moved to route (AC-9). spec.contract text stale — review F8"},
+    "AC-9": {"kind": "fitness", "status": "pass", "where": "ci/checks/db/assistant-dispatch-failure.test.ts", "note": "thread gets canonical reply (== DISPATCH_FAILURE_REPLY) AND response is 500 INTERNAL; raw err not leaked"},
+    "AC-10": {"kind": "unit", "status": "pass", "where": "src/__tests__/assistant-analyst-digest.test.ts", "note": "plain query → no S3-telemetry sections; process query → included"},
+    "AC-11": {"kind": "fitness", "status": "pass", "where": "assistant-llm-message-jargon.sh + --self-test"},
+    "AC-12": {"kind": "fitness", "status": "pass", "where": "anti-case-lock.sh"},
+    "AC-13": {"kind": "fitness", "status": "pass", "where": "npm test + npm run build + npm run fitness:db (doc-* flake isolated)"}
+  },
+  "adversarial": [
+    {"id": "M1", "target": "(а) READ-PDP grant filter", "mutation": "if(false && !isRecordReadable(...)) continue;", "expected_red": "AC-3", "observed": "AC-3 RED — ci/checks/db/registry-digest.test.ts:143 viewerEntry.visibleCount toBe(0) failed (non-reader leaks another registry's count)", "reverted": true},
+    {"id": "M2", "target": "(б) owner short-circuit", "mutation": "if(false && ctx.isTenantOwner){...}", "expected_red": "AC-4 and/or AC-5", "observed": "unit AC-4 RED (assistant-configurator-owner.test.ts: OWNER-without-grant → ADMITTED failed); AC-5 DB stayed GREEN (seeded owner admitted via authoring_draft path — review F9)", "reverted": true},
+    {"id": "M3", "target": "(в2) honest ops report", "mutation": "buildHonestOpsReport returns finalTextFromLlm unconditionally", "expected_red": "AC-7", "observed": "4 tests RED incl. AC-7 (✗ not shown; ✅/optimistic carried over failures; «уже было» absent)", "reverted": true},
+    {"id": "M4", "target": "(г) reply-in-thread persist", "mutation": "skip withTenantTx persist in persistAssistantFailureReply, keep 500", "expected_red": "AC-9a (thread reply), AC-9b (500) intact", "observed": "AC-9 RED at assistant-dispatch-failure.test.ts:148 assistantMsgs.length toBeGreaterThanOrEqual(1) — thread mute; 500 still returned", "reverted": true}
+  ],
+  "non_regression_checks": [
+    {"check": "anti-mask invariant (T-0573 §2.2)", "test": "ci/checks/db/assistant-llm-unavailable.test.ts anti-mask case", "result": "PASS — plain non-LLM error still yields 500 INTERNAL after (г) reconciliation"},
+    {"check": "error-propagation contract", "test": "src/core/__tests__/assistant-analyst.test.ts + agent-on-behalf.test.ts", "result": "PASS — 29 tests, analyst propagates dormant/other errors"}
+  ],
+  "failures": [],
+  "flakes": [
+    {"test": "ci/checks/db/doc-summary.db.test.ts (FS-1/2/3/5)", "cause": "5000ms testTimeout exceeded under fitness:db parallel load", "isolated_result": "5/5 PASS at testTimeout=60000 (144s)", "attribution": "environmental, unrelated to T-0607 (touches no changed files), pre-warned in brief"}
+  ],
+  "notes": "Tree verified clean at HEAD after all 4 mutations reverted (git status empty, 0 MUTATION markers in src/). Brief's schemas/validate.py does not exist in the repo — contract JSONs (spec/adr/pr-handoff) validated as well-formed JSON and structurally consistent with the T-0599 sample; no generic contract validator is present in the repo. pr-handoff honestly declares all three ADR/spec deviations (analyst-swallow→propagate reconciliation, AC-8 reformulation, non-owner admission on intersection). Contract JSONs themselves are stale vs the reconciled code (review F8) — documentation only, non-blocking."
+}
