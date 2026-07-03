@@ -36,7 +36,7 @@
  * assistant.ts.
  */
 
-import { canonicalizeLlmError, classifyLlmUnavailability, type LlmPort } from "./llm-port.js";
+import type { LlmPort } from "./llm-port.js";
 import type { GrantSource } from "./grant-resolver.js";
 import type { HandlerContext, HandlerResult } from "./assistant-intent.js";
 import type { AncestryOracle } from "./grant-lattice.js";
@@ -494,46 +494,34 @@ export async function runAnalyst(
   const systemPrompt = buildAnalystSystemPrompt(ctx.tenantId, promptOverride);
   const draftContext = buildDraftContext(draft);
 
-  // T-0607 (г): wrap the LLM call — every user message must get an answer OR an
-  // honest error IN THE THREAD, never a silent no-reply. Previously runAnalyst
-  // let a non-"unavailable" LLM error propagate → the route returned a bare 500
-  // WITHOUT persisting any assistant message, so the thread stayed silent. Now
-  // any caught LLM error becomes a canonical, jargon-free reply (same discipline
-  // as the configurator loop, T-0600); the raw error is logged server-side only.
-  let llmText: string;
-  try {
-    const llmResult = await (ctx.llm as LlmPort).chat({
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content:
-            `Контекст данных (видимые пользователю):\n${draftContext}\n\n` +
-            `Запрос пользователя: ${userText}`,
-        },
-      ],
-    });
-    llmText = llmResult.text + SAVE_HINT;
-  } catch (err) {
-    // T-0573: a dormant/unavailable LLM must still reach the route's honest-503
-    // path (respondLlmUnavailable — admin/non-admin deep-links). We RE-THROW
-    // those so that richer 503 UX is preserved; we only swallow OTHER errors
-    // (timeout / network / malformed) into a canonical in-thread reply (г).
-    if (classifyLlmUnavailability(err) === "unavailable") {
-      throw err;
-    }
-    console.error(`[T-0607] analyst LLM call failed: ${String(err)}`);
-    // Honest canonical text (no raw provider body, no dev-jargon) — the thread
-    // gets a real reply instead of silence.
-    return { text: canonicalizeLlmError(err), intent: "analyst" };
-  }
+  // T-0607 (г): the analyst does NOT swallow LLM errors here. Errors propagate
+  // to the assistant ROUTE, which guarantees every user message gets a reply IN
+  // THE THREAD without masking real bugs:
+  //   - LlmDormantError / LlmUnavailableError → route's honest-503 path
+  //     (respondLlmUnavailable — persists a thread message + canonical envelope);
+  //   - any OTHER error (a real bug / transport failure) → the route persists a
+  //     canonical in-thread reply AND still surfaces INTERNAL 500 (anti-mask,
+  //     T-0573 ADR §2.2) — the thread is never mute, the bug is never hidden.
+  // Swallowing here would either (a) mask a genuine bug as a friendly 200, or
+  // (b) bypass the richer 503 UX — both worse than a single, honest route seam.
+  const llmResult = await (ctx.llm as LlmPort).chat({
+    system: systemPrompt,
+    messages: [
+      {
+        role: "user",
+        content:
+          `Контекст данных (видимые пользователю):\n${draftContext}\n\n` +
+          `Запрос пользователя: ${userText}`,
+      },
+    ],
+  });
 
   // -------------------------------------------------------------------------
-  // 6. The save-hint was already appended to the LLM output above.
+  // 6. Append the save-hint to the LLM output.
   //    This is a static text hint, NOT a DB write; the user chooses to save
   //    by clicking the FE "Сохранить как отчёт" control.
   // -------------------------------------------------------------------------
-  const replyText = llmText;
+  const replyText = llmResult.text + SAVE_HINT;
 
   return {
     text: replyText,

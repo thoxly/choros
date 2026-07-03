@@ -1347,13 +1347,22 @@ async function respondLlmUnavailable(
 
 // ---------------------------------------------------------------------------
 // T-0607 (г): persist an honest in-thread reply for a NON-LLM-unavailable
-// dispatch failure, then respond with the same canonical text.
+// dispatch failure, then STILL surface the bug as a 500 INTERNAL envelope.
 //
-// Guarantees a user message never stays silent behind a bare 500: the thread
-// gets a real assistant message (canonical, jargon-free — buildDispatchFailureReply),
-// and the HTTP response carries that same text at 200 so the web chat renders a
-// reply bubble rather than swallowing a 500 with no thread update. The raw error
-// is the CALLER's responsibility to log (already done at the call site).
+// This reconciles TWO invariants that pull in opposite directions:
+//   (г, T-0607)  every user message must get an answer OR an honest error IN THE
+//                THREAD — previously a non-LLM error fell through to a bare 500
+//                with NO thread message, leaving the thread silent (user message,
+//                no reply, no error bubble).
+//   (anti-mask, T-0573 ADR §2.2)  a plain (non-LLM-classified) error is a REAL
+//                BUG and must NOT be masked as a friendly 200 — it must stay
+//                visible as an INTERNAL 500 so it is not swept under the rug.
+//
+// The reconciliation: persist a canonical, jargon-free assistant message into
+// the thread (so the chat shows a reply bubble — the thread is never mute), AND
+// respond with the SAME 500 INTERNAL envelope the router would have produced (so
+// the bug is still loudly visible to operators/tests). The raw error is logged
+// by the caller before this is invoked.
 // ---------------------------------------------------------------------------
 async function persistAssistantFailureReply(
   pool: pg.Pool,
@@ -1364,8 +1373,6 @@ async function persistAssistantFailureReply(
   res: ServerResponse,
 ): Promise<void> {
   const text = buildDispatchFailureReply();
-  const msgId = randomUUID();
-  const ts = Date.now();
   try {
     await withTenantTx(pool, tenantId, async (client) => {
       const payload: MessagePayload = {
@@ -1377,7 +1384,7 @@ async function persistAssistantFailureReply(
         streaming_done: true,
       };
       await auditWriter.appendAuditEvent(client, {
-        id: msgId,
+        id: randomUUID(),
         type: "assistant.message",
         actor: agentSlug,
         subject: actorSlug,
@@ -1386,25 +1393,16 @@ async function persistAssistantFailureReply(
         proposed_by: null,
         confirmed_by: null,
         payload,
-        occurred_at: ts,
+        occurred_at: Date.now(),
       });
     });
   } catch (persistErr) {
-    // Even the persist failed — still answer honestly (do not mask with 500).
+    // Even the persist failed — do not mask; the 500 below still surfaces the bug.
     console.error(`[T-0607] failed to persist dispatch-failure reply: ${String(persistErr)}`);
   }
-  res.statusCode = 200;
-  res.setHeader("Content-Type", "application/json");
-  res.end(
-    JSON.stringify({
-      id: msgId,
-      role: "assistant",
-      text,
-      ts: new Date(ts).toISOString(),
-      intent: "unknown",
-      streaming_done: true,
-    }),
-  );
+  // Anti-mask: the underlying error is a real bug — respond with INTERNAL 500
+  // (the canonical envelope the router itself uses), NOT a friendly 200.
+  sendErrorEnvelope(res, 500, "INTERNAL", "internal server error");
 }
 
 interface ThreadRow {

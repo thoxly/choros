@@ -151,14 +151,15 @@ describe("S3 telemetry gate (T-0607 д)", () => {
   });
 });
 
-describe("analyst LLM-error → honest reply in thread (T-0607 г)", () => {
-  it("AC-8: throwing LLM port yields a canonical HandlerResult, no propagation", async () => {
+describe("analyst LLM-error propagates to the route (T-0607 г / anti-mask)", () => {
+  it("AC-8: a throwing LLM port PROPAGATES (analyst does not mask) — the route seam handles it", async () => {
+    // The (г) guarantee (thread never mute) + the anti-mask invariant (real bugs
+    // stay visible) are BOTH enforced at the assistant ROUTE seam, not swallowed
+    // here. So the analyst must let the error propagate — the route then persists
+    // a canonical in-thread reply AND returns INTERNAL 500 (see
+    // ci/checks/db/assistant-dispatch-failure.test.ts + assistant-report.test.ts).
     const stub = new StubChatLlmPort({ mode: "error" });
     const ports: AnalystPorts = { loadRegistryDigest: async () => ({ degraded: false, registries: [] }) };
-    const result = await runAnalyst("любой запрос", ctx(stub), ports);
-    expect(result.intent).toBe("analyst");
-    expect(result.text.length).toBeGreaterThan(0);
-    // Canonical, not a raw thrown Error / provider body.
-    expect(result.text).not.toMatch(/Error:|OpenAI API error|at \w+\.ts:/);
+    await expect(runAnalyst("любой запрос", ctx(stub), ports)).rejects.toBeInstanceOf(Error);
   });
 });
