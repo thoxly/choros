@@ -1,0 +1,137 @@
+-- 122 · on_create trigger-scope + registry write-protection (T-0606 [approval-registry-guard])
+--
+-- CONTEXT (two independent live bugs, one migration; both concern
+-- choros.process_app_binding + choros.registry_def, the two tables the ADR
+-- names as the natural owners — no new table):
+--
+-- BUG #2 (phantom process spawns): getOnCreateBinding (src/db/binding-trigger-
+-- dao.ts) matches an on_create binding ONLY on (tenant_id, application_id,
+-- trigger_type='on_create') — see its SQL WHERE clause pre-this-migration.
+-- Its caller, createRecord (src/http/records.ts ~813), passes
+-- `reg.application_id` (the registry_def row of whatever registry the CALLER
+-- is writing into). Any registry_def belonging to the SAME application_id —
+-- including a step-result "Согласование" projection registry seeded
+-- alongside the primary "Заявки" registry (migration 076) — therefore fires
+-- the SAME on_create binding. Manually creating a row in "Согласование"
+-- (which shares tel-approval's application_id) spawns a brand-new telLinear
+-- instance, which is never the intent: the binding should fire ONLY when a
+-- record is created in the application's PRIMARY (business-data) registry.
+--
+-- BUG #1 (phantom/deletable decision records): approval/decision projection
+-- registries (the registry step-applier.ts's applyStepResult writes
+-- decision records into, migration 076 "Согласование") accept ordinary
+-- CRUD create/update/delete via POST/PUT/DELETE /api/records the same as
+-- any user-authored registry. A user can manually fabricate or delete a
+-- "decision" record that was never a real BPMN step outcome.
+--
+-- WHAT THIS MIGRATION ADDS (two independent, additive, orthogonal columns —
+-- ADR-T0606-approval-registry-guard.md §2/§3 for the full decision record):
+--
+--   1. choros.process_app_binding.trigger_registry_id uuid NULL
+--      — Part A (BUG #2). The registry_def.id that the on_create binding is
+--      scoped to. NOT a reuse of target_registry_slug (migration 119): that
+--      column is EXCLUSIVELY the step-RESULT WRITE target used by
+--      step-applier.ts's applyStepResult (via resolveDefaultStepResultSlug()
+--      fallback) to decide where a COMPLETED step's decision record lands —
+--      an entirely separate concern (outbound, post-decision) from "which
+--      registry's create event fires the START of a process" (inbound,
+--      pre-decision). Conflating the two would make one column serve two
+--      unrelated reads with incompatible NULL-fallback semantics (see ADR
+--      §1 for the full investigation of target_registry_slug's actual
+--      meaning). trigger_registry_id is chosen over a slug-text column
+--      because the call site (records.ts's createRecord) already holds the
+--      registry_def row (`reg`) with `reg.id` in hand — an id-FK-shaped
+--      column avoids adding a slug lookup/join the caller does not otherwise
+--      need (the ADR records this trade-off explicitly).
+--      NULL-SEMANTICS: NULL = the binding fires on create in the
+--      application's PRIMARY registry — defined identically to the existing
+--      "primary registry" notion process-instance-resolver.ts's Step 3
+--      already uses (first non-system registry by created_at ASC) — NOT on
+--      any other registry_def under the same application_id. This is
+--      additive/backward-compatible: every row that existed before this
+--      migration is NULL, and for the ТЭЛ seed (085, telLinear →
+--      tel-approval) the application's ONLY non-system registry is
+--      "purchases" (Заявки; migration 086 flips it to is_system=false,
+--      "soglasovanie"/Согласование stays is_system=true permanently) — so
+--      the NULL fallback resolves to EXACTLY the same registry the existing
+--      ТЭЛ create=start scenario already depends on. Zero behavior change
+--      for telLinear; BUG #2 (Согласование wrongly re-firing the binding)
+--      is closed because "Согласование" is_system=true is NEVER a candidate
+--      for the NULL/primary-registry fallback in the first place.
+--
+--   2. choros.registry_def.engine_managed boolean NOT NULL DEFAULT false
+--      — Part B (BUG #1). Marks a registry_def as engine-managed / write-
+--      protected: generic CRUD create/update/delete via the HTTP
+--      /api/records route must reject a request against a registry with
+--      this flag set (403, see src/http/records.ts guard). Chosen as a
+--      first-class boolean column (mirrors the existing is_system column,
+--      migration 004, same shape/precedent) over a jsonb convention key
+--      inside record_schema (e.g. "x-write-protected": "engine") — a
+--      top-level column is queryable/indexable without parsing jsonb, and
+--      keeps GOVERNANCE metadata (who is allowed to write) separate from
+--      SCHEMA-CONTENT metadata (what shape the data takes), matching this
+--      codebase's existing precedent of is_system as a first-class column
+--      rather than a schema-embedded flag (ADR §3 records the full
+--      trade-off). DEFAULT false: every existing registry_def row (and any
+--      future one that does not opt in) is unprotected by default — zero
+--      behavior change for ordinary user-authored registries.
+--
+-- DATA COMPLETION (seed-data UPDATE, NOT a src/ code slug — D-064 §5 draws
+-- the boundary at src/ TypeScript source; a literal inside a MIGRATION's
+-- data-completion UPDATE is the SAME precedent-sanctioned class as migration
+-- 119's `WHERE process_key = 'telLinear'` / 121's `WHERE ... = 'task-submit'`
+-- — seed-data, not code):
+--   - choros.registry_def: mark the ТЭЛ "Согласование" registry
+--     (a7000000-…-0003, migration 076) as engine_managed = true. This is the
+--     registry applyStepResult (step-applier.ts) writes decision records
+--     into — the canonical "step-result projection registry" this migration
+--     protects. Idempotent, no-op if the 076 seed row is absent
+--     (CHOROS_SEED_DEMO=off).
+--   - choros.process_app_binding: leave the ТЭЛ telLinear→tel-approval
+--     binding's trigger_registry_id as NULL (no UPDATE needed — NULL already
+--     resolves correctly to "purchases", per the NULL-semantics above; an
+--     explicit non-NULL value here would be redundant, not more correct).
+--
+-- ADDITIVE ONLY: ALTER TABLE ... ADD COLUMN IF NOT EXISTS on the TWO EXISTING
+-- tenant tables choros.process_app_binding (075) and choros.registry_def
+-- (004). No new table, no new RLS policy, no existing row's behavior changed
+-- by the DDL itself (both new columns have safe, backward-compatible
+-- defaults/NULL). The existing RLS predicates (process_app_binding_tenant_
+-- isolation, registry_def_tenant_isolation) are NOT modified.
+--
+-- known_tenant_tables.txt: NOT modified (both tables already listed).
+--
+-- FROZEN-CHECK SANCTION:
+--   dual-control-isolation.sh (FF-DC7): 122 ALTERs two known tenant tables,
+--   which triggers FF-DC7. Additive relief for this migration
+--   (T0606-DC-MIG122-GUARD) is appended to that check, mirroring the
+--   082/109/115/116/117/119/120/121 precedent (ADD COLUMN on existing
+--   tables, no dual-control authority domain touched: no grant/confirmation/
+--   confirmed2_by column involved).
+--   defer-no-new-table.sh Check-2: no CREATE TABLE statement here — only ADD
+--   COLUMN — so Check-2 does not apply, no relief needed.
+--   Check-1 also does not apply: known_tenant_tables.txt is unchanged.
+--
+-- Idempotency (NF-1): ADD COLUMN IF NOT EXISTS on both tables; the UPDATE is
+-- a no-op re-apply (guarded by `engine_managed IS DISTINCT FROM true`).
+-- Migration slot: 122 (121 is the highest occupied slot at authoring time).
+
+ALTER TABLE choros.process_app_binding
+  ADD COLUMN IF NOT EXISTS trigger_registry_id uuid NULL;
+
+ALTER TABLE choros.registry_def
+  ADD COLUMN IF NOT EXISTS engine_managed boolean NOT NULL DEFAULT false;
+
+-- @demo-seed-adjacent data completion (non-DDL, no-op when the 076 seed row is
+-- absent): mark the ТЭЛ "Согласование" (approvals projection) registry as
+-- engine-managed/write-protected — it is the registry applyStepResult
+-- (step-applier.ts) writes decision records into via its own direct DAO
+-- insert (NOT through this guard's HTTP route — see ADR §5 for the isolation
+-- argument). Safe under CHOROS_SEED_DEMO=off (no-op UPDATE touching zero rows
+-- when 076 never ran).
+UPDATE choros.registry_def
+   SET engine_managed = true
+ WHERE tenant_id = 'a0000000-0000-0000-0000-000000000001'
+   AND id         = 'a7000000-0000-0000-0000-000000000003'
+   AND application_id = 'a7000000-0000-0000-0000-000000000001'
+   AND engine_managed IS DISTINCT FROM true;

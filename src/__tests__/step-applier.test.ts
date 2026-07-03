@@ -295,6 +295,51 @@ describe("applyStepResult — A-class step", () => {
       applied.recordId,
     );
   });
+
+  it("SA-11 (T-0606 [approval-registry-guard]): applyStepResult's direct DAO insert is STRUCTURALLY unaffected by registry_def.engine_managed — resolveApprovalsRegistry never selects that column, and the INSERT proceeds regardless", async () => {
+    // This is the isolation proof required by ADR-T0606-approval-registry-guard.md
+    // §5: the HTTP write-protection guard (src/http/records.ts's
+    // assertNotEngineManaged) lives INSIDE createRecord/updateRecord/deleteRecord —
+    // functions applyStepResult never calls. applyStepResult writes the
+    // «Согласование» decision record via its OWN direct
+    // `INSERT INTO choros.record` (this file, ~line 700), reached through
+    // resolveApprovalsRegistry's `SELECT id, application_id FROM
+    // choros.registry_def WHERE ... AND slug = $3` — a query that does not
+    // (and, after this migration, still does not) select engine_managed at
+    // all. This test proves BOTH halves: (a) the SQL text of every
+    // registry_def query issued by this call never mentions engine_managed,
+    // and (b) the record INSERT still succeeds and targets the approvals
+    // registry — i.e. marking that registry engine_managed=true (as
+    // migration 122's data-completion UPDATE does for the live ТЭЛ
+    // «Согласование» row) cannot possibly block this path, by construction.
+    const { store, enqueued } = makeOutboxSpy();
+    const { client, calls } = makeHappyClient();
+
+    const result = await applyStepResult(client, {
+      ...baseArgs({ outboxStore: store }),
+    });
+
+    expect(result.kind).toBe("applied-A");
+    const applied = result as AppliedA;
+
+    // (a) No registry_def query issued by this path ever references
+    // engine_managed — the column is invisible to this code path entirely.
+    const registryDefQueries = calls.filter((c) =>
+      /FROM choros\.registry_def/i.test(c.sql),
+    );
+    expect(registryDefQueries.length).toBeGreaterThan(0);
+    for (const q of registryDefQueries) {
+      expect(q.sql).not.toMatch(/engine_managed/i);
+    }
+
+    // (b) The record INSERT still landed in the approvals registry — proving
+    // a hypothetical engine_managed=true on that row changes nothing here.
+    const recordInsert = calls.find((c) => /INSERT INTO choros\.record/i.test(c.sql));
+    expect(recordInsert).toBeDefined();
+    expect(recordInsert?.values).toContain(APPROVALS_REGISTRY_ID);
+    expect(enqueued).toHaveLength(1);
+    expect(applied.recordId).toBeDefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

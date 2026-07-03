@@ -195,6 +195,7 @@ _dc_mig118_failed=0                                                             
 _dc_mig119_failed=0                                                                # T0575-DC-MIG119-GUARD track when 119 triggers the FF-DC7 fail
 _dc_mig120_failed=0                                                                # T0594-DC-MIG120-GUARD track when 120 triggers the FF-DC7 fail
 _dc_mig121_failed=0                                                                # T0604-DC-MIG121-GUARD track when 121 triggers the FF-DC7 fail
+_dc_mig122_failed=0                                                                # T0606-DC-MIG122-GUARD track when 122 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -271,6 +272,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/121_process_app_binding_submit_task_key.sql" ]]; then # T0604-DC-MIG121-GUARD
       _dc_mig121_failed=1                                                     # T0604-DC-MIG121-GUARD
     fi                                                                        # T0604-DC-MIG121-GUARD
+    # Track specifically when 122 triggers this FAIL (and nothing else).     # T0606-DC-MIG122-GUARD
+    if [[ "${m}" == "migrations/122_approval_registry_guard.sql" ]]; then     # T0606-DC-MIG122-GUARD
+      _dc_mig122_failed=1                                                     # T0606-DC-MIG122-GUARD
+    fi                                                                        # T0606-DC-MIG122-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -753,6 +758,30 @@ if [[ "${_dc_mig121_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0604-submit-task-key]: migration 121_process_app_binding_submit_task_key.sql adds ONE nullable column to process_app_binding + a keyed data-completion UPDATE — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0604-DC-MIG121-GUARD
   fi                                                                           # T0604-DC-MIG121-GUARD
 fi                                                                             # T0604-DC-MIG121-GUARD
+# T-0606: additive relief for migration 122_approval_registry_guard.sql.       # T0606-DC-MIG122-GUARD
+# 122 ALTERs TWO EXISTING tables (process_app_binding: 075/082/119/121         # T0606-DC-MIG122-GUARD
+# precedent; registry_def: 004 precedent), adding ONE nullable column to      # T0606-DC-MIG122-GUARD
+# each (trigger_registry_id, engine_managed) + a keyed, idempotent UPDATE     # T0606-DC-MIG122-GUARD
+# completing the ТЭЛ «Согласование» seed row's engine_managed flag. No new    # T0606-DC-MIG122-GUARD
+# TABLE, no new RLS policy, no confirmed2_by touch — UNRELATED to the         # T0606-DC-MIG122-GUARD
+# dual-control authority domain (grant/confirmation/confirmed2_by). Same     # T0606-DC-MIG122-GUARD
+# class as the 119/121 reliefs.                                              # T0606-DC-MIG122-GUARD
+_dc_mig122_stem="migrations/122_approval_registry_guard.sql"                  # T0606-DC-MIG122-GUARD
+if [[ "${_dc_mig122_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig122_stem}"; then # T0606-DC-MIG122-GUARD
+  _dc_mig122_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig122_stem}" 2>/dev/null || true)"  # T0606-DC-MIG122-GUARD
+  _dc_mig122_bad=0                                                             # T0606-DC-MIG122-GUARD
+  if echo "${_dc_mig122_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0606-DC-MIG122-GUARD
+    _dc_mig122_bad=1                                                           # T0606-DC-MIG122-GUARD introduces DDL/RLS
+  fi                                                                           # T0606-DC-MIG122-GUARD
+  if echo "${_dc_mig122_content}" | grep -iqE "confirmed2_by"; then           # T0606-DC-MIG122-GUARD
+    _dc_mig122_bad=1                                                           # T0606-DC-MIG122-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0606-DC-MIG122-GUARD
+  if [[ "${_dc_mig122_bad}" -eq 0 ]]; then                                    # T0606-DC-MIG122-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0606-DC-MIG122-GUARD cancel false-red
+    _dc_mig122_failed=0                                                        # T0606-DC-MIG122-GUARD
+    echo "PASS [FF-DC7-T0606-approval-registry-guard]: migration 122_approval_registry_guard.sql adds ONE nullable/boolean column to EACH of process_app_binding + registry_def + a keyed data-completion UPDATE — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0606-DC-MIG122-GUARD
+  fi                                                                           # T0606-DC-MIG122-GUARD
+fi                                                                             # T0606-DC-MIG122-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

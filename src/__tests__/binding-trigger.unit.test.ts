@@ -131,9 +131,30 @@ function makeStubClient(opts: {
       if (/UPDATE choros\.audit_head/i.test(sql)) {
         return { rows: [] };
       }
-      // registry_def SELECT
+      // process_app_binding SELECT (getOnCreateBinding) — T-0606: this query's
+      // WHERE clause now embeds a nested `FROM choros.registry_def` subquery
+      // (the NULL-trigger_registry_id "primary registry" fallback), so it
+      // MUST be checked BEFORE the generic registry_def branch below, else
+      // the subquery text would misroute this call to the plain registry_def
+      // responder instead of the binding-row responder.
+      if (/FROM choros\.process_app_binding/i.test(sql)) {
+        if (bindingRow === null || bindingRow === undefined) {
+          return { rows: [] };
+        }
+        // T-0604: mirror the real column's NULL default when a fixture omits
+        // submit_task_key entirely (pre-T-0604 test literals).
+        // T-0606: mirror the real column's NULL default when a fixture omits
+        // trigger_registry_id entirely (pre-T-0606 test literals) — NULL means
+        // "fires on the application's primary registry", which this stub's
+        // fakeRegistryDef.id always satisfies (see the nested subquery below).
+        return { rows: [{ submit_task_key: null, trigger_registry_id: null, ...bindingRow }] };
+      }
+      // registry_def SELECT (both the createRecord governing-registry lookup
+      // AND getOnCreateBinding's nested "primary registry" subquery resolve
+      // to the SAME single fakeRegistryDef in this stub — there is only one
+      // registry_def in play, so it is trivially always the "primary" one).
       if (/FROM choros\.registry_def/i.test(sql)) {
-        return { rows: [fakeRegistryDef] };
+        return { rows: [{ ...fakeRegistryDef, engine_managed: false }] };
       }
       // record INSERT
       if (/INSERT INTO choros\.record/i.test(sql)) {
@@ -142,15 +163,6 @@ function makeStubClient(opts: {
       // audit_event INSERT (appendAuditEvent)
       if (/INSERT INTO choros\.audit_event/i.test(sql)) {
         return { rows: [] };
-      }
-      // process_app_binding SELECT (getOnCreateBinding)
-      if (/FROM choros\.process_app_binding/i.test(sql)) {
-        if (bindingRow === null || bindingRow === undefined) {
-          return { rows: [] };
-        }
-        // T-0604: mirror the real column's NULL default when a fixture omits
-        // submit_task_key entirely (pre-T-0604 test literals).
-        return { rows: [{ submit_task_key: null, ...bindingRow }] };
       }
       // record readback SELECT (joined)
       if (/FROM choros\.record r/i.test(sql)) {
@@ -864,6 +876,395 @@ describe("T-0603 on_create: embedded-rollup field reaches startInstance variable
       // Empty collection → honest null (never coerced to 0); ${amount>500000} is
       // deterministically false → the gateway takes its default branch.
       expect(calledVars!["amount"]).toBe(null);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0606 [approval-registry-guard] Part A: on_create trigger SCOPE
+// ---------------------------------------------------------------------------
+// getOnCreateBinding (binding-trigger-dao.ts) previously matched an on_create
+// binding on application_id ALONE — ANY registry_def sharing that
+// application_id fired the SAME binding, including an engine-managed
+// "Согласование" projection registry seeded alongside the application's
+// primary "Заявки" registry. Migration 122 adds
+// process_app_binding.trigger_registry_id: NULL = fires on create in the
+// application's PRIMARY registry (first non-system registry_def by
+// created_at ASC — the SAME definition process-instance-resolver.ts's Step 3
+// already uses), non-NULL = fires ONLY for that exact registry_def id. These
+// tests stub TWO distinct registry_def rows under one application: a
+// PRIMARY (is_system=false, earlier created_at) and a SECONDARY projection
+// registry (is_system=true, later created_at) — mirroring the real ТЭЛ seed
+// shape (076/086: purchases is_system=false, soglasovanie stays
+// is_system=true).
+// ---------------------------------------------------------------------------
+
+const PRIMARY_REGISTRY_ID = "a7000000-0000-0000-0000-000000000002"; // mirrors ТЭЛ "purchases"
+const SECONDARY_REGISTRY_ID = "a7000000-0000-0000-0000-000000000003"; // mirrors ТЭЛ "soglasovanie"
+const TRIGGER_SCOPE_APP_ID = "a0000000-0000-0000-0000-000000000001";
+const TRIGGER_SCOPE_TENANT_ID = "a0000000-0000-0000-0000-000000000001";
+
+/**
+ * Stub pg PoolClient for the trigger-scope tests: TWO registry_def rows
+ * under one application (primary + secondary), a configurable binding row
+ * (with trigger_registry_id), and a record create targeting a caller-chosen
+ * registryId.
+ */
+function makeTriggerScopeClient(opts: {
+  /** Which registry the POST /api/records call targets. */
+  targetRegistryId: string;
+  bindingRow: {
+    id: string;
+    process_key: string;
+    trigger_type: string;
+    start_form_key: string | null;
+    field_mapping: Record<string, string>;
+    submit_task_key?: string | null;
+    trigger_registry_id?: string | null;
+  } | null;
+}) {
+  const { targetRegistryId, bindingRow } = opts;
+
+  const registries: Record<string, { id: string; application_id: string; is_system: boolean; created_at: string }> = {
+    [PRIMARY_REGISTRY_ID]: {
+      id: PRIMARY_REGISTRY_ID,
+      application_id: TRIGGER_SCOPE_APP_ID,
+      is_system: false,
+      created_at: "0",
+    },
+    [SECONDARY_REGISTRY_ID]: {
+      id: SECONDARY_REGISTRY_ID,
+      application_id: TRIGGER_SCOPE_APP_ID,
+      is_system: true,
+      created_at: "0",
+    },
+  };
+
+  const targetReg = registries[targetRegistryId];
+  if (!targetReg) throw new Error(`unknown targetRegistryId in test fixture: ${targetRegistryId}`);
+
+  const fakeRecord = {
+    id: "ac000000-0000-0000-0000-000000000099",
+    registry_id: targetRegistryId,
+    application_id: TRIGGER_SCOPE_APP_ID,
+    record_schema_version: 1,
+    data: {},
+    created_at: "1000",
+    updated_at: "1000",
+  };
+
+  return {
+    query: vi.fn(async (sql: string, params?: unknown[]) => {
+      const trimmed = sql.trim();
+      if (/^(BEGIN|COMMIT|ROLLBACK|SET LOCAL)/i.test(trimmed)) {
+        return { rows: [] };
+      }
+      if (/current_setting\s*\(\s*'choros\.tenant_id'/i.test(sql) && !/INSERT|UPDATE/i.test(sql)) {
+        return { rows: [{ tenant_id: TRIGGER_SCOPE_TENANT_ID }] };
+      }
+      if (/INSERT INTO choros\.audit_head/i.test(sql)) return { rows: [] };
+      if (/FROM choros\.audit_head/i.test(sql)) {
+        return { rows: [{ seq: 0, row_hash: Buffer.alloc(32), vocab_version: 1 }] };
+      }
+      if (/UPDATE choros\.audit_head/i.test(sql)) return { rows: [] };
+      if (/INSERT INTO choros\.audit_event/i.test(sql)) return { rows: [] };
+      if (/INSERT INTO choros\.record/i.test(sql)) return { rows: [] };
+
+      // process_app_binding SELECT (getOnCreateBinding) — MUST be checked
+      // before the generic registry_def branch: this query embeds a nested
+      // `FROM choros.registry_def` subquery for the NULL-fallback primary
+      // registry resolution. The stub EVALUATES the same trigger-scope
+      // predicate the real SQL's WHERE clause does (params[2] is the
+      // registryId argument, $3 in the query): match if
+      // trigger_registry_id === registryId, OR trigger_registry_id is NULL
+      // AND registryId === the PRIMARY registry — else no row (mirrors a
+      // real WHERE clause filtering out a non-matching row, not just
+      // returning it unconditionally).
+      if (/FROM choros\.process_app_binding/i.test(sql)) {
+        if (bindingRow === null || bindingRow === undefined) return { rows: [] };
+        const effectiveTriggerRegistryId =
+          "trigger_registry_id" in bindingRow ? (bindingRow.trigger_registry_id ?? null) : null;
+        const calledRegistryId = (params ?? [])[2] as string | undefined;
+        const matches =
+          effectiveTriggerRegistryId !== null
+            ? effectiveTriggerRegistryId === calledRegistryId
+            : calledRegistryId === PRIMARY_REGISTRY_ID;
+        if (!matches) return { rows: [] };
+        return { rows: [{ submit_task_key: null, trigger_registry_id: null, ...bindingRow }] };
+      }
+
+      // registry_def lookups: resolveGoverningRegistryDef's own query (by id)
+      // AND getOnCreateBinding's nested "primary registry" subquery
+      // (is_system = false ORDER BY created_at ASC LIMIT 1). Distinguish by
+      // whether the SQL text carries the is_system predicate.
+      if (/FROM choros\.registry_def/i.test(sql)) {
+        if (/is_system\s*=\s*false/i.test(sql)) {
+          // The nested primary-registry subquery — always resolves to the
+          // one PRIMARY (is_system=false) row in this fixture, regardless of
+          // which registry the caller is writing into.
+          return { rows: [{ id: PRIMARY_REGISTRY_ID }] };
+        }
+        // resolveGoverningRegistryDef: return the CALLER'S target registry.
+        return {
+          rows: [
+            {
+              id: targetReg.id,
+              application_id: targetReg.application_id,
+              record_schema: { type: "object", properties: {}, additionalProperties: true },
+              record_schema_version: 1,
+              engine_managed: targetReg.is_system, // mirrors the migration 122 seed pattern
+            },
+          ],
+        };
+      }
+
+      if (/FROM choros\.record r/i.test(sql)) {
+        return { rows: [fakeRecord] };
+      }
+      // Defensive: surface unexpected queries loudly (params kept for debugging).
+      void params;
+      return { rows: [] };
+    }),
+    release: vi.fn(),
+  };
+}
+
+function makeTriggerScopePool(opts: Parameters<typeof makeTriggerScopeClient>[0]) {
+  const client = makeTriggerScopeClient(opts);
+  return {
+    connect: async () => client as unknown as import("pg").PoolClient,
+    _client: client,
+  } as unknown as import("pg").Pool;
+}
+
+describe("T-0606 Part A: on_create trigger scope (bug #2 — phantom process spawns)", () => {
+  it("create in the SECONDARY (non-primary) registry of the same application → process does NOT start", async () => {
+    const flowable = makeStubFlowable({ ok: true, instanceId: "inst-t0606-a" });
+    const bindingRow = {
+      id: "bind-t0606-a",
+      process_key: "telLinear",
+      trigger_type: "on_create",
+      start_form_key: null,
+      field_mapping: {} as Record<string, string>,
+      trigger_registry_id: null, // NULL = fires on the PRIMARY registry only
+    };
+    const pool = makeTriggerScopePool({ targetRegistryId: SECONDARY_REGISTRY_ID, bindingRow });
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => TRIGGER_SCOPE_TENANT_ID,
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        {
+          application_id: TRIGGER_SCOPE_APP_ID,
+          registry_def_id: SECONDARY_REGISTRY_ID,
+          data: { decision: "approve" },
+        },
+      );
+      // The secondary registry in this fixture is engine_managed (is_system
+      // mirrors engine_managed for this seed shape) — the write-protection
+      // guard (Part B) rejects the CREATE itself before on_create is even
+      // reached. This is the CORRECT combined behavior (both bugs fixed
+      // simultaneously protect this registry), but to isolate the TRIGGER-
+      // SCOPE assertion specifically (bug #2), assert on the engine call
+      // directly: even though the guard fired first (403, not 201),
+      // startInstance must NEVER have been called for this registry.
+      expect(res.status).toBe(403);
+      expect(flowable.startInstance).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it("create in the PRIMARY registry of the same application → process DOES start (regression: telLinear/purchaseApproval scenarios unaffected)", async () => {
+    const flowable = makeStubFlowable({ ok: true, instanceId: "inst-t0606-b" });
+    const bindingRow = {
+      id: "bind-t0606-b",
+      process_key: "telLinear",
+      trigger_type: "on_create",
+      start_form_key: null,
+      field_mapping: {} as Record<string, string>,
+      trigger_registry_id: null, // NULL = fires on the PRIMARY registry
+    };
+    const pool = makeTriggerScopePool({ targetRegistryId: PRIMARY_REGISTRY_ID, bindingRow });
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => TRIGGER_SCOPE_TENANT_ID,
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        {
+          application_id: TRIGGER_SCOPE_APP_ID,
+          registry_def_id: PRIMARY_REGISTRY_ID,
+          data: { title: "Заявка" },
+        },
+      );
+      expect(res.status).toBe(201);
+      expect(flowable.startInstance).toHaveBeenCalledOnce();
+      expect(flowable.startInstance).toHaveBeenCalledWith("telLinear", undefined);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("create in a SECONDARY registry that is NOT engine_managed still does not fire an on_create binding scoped (via NULL) to the PRIMARY registry", async () => {
+    // Isolates the trigger-scope assertion from the write-protection guard
+    // (Part B) by using a secondary registry that is is_system=false /
+    // engine_managed=false — a plain second user registry under the same
+    // application (not necessarily a "Согласование"-shaped one). The create
+    // itself succeeds (201) because there is no write-protection in play,
+    // but the on_create binding (NULL trigger_registry_id → primary only)
+    // must still NOT fire for it.
+    const flowable = makeStubFlowable({ ok: true, instanceId: "inst-t0606-c" });
+    const bindingRow = {
+      id: "bind-t0606-c",
+      process_key: "telLinear",
+      trigger_type: "on_create",
+      start_form_key: null,
+      field_mapping: {} as Record<string, string>,
+      trigger_registry_id: null,
+    };
+    // Reuse the trigger-scope stub but override the secondary registry's
+    // is_system/engine_managed to false via a custom targetRegistryId path:
+    // we simulate this by pointing targetRegistryId at SECONDARY_REGISTRY_ID
+    // but patching engine_managed off through a thin wrapper client.
+    const basePool = makeTriggerScopeClient({ targetRegistryId: SECONDARY_REGISTRY_ID, bindingRow });
+    const wrappedClient = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        const result = await basePool.query(sql, params);
+        if (/FROM choros\.registry_def/i.test(sql) && !/is_system\s*=\s*false/i.test(sql)) {
+          return { rows: result.rows.map((r: Record<string, unknown>) => ({ ...r, engine_managed: false })) };
+        }
+        return result;
+      }),
+      release: vi.fn(),
+    };
+    const pool = {
+      connect: async () => wrappedClient as unknown as import("pg").PoolClient,
+    } as unknown as import("pg").Pool;
+
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => TRIGGER_SCOPE_TENANT_ID,
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        {
+          application_id: TRIGGER_SCOPE_APP_ID,
+          registry_def_id: SECONDARY_REGISTRY_ID,
+          data: { note: "not engine-managed, just a second registry" },
+        },
+      );
+      expect(res.status).toBe(201);
+      expect(flowable.startInstance).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it("binding with explicit non-NULL trigger_registry_id pinned to the SECONDARY registry → fires for that registry, NOT the primary", async () => {
+    const flowable = makeStubFlowable({ ok: true, instanceId: "inst-t0606-d" });
+    const bindingRow = {
+      id: "bind-t0606-d",
+      process_key: "customProcess",
+      trigger_type: "on_create",
+      start_form_key: null,
+      field_mapping: {} as Record<string, string>,
+      trigger_registry_id: SECONDARY_REGISTRY_ID, // explicit pin, not the primary
+    };
+
+    // A create in the PRIMARY registry must NOT fire this binding (it's pinned elsewhere).
+    const poolPrimary = makeTriggerScopePool({ targetRegistryId: PRIMARY_REGISTRY_ID, bindingRow });
+    const { server: serverPrimary, baseUrl: baseUrlPrimary } = buildServer({
+      pool: poolPrimary,
+      resolveActorTenant: async () => TRIGGER_SCOPE_TENANT_ID,
+      flowable,
+    });
+    await new Promise<void>((r) => serverPrimary.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrlPrimary()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        { application_id: TRIGGER_SCOPE_APP_ID, registry_def_id: PRIMARY_REGISTRY_ID, data: {} },
+      );
+      expect(res.status).toBe(201);
+      expect(flowable.startInstance).not.toHaveBeenCalled();
+    } finally {
+      serverPrimary.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0606 Part C (T-0604 reviewer AC-3b): submit_task_key=NULL + first live
+// active user-task keyed 'task-submit' → auto-complete must still NOT fire.
+// Pins the invariant "NULL = disabled, no fallback literal guess" even when
+// the live task's defKey HAPPENS to equal the string a hypothetical fallback
+// might have guessed.
+// ---------------------------------------------------------------------------
+
+describe("T-0606 Part C (T-0604 AC-3b bonus): submit_task_key NULL + live first task keyed 'task-submit' → completeUserTask NOT called", () => {
+  it("NULL submit_task_key + first active task defKey coincidentally 'task-submit' → no auto-complete (no fallback literal guess)", async () => {
+    const flowable = makeStubFlowable(
+      { ok: true, instanceId: "inst-t0606-c1" },
+      [
+        {
+          id: "engine-task-t0606-c1",
+          taskDefinitionKey: "task-submit",
+          name: "Подача заявки",
+          candidateGroups: ["role-initiator"],
+        },
+      ],
+    );
+    const bindingRow = {
+      id: "bind-t0606-c1",
+      process_key: "genericProcess",
+      trigger_type: "on_create",
+      start_form_key: null,
+      field_mapping: {} as Record<string, string>,
+      submit_task_key: null, // explicit: disabled, no fallback guess
+    };
+    const pool = makeStubPool({ bindingRow });
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => "a0000000-0000-0000-0000-000000000001",
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        { application_id: "a0000000-0000-0000-0000-000000000001", data: {} },
+      );
+      expect(res.status).toBe(201);
+      expect(flowable.startInstance).toHaveBeenCalledOnce();
+      // The coincidental defKey match must NOT matter: NULL means "never
+      // auto-complete", full stop — not "guess task-submit as a fallback".
+      expect(flowable.completeUserTask).not.toHaveBeenCalled();
     } finally {
       server.close();
     }
