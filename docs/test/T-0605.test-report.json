@@ -1,0 +1,75 @@
+{
+  "task_id": "T-0605",
+  "verdict": "pass",
+  "reviewed_sha": "df321de7fd6f697dc3217ad722d5e81aae5955ae",
+  "base_sha": "a12b1ae5049de04f051538d32a3294c43966a9b1",
+  "deterministic": {
+    "build": {"result": "pass", "exit": 0, "_note": "npm run build — tsc + seed tsc, 0 ошибок"},
+    "root_vitest": {"total": 4903, "passed": 4893, "skipped": 10, "failed": 0, "files": "254 passed | 2 skipped (256)", "exit": 0, "_note": "вкл. src/__tests__/grants-dao.test.ts 30/30 (mirror приведён к каноническому + e-crit-routine позитивный кейс)"},
+    "web_vitest": {"total": 1637, "passed": 1637, "skipped": 0, "failed": 0, "files": "60 passed (60)", "exit": 0, "_note": "вкл. screen-inbox.test.jsx 17/17 (+3 T-0605 на claim-тост)"},
+    "fitness_db_targeted_live_pg": {
+      "passed": 23, "failed": 0, "exit": 0,
+      "files": {
+        "rights-eligibility-sew.db.test.ts": "4/4",
+        "grants-dao-dual-control.db.test.ts": "11/11",
+        "inbox_claim.test.ts": "7/7",
+        "role-assignment-scope.test.ts": "1/1"
+      },
+      "_note": "живой Postgres DATABASE_URL=postgres://choros_migrator:...@localhost:55432/choros, vitest run --dir ci/checks/db --no-file-parallelism. Все таргетно перегнаны судьёй."
+    },
+    "doc_reconcile_flake": {"parallel": "fail (5000ms timeout под нагрузкой fitness:db)", "solo": "15/15 pass", "_note": "известный doc-* флейк, НЕ связан с T-0605 (doc-pipeline reconcile, ничего про role_assignment/grants/eligibility). Перегнан соло согласно durable-уроку памяти «упавшее перепроверять соло» — зелёный."},
+    "dual_control_isolation_sh": {"result": "pass", "_note": "FF-DC1..DC8 + FF-DC11 все зелёные (module boundary + write-path seam, known_tenant_tables byte-unchanged)"},
+    "anti_case_lock_sh": {"result": "pass", "_note": "Phase 1 delegates clean; Phase 2 D-064 §5 denylist aggregate 24 (baseline 24), 0 новых кейс-литералов"},
+    "_note": "ВСЕ лейны перегнаны судьёй-тестером НЕЗАВИСИМО с чистого запуска (не доверие handoff-числам). Числа совпали с pr-handoff (root 4893, web 1637). Рабочее дерево после мутационных проб восстановлено байт-в-байт до HEAD (git diff HEAD пуст)."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1..AC-3 (канонический предикат активации назначения в двух функциях; удаление CRITICAL_GRANT_PREDICATE_G)", "test": "src/__tests__/grants-dao.test.ts (30/30 root vitest, TS-mirror предиката) + git-diff/grep verification (обе функции идентичный `confirmed2 NOT NULL OR proposed_by IS NULL`; _G удалён, grep src/ ci/ → NONE)", "result": "pass"},
+    {"ac": "AC-4 positive (рутинное self-назначение к approve-роли → getRoleSlugsForActor INCLUDES slug → claim прошёл бы)", "test": "ci/checks/db/rights-eligibility-sew.db.test.ts :: 'owner with a ROUTINE assignment → INCLUDES slug' + 'claim eligibility invariant taskRole ∈ myRoles' — живой PG, 2/2 pass", "result": "pass"},
+    {"ac": "AC-4 regression (не-держатель → пустой набор → claim 403 NOT_ELIGIBLE)", "test": "rights-eligibility-sew.db.test.ts :: 'stranger with NO assignment → [] → 403' — живой PG pass", "result": "pass"},
+    {"ac": "AC-4 semi-confirmed guard (эскалирующее назначение proposed_by set, confirmed2 NULL → excluded)", "test": "rights-eligibility-sew.db.test.ts :: 'escalated (proposed_by set) → slug excluded' — живой PG pass; дублировано grants-dao-dual-control e-ra-critical", "result": "pass"},
+    {"ac": "AC-5..AC-7 (grant-уровневый дуал-контроль критичного ГРАНТА, step-3, НЕ ослаблен — все 4 оси)", "test": "ci/checks/db/grants-dao-dual-control.db.test.ts :: axis-a approve (один→NOT active, два→active), axis-b, axis-c read+confidential, Q-2 garbage-clearance, M1 expired-crit-grant не криминализует sibling assignment — 11/11 живой PG", "result": "pass"},
+    {"ac": "AC-8 (web claim-ошибка ВСЕГДА человеческий тост; NOT_ELIGIBLE осмысленный; не молчаливый)", "test": "web/src/screens/screen-inbox.test.jsx :: 'CLAIM_ERROR_MESSAGE с NOT_ELIGIBLE-текстом' + 'claimTask maps EVERY code via claimErrorMessage (нет `Ошибка: ${code}`)' + 'fallback человеческий (не молчит)' — 3/3 web vitest", "result": "pass"},
+    {"ac": "AC-9 (миграции БД нет)", "test": "git diff a12b1ae..HEAD -- migrations/ пуст; dual-control-isolation FF-DC7 known_tenant_tables byte-unchanged", "result": "pass"},
+    {"ac": "AC-10 (нет новых кейс-литералов D-064)", "test": "bash ci/checks/anti-case-lock.sh PASS", "result": "pass"}
+  ],
+  "adversarial": [
+    {
+      "probe": "МУТАЦИЯ (a): revert предиката getRoleSlugsForActor к старой абсолютно-критичной форме (confirmed2 OR NOT EXISTS(critical grant IN window)) — воссоздать CRITICAL_GRANT_PREDICATE_G",
+      "result": "kills target",
+      "note": "npx tsc чист → live PG: rights-eligibility-sew.db.test.ts 2/2 AC-4 позитива КРАСНЫЕ ('expected [] to include sew-role-...', 'expected false to be true'). Доказывает: sew-тест реально пинит фикс (не тест-театр) — старый предикат воспроизводит self-lock 403. Файл восстановлен из бэкапа."
+    },
+    {
+      "probe": "МУТАЦИЯ (b): сломать канон — убрать дизъюнкт `OR ra.proposed_by IS NULL` в ОБОИХ местах (оставить только confirmed2 NOT NULL)",
+      "result": "kills target",
+      "note": "live PG: 4 теста КРАСНЫЕ — rights-eligibility-sew AC-4 (2: routine→[]), grants-dao-dual-control 'T-0605 FIX routine assignment→INCLUDED' + 'M1 expired critical grant→assignment still INCLUDED'. Канон-дизъюнкт (рутинное активно на один confirm) пинится обоими live-suite. Файл восстановлен."
+    },
+    {
+      "probe": "МУТАЦИЯ (c): в web claim-обработчике вернуть сырой код (`code === 'ALREADY_CLAIMED' ? 'Задача уже взята...' : `Ошибка: ${code}``) вместо claimErrorMessage(code)",
+      "result": "kills target",
+      "note": "web vitest: screen-inbox.test.jsx 'claimTask maps EVERY error code via claimErrorMessage (no raw `Ошибка: ${code}`)' КРАСНЫЙ — claimBody больше не содержит 'claimErrorMessage(code)'. Доказывает: тост-тест пинит человеческий текст (не театр). Файл восстановлен."
+    },
+    {
+      "probe": "SECURITY-ИНВАРИАНТ: PDP-read не шире write-side — комбинаторика всех write-side троек (proposed_by, confirmed_by, confirmed2_by) против нового предиката",
+      "result": "invariant holds",
+      "note": "6 классов write-side-строк перечислены (см. review.json security_invariant): routine (proposed NULL)→active, escalating (proposed set, conf2 NULL)→inactive под новым, dual-confirmed (conf2 set)→active, hire→routine, register bootstrap→active (non-critical role), seeds→active/grandfathered-109. Расхождение old↔new ТОЛЬКО для routine-к-критичной-роли (self-lock, чинимый P0). Эскалирующая семи-подтверждённая строка ОСТАЁТСЯ INACTIVE под новым (sew 'escalated' + dual-control e-ra-critical живой PG). Grant-level step-3 (критичный грант ⇒ confirmed2) НЕ ТРОНУТ и зелён по всем 4 осям. Дыры самонаделения СВЕРХ намеренного дизайна НЕТ — восстановление pre-T-0397 семантики; authority критичных ПРАВ остаётся на выдаче+активации гранта (2 человека)."
+    },
+    {
+      "probe": "BYPASS write-path: путь записи в role_assignment МИМО grants.ts, производящий строку, активную под новым/неактивную под старым в обход намерения",
+      "result": "none found",
+      "note": "Проверены все 7 INSERT-сайтов (register.ts×5 proposed_by=NULL bootstrap, grants.ts×1, rights-intents.ts×1 hire) + сиды (026/044/084/109/118/120 все proposed_by=NULL explicit). Единственный расходящийся класс (proposed_by=NULL к критичной роли) — намеренное «рутинное активное назначение». Ни один сайт не производит скрытно-активируемую строку. Эскалирующие (proposed NOT NULL) остаются INACTIVE."
+    },
+    {
+      "probe": "PRE-EXISTING out-of-scope: invoke-путь (src/http/invoke.ts loadCallerInvokeGrants) резолвит invoke-гранты БЕЗ assignment-active предиката и БЕЗ grant confirmed2-гейта",
+      "result": "flagged (out of scope, not a T-0605 regression)",
+      "note": "Инлайн-запрос JOIN role_assignment на employee_id без confirmed_by/proposed/confirmed2/окна; гранты без confirmed_by/confirmed2/критичного-гейта. Игнорирует дуал-контроль полностью. НО файл НЕ в диффе T-0605 (git diff --stat не содержит invoke.ts) — предсуществующая дыра, независимая от этого фикса. Занесено как review F-1 / follow-up. НЕ блокирует T-0605."
+    }
+  ],
+  "numbers_summary": {
+    "root_vitest": "4893 passed / 10 skipped / 0 failed (256 files)",
+    "web_vitest": "1637 passed / 0 failed (60 files)",
+    "fitness_db_targeted": "23 passed / 0 failed (4 files, live PG)",
+    "build": "exit 0",
+    "static_checks": "dual-control-isolation PASS, anti-case-lock PASS",
+    "mutations": "3/3 kill their target (a: sew red, b: 4 tests red, c: web red)"
+  }
+}
