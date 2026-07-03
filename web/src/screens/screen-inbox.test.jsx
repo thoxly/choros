@@ -51,11 +51,37 @@ describe('screen-inbox — alert() replaced by pushToast (AC-1/AC-2)', () => {
   it('preserves the ENGINE_DRIVE_ERROR_MESSAGE mapping (human-readable text unchanged)', () => {
     expect(src).toContain('ENGINE_DRIVE_ERROR_MESSAGE[code]');
   });
-  it('preserves the ALREADY_CLAIMED human-readable branch in claimTask', () => {
-    expect(src).toContain("code === 'ALREADY_CLAIMED' ? 'Задача уже взята другим пользователем'");
+  it('preserves the ALREADY_CLAIMED human-readable message (now in CLAIM_ERROR_MESSAGE)', () => {
+    // T-0605: the inline `code === 'ALREADY_CLAIMED' ? ...` ternary was refactored
+    // into the CLAIM_ERROR_MESSAGE map; the human sentence is unchanged.
+    expect(src).toContain('ALREADY_CLAIMED: "Задача уже взята другим пользователем"');
   });
   it('preserves the NOT_ELIGIBLE fallback used elsewhere on the screen', () => {
     expect(src).toContain("'Нет права на выполнение этого шага'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0605 — claim errors ALWAYS surface with a human sentence (никогда сырой код,
+// никогда молчаливый провал). The live-факт приёмки: claim → 403 NOT_ELIGIBLE
+// shown as a bare code, then a repeat 403 shown as nothing.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0605 claim errors are human-readable, never silent', () => {
+  it('defines a CLAIM_ERROR_MESSAGE map with a NOT_ELIGIBLE human sentence', () => {
+    expect(src).toContain('CLAIM_ERROR_MESSAGE');
+    // The exact human wording the task requires (owner is told to ask an admin).
+    expect(src).toContain('Нет роли для этой задачи — попросите администратора назначить роль');
+  });
+  it('claimTask maps EVERY error code via claimErrorMessage (no raw `Ошибка: ${code}`)', () => {
+    const idx = src.indexOf('const claimTask');
+    const claimBody = src.slice(idx, src.indexOf('const approveTask'));
+    expect(claimBody).toContain('claimErrorMessage(code)');
+    // The bare-code path that showed `Ошибка: NOT_ELIGIBLE` on the stand is gone.
+    expect(claimBody).not.toMatch(/`Ошибка: \$\{code\}`/);
+  });
+  it('claimErrorMessage falls back to a human sentence (still surfaces, not silent)', () => {
+    // Even an unmapped code yields a sentence, never an empty/silent toast.
+    expect(src).toContain('Не удалось взять задачу:');
   });
 });
 

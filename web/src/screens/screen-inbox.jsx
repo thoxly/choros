@@ -360,6 +360,24 @@ const ENGINE_DRIVE_ERROR_MESSAGE = {
   ENGINE_DRIVE_TIMEOUT: "Действие выполняется дольше обычного — оно могло уже примениться, обновите страницу, чтобы увидеть актуальное состояние",
 };
 
+// T-0605: human-readable messages for claim ("Взять") errors. The live-факт
+// приёмки был: claim → 403 NOT_ELIGIBLE, показанный сырым кодом (а второй 403 —
+// вообще молчаливо). Every claim error MUST surface as a toast with a human
+// sentence — никогда сырой код, никогда молчаливый провал. NOT_ELIGIBLE тянет
+// пользователя к действию: попросить администратора назначить роль.
+const CLAIM_ERROR_MESSAGE = {
+  NOT_ELIGIBLE:
+    "Нет роли для этой задачи — попросите администратора назначить роль, которая может её взять",
+  ALREADY_CLAIMED: "Задача уже взята другим пользователем",
+  NOT_POOL_TASK: "Эту задачу нельзя взять из пула",
+  NOT_FOUND: "Эта задача уже недоступна — обновите страницу",
+};
+
+/** Map a claim error code to a human sentence (fallback keeps the code visible). */
+function claimErrorMessage(code) {
+  return CLAIM_ERROR_MESSAGE[code] ?? `Не удалось взять задачу: ${code}`;
+}
+
 function TaskDetailPanel({ taskId, onClose, onActionDone }) {
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState(null); // { item, projection }
@@ -677,14 +695,18 @@ function InboxScreen() {
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         const code = body?.error?.code ?? `HTTP ${res.status}`;
-        throw new Error(code === 'ALREADY_CLAIMED' ? 'Задача уже взята другим пользователем' : `Ошибка: ${code}`);
+        // T-0605: human-readable message for EVERY claim error via
+        // claimErrorMessage. Before, only ALREADY_CLAIMED had a sentence and
+        // every other code (incl. NOT_ELIGIBLE) surfaced as a bare code — the
+        // приёмки showed a raw code, then a repeat 403 showed nothing.
+        throw new Error(claimErrorMessage(code));
       }
       // Optimistic local state + re-fetch to sync mine flag
       setTaken((s) => ({ ...s, [taskId]: true }));
       await load();
     } catch (e) {
       // T-0597 (находка №6): surface as a toast, not a blocking native modal —
-      // task remains in pool for retry. Same human-readable message as before.
+      // task remains in pool for retry. T-0605: ALWAYS surface, human message.
       pushToast({ tone: 'error', message: e.message });
     } finally {
       setClaiming((s) => ({ ...s, [taskId]: false }));
