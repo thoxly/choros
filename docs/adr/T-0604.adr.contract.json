@@ -1,0 +1,72 @@
+{
+  "task_id": "T-0604",
+  "status": "ready",
+  "decision": "process_app_binding получает NULLABLE колонку submit_task_key (миграция, additive ALTER TABLE ADD COLUMN IF NOT EXISTS, мирроит форму миграции 119/target_registry_slug буквально). NULL — единственный safe-default: авто-комплит не включён (первый активный userTask остаётся живым). Non-NULL '<key>' включает авто-комплит СТРОГО УСЛОВНО: срабатывает только когда taskDefinitionKey первого активного userTask инстанса равен '<key>'; иначе не срабатывает (ожидаемое несовпадение, не ошибка). В отличие от прецедента 119 (где NULL = 'используй именованный config-primitive дефолт', безопасно для адресации результата УЖЕ решённого шага), здесь НЕ вводится code-дефолт вроде resolveDefaultSubmitTaskKey('task-submit') — угаданный литерал был бы тем же классом бага, просто на уровень конфигурации глубже. getOnCreateBinding (binding-trigger-dao.ts) прокидывает submit_task_key: string|null в OnCreateBindingRow. records.ts консолидирует движковый вызов: вместо getFirstActiveUserTask (только taskId, для решения о комплите) + отдельного getActiveUserTasks ниже (для BUG-015 projection), используется ОДИН вызов getActiveUserTasks сразу после startInstance; tasks[0] используется и для defKey-гейта комплита (сравнение firstActiveTask.taskDefinitionKey === binding.submit_task_key — обе стороны переменные, не литералы, паттерн явно признан known-good в engine-drive-no-literal-defkey.sh's self-test), и для существующей BUG-015 fallback-логики (без изменений). getFirstActiveUserTask остаётся в клиенте как метод, просто не вызывается из этого блока. Данные: telLinear seed (085/087) дополняется UPDATE submit_task_key='task-submit' (реальный первый userTask в tel-linear.bpmn20.xml:52) — существующий ТЭЛ-сценарий не регрессирует. purchaseApproval (живой UI-binding, вне migrations/) не трогается этой задачей — NULL-default даёт желаемое поведение (первый шаг 'Проверка руководителем' остаётся человеку) автоматически.",
+  "rejected_alternatives": [
+    {
+      "option": "Именованный config-primitive дефолт для NULL (resolveDefaultSubmitTaskKey() → 'task-submit', по прецеденту 119/BUG-017 resolveDefaultStepResultSlug)",
+      "why_not": "Прецедент 119 безопасен, потому что его дефолт адресует КУДА записать результат УЖЕ решённого человеком шага — угадать неверно там означает неудобство (запись не туда), не пропуск контроля. Здесь дефолт решал бы, ПРОПУСКАТЬ ЛИ человека вообще на необратимом движковом действии. Угаданный литерал 'task-submit' как unconditional-дефолт для ЛЮБОГО тенантского процесса без объявленного submit-ключа воспроизвёл бы РОВНО класс бага, который эта задача чинит — просто на уровень глубже (теперь угадывается имя вместо позиции). NULL='нет авто-комплита' — единственный дефолт, не делающий предположений о чужой BPMN-топологии."
+    },
+    {
+      "option": "Расширить getFirstActiveUserTask, чтобы он тоже возвращал taskDefinitionKey (вместо переиспользования getActiveUserTasks)",
+      "why_not": "getActiveUserTasks (T-0443, расширен T-0575 идентити-линками) уже вызывается в records.ts на ТОМ ЖЕ инстансе сразу после старта для BUG-015 projection — тот же движковый эндпоинт (GET /runtime/tasks?processInstanceId=...), тот же taskDefinitionKey/candidateGroups/name. Расширение getFirstActiveUserTask создало бы ВТОРОЙ путь чтения того же состояния (два round-trip к движку вместо одного) и дублирование контракта (два метода, отвечающих на пересекающийся вопрос). Консолидация в один вызов — не new API surface, а устранение избыточного round-trip."
+    },
+    {
+      "option": "Матчить по porядковому индексу вместо defKey (например 'первый таск ИЛИ второй, если binding так скажет')",
+      "why_not": "Позиционная адресация («N-й таск по счёту») — тот же класс хрупкости, что баг T-0368 сам: движковый порядок активных тасков не гарантированно стабилен (параллельные ветки, gateway-переходы), а defKey — СТРУКТУРНЫЙ идентификатор BPMN-узла, задокументированный в самом процессе. defKey-матчинг детерминирован по построению BPMN, не по случайности порядка ответа движка."
+    },
+    {
+      "option": "Хранить submit_task_key НЕ на process_app_binding, а на отдельной новой таблице/поле процесса",
+      "why_not": "process_app_binding (075) уже владеет отношением (process_key, application_id) и уже несёт РОДСТВЕННУЮ конфигурацию того же класса (target_registry_slug, миграция 119: конфигурация ПО ЭТОЙ ПАРЕ process+app). Submit_task_key — конфигурация того же уровня (какой BPMN-узел этого процесса особый для ЭТОЙ интеграции с приложением). Новая таблица — новый RLS-периметр + миграция + DAO ради одного скалярного атрибута существующей владеющей строки — непропорционально (то же обоснование, что 119 §вводная, D-056 additive discipline)."
+    },
+    {
+      "option": "Матчить по кандидатным ролям/названию таска вместо taskDefinitionKey",
+      "why_not": "candidateGroups/name — человекочитаемые/локализуемые атрибуты, не стабильный структурный идентификатор (два процесса могут иметь одинаковое название таска 'Согласование' с разным смыслом; название может редактироваться в BPMN-конструкторе без смены defKey). taskDefinitionKey — единственный устойчивый техническый идентификатор BPMN-узла, предназначенный именно для программной адресации (это тот же тип идентификатора, что engine-drive-no-literal-defkey.sh и BUG-014-фикс T-0571 используют для 'какой таск апрувить')."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "process_app_binding (существующая таблица, миграция 075, расширяется)",
+      "fields": [
+        {"name": "submit_task_key", "type": "text NULL — новый (миграция T-0604). NULL = авто-комплит выключен; non-NULL = BPMN taskDefinitionKey, легитимный для авто-завершения на on_create"}
+      ]
+    },
+    {
+      "entity": "OnCreateBindingRow (расширяется, src/db/binding-trigger-dao.ts)",
+      "fields": [
+        {"name": "submit_task_key", "type": "string | null — прокинуто из process_app_binding.submit_task_key"}
+      ]
+    }
+  ],
+  "contracts": [
+    "migrations/<next>_process_app_binding_submit_task_key.sql — ADD COLUMN IF NOT EXISTS + telLinear seed UPDATE (данные)",
+    "src/db/binding-trigger-dao.ts::getOnCreateBinding — SELECT + OnCreateBindingRow расширены submit_task_key",
+    "src/http/records.ts — on_create блок: один getActiveUserTasks вызов, defKey-гейт перед completeUserTask, BUG-015 projection читает тот же firstActiveTask (ADR §1.3)",
+    "src/__tests__/binding-trigger.unit.test.ts — AC-3/AC-4/AC-5/AC-6 (стаб-pool/стаб-flowable, переосмысленные стабы)",
+    "docs/handoff/T-0604.pr-handoff.json — BUILD-фаза"
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1: миграция добавляет submit_task_key text NULL, существующие строки NULL.", "ci_check": "npm run fitness:db (migration runner применяет 121_*.sql на чистой БД)"},
+    {"id": "FF-2", "rule": "AC-2: getOnCreateBinding возвращает submit_task_key в OnCreateBindingRow.", "ci_check": "vitest run src/__tests__/binding-trigger.unit.test.ts"},
+    {"id": "FF-3", "rule": "AC-3: binding без submit_task_key → completeUserTask НЕ вызван даже при наличии активного таска.", "ci_check": "тот же тест-файл"},
+    {"id": "FF-4", "rule": "AC-4: binding с submit_task_key='X', первый таск defKey='X' → completeUserTask вызван с этим taskId.", "ci_check": "тот же тест-файл"},
+    {"id": "FF-5", "rule": "AC-5: binding с submit_task_key='X', первый таск defKey≠'X' → completeUserTask НЕ вызван.", "ci_check": "тот же тест-файл"},
+    {"id": "FF-6", "rule": "AC-6: существующие тесты приведены к новой семантике без потери покрытия.", "ci_check": "vitest run src/__tests__/binding-trigger.unit.test.ts (полный набор, старые+новые)"},
+    {"id": "FF-7", "rule": "AC-7: telLinear seed дополнен submit_task_key='task-submit' данными.", "ci_check": "grep миграции + npm run fitness:db прогоняет миграции идемпотентно"},
+    {"id": "FF-8", "rule": "AC-8: ноль литеральных defKey-сравнений в src/.", "ci_check": "bash ci/checks/engine-drive-no-literal-defkey.sh && bash ci/checks/detel-literal-baseline.sh"},
+    {"id": "FF-9", "rule": "AC-9: полный гейт-набор зелёный.", "ci_check": "npm test && npm run build && npm run fitness:db && bash ci/checks/anti-case-lock.sh"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-2"},
+    {"ac": "AC-3", "covered_by": "FF-3"},
+    {"ac": "AC-4", "covered_by": "FF-4"},
+    {"ac": "AC-5", "covered_by": "FF-5"},
+    {"ac": "AC-6", "covered_by": "FF-6"},
+    {"ac": "AC-7", "covered_by": "FF-7"},
+    {"ac": "AC-8", "covered_by": "FF-8"},
+    {"ac": "AC-9", "covered_by": "FF-9"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0604-skip-submit-defkey.md",
+  "escalation": "Нет. Механизм additive (nullable колонка на существующей tenant-таблице, мирроит миграцию 119 буквально), не вводит новый code-дефолт/литерал, не меняет BPMN. purchaseApproval (живой тенантский binding) не трогается кодом/миграцией этой задачи — NULL-safe-default решает живой факт приёмки автоматически. telLinear seed-данные обновляются, сохраняя существующий сценарий. Founder-класса решений (деньги/секреты/необратимое вовне продукта) нет."
+}

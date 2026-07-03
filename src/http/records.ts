@@ -932,57 +932,44 @@ async function createRecord(args: {
           throw new HttpError(status, code, message);
         }
 
-        // T-0368 (E16): dissolve double-submit.
+        // T-0368 (E16): dissolve double-submit — T-0604 [P0/целостность
+        // согласований] GATED REWRITE.
         //
         // A create=start instance enters the BPMN at startEvent and immediately
-        // waits at the «Подача заявки» (task-submit) user task — because the BPMN's
-        // intent is that the initiator fills the form there. But for on_create
-        // instances the CREATE FORM IS the submit: the record+data already exist
-        // (just inserted above). Keeping the process waiting at task-submit means the
-        // user must submit a second time — a hollow double step.
+        // waits at its FIRST user task. T-0368's original assumption — "the first
+        // active user task is always «Подача заявки» (task-submit)" — held only
+        // for the ТЭЛ linear fixture. It is FALSE in general: a tenant-authored
+        // process (data, not code) may wait at any first step (e.g. «Проверка
+        // руководителем», defKey task-review). Once T-0571 fixed completeUserTask's
+        // HTTP verb (it was a silent no-op before — PUT vs POST, BUG-014), this
+        // unconditional assumption started SILENTLY COMPLETING REAL APPROVAL STEPS
+        // with no human involved (live acceptance 2026-07-03: instances 5cf10788 /
+        // 1aecce4e closed task-review in ~35ms, assignee empty).
         //
-        // Fix: immediately after startInstance, find the first active user task for
-        // the new instance (will be task-submit). If found, auto-complete it with no
-        // variables (field_mapping already injected amount into Flowable variables at
-        // startInstance time). The process then advances to the triage serviceTask.
+        // FIX (ADR-T0604-skip-submit-defkey.md): the on_create binding now DECLARES
+        // (as DATA, migration 121 process_app_binding.submit_task_key) which BPMN
+        // taskDefinitionKey is legitimately auto-completable for THIS binding.
+        //   - binding.submit_task_key === null → auto-complete is NOT engaged (the
+        //     safe default — every binding that never sets this explicitly, e.g.
+        //     purchaseApproval, leaves its first step for a human).
+        //   - non-null → auto-complete fires ONLY when the live engine's first
+        //     active user-task's taskDefinitionKey EXACTLY matches the declared
+        //     key (a comparison of two VALUES — the engine's live defKey and the
+        //     binding's configured key — never a literal string in this code; see
+        //     ci/checks/engine-drive-no-literal-defkey.sh).
         //
-        // This is best-effort: a lookup or complete failure is logged but does NOT
-        // roll back the record or the started instance — the instance just waits
-        // at task-submit (degraded, not broken). The BPMN is NOT modified; the
-        // explicit launcher path (process-start.ts) is unaffected (it never calls
-        // getFirstActiveUserTask / completeUserTask).
-        try {
-          const taskResult = await flowable.getFirstActiveUserTask(startResult.instanceId);
-          if (taskResult.ok && taskResult.taskId !== null) {
-            // Auto-complete the waiting user task (task-submit for on_create path).
-            const completeResult = await flowable.completeUserTask(taskResult.taskId);
-            if (!completeResult.ok) {
-              // Non-fatal: log and continue — record and instance are live.
-              console.warn(
-                `[on_create skip-submit] completeUserTask failed for instance ` +
-                  `${startResult.instanceId}, task ${taskResult.taskId}: ${completeResult.code}`,
-              );
-            }
-          }
-        } catch (skipErr) {
-          // Non-fatal: skip-submit errors must NOT invalidate the committed record.
-          console.warn(
-            `[on_create skip-submit] unexpected error for instance ` +
-              `${startResult.instanceId}:`,
-            skipErr,
-          );
-        }
-
-        // T-0575 [W1/деТЭЛ] BUG-015: resolve the REAL waiting user-task's
-        // candidateGroups[0]/name from the live engine BEFORE the projection
-        // write, so the base process.started task carries THIS process's OWN
-        // role/label instead of the process-agnostic ТЭЛ constant. Read AFTER the
-        // skip-submit auto-complete above so this reflects the task the instance
-        // is ACTUALLY waiting at post-submit (task-submit itself was just
-        // auto-completed and is gone by this point for the common case).
-        // Best-effort: an engine read failure degrades to the named
-        // config-primitive fallback (resolveDefaultApproverRole/Step/TaskName in
-        // appendProcessStarted) — never blocks the already-committed start.
+        // CONSOLIDATION (N4): a single flowable.getActiveUserTasks call (the same
+        // engine endpoint T-0443/T-0575 BUG-015 already needed below for the
+        // process.started projection's candidateGroups/name) now serves BOTH the
+        // defKey gate above AND the projection read — getFirstActiveUserTask (which
+        // only ever returned a bare taskId, never a defKey) is no longer called from
+        // this block. This is best-effort exactly as before: an engine read failure
+        // degrades to the named config-primitive fallback (resolveDefaultApproverRole/
+        // Step/TaskName in appendProcessStarted) and never blocks the already-
+        // committed record — the instance simply waits at whatever task the engine
+        // reports (degraded, not broken). The BPMN is NOT modified; the explicit
+        // launcher path (process-start.ts) is unaffected (it never calls
+        // getActiveUserTasks / completeUserTask on this path).
         let firstActiveTask: ActiveUserTask | undefined;
         try {
           const tasksResult = await flowable.getActiveUserTasks(startResult.instanceId);
@@ -992,6 +979,34 @@ async function createRecord(args: {
         } catch {
           // Best-effort: engine read failure → fall back to config-primitive defaults.
         }
+
+        if (
+          binding.submit_task_key !== null &&
+          firstActiveTask !== undefined &&
+          firstActiveTask.taskDefinitionKey === binding.submit_task_key
+        ) {
+          try {
+            const completeResult = await flowable.completeUserTask(firstActiveTask.id);
+            if (!completeResult.ok) {
+              // Non-fatal: log and continue — record and instance are live.
+              console.warn(
+                `[on_create skip-submit] completeUserTask failed for instance ` +
+                  `${startResult.instanceId}, task ${firstActiveTask.id}: ${completeResult.code}`,
+              );
+            }
+          } catch (skipErr) {
+            // Non-fatal: skip-submit errors must NOT invalidate the committed record.
+            console.warn(
+              `[on_create skip-submit] unexpected error for instance ` +
+                `${startResult.instanceId}:`,
+              skipErr,
+            );
+          }
+        }
+        // else: no declared submit_task_key, or the first active task does not
+        // match it — this is NOT an error, it means "leave this task for a human"
+        // (either by explicit binding config, or because the first step legitimately
+        // isn't the declared submit step for this instance).
 
         // Projection write: best-effort, isolated by a SAVEPOINT so a projection
         // failure cannot poison the outer tx and cause the committed record+instance

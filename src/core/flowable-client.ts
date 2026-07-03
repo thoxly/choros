@@ -297,22 +297,36 @@ export interface FlowableClient {
   ): Promise<FailTaskResult>;
   /**
    * T-0368 (E16): find the first active user task id for the given process
-   * instance. Used after a create=start to identify the waiting task-submit
-   * user task so it can be auto-completed. Returns { ok: true, taskId: null }
-   * when the instance has no active user tasks (already at a service task or
-   * completed), { ok: false } on engine error.
+   * instance. Returns { ok: true, taskId: null } when the instance has no
+   * active user tasks (already at a service task or completed), { ok: false }
+   * on engine error.
+   *
+   * T-0604 [P0/целостность согласований]: the on_create «skip-submit» path in
+   * src/http/records.ts no longer calls this method — it needs the live
+   * taskDefinitionKey (to gate auto-complete against binding.submit_task_key,
+   * see ADR-T0604-skip-submit-defkey.md §1.3), which this size=1 lookup does
+   * not carry. records.ts now consolidates on getActiveUserTasks (below),
+   * which it already needed for the BUG-015 projection read. This method is
+   * kept as a public client contract (a bare-taskId lookup remains a
+   * legitimate, narrower query than the full list) but currently has no
+   * caller in src/.
    *
    * Flowable endpoint: GET {baseUrl}/runtime/tasks?processInstanceId={id}&size=1
    */
   getFirstActiveUserTask(instanceId: string): Promise<GetFirstUserTaskResult>;
   /**
    * T-0368 (E16): complete a Flowable USER task (not an external/service task)
-   * by id. Used by the on_create trigger path to auto-complete the
-   * «Подача заявки» (task-submit) user task so the instance advances past
-   * the submit step without waiting for a human.
+   * by id. Used by the on_create trigger path to auto-complete a
+   * legitimately-declared submit user task (T-0604: gated by
+   * process_app_binding.submit_task_key matching the live engine's defKey —
+   * never unconditional) so the instance advances past the submit step
+   * without waiting for a human.
    *
-   * Flowable endpoint: PUT {baseUrl}/runtime/tasks/{taskId}  body: {"action":"complete"}
-   * Success: 200 (Flowable 7 returns the task JSON on PUT complete).
+   * T-0571 (BUG-014): Flowable 7's REST API executes task actions via POST,
+   * not PUT — see the implementation's doc-comment for the full empirical
+   * diagnosis. POST returns 200 with an empty body on success.
+   *
+   * Flowable endpoint: POST {baseUrl}/runtime/tasks/{taskId}  body: {"action":"complete"}
    */
   completeUserTask(taskId: string): Promise<CompleteUserTaskResult>;
   /**

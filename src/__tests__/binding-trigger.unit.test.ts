@@ -15,25 +15,40 @@ import { describe, it, expect, vi } from "vitest";
 import * as http from "node:http";
 import { Router } from "../http/router.js";
 import { registerRecordRoutes, type RecordRoutesDeps } from "../http/records.js";
-import type { FlowableClient, StartResult } from "../core/flowable-client.js";
+import type { ActiveUserTask, FlowableClient, StartResult } from "../core/flowable-client.js";
 
 // ---------------------------------------------------------------------------
 // Stubs
 // ---------------------------------------------------------------------------
 
-/** Stub FlowableClient — configurable startInstance result. */
-function makeStubFlowable(result: StartResult): FlowableClient {
+/**
+ * Stub FlowableClient — configurable startInstance result.
+ *
+ * T-0604 [P0/целостность согласований]: the on_create skip-submit gate
+ * (records.ts) now consolidates on a SINGLE flowable.getActiveUserTasks call
+ * (no more getFirstActiveUserTask in that path — see ADR-T0604 §1.3) and
+ * gates completeUserTask on binding.submit_task_key matching the live
+ * engine's first active task's taskDefinitionKey. `activeTasks` lets each
+ * test declare what the "live engine" reports as active user-tasks right
+ * after startInstance; defaults to [] (mirrors the pre-T-0604 default of "no
+ * active user task" — auto-complete never fires, existing tests relying on
+ * this default are unaffected).
+ */
+function makeStubFlowable(result: StartResult, activeTasks: ActiveUserTask[] = []): FlowableClient {
   return {
     deployBpmn: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     startInstance: vi.fn().mockResolvedValue(result),
     fetchAndLock: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     completeTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     failTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
-    // T-0368: skip-submit stubs — return no active user task so auto-complete is a no-op in unit tests.
+    // T-0368: kept as a stub for interface completeness — T-0604 removed its
+    // only caller (records.ts on_create block now uses getActiveUserTasks
+    // exclusively, see ADR-T0604 §1.3). Not asserted on by these tests.
     getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null }),
     completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
-    // T-0443: engine-reconcile stubs — not exercised by binding-trigger tests.
-    getActiveUserTasks: vi.fn().mockResolvedValue({ ok: true, tasks: [] }),
+    // T-0443 / T-0604: the on_create block's SOLE engine-state read — drives
+    // both the submit_task_key gate and the BUG-015 projection fallback.
+    getActiveUserTasks: vi.fn().mockResolvedValue({ ok: true, tasks: activeTasks }),
     getMessageCatchWaits: vi.fn().mockResolvedValue({ ok: true, waits: [] }),
     correlateMessage: vi.fn().mockResolvedValue({ ok: true }),
     isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
@@ -56,6 +71,14 @@ function makeStubClient(opts: {
     trigger_type: string;
     start_form_key: string | null;
     field_mapping: Record<string, string> | null;
+    /**
+     * T-0604: the declared submit-task defKey (migration 121). Optional here
+     * for backward-compat with pre-T-0604 test fixtures that never mention
+     * it — the stub SQL response below defaults an absent key to `null`
+     * (mirrors the real column's NULL default for every row that predates
+     * migration 121 / never sets this explicitly).
+     */
+    submit_task_key?: string | null;
   } | null;
   trackRollback?: { called: boolean };
   /**
@@ -125,7 +148,9 @@ function makeStubClient(opts: {
         if (bindingRow === null || bindingRow === undefined) {
           return { rows: [] };
         }
-        return { rows: [bindingRow] };
+        // T-0604: mirror the real column's NULL default when a fixture omits
+        // submit_task_key entirely (pre-T-0604 test literals).
+        return { rows: [{ submit_task_key: null, ...bindingRow }] };
       }
       // record readback SELECT (joined)
       if (/FROM choros\.record r/i.test(sql)) {
@@ -397,6 +422,170 @@ describe("T-0351 on_create: engine fail → tx rolled back (create = start atomi
       // Empty field_mapping → no variables (undefined, not {})
       const [, calledVars] = (flowable.startInstance as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown];
       expect(calledVars).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0604 [P0/целостность согласований]: on_create skip-submit auto-complete
+// is gated by process_app_binding.submit_task_key — never unconditional.
+// ---------------------------------------------------------------------------
+// Live fact (приёмка 2026-07-03): the T-0368 auto-complete unconditionally
+// completed the FIRST active user task after startInstance, assuming it was
+// always task-submit. In the purchaseApproval process the first task is
+// «Проверка руководителем» (task-review) — a REAL approval step, silently
+// swallowed in ~35ms once T-0571 made completeUserTask a live call. These
+// tests exercise the new gate directly through the REAL HTTP route (same
+// pattern as every other describe block in this file): AC-3 (no declared key
+// → never auto-complete), AC-4 (declared key matches the live first task →
+// auto-complete fires), AC-5 (declared key present but does NOT match → auto-
+// complete does not fire, task-review-shaped step is left for a human).
+
+describe("T-0604 on_create: skip-submit gated by submit_task_key", () => {
+  const baseBindingRow = {
+    id: "bind-604",
+    process_key: "purchaseApprovalGeneric",
+    trigger_type: "on_create",
+    start_form_key: null,
+    field_mapping: {} as Record<string, string>,
+  };
+
+  it("AC-3: submit_task_key NULL (no binding config) → completeUserTask NOT called even though an active user task exists", async () => {
+    const flowable = makeStubFlowable(
+      { ok: true, instanceId: "inst-604a" },
+      // The live engine reports an active task — e.g. "Проверка руководителем"
+      // (task-review) — but the binding declares NO submit_task_key at all.
+      [
+        {
+          id: "engine-task-604a",
+          taskDefinitionKey: "task-review",
+          name: "Проверка руководителем",
+          candidateGroups: ["role-reviewer"],
+        },
+      ],
+    );
+    const bindingRow = { ...baseBindingRow, submit_task_key: null };
+    const pool = makeStubPool({ bindingRow });
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => "a0000000-0000-0000-0000-000000000001",
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        { application_id: "a0000000-0000-0000-0000-000000000001", data: {} },
+      );
+      expect(res.status).toBe(201);
+      expect(flowable.startInstance).toHaveBeenCalledOnce();
+      // The safe default: no config → the real approval step is left alone.
+      expect(flowable.completeUserTask).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it("AC-4: submit_task_key set AND first active task's defKey matches → completeUserTask IS called with that task's id", async () => {
+    const flowable = makeStubFlowable(
+      { ok: true, instanceId: "inst-604b" },
+      [
+        {
+          id: "engine-task-604b",
+          taskDefinitionKey: "task-submit",
+          name: "Подача заявки",
+          candidateGroups: ["role-initiator"],
+        },
+      ],
+    );
+    const bindingRow = { ...baseBindingRow, submit_task_key: "task-submit" };
+    const pool = makeStubPool({ bindingRow });
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => "a0000000-0000-0000-0000-000000000001",
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        { application_id: "a0000000-0000-0000-0000-000000000001", data: {} },
+      );
+      expect(res.status).toBe(201);
+      expect(flowable.completeUserTask).toHaveBeenCalledOnce();
+      expect(flowable.completeUserTask).toHaveBeenCalledWith("engine-task-604b");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("AC-5: submit_task_key set but first active task's defKey does NOT match → completeUserTask NOT called (task-review-shaped step stays live)", async () => {
+    const flowable = makeStubFlowable(
+      { ok: true, instanceId: "inst-604c" },
+      // The binding declares 'task-submit' as legitimate, but the live first
+      // active task is actually task-review — the purchaseApproval live-fact
+      // shape. The mismatch must NOT be treated as an error; the task is
+      // simply left for a human.
+      [
+        {
+          id: "engine-task-604c",
+          taskDefinitionKey: "task-review",
+          name: "Проверка руководителем",
+          candidateGroups: ["role-reviewer"],
+        },
+      ],
+    );
+    const bindingRow = { ...baseBindingRow, submit_task_key: "task-submit" };
+    const pool = makeStubPool({ bindingRow });
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => "a0000000-0000-0000-0000-000000000001",
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        { application_id: "a0000000-0000-0000-0000-000000000001", data: {} },
+      );
+      expect(res.status).toBe(201);
+      expect(flowable.completeUserTask).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it("AC-2/AC-6 regression guard: no active user tasks at all (empty getActiveUserTasks) → completeUserTask not called, even with submit_task_key set — mirrors the original T-0368 default-stub behavior", async () => {
+    const flowable = makeStubFlowable({ ok: true, instanceId: "inst-604d" }, []);
+    const bindingRow = { ...baseBindingRow, submit_task_key: "task-submit" };
+    const pool = makeStubPool({ bindingRow });
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => "a0000000-0000-0000-0000-000000000001",
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        { application_id: "a0000000-0000-0000-0000-000000000001", data: {} },
+      );
+      expect(res.status).toBe(201);
+      expect(flowable.completeUserTask).not.toHaveBeenCalled();
     } finally {
       server.close();
     }

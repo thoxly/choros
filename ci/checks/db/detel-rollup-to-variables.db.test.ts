@@ -385,10 +385,21 @@ async function seedOnCreateBinding(
   const id = uuid();
   await c.query('BEGIN');
   await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+  // T-0604 [P0/целостность согласований]: on_create auto-complete is now GATED
+  // by process_app_binding.submit_task_key (migration 121) — the live engine's
+  // first active user-task's taskDefinitionKey must match this declared value
+  // for the skip-submit auto-complete to fire at all (NULL = no auto-complete,
+  // the new safe default). This test's BPMN (rollupGatewayBpmn, see the
+  // module-level comment above) deliberately names its first userTask
+  // "task-submit" so it can exercise the SAME submit-then-decide shape a real
+  // authored on_create process has — declaring submit_task_key='task-submit'
+  // here preserves that intent under the new gate (without it, this seeded
+  // binding would default to NULL and the instance would wait at task-submit
+  // forever, never reaching the gateway this test observes).
   await c.query(
     `INSERT INTO choros.process_app_binding
-       (tenant_id, id, process_key, application_id, trigger_type, field_mapping, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, 'on_create', $5::jsonb, 0, 0)`,
+       (tenant_id, id, process_key, application_id, trigger_type, field_mapping, submit_task_key, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'on_create', $5::jsonb, 'task-submit', 0, 0)`,
     [tenantId, id, processKey, applicationId, JSON.stringify({ amount: 'totalAmount' })],
   );
   await c.query('COMMIT');
