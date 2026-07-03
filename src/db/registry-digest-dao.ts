@@ -34,6 +34,7 @@ import { getGrantsForSubject } from "./grants-dao.js";
 import { loadTenantOrgAncestry } from "./org-ancestry.js";
 import { makeResourceAncestryOracle } from "./resource-ancestry.js";
 import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
+import { sandboxReadPredicate } from "../core/sandbox-gate.js";
 
 // ---------------------------------------------------------------------------
 // Result shape
@@ -148,6 +149,10 @@ export async function loadReadableRegistryDigest(
       await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
       await client.query("SET LOCAL search_path TO choros");
 
+      // Sandbox gate via the canonical predicate module (FF-10 tier-isolation):
+      // the digest is deliberately published-only for EVERY actor
+      // (actorIsPrivileged:false) — draft/sandbox registries never feed the
+      // LLM context, even for owners (conservative MVP, ADR-T0607 §1.1).
       const regRes = await client.query<{
         id: string;
         slug: string;
@@ -159,7 +164,7 @@ export async function loadReadableRegistryDigest(
            JOIN choros.application a
              ON a.tenant_id = rd.tenant_id AND a.id = rd.application_id
           WHERE rd.tenant_id = $1
-            AND a.tier = 'published'
+            AND (${sandboxReadPredicate({ tierColumn: "a.tier", actorIsPrivileged: false }).sql})
           ORDER BY rd.created_at ASC
           LIMIT $2`,
         [tenantId, registryLimit],
