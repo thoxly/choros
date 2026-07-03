@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0608",
+  "status": "ready",
+  "summary": "P2-гигиена, шесть точечных находок приёмки (тенант Аксон, 2026-07-03): (а) движок закрыл userTask, но инбокс-строка висела «в пуле» сутки+ (реконсиляция с закрытым тасков); (б) один живой engine-task давал ДВЕ строки инбокса (base process.started + process.next_task, два дедлайна) — listInstanceInboxTasks не прятал base-строку по факту существования next_task для того же инстанса; (в) approve/complete-путь показывал сырой код («Ошибка: NOT_ELIGIBLE») — T-0605 зачистил только claim; (г) employee без имени рендерился как raw UUID/slug (АВТОР на карточке записи; сотрудник в дропдауне «Назначить роль») — GET /api/org/tenant-state не селектил display_name вообще, GET /api/records/:id detail рендерил created_by (slug) сырым; (д) счётчик держателей роли считал grants.length вместо числа держателей, задвоение держателя (два role_assignment-ряда на одного employee, нет write-side идемпотентности) рендерилось как два отдельных badge; (е) протухший access-token mid-session давал мёртвый «HTTP 401», «Повторить» ретраил тем же токеном (F5 — единственное лечение, т.к. только boot-time bootstrap в shell.jsx делает silent refresh).",
+  "functional": [
+    "F1 (а/б). listInstanceInboxTasks (src/http/process-projection.ts) прячет base process.started-строку ТАКЖЕ когда для её инстанса существует хотя бы одна process.next_task-строка (любого состояния approved) — существование next_task доказывает (по конструкции всех 4 эмит-сайтов: reconcileInstanceTimers/reconcileInstanceEngineDrive/deliverMessageEnvelope/surfaceMessageCatchWaits — каждый пишет next_task ТОЛЬКО после живого engine.getActiveUserTasks-подтверждения), что движок уже продвинулся мимо base-шага, независимо от того, писал ли НАШ /action-эндпоинт task.approved для base-строки.",
+    "F2 (а). reconcileInboxEngineDriveOnRead (T-0522, уже существовал) корректно самолечит «инстанс закрыт в движке, но НАШ task.approved никогда не писался для base-строки» на СЛЕДУЮЩЕМ GET /api/inbox — покрыто регресс-тестом, доказывающим существующий механизм (не новый код).",
+    "F3 (в). ACTION_ERROR_MESSAGE map + actionErrorMessage(code) (web/src/screens/screen-inbox.jsx) — единый человекочитаемый маппинг для approve/complete-путь (POST /api/inbox/:id/action), покрывающий NOT_ELIGIBLE/NOT_FOUND/VALIDATION/FORM_VALIDATION (плюс существующий ENGINE_DRIVE_ERROR_MESSAGE для 502-семейства); используется И approveTask (построчная кнопка), И TaskDetailPanel.handleComplete (дровер) — ни один код approve/complete не долетает до пользователя сырым `Ошибка: ${code}`.",
+    "F4 (г). GET /api/org/tenant-state (src/http/seed-write.ts) селектит display_name у employee (было: id, slug only) — аддитивное расширение, обратная совместимость с существующим потребителем (reset-diff importer) сохранена.",
+    "F5 (г). ra-overview-forms.jsx: дропдаун «Назначить роль» рендерит formatPersonName(e.display_name) || e.slug вместо голого e.slug (который для KC-зарегистрированного человека равен Keycloak UUID).",
+    "F6 (г). screen-record-detail.jsx резолвит record.created_by (актор-slug) в display-имя через GET /api/org (переиспользован fetchEmployees, экспортирован из web/src/forms/field-renderer.jsx, тот же паттерн что PersonPicker) — рендер formatPersonName(authorNames.get(created_by)) || created_by (никогда не хуже прежнего поведения при неудачном резолве).",
+    "F7 (г). formatPersonName (web/src/lib/format.js) — единственный слой честного фолбэка: пустое имя + доступный email/секондари-идентификатор → «Без имени (X)»; оба пусты → null (вызывающий сам решает последний фолбэк, никогда не выдумывает UUID).",
+    "F8 (д). holderCount (screen-rights.jsx) = число РАЗЛИЧНЫХ employee_id среди активных role.assignments (не role.grants.length) — рендерится в позиции chs-rolerow__count вместо прежнего grantCount.",
+    "F9 (д). dedupHolders (screen-rights.jsx) схлопывает несколько активных role_assignment-рядов одного employee в ОДИН holder-badge, сохраняя ВСЕ исходные assignment.id в поле `ids` для корректного отзыва.",
+    "F10 (д). RevokeAssignmentButton (ra-overview-forms.jsx) принимает `ids` (массив) в дополнение к `id` (одиночный) — отзывает ВСЕ id последовательно на одно подтверждение, не оставляя сиротский активный дубликат-ряд после отзыва.",
+    "F11 (е). fetchWithAuthRetry (web/src/app-shell/dev-auth.js) — общий fetch-обработчик: 401 в keycloak mode → один silent refresh (kc.tryRefresh) → один ретрай оригинального запроса → на неудаче (нет refresh-токена ИЛИ ретрай тоже 401) редирект на логин (kc.login), не мёртвый 401. Dev mode — чистый passthrough (без токен-концепции).",
+    "F12 (е). Все fetch-вызовы web/src/screens/screen-inbox.jsx переведены на fetchWithAuthRetry (список: form-binding, task-detail, complete-action, load, load-more, claim, approve) — ни одного сырого fetch() не остаётся на этом экране."
+  ],
+  "non_functional": [
+    "N1 (б). Регресс-safety AND-split/6M gateway (T-0456): фикс НЕ ломает legit-сценарий, где base-строка уже approved И существуют несколько concurrent next_task-строк (concurrentSteps) — существующий тест 9a/9b/9c inbox-engine-drive.test.ts остаётся зелёным без изменений (base уже approved до появления next_task в этом сценарии, новое условие — дополнительная, не конфликтующая причина прятать).",
+    "N2 (д). Read-only фикс на UI-слое (screen-rights.jsx/ra-overview-forms.jsx) — rights-overview.ts (read DAO) НЕ меняется, продолжает честно возвращать ВСЕ role_assignment-ряды как ground truth (не скрывает дубли от админа на уровне API — только на уровне рендера, с сохранённой возможностью отозвать все).",
+    "N3 (г). Никакой миграции данных для бэкфилла существующих пустых display_name — решение зафиксировано в ADR §4 (риск неверной атрибуции легаси-данных перевешивает косметическую выгоду; genesis-путь уже честно заполняет имя для НОВЫХ tenant).",
+    "N4 (е). fetchWithAuthRetry — НЕ глобальный monkey-patch fetch(); опт-ин на уровне вызова, применён только к screen-inbox.jsx (живой факт наблюдался там) — остальные 28+ экранов, использующих authHeaders()/devHeaders(), не тронуты (follow-up).",
+    "N5. D-064 закон границы: без кейс-литералов (роль/слаг/имя из данных). bash ci/checks/anti-case-lock.sh + self-test зелёные.",
+    "N6. Все существующие тесты (root 4965, web 1684, db 1111) остаются зелёными — ни один фикс не регрессирует существующее поведение AND-split/timer-escalation/message-catch/claim-eligibility (T-0605)/dual-control (T-0605)."
+  ],
+  "out_of_scope": [
+    "O1. Полный рефакторинг молчаливых/сырых ошибок по ВСЕМ web-экранам — только approve/complete/claim путь инбокса (живые факты приёмки).",
+    "O2. fetchWithAuthRetry для всех экранов — только screen-inbox.jsx; остальные экраны — follow-up (ADR §5).",
+    "O3. Миграция данных для бэкфилла пустых display_name существующих employee-рядов — сознательно НЕ делается (ADR §4).",
+    "O4. Переработка write-side идемпотентности POST /api/role-assignments (защита от дублей НА ЗАПИСИ) — вне рамок этой P2-гигиены; текущий фикс дедупит на чтении/рендере, отзыв работает корректно для существующих дублей. Follow-up зафиксирован.",
+    "O5. Дуал-контроль/critical-grant модель (T-0605) — не трогается."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "(б) listInstanceInboxTasks: инстанс с НЕАПРУВНУТЫМ base-рядом И существующим (approved или нет) process.next_task-рядом для того же инстанса возвращает ТОЛЬКО next_task-ряд, никогда оба.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "(б) AND-split регресс: инстанс с APPROVED base-рядом и НЕСКОЛЬКИМИ concurrent next_task-рядами (T-0456) по-прежнему возвращает ВСЕ concurrent-ряды (существующий тест 9a остаётся зелёным).", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "(а) reconcileInboxEngineDriveOnRead: инстанс, чей base-ряд НИКОГДА не approved нашим /action-эндпоинтом, но engine.isInstanceEnded=true, эмитит instance.ended и base-ряд пропадает на следующем listInstanceInboxTasks (регресс-тест, доказывающий существующий механизм).", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "(в) actionErrorMessage(code) покрывает NOT_ELIGIBLE/NOT_FOUND/VALIDATION/FORM_VALIDATION человекочитаемым текстом; ни approveTask, ни handleComplete не содержат `Ошибка: ${code}`-throw для этих кодов.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "(г) GET /api/org/tenant-state возвращает непустой display_name для каждого employee-ряда (live PG, seed-pack.test.ts).", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "(г) ra-overview-forms.jsx дропдаун использует formatPersonName(e.display_name) || e.slug, не голый e.slug.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "(г) screen-record-detail.jsx резолвит created_by через fetchEmployees + formatPersonName, деградирует к raw slug на неудачном резолве (никогда не хуже прежнего).", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "(г) formatPersonName: пустое имя + email → «Без имени (email)»; оба пусты → null.", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "(д) holderCount считает РАЗЛИЧНЫХ employee_id, не grants.length — роль с 4 грантами и 2 держателями показывает 2, роль с 0 грантами и 3 держателями показывает 3.", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "(д) dedupHolders схлопывает 2 role_assignment-ряда одного employee в 1 holder, сохраняя оба id в `ids`.", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "(д) RevokeAssignmentButton с `ids` (массив) отзывает ВСЕ id последовательно, не только первый.", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "(е) fetchWithAuthRetry: 401 в keycloak mode → один tryRefresh → один ретрай; успех → возвращает retry-response; неудача (нет refresh-токена или ретрай тоже 401) → login() redirect, никогда бесконечный цикл.", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "(е) fetchWithAuthRetry в dev mode — чистый passthrough, 401 возвращается как есть, без refresh/login попытки.", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "(е) screen-inbox.jsx не содержит сырых fetch(...) вызовов — все переведены на fetchWithAuthRetry.", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "bash ci/checks/anti-case-lock.sh (+ --self-test) зелёный, без новых кейс-литералов.", "verifiable_as": "fitness"},
+    {"id": "AC-16", "text": "npm test (root) + cd web && npx vitest run + npm run build (оба уровня) + npm run fitness:db (DATABASE_URL PG :55432) + bash ci/checks/tier-isolation.sh — все зелёные.", "verifiable_as": "fitness"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0608-inbox-identity-hygiene.spec.md"
+}
