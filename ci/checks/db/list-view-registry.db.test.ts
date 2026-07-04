@@ -476,4 +476,73 @@ describe.skipIf(!hasDb)('T-0581 view-registry — LIVE Postgres proofs', () => {
       await c.query('ROLLBACK');
     });
   });
+
+  // AC-13/NF-6 (tester-added, T-0581 TEST phase): the unit tests in
+  // src/core/__tests__/view-query.test.ts already prove the PURE translator
+  // never string-interpolates a hostile field_key/value into SQL — but that
+  // is a proof against the translator in isolation. This test fires the SAME
+  // hostile payloads through the REAL HTTP endpoint against the REAL Postgres
+  // (not a stub/fake pool) and asserts the table survives and ordinary data
+  // is still readable afterward — the strongest available proof that no
+  // second, less-careful code path reintroduces string-concatenated SQL
+  // between the HTTP boundary and the translator.
+  it('AC-13/NF-6 LIVE: a SQL-injection-shaped field_key/value in ?filter= does not corrupt or drop data', async () => {
+    // Hostile field_key: not a real record_schema key, contains SQL metachars
+    // that would matter if ever concatenated raw into a WHERE/ORDER BY clause.
+    const hostileFieldKey = "amount'; DROP TABLE choros.list_view; --";
+    const hostileValue = "x'); DELETE FROM choros.record WHERE tenant_id = 'x"; // also SQLi-shaped
+    const filter = b64([{ field_key: hostileFieldKey, op: 'eq', value: hostileValue }]);
+
+    const { statusCode, body } = await httpReq(
+      baseUrl,
+      'GET',
+      `/api/records?application_id=${appAId}&registry_def_id=${regAId}&filter=${filter}`,
+      'a-reader',
+    );
+    // A hostile-but-unknown field_key is dropped by the whitelist (translateFilters)
+    // — the request must NOT 500/error; it degrades to "no filter applied" (all
+    // tenant-A records visible to a-reader's root-sentinel grant), never a crash.
+    expect(statusCode).toBe(200);
+    const ids = (body['records'] as Array<Record<string, unknown>>).map((r) => r['id']);
+    expect(ids).toContain(recordOpenHigh);
+    expect(ids).toContain(recordOpenLow);
+    expect(ids).toContain(recordWon);
+    expect(ids).toContain(recordNoAmount);
+
+    // Also probe a hostile VALUE against a REAL whitelisted field_key (status) —
+    // this exercises the bind-parameter path end-to-end against live PG: if the
+    // value were ever concatenated raw, this would either error out or mutate
+    // data; a parameterized query simply finds zero matches (no row has that
+    // literal string as its status) and returns 200 with an empty page.
+    const filterRealField = b64([{ field_key: 'status', op: 'eq', value: hostileValue }]);
+    const res2 = await httpReq(
+      baseUrl,
+      'GET',
+      `/api/records?application_id=${appAId}&registry_def_id=${regAId}&filter=${filterRealField}`,
+      'a-reader',
+    );
+    expect(res2.statusCode).toBe(200);
+    expect((res2.body['records'] as unknown[]).length).toBe(0);
+
+    // PROOF OF NO CORRUPTION: choros.list_view and choros.record both still
+    // exist with their expected row counts (the DROP TABLE / DELETE payloads
+    // above did NOT execute as SQL — they were only ever bind-parameter text).
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      const viewStillThere = await c.query(
+        'SELECT 1 FROM choros.list_view WHERE tenant_id = $1 AND id = $2',
+        [TENANT_A, viewOpenSortDesc],
+      );
+      expect(viewStillThere.rowCount).toBe(1);
+      const recordsStillThere = await c.query(
+        'SELECT count(*)::int AS n FROM choros.record WHERE tenant_id = $1 AND registry_id = $2',
+        [TENANT_A, regAId],
+      );
+      // All 4 seeded records (recordOpenHigh/Low/Won/NoAmount) must still exist —
+      // a successful injected DELETE would have dropped this below 4.
+      expect(recordsStillThere.rows[0]!.n).toBeGreaterThanOrEqual(4);
+      await c.query('COMMIT');
+    });
+  });
 });
