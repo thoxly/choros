@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0635",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/core/lane-role-mapper.ts:244-269, src/core/timer-escalation-mapper.ts:350-375, src/http/process-defs.ts:407-417",
+      "issue": "The exact same architectural defect T-0635 fixes for agent-task (flowable:* stamped without a guaranteed xmlns:flowable declaration) is also present in lane-role-mapper.ts and timer-escalation-mapper.ts — both inject flowable:candidateGroups with zero namespace guarantee. WORSE than the pre-fix agent-task path: these two mappers still run and PERSIST their output at draft-save time (mapLanesToCandidateGroups/mapTimerEscalation are still called unconditionally in POST /api/process-defs, process-defs.ts:407-417) — T-0635 only relocated the agent-task transform to publish-time, it did not touch this. A diagram with a lane-assigned or timer-escalated userTask and NO agent task will still produce an unbound `flowable:` prefix on publish and hit AttributePrefixUnbound at Flowable's deploy-time SAX parser. Verified directly: lane-role-mapper.test.ts and timer-escalation-mapper.test.ts fixtures never assert xmlns:flowable is required/injected, and no call site invokes ensureFlowableNamespace for these two paths.",
+      "suggestion": "File an immediate follow-up task to (a) extend ensureFlowableNamespace (or an equivalent call) to the lane/timer draft-save path, and (b) decide whether lane/timer output should also move to publish-time-only like agent-task, closing the same draft-corruption risk class. Not blocking THIS task because: LIVE_PROOF T-0586 exercised only the agent path (author has not claimed lane/timer coverage), the gap pre-dates this diff (no regression introduced), it is explicitly flagged in pr-handoff open_questions with correct rationale, and T-0635's OTHER fix (BAD_BPMN vs ENGINE_UNAVAILABLE classification) actually improves the lane/timer failure mode today — an unbound-prefix lane-only publish now surfaces as honest 422 instead of false 503, which is strictly better than the pre-T-0635 state even though the root xmlns gap for that path remains."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7 (LIVE_PROOF)", "covered": false }
+  ],
+  "role_gap_evidence": [
+    "SQ11 candidate data point: this is the SECOND time in this task family (after T-0586/T-0058) that a namespace/wire-format defect was caught only by direct empirical probing against a live-verified artifact (T-0058.test-report.json probe-a) rather than by design review — a lightweight 'does every publish-path transform that emits flowable:* also guarantee xmlns:flowable, and is that guarantee tested with a fixture that does NOT pre-declare it' checklist item for the bpmn-mapper family (lane/agent/timer) would have caught the residual lane/timer gap noted in R-1 at spec time, not at a future LIVE_PROOF incident."
+  ],
+  "review_notes": {
+    "reviewer": "independent, code-diff-grounded (not author)",
+    "verified_directly": [
+      "tsc --noEmit: clean, zero errors",
+      "npx vitest run (full suite): 275 files passed, 2 skipped, 5407 tests passed, 10 skipped, 0 failed — matches pr-handoff claim exactly",
+      "npx vitest run on the 3 new/touched test files solo: 76/76 pass (agent-task-external-mapper.test.ts 27, flowable-client.test.ts 42, process-defs.agentxml-draft.test.ts 7)",
+      "git diff dev...HEAD -- src/core/flowable-client.ts against dev@4bc2d96 (which already contains T-0636 merged): touches ONLY deployBpmn + two new pure helpers (safeReadJson, isBpmnParseRejection) + one return-type annotation — zero overlap with T-0636's fetchAndLock/failTask/msToIso8601Duration/credentials work. No conflict.",
+      "docs/test-reports/T-0058.test-report.json probe-a: confirmed real artifact, exact quoted shape (HTTP 500 + XMLStreamException, engine health stayed 200) matches the code comments and test fixtures verbatim — the BAD_BPMN classification is grounded in a real, pre-existing empirical artifact, not invented.",
+      "git diff dev...HEAD --stat -- ci/checks/: empty — no frozen-check drift (D-007/T-0146 pre-check clean).",
+      "Anti-case grep (tel-/тэл/нормоконтрол literals) on added src/ lines: no matches.",
+      "Isolation claim (NF3): git diff dev...HEAD --name-only touches exactly src/core/agent-task-external-mapper.ts, src/core/flowable-client.ts, src/http/process-defs.ts + 3 test files — zero touch on agent-dispatch/**, assistant-analyst, registry-digest-dao, inbox.",
+      "Spot-ran 3 directly relevant fitness gates (bpmn-linter-isolation.sh, mutation-gateway-isolation.sh, flowable-bridge-contract.sh) — all PASS/exit 0.",
+      "Confirmed via grep that lane-role-mapper.ts and timer-escalation-mapper.ts independently stamp flowable:candidateGroups with no xmlns guard and are still invoked unconditionally at draft-save (process-defs.ts lines 401-417) — this is the finding in R-1, verified first-hand, not taken on the author's word."
+    ],
+    "not_independently_verified": [
+      "AC-7 (LIVE_PROOF manual stand verification) — pr-handoff supplies only a live_proof_plan (steps to execute), not evidence of execution/results on the dev stand. Marked covered:false pending that manual run; this is expected at review-phase (LIVE_PROOF is typically a separate downstream gate) and is NOT treated as blocking for a code-review verdict, consistent with reviewer.md's remit (code correctness + CI + ADR/spec conformance — not stand execution).",
+      "Full npm run fitness (~240+ check chain) was not run end-to-end in this review due to its length; tsc/build/full-vitest/anti-case/ci-checks-diff/isolation + 3 most-relevant individual fitness gates were verified directly as a proportionate substitute. No signal of risk found in any check actually run."
+    ]
+  }
+}

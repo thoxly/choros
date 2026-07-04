@@ -17,6 +17,8 @@ import { describe, it, expect } from "vitest";
 import {
   mapAgentTaskToExternal,
   extractAgentTaskConfigs,
+  ensureFlowableNamespace,
+  FLOWABLE_NAMESPACE_URI,
   AGENT_STEP_TOPIC,
 } from "../agent-task-external-mapper.js";
 import { lintBpmn } from "../bpmn-linter.js";
@@ -29,6 +31,24 @@ const NS =
 /** Wrap body fragments in a minimal well-formed process so lintBpmn accepts it. */
 function proc(body: string): string {
   return `<definitions ${NS}><process id="p1">${body}</process></definitions>`;
+}
+
+// ---------------------------------------------------------------------------
+// T-0635 [P0-4]: the REALISTIC modeler-exported shape — NO xmlns:flowable.
+//
+// web/src/canvas/choros-moddle-extension.js registers ONLY the choros namespace
+// (associations: [] — it does not import/associate flowable), so a real
+// modeler saveXML() NEVER emits xmlns:flowable. These fixtures mirror that
+// reality (unlike `proc()` above, which hand-authors xmlns:flowable and so
+// never would have caught the AttributePrefixUnbound regression).
+// ---------------------------------------------------------------------------
+const MODELER_NS =
+  'xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" ' +
+  'xmlns:choros="http://choros.io/bpmn"';
+
+/** Wrap body fragments the way the REAL modeler exports them — no xmlns:flowable. */
+function modelerProc(body: string): string {
+  return `<definitions ${MODELER_NS}><process id="p1">${body}</process></definitions>`;
 }
 
 const AGENT_ID = "d0000000-0000-0000-0000-000000000006";
@@ -166,5 +186,108 @@ describe("mapAgentTaskToExternal — cross-check with the linter (FF-R5-1/5)", (
     const a = mapAgentTaskToExternal(proc(agentTaskPaired()));
     const b = mapAgentTaskToExternal(proc(agentTaskPaired()));
     expect(a).toBe(b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0635 [P0-4]: AttributePrefixUnbound fix — xmlns:flowable root declaration.
+// ---------------------------------------------------------------------------
+
+describe("mapAgentTaskToExternal — xmlns:flowable root declaration (T-0635 P0-4)", () => {
+  it("REGRESSION: a REAL modeler-exported diagram (no xmlns:flowable) gets the " +
+    "namespace injected onto <definitions> once an agent task is wired", () => {
+    const input = modelerProc(agentTaskPaired());
+    expect(input).not.toContain("xmlns:flowable"); // sanity: fixture mirrors reality
+    const out = mapAgentTaskToExternal(input);
+    expect(out).toContain(`xmlns:flowable="${FLOWABLE_NAMESPACE_URI}"`);
+    // The namespace declaration lives on <definitions>, not anywhere else.
+    expect(out).toMatch(/<definitions\b[^>]*\bxmlns:flowable=/);
+  });
+
+  it("the declared URI matches the hand-authored seed processes under " +
+    "config/flowable/processes/ (e.g. choros-smoke.bpmn20.xml) so Flowable 7.1 " +
+    "recognises the flowable: prefix", () => {
+    expect(FLOWABLE_NAMESPACE_URI).toBe("http://flowable.org/bpmn");
+  });
+
+  it("does NOT inject the namespace when there are no agent tasks (additive, matches the byte-identical no-op)", () => {
+    const input = modelerProc(`<userTask id="u1" name="Approve"/>`);
+    const out = mapAgentTaskToExternal(input);
+    expect(out).toBe(input);
+    expect(out).not.toContain("xmlns:flowable");
+  });
+
+  it("does NOT inject the namespace when the only agent task is already-external (no new flowable:* emitted)", () => {
+    const alreadyExternal =
+      `<serviceTask id="t1" name="Step" choros:executorType="agent" ` +
+      `choros:agentRef="${AGENT_ID}" flowable:type="external" flowable:topic="agent-step"/>`;
+    const input = modelerProc(alreadyExternal);
+    const out = mapAgentTaskToExternal(input);
+    expect(out).toBe(input); // byte-identical — no xmlns injected, nothing else touched
+  });
+
+  it("does NOT inject the namespace when the only agent task is id-less (nothing wired)", () => {
+    const noId = `<serviceTask name="Step" choros:executorType="agent" choros:agentRef="${AGENT_ID}"/>`;
+    const input = modelerProc(noId);
+    const out = mapAgentTaskToExternal(input);
+    expect(out).toBe(input);
+  });
+
+  it("is IDEMPOTENT at the namespace level too — re-running does not double-declare xmlns:flowable", () => {
+    const once = mapAgentTaskToExternal(modelerProc(agentTaskPaired()));
+    const twice = mapAgentTaskToExternal(once);
+    expect(twice).toBe(once);
+    expect((once.match(/xmlns:flowable=/g) ?? []).length).toBe(1);
+  });
+
+  it("respects an EXPLICIT prior xmlns:flowable declaration (author/prior-run wins, no double-declare)", () => {
+    const alreadyDeclared =
+      `<definitions ${MODELER_NS} xmlns:flowable="http://flowable.org/bpmn">` +
+      `<process id="p1">${agentTaskPaired()}</process></definitions>`;
+    const out = mapAgentTaskToExternal(alreadyDeclared);
+    expect((out.match(/xmlns:flowable=/g) ?? []).length).toBe(1);
+  });
+
+  it("the transformed output of a realistic modeler diagram PASSES lintBpmn (proves the " +
+    "output is coherent end-to-end, not just namespace-well-formed)", () => {
+    const out = mapAgentTaskToExternal(modelerProc(agentTaskPaired()));
+    const result = lintBpmn(out);
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("ensureFlowableNamespace — standalone unit (T-0635 P0-4)", () => {
+  it("injects xmlns:flowable onto a bare <definitions> root with no other namespaces", () => {
+    const input = `<definitions><process id="p1"/></definitions>`;
+    const out = ensureFlowableNamespace(input);
+    expect(out).toContain(`xmlns:flowable="${FLOWABLE_NAMESPACE_URI}"`);
+  });
+
+  it("is a no-op when xmlns:flowable is already declared (any prior value wins)", () => {
+    const input = `<definitions xmlns:flowable="http://flowable.org/bpmn"><process id="p1"/></definitions>`;
+    expect(ensureFlowableNamespace(input)).toBe(input);
+  });
+
+  it("handles a namespace-prefixed <bpmn:definitions> root", () => {
+    const input = `<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"><bpmn:process id="p1"/></bpmn:definitions>`;
+    const out = ensureFlowableNamespace(input);
+    expect(out).toMatch(/<bpmn:definitions\b[^>]*\bxmlns:flowable=/);
+  });
+
+  it("is a no-op (byte-identical) when there is no <definitions> element at all", () => {
+    const input = `<not-bpmn/>`;
+    expect(ensureFlowableNamespace(input)).toBe(input);
+  });
+
+  it("preserves the rest of the document byte-for-byte (DI, other namespaces, formatting)", () => {
+    const input =
+      `<?xml version="1.0" encoding="UTF-8"?>\n` +
+      `<definitions ${MODELER_NS} targetNamespace="http://choros.io/test">\n` +
+      `  <process id="p1"><startEvent id="s"/></process>\n` +
+      `  <bpmndi:BPMNDiagram xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"/>\n` +
+      `</definitions>`;
+    const out = ensureFlowableNamespace(input);
+    // Everything except the injected attribute is untouched.
+    expect(out.replace(` xmlns:flowable="${FLOWABLE_NAMESPACE_URI}"`, "")).toBe(input);
   });
 });

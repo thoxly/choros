@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0635",
+  "status": "pr_open",
+  "branch": "task/T-0635-publish-agent-xml",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/agent-task-external-mapper.ts",
+    "src/core/__tests__/agent-task-external-mapper.test.ts",
+    "src/core/flowable-client.ts",
+    "src/__tests__/flowable-client.test.ts",
+    "src/http/process-defs.ts",
+    "src/__tests__/process-defs.agentxml-draft.test.ts",
+    "T-0635.spec.md",
+    "T-0635.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "Spec/ADR combined into T-0635.spec.md (no separate .adr.md) per the task's explicit instruction naming only that one deliverable path.",
+    "lane-role-mapper.ts / timer-escalation-mapper.ts carry the SAME architectural gap (flowable:candidateGroups injected without a xmlns:flowable guarantee, and persisted at draft-save time) but were deliberately left untouched — the task mandate scoped this fix to the agent-task path only. Flagged in open_questions, not fixed here."
+  ],
+  "open_questions": [
+    "lane-role-mapper.ts and timer-escalation-mapper.ts have not been audited/fixed for the same two defects (missing xmlns:flowable guarantee; transform persisted into the draft at save time) — they were out of this task's explicit mandate. Recommend a follow-up task once T-0635 lands, since a diagram mixing lanes/timers WITH an agent step will now get the namespace declared (because the agent-task mapper's ensureFlowableNamespace covers the whole document), but a lane-only or timer-only diagram with candidateGroups on a userTask remains exposed to the same AttributePrefixUnbound risk in principle — has not hit LIVE_PROOF yet, unlike the agent path.",
+    "Coordination with T-0636 (parallel task, already merged into dev as commit 4bc2d96 by the time this branch rebased): the only shared file is src/core/flowable-client.ts. T-0636 touched fetchAndLock/completeTask/failTask (credentials, tenant GUC, lockDuration) — this task touched only deployBpmn + the two new helper functions (safeReadJson, isBpmnParseRejection) plus a return-type annotation on deployBpmn's withRetry callback. Rebase onto origin/dev (4bc2d96) completed with zero conflicts; full suite + fitness + fitness:db re-verified green on the rebased branch."
+  ],
+  "transform_fix": {
+    "defect": "AttributePrefixUnbound — mapAgentTaskToExternal stamped flowable:type/flowable:topic/<flowable:field> without ensuring xmlns:flowable was declared on <definitions>. The modeler's web/src/canvas/choros-moddle-extension.js registers ONLY the choros namespace (associations: []), so a real modeler export never carries xmlns:flowable — confirmed by direct inspection of that file and of web/src/canvas/bpmn-modeler-wrapper.jsx (moddleExtensions: { choros: ChorosModdleDescriptor } only).",
+    "fix": "New exported function ensureFlowableNamespace(bpmnXml) in src/core/agent-task-external-mapper.ts injects xmlns:flowable=\"http://flowable.org/bpmn\" (verified against the already-working hand-authored seed processes under config/flowable/processes/) onto the <definitions> root. Called from mapAgentTaskToExternal only when this invocation actually wired at least one new agent serviceTask (idempotent — skips if xmlns:flowable is already declared with any value; additive — a no-agent-task or already-external-only diagram is untouched, matching the existing byte-identical no-op contract of the rest of the module).",
+    "files": ["src/core/agent-task-external-mapper.ts"]
+  },
+  "error_mapping_fix": {
+    "defect": "Ложный 503 — deployBpmn classified any HTTP status >= 500 as ENGINE_UNAVAILABLE via httpStatusToCode. Flowable's deployment servlet is LIVE-VERIFIED (docs/test-reports/T-0058.test-report.json probe-a, an existing artifact in this repo predating this task) to respond to a malformed/unparsable BPMN deploy with HTTP 500 and a JSON body {\"message\": ..., \"exception\": \"...XMLStreamException...\"} — not a clean 400 — while the engine itself stays healthy (health check 200 throughout). That meant a genuine 'our XML is broken' case (including the AttributePrefixUnbound bug above) surfaced as a dishonest 'движок недоступен' 503 and burned 3 retries first.",
+    "fix": "deployBpmn now reads the response body on any non-201 result via a new safeReadJson helper (never throws — falls back to plain status-code classification on a missing/non-JSON body) and checks it with a new isBpmnParseRejection helper against known Flowable XML-exception signatures (XMLStreamException, SAXParseException, BpmnXMLException, AttributePrefixUnbound, XMLException). A match classifies the result as BAD_BPMN regardless of the raw HTTP status. BAD_BPMN was already in withRetry's not-retryable list and flowableErrorToHttp already mapped it to 422 with a human message — this fix only corrects the upstream CLASSIFICATION so real rejections reach that existing, already-correct path instead of falling into ENGINE_UNAVAILABLE. Any other 5xx (no body, unrelated exception text, network error) is unaffected and still surfaces as ENGINE_UNAVAILABLE/503 — genuine outages are not masked (covered by a dedicated regression test).",
+    "files": ["src/core/flowable-client.ts"]
+  },
+  "draft_preservation_fix": {
+    "defect": "Порча черновика — POST /api/process-defs ran mapAgentTaskToExternal BEFORE persisting the draft, so the transformed (flowable:*-bearing) XML was written straight into choros.process_definition.bpmn_xml. Re-opening that draft in the modeler then failed importXML() with an unparsable-content error, because the modeler's moddle extension does not know the flowable: attributes/elements this transform emits.",
+    "fix": "mapAgentTaskToExternal is no longer called in the POST /api/process-defs (draft-save) handler in src/http/process-defs.ts — the persisted bpmn_xml is now exactly the author's XML (choros:* only) after lane/timer mapping (unchanged, out of scope). The transform now runs ONLY inside publishProcessByKey, immediately after loading the row and before lint/executor-resolution-gate/normalizeBpmnForDeploy/deployBpmn, producing a local `publishXml` variable that is used for lint, the agentRef-resolution gate, and the deploy payload — and is NEVER written back to the process_definition row (the publish UPDATE statement only ever set status/deployment_id/updated_at, confirmed unchanged and asserted by a new test that inspects the literal SQL to ensure it never touches bpmn_xml).",
+    "files": ["src/http/process-defs.ts"]
+  },
+  "tests_added": [
+    {
+      "file": "src/core/__tests__/agent-task-external-mapper.test.ts",
+      "covers": "ensureFlowableNamespace unit tests (bare root, already-declared no-op, prefixed <bpmn:definitions>, no-<definitions> no-op, byte-preservation of the rest of the document) + mapAgentTaskToExternal integration tests using a NEW realistic modeler-shaped fixture (choros: namespace only, no xmlns:flowable — unlike every pre-existing fixture in this file, which hardcoded xmlns:flowable and so never exercised this gap): namespace injected only when new flowable:* content is emitted (not for no-agent-task / already-external / id-less cases), idempotent at the namespace level, respects an explicit prior declaration, and the transformed output still passes lintBpmn end to end."
+    },
+    {
+      "file": "src/__tests__/flowable-client.test.ts",
+      "covers": "deployBpmn body-detection: HTTP 500 + XMLStreamException/SAXParseException body → BAD_BPMN; no retries burned on a body-detected BAD_BPMN; HTTP 500 with an UNRELATED exception (OutOfMemoryError) → still ENGINE_UNAVAILABLE and still retried (proves genuine outages are not masked); HTTP 500 with an unparseable/non-JSON body → falls back to ENGINE_UNAVAILABLE without throwing; HTTP 503 with no body → still ENGINE_UNAVAILABLE; HTTP 400 with the exception-shaped body → still BAD_BPMN (both detection paths agree)."
+    },
+    {
+      "file": "src/__tests__/process-defs.agentxml-draft.test.ts",
+      "covers": "NEW file. Draft preservation: POST /api/process-defs persists choros:*-only XML (no flowable:type/topic/field/xmlns leak); GET round-trips the same clean XML; publishing does NOT retroactively rewrite the persisted bpmn_xml (asserted via shared mutable pool state across save→publish, and via a literal-SQL assertion that the publish UPDATE never sets bpmn_xml). Publish correctness: deployBpmn receives xmlns:flowable-complete + externalised XML with the dispatcher variable keys stamped. Regression: a human-only process (no agent task) still publishes unchanged. Error-mapping integration: a Flowable BAD_BPMN result surfaces as thrown HttpError(422, code BAD_BPMN) through the real route, and a genuine ENGINE_UNAVAILABLE result still surfaces as HttpError(503, code ENGINE_UNAVAILABLE) — proving the two fixes and the draft-preservation fix all cohere through the actual publish route, not just at the unit level."
+    }
+  ],
+  "gates": {
+    "tsc_noemit": "pass",
+    "npm_build": "pass",
+    "npm_lint": "pass (0 errors, 41 pre-existing no-console warnings unrelated to this diff)",
+    "vitest_full": "pass — 5407 passed, 10 skipped, 0 failed (275 files passed, 2 skipped)",
+    "npm_run_fitness": "pass — exit 0 (full ~240+ check chain; FAIL-labelled lines in the log are OTHER gates' own self-test fixtures operating on /tmp scratch files, confirmed by inspecting context around each — e.g. read-pdp-anti-case's own synthetic-diff self-test intentionally plants a 'role-approver' fixture to prove its detector fires)",
+    "anti_case_ffrp7": "pass — 0 D-064 anti-case literals in added src/ lines (verified twice: once mid-work, once after rebase onto the new dev tip; one incidental 'tel-linear.bpmn20.xml' filename mention in a doc-comment was caught and reworded to 'choros-smoke.bpmn20.xml' before commit since it incidentally matched the banned 'tel-' substring despite not being case-specific business logic)",
+    "fitness_db": "pass — 124 files / 1203 tests, 0 failed (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@127.0.0.1:55432/choros against the running choros-postgres-1 container). One transient timeout on doc-reconcile.db.test.ts F-9 was observed on an earlier full run under load and reproduced as a clean pass when re-run solo — confirmed a pre-existing flake unrelated to this diff (that test file has no relation to process-defs/agent-mapper/flowable-client), and the subsequent full fitness:db run after rebase passed cleanly with no timeout at all.",
+    "migration": "none required — pure code fix, no schema changes"
+  },
+  "live_proof_plan": [
+    "1. On the dev stand, open the process modeler and author (or open an existing draft of) a process containing at least one Agent Task step with choros:executorType=\"agent\" wired to a real provisioned agent (agentRef resolving to a kind='agent' employee in the tenant), save the draft.",
+    "2. Publish the process via the modeler's publish action (POST /api/process-defs/:key/publish). Expected: 200 status=published with a deploymentId — Flowable accepted the XML (xmlns:flowable declared, no AttributePrefixUnbound). Confirm via the Flowable admin REST (GET /repository/process-definitions) that the deployment is listed.",
+    "3. Re-open the SAME process key in the modeler (GET /api/process-defs/:key → load into bpmn-js). Expected: the diagram loads cleanly with no 'unparsable content' error, and the Agent Task step's properties panel still shows the authored agent/role — proving the persisted draft is still the author's choros:* XML, not the flowable:*-transformed shape.",
+    "4. Adversarial probe: temporarily point the FlowableClient at a stopped/unreachable Flowable instance (or simulate via a deliberately malformed process — e.g. an unresolvable agentRef bypassed, or direct engine stop) and re-publish. Expected for a genuine engine outage: honest 503 'движок недоступен'. Expected for a content-level Flowable rejection (if reproducible live, e.g. by temporarily reverting the xmlns fix in a side branch to compare): honest 422 with a human-readable reason, not a 503 — confirms the classification fix holds against the real engine, not just the HTTP-mock unit tests.",
+    "5. Regression check: publish an existing human-only process (userTask-only, no agent step) on the same stand and confirm it still publishes and runs exactly as before (no behavior change for the non-agent path)."
+  ]
+}
