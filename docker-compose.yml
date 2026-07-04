@@ -208,6 +208,10 @@ services:
       # string drift (FF-R5-6). Dormant-safe: no LLM key → the dispatcher honestly defers.
       FLOWABLE_TOPICS: ${FLOWABLE_TOPICS:-tel-intake,agent-step}
       AGENT_TOPICS:    ${AGENT_TOPICS:-agent-step}
+      # T-0586 [столп 4]: агенты исполняют шаги живьём. Дефолт false (дормант — агенты
+      # честно деферят в инбокс). Стенд ставит =true для LIVE_PROOF. Per-agent гранулярность
+      # уже даёт привязка llm_connection к агенту (агент без коннекшна → всегда defer).
+      AGENT_LIVE_ENABLED: ${AGENT_LIVE_ENABLED:-false}
       # T-0363 (E17): DeepSeek LLM wiring. Key has NO default — absent → dormant LLM (honest-degrade).
       DEEPSEEK_API_KEY:  ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}

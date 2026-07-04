@@ -31,6 +31,11 @@ import {
   type LlmResult,
   dormantLlmPort,
   LlmDormantError,
+  // T-0586 F6(b): a CONFIGURED provider call that failed (bad key/handle, HTTP
+  // error, timeout, network) — distinct from LlmDormantError (no config at all).
+  // Both pure (no network) — safe to import into this neutral motor file.
+  LlmUnavailableError,
+  canonicalizeLlmError,
 } from "../../core/llm-port.js";
 import {
   type PrecheckOutcome,
@@ -63,14 +68,42 @@ export type { PrecheckOutcome };
 export const DEFAULT_AUTONOMY_THRESHOLD = 0.85;
 
 // ---------------------------------------------------------------------------
+// LiveLlmConfig — T-0586 ND-2: neutral contract for the per-job live port
+// factory. Deliberately does NOT import any adapter type (this file stays
+// adapter-free) — the composition root (agent-dispatch-loop.ts) is the only
+// place that knows about OpenAILlmPort.
+// ---------------------------------------------------------------------------
+
+/**
+ * Neutral, adapter-free shape handed to `RunAgentStepDeps.llmPortFactory`.
+ * Built from the agent's OWN per-job resolved config (`ctx.llm`, already
+ * assembled by `assembleAgentStepContext` via `readAgentCardLlmConfigById`).
+ * `secretHandle` is the OPAQUE reference alias (never a raw secret — RL-3).
+ */
+export interface LiveLlmConfig {
+  readonly tenantId: string;
+  readonly endpoint: string;
+  readonly model: string;
+  readonly secretHandle: string;
+}
+
+// ---------------------------------------------------------------------------
 // RunAgentStepDeps — injected (DI, mirrors PrecheckDeps minus the PDP).
 // ---------------------------------------------------------------------------
 
 /**
  * Dependencies for runAgentStep.
  *
- * llm         — LlmPort; production: BYO adapter; test: stub; default: dormantLlmPort.
- * liveEnabled — deploy-time flag; false → force dormant regardless of llm_* config.
+ * llm            — LlmPort; production: BYO adapter; test: stub; default: dormantLlmPort.
+ * liveEnabled    — deploy-time flag; false → force dormant regardless of llm_* config.
+ * llmPortFactory — T-0586 (ND-2, additive optional): per-job live port factory.
+ *   When present AND the live-gate is open (liveEnabled && llm_* configured), the
+ *   motor calls `llmPortFactory(cfg)` to build a FRESH port from the job's own
+ *   `ctx.llm` — no cache, no shared-instance carry-over between jobs (a UI key
+ *   change is picked up on the very next job, mirrors the assistant path's
+ *   `makeLlmPortFactory` "no caching" contract). When ABSENT (unit tests,
+ *   degraded deps) the behaviour is UNCHANGED from pre-T-0586: `deps.llm` is
+ *   used directly (frozen weld contract — AC-4/AC-5).
  *
  * The PDP read-gate from run-precheck.ts is NOT replicated here for the keystone:
  * the agent's grants are already the basis of its toolset (resolveAgentToolset) and
@@ -82,6 +115,8 @@ export interface RunAgentStepDeps {
   readonly llm: LlmPort;
   /** deploy-time live flag; false ⇒ override to dormantLlmPort. */
   readonly liveEnabled: boolean;
+  /** Additive (T-0586): per-job live LlmPort factory. Absent ⇒ use `llm` (dormant/stub). */
+  readonly llmPortFactory?: (cfg: LiveLlmConfig) => LlmPort;
 }
 
 /** Returns true iff all three llm_* fields are non-null (live configured). */
@@ -172,8 +207,21 @@ export async function runAgentStep(
   }
 
   // --- Live-gate: pick the port (dormant unless live AND configured). ---
-  const port: LlmPort =
-    deps.liveEnabled && llmConfigured(ctx.llm) ? deps.llm : dormantLlmPort;
+  // T-0586 (ND-2): when the gate is open AND a llmPortFactory is injected, build
+  // a FRESH port per-job from ctx.llm (no cache — see RunAgentStepDeps doc).
+  // Absent factory (tests / degraded deps) ⇒ unchanged pre-T-0586 behaviour.
+  const liveConfigured = deps.liveEnabled && llmConfigured(ctx.llm);
+  const port: LlmPort = liveConfigured
+    ? (deps.llmPortFactory
+        ? deps.llmPortFactory({
+            tenantId: ctx.tenantId,
+            // llmConfigured() above guarantees these three are non-null.
+            endpoint: ctx.llm.endpoint!,
+            model: ctx.llm.model!,
+            secretHandle: ctx.llm.secretHandle!,
+          })
+        : deps.llm)
+    : dormantLlmPort;
 
   // --- Call the model through the port (catch dormant / timeout / egress / error). ---
   const req = buildNeutralLlmRequest(ctx);
@@ -188,6 +236,19 @@ export async function runAgentStep(
   } catch (err) {
     if (err instanceof LlmDormantError) {
       llmOutcome = { ok: false, errorKind: undefined, dormant: true };
+    } else if (err instanceof LlmUnavailableError) {
+      // T-0586 F6(b): a CONFIGURED provider call failed (bad key / HTTP error /
+      // timeout / network — see LlmUnavailableError doc in llm-port.ts). Route
+      // to defer-to-human (NOT fail-closed) so the broken key lands in
+      // «Эскалации» with a human-readable reason and the process does NOT
+      // hang — a human takes over from the inbox (AC-9). Zero retries at the
+      // dispatcher-loop level: this is a TERMINAL outcome for this step.
+      return {
+        kind: "defer-to-human",
+        signal: "model",
+        doubtReason: canonicalizeLlmError(err),
+        inboxTaskRef: "pending",
+      };
     } else if (err instanceof Error && err.message.toLowerCase().includes("timeout")) {
       llmOutcome = { ok: false, errorKind: "llm_timeout", dormant: false };
     } else if (err instanceof Error && err.message.toLowerCase().includes("egress")) {

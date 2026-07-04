@@ -175,6 +175,124 @@ describe("runAgentStep — live proceed path (flip-on, llm_* configured)", () =>
   });
 });
 
+// ---------------------------------------------------------------------------
+// T-0586 ND-2 — llmPortFactory DI: when present + live-gate open, the motor
+// builds the port PER-JOB from the factory (with ctx.llm's own values), NOT
+// from deps.llm. When absent, deps.llm is used unchanged (frozen weld — see
+// agent-step-weld.*.test.ts, which never pass llmPortFactory at all).
+// ---------------------------------------------------------------------------
+
+describe("T-0586 ND-2 — llmPortFactory DI (per-job live port construction)", () => {
+  const liveLlm = { endpoint: "https://live.example/v1", model: "live-model", secretHandle: "app://tenant/x/handle" };
+
+  it("live-gate open + llmPortFactory present → factory is called with ctx.llm's own values, its returned port is used (NOT deps.llm)", async () => {
+    const neverCalled = new StubLlmPort({ mode: "succeed", recordCalls: true });
+    const factoryPort = new StubLlmPort({ mode: "succeed", recordCalls: true });
+    let capturedCfg: unknown;
+    const outcome = await runAgentStep(makeCtx({ llm: liveLlm }), {
+      llm: neverCalled, // fallback port — must NOT be the one invoked
+      liveEnabled: true,
+      llmPortFactory: (cfg) => {
+        capturedCfg = cfg;
+        return factoryPort;
+      },
+    });
+
+    expect(outcome.kind).toBe("proceed");
+    // The factory-built port was used — NOT the deps.llm fallback.
+    expect(factoryPort.calls.length).toBe(1);
+    expect(neverCalled.calls.length).toBe(0);
+    // The factory received exactly ctx.llm's resolved fields + tenantId.
+    expect(capturedCfg).toEqual({
+      tenantId: TENANT,
+      endpoint: liveLlm.endpoint,
+      model: liveLlm.model,
+      secretHandle: liveLlm.secretHandle,
+    });
+  });
+
+  it("llmPortFactory absent → deps.llm is used directly (unchanged pre-T-0586 behaviour)", async () => {
+    const stub = new StubLlmPort({ mode: "succeed", recordCalls: true });
+    // No llmPortFactory key at all — mirrors every existing weld test's deps shape.
+    const outcome = await runAgentStep(makeCtx({ llm: liveLlm }), { llm: stub, liveEnabled: true });
+    expect(outcome.kind).toBe("proceed");
+    expect(stub.calls.length).toBe(1);
+  });
+
+  it("liveEnabled=false → llmPortFactory is NEVER called even if present (dormant wins)", async () => {
+    let factoryCalled = false;
+    const outcome = await runAgentStep(makeCtx(), {
+      llm: dormantLlmPort,
+      liveEnabled: false,
+      llmPortFactory: () => {
+        factoryCalled = true;
+        return new StubLlmPort({ mode: "succeed" });
+      },
+    });
+    expect(outcome.kind).toBe("defer-to-human");
+    expect(factoryCalled).toBe(false);
+  });
+
+  it("llm_* unconfigured (ctx.llm nulls) → llmPortFactory is NEVER called even if liveEnabled=true", async () => {
+    let factoryCalled = false;
+    const outcome = await runAgentStep(makeCtx({ llm: { endpoint: null, model: null, secretHandle: null } }), {
+      llm: dormantLlmPort,
+      liveEnabled: true,
+      llmPortFactory: () => {
+        factoryCalled = true;
+        return new StubLlmPort({ mode: "succeed" });
+      },
+    });
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") expect(outcome.signal).toBe("dormant");
+    expect(factoryCalled).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0586 F6(b) / FF-586-4 — LlmUnavailableError → defer-to-human (NOT fail-closed).
+// ---------------------------------------------------------------------------
+
+describe("T-0586 FF-586-4 — LlmUnavailableError (configured but call failed) → defer-to-human", () => {
+  const liveLlm = { endpoint: "https://x", model: "m", secretHandle: "h" };
+
+  it("port.complete throws LlmUnavailableError → defer-to-human(signal=model), human-readable doubtReason, NOT fail-closed", async () => {
+    const stub = new StubLlmPort({ mode: "unavailable", recordCalls: true });
+    const outcome = await runAgentStep(makeCtx({ llm: liveLlm }), { llm: stub, liveEnabled: true });
+
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") {
+      expect(outcome.signal).toBe("model");
+      expect(outcome.doubtReason).toBeTruthy();
+      // Human-readable canonical text (canonicalizeLlmError) — never the raw
+      // stub error message (no leaking internal/dev-facing detail).
+      expect(outcome.doubtReason).not.toContain("stub:");
+      expect(outcome.inboxTaskRef).toBe("pending");
+    }
+    // The call WAS attempted exactly once (config existed, the call itself failed).
+    expect(stub.calls.length).toBe(1);
+  });
+
+  it("LlmUnavailableError is classified BEFORE the generic/timeout/egress fallback (narrow branch wins)", async () => {
+    // A message that ALSO contains the substring "timeout" must still classify
+    // as defer-to-human via the LlmUnavailableError branch (type-based check,
+    // ordered before the string-based timeout/egress heuristics) — proves the
+    // narrow `instanceof LlmUnavailableError` branch short-circuits first.
+    const stub = new StubLlmPort({ mode: "unavailable" });
+    const outcome = await runAgentStep(makeCtx({ llm: liveLlm }), { llm: stub, liveEnabled: true });
+    expect(outcome.kind).toBe("defer-to-human");
+  });
+
+  it("dormant LlmDormantError is UNCHANGED by the new branch (still signal=dormant, not signal=model)", async () => {
+    // Regression guard: adding the LlmUnavailableError branch must not shadow
+    // the pre-existing LlmDormantError → signal=dormant path (AC-5).
+    const stub = new StubLlmPort({ mode: "dormant" });
+    const outcome = await runAgentStep(makeCtx({ llm: liveLlm }), { llm: stub, liveEnabled: true });
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") expect(outcome.signal).toBe("dormant");
+  });
+});
+
 describe("runAgentStep — determinism", () => {
   it("same dormant input → same outcome (NF-6)", async () => {
     const a = await runAgentStep(makeCtx(), dormantDeps);

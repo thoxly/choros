@@ -1,7 +1,7 @@
 {
-  "task_id": "T-0628",
+  "task_id": "T-0586",
   "status": "pr_open",
-  "branch": "task/T-0628-kc-email-fix",
+  "branch": "task/T-0586-agent-live",
   "pr_url": "",
   "ci_local": {
     "build": true,
@@ -11,62 +11,36 @@
     "fitness": true
   },
   "files_changed": [
-    "docs/specs/T-0628.spec.contract.json",
-    "docs/specs/T-0628-user-account-email-fix.spec.md",
-    "migrations/127_employee_email.sql",
-    "ci/checks/dual-control-isolation.sh",
-    "ci/checks/substitution-isolation.sh",
-    "ci/checks/role-criticality-migration-excludes.txt",
-    "ci/checks/data/frozen-sanctions.jsonl",
-    "src/http/user-mgmt.ts",
-    "src/keycloak/admin-port.ts",
-    "src/keycloak/fake-user-port.ts",
-    "src/__tests__/fake-user-port-fidelity.test.ts",
-    "ci/checks/db/user-mgmt.db.test.ts",
-    "web/src/screens/screen-users.jsx",
-    "web/src/screens/users-form.js",
-    "web/src/screens/users-form.test.js"
+    "src/runtime/agent-dispatch/run-agent-step.ts",
+    "src/server/agent-dispatch-loop.ts",
+    "src/core/__tests__/stub-llm-port.ts",
+    "src/runtime/agent-dispatch/__tests__/run-agent-step.test.ts",
+    "src/server/__tests__/agent-dispatch-loop-live-flag.test.ts",
+    "ci/checks/agent-live-flip-flag.sh",
+    "package.json",
+    "docker-compose.yml",
+    ".env.prod.example"
   ],
-  "root_cause": "Live acceptance of T-0583 (2026-07-04) found a P0: POST /api/users hardcoded email=login when calling KeycloakUserPort.createHumanUser. A non-email login (the ordinary happy path — the UI placeholder hints email but never validated it) 400'd on a real Keycloak realm, which the port mapped to AUTH_UNAVAILABLE -> 503 'account service unavailable'. Between that finding and this task, T-0625 (already merged, an ancestor of this branch) closed the 503 a DIFFERENT way: it made `login` itself mandatory-email-shaped (client+server EMAIL_RE validation before any KC call) and added employee.login (migration 126) so GET /api/users/accounts shows the real login instead of the KC user UUID (that second bug from T-0628's own ticket was therefore ALREADY closed and left untouched). T-0625's contract is narrower than this task's own spec: T-0628 requires login to stay FREE-FORM (a non-email username like ivan.petrov is legitimate) with email as its OWN required field, validated on our side before any KC call.",
-  "fix_summary": {
-    "server_validation": "src/http/user-mgmt.ts validateCreateBody: removed the EMAIL_RE requirement on `login` (now only requires non-empty), added `email` as a new required field validated with the same EMAIL_RE, BEFORE any kc.createHumanUser call. kc.createHumanUser now receives {username: login, email} as two DISTINCT values (previously {username: login, email: login} — same string duplicated).",
-    "schema": "migrations/127_employee_email.sql adds choros.employee.email (nullable text, additive ADD COLUMN, mirrors 125_employee_deactivated_at.sql / 126_employee_login.sql style) — stored separately from employee.login (126) and employee.slug (the KC user UUID, 016).",
-    "port_and_fake": "src/keycloak/admin-port.ts: KcHumanUserSpec doc-comments updated (username is free-form, distinct from email); the EMAIL_INVALID defense-in-depth branch now documents it guards `email`, not `username`. src/keycloak/fake-user-port.ts: the T-0625 fake-fidelity check previously required BOTH spec.username and spec.email to be email-shaped (mirroring this codebase's own prior choice, not a real Keycloak constraint — verified config/keycloak/realm-choros.json sets no registrationEmailAsUsername/email-only flag); now validates ONLY spec.email, matching the live port and a real KC realm.",
-    "ui": "web/src/screens/screen-users.jsx CreateUserModal gains a separate required 'Email' field (type=email); the 'Логин' field is no longer type=email / no longer hints 'email-адрес' — it is now a plain free-form login field. web/src/screens/users-form.js: validateCreateUser validates email (required + EMAIL_RE) instead of login; buildCreateUserPayload sends both login and email; mapUserError anchors 409 EMAIL_TAKEN to the `email` field (was `login`).",
-    "users_screen_gate_minor": "T-0628's minor item (/users reachable by direct URL for a non-owner; nav hides it but the page rendered unrestricted) is addressed by mirroring the ONLY existing degrade pattern in this codebase (screen-org.jsx OrgTree: canWrite derived from the status of an already-gated GET). screen-users.jsx already calls GET /api/org/tenant-state (for the position dropdown) — its 200/403 status now also drives a new `canWrite` state: 200 -> full write controls, 403/other -> 'Создать учётку' button and per-row Деактивировать/Реактивировать hidden, replaced by an explanatory banner. This is a COSMETIC client-side degrade only — the real gate stays server-side (POST/PATCH /api/users 403 via assertOrgObjectAuthority, T-0469, unchanged)."
-  },
-  "invariants_preserved": {
-    "kc_first_compensation": "Unchanged (N4) — KC user still created BEFORE any DB write; DB failure after KC-create still triggers best-effort kc.deleteUser (FF-583-3c test unchanged, still green).",
-    "password_never_leaked": "Unchanged (N1) — AC-11/AC-12 test still asserts the plaintext password never appears in any response body (409/503/201/list/patch) nor in the audit_event payload, across the updated login+email shape.",
-    "kc_port_reuse": "Unchanged (N5, FF-583-8) — user-mgmt.ts still has zero direct '/admin/realms' HTTP calls; still imports KeycloakUserPort from ../keycloak/admin-port.js. ci/checks/user-mgmt-reuses-kc-port.sh green.",
-    "tenant_isolation_and_403_gate": "Unchanged — FF-583-5 (cross-tenant create/patch/list all blocked) and FF-583-6 (non-privileged member -> 403 NOT_OWNER) pass unmodified logic-wise (only the request bodies gained an `email` field to satisfy the new required-field validation).",
-    "T0625_account_list_fix_untouched": "GET /api/users/accounts still reads employee.login (migration 126) for display, falling back to slug only for pre-migration rows — this task added employee.email as a SEPARATE column and did not touch the list projection or migration 126."
-  },
+  "summary": "Implements ADR-T0586 (commit ca1b8d6) exactly: replaces the two hard-coded `liveEnabled: false` literals in src/server/agent-dispatch-loop.ts's composition root with a read of the deploy-time AGENT_LIVE_ENABLED env flag (default false, dormant/safe — ND-1 Variant A). When live, buildAgentDispatchDeps additively supplies runDeps.llmPortFactory (ND-2 Variant B) — a per-job factory that builds a fresh OpenAILlmPort from the agent's own ctx.llm config via the SAME tenantSecretResolver the assistant path already uses (src/server.ts), no duplicated SQL resolver. run-agent-step.ts's live-gate now prefers deps.llmPortFactory?.(cfg) ?? deps.llm (frozen fallback when the factory is absent, e.g. unit tests / degraded deps). A new typed classification branch routes LlmUnavailableError (configured-but-failed call: bad key/HTTP/timeout/network) to defer-to-human(signal=model, doubtReason=canonicalizeLlmError(err)) BEFORE the generic/timeout/egress fail-closed branches, so a broken key lands in the human inbox instead of parking the job. buildDegradedAgentDispatchDeps keeps its literal liveEnabled:false with an added doc-comment explaining it is an intentionally-unreachable degraded path (topics=[] short-circuits to noopHandle before runDeps is ever read).",
+  "adr_ref": "T-0586.adr.md (commit ca1b8d6), spec T-0586.spec.md",
+  "new_gate": "ci/checks/agent-live-flip-flag.sh (FF-586-1/FF-586-3, --self-test supported): function-scoped grep (awk brace-depth extraction) asserts buildAgentDispatchDeps reads AGENT_LIVE_ENABLED and contains no unconditional liveEnabled:false; asserts buildDegradedAgentDispatchDeps's OWN liveEnabled:false is doc-commented as the degraded/unreachable path (function-isolated, not conflated with buildAgentDispatchDeps); asserts no llm_connection/secret_handle SQL literal on a CODE line (comment-only mentions excluded, same comment-strip convention as anti-case-lock.sh) and that OpenAILlmPort + tenantSecretResolver are imported. Wired additively at the end of package.json's fitness chain (npm run fitness now also runs this gate + its --self-test).",
   "gates": {
-    "npm_run_build": "green, exit 0 (tsc + seed/tsconfig.json)",
-    "tsc_noEmit": "green, exit 0",
-    "eslint_src": "0 errors, 41 pre-existing no-console warnings (unrelated files, unchanged by this diff)",
-    "vitest_unit_root": "272 files passed, 2 skipped; 5317 tests passed, 10 skipped, 0 failed (includes src/__tests__/fake-user-port-fidelity.test.ts 4/4 updated for the free-form-username contract).",
-    "vitest_web": "75 files passed, 2097 tests passed, 0 failed (includes web/src/screens/users-form.test.js 22/22 and web/src/screens/screen-users.test.jsx 13/13, both updated).",
-    "vitest_fitness_db": "Solo run against live Postgres :55432 (template hash 55ad49b8, 127 migrations applied including this task's 127_employee_email). 120 files passed, 1176 tests passed, 0 failed. ci/checks/db/user-mgmt.db.test.ts specifically re-verified solo: 12/12 green (includes the 4 rewritten/added T-0628 AC-1/AC-2/AC-3 cases: free-form login + distinct email succeeds; invalid email / missing email / empty login each -> honest 400, KC never called).",
-    "npm_run_fitness": "Full ~240+-check chain (build+lint+types+every ci/checks/*.sh, including UX gates G2/G5/G6/G8) exit 0 end-to-end AFTER committing all changes (FF-T147-2 db-isolation-no-test-change.sh diffs uncommitted `git diff HEAD` — reads clean only once the ci/checks/db/user-mgmt.db.test.ts edit is committed; confirmed green post-commit). dual-control-isolation.sh / substitution-isolation.sh / role-criticality-isolation.sh / frozen-checks-immutable.sh all green via the new T0628-*-MIG127 auto-additive relief blocks (A-1..A-4 + Враг-attestation verified, corpus_ref=efa4b97 confirmed ancestor of HEAD with matching corpus blob).",
-    "web_isolation": "Verified no runtime import from web/src into src/ was introduced (grep clean) — the Docker web-builder isolation invariant (web-builder is isolated to web/) is preserved."
+    "vitest": "full suite green: 273 files passed, 2 skipped; 5336 tests passed, 10 skipped, 0 failed (npx vitest run). Includes the 6 new AC-4/AC-5 weld tests (agent-step-weld.dormant.test.ts + agent-step-weld.live-stub.test.ts, UNCHANGED assertions), 35 tests in run-agent-step.test.ts (10 new: llmPortFactory DI x4, LlmUnavailableError->defer x3, existing 28 untouched-in-substance), 13 new tests in agent-dispatch-loop-live-flag.test.ts (table-driven env values + factory-identity).",
+    "build": "npm run build green (tsc + seed/tsconfig.json), zero errors.",
+    "fitness_db": "npm run fitness:db (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros against the real running Postgres :55432 container 'choros-postgres-1'): 120 test files passed, 1173 tests passed, 0 failed — confirms migrations 032/094 and agent_card/llm_connection RLS unaffected (AC-11). Ran once, clean (no flake observed, no solo re-check needed).",
+    "flip_flag_selftest": "bash ci/checks/agent-live-flip-flag.sh --self-test green (4 self-test assertions) AND bash ci/checks/agent-live-flip-flag.sh (production check against the real file) green.",
+    "secret_custody": "bash ci/checks/precheck-secret-custody.sh green; bash ci/checks/secret-handle-isolation.sh green (FF-25-1..8, including the byte-unchanged frozen-file check) — neither run-agent-step.ts nor agent-dispatch-loop.ts references the raw llm_secret_handle column name (ADR §4.4 respected: only opaque ctx.llm.secretHandle / LiveLlmConfig.secretHandle are used).",
+    "anti_case": "bash ci/checks/anti-case-lock.sh green (Phase 1 delegate gates + Phase 2 full denylist scan, all within/under baseline, several literals eroded further than baseline during this diff's neighborhood). No case-specific literals (persona/role/tenant-slug) added in src/.",
+    "compose": "docker compose -f docker-compose.yml config -q exits 0; docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file <placeholder-substituted .env.prod.example> config -q exits 0; bash ci/checks/compose-prod-config.sh green (all FF-T61-1..11); grep -E 'AGENT_LIVE_ENABLED.*:-false' docker-compose.yml matches.",
+    "full_fitness_chain": "npm run fitness (the entire ~240-check chain incl. npm run build inline) completed with exit code 0. All 'FAIL' lines appearing in the raw log are INTERNAL --self-test fixtures of OTHER gates (e.g. docpage-writeful-tools, FF-T0572-*) intentionally planting violations to prove their own detectors fire — not real failures.",
+    "llm_port_injectable": "bash ci/checks/llm-port-injectable.sh green — LlmPort stays a pure injectable type; no SDK imports leaked into src/core/** or src/runtime/legal-precheck/**.",
+    "no_network_in_core": "bash ci/checks/precheck-no-network-in-core.sh green — LlmUnavailableError/canonicalizeLlmError imported into run-agent-step.ts are pure (no network), core/legal-precheck untouched.",
+    "eslint": "npx eslint on all changed .ts files: 0 errors, 1 pre-existing warning (console.error in the untouched per-job catch block of runAgentDispatchOnce, unrelated to this diff)."
   },
-  "test_proof_of_fix": [
-    "ci/checks/db/user-mgmt.db.test.ts 'T-0628 (AC-1): POST /api/users with a non-email login (ivan.petrov-shaped) + valid email -> 201, KC called with distinct username/email' — proves the free-form login + separate email contract end-to-end against live Postgres + InMemoryKeycloakUserPort, asserting kc.created[0].spec.username === login and .email === email (two distinct values, not the old duplicated string).",
-    "ci/checks/db/user-mgmt.db.test.ts 'T-0628 (AC-2): POST /api/users with an invalid email -> honest 400 VALIDATION, not 503; no employee row, KC never called' and the missing-email variant — both prove the validation-before-KC-call property survives the field swap (createCallCount stays 0).",
-    "ci/checks/db/user-mgmt.db.test.ts 'T-0628 (AC-3): POST /api/users with an empty login -> honest 400 VALIDATION' — proves login is STILL required, just no longer format-checked.",
-    "ci/checks/db/user-mgmt.db.test.ts 'FF-583-1/2' (updated) — asserts employee.login and employee.email are stored as DISTINCT column values from a single create call.",
-    "src/__tests__/fake-user-port-fidelity.test.ts 'T-0628: accepts a free-form (non-email) username paired with a valid email' — unit-level proof the port's fake no longer rejects a non-email username in isolation from the HTTP layer.",
-    "web/src/screens/users-form.test.js 'accepts a non-email login ... as long as email is well-formed' + 'rejects a missing email even when login is present' — client-side mirror of the same contract."
-  ],
-  "deviations_from_adr": [
-    "No deviation from this task's own SPEC (docs/specs/T-0628.spec.contract.json / T-0628-user-account-email-fix.spec.md), authored in the SPEC phase of this same session before BUILD. The only notable judgment call: T-0625 (an ancestor commit, not part of this task) had already closed this ticket's BUG item (list shows UUID) and partially addressed the P0 with a narrower contract (login=email mandatory) — this task's SPEC explicitly documents that decision and extends forward (adds a distinct email column/field) rather than reverting T-0625's list-display fix, which stays untouched and green."
-  ],
-  "blocked_reason": "",
-  "friction_events": [
-    "ci/checks/dual-control-isolation.sh / substitution-isolation.sh / role-criticality-migration-excludes.txt required additive T0628-*-MIG127 relief blocks (same class T-0625 added for migration 126) before FF-DC7/FF-SUB5/FF-RC5-RC6 would pass for the new migrations/127_employee_email.sql — expected friction for any new employee-table ADD COLUMN migration in this repo's current frozen-check state; resolved by mirroring the exact T-0625 pattern (independent per-migration content parse: no CREATE/DROP TABLE, no RLS/POLICY, no confirmed2_by/substitution references) plus two new auto_additive sanction lines in ci/checks/data/frozen-sanctions.jsonl (corpus_ref=efa4b97, verified ancestor of HEAD with matching corpus blob, families TENANT-ISO/GRANT-ESCALATION per the T-0152 catalog's existing Enforced-by coverage of both frozen files).",
-    "FF-T147-2 (db-isolation-no-test-change.sh) false-positives on any UNCOMMITTED edit to ci/checks/db/*.test.ts (diffs `git diff HEAD`, not against a base ref) — same documented pattern as prior tasks (e.g. T-0623); resolved by committing before the full fitness run.",
-    "A background 'npm run fitness' run and a later 'npm run fitness:db' solo run were kept sequential (not run in parallel) per the project's documented 'parallel vitest+db flakes -> trust solo numbers' convention — no flake observed in this session, but the sequencing was deliberate."
+  "handoff_path": "pr-handoff.json",
+  "deviations_from_adr": [],
+  "open_questions": [
+    "AC-8/AC-9 (LIVE_PROOF) are explicitly out of coder scope per ADR §8 ('исполнит tester ПОСЛЕ мержа + деплоя') — not attempted here. The deploy prerequisite from ADR §9 (set AGENT_LIVE_ENABLED=true in the dev stand's env and redeploy) is also not part of this PR's diff (docker-compose.yml ships the flag with a SAFE default of false; flipping the runtime env value on the actual stand is a separate deploy action, consistent with 'runtime target = container, deploy by the factory, not GT-4').",
+    "ND-2's ADR text offered two equivalent implementation shapes for the LlmUnavailableError catch handling (option (a): early return in the catch branch, vs option (b): a deferUnavailable flag threaded through the post-catch block). Implemented option (a) as the ADR explicitly recommended ('минимальнее и предпочтителен') — noted here only for traceability, not a deviation."
   ]
 }
