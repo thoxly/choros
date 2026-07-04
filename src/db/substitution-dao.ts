@@ -168,6 +168,15 @@ const SUBST_SELECT = `
   JOIN choros.employee e_sub
     ON e_sub.tenant_id = sr.tenant_id
    AND e_sub.id = sr.substitute_employee_id
+   -- T-0588 (BLOCK-2, review R-1 follow-up): a deactivated substitute must
+   -- never be usable as a stand-in — mirrors the FR-2 deactivation-filter
+   -- principle (grants-dao.ts getHoldersForRole/findTenantOwnerSlug) applied
+   -- to the substitution_rule read path. Applied in the SHARED SUBST_SELECT
+   -- fragment (not just the claim-eligibility reader) so ALL THREE readers
+   -- (ForEmployee/ByRole/ForSubstitute) agree: a fired employee is never an
+   -- effective substitute, whether looked up by absentee, by role, or by
+   -- themselves. Additive predicate only — no signature change.
+   AND e_sub.deactivated_at IS NULL
   JOIN choros.role r
     ON r.tenant_id = sr.tenant_id
    AND r.id = sr.role_id
