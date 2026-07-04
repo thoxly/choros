@@ -23,9 +23,12 @@
    What it renders:
      scalar  → text / textarea / number / checkbox / date  (per presentation)
      enum    → <select> (or radio)                          (options[] required)
-     relation / collection / date-range / money / file      → honest "not yet
-       authorable here" readout (D7-6/7/8 deliver their editable UI; the renderer
-       degrades visibly rather than pretending a text box captures them)
+     relation / collection / date-range / file (T-0579)     → dedicated structural
+       components (RelationPickerField / CollectionField / DateRangeField /
+       FileField) — each owns its own fetch/local state.
+     money / matrix-lookup not-yet-authorable contracts      → honest "not yet
+       authorable here" readout (degrades visibly rather than pretending a text
+       box captures them)
      rollup / matrix-lookup (editable:false)                → read-only readout
 
    Per-step field MODE (T-0404 [D7-9]): each renderable field may carry a `mode`
@@ -200,6 +203,207 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
     <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
       {labelNode}
       {control}
+      {errorNode}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// T-0579: FileField — upload/download control for a `file` contract.
+//
+// The ONLY new structural component this task adds. Talks EXCLUSIVELY to the
+// already-built file routes (src/http/files.ts, T-0518):
+//   POST /api/records/:recordId/files              — upload (raw body)
+//   GET  /api/records/:recordId/files               — list (resolve display name)
+//   GET  /api/files/:versionId/download[?disposition=inline] — download/preview
+//
+// Stored value: fileVersionId (a plain string — same pattern as person=id,
+// relation=uuid). No client-side S3/bucket/presign call, no client file-ACL
+// (FF-UPLOAD-ROUTE-ONLY / NF-2) — visibility/authorization is a pure derivative
+// of the owning record's PDP grant, enforced entirely server-side.
+//
+// field.recordId — the CURRENT record's id (required to know where to POST/GET
+// the file list; absent on a not-yet-created record → upload disabled with an
+// honest message, matching the "create record first" constraint any file-attach
+// UI has).
+//
+// Honest states (NF-5/D-062): Empty (upload affordance) / Loading (upload
+// in-flight, disabled) / Error (size_exceeded / mime rejection / network,
+// surfaced by message) / Populated (file name + Скачать + Заменить).
+// ---------------------------------------------------------------------------
+
+/**
+ * Upload/download control for a `file` contract field. Stores the uploaded
+ * file's versionId as the field value; resolves the display name via the
+ * record's file listing (GET /api/records/:recordId/files).
+ *
+ * @param {{ key, label?, title?, required?, recordId? }} field
+ * @param {string} value  current value (fileVersionId or "")
+ * @param {(key, value) => void} onChange
+ * @param {string|undefined} error
+ * @param {string} idPrefix
+ * @param {boolean} isRequired
+ * @param {boolean} readOnly
+ */
+export function FileField({ field, value, onChange, error, idPrefix = 'field', isRequired = false, readOnly = false }) {
+  const id = `${idPrefix}-${field.key}`;
+  const errorId = error ? `${id}-error` : undefined;
+  const label = field.label || field.title || field.key;
+  const invalid = Boolean(error);
+  const recordId = field.recordId;
+
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  // fileMeta: { originalName, mime } for the CURRENT value's versionId, resolved
+  // from the record's file listing. null = not yet resolved / no listing available.
+  const [fileMeta, setFileMeta] = useState(null);
+
+  // Resolve the display name + mime for the current value from the record's
+  // file listing (the same endpoint the list/card cells use — one source of
+  // metadata, no duplicate resolution logic).
+  useEffect(() => {
+    if (!value || !recordId) { setFileMeta(null); return; }
+    let cancelled = false;
+    fetch(`/api/records/${encodeURIComponent(recordId)}/files`, { headers: devHeaders() })
+      .then(async (res) => {
+        if (cancelled || !res.ok) return;
+        const files = await res.json();
+        if (cancelled || !Array.isArray(files)) return;
+        const match = files.find((f) => f && f.currentVersionId === value);
+        if (match) setFileMeta({ originalName: match.originalName, mime: match.mime });
+      })
+      .catch(() => { /* honest degrade: fall back to showing the raw value below */ });
+    return () => { cancelled = true; };
+  }, [value, recordId]);
+
+  const handleFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    // Reset the input so selecting the SAME file again still fires onChange
+    // (replace flow) — browsers dedupe change events on identical selections.
+    e.target.value = '';
+    if (!file) return;
+    if (!recordId) {
+      setUploadError('Сначала сохраните запись, затем прикрепите файл');
+      return;
+    }
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const res = await fetch(`/api/records/${encodeURIComponent(recordId)}/files`, {
+        method: 'POST',
+        headers: {
+          ...devHeaders(),
+          'Content-Type': file.type || 'application/octet-stream',
+          'X-File-Name': file.name || 'upload',
+        },
+        body: file,
+      });
+      if (!res.ok) {
+        throw new Error(formatError(res.status));
+      }
+      const body = await res.json();
+      setFileMeta({ originalName: file.name, mime: file.type });
+      onChange(field.key, body.versionId);
+    } catch (err) {
+      setUploadError(String(err?.message || err));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const inputStyle = { display: 'block', width: '100%', boxSizing: 'border-box' };
+
+  const labelNode = (
+    <label className="chs-label" htmlFor={id}>
+      {label}
+      {isRequired && (
+        <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+      )}
+    </label>
+  );
+  const errorNode = error ? (
+    <span id={errorId} role="alert" style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+      {error}
+    </span>
+  ) : null;
+  const uploadErrorNode = uploadError ? (
+    <span role="alert" style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+      {uploadError}
+    </span>
+  ) : null;
+
+  const displayName = fileMeta?.originalName || (typeof value === 'string' && value.length > 0 ? value : '');
+  const downloadHref = value ? `/api/files/${encodeURIComponent(value)}/download` : null;
+
+  let control;
+  if (uploading) {
+    // Loading — upload in flight, control disabled (honest, no dead affordance).
+    control = (
+      <div id={id} className="chs-input" aria-live="polite" aria-busy="true"
+        style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-sm)' }}>
+        Загрузка файла…
+      </div>
+    );
+  } else if (value) {
+    // Populated — show the resolved name, a real download link, and (unless
+    // readOnly) a "Заменить" re-upload control.
+    control = (
+      <div id={id} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)', flexWrap: 'wrap' }}>
+          <a
+            href={downloadHref}
+            className="chs-input"
+            style={{ ...inputStyle, width: 'auto', flex: 1, textDecoration: 'none', color: 'var(--chs-color-accent)' }}
+            aria-describedby={errorId}
+          >
+            {displayName || 'Скачать файл'}
+          </a>
+          {!readOnly && (
+            <label
+              className="chs-label"
+              style={{ margin: 0, cursor: 'pointer', color: 'var(--chs-color-accent)', fontSize: 'var(--chs-text-sm)' }}
+            >
+              Заменить
+              <input
+                type="file"
+                onChange={handleFileSelect}
+                style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0,0,0,0)' }}
+                aria-label={`Заменить файл: ${label}`}
+              />
+            </label>
+          )}
+        </div>
+      </div>
+    );
+  } else if (readOnly) {
+    // Empty + read-only: no upload affordance (nothing to download either) — honest.
+    control = (
+      <div id={id} className="chs-input" aria-readonly="true"
+        style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-sm)' }}>
+        Файл не загружен
+      </div>
+    );
+  } else {
+    // Empty — the upload affordance (Empty state).
+    control = (
+      <input
+        id={id}
+        type="file"
+        className="chs-input"
+        onChange={handleFileSelect}
+        aria-required={isRequired || undefined}
+        aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
+        style={inputStyle}
+      />
+    );
+  }
+
+  return (
+    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+      {labelNode}
+      {control}
+      {uploadErrorNode}
       {errorNode}
     </div>
   );
@@ -859,6 +1063,25 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   if (presentation === 'table') {
     return (
       <CollectionField
+        field={field}
+        value={value}
+        onChange={onChange}
+        error={error}
+        idPrefix={idPrefix}
+        isRequired={isRequired}
+        readOnly={readOnly}
+      />
+    );
+  }
+
+  // T-0579: file (presentation='file') → FileField.
+  // Structural contract with fetch/local state (resolves the display name via
+  // the record's file listing) — same category as relation/collection, not a
+  // scalarish inline input. Talks ONLY to the existing file routes (§2.3/§2.4
+  // of the ADR); no client-side S3/bucket/presign, no client file-ACL.
+  if (presentation === 'file') {
+    return (
+      <FileField
         field={field}
         value={value}
         onChange={onChange}

@@ -13,10 +13,16 @@
  *     List all files attached to a record (tenant-scoped, read-gated).
  *     Returns [{ fileId, originalName, currentVersionId, mime, sizeBytes, createdAt }].
  *
- *   GET /api/files/:fileVersionId/download
+ *   GET /api/files/:fileVersionId/download[?disposition=inline]
  *     Presign or stream the content of a specific file version (PDP read-gated).
  *     - FsObjectStore: streams bytes directly from disk.
  *     - http(s) presign url (S3): 302 redirect.
+ *     T-0579: ?disposition=inline requests Content-Disposition: inline instead
+ *     of attachment, for record-card preview (image/*, application/pdf only —
+ *     see isInlineSafeMime). Only applies to the FsObjectStore streaming path
+ *     (the redirect/JSON-fallback paths are unaffected — presign URLs carry
+ *     no disposition header here). Without the param, or for any other mime
+ *     (including image/svg+xml — anti-XSS), behaviour is UNCHANGED: attachment.
  *
  * Authorization: every route delegates to the T-0021 PDP via makeFileRecordResolver
  * (the owner RECORD's grant governs; no separate file ACL — FF-NOACL). Tenant
@@ -61,6 +67,28 @@ const MAX_UPLOAD_BYTES = 26_214_400;
 
 /** Presign TTL in seconds (served or redirected). */
 const PRESIGN_TTL_SECONDS = 300;
+
+// ---------------------------------------------------------------------------
+// T-0579: inline-disposition allowlist (FR-8 / FF-INLINE-SAFE)
+//
+// GET /api/files/:fileVersionId/download?disposition=inline requests an inline
+// Content-Disposition (browser renders instead of downloads — needed for the
+// record-card preview, ADR §2.7). Only preview-SAFE mime types are honoured:
+// image/* (EXCLUDING image/svg+xml — an SVG can carry a <script>, which would
+// execute in the app's origin if rendered inline: stored-XSS) and
+// application/pdf. Every other mime, and the absence of the query param,
+// falls back to `attachment` — the existing default behaviour is UNCHANGED
+// (no regression on any pre-T-0579 test/caller).
+// ---------------------------------------------------------------------------
+
+/** True iff `mime` is safe to serve with Content-Disposition: inline. */
+function isInlineSafeMime(mime: string | null | undefined): boolean {
+  if (typeof mime !== "string" || mime.length === 0) return false;
+  if (mime === "image/svg+xml") return false; // anti-XSS: SVG can carry <script>
+  if (mime.startsWith("image/")) return true;
+  if (mime === "application/pdf") return true;
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Deps
@@ -325,6 +353,14 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
         const fileVersionId = params["fileVersionId"] ?? "";
         assertUuidShape(fileVersionId, "fileVersionId");
 
+        // T-0579: parse ?disposition=inline. Additive — absence of the param
+        // (or any value other than "inline") preserves the exact prior
+        // behaviour (attachment), so every existing caller/test is unaffected.
+        const rawUrl = req.url ?? "";
+        const qIdx = rawUrl.indexOf("?");
+        const query = new URLSearchParams(qIdx >= 0 ? rawUrl.slice(qIdx + 1) : "");
+        const wantsInline = query.get("disposition") === "inline";
+
         const urlResult = await getFileContentUrl(
           {
             resolver,
@@ -367,11 +403,19 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
           const contentType = version?.mimeType ?? "application/octet-stream";
           const fileName = version ? `file-${fileVersionId}` : "download";
 
+          // T-0579 (FR-8/FF-INLINE-SAFE): inline ONLY when the caller asked for
+          // it AND the mime is on the preview-safe allowlist (image/* except
+          // svg, application/pdf). Everything else — no param, or an unsafe
+          // mime (including image/svg+xml and text/html) — stays `attachment`,
+          // exactly as before T-0579 (anti-XSS: an inline SVG/HTML response
+          // would execute in the app's origin).
+          const disposition = wantsInline && isInlineSafeMime(contentType) ? "inline" : "attachment";
+
           res.statusCode = 200;
           res.setHeader("Content-Type", contentType);
           res.setHeader(
             "Content-Disposition",
-            `attachment; filename="${fileName}"`,
+            `${disposition}; filename="${fileName}"`,
           );
           // Prevent browsers from MIME-sniffing the response and executing it
           // as a different content type (e.g. treating an octet-stream as HTML).

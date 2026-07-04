@@ -75,6 +75,8 @@ export const INPUT_KIND = {
   person: "person",
   collection: "collection",
   computed: "computed",
+  // T-0579: file — upload/download control; value is the fileVersionId string.
+  file: "file",
 };
 
 /**
@@ -433,6 +435,22 @@ export function schemaToFormFields(recordSchema) {
       };
     }
 
+    // T-0579: detect file fields by the presence of x-file annotation.
+    // Shape: { type: "string", "x-file": {…} }. Must be detected before the generic
+    // string fallthrough. A property WITHOUT x-file never detects as "file" —
+    // backward-compatible (NF-3).
+    const xFile = def && typeof def === "object" ? def["x-file"] : undefined;
+    if (xFile && typeof xFile === "object" && !Array.isArray(xFile)) {
+      return {
+        key,
+        type: "file",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "file",
+      };
+    }
+
     // T-0294: detect select fields by the presence of a non-empty enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
     if (hasEnum) {
@@ -681,6 +699,16 @@ export function validateRecordValues(formFields, values) {
       continue;
     }
 
+    // T-0579: file — value is the fileVersionId string; non-empty when required.
+    // Optional + blank → valid (no file attached yet). AC-8.
+    if (f.type === "file") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Прикрепите файл";
+      }
+      continue;
+    }
+
     // T-0446: relation — required → must be a non-empty UUID string.
     if (f.type === "relation") {
       const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
@@ -886,6 +914,16 @@ export function serializeRecordData(formFields, values) {
       continue;
     }
 
+    // T-0579: file — the uploaded value IS the fileVersionId string (returned by
+    // POST /api/records/:recordId/files). Blank optional → omit; blank required
+    // is caught by validateRecordValues.
+    if (f.type === "file") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0 && !f.required) continue; // omit blank optional
+      data[f.key] = str; // fileVersionId string — passes AJV type:"string"
+      continue;
+    }
+
     // T-0446: relation — the picked value IS the referenced record's UUID string.
     // Emitted as a plain string (the schema stores it as type:"string"). Blank
     // optional ⇒ omit; blank required is caught by validateRecordValues.
@@ -993,6 +1031,16 @@ export function deriveRecordLabel(record) {
  */
 export const RELATION_CELL_ASYNC = Symbol("relation_cell_async");
 
+/**
+ * T-0579: sentinel for a file-type cell whose value (a fileVersionId) needs an
+ * async resolve to a display name via GET /api/records/:recordId/files (the
+ * same listing FileField itself consumes — one source of metadata, no second
+ * resolver). Mirrors RELATION_CELL_ASYNC's pattern: formatCellValue cannot
+ * fetch, so it signals the caller to render an async cell component instead of
+ * ever surfacing the raw fileVersionId (FF-CELL-NO-UUID).
+ */
+export const FILE_CELL_ASYNC = Symbol("file_cell_async");
+
 export function formatCellValue(value, type) {
   if (value === null || value === undefined) return "—";
   if (type === "boolean" || typeof value === "boolean") {
@@ -1004,6 +1052,15 @@ export function formatCellValue(value, type) {
   if (type === "relation") {
     if (typeof value === "string" && value.length > 0) return RELATION_CELL_ASYNC;
     return "—"; // blank or unexpected non-string → absent
+  }
+
+  // T-0579: file value is a fileVersionId — name resolution is async (via the
+  // record's file listing, GET /api/records/:recordId/files). Return the sentinel
+  // so callers render an async cell/card component instead of ever surfacing the
+  // raw uuid (FF-CELL-NO-UUID, AC-9/AC-10). Empty string → no file attached → "—".
+  if (type === "file") {
+    if (typeof value === "string" && value.length > 0) return FILE_CELL_ASYNC;
+    return "—";
   }
   // T-0453: computed field value is a number (pre-computed before call) or null.
   // Format as a string number (locale-neutral — consistent with number fields) or «—».

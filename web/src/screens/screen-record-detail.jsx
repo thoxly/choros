@@ -25,7 +25,7 @@ import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDia
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { formatDate, formatError, formatJsonReadable, formatPersonName } from '../lib/format.js';
-import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel, computeRollup } from './records-form.js';
+import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, FILE_CELL_ASYNC, deriveRecordLabel, computeRollup } from './records-form.js';
 // T-0608 (пункт г): resolve record.created_by (an employee SLUG — for a
 // Keycloak-registered human, slug === the KC user UUID) to a display name.
 import { fetchEmployees } from '../forms/field-renderer.jsx';
@@ -395,6 +395,93 @@ function RelationFieldValue({ targetId, recordId, appId }) {
 }
 
 // ---------------------------------------------------------------------------
+// T-0579: FileFieldValue — resolves a fileVersionId to a download link + (for
+// preview-safe mime types) an inline preview, in the record detail card.
+//
+// Resolution: GET /api/records/:recordId/files (the same listing FileField and
+// FileCell consume) to get the display name + mime. Preview uses the inline-
+// disposition route (?disposition=inline) which the server allowlists to
+// image/* (except svg) and application/pdf — everything else download-only.
+//
+// Honest states: loading / denied (not found in listing) / resolved (name link
+// + optional preview).
+// ---------------------------------------------------------------------------
+
+/** Preview-safe mime allowlist mirrored from src/http/files.ts (client display
+ * decision only — the SERVER re-validates and is the actual security boundary;
+ * this just decides whether to render an <img>/<embed> at all). */
+function isPreviewSafeMime(mime) {
+  if (typeof mime !== 'string') return false;
+  if (mime === 'image/svg+xml') return false; // anti-XSS: svg never inline (FR-8)
+  return mime.startsWith('image/') || mime === 'application/pdf';
+}
+
+/**
+ * Inline file field value for the record detail card: name-as-download-link,
+ * plus an inline preview for image/*(non-svg)/pdf.
+ *
+ * @param {string} versionId  fileVersionId stored as the field value.
+ * @param {string} recordId   current record's id (listing fetch).
+ */
+function FileFieldValue({ versionId, recordId }) {
+  const [state, setState] = useState('loading'); // 'loading'|'resolved'|'denied'
+  const [meta, setMeta] = useState(null); // { originalName, mime }
+
+  useEffect(() => {
+    if (!versionId || !recordId) { setState('denied'); return; }
+    let cancelled = false;
+    setState('loading');
+    fetch(`/api/records/${encodeURIComponent(recordId)}/files`, { headers: devHeaders() })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) { setState('denied'); return; }
+        const files = await res.json();
+        if (cancelled) return;
+        const match = Array.isArray(files) ? files.find((f) => f && f.currentVersionId === versionId) : null;
+        if (!match) { setState('denied'); return; }
+        setMeta({ originalName: match.originalName, mime: match.mime });
+        setState('resolved');
+      })
+      .catch(() => { if (!cancelled) setState('denied'); });
+    return () => { cancelled = true; };
+  }, [versionId, recordId]);
+
+  if (state === 'loading') {
+    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>…</span>;
+  }
+
+  if (state === 'denied' || !meta) {
+    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>— / Нет доступа</span>;
+  }
+
+  const downloadHref = `/api/files/${encodeURIComponent(versionId)}/download`;
+  const previewHref = `${downloadHref}?disposition=inline`;
+  const previewSafe = isPreviewSafeMime(meta.mime);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', alignItems: 'flex-start' }}>
+      <a href={downloadHref} style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }} title="Скачать файл">
+        {meta.originalName || 'Скачать файл'}
+      </a>
+      {previewSafe && meta.mime && meta.mime.startsWith('image/') && (
+        <img
+          src={previewHref}
+          alt={meta.originalName || 'Превью файла'}
+          style={{ maxWidth: '320px', maxHeight: '320px', borderRadius: 'var(--chs-radius-2)', border: '1px solid var(--chs-color-border)' }}
+        />
+      )}
+      {previewSafe && meta.mime === 'application/pdf' && (
+        <embed
+          src={previewHref}
+          type="application/pdf"
+          style={{ width: '100%', maxWidth: '480px', height: '360px', border: '1px solid var(--chs-color-border)', borderRadius: 'var(--chs-radius-2)' }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // RecordDetailScreen
 // ---------------------------------------------------------------------------
 
@@ -655,6 +742,10 @@ function RecordDetailScreen() {
                     const hasValue = val !== undefined && val !== null;
                     const isAsyncRelation = isRelation && hasValue &&
                       formatCellValue(val, f.type) === RELATION_CELL_ASYNC;
+                    // T-0579: file fields render name-link + inline preview, not raw uuid.
+                    const isFile = f.type === 'file';
+                    const isAsyncFile = isFile && hasValue &&
+                      formatCellValue(val, f.type) === FILE_CELL_ASYNC;
                     return (
                       <div key={f.key} style={fieldRowStyle}>
                         <span style={labelStyle}>{f.label}</span>
@@ -669,7 +760,14 @@ function RecordDetailScreen() {
                                   appId={appId}
                                 />
                               )
-                              : formatCellValue(val, f.type)}
+                              : isAsyncFile
+                                ? (
+                                  <FileFieldValue
+                                    versionId={String(val)}
+                                    recordId={record.id}
+                                  />
+                                )
+                                : formatCellValue(val, f.type)}
                         </span>
                       </div>
                     );

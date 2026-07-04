@@ -302,6 +302,11 @@ export function contractKindForFieldType(type) {
     case 'person':
       // T-0512: person fields use the 'person' catalog contract.
       return 'person';
+    case 'file':
+      // T-0579: file fields use the 'file' catalog contract (structural — fetch/
+      // state, not inline scalar). The 'file' descriptor was already declared in
+      // BINDING_CONTRACT_CATALOG as a stub (§ file entry above); this wires it up.
+      return 'file';
     case 'url':
       // T-0516: url fields use the scalar contract with url presentation.
       return 'scalar';
@@ -342,13 +347,16 @@ export function contractKindForFieldType(type) {
 export function resolveFieldContract(field) {
   const hasOptions = Array.isArray(field?.options) && field.options.length > 0;
 
-  // A structural record-entry type (relation/collection/computed/money/multi-select/person)
-  // maps directly to its catalog kind. multi-select carries `options` but we classify it
-  // as structural BEFORE the options-force-enum scalar rule so it gets its own catalog kind.
-  // T-0516: url/email are handled via their typePresentation (scalar contract) below.
+  // A structural record-entry type (relation/collection/computed/money/multi-select/
+  // person/file) maps directly to its catalog kind. multi-select carries `options`
+  // but we classify it as structural BEFORE the options-force-enum scalar rule so
+  // it gets its own catalog kind. T-0516: url/email are handled via their
+  // typePresentation (scalar contract) below. T-0579: file is structural (fetch/
+  // state via FileField), not a scalar text input.
   const structuralKind =
     field?.type === 'relation' || field?.type === 'collection' || field?.type === 'computed' ||
-    field?.type === 'money' || field?.type === 'multi-select' || field?.type === 'person'
+    field?.type === 'money' || field?.type === 'multi-select' || field?.type === 'person' ||
+    field?.type === 'file'
       ? contractKindForFieldType(field.type)
       : undefined;
 

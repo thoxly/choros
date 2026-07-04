@@ -85,6 +85,20 @@
  *              written to record.data. Compute-on-read: the actual aggregation is produced at
  *              display time (T-0453). This task = authoring + schema round-trip only.
  *
+ * T-0579 ADDITION:
+ *   file — an uploaded file/attachment (structural primitive, like relation/person).
+ *          Emitted as { type: "string", "x-file": {…}, title }. The value stored in
+ *          record.data is the fileVersionId (a string — same pattern as person=id,
+ *          relation=uuid). Day-1 x-file config is an empty object; extensible
+ *          additive (e.g. { mime_allow?, max_bytes? }) without a retrofit. The
+ *          x-file annotation is the round-trip discriminator (same convention as
+ *          x-person/x-url/x-relation); stripped by the server's generic
+ *          stripXExtensions before AJV-strict compile — the validator is NOT touched.
+ *          The backend (upload/list/download routes, PDP-derived authorization,
+ *          storage) is pre-existing (T-0518/T-0201) — this task only wires the
+ *          taxonomy + form/list/card display through to it (see docs/design/
+ *          T-0579-file-field.adr.md).
+ *
  * IMPORTANT — `format` is NOT emitted. AJV strict THROWS on an unknown format
  * (e.g. "email"/"date"), so `validateRecordSchemaDefinition` would reject it.
  * The seeds carry `format` only because they are inserted via raw SQL, bypassing
@@ -119,6 +133,7 @@ export const FIELD_TYPES = [
   { value: "person", label: "Сотрудник" },
   { value: "collection", label: "Список строк" },
   { value: "computed", label: "Итог" },
+  { value: "file", label: "Файл" },
 ];
 
 // T-0452: valid rollup operations for a computed field.
@@ -508,6 +523,14 @@ export function buildRecordSchema(fields) {
       // into collection items.properties, so a date sub-field must stay plain string
       // (emitScalarProp) or AJV strict would throw on the nested x-date keyword.
       prop = { type: "string", "x-date": true };
+    } else if (f.type === "file") {
+      // T-0579: file → type:string + x-file extension (round-trip discriminator).
+      // Same x-* strip convention as x-person/x-relation — AJV strips x-file before
+      // compile (validateRecordSchemaDefinition, unchanged). Stored value is a plain
+      // string: the fileVersionId returned by POST /api/records/:recordId/files
+      // (docs/design/T-0579-file-field.adr.md §2.1/§2.4). Day-1 config is empty —
+      // extensible additive (mime_allow/max_bytes) without breaking existing schemas.
+      prop = { type: "string", "x-file": {} };
     } else {
       prop = emitScalarProp(f);
     }
@@ -715,6 +738,16 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "date", title, required: requiredSet.has(key) };
     }
 
+    // T-0579: detect file fields by the presence of x-file annotation.
+    // Shape: { type: "string", "x-file": {…} }. Must be detected before the generic
+    // string fallthrough. A property WITHOUT x-file never detects as "file" —
+    // backward-compatible (NF-3): schemas persisted before T-0579 are unaffected.
+    const xFile = def && typeof def === "object" ? def["x-file"] : undefined;
+    if (xFile && typeof xFile === "object" && !Array.isArray(xFile)) {
+      const title = typeof def.title === "string" ? def.title : "";
+      return { key, type: "file", title, required: requiredSet.has(key) };
+    }
+
     // T-0294: detect select fields by the presence of an enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
     if (hasEnum) {
@@ -725,12 +758,13 @@ export function parseRecordSchema(recordSchema) {
     }
 
     // If the persisted type isn't one we offer (excluding select/relation/collection/money/
-    // multi-select/person/url/email/computed which are handled above), fall back to "string"
-    // so the dropdown stays valid; the user can re-pick.
+    // multi-select/person/url/email/computed/file which are handled above), fall back to
+    // "string" so the dropdown stays valid; the user can re-pick.
     // (Honest: never show a type option the backend wouldn't accept.)
     const nonSpecialTypes = FIELD_TYPE_VALUES.filter((v) =>
       v !== "select" && v !== "relation" && v !== "collection" && v !== "money" &&
-      v !== "multi-select" && v !== "person" && v !== "url" && v !== "email" && v !== "computed"
+      v !== "multi-select" && v !== "person" && v !== "url" && v !== "email" && v !== "computed" &&
+      v !== "file"
     );
     const type = nonSpecialTypes.includes(rawType) ? rawType : "string";
     const title =

@@ -333,7 +333,11 @@ async function httpGet(
       {
         hostname: parsed.hostname,
         port: Number(parsed.port),
-        path: parsed.pathname,
+        // T-0579: include the query string (parsed.search) — the pre-existing
+        // helper dropped it (path: parsed.pathname only), which silently
+        // discarded ?disposition=inline. No prior test exercised query params
+        // on this route, so the gap was latent until now.
+        path: parsed.pathname + parsed.search,
         method: "GET",
         headers,
       },
@@ -816,5 +820,179 @@ describe("GET /api/files/:fileVersionId/download", () => {
     // Security header must be present on streamed file responses.
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
     expect(res.headers["content-disposition"]).toMatch(/attachment/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0579 (AC-11, FF-INLINE-SAFE): ?disposition=inline on the download route.
+//
+// Only preview-safe mime types (image/* excluding svg, application/pdf) get
+// Content-Disposition: inline when the param is present; everything else
+// (including no param at all) stays `attachment` — the pre-T-0579 default is
+// UNCHANGED (verified by AC-download-8 above, which has no query param and
+// still asserts `attachment`). PDP gate, tenant/actor-from-identity, and
+// nosniff are untouched — only the file:// (FsObjectStore) streaming branch
+// gets the new header logic; these tests exercise exactly that branch.
+// ---------------------------------------------------------------------------
+
+describe("GET /api/files/:fileVersionId/download?disposition=inline (T-0579)", () => {
+  function writeTempFile(contents: string): string {
+    const tmpFile = path.join(os.tmpdir(), `choros-test-inline-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`);
+    fs.writeFileSync(tmpFile, contents);
+    return tmpFile;
+  }
+
+  function fsObjectStoreFor(tmpFile: string): ObjectStore {
+    const expiresAt = Date.now() + 300_000;
+    const fileUrl = `file://${tmpFile}?expires=${expiresAt}`;
+    return {
+      async put(_key: string, _body: Uint8Array, _meta: { mime: string; size: number }): Promise<void> { /* no-op */ },
+      async presignGet(_key: string, _ttl: number): Promise<string> { return fileUrl; },
+      async erase(_key: string): Promise<void> { /* no-op */ },
+    };
+  }
+
+  it("AC-11: image/png with ?disposition=inline → Content-Disposition: inline", async () => {
+    const tmpFile = writeTempFile("fake-png-bytes");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "image/png" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^inline/);
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  });
+
+  it("AC-11: application/pdf with ?disposition=inline → Content-Disposition: inline", async () => {
+    const tmpFile = writeTempFile("%PDF-1.4 fake");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "application/pdf" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^inline/);
+  });
+
+  it("AC-11 anti-XSS: image/svg+xml with ?disposition=inline → STILL attachment (svg excluded)", async () => {
+    const tmpFile = writeTempFile("<svg onload=alert(1)></svg>");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "image/svg+xml" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  it("AC-11 anti-XSS: text/html with ?disposition=inline → STILL attachment", async () => {
+    const tmpFile = writeTempFile("<script>alert(1)</script>");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "text/html" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  it("AC-11: text/plain with ?disposition=inline → attachment (not on the allowlist)", async () => {
+    const tmpFile = writeTempFile("plain text content");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "text/plain" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  it("AC-11: image/png WITHOUT the query param → attachment (default unchanged)", async () => {
+    const tmpFile = writeTempFile("fake-png-bytes");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "image/png" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  it("AC-12/FF-DERIVED-AUTHZ regression: resolver deny → 403 even with ?disposition=inline (no bytes)", async () => {
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "image/png" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, resolver: makeDenyResolver("no_grant") });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    expect(res.status).toBe(403);
+    expect(res.body).not.toContain("fake-png-bytes");
+  });
+
+  it("AC-13/FF-CROSS-TENANT regression: cross-tenant actor → 404 even with ?disposition=inline (no bytes)", async () => {
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "image/png" })); // seeded in TENANT_A
+
+    const { server, baseUrl } = buildTestServer({
+      fileStore,
+      resolver: makeAllowResolver(),
+      tenantForActor: async (slug) => (slug === ACTOR_B ? TENANT_B : TENANT_A),
+    });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_B });
+
+    // 404: version is not visible in TENANT_B — no leak of TENANT_A existence,
+    // regardless of the inline query param.
+    expect(res.status).toBe(404);
   });
 });
