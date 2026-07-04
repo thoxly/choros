@@ -17,6 +17,7 @@ import {
   startBridgePollLoop,
   makeErrorLogThrottle,
   CHOROS_TENANT_VAR,
+  DEFAULT_BRIDGE_WORKER_ID,
   type ExternalTaskBridgeConfig,
   type BridgePollResult,
 } from "../core/externalTaskBridge.js";
@@ -374,8 +375,56 @@ describe("Block B — makeExternalTaskDeliver complete-path", () => {
     expect(client.completeCalls).toHaveLength(1);
     const [calledTaskId, calledWorkerId, calledVars] = client.completeCalls[0];
     expect(calledTaskId).toBe(externalTaskId);
-    expect(calledWorkerId).toBe(WORKER_ID);
+    // T-0644 (P0/столп4): completeTask MUST use the bridge's OWN workerId
+    // (DEFAULT_BRIDGE_WORKER_ID when no bridgeWorkerId override is supplied to
+    // makeExternalTaskDeliver, as here) — NEVER row.payload["workerId"] (which
+    // may have been written by a completely different component, e.g. the
+    // agent dispatcher, that has no relationship to the Flowable lock).
+    expect(calledWorkerId).toBe(DEFAULT_BRIDGE_WORKER_ID);
+    expect(calledWorkerId).not.toBe(WORKER_ID);
     expect(calledVars).toEqual({ approved: true });
+  });
+
+  it("T-0644 (P0/столп4): completeTask uses the injected bridgeWorkerId, ignoring a DIFFERENT payload.workerId (the workerId-mismatch bug this task fixes)", async () => {
+    // Regression test for the LIVE_PROOF bug: the agent dispatcher stamps its
+    // OWN identity ("choros-agent-dispatcher") into the task_completed outbox
+    // payload — a completely different worker than whoever actually holds the
+    // Flowable lock (the bridge). Before the fix, deliver() forwarded
+    // payload.workerId verbatim to completeTask, which Flowable REJECTS
+    // (workerId must match the lock-holder from fetchAndLock) — the process
+    // instance would hang forever ("вечно в процессе"). After the fix,
+    // completeTask always receives the bridge's OWN workerId regardless of
+    // what a producer wrote into the payload.
+    const client = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+    const BRIDGE_LOCK_HOLDER = "choros-bridge"; // the identity that did fetchAndLock
+    const AGENT_DISPATCHER_ID = "choros-agent-dispatcher"; // a DIFFERENT component's identity
+
+    const externalTaskId = "ext-mismatch";
+    const jobId = "job-uuid-mismatch";
+    jobStore.pool = makeMockPool(new Map(), (id) => (id === jobId ? externalTaskId : undefined));
+
+    // The bridge is constructed with its OWN worker identity (4th arg) — the
+    // SAME value used for the fetchAndLock that acquired this task's lock.
+    const deliver = makeExternalTaskDeliver(client, asJobStore(jobStore), undefined, BRIDGE_LOCK_HOLDER);
+
+    // The outbox row was produced by the agent dispatcher, which stamped ITS
+    // OWN workerId into the payload (dispatch-outcome.ts enqueueTaskCompleted).
+    const row = makeOutboxRow({
+      aggregateId: jobId,
+      eventType: "task_completed",
+      payload: { workerId: AGENT_DISPATCHER_ID, variables: { source: "agent", outcome: "defer" } },
+    });
+
+    const result = await deliver(row);
+
+    expect(result.ok).toBe(true);
+    expect(client.completeCalls).toHaveLength(1);
+    const [, calledWorkerId] = client.completeCalls[0];
+    // THE KEYSTONE ASSERTION: Flowable receives the LOCK-HOLDER's workerId, not
+    // the agent dispatcher's — this is what makes Flowable accept the complete.
+    expect(calledWorkerId).toBe(BRIDGE_LOCK_HOLDER);
+    expect(calledWorkerId).not.toBe(AGENT_DISPATCHER_ID);
   });
 
   it("AC-7: completeTask NOT_FOUND → idempotentSuccess:true → dispatched", async () => {
@@ -443,10 +492,43 @@ describe("Block C — makeExternalTaskDeliver fail-path", () => {
     expect(client.failCalls).toHaveLength(1);
     const [taskId, wId, errMsg, retries, retryTimeout] = client.failCalls[0];
     expect(taskId).toBe(externalTaskId);
-    expect(wId).toBe(WORKER_ID);
+    // T-0644 (P0/столп4): failTask MUST use the bridge's OWN workerId (same
+    // rationale as completeTask's AC-6 above) — never row.payload["workerId"].
+    expect(wId).toBe(DEFAULT_BRIDGE_WORKER_ID);
+    expect(wId).not.toBe(WORKER_ID);
     expect(errMsg).toBe("worker crashed");
     expect(retries).toBe(2);
     expect(retryTimeout).toBe(5000);
+  });
+
+  it("T-0644 (P0/столп4): failTask uses the injected bridgeWorkerId, ignoring a DIFFERENT payload.workerId", async () => {
+    const client = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+    const BRIDGE_LOCK_HOLDER = "choros-bridge";
+    const OTHER_PRODUCER_ID = "choros-agent-dispatcher";
+
+    const externalTaskId = "ext-fail-mismatch";
+    const jobId = "job-uuid-fail-mismatch";
+    jobStore.pool = makeMockPool(new Map(), (id) => (id === jobId ? externalTaskId : undefined));
+
+    const deliver = makeExternalTaskDeliver(client, asJobStore(jobStore), undefined, BRIDGE_LOCK_HOLDER);
+    const row = makeOutboxRow({
+      aggregateId: jobId,
+      eventType: "task_failed",
+      payload: {
+        workerId: OTHER_PRODUCER_ID,
+        errorMessage: "llm_error",
+        retries: 0,
+        retryTimeout: 30_000,
+      },
+    });
+
+    const result = await deliver(row);
+
+    expect(result.ok).toBe(true);
+    const [, wId] = client.failCalls[0];
+    expect(wId).toBe(BRIDGE_LOCK_HOLDER);
+    expect(wId).not.toBe(OTHER_PRODUCER_ID);
   });
 
   it("AC-11: failTask NOT_FOUND → idempotentSuccess:true", async () => {

@@ -520,6 +520,15 @@ export async function runBridgeOnce(
 // ---------------------------------------------------------------------------
 
 /**
+ * T-0644 (P0/столп4): the single point of truth for the worker identity that
+ * COMPLETES/FAILS a Flowable external task on the bridge's behalf when the
+ * caller of makeExternalTaskDeliver does not supply its own (legacy call-shape
+ * — see bridgeWorkerId param doc below). Mirrors the CHOROS_TENANT_VAR pattern:
+ * one exported literal, never duplicated.
+ */
+export const DEFAULT_BRIDGE_WORKER_ID = "choros-bridge";
+
+/**
  * Factory: returns a Deliver function implementing the outboxDispatcher.Deliver
  * contract (T-0062 §4.3).
  *
@@ -546,11 +555,40 @@ export async function runBridgeOnce(
  *   lookupExternalTaskId). When no rule table is authored for the process, or on
  *   any evaluation error, the task still completes but without any injected
  *   routing variable → the gateway's BPMN `default` flow is taken (fail-closed).
+ *
+ * T-0644 (P0/столп4) — WORKER-ID SOURCE OF TRUTH:
+ *   Flowable's external-job API requires the SAME workerId at completeTask/failTask
+ *   time as the workerId that HELD THE LOCK at fetchAndLock time (a worker-id
+ *   mismatch is REJECTED by the engine — LIVE_PROOF diagnosis). The lock is always
+ *   acquired by THIS bridge (runBridgeOnce → flowableClient.fetchAndLock(topic,
+ *   workerId, …), workerId = the SAME value passed to startBridgePollLoop /
+ *   ExternalTaskBridgeConfig.workerId). Any OTHER component that later decides the
+ *   job's outcome (e.g. the agent dispatcher, src/server/agent-dispatch-loop.ts)
+ *   operates on a DIFFERENT lock domain entirely (choros.job row-lock, not the
+ *   Flowable REST lock) and has NO relationship to the Flowable lock-holder
+ *   identity — its own `workerId` (e.g. "choros-agent-dispatcher") must NEVER be
+ *   forwarded to completeTask/failTask.
+ *
+ *   `bridgeWorkerId` is therefore the ONLY source of truth this function consults
+ *   for the Flowable call. `row.payload["workerid"]` is IGNORED for that purpose —
+ *   a producer may still record its own workerId in the outbox payload for
+ *   audit/observability (dispatch-outcome.ts does), but that value is domain data
+ *   about who decided the Choros-side outcome, never the Flowable lock identity.
+ *
+ *   Callers MUST pass the SAME value used for the bridge's own fetchAndLock
+ *   (see startBridgePollLoop's `opts.workerId` / lifecycle-bridge.ts's
+ *   `FLOWABLE_WORKER_ID` env resolution) so completeTask/failTask never diverges
+ *   from the lock-holder. The default (`DEFAULT_BRIDGE_WORKER_ID`) exists ONLY for
+ *   legacy call-sites (unit tests, bridge-smoke-runner) that construct a
+ *   single-worker bridge with no explicit config — it MUST equal the default used
+ *   by startBridgePollLoop/ExternalTaskBridgeConfig so a caller that omits both
+ *   stays consistent by construction.
  */
 export function makeExternalTaskDeliver(
   flowableClient: FlowableClient,
   jobStore: PostgresJobStore,
   _onDispatched?: OnDispatched,
+  bridgeWorkerId: string = DEFAULT_BRIDGE_WORKER_ID,
 ): Deliver {
   // resolveFor is the record-mutation seam (FF-G3 / T-0028 Layer C).
   // T-0068 will complete the authorization wiring here.
@@ -663,9 +701,12 @@ export function makeExternalTaskDeliver(
           }
         }
 
+        // T-0644 (P0/столп4): ALWAYS use bridgeWorkerId (the actual Flowable
+        // lock-holder), never row.payload["workerId"] — see the doc-comment
+        // above makeExternalTaskDeliver for the full mismatch diagnosis.
         const result = await flowableClient.completeTask(
           externalTaskId,
-          row.payload["workerId"] as string | undefined ?? "choros-bridge",
+          bridgeWorkerId,
           payload,
         );
 
@@ -698,9 +739,12 @@ export function makeExternalTaskDeliver(
             ? row.payload["retryTimeout"]
             : 0;
 
+        // T-0644 (P0/столп4): ALWAYS use bridgeWorkerId — same rationale as
+        // completeTask above (failTask has the identical Flowable lock-owner
+        // requirement).
         const result = await flowableClient.failTask(
           externalTaskId,
-          row.payload["workerId"] as string | undefined ?? "choros-bridge",
+          bridgeWorkerId,
           errorMessage,
           failRetries,
           retryTimeout,

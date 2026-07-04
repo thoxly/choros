@@ -243,7 +243,10 @@ async function main(): Promise<void> {
   // -------------------------------------------------------------------------
   process.stdout.write("\n=== Step 4: Outbox dispatch → completeTask in Flowable ===\n");
 
-  const deliver = makeExternalTaskDeliver(flowableClient, jobStore);
+  // T-0644 (P0/столп4): bridgeWorkerId MUST match the workerId used above for
+  // fetchAndLock/the job lock (Step 1/3) — this smoke runner is a single-worker
+  // harness, so its own `workerId` IS the Flowable lock-holder identity.
+  const deliver = makeExternalTaskDeliver(flowableClient, jobStore, undefined, workerId);
   const dispatchResult = await runOutboxOnce(outboxStore, deliver, {
     batchLimit: 10,
     maxAttempts: 3,

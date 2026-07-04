@@ -16,6 +16,7 @@ import { InMemoryAuditWriter, inMemoryTx } from "../db/audit-writer.js";
 import { PostgresJobStore } from "../core/postgres/pgJobStore.js";
 import { PostgresOutboxStore } from "../core/postgres/pgOutboxStore.js";
 import * as flowableClientModule from "../core/flowable-client.js";
+import * as externalTaskBridgeModule from "../core/externalTaskBridge.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 
@@ -105,6 +106,72 @@ describe("startLifecycleBridge — FLOWABLE credential env names (T-0636 P0-5)",
 
     const config = vi.mocked(flowableClientModule.makeFlowableClient).mock.calls[0][0];
     expect(config?.adminPassword).not.toBe("test");
+
+    handle.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0644 (P0/столп4): the SAME workerId must reach BOTH the poll loop's
+// fetchAndLock (via startBridgePollLoop's opts.workerId) AND the deliver
+// path's completeTask/failTask (via makeExternalTaskDeliver's bridgeWorkerId
+// param) — a divergence here is exactly the LIVE_PROOF bug (Flowable rejects
+// completeTask when its workerId doesn't match the lock-holder).
+// ---------------------------------------------------------------------------
+describe("startLifecycleBridge — T-0644: bridgeWorkerId consistency between poll loop and deliver", () => {
+  const fakePool = { query: vi.fn(), connect: vi.fn() } as unknown as import("pg").Pool;
+
+  function fullDeps() {
+    return {
+      pool: fakePool,
+      jobStore: new PostgresJobStore(fakePool),
+      outboxStore: new PostgresOutboxStore(fakePool),
+    };
+  }
+
+  beforeEach(() => {
+    vi.spyOn(flowableClientModule, "makeFlowableClient").mockReturnValue(
+      {} as unknown as ReturnType<typeof flowableClientModule.makeFlowableClient>,
+    );
+    vi.spyOn(externalTaskBridgeModule, "startBridgePollLoop").mockReturnValue({ stop: () => {} });
+    vi.spyOn(externalTaskBridgeModule, "makeExternalTaskDeliver");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("FLOWABLE_WORKER_ID set → startBridgePollLoop's workerId === makeExternalTaskDeliver's bridgeWorkerId (4th arg)", () => {
+    const handle = startLifecycleBridge(fullDeps(), {
+      FLOWABLE_BASE_URL: "http://flowable:8082",
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: "pw",
+      FLOWABLE_WORKER_ID: "custom-bridge-identity",
+    } as unknown as NodeJS.ProcessEnv);
+
+    const pollLoopOpts = vi.mocked(externalTaskBridgeModule.startBridgePollLoop).mock.calls[0][2];
+    const deliverArgs = vi.mocked(externalTaskBridgeModule.makeExternalTaskDeliver).mock.calls[0];
+
+    expect(pollLoopOpts.workerId).toBe("custom-bridge-identity");
+    // 4th positional arg of makeExternalTaskDeliver is bridgeWorkerId.
+    expect(deliverArgs[3]).toBe("custom-bridge-identity");
+    expect(deliverArgs[3]).toBe(pollLoopOpts.workerId);
+
+    handle.stop();
+  });
+
+  it("FLOWABLE_WORKER_ID absent → both default to the SAME DEFAULT_BRIDGE_WORKER_ID", () => {
+    const handle = startLifecycleBridge(fullDeps(), {
+      FLOWABLE_BASE_URL: "http://flowable:8082",
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: "pw",
+      // FLOWABLE_WORKER_ID intentionally absent.
+    } as unknown as NodeJS.ProcessEnv);
+
+    const pollLoopOpts = vi.mocked(externalTaskBridgeModule.startBridgePollLoop).mock.calls[0][2];
+    const deliverArgs = vi.mocked(externalTaskBridgeModule.makeExternalTaskDeliver).mock.calls[0];
+
+    expect(pollLoopOpts.workerId).toBe(externalTaskBridgeModule.DEFAULT_BRIDGE_WORKER_ID);
+    expect(deliverArgs[3]).toBe(externalTaskBridgeModule.DEFAULT_BRIDGE_WORKER_ID);
+    expect(deliverArgs[3]).toBe(pollLoopOpts.workerId);
 
     handle.stop();
   });
