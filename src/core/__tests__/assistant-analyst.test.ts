@@ -288,6 +288,48 @@ describe("handleAnalyst — module port registry", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 8. T-0587 (FF-1/AC-1): identity anti-regression — loadRegistryDigest is
+//    ALWAYS called with ctx.userSubject.subjectId (the real asker), NEVER
+//    ctx.agentSubject.subjectId or any other identity/literal. This is the
+//    load-bearing invariant behind FR-1: the analyst must never widen the
+//    asker's own visibility ceiling by resolving data as the agent or as a
+//    hardcoded "owner".
+// ---------------------------------------------------------------------------
+
+describe("runAnalyst — identity anti-regression (T-0587 FF-1/AC-1)", () => {
+  it("calls loadRegistryDigest with ctx.userSubject.subjectId, NOT ctx.agentSubject.subjectId", async () => {
+    const calls: Array<{ tenantId: string; actorSlug: string }> = [];
+    const ports: AnalystPorts = {
+      loadRegistryDigest: async (tenantId, actorSlug) => {
+        calls.push({ tenantId, actorSlug });
+        return { degraded: false, registries: [] };
+      },
+    };
+
+    await runAnalyst("сколько записей", makeCtx(), ports);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.actorSlug).toBe(userSubject.subjectId);
+    expect(calls[0]!.actorSlug).not.toBe(agentSubject.subjectId);
+    expect(calls[0]!.tenantId).toBe(TENANT_A);
+  });
+
+  it("a DIFFERENT userSubject on the ctx changes the identity loadRegistryDigest is called with (no hardcoded owner/service identity)", async () => {
+    const calls: string[] = [];
+    const ports: AnalystPorts = {
+      loadRegistryDigest: async (_tenantId, actorSlug) => {
+        calls.push(actorSlug);
+        return { degraded: false, registries: [] };
+      },
+    };
+
+    await runAnalyst("сколько записей", makeCtx({ userSubject: managerSubject }), ports);
+
+    expect(calls).toEqual([managerSubject.subjectId]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7. S3 journal data included in LLM context (cycle-time pass-through).
 // ---------------------------------------------------------------------------
 
