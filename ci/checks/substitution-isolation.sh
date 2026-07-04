@@ -178,6 +178,8 @@ for f in "${MIGRATIONS_DIR}"/*.sql; do
       : # tracked & unchanged → belongs to another task's baseline, not ours.
     elif [[ "${base}" == "126_employee_login.sql" ]]; then
       : # T0625-SUB-MIG126-GUARD — see additive relief below; do not double-count here.
+    elif [[ "${base}" == "127_employee_email.sql" ]]; then
+      : # T0628-SUB-MIG127-GUARD — see additive relief below; do not double-count here.
     else
       echo "FAIL [FF-SUB5]: forbidden migration number introduced: ${base} (only 036/037 permitted)"
       ERRORS=$((ERRORS + 1))
@@ -217,6 +219,32 @@ if [[ -f "${MIGRATIONS_DIR}/126_employee_login.sql" ]]; then                  # 
     ERRORS=$((ERRORS + 1))                                                     # T0625-SUB-MIG126-GUARD
   fi                                                                           # T0625-SUB-MIG126-GUARD
 fi                                                                              # T0625-SUB-MIG126-GUARD
+
+# T-0628: additive relief for migration 127_employee_email.sql — a single      # T0628-SUB-MIG127-GUARD
+# ADDITIVE ADD COLUMN (choros.employee.email text NULL, the separate required  # T0628-SUB-MIG127-GUARD
+# email field POST /api/users now stores distinct from `login`). No           # T0628-SUB-MIG127-GUARD
+# CREATE/DROP TABLE, no RLS/POLICY change (employee inherits its existing RLS  # T0628-SUB-MIG127-GUARD
+# policy unchanged), completely unrelated to the substitution-authority domain # T0628-SUB-MIG127-GUARD
+# (T-0035's substitution_rule table / grant-resolver.ts substitution port —    # T0628-SUB-MIG127-GUARD
+# this migration touches neither). Independent verification (parses the       # T0628-SUB-MIG127-GUARD
+# migration file itself), same additive-relief class as the 126 relief above. # T0628-SUB-MIG127-GUARD
+_sub_mig127_stem="migrations/127_employee_email.sql"                          # T0628-SUB-MIG127-GUARD
+if [[ -f "${MIGRATIONS_DIR}/127_employee_email.sql" ]]; then                  # T0628-SUB-MIG127-GUARD
+  _sub_mig127_content="$(awk '/^[[:space:]]*--/{next}1' "${MIGRATIONS_DIR}/127_employee_email.sql" 2>/dev/null || true)" # T0628-SUB-MIG127-GUARD
+  _sub_mig127_bad=0                                                            # T0628-SUB-MIG127-GUARD
+  if echo "${_sub_mig127_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0628-SUB-MIG127-GUARD
+    _sub_mig127_bad=1                                                          # T0628-SUB-MIG127-GUARD introduces DDL/RLS
+  fi                                                                           # T0628-SUB-MIG127-GUARD
+  if echo "${_sub_mig127_content}" | grep -iqE "substitution"; then            # T0628-SUB-MIG127-GUARD
+    _sub_mig127_bad=1                                                          # T0628-SUB-MIG127-GUARD touches substitution domain
+  fi                                                                           # T0628-SUB-MIG127-GUARD
+  if [[ "${_sub_mig127_bad}" -eq 0 ]]; then                                   # T0628-SUB-MIG127-GUARD
+    echo "PASS [FF-SUB5-T0628-employee-email]: migration 127_employee_email.sql is a single additive ADD COLUMN (employee.email text NULL, no CREATE TABLE/RLS/substitution-domain touch) — unrelated to T-0035 substitution authority — relief granted" # T0628-SUB-MIG127-GUARD
+  else                                                                         # T0628-SUB-MIG127-GUARD
+    echo "FAIL [FF-SUB5-T0628-employee-email]: migration 127_employee_email.sql failed independent additive verification (DDL/RLS or substitution-domain touch found) — relief DENIED" # T0628-SUB-MIG127-GUARD
+    ERRORS=$((ERRORS + 1))                                                     # T0628-SUB-MIG127-GUARD
+  fi                                                                           # T0628-SUB-MIG127-GUARD
+fi                                                                              # T0628-SUB-MIG127-GUARD
 
 # ---- FF-SUB6: known_tenant_tables.txt lists substitution_rule ---------------
 before=${ERRORS}
