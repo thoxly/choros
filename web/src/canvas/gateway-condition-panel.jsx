@@ -395,13 +395,20 @@ export function GatewayConditionPanel({ bo, modeler, element }) {
   // Guard: no outgoing flows → nothing to show
   const outgoing = (bo && bo.outgoing) || [];
 
+  /* T-0634 [P0-3] fix: this panel is always-expanded (no collapse toggle), but
+     editor.css keys the entries container's visibility off the literal `.open`
+     class (`.bio-properties-panel-group-entries { display: none }` +
+     `.open { display: flex }`) — the same class bpmn-properties-panel.jsx's
+     PanelGroup now always applies while expanded. Without it here the section
+     was permanently display:none, hiding the routing-variable field and
+     per-flow condition rows entirely. */
   if (outgoing.length === 0) {
     return (
       <div className="bio-properties-panel-group">
         <div className="bio-properties-panel-group-header">
           <span className="bio-properties-panel-group-header-title">Условия ветвления</span>
         </div>
-        <div className="bio-properties-panel-group-entries">
+        <div className="bio-properties-panel-group-entries open">
           <div className="bio-properties-panel-entry">
             <p className="bio-properties-panel-description">
               Нет исходящих потоков. Соедините шлюз с элементами диаграммы.
@@ -422,7 +429,7 @@ export function GatewayConditionPanel({ bo, modeler, element }) {
         <span className="bio-properties-panel-group-header-title">Условия ветвления</span>
       </div>
 
-      <div className="bio-properties-panel-group-entries">
+      <div className="bio-properties-panel-group-entries open">
 
         {/* Fix 3: label renamed to «Поле, по которому выбирается ветка» */}
         <div className="bio-properties-panel-entry">

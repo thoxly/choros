@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0634",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 2109,
+    "passed": 2109,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-a",
+      "test": "web/src/canvas/bpmn-palette-provider.test.js (8 tests: moddle-property, $attrs fallback, export-XML proof for agent+service, AGENT_EXECUTOR_TYPE literal-value cross-check)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-b",
+      "test": "web/src/canvas/bpmn-properties-panel.open-class.test.jsx (4 tests: .open class present/absent by state, exact CSS class name, real OutcomesPanel product-panel regression) — choros:agentRef write/read mechanics covered by pre-existing unchanged web/src/canvas/element-config-contract.test.js (writeAgentConfig/writeConfigAttr, NF4 no-regression)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-c",
+      "test": "bpmn-palette-provider.test.js regression cases (user-task no executorType, timer eventDefinitionType unaffected) + full web vitest suite (77 files / 2109 tests) green, no existing choros:* attribute test broken",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-d (LIVE_PROOF)",
+      "test": "deferred post-merge — manual browser proof on deployed stand (drag Agent Task, expand panel, pick agent, publish, observe XML/engine) not executed in this deterministic TEST pass",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "UX_REVIEW gate (fd78e18)",
+      "result": "pass",
+      "note": "approved with 2 non-blocking nits (jargon in .description, prefer real-click over synthetic in future LIVE_PROOF) — not blocking this merge"
+    },
+    {
+      "check": "web isolation build (D-056/D-064 Docker-honesty)",
+      "result": "pass",
+      "note": "cd web && npm run build run in isolation (not from root, not tunneling ../src) — exit 0, 534 modules, no src/ dependency"
+    },
+    {
+      "check": "dev-overlap scan",
+      "result": "n/a",
+      "note": "merge-base(origin/dev, HEAD) == origin/dev HEAD (e8e9709) — branch has not drifted from dev, 0 overlapping files, T-0636/T-0633 not yet merged so no intersection possible"
+    },
+    {
+      "check": "runtime-import web→src scan",
+      "result": "pass",
+      "note": "git diff origin/dev...HEAD -- web/ grepped for imports from ../src or @/src in added lines — zero matches"
+    }
+  ],
+  "failures": [],
+  "dev_overlap_files": [],
+  "web_isolation": "ok",
+  "notes": "Scope confirmed diff-only: web/src/canvas/{bpmn-palette-provider.js,bpmn-palette-provider.test.js,bpmn-properties-panel.jsx,bpmn-properties-panel.open-class.test.jsx,gateway-condition-panel.jsx} + task artifacts (spec/review/ux-review/pr-handoff json, no runtime effect). Root `npm run fitness` full chain green (exit 0); embedded '--self-test' sub-checks intentionally emit FAIL lines against planted bad fixtures under /tmp — expected detector behavior, not a real failure (verified script exit code and that the chain proceeded through every subsequent && check to completion)."
+}

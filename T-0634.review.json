@@ -1,0 +1,24 @@
+{
+  "task_id": "T-0634",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "T-0634.pr-handoff.json:live_proof_plan / AC-a,b,c covered by tests, AC-d (LIVE_PROOF) not executed in this handoff",
+      "issue": "AC-d требует ручного LIVE_PROOF на стенде реальным браузером (drag Agent Task → раскрыть панель → выбрать агента → опубликовать → проверить XML). Кодер честно задокументировал это как live_proof_plan (план, не выполнение) и не заявляет её выполненной — deviations_from_adr пуст по этому пункту, никакой ложной галочки нет. Но сама LIVE_PROOF-проверка (D-064 дисциплина) в этом хэндоффе не пройдена.",
+      "suggestion": "Перед промоушном в main выполнить AC-d вживую на dev-стенде (браузером, не curl/SQL) — задокументировать в отдельном приёмочном прогоне, как это делается для остальных W3-задач."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-a", "covered": true},
+    {"ac": "AC-b", "covered": true},
+    {"ac": "AC-c", "covered": true},
+    {"ac": "AC-d (LIVE_PROOF)", "covered": false}
+  ],
+  "role_gap_evidence": []
+}
