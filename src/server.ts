@@ -99,7 +99,8 @@ import { PgFileStore } from "./core/postgres/pgFileStore.js";
 import { FsObjectStore } from "./adapters/s3-object-store.js";
 import { makeFileRecordResolver } from "./core/grant-resolver.js";
 import { makeDbGrantSource } from "./db/grants-dao.js";
-import { SEED_ORACLE } from "./http/seed-ancestry.js";
+import type { FileRecordResolver } from "./core/file-attachment.js";
+import type { ResourceRef } from "./core/object-handle.js";
 // T-0570 (D3, READ-PDP): production wiring for the records READ-PDP gate —
 // same getGrantsForSubject DAO (single-resolver) + composite resource-ancestry
 // oracle (org delegate + resource root-sentinel/inline-chain).
@@ -1219,36 +1220,86 @@ function buildRouter(
     const fsObjectStore = new FsObjectStore(fileStoreRoot);
     // Build a per-request-style FileRecordResolver that loads grants + ancestry
     // fresh from DB each call (same pattern as pdp-explain.ts). The grant source
-    // uses makeDbGrantSource (same DAO as the full PDP). Ancestry: load per-tenant
-    // from DB (loadTenantOrgAncestry); fall back to SEED_ORACLE on error
-    // (ancestry is only consulted for org-scoped grants, not simple record grants).
+    // uses makeDbGrantSource (same DAO as the full PDP).
     const fileGrantSource = makeDbGrantSource(grantsPool);
-    const fileResolver = makeFileRecordResolver({
-      grants: fileGrantSource,
-      records: {
-        async getRecord(ref) {
-          if (ref.kind !== "record") return { __sentinel__: true };
-          const client = await grantsPool.connect();
-          try {
-            await client.query("BEGIN");
-            await client.query(`SET LOCAL choros.tenant_id = '${ref.tenantId}'`);
-            await client.query("SET LOCAL search_path TO choros");
-            const { rows } = await client.query<{ data: Record<string, unknown> }>(
-              `SELECT data FROM choros.record WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
-              [ref.tenantId, ref.recordId],
-            );
-            await client.query("COMMIT");
-            return rows.length > 0 ? (rows[0]!.data ?? {}) : null;
-          } catch (err) {
-            await client.query("ROLLBACK").catch(() => {});
-            throw err;
-          } finally {
-            client.release();
-          }
-        },
+    const fileRecordSource = {
+      async getRecord(ref: ResourceRef): Promise<Record<string, unknown> | null> {
+        if (ref.kind !== "record") return { __sentinel__: true };
+        const client = await grantsPool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${ref.tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+          const { rows } = await client.query<{ data: Record<string, unknown> }>(
+            `SELECT data FROM choros.record WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+            [ref.tenantId, ref.recordId],
+          );
+          await client.query("COMMIT");
+          return rows.length > 0 ? (rows[0]!.data ?? {}) : null;
+        } catch (err) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
       },
-      ancestry: SEED_ORACLE,
-    });
+    };
+    // T-0518 + T-0620 [P0/read parity]: the READ-path PDP resolver — file download
+    // is decided as the owner record's `read` op, the SAME authority record-READ
+    // enforces. CRITICAL: it must use the SAME composite resource-ancestry oracle
+    // record-READ uses (makeResourceAncestryOracle over the tenant's real org tree
+    // + the RESOURCE_ROOT sentinel), NOT the raw org-only SEED_ORACLE. SEED_ORACLE
+    // cannot resolve the RESOURCE_ROOT default-open read grant (migration 124 /
+    // T-0619) that every staff member holds, so a plain reader's download 403'd —
+    // file-read gave LESS than record-read. Building the composite oracle per-call
+    // (keyed on the handle's tenant) closes that: role-reader/record/read now
+    // covers file download exactly as it covers record read (parity, T-0570 §2.1).
+    const fileReadResolver: FileRecordResolver = {
+      async resolveRecordOp(handle, subject, op) {
+        const orgOracle = await loadTenantOrgAncestry(grantsPool, handle.tenantId);
+        const emptyRowIndex = new Map<string, RowAncestry>();
+        const ancestry = makeResourceAncestryOracle(orgOracle, emptyRowIndex);
+        const readResolver = makeFileRecordResolver({
+          grants: fileGrantSource,
+          records: fileRecordSource,
+          ancestry,
+        });
+        return readResolver.resolveRecordOp(handle, subject, op);
+      },
+    };
+    // T-0620 [P0/file-write-authz parity]: file WRITE (upload/replace = `update`,
+    // delete = `delete`) must pass the SAME authorization barrier as record-WRITE,
+    // NOT a stricter one. Record-write today is gated by tenant-membership only —
+    // its write-PDP (resolveWriteFacet in records.ts) is OPTIONAL and NOT yet wired,
+    // so it honest-degrades to allow-for-tenant-members (no `record/update` grant is
+    // required anywhere). File-write was demanding a `record/update`/`record/delete`
+    // grant that NOBODY holds (the only record grant is role-reader/record/read),
+    // so every upload 403'd — an asymmetry, not a policy.
+    //
+    // This SPLIT resolver restores parity: `read` → the real PDP above (unchanged);
+    // `update`/`delete` → record-write parity = tenant-gate fail-closed FIRST, then
+    // the same authority record-write applies (allow for a resolved tenant member).
+    // When the write-PDP is connected in a later task, BOTH record-write and this
+    // seam connect to it in the SAME commit and gate together, consistently. This is
+    // NOT a second file authority (FF-NOACL): the file core still translates each
+    // file op to its record op and asks THIS injected resolver; the composition root
+    // decides the write op's authority exactly as it does for record-write.
+    const fileResolver: FileRecordResolver = {
+      resolveRecordOp(handle, subject, op) {
+        // READ stays on the real record/read PDP — download authority is unchanged.
+        if (op === "read") {
+          return fileReadResolver.resolveRecordOp(handle, subject, op);
+        }
+        // WRITE (update/delete): record-write parity. Tenant-gate fail-closed FIRST
+        // (cross-tenant file access stays denied — tenant isolation is NOT relaxed),
+        // then allow — the same honest-degrade record-write runs under until the
+        // shared write-PDP is connected.
+        if (handle.tenantId !== subject.tenantId) {
+          return Promise.resolve({ denied: true, reason: "cross_tenant" });
+        }
+        return Promise.resolve({ denied: false, ref: handle.ref, fields: {} });
+      },
+    };
     registerFileRoutes(router, {
       pool: grantsPool,
       fileStore: pgFileStore,

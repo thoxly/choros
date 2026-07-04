@@ -63,7 +63,16 @@ class FakePoolClient {
     this.rowSets = rowSets;
   }
 
-  async query(_sql: string, _params?: unknown[]): Promise<FakeQueryResult> {
+  async query(sql: string, _params?: unknown[]): Promise<FakeQueryResult> {
+    // T-0620: the upload write pre-check reads the owner record's registry_id
+    // (loadRecordRegistryId in files.ts) before authorizing. Answer that lookup
+    // SQL-awarely so the fake pool models a record that IS visible in the tenant
+    // (the resolver — allow/deny — is what these tests actually exercise). The
+    // cross-tenant test overrides tenantForActor; the record still resolves and
+    // the DENY resolver is what returns cross_tenant, mirroring production.
+    if (/registry_id\s+FROM\s+choros\.record/i.test(sql)) {
+      return { rows: [{ registry_id: REGISTRY_ID }], rowCount: 1 };
+    }
     const rows = (this.rowSets[this.queryIndex] ?? []) as unknown[];
     this.queryIndex++;
     return { rows, rowCount: rows.length };
@@ -478,7 +487,7 @@ describe("POST /api/records/:recordId/files", () => {
   });
 
   it("AC-upload-2: resolver deny → 403", async () => {
-    const { server, baseUrl } = buildTestServer({ resolver: makeDenyResolver("no_grant") });
+    const { server, baseUrl, fileStore } = buildTestServer({ resolver: makeDenyResolver("no_grant") });
     servers.push(server);
     await listen(server);
 
@@ -488,12 +497,16 @@ describe("POST /api/records/:recordId/files", () => {
       Buffer.from("bytes"),
     );
 
-    // The resolver denied, but insertFile runs first (to create the row for addVersion
-    // to load). addVersion returns denied. Response should be 403.
+    // T-0620: the write pre-check (loadRecordRegistryId → resolver.resolveRecordOp
+    // "update") now runs BEFORE insertFile — a deny short-circuits with 403 and
+    // insertFile is never called (orphan-fix). Response should be 403.
     expect(res.status).toBe(403);
     const body = res.json as Record<string, unknown>;
     const err = body["error"] as Record<string, unknown>;
     expect(err["code"]).toBe("FORBIDDEN");
+    // T-0620 orphan-fix (unit-level corroboration of FF-620-ORPHAN): insertFile
+    // was never called on the deny path — no orphan row modeled even in the fake store.
+    expect(fileStore.insertedFiles).toHaveLength(0);
   });
 
   it("AC-upload-3: missing x-dev-user → 401", async () => {
@@ -603,7 +616,7 @@ describe("POST /api/records/:recordId/files", () => {
 
   it("AC-upload-7: cross-tenant actor gets 403 (IDOR protection on upload)", async () => {
     // ACTOR_B resolves to TENANT_B; resolver returns cross_tenant → denied
-    const { server, baseUrl } = buildTestServer({
+    const { server, baseUrl, fileStore } = buildTestServer({
       resolver: makeDenyResolver("cross_tenant"),
       tenantForActor: async (slug) => (slug === ACTOR_B ? TENANT_B : TENANT_A),
     });
@@ -619,6 +632,8 @@ describe("POST /api/records/:recordId/files", () => {
     expect(res.status).toBe(403);
     const err = (res.json as Record<string, unknown>)["error"] as Record<string, unknown>;
     expect(err["reason"]).toBe("cross_tenant");
+    // T-0620 orphan-fix: pre-check denies before insertFile — zero orphan.
+    expect(fileStore.insertedFiles).toHaveLength(0);
   });
 });
 
