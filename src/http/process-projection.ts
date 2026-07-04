@@ -508,6 +508,14 @@ export async function appendProcessStarted(
  * backward-compat (callers without a duration pass nothing → null, preserving the
  * T-0332 contract); the approve route always supplies it now so the
  * transition_payload.duration_ms is a positive int.
+ *
+ * T-0588 (BLOCK-4): optional `onBehalfOf` — when the approve was authorized via
+ * a Tier-2 substitution_rule (the actor does not hold `task.role` directly, but
+ * stands in for an absent holder), the absent holder's employee SLUG. Mirrors
+ * appendTaskClaimed's onBehalfOf (claim-projection.ts): recorded in the JSONB
+ * payload (not a new audit_event column — same "no migration" reasoning as the
+ * claim event), defaults to undefined so the payload key is OMITTED for a
+ * normal role-assignment approve (byte-identical to pre-T-0588 behaviour).
  */
 export async function appendTaskApproved(
   tx: PgClientLike,
@@ -529,6 +537,13 @@ export async function appendTaskApproved(
      * ⇒ null (the pre-T-0335 behaviour).
      */
     readonly durationMs?: number | null;
+    /**
+     * T-0588 (BLOCK-4): when the approve was authorized via a Tier-2
+     * substitution_rule, the absent holder's employee SLUG. Optional — defaults
+     * to undefined, in which case the payload key is OMITTED (byte-identical to
+     * the pre-T-0588 payload for a normal role-assignment approve).
+     */
+    readonly onBehalfOf?: string;
   },
 ): Promise<void> {
   // T-0332: actor_type for human approve path is always "human" (user-task channel).
@@ -553,6 +568,8 @@ export async function appendTaskApproved(
       transition: "approve",
       // The post-transition target node (linear ТЭЛ: approve → end → done).
       to_status: "done",
+      // T-0588: on_behalf_of is present ONLY for a substitution-authorized approve.
+      ...(args.onBehalfOf !== undefined ? { on_behalf_of: args.onBehalfOf } : {}),
       // T-0332: canonical TransitionPayload — same shape as the engine path,
       // form-neutral. duration_ms = null (not available here; T-0335 fills in S1).
       [TRANSITION_PAYLOAD_KEY]: buildTransitionPayload({
