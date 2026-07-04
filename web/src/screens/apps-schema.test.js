@@ -26,7 +26,12 @@ import {
   COLLECTION_SUB_FIELD_TYPES,
   ROLLUP_OPS,
   ROLLUP_OP_VALUES,
+  COMPUTED_MODES,
+  COMPUTED_MODE_VALUES,
+  operandTypesFromFields,
+  formulaEligibleSiblings,
   validateField,
+  validateFormulaField,
   validateFields,
   buildRecordSchema,
   parseRecordSchema,
@@ -1557,6 +1562,305 @@ describe('apps-schema T-0452 · computed field type — blankField defaults', ()
     expect(b.rollupOp).toBe('sum');
     expect(b.rollupValueField).toBe('');
     expect(b.rollupFactorField).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0580: computed field FORMULA mode (scalar formulas), alongside T-0452 rollup mode
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0580 · computed field FORMULA mode — constants', () => {
+  it('COMPUTED_MODES has exactly rollup + formula', () => {
+    expect(COMPUTED_MODE_VALUES.sort()).toEqual(['formula', 'rollup']);
+  });
+
+  it('blankField defaults to computedMode "rollup" (backward-compatible)', () => {
+    const b = blankField();
+    expect(b.computedMode).toBe('rollup');
+    expect(b.formulaExpr).toBe('');
+    expect(b.formulaResultType).toBe('number');
+  });
+});
+
+describe('apps-schema T-0580 · operandTypesFromFields', () => {
+  it('classifies number/integer/money as "number"', () => {
+    const fields = [
+      { key: 'a', type: 'number' },
+      { key: 'b', type: 'integer' },
+      { key: 'c', type: 'money' },
+    ];
+    expect(operandTypesFromFields(fields)).toEqual({ a: 'number', b: 'number', c: 'number' });
+  });
+
+  it('classifies date as "date"', () => {
+    const fields = [{ key: 'd', type: 'date' }];
+    expect(operandTypesFromFields(fields)).toEqual({ d: 'date' });
+  });
+
+  it('classifies string/boolean/relation as "other"', () => {
+    const fields = [
+      { key: 'name', type: 'string' },
+      { key: 'flag', type: 'boolean' },
+      { key: 'ref', type: 'relation' },
+    ];
+    expect(operandTypesFromFields(fields)).toEqual({ name: 'other', flag: 'other', ref: 'other' });
+  });
+
+  it('classifies a rollup-mode computed sibling as "number"', () => {
+    const fields = [{ key: 'total', type: 'computed', computedMode: 'rollup' }];
+    expect(operandTypesFromFields(fields)).toEqual({ total: 'number' });
+  });
+
+  it('classifies a formula-mode computed sibling by its declared result_type', () => {
+    const fields = [
+      { key: 'itogo', type: 'computed', computedMode: 'formula', formulaResultType: 'number' },
+      { key: 'deadline', type: 'computed', computedMode: 'formula', formulaResultType: 'date' },
+    ];
+    expect(operandTypesFromFields(fields)).toEqual({ itogo: 'number', deadline: 'date' });
+  });
+
+  it('excludes the self field by key', () => {
+    const fields = [{ key: 'self', type: 'number' }, { key: 'other', type: 'number' }];
+    expect(operandTypesFromFields(fields, 'self')).toEqual({ other: 'number' });
+  });
+});
+
+describe('apps-schema T-0580 · formulaEligibleSiblings', () => {
+  it('includes number/integer/money/date/computed fields; excludes string/boolean/relation', () => {
+    const fields = [
+      { key: 'summa', type: 'number', title: 'Сумма' },
+      { key: 'count', type: 'integer' },
+      { key: 'price', type: 'money' },
+      { key: 'd', type: 'date' },
+      { key: 'total', type: 'computed' },
+      { key: 'name', type: 'string' },
+      { key: 'flag', type: 'boolean' },
+      { key: 'ref', type: 'relation' },
+    ];
+    const keys = formulaEligibleSiblings(fields).map((s) => s.key).sort();
+    expect(keys).toEqual(['count', 'd', 'price', 'summa', 'total']);
+  });
+
+  it('excludes the field itself by key', () => {
+    const fields = [{ key: 'itogo', type: 'number' }, { key: 'other', type: 'number' }];
+    const keys = formulaEligibleSiblings(fields, 'itogo').map((s) => s.key);
+    expect(keys).toEqual(['other']);
+  });
+
+  it('falls back to the key as the label when title is absent', () => {
+    const fields = [{ key: 'summa', type: 'number' }];
+    expect(formulaEligibleSiblings(fields)[0]).toEqual({ key: 'summa', label: 'summa', type: 'number' });
+  });
+});
+
+describe('apps-schema T-0580 · validateFormulaField', () => {
+  const siblings = [
+    { key: 'summa', type: 'number' },
+    { key: 'nds_rate', type: 'number' },
+    { key: 'vendor_name', type: 'string' },
+  ];
+
+  it('accepts a valid arithmetic formula', () => {
+    const field = { key: 'itogo', formulaExpr: 'summa * (1 + nds_rate)' };
+    expect(validateFormulaField(field, siblings)).toEqual({});
+  });
+
+  it('rejects an empty formula', () => {
+    const field = { key: 'itogo', formulaExpr: '' };
+    const errors = validateFormulaField(field, siblings);
+    expect(errors.formulaExpr).toBeTruthy();
+  });
+
+  it('rejects a formula referencing an unknown field with a HUMAN message (no dev jargon)', () => {
+    const field = { key: 'itogo', formulaExpr: 'ghost_field + 1' };
+    const errors = validateFormulaField(field, siblings);
+    expect(errors.formulaExpr).toMatch(/ghost_field/);
+    expect(errors.formulaExpr).not.toMatch(/AST|eval|parse error/i);
+  });
+
+  it('rejects a formula referencing an invalid-type (string) field', () => {
+    const field = { key: 'itogo', formulaExpr: 'vendor_name + 1' };
+    const errors = validateFormulaField(field, siblings);
+    expect(errors.formulaExpr).toBeTruthy();
+  });
+
+  it('rejects an injection string as a syntax error, not silently', () => {
+    const field = { key: 'itogo', formulaExpr: "process.exit(1)" };
+    const errors = validateFormulaField(field, siblings);
+    expect(errors.formulaExpr).toBeTruthy();
+  });
+
+  it('accepts a valid date formula', () => {
+    const dateSiblings = [{ key: 'start_date', type: 'date' }, { key: 'term_days', type: 'number' }];
+    const field = { key: 'deadline', formulaExpr: 'start_date + term_days' };
+    expect(validateFormulaField(field, dateSiblings)).toEqual({});
+  });
+
+  it('rejects an invalid date combination (date + date)', () => {
+    const dateSiblings = [{ key: 'a', type: 'date' }, { key: 'b', type: 'date' }];
+    const field = { key: 'x', formulaExpr: 'a + b' };
+    const errors = validateFormulaField(field, dateSiblings);
+    expect(errors.formulaExpr).toBeTruthy();
+  });
+
+  it('excludes the field itself from sibling resolution (a self-reference is "unknown field")', () => {
+    const field = { key: 'itogo', formulaExpr: 'itogo + 1' };
+    const errors = validateFormulaField(field, siblings);
+    expect(errors.formulaExpr).toBeTruthy();
+  });
+});
+
+describe('apps-schema T-0580 · validateField dispatches by computedMode', () => {
+  it('a computed field in rollup mode still validates rollup errors (regression)', () => {
+    const field = { key: 'total', type: 'computed', computedMode: 'rollup', rollupSource: '', rollupOp: 'sum' };
+    const err = validateField(field, []);
+    expect(err.rollupSource).toBeTruthy();
+    expect(err.formulaExpr).toBeUndefined();
+  });
+
+  it('a computed field with NO computedMode key validates as rollup mode (backward-compatible default)', () => {
+    const field = { key: 'total', type: 'computed', rollupSource: '', rollupOp: 'sum' };
+    const err = validateField(field, []);
+    expect(err.rollupSource).toBeTruthy();
+  });
+
+  it('a computed field in formula mode validates the formula, not rollup fields', () => {
+    const field = { key: 'itogo', type: 'computed', computedMode: 'formula', formulaExpr: '' };
+    const err = validateField(field, []);
+    expect(err.formulaExpr).toBeTruthy();
+    expect(err.rollupSource).toBeUndefined();
+  });
+});
+
+describe('apps-schema T-0580 · buildRecordSchema — formula mode', () => {
+  it('emits {type:"number","x-formula":{expr,result_type:"number"}} for a numeric formula', () => {
+    const fields = [
+      { key: 'summa', type: 'number', required: false },
+      { key: 'nds_rate', type: 'number', required: false },
+      { key: 'itogo', type: 'computed', computedMode: 'formula', formulaExpr: 'summa * (1 + nds_rate)', required: false },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect(schema.properties.itogo).toEqual({
+      type: 'number',
+      'x-formula': { expr: 'summa * (1 + nds_rate)', result_type: 'number' },
+    });
+  });
+
+  it('emits {type:"string","x-formula":{...,result_type:"date"},"x-date":true} for a date formula', () => {
+    const fields = [
+      { key: 'start_date', type: 'date', required: false },
+      { key: 'term_days', type: 'number', required: false },
+      { key: 'deadline', type: 'computed', computedMode: 'formula', formulaExpr: 'start_date + term_days', required: false },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect(schema.properties.deadline).toEqual({
+      type: 'string',
+      'x-formula': { expr: 'start_date + term_days', result_type: 'date' },
+      'x-date': true,
+    });
+  });
+
+  it('a formula field is NEVER added to schema.required even when required:true is passed', () => {
+    const fields = [
+      { key: 'summa', type: 'number', required: false },
+      { key: 'itogo', type: 'computed', computedMode: 'formula', formulaExpr: 'summa + 1', required: true },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect(schema.required || []).not.toContain('itogo');
+  });
+
+  it('a formula field never carries x-rollup (mutual exclusion, emit-side)', () => {
+    const fields = [
+      { key: 'summa', type: 'number', required: false },
+      { key: 'itogo', type: 'computed', computedMode: 'formula', formulaExpr: 'summa + 1', required: false },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect('x-rollup' in schema.properties.itogo).toBe(false);
+  });
+
+  it('the emitted formula schema is AJV-strict-compilable after the standard x-* strip', () => {
+    const fields = [
+      { key: 'summa', type: 'number', required: false },
+      { key: 'nds_rate', type: 'number', required: false },
+      { key: 'itogo', type: 'computed', computedMode: 'formula', formulaExpr: 'summa * (1 + nds_rate)', required: false },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect(backendAccepts(schema)).toBe(true);
+    expect(validateRecordSchemaDefinition(schema).valid).toBe(true);
+  });
+
+  it('a rollup-mode computed field round-trips unaffected (regression — mode branch does not disturb the other)', () => {
+    const fields = [
+      { key: 'lines', type: 'collection', subFields: [{ key: 'price', type: 'number', label: 'Price' }], required: false },
+      {
+        key: 'total', type: 'computed', computedMode: 'rollup',
+        rollupSource: 'lines', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: '',
+        required: false,
+      },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect(schema.properties.total['x-rollup']).toEqual({ source: 'lines', op: 'sum', value_field: 'price' });
+    expect('x-formula' in schema.properties.total).toBe(false);
+  });
+});
+
+describe('apps-schema T-0580 · parseRecordSchema — formula mode round-trip', () => {
+  it('round-trips a numeric formula field', () => {
+    const original = [
+      { key: 'summa', type: 'number', required: false },
+      { key: 'nds_rate', type: 'number', required: false },
+      { key: 'itogo', type: 'computed', computedMode: 'formula', formulaExpr: 'summa * (1 + nds_rate)', required: false },
+    ];
+    const schema = buildRecordSchema(original);
+    const parsed = parseRecordSchema(schema);
+    const f = parsed.find((p) => p.key === 'itogo');
+    expect(f.type).toBe('computed');
+    expect(f.computedMode).toBe('formula');
+    expect(f.formulaExpr).toBe('summa * (1 + nds_rate)');
+    expect(f.formulaResultType).toBe('number');
+    expect(f.required).toBe(false);
+  });
+
+  it('round-trips a date-result formula field', () => {
+    const original = [
+      { key: 'start_date', type: 'date', required: false },
+      { key: 'term_days', type: 'number', required: false },
+      { key: 'deadline', type: 'computed', computedMode: 'formula', formulaExpr: 'start_date + term_days', required: false },
+    ];
+    const schema = buildRecordSchema(original);
+    const parsed = parseRecordSchema(schema);
+    const f = parsed.find((p) => p.key === 'deadline');
+    expect(f.computedMode).toBe('formula');
+    expect(f.formulaResultType).toBe('date');
+  });
+
+  it('a round-tripped formula field carries empty rollup defaults (clean mode-switch target)', () => {
+    const original = [
+      { key: 'summa', type: 'number', required: false },
+      { key: 'itogo', type: 'computed', computedMode: 'formula', formulaExpr: 'summa + 1', required: false },
+    ];
+    const schema = buildRecordSchema(original);
+    const parsed = parseRecordSchema(schema);
+    const f = parsed.find((p) => p.key === 'itogo');
+    expect(f.rollupSource).toBe('');
+    expect(f.rollupOp).toBe('sum');
+  });
+
+  it('rollup-mode fields still round-trip as computedMode "rollup" (regression)', () => {
+    const original = [
+      { key: 'lines', type: 'collection', subFields: [{ key: 'price', type: 'number', label: 'Price' }], required: false },
+      {
+        key: 'total', type: 'computed', computedMode: 'rollup',
+        rollupSource: 'lines', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: '',
+        required: false,
+      },
+    ];
+    const schema = buildRecordSchema(original);
+    const parsed = parseRecordSchema(schema);
+    const f = parsed.find((p) => p.key === 'total');
+    expect(f.computedMode).toBe('rollup');
+    expect(f.rollupSource).toBe('lines');
+    expect(f.formulaExpr).toBe(''); // clean mode-switch target
   });
 });
 

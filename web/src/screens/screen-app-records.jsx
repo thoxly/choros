@@ -65,7 +65,7 @@ import {
   deriveRecordLabel,
   mapRecordError,
   extractFieldErrors,
-  computeRollup,
+  computeComputedFieldValue,
 } from './records-form.js';
 // T-0399/T-0480 [D7-K]: record-entry fields render through the ONE unified
 // renderer (catalog-driven). FieldControl draws the scalar/enum controls;
@@ -562,14 +562,16 @@ function LineItemsField({ field, value, onChange, error, idPrefix = 'field' }) {
 // ---------------------------------------------------------------------------
 
 /**
- * Read-only aggregate readout for a computed field in the record-entry drawer.
+ * Read-only readout for a computed field in the record-entry drawer — EITHER
+ * mode (T-0452 rollup aggregate or T-0580 scalar formula); computeComputedFieldValue
+ * dispatches on field.computedMode.
  *
- * @param {{ key, label, rollupSource, rollupOp, rollupValueField, rollupFactorField }} field
- * @param {Record<string, unknown>} currentValues  live form values (includes collection rows)
+ * @param {{ key, label, computedMode, rollupSource, rollupOp, rollupValueField, rollupFactorField, formulaExpr }} field
+ * @param {Record<string, unknown>} currentValues  live form values (includes collection rows / sibling scalars)
  */
 function ComputedReadout({ field, currentValues }) {
   const label = field.label || field.title || field.key;
-  const computed = computeRollup(field, currentValues);
+  const computed = computeComputedFieldValue(field, currentValues);
   const display = formatCellValue(computed, 'computed');
 
   return (
@@ -1082,8 +1084,10 @@ function AppRecordsScreen() {
                       onClick={() => navigate(`/apps/${appId}/records/${rec.id}`)}
                     >
                       {columns.map((c) => {
-                        // T-0507: computed fields are never stored in data, so compute on-read.
-                        const cellVal = c.type === 'computed' ? computeRollup(c, data) : data[c.key];
+                        // T-0507/T-0580: computed fields (rollup OR formula mode) are
+                        // never stored in data, so compute on-read (client preview,
+                        // NF-4 — server's derived-map is the source of truth).
+                        const cellVal = c.type === 'computed' ? computeComputedFieldValue(c, data) : data[c.key];
                         const rendered = formatCellValue(cellVal, c.type);
                         // T-0447: relation cells resolve async — use RelationCell.
                         if (rendered === RELATION_CELL_ASYNC) {

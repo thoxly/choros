@@ -41,8 +41,23 @@
  * computeAllDerivedFields(client, tenantId, record, derivedSpecs)
  * ──────────────────────────────────────────────────────────────────────
  *   Runs all derived-field computations for a single record and returns a map
- *   fieldKey → number | null. Called by the GET /api/records/:id handler after
- *   the main record fetch.
+ *   fieldKey → number | string | null. Called by the GET /api/records/:id
+ *   handler after the main record fetch.
+ *
+ *   T-0580 ORDERING (ADR-T0580 §2.4 — NOT a flat Promise.all across every
+ *   kind): rollup / rollup-embedded / matrix-lookup are computed FIRST, in
+ *   parallel (as before — they are independent of each other and of any
+ *   formula). THEN formula-kind specs are resolved in the TOPOLOGICAL ORDER
+ *   detectFormulaCycles computes (a formula may reference another formula
+ *   field; ancliclicity is guaranteed by the authoring-time gate, FR-6/FR-7,
+ *   but the compute-time order still matters for correctness), each formula's
+ *   result being folded into the scope BEFORE the next formula runs. Running
+ *   formulas via Promise.all would let formula A see formula B's value as
+ *   "not yet computed" or vice versa depending on scheduling — a real race,
+ *   not just a style nit (rejected alternative A6, ADR §4) — so formulas are
+ *   evaluated SEQUENTIALLY, in dependency order, never in parallel with each
+ *   other (though they still run after — not interleaved with — the
+ *   non-formula derived batch above).
  *
  * TENANT ISOLATION (mandatory):
  *   Every query carries an explicit `WHERE tenant_id = $1` AND runs inside an
@@ -64,6 +79,8 @@ import type {
   DerivedFieldSpec,
 } from "../core/rollup-contract.js";
 import { computeEmbeddedRollup } from "../core/rollup-contract.js";
+import { evalFormula } from "../core/formula-eval.js";
+import { detectFormulaCycles, type FormulaGraphNode } from "../core/formula-cycles.js";
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -74,8 +91,18 @@ export type DerivedFieldResult =
   | { ok: true; value: number | null }
   | { ok: false; error: string };
 
-/** Map of fieldKey → computed value (null if no matching rows/cell). */
-export type DerivedFieldMap = Record<string, number | null>;
+/**
+ * Map of fieldKey → computed value.
+ *
+ * T-0580 (public-surface compatibility contract, ADR §7 — the ONE type
+ * extension this task makes): was `number | null`; now `number | string |
+ * null` — a `string` value is a formula field's ISO YYYY-MM-DD date result
+ * (result_type:"date", ADR §2.3). Every existing consumer (records.ts
+ * serializes the map to JSON as-is; the web `derived[key]` readout displays a
+ * string as-is) already tolerates a string value structurally — this is an
+ * additive union widening, not a breaking change to any call site.
+ */
+export type DerivedFieldMap = Record<string, number | string | null>;
 
 // ---------------------------------------------------------------------------
 // computeRollupValue — single GROUP BY aggregate over child records
@@ -230,6 +257,12 @@ export async function computeMatrixLookupValue(
  * failure should not crash the whole record read). The caller should log
  * errors if monitoring is needed.
  *
+ * T-0580 (ADR §2.4): formula-kind specs are NOT part of the Promise.all batch
+ * below — they are computed in a SECOND, SEQUENTIAL pass, in topological
+ * order, AFTER every rollup/rollup-embedded/matrix-lookup value is known (a
+ * formula may reference one of those derived values by field key). See
+ * computeFormulaFields below for why this must not be parallelized.
+ *
  * @param client      pg client inside an ALREADY-OPEN tenant-scoped tx.
  * @param tenantId    tenant UUID.
  * @param parentRecordId  the UUID of the record being read.
@@ -245,8 +278,15 @@ export async function computeAllDerivedFields(
 ): Promise<DerivedFieldMap> {
   const result: DerivedFieldMap = {};
 
+  // Step 1: rollup / rollup-embedded / matrix-lookup — independent of each
+  // other AND of any formula, computed in parallel exactly as before T-0580.
+  const nonFormulaSpecs = derivedSpecs.filter((spec) => spec.kind !== "formula");
+  const formulaSpecs = derivedSpecs.filter(
+    (spec): spec is Extract<DerivedFieldSpec, { kind: "formula" }> => spec.kind === "formula",
+  );
+
   await Promise.all(
-    derivedSpecs.map(async (spec) => {
+    nonFormulaSpecs.map(async (spec) => {
       let fieldResult: DerivedFieldResult;
 
       if (spec.kind === "rollup") {
@@ -274,7 +314,71 @@ export async function computeAllDerivedFields(
     }),
   );
 
+  // Step 2: formula fields — SEQUENTIAL, topologically ordered (T-0580 §2.4).
+  if (formulaSpecs.length > 0) {
+    computeFormulaFields(recordData, result, formulaSpecs);
+  }
+
   return result;
+}
+
+/**
+ * Compute every formula-kind DerivedFieldSpec, in topological order, folding
+ * each result into `scope` (record.data ∪ non-formula-derived ∪ previously-
+ * computed formulas) before evaluating the next one — so a formula that
+ * references ANOTHER formula field by name sees a real, already-computed
+ * value rather than `undefined`.
+ *
+ * WHY SEQUENTIAL, NOT Promise.all (ADR §4, rejected alternative A6): formula
+ * evaluation is synchronous, in-memory, pure — there is no I/O to parallelize
+ * over. Running the specs through Promise.all in fieldKey-iteration-order
+ * would not actually be concurrent (evalFormula never awaits), but relying on
+ * "whatever order Object.entries/array iteration happens to produce" is NOT
+ * the same as the topologically-CORRECT order — a formula referencing a
+ * later-in-array formula would silently see it as unset (null) instead of its
+ * real value. detectFormulaCycles's returned `order` is the authoritative
+ * evaluation order (ancliclicity is already guaranteed by the authoring-time
+ * gate, FR-6/FR-7 — see registry-defs.ts's formula-schema-gate); this
+ * function still calls it defensively (defense-in-depth: a corrupted/legacy
+ * schema that bypassed the gate degrades every formula field to null rather
+ * than infinite-looping or crashing the whole record read).
+ *
+ * PURE — no I/O, no `client` parameter (formulas never touch the DB, mirrors
+ * computeEmbeddedRollup).
+ */
+function computeFormulaFields(
+  recordData: Record<string, unknown>,
+  result: DerivedFieldMap,
+  formulaSpecs: readonly Extract<DerivedFieldSpec, { kind: "formula" }>[],
+): void {
+  const nodes: FormulaGraphNode[] = formulaSpecs.map((spec) => ({
+    fieldKey: spec.fieldKey,
+    ast: spec.ast,
+  }));
+  const cycleCheck = detectFormulaCycles(nodes);
+
+  if (!cycleCheck.ok) {
+    // Defense-in-depth ONLY (FR-6): the authoring-time gate rejects a cyclic
+    // schema before it is ever persisted, so this branch should be
+    // unreachable in practice. If a schema is somehow corrupted/migrated in
+    // with a cycle anyway, degrade every involved formula field honestly to
+    // null (never infinite-loop, never crash the record read).
+    for (const spec of formulaSpecs) {
+      result[spec.fieldKey] = null;
+    }
+    return;
+  }
+
+  const byKey = new Map(formulaSpecs.map((spec) => [spec.fieldKey, spec] as const));
+  const scope: Record<string, unknown> = { ...recordData, ...result };
+
+  for (const fieldKey of cycleCheck.order) {
+    const spec = byKey.get(fieldKey);
+    if (!spec) continue; // defensive — every order entry originates from nodes above
+    const value = evalFormula(spec.ast, scope);
+    result[fieldKey] = value;
+    scope[fieldKey] = value; // subsequent formulas may reference this one
+  }
 }
 
 // ---------------------------------------------------------------------------

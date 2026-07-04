@@ -55,7 +55,22 @@
  *
  * PURITY: no pg, no node:http, no node:fs, no process.env, no child_process.
  * Mirrors binding-contract-catalog.ts / cross-app-ref.ts / form-submit-validator.ts.
+ *
+ * ──────────────────────────────────────────────────────────────────────
+ * FORMULA  (T-0580 — scalar expression over THIS record's own fields)
+ * ──────────────────────────────────────────────────────────────────────
+ * A FOURTH derived-field flavor, added by T-0580: `formula`. Unlike rollup/
+ * matrix-lookup (which aggregate OTHER rows), a formula is a read-only scalar
+ * expression (arithmetic + two date patterns) over SIBLING scalar fields of
+ * THIS SAME record — see src/core/formula-contract.ts / formula-parser.ts /
+ * formula-typecheck.ts / formula-eval.ts for the grammar + safe evaluator.
+ * `x-formula` and `x-rollup` are MUTUALLY EXCLUSIVE on one property — a
+ * property carrying BOTH is rejected as invalid (never guessed), matching the
+ * discipline documented for the rollup/embedded-rollup discriminator above.
  */
+
+import { validateFormulaFieldDef, type FormulaFieldDef } from "./formula-contract.js";
+import { parseFormula, type FormulaAst } from "./formula-parser.js";
 
 // ---------------------------------------------------------------------------
 // Aggregate function vocabulary (rollup)
@@ -214,7 +229,14 @@ export interface MatrixLookupFieldDef {
 export type DerivedFieldSpec =
   | { readonly kind: "rollup"; readonly fieldKey: string; readonly def: RollupFieldDef }
   | { readonly kind: "rollup-embedded"; readonly fieldKey: string; readonly def: EmbeddedRollupFieldDef }
-  | { readonly kind: "matrix-lookup"; readonly fieldKey: string; readonly def: MatrixLookupFieldDef };
+  | { readonly kind: "matrix-lookup"; readonly fieldKey: string; readonly def: MatrixLookupFieldDef }
+  | {
+      readonly kind: "formula";
+      readonly fieldKey: string;
+      readonly def: FormulaFieldDef;
+      /** Parsed once here (extraction time), reused by every compute call. */
+      readonly ast: FormulaAst;
+    };
 
 // ---------------------------------------------------------------------------
 // Validation helpers — pure, no I/O
@@ -579,12 +601,14 @@ export function validateMatrixLookupFieldDef(
 
 /**
  * Scan a registry_def's `record_schema` and extract all derived-field annotations
- * (`x-rollup` and `x-matrix-lookup`). Returns a (possibly empty) array of
- * DerivedFieldSpec, one per valid annotated property.
+ * (`x-rollup`, `x-matrix-lookup`, and `x-formula` — T-0580). Returns a
+ * (possibly empty) array of DerivedFieldSpec, one per valid annotated property.
  *
  * Invalid annotations are SILENTLY SKIPPED (defensive — the schema was already
  * validated on write; a corrupt annotation should not crash read). The caller
- * may log parse errors if needed; this function focuses on extraction.
+ * may log parse errors if needed; this function focuses on extraction. A
+ * property carrying BOTH `x-formula` and `x-rollup` is likewise skipped
+ * (mutually-exclusive flavors, T-0580 AC-12 — never guess which one wins).
  *
  * Pure — no I/O.
  *
@@ -607,6 +631,33 @@ export function extractDerivedFields(schema: unknown): DerivedFieldSpec[] {
       continue;
     }
     const pd = propDef as Record<string, unknown>;
+
+    // T-0580: x-formula / x-rollup MUTUAL EXCLUSION — a property carrying BOTH
+    // is invalid (never guess a flavor); skip it entirely (defensive, mirrors
+    // every other silent-skip branch below).
+    if (pd["x-formula"] !== undefined && pd["x-rollup"] !== undefined) {
+      continue;
+    }
+
+    // x-formula annotation (T-0580) — the scalar-formula flavor of `computed`.
+    // Parsed ONCE here (extraction time); the AST is reused by every compute
+    // call (computeAllDerivedFields), mirroring how validateRollupFieldDef's
+    // parsed def is reused. A formula that fails shape-validation OR fails to
+    // PARSE (syntax error) is silently skipped — same defensive posture as a
+    // corrupt x-rollup (the authoring-time gate, FR-7, is what actually
+    // prevents an invalid formula from ever being persisted in the first
+    // place; this is the READ-side belt-and-suspenders).
+    const xFormula = pd["x-formula"];
+    if (xFormula !== undefined) {
+      const parsedDef = validateFormulaFieldDef(xFormula);
+      if (parsedDef.ok) {
+        const parsedAst = parseFormula(parsedDef.def.expr);
+        if (parsedAst.ok) {
+          result.push({ kind: "formula", fieldKey, def: parsedDef.def, ast: parsedAst.ast });
+        }
+      }
+      continue; // x-formula and x-rollup are mutually exclusive — never fall through
+    }
 
     // x-rollup annotation — TWO flavors share this key, distinguished by an
     // EXPLICIT discriminator (never a try-one-then-the-other fallback):

@@ -85,6 +85,20 @@
  *              written to record.data. Compute-on-read: the actual aggregation is produced at
  *              display time (T-0453). This task = authoring + schema round-trip only.
  *
+ * T-0580 ADDITION:
+ *   computed («Итог») gets a SECOND mode — «формула» (scalar formula) — alongside
+ *   the T-0452 «агрегат» (rollup) mode above, under the SAME `type:"computed"`
+ *   (no new field type). The author picks `computedMode: "rollup" | "formula"`
+ *   in the editor (default "rollup", backward-compatible). Formula mode emits:
+ *     { type: "number"|"string", title, "x-formula": { expr: <source string>,
+ *       result_type: "number"|"date" }, "x-date"?: true (when result_type==="date") }
+ *   `expr` is parsed/type-checked by the SAME core evaluator the server uses
+ *   (imported directly from src/core/formula-parser.js / formula-typecheck.js —
+ *   one source, not a duplicated grammar, ADR-T0580 §2.6/§4 D2 — mirrors how
+ *   Floor2Viewer.jsx imports src/core/floor2-renderer.js). `x-formula` and
+ *   `x-rollup` are MUTUALLY EXCLUSIVE on one property (T-0580 AC-12) — the
+ *   editor only ever emits one, keyed off `computedMode`.
+ *
  * IMPORTANT — `format` is NOT emitted. AJV strict THROWS on an unknown format
  * (e.g. "email"/"date"), so `validateRecordSchemaDefinition` would reject it.
  * The seeds carry `format` only because they are inserted via raw SQL, bypassing
@@ -96,6 +110,17 @@
  * dep field_keys (report_page_dep.field_key / template_dep.field_key) we require
  * an identifier-ish shape: a letter or underscore, then letters/digits/underscore.
  */
+
+// T-0580: import the SAME core formula parser/typechecker the server uses —
+// ONE grammar/evaluator, not a duplicated copy (ADR §2.6/§4 D2). The explicit
+// `.ts` extension is REQUIRED here (unlike the `.js`-suffixed convention used
+// elsewhere for compiled-output imports, e.g. record-schema-validator.js in
+// this same file's header comment) — apps-schema.test.js already established
+// this exact pattern (`from '../../../src/core/record-schema-validator.ts'`)
+// and vitest/vite resolve it correctly; a `.js`-suffixed specifier does NOT
+// resolve the sibling .ts source under this repo's toolchain.
+import { parseFormula } from '../../../src/core/formula-parser.ts';
+import { typeCheckFormula, fieldTypesFromRecordSchema } from '../../../src/core/formula-typecheck.ts';
 
 // Supported JSON-Schema primitive types the editor offers. value = the `type`
 // string emitted into record_schema; label = the human label in the dropdown.
@@ -131,6 +156,13 @@ export const ROLLUP_OPS = [
 ];
 export const ROLLUP_OP_VALUES = ROLLUP_OPS.map((o) => o.value);
 
+// T-0580: the two modes of a "computed" field, shown as a switch in the editor.
+export const COMPUTED_MODES = [
+  { value: "rollup", label: "Агрегат" },
+  { value: "formula", label: "Формула" },
+];
+export const COMPUTED_MODE_VALUES = COMPUTED_MODES.map((m) => m.value);
+
 export const FIELD_TYPE_VALUES = FIELD_TYPES.map((t) => t.value);
 
 // Field key: identifier-ish (letter/underscore lead, then word chars), 1..64.
@@ -141,6 +173,136 @@ export const FIELD_TITLE_MAX = 256;
 // T-0448: Scalar types permitted as collection sub-fields (depth cap 1: no collection/relation).
 // Declared before validateField (which references it) — `const` is not hoisted.
 export const COLLECTION_SUB_FIELD_TYPES = ["string", "number", "integer", "boolean", "select", "date"];
+
+/**
+ * T-0580: derive a fieldKey → operand-type map ("number"|"date"|"other") from
+ * the EDITOR's in-memory field list (allFields), for the inline formula
+ * preview's type-checker. Mirrors formula-typecheck-web.js's classification
+ * rules, applied to the {key,type,computedMode,...} editor row shape instead
+ * of a built record_schema — the editor validates BEFORE buildRecordSchema
+ * ever runs, so no record_schema object exists yet to feed
+ * fieldTypesFromRecordSchema directly.
+ *
+ * @param {Array} allFields  the full in-memory field list (editor rows)
+ * @param {string} selfKey   the formula field's OWN key (excluded — a field
+ *                           cannot be typed relative to itself; the cycle
+ *                           check, not the type-checker, is what actually
+ *                           needs to reason about self-reference)
+ * @returns {Record<string,'number'|'date'|'other'>}
+ */
+export function operandTypesFromFields(allFields, selfKey) {
+  const result = {};
+  for (const f of Array.isArray(allFields) ? allFields : []) {
+    if (!f || typeof f.key !== "string" || f.key.length === 0 || f.key === selfKey) continue;
+    if (f.type === "number" || f.type === "integer" || f.type === "money") {
+      result[f.key] = "number";
+    } else if (f.type === "date") {
+      result[f.key] = "date";
+    } else if (f.type === "computed") {
+      // A computed sibling is a valid derived operand ONLY once it resolves
+      // to a usable result: rollup mode is always numeric; formula mode
+      // carries its own declared result_type (default "number" until the
+      // author sets it — a not-yet-typed field is still offered as "number"
+      // so the editor doesn't block on ordering, matching how a mid-edit
+      // rollup field is tentatively "number" before its config is complete).
+      result[f.key] = f.computedMode === "formula" && f.formulaResultType === "date" ? "date" : "number";
+    } else {
+      result[f.key] = "other";
+    }
+  }
+  return result;
+}
+
+/**
+ * T-0580 / O-5 (autocomplete help, not-blocking): the sibling fields eligible
+ * as formula operands — number/integer/money/date + a rollup/formula-mode
+ * computed sibling (excluding the field itself). Used by FormulaConfigEditor
+ * to render a clickable reference list next to the textarea (FR-2/§2.6).
+ *
+ * @param {Array} allFields
+ * @param {string} selfKey
+ * @returns {Array<{key:string, label:string, type:string}>}
+ */
+export function formulaEligibleSiblings(allFields, selfKey) {
+  const eligibleTypes = new Set(["number", "integer", "money", "date", "computed"]);
+  return (Array.isArray(allFields) ? allFields : [])
+    .filter((f) => f && typeof f.key === "string" && f.key.length > 0 && f.key !== selfKey && eligibleTypes.has(f.type))
+    .map((f) => ({ key: f.key, label: f.title || f.key, type: f.type }));
+}
+
+/**
+ * T-0580: validate a formula-mode computed field's expression (inline preview
+ * — NF-4; the server re-validates authoritatively via the SAME check shape at
+ * save time, formula-schema-gate.ts). Runs: (a) syntax (parseFormula), (b)
+ * sibling-reference/type (typeCheckFormula), (c) result_type declared vs
+ * inferred. Acyclicity across MULTIPLE formula fields needs the whole field
+ * list's graph — that full-schema check is validateFields' job (mirrors how
+ * the server's whole-schema formula-schema-gate sits above the single-field
+ * typeCheckFormula); this per-field function surfaces what it CAN determine
+ * from one field's own expression.
+ *
+ * @param {{key?:string, formulaExpr?:string}} field
+ * @param {Array} allFields
+ * @returns {{formulaExpr?: string}} error map (empty = ok)
+ */
+export function validateFormulaField(field, allFields) {
+  const errors = {};
+  const expr = typeof field?.formulaExpr === "string" ? field.formulaExpr.trim() : "";
+
+  if (expr.length === 0) {
+    errors.formulaExpr = "Введите формулу";
+    return errors;
+  }
+
+  const parsed = parseFormula(expr);
+  if (!parsed.ok) {
+    errors.formulaExpr = formulaErrorMessage(parsed.error, parsed.message);
+    return errors;
+  }
+
+  const fieldTypes = operandTypesFromFields(allFields, field?.key);
+  const typeChecked = typeCheckFormula(parsed.ast, fieldTypes);
+  if (!typeChecked.ok) {
+    errors.formulaExpr = formulaErrorMessage(typeChecked.error, typeChecked.message, typeChecked.field);
+    return errors;
+  }
+
+  return errors;
+}
+
+/**
+ * T-0580 / NF-7 (G5 no dev-jargon): translate a parseFormula/typeCheckFormula
+ * error code into a HUMAN, product-language message — never surfaces "AST",
+ * "parse error at token", "eval", or any internal code-shaped text.
+ */
+function formulaErrorMessage(code, rawMessage, field) {
+  switch (code) {
+    case "empty_expression":
+      return "Введите формулу";
+    case "too_long":
+      return "Формула слишком длинная";
+    case "max_depth_exceeded":
+      return "Формула слишком сложная (слишком много вложенных скобок)";
+    case "max_refs_exceeded":
+      return "Формула ссылается на слишком много полей";
+    case "lexical_error":
+    case "unexpected_token":
+    case "unexpected_end_of_input":
+      return "Формула написана неверно — проверьте операторы и скобки";
+    case "unbalanced_parens":
+      return "Не хватает закрывающей скобки";
+    case "unknown_field":
+      return `Поле «${field || ""}» не найдено`;
+    case "invalid_operand_type":
+      return `Поле «${field || ""}» нельзя использовать в формуле (нужны число, дата или сумма)`;
+    case "unary_minus_on_date":
+      return "К дате нельзя применить знак минус";
+    case "date_combination_not_allowed":
+      return "Такое сочетание с датой не поддерживается (доступно: дата ± число дней, дата − дата)";
+    default:
+      return rawMessage || "Ошибка в формуле";
+  }
+}
 
 /**
  * Validate a single field row for the editor.
@@ -206,48 +368,57 @@ export function validateField(field, allFields) {
     }
   }
 
-  // T-0452: validate computed (rollup) fields.
+  // T-0452/T-0580: validate computed fields — TWO modes under one type.
+  // computedMode defaults to "rollup" (backward-compatible: existing saved
+  // fields with no computedMode key are the T-0452 rollup flavor).
   if (type === "computed") {
-    const source = typeof field?.rollupSource === "string" ? field.rollupSource.trim() : "";
-    const op = typeof field?.rollupOp === "string" ? field.rollupOp.trim() : "";
-    const valueField = typeof field?.rollupValueField === "string" ? field.rollupValueField.trim() : "";
-    const factorField = typeof field?.rollupFactorField === "string" ? field.rollupFactorField.trim() : "";
+    const computedMode = field?.computedMode === "formula" ? "formula" : "rollup";
 
-    // source must reference an existing sibling collection field.
-    if (source.length === 0) {
-      errors.rollupSource = "Выберите поле «Список строк», по которому считать";
+    if (computedMode === "formula") {
+      const formulaErrors = validateFormulaField(field, allFields);
+      Object.assign(errors, formulaErrors);
     } else {
-      const siblings = Array.isArray(allFields) ? allFields : [];
-      const sourceField = siblings.find((f) => f && f.key === source && f.type === "collection");
-      if (!sourceField) {
-        errors.rollupSource = "Поле «Список строк» с таким ключом не найдено";
+      const source = typeof field?.rollupSource === "string" ? field.rollupSource.trim() : "";
+      const op = typeof field?.rollupOp === "string" ? field.rollupOp.trim() : "";
+      const valueField = typeof field?.rollupValueField === "string" ? field.rollupValueField.trim() : "";
+      const factorField = typeof field?.rollupFactorField === "string" ? field.rollupFactorField.trim() : "";
+
+      // source must reference an existing sibling collection field.
+      if (source.length === 0) {
+        errors.rollupSource = "Выберите поле «Список строк», по которому считать";
       } else {
-        // op must be a known value.
-        if (!ROLLUP_OP_VALUES.includes(op)) {
-          errors.rollupOp = "Выберите операцию";
+        const siblings = Array.isArray(allFields) ? allFields : [];
+        const sourceField = siblings.find((f) => f && f.key === source && f.type === "collection");
+        if (!sourceField) {
+          errors.rollupSource = "Поле «Список строк» с таким ключом не найдено";
         } else {
-          // For non-count ops, value_field must name a numeric sub-field of the source.
-          const numericSubTypes = ["number", "integer"];
-          const subFields = Array.isArray(sourceField.subFields) ? sourceField.subFields : [];
-          if (op !== "count") {
-            if (valueField.length === 0) {
-              errors.rollupValueField = "Укажите поле значения для этой операции";
-            } else {
-              const sfMatch = subFields.find((sf) => sf && sf.key === valueField);
-              if (!sfMatch) {
-                errors.rollupValueField = "Поле значения не найдено в колонках источника";
-              } else if (!numericSubTypes.includes(sfMatch.type)) {
-                errors.rollupValueField = "Поле значения должно быть числовым (Число или Целое)";
+          // op must be a known value.
+          if (!ROLLUP_OP_VALUES.includes(op)) {
+            errors.rollupOp = "Выберите операцию";
+          } else {
+            // For non-count ops, value_field must name a numeric sub-field of the source.
+            const numericSubTypes = ["number", "integer"];
+            const subFields = Array.isArray(sourceField.subFields) ? sourceField.subFields : [];
+            if (op !== "count") {
+              if (valueField.length === 0) {
+                errors.rollupValueField = "Укажите поле значения для этой операции";
+              } else {
+                const sfMatch = subFields.find((sf) => sf && sf.key === valueField);
+                if (!sfMatch) {
+                  errors.rollupValueField = "Поле значения не найдено в колонках источника";
+                } else if (!numericSubTypes.includes(sfMatch.type)) {
+                  errors.rollupValueField = "Поле значения должно быть числовым (Число или Целое)";
+                }
               }
             }
-          }
-          // factor_field (optional): if provided, must be a numeric sub-field.
-          if (factorField.length > 0) {
-            const sfFactor = subFields.find((sf) => sf && sf.key === factorField);
-            if (!sfFactor) {
-              errors.rollupFactorField = "Поле множителя не найдено в колонках источника";
-            } else if (!numericSubTypes.includes(sfFactor.type)) {
-              errors.rollupFactorField = "Поле множителя должно быть числовым (Число или Целое)";
+            // factor_field (optional): if provided, must be a numeric sub-field.
+            if (factorField.length > 0) {
+              const sfFactor = subFields.find((sf) => sf && sf.key === factorField);
+              if (!sfFactor) {
+                errors.rollupFactorField = "Поле множителя не найдено в колонках источника";
+              } else if (!numericSubTypes.includes(sfFactor.type)) {
+                errors.rollupFactorField = "Поле множителя должно быть числовым (Число или Целое)";
+              }
             }
           }
         }
@@ -449,6 +620,29 @@ export function buildRecordSchema(fields) {
       // The value stored in the record is the referenced record's UUID (string).
       const targetId = typeof f.targetRegistryId === "string" ? f.targetRegistryId.trim() : "";
       prop = { type: "string", "x-relation": { target_registry_id: targetId } };
+    } else if (f.type === "computed" && f.computedMode === "formula") {
+      // T-0580: computed in FORMULA mode → x-formula extension (rides
+      // alongside the T-0452 rollup mode below, under the same type:"computed").
+      // result_type is derived by re-running the SAME type-checker used for
+      // inline validation (validateFormulaField) — the build step does not
+      // trust a stale client-held result_type; it recomputes from the CURRENT
+      // expr + sibling field list, so a save always persists an honest,
+      // freshly-inferred type (defends against a field being edited around
+      // the formula without re-validating). If type-checking fails at build
+      // time (should not happen — the editor blocks save on validateFields
+      // errors first), default to "number" — a harmless placeholder that will
+      // be rejected by the SERVER's formula-schema-gate (FR-7) as the true
+      // authority, never silently persisted as a false "valid" schema.
+      const expr = typeof f.formulaExpr === "string" ? f.formulaExpr.trim() : "";
+      const fieldTypes = operandTypesFromFields(list, f.key);
+      const parsed = parseFormula(expr);
+      const typeChecked = parsed.ok ? typeCheckFormula(parsed.ast, fieldTypes) : null;
+      const resultType = typeChecked && typeChecked.ok ? typeChecked.result_type : "number";
+      const xFormula = { expr, result_type: resultType };
+      prop =
+        resultType === "date"
+          ? { type: "string", "x-formula": xFormula, "x-date": true }
+          : { type: "number", "x-formula": xFormula };
     } else if (f.type === "computed") {
       // T-0452: computed (Итог/rollup) → type:number + x-rollup extension.
       // Same x-* strip convention as x-relation — AJV strips x-rollup before compile.
@@ -645,6 +839,35 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "collection", title, required: requiredSet.has(key), subFields };
     }
 
+    // T-0580: detect FORMULA-mode computed fields by the presence of x-formula
+    // extension — checked BEFORE x-rollup (mutually exclusive flavors, AC-12;
+    // a property somehow carrying both is defensively treated as formula-mode
+    // here, matching this file's own emit order, though the server would have
+    // rejected such a schema at save time and extractDerivedFields skips it
+    // entirely as invalid — this round-trip path only ever sees what THIS
+    // editor persisted, so the ambiguity is theoretical, not reachable in
+    // practice).
+    const xFormula = def && typeof def === "object" ? def["x-formula"] : undefined;
+    if (xFormula && typeof xFormula === "object" && !Array.isArray(xFormula)) {
+      const title = typeof def.title === "string" ? def.title : "";
+      return {
+        key,
+        type: "computed",
+        title,
+        required: false, // computed fields are NEVER required (never written to data)
+        computedMode: "formula",
+        formulaExpr: typeof xFormula.expr === "string" ? xFormula.expr : "",
+        formulaResultType: xFormula.result_type === "date" ? "date" : "number",
+        // Rollup-mode fields carry these keys too (blankField's defaults) —
+        // present them as empty here so a mode-switch in the editor (formula
+        // → rollup) starts from a clean rollup config rather than `undefined`.
+        rollupSource: "",
+        rollupOp: "sum",
+        rollupValueField: "",
+        rollupFactorField: "",
+      };
+    }
+
     // T-0452: detect computed (rollup) fields by the presence of x-rollup extension.
     const xRollup = def && typeof def === "object" ? def["x-rollup"] : undefined;
     if (xRollup && typeof xRollup === "object" && !Array.isArray(xRollup)) {
@@ -654,10 +877,15 @@ export function parseRecordSchema(recordSchema) {
         type: "computed",
         title,
         required: false, // computed fields are NEVER required (never written to data)
+        computedMode: "rollup",
         rollupSource: typeof xRollup.source === "string" ? xRollup.source : "",
         rollupOp: typeof xRollup.op === "string" ? xRollup.op : "",
         rollupValueField: typeof xRollup.value_field === "string" ? xRollup.value_field : "",
         rollupFactorField: typeof xRollup.factor_field === "string" ? xRollup.factor_field : "",
+        // Formula-mode keys, present-but-empty for a clean mode-switch (mirror
+        // of the formula branch above).
+        formulaExpr: "",
+        formulaResultType: "number",
       };
     }
 
@@ -784,12 +1012,16 @@ export function mapSchemaError(status, body) {
  * T-0294: includes `options` (empty array — populated when type is "select").
  * T-0448: includes `subFields` (empty array — populated when type is "collection").
  * T-0452: includes rollup config defaults (populated when type is "computed").
+ * T-0580: includes `computedMode` (default "rollup", backward-compatible) +
+ * formula config defaults (populated when computedMode is "formula").
  */
 export function blankField() {
   return {
     key: "", type: "string", title: "", required: false,
     options: [], subFields: [],
+    computedMode: "rollup",
     rollupSource: "", rollupOp: "sum", rollupValueField: "", rollupFactorField: "",
+    formulaExpr: "", formulaResultType: "number",
   };
 }
 
