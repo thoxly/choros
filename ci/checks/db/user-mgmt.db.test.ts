@@ -376,4 +376,88 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     const patchRes = await patchUser(ownerCreate.json.employee_id, { active: false }, plainSlug);
     expect(patchRes.status).toBe(403);
   });
+
+  // ---------------------------------------------------------------------
+  // AC-11/AC-12 (tester-added, T-0583 TEST phase): the plaintext password
+  // must never surface in ANY HTTP response body — success AND error paths
+  // (create-409, create-503, create-201, list, patch) — and never in the
+  // audit_event payload row written for create/deactivate/reactivate. The
+  // static half of this (FF-583-7, ci/checks/user-mgmt-no-secret-leak.sh)
+  // only inspects source code; this is the DYNAMIC probe its own header
+  // comment claims exists but that, before this addition, only asserted the
+  // password absence on the single 201-create response (see FF-583-1 above)
+  // — never on 409/503/patch/list bodies nor the actual audit_event row.
+  // ---------------------------------------------------------------------
+  it('AC-11/AC-12: plaintext password never appears in any response body or in the audit_event payload', async () => {
+    const t = await registerOne('pwleak');
+    kc.reset();
+    const SECRET = `t0583-super-secret-pw-${Date.now()}`;
+    const login = `t0583-pwleak-${Date.now()}@example.com`;
+
+    // 1) 409 EMAIL_TAKEN path — body must not echo the password.
+    kc.failOnCreate = true;
+    const conflictRes = await postUsers(
+      { tenant_id: t.tenantId, login, password: SECRET, display_name: 'PwLeak Conflict' },
+      t.ownerSlug,
+    );
+    expect(conflictRes.status).toBe(409);
+    expect(JSON.stringify(conflictRes.json)).not.toContain(SECRET);
+
+    // 2) 503 AUTH_UNAVAILABLE path — body must not echo the password.
+    kc.failOnCreate = false;
+    kc.failOnAuth = true;
+    const unavailRes = await postUsers(
+      { tenant_id: t.tenantId, login, password: SECRET, display_name: 'PwLeak Unavail' },
+      t.ownerSlug,
+    );
+    expect(unavailRes.status).toBe(503);
+    expect(JSON.stringify(unavailRes.json)).not.toContain(SECRET);
+
+    // 3) 201 create path — body must not echo the password (redundant with
+    // FF-583-1 but re-asserted here alongside the other paths for one
+    // single-purpose AC-11/AC-12 test).
+    kc.failOnAuth = false;
+    const createRes = await postUsers(
+      { tenant_id: t.tenantId, login, password: SECRET, display_name: 'PwLeak Create' },
+      t.ownerSlug,
+    );
+    expect(createRes.status, JSON.stringify(createRes.json)).toBe(201);
+    expect(JSON.stringify(createRes.json)).not.toContain(SECRET);
+    const employeeId = createRes.json.employee_id as string;
+
+    // 4) GET /accounts — list body must not echo the password.
+    const listRes = await getAccounts(t.ownerSlug);
+    expect(listRes.status).toBe(200);
+    expect(JSON.stringify(listRes.json)).not.toContain(SECRET);
+
+    // 5) PATCH deactivate/reactivate — body must not echo the password
+    // (the PATCH body itself never carries a password, but assert the
+    // RESPONSE never does either, matching the AC-11 "every response" scope).
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(off.status).toBe(200);
+    expect(JSON.stringify(off.json)).not.toContain(SECRET);
+    const on = await patchUser(employeeId, { active: true }, t.ownerSlug);
+    expect(on.status).toBe(200);
+    expect(JSON.stringify(on.json)).not.toContain(SECRET);
+
+    // 6) AC-12: audit_event payload rows for this tenant's user_account.*
+    // events never carry the plaintext password (dynamic DB-level probe —
+    // the static script can only see the source, not what was ACTUALLY
+    // written at runtime).
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query<{ payload: unknown }>(
+        `SELECT payload FROM choros.audit_event
+          WHERE tenant_id = $1
+            AND type IN ('user_account.create', 'user_account.deactivate', 'user_account.reactivate')`,
+        [t.tenantId],
+      );
+      expect(rows.length, 'expected at least the create+deactivate+reactivate audit rows').toBeGreaterThanOrEqual(3);
+      for (const row of rows) {
+        expect(JSON.stringify(row.payload)).not.toContain(SECRET);
+      }
+      await c.query('COMMIT');
+    });
+  });
 });
