@@ -33,10 +33,16 @@ import { findEmployee } from "./org.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant, resolveActorSlugFromAuth } from "../db/org.js";
 import { findEmployeeById } from "../db/org.js";
-import { getRoleSlugsForActor, getHoldersForRole, findTenantOwnerSlug } from "../db/grants-dao.js";
+import {
+  getRoleSlugsForActor,
+  getHoldersForRole,
+  findTenantOwnerSlug,
+  getRoleAssignmentOrgScopesForEmployee,
+} from "../db/grants-dao.js";
 import { getActiveSubstitutionsByRole, getActiveSubstitutionsForSubstitute } from "../db/substitution-dao.js";
 import { isRuleEffective } from "../core/substitution.js";
-import { BOTTOM, isNarrowerOrEqual, type AncestryOracle, type ScopeElement } from "../core/grant-lattice.js";
+import { isNarrowerOrEqual, type ScopeElement } from "../core/grant-lattice.js";
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import { parsePaginationParams, paginateInMemory } from "../core/data-access-port.js";
 // executor-resolver: the batch path (resolveExecutorFallbackBatch below) calls
 // DAO functions directly for performance (avoids port-wrapper overhead at scale).
@@ -971,6 +977,70 @@ function parseQuery(url: string | undefined): URLSearchParams {
 }
 
 // ---------------------------------------------------------------------------
+// T-0588 (BLOCK-1/BLOCK-4): resolveTier2SubstitutionClaim — shared Tier-2
+// substitution-eligibility check, used by BOTH the claim route (FR-1) and the
+// approve route (BLOCK-4 — a substitute who claimed via Tier-2 must also be
+// able to complete the userTask, or the substitution is claim-only and dead
+// weight for LIVE_PROOF). Extracted so the two gates cannot silently drift.
+//
+// Returns the absent employee's slug when a Tier-2 substitution_rule licenses
+// `actorSlug` to act as `taskRole` on this task's behalf; undefined otherwise
+// (including on any DB error — degrades to "no match", never throws: the
+// caller's base role-check has already run and rejected before this is
+// consulted, so failure here must fall through to the caller's own 403, not
+// mask it with a 500).
+//
+// Containment (BLOCK-1, review R-1 fix): a pool task carries no org-scope of
+// its own (task.role is the only addressing field). The ONLY real,
+// task-relevant scope available is the ABSENT holder's OWN
+// role_assignment.org_scope for this role — the rule is honest only when its
+// org_scope does not exceed that real assignment's reach
+// (isNarrowerOrEqual(rule.orgScope, absentAssignmentScope)). No active
+// assignment to check against ⇒ fail closed (no match) — see
+// getRoleAssignmentOrgScopesForEmployee doc comment (grants-dao.ts) for the
+// full rationale (no TOP/tenant-wide sentinel exists in this lattice either).
+// ---------------------------------------------------------------------------
+
+async function resolveTier2SubstitutionClaim(
+  pool: pg.Pool,
+  tenantId: string,
+  actorSlug: string,
+  taskRole: string,
+  nowMs: number,
+): Promise<string | undefined> {
+  try {
+    const substRules = await getActiveSubstitutionsForSubstitute(pool, tenantId, actorSlug, nowMs);
+    const candidates = substRules.filter(
+      (r) =>
+        r.roleId === taskRole &&
+        r.ttlGrantId !== null && // Tier-2 only — Tier-1 substitutes already hold the role via role_assignment
+        isRuleEffective(r, nowMs),
+    );
+    if (candidates.length === 0) return undefined;
+
+    const oracle = await loadTenantOrgAncestry(pool, tenantId);
+    for (const candidate of candidates) {
+      const absentScopes = await getRoleAssignmentOrgScopesForEmployee(
+        pool,
+        tenantId,
+        candidate.absentEmployeeId,
+        taskRole,
+        nowMs,
+      );
+      const covered = absentScopes.some((absentScope) =>
+        isNarrowerOrEqual(candidate.orgScope as ScopeElement, absentScope, oracle),
+      );
+      if (covered) return candidate.absentEmployeeId;
+    }
+    return undefined;
+  } catch {
+    // Degrade gracefully: a lookup failure does NOT grant a claim/approve that
+    // the base role-check already rejected — falls through to the caller's 403.
+    return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -1330,6 +1400,23 @@ export function registerInboxRoutes(
       throw new HttpError(409, "NOT_POOL_TASK", "task is not a pool task and cannot be claimed");
     }
 
+    // T-0588 (BLOCK-3, review follow-up): a deactivated actor must not be able
+    // to claim ANY pool task — not even one addressed to a role they still hold
+    // a role_assignment for. Deactivation disables the ACCOUNT (T-0583/migration
+    // 125) independently of role_assignment.valid_until (see ADR §"Дыра №2" —
+    // "деактивированный = не держатель"); the role/substitution eligibility gate
+    // below only checks role/substitution membership, so without this check a
+    // fired employee whose role_assignment was not separately revoked could
+    // still claim new work up to that point. Fail-closed: unlike the actorKind
+    // telemetry lookup further below, a DB error here is NOT swallowed — this
+    // IS the security gate.
+    if (hasDb()) {
+      const actingEmp = await findEmployeeById(getOrgPool(), tenantId, devUserId);
+      if (actingEmp?.deactivatedAt != null) {
+        throw new HttpError(403, "NOT_ELIGIBLE", "actor account is deactivated and cannot claim tasks");
+      }
+    }
+
     // T-0336 (E15-S2): PDP resolveFor(op=transition) gate — claim-from-pool invariant.
     //
     // The PDP checks:
@@ -1361,45 +1448,10 @@ export function registerInboxRoutes(
     // it only ever ALLOWS this one claim, and only records who was substituted for.
     let onBehalfOfSlug: string | undefined;
     if (taskRole !== undefined && !myRoles.includes(taskRole)) {
-      let substitutionAllowed = false;
       if (hasDb()) {
-        try {
-          const substRules = await getActiveSubstitutionsForSubstitute(
-            getOrgPool(),
-            tenantId,
-            devUserId,
-            nowMs,
-          );
-          // Task org-scope is not modelled on the pool-task shape here; default to
-          // BOTTOM (root scope) — mirrors resolveExecutor's `opts.orgScope ?? BOTTOM`
-          // default so an unscoped task is covered by any org-scoped rule.
-          const taskOrgScope: ScopeElement = BOTTOM;
-          const ancestry: AncestryOracle = {
-            isDescendantOrSelf(_hierarchy, descendantId, ancestorId) {
-              return descendantId === ancestorId;
-            },
-          };
-          // Select the first rule where: this actor IS the substitute (already the
-          // query predicate), roleId === taskRole, effective at nowMs (confirmed +
-          // in-window), and the task's org-scope is contained by the rule's org-scope.
-          const matched = substRules.find(
-            (r) =>
-              r.roleId === taskRole &&
-              r.ttlGrantId !== null && // Tier-2 only — Tier-1 substitutes already hold the role via role_assignment
-              isRuleEffective(r, nowMs) &&
-              isNarrowerOrEqual(taskOrgScope, r.orgScope, ancestry),
-          );
-          if (matched !== undefined) {
-            substitutionAllowed = true;
-            onBehalfOfSlug = matched.absentEmployeeId;
-          }
-        } catch {
-          // Degrade gracefully: substitution lookup failure does NOT grant a claim
-          // that the base role-check already rejected — falls through to 403.
-          substitutionAllowed = false;
-        }
+        onBehalfOfSlug = await resolveTier2SubstitutionClaim(getOrgPool(), tenantId, devUserId, taskRole, nowMs);
       }
-      if (!substitutionAllowed) {
+      if (onBehalfOfSlug === undefined) {
         throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
       }
     }
@@ -1590,12 +1642,24 @@ export function registerInboxRoutes(
       // the sub→slug resolution above). No fallback needed — actor IS the slug.
       const nowMs = Date.now();
       const myRoles = await resolveRolesForActor(actor, tenantId, nowMs);
+      // T-0588 (BLOCK-4, review follow-up): a Tier-2 substitute who claimed this
+      // task (claim route, FR-1) must also be able to APPROVE it — otherwise the
+      // substitution is claim-only and the substitute is stuck holding a task
+      // they can never complete (LIVE_PROOF §"(б) Заместитель забирает задачу"
+      // requires claim→approve→done end-to-end). Same Tier-2 gate as the claim
+      // route (resolveTier2SubstitutionClaim — same guards: confirmed, in-window,
+      // deactivated-substitute filter via SUBST_SELECT, org-scope containment
+      // against the absent holder's real role_assignment).
+      let approveOnBehalfOfSlug: string | undefined;
       if (!myRoles.includes(task.role)) {
-        throw new HttpError(
-          403,
-          "NOT_ELIGIBLE",
-          "actor does not hold the approve grant for this task",
-        );
+        approveOnBehalfOfSlug = await resolveTier2SubstitutionClaim(pool, tenantId, actor, task.role, nowMs);
+        if (approveOnBehalfOfSlug === undefined) {
+          throw new HttpError(
+            403,
+            "NOT_ELIGIBLE",
+            "actor does not hold the approve grant for this task",
+          );
+        }
       }
 
       // F2 (T-0335): compute the wall-clock task duration ONCE here, in the approve
@@ -1618,6 +1682,10 @@ export function registerInboxRoutes(
           nowMs,
           durationMs, // T-0335: real duration (was hard-coded null in T-0332)
           tenantId,
+          // T-0588 (BLOCK-4): set ONLY when this approve was authorized via the
+          // Tier-2 substitution branch above; undefined for a normal role-assignment
+          // approve (payload key omitted, byte-identical to today).
+          onBehalfOf: approveOnBehalfOfSlug,
         });
 
         // T-0335 applier seam: engage ONLY when the outbox store is wired (the

@@ -39,7 +39,7 @@
  */
 
 import pg from "pg";
-import type { Grant } from "../core/grant-lattice.js";
+import type { Grant, ScopeElement } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 import type { GrantSource } from "../core/grant-resolver.js";
 import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
@@ -479,6 +479,64 @@ export async function getHoldersForRole(
       [tenantId, roleSlug, nowMs],
     );
     return rows.map((r) => r.slug);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// getRoleAssignmentOrgScopesForEmployee — T-0588 (BLOCK-1, review R-1 fix):
+// the CONFIRMED, IN-WINDOW org_scope(s) of a given employee's role_assignment
+// row(s) for a given role.
+//
+// WHY THIS EXISTS: a pool task carries no org-scope of its own (task.role is
+// the only addressing field — recon confirmed no BPMN/task shape threads a
+// department/org context through). The claim route's Tier-2 substitution
+// branch previously defaulted the "task's org-scope" to BOTTOM (empty scope),
+// which made the containment check `isNarrowerOrEqual(BOTTOM, rule.orgScope,
+// oracle)` VACUOUSLY TRUE for every rule (⊥ ⊑ anything) — the org-scope
+// restriction on a Tier-2 substitution_rule was a complete no-op (review R-1,
+// blocking). There is no "tenant-wide"/TOP sentinel in this lattice either
+// (grant-lattice.ts has only BOTTOM/⊥; org authority always resolves through
+// EITHER an explicit org node/set OR the out-of-band isGenesisOwner bypass —
+// confirmed by recon, no TOP construct exists anywhere in this codebase).
+//
+// THE FIX: the only real, task-relevant scope available at claim time is the
+// ABSENT holder's OWN role_assignment.org_scope for the substituted role — the
+// literal department(s) where that person actually held role-X. A Tier-2
+// substitution_rule is honest only when its org_scope is CONTAINED WITHIN
+// (isNarrowerOrEqual) at least one of the absent employee's own active
+// assignments for that role: the rule cannot license MORE reach than the
+// assignment it substitutes for. If the absent employee holds NO active
+// assignment for the role (e.g. it was revoked after the rule was minted),
+// there is nothing to check containment against — the caller must fail
+// closed (deny), not silently treat that as "no restriction".
+//
+// Read-only, additive: mirrors getHoldersForRole's query shape (same JOIN,
+// same active-assignment predicate), narrowed to ONE employee + returning
+// org_scope instead of the slug list.
+// ---------------------------------------------------------------------------
+
+export async function getRoleAssignmentOrgScopesForEmployee(
+  pool: pg.Pool,
+  tenantId: string,
+  employeeSlug: string,
+  roleSlug: string,
+  nowMs: number = Date.now(),
+): Promise<ScopeElement[]> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ org_scope: unknown }>(
+      `SELECT ra.org_scope
+         FROM choros.role_assignment ra
+         JOIN choros.employee e ON e.tenant_id = ra.tenant_id AND e.id = ra.employee_id
+         JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE ra.tenant_id = $1
+          AND e.slug = $2
+          AND r.slug = $3
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $4)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $4)`,
+      [tenantId, employeeSlug, roleSlug, nowMs],
+    );
+    return rows.map((r) => r.org_scope as ScopeElement);
   });
 }
 
