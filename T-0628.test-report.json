@@ -1,0 +1,100 @@
+{
+  "task_id": "T-0628",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 3630,
+    "passed": 3630,
+    "failed": 0,
+    "note": "357 fitness-gate script invocations (npm run fitness, incl. self-tests) + 1176 fitness:db vitest tests (real Postgres :55432) + 2097 web vitest tests = 3630; all green, 0 failed"
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/db/user-mgmt.db.test.ts::T-0628 (AC-1): POST /api/users with a non-email login (ivan.petrov-shaped) + valid email -> 201, KC called with distinct username/email; + FF-583-1/2 same-file; + web/src/screens/users-form.test.js::validateCreateUser accepts a non-email login",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "ci/checks/db/user-mgmt.db.test.ts::T-0628 (AC-2): invalid email -> 400 VALIDATION, KC never called / T-0628 (AC-2): missing email -> 400 VALIDATION, KC never called; + web/src/screens/users-form.test.js::rejects a missing email / rejects an email with no @ or no domain part",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "ci/checks/db/user-mgmt.db.test.ts::T-0628 (AC-3): empty login -> 400 VALIDATION; + web/src/screens/users-form.test.js::rejects an empty login even when email is well-formed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "ci/checks/db/user-mgmt.db.test.ts::FF-583-1/2 (GET /api/users/accounts shows login, not KC UUID) — unmodified regression guard, still green after this task's changes",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "manual/secondary — web/src/screens/screen-users.jsx canWrite gate (GET /api/org/tenant-state 200/403) mirrors screen-org.jsx pattern; verified by direct code read (no redirect, banner degrade, server POST/PATCH still gated by authorizeOrgWrite/assertOrgObjectAuthority) + web/src/screens/screen-users.test.jsx (13 tests, all pass) exercises the screen",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "ci/checks/db/user-mgmt.db.test.ts::FF-583-5 (tenant isolation) / FF-583-6 (non-privileged member 403 ADMIN_GATE_REJECTED/NOT_OWNER) — both unmodified regression guards, still green",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "ci/checks/db/user-mgmt.db.test.ts::FF-583-3a (EMAIL_TAKEN->409) / FF-583-3b (AUTH_UNAVAILABLE->503) / AC-11-AC-12 (password never leaks in any response or audit_event payload); EMAIL_INVALID->400 mapping verified by code read (user-mgmt.ts:270-272, admin-port.ts:390-394) — see finding F-1 for the one untested sub-branch",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "web build isolation (vite build standalone from web/, no runtime import from src/)",
+      "result": "pass",
+      "note": "вторично; npm run build in web/ succeeded standalone (534 modules, EXIT:0), confirming D-056 web-builder isolation for this diff"
+    },
+    {
+      "check": "web vitest full suite regression (all screens, not just users-form)",
+      "result": "pass",
+      "note": "вторично; 75 files / 2097 tests green in web/, including screen-users.test.jsx (13 tests)"
+    },
+    {
+      "check": "docker-compose config touched by this task",
+      "result": "n/a",
+      "note": "вторично; git diff origin/dev...HEAD -- docker-compose* is empty — compose untouched by T-0628"
+    }
+  ],
+  "failures": [],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "note": "AC-7's EMAIL_INVALID branch (admin-port.ts:390-394, defense-in-depth for a real KC realm rejecting a syntactically-valid-but-realm-disallowed email) has no direct fake-port-injection test forcing that specific throw and asserting the 400 mapping in user-mgmt.ts. Same gap flagged independently by reviewer (R-2 in T-0628.review.json) — pre-existing pattern inherited unchanged from T-0625, not a regression. Does not block: the mapping code is a straightforward 3-way switch (EMAIL_TAKEN/EMAIL_INVALID/else->AUTH_UNAVAILABLE) already exercised for the other two branches, and user-mgmt.ts's own server-side validateCreateBody makes this KC-side branch unreachable in this product's own flow (defense-in-depth only)."
+    }
+  ],
+  "dev_drift": {
+    "status": "none",
+    "note": "git fetch origin dev; git log HEAD..origin/dev --oneline is empty — dev has not advanced past this branch's base, zero merge risk. Branch is 6 commits ahead of dev (T-0628 changes only)."
+  },
+  "suites_run": [
+    {
+      "name": "npm run fitness",
+      "result": "pass",
+      "note": "full chained fitness gate (~250+ scripts incl. dual-control-isolation.sh / substitution-isolation.sh with the two new T-0628 auto_additive reliefs for migration 127, both re-verified independently at gate-runtime, not trusted by filename), single EXIT:0, zero FAIL lines in the entire log"
+    },
+    {
+      "name": "npm run fitness:db",
+      "result": "pass",
+      "note": "real Postgres :55432 (choros_migrator), migration 127 already applied; 120 test files / 1176 tests passed, 0 failed, user-mgmt.db.test.ts 12/12 (includes all 3 new T-0628 AC tests); Flowable-dependent tests skipped cleanly (Flowable not running — expected, not a failure)"
+    },
+    {
+      "name": "web build (D-056 pre-test artifact)",
+      "result": "pass",
+      "note": "npm run build inside web/, standalone, EXIT:0, 534 modules — confirms web build does not depend on a runtime import from src/"
+    },
+    {
+      "name": "web vitest (full)",
+      "result": "pass",
+      "note": "75 files / 2097 tests, includes users-form.test.js (22/22) and screen-users.test.jsx (13/13)"
+    }
+  ],
+  "flakes_resolved": [],
+  "docker_compose_touched": false
+}
