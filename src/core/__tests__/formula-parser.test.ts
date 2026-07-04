@@ -12,7 +12,8 @@
 
 import { describe, it, expect } from "vitest";
 import { parseFormula, astDepth, collectFieldRefs, type FormulaAst } from "../formula-parser.js";
-import { FORMULA_MAX_LENGTH, FORMULA_MAX_REFS } from "../formula-contract.js";
+import { evalFormula } from "../formula-eval.js";
+import { FORMULA_MAX_LENGTH, FORMULA_MAX_DEPTH, FORMULA_MAX_REFS } from "../formula-contract.js";
 
 describe("parseFormula — arithmetic happy path (FP-1)", () => {
   it("parses a bare number literal", () => {
@@ -151,19 +152,55 @@ describe("parseFormula — limits (FP-3, NF-5 / AC-8)", () => {
     if (!r.ok) expect(r.error).toBe("too_long");
   });
 
-  it("accepts a long expression right up to (but not exceeding) FORMULA_MAX_LENGTH", () => {
-    // A FLAT chain of numeric-literal additions (no field refs, no nested
-    // parens) isolates the LENGTH limit from the separate max-refs and
-    // max-depth limits (each covered by its own test above/below): the parser
-    // is left-associative, so `1+1+1+...` builds a left-leaning tree whose
-    // depth grows with term count, not exponentially — well under
-    // FORMULA_MAX_DEPTH for a string capped at FORMULA_MAX_LENGTH chars.
+  it("a long FLAT operand chain is governed by REAL AST depth, not source length (fix R-1)", () => {
+    // CORRECTED (T-0580 REVIEW R-1 fix): a flat `1+1+1+...` chain is
+    // LEFT-associative, so each `+` adds exactly ONE level of REAL AST depth
+    // (binary.left nests one deeper each time) — depth grows 1:1 with operand
+    // count, NOT "well under FORMULA_MAX_DEPTH" as this test previously
+    // (incorrectly) asserted. A chain long enough to approach
+    // FORMULA_MAX_LENGTH (500 chars, ~166 operands) has REAL AST depth ~166 —
+    // far past FORMULA_MAX_DEPTH=32 — so it MUST be rejected at authoring,
+    // exactly like any other over-depth formula. This is the authoring-time
+    // half of the R-1 invariant: "accepted at authoring" ⟹ "computed at
+    // runtime, never null-by-depth" — so a formula this deep must never be
+    // accepted in the first place (previously it WAS wrongly accepted here,
+    // and then silently evaluated to null at runtime — the exact bug REVIEW
+    // caught).
     let expr = "1";
     while (expr.length + 2 <= FORMULA_MAX_LENGTH) expr += "+1";
     expect(expr.length).toBeLessThanOrEqual(FORMULA_MAX_LENGTH);
-    expect(expr.length).toBeGreaterThan(FORMULA_MAX_LENGTH - 10); // close to the boundary
+    const r = parseFormula(expr);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe("max_depth_exceeded");
+  });
+
+  it("a flat operand chain right at the real AST-depth boundary is ACCEPTED and COMPUTES a number (fix R-1)", () => {
+    // The authoring/runtime depth invariant, proven positively: build the
+    // LONGEST flat `+` chain whose REAL astDepth is exactly FORMULA_MAX_DEPTH
+    // (not a grammatical-frame count) — it must parse AND evaluate to a
+    // correct number, never null-by-depth.
+    const operandCount = FORMULA_MAX_DEPTH; // depth of a left-assoc chain of N operands is N
+    let expr = "price";
+    for (let i = 1; i < operandCount; i++) expr += ` + ${i}`;
     const r = parseFormula(expr);
     expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(astDepth(r.ast)).toBe(FORMULA_MAX_DEPTH);
+      const sumOfIncrements = ((operandCount - 1) * operandCount) / 2; // 1+2+...+(N-1)
+      expect(evalFormula(r.ast, { price: 1000 })).toBe(1000 + sumOfIncrements);
+    }
+  });
+
+  it("one operand past the real AST-depth boundary is REJECTED at authoring with a human error, never silently accepted (fix R-1)", () => {
+    const operandCount = FORMULA_MAX_DEPTH + 1;
+    let expr = "price";
+    for (let i = 1; i < operandCount; i++) expr += ` + ${i}`;
+    const r = parseFormula(expr);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toBe("max_depth_exceeded");
+      expect(r.message.length).toBeGreaterThan(0);
+    }
   });
 
   it("rejects a formula with more than FORMULA_MAX_REFS distinct field references", () => {
@@ -181,13 +218,38 @@ describe("parseFormula — limits (FP-3, NF-5 / AC-8)", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("rejects a deeply nested parenthesized expression beyond FORMULA_MAX_DEPTH", () => {
-    // Each level of nesting adds several recursive-descent frames (expr→term→
-    // factor→primary), so a modest nesting count already exceeds depth 32.
-    const deep = "(".repeat(40) + "a" + ")".repeat(40);
-    const r = parseFormula(deep);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toBe("max_depth_exceeded");
+  it("a modest wrap of redundant parens is NOT falsely rejected as over-depth (fix R-1)", () => {
+    // CORRECTED (T-0580 REVIEW R-1 fix): a `(`-wrapped primary does not add
+    // an AST node at all (parsePrimary's `(`-branch returns `inner` directly)
+    // — so N levels of pure parenthesization around a single literal has REAL
+    // AST depth 1, regardless of N. The OLD version of this test asserted
+    // "(".repeat(40)+"a"+")".repeat(40) is rejected — that was measuring
+    // grammatical recursion-descent FRAME count (~4 frames per paren level),
+    // NOT real AST depth, and is exactly the false-positive REVIEW flagged:
+    // `((((((((1))))))))` (8 parens) was being wrongly rejected as
+    // "max_depth_exceeded" despite a real AST depth of 1. This is now backed
+    // by the RECURSION_FRAME_GUARD anti-DoS backstop (a large multiple of
+    // FORMULA_MAX_DEPTH) instead of the tight authoring limit, so a
+    // reasonable number of redundant parens must be ACCEPTED.
+    const wrapped = "(".repeat(8) + "1" + ")".repeat(8);
+    const r = parseFormula(wrapped);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(astDepth(r.ast)).toBe(1);
+      expect(evalFormula(r.ast, {})).toBe(1);
+    }
+  });
+
+  it("a pathologically large paren count still hits the anti-DoS recursion backstop, not a stack overflow", () => {
+    // The grammatical-frame anti-DoS guard (RECURSION_FRAME_GUARD, formula-parser.ts)
+    // still exists to protect the JS call stack against an absurd input — this
+    // is deliberately far beyond what FORMULA_MAX_LENGTH (500 chars) can even
+    // encode, so in practice the length gate fires first; this test only
+    // proves parseFormula never throws an uncaught error for a bad paren run.
+    const pathological = "(".repeat(300) + "1" + ")".repeat(300);
+    expect(() => parseFormula(pathological)).not.toThrow();
+    const r = parseFormula(pathological);
+    expect(r.ok).toBe(false); // rejected — either too_long or max_depth_exceeded, never a crash
   });
 
   it("rejects the empty expression", () => {
