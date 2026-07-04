@@ -327,6 +327,12 @@ async function runStep(page: Page, step: Step, bag: Bag): Promise<Bag> {
     case "fill":
       await resolveLocator(page, step.target!, bag).fill(interpolate(step.value!, bag));
       return bag;
+    case "selectOption":
+      // T-0579 (review C2): native <select> — Playwright's fill() throws on
+      // it ("Element is not an <input>, <textarea> or [contenteditable]
+      // element", verified empirically); selectOption() is the correct API.
+      await resolveLocator(page, step.target!, bag).selectOption(interpolate(step.optionValue!, bag));
+      return bag;
     case "expectVisible":
       await expect(resolveLocator(page, step.target!, bag), step.name).toBeVisible();
       return bag;

@@ -11,7 +11,13 @@
  *
  *   GET /api/records/:recordId/files
  *     List all files attached to a record (tenant-scoped, read-gated).
- *     Returns [{ fileId, originalName, currentVersionId, mime, sizeBytes, createdAt }].
+ *     Returns [{ fileId, originalName, currentVersionId, versionIds, mime,
+ *     sizeBytes, createdAt }]. versionIds (T-0579 fix-forward, review m1) is
+ *     EVERY version id the file has ever had (not just the current one) — a
+ *     field's stored value is whatever fileVersionId was captured at upload
+ *     time, and a later re-upload advances currentVersionId while the OLD
+ *     value remains a legitimate historical version; callers resolving a
+ *     value to a display name must match against the full set.
  *
  *   GET /api/files/:fileVersionId/download[?disposition=inline]
  *     Presign or stream the content of a specific file version (PDP read-gated).
@@ -81,12 +87,26 @@ const PRESIGN_TTL_SECONDS = 300;
 // (no regression on any pre-T-0579 test/caller).
 // ---------------------------------------------------------------------------
 
-/** True iff `mime` is safe to serve with Content-Disposition: inline. */
+/**
+ * True iff `mime` is safe to serve with Content-Disposition: inline.
+ *
+ * T-0579 fix-forward (review B1): normalize (trim + lowercase) BEFORE any
+ * comparison — this is the second line of defense (the upload path already
+ * stores a normalized mime; this function does not trust that as its ONLY
+ * guarantee, since it is also the read-time boundary for the inline decision
+ * and must not regress if a row was written before the upload-side fix, by a
+ * migration/import path, or by any future writer). Without normalizing here,
+ * a stored `image/SVG+xml` would fail the exact `=== "image/svg+xml"` compare
+ * yet still pass `startsWith("image/")` → inline → stored-XSS (SVG can carry
+ * <script>, executed in the app's origin).
+ */
 function isInlineSafeMime(mime: string | null | undefined): boolean {
   if (typeof mime !== "string" || mime.length === 0) return false;
-  if (mime === "image/svg+xml") return false; // anti-XSS: SVG can carry <script>
-  if (mime.startsWith("image/")) return true;
-  if (mime === "application/pdf") return true;
+  const normalized = mime.trim().toLowerCase();
+  if (normalized.length === 0) return false;
+  if (normalized === "image/svg+xml") return false; // anti-XSS: SVG can carry <script>
+  if (normalized.startsWith("image/")) return true;
+  if (normalized === "application/pdf") return true;
   return false;
 }
 
@@ -205,8 +225,20 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
         const bodyBuf = await readRawBody(req, MAX_UPLOAD_BYTES);
 
         // Derive mime from Content-Type; strip parameters (e.g. ; charset=...).
+        // T-0579 fix-forward (review B1): normalize to lowercase at the ONE
+        // ingestion boundary so every stored mime is canonical from here on —
+        // `image/SVG+xml` / `image/Svg+xml` etc. are stored as `image/svg+xml`.
+        // Without this, isInlineSafeMime's exact `=== "image/svg+xml"` compare
+        // (case-sensitive per the MIME grammar's subtype being case-preserved
+        // in this codebase's comparisons) would miss a registro-variant and
+        // `startsWith("image/")` would then let it through as inline —
+        // stored-XSS (an SVG can carry <script>, executed in the app's origin).
+        // Normalizing on WRITE means every reader (this route's own inline
+        // check, the client preview gate, any future consumer) sees one
+        // canonical form — one boundary, not N scattered case-insensitive
+        // compares.
         const rawCt = req.headers["content-type"] ?? "application/octet-stream";
-        const mime = rawCt.split(";")[0]!.trim() || "application/octet-stream";
+        const mime = (rawCt.split(";")[0] ?? "").trim().toLowerCase() || "application/octet-stream";
 
         // Original name from X-File-Name header.
         let xFileName = req.headers["x-file-name"];

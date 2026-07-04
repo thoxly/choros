@@ -346,25 +346,36 @@ function RelationCell({ targetId, appId }) {
  * @param {string} recordId   The record this cell belongs to (for the listing fetch).
  */
 function FileCell({ versionId, recordId }) {
-  const [state, setState] = React.useState('loading'); // 'loading'|'resolved'|'denied'
+  // review m2: 'empty' (no value — not an access problem) / 'forbidden'
+  // (listing fetch itself failed) / 'notfound' (listing loaded but this
+  // versionId isn't in it) are distinct honest truths — no longer merged
+  // into one "denied" bucket.
+  const [state, setState] = React.useState(versionId && recordId ? 'loading' : 'empty');
   const [name, setName] = React.useState(null);
 
   React.useEffect(() => {
-    if (!versionId || !recordId) { setState('denied'); return; }
+    if (!versionId || !recordId) { setState('empty'); return; }
     let cancelled = false;
     setState('loading');
     fetch(`/api/records/${encodeURIComponent(recordId)}/files`, { headers: devHeaders() })
       .then(async (res) => {
         if (cancelled) return;
-        if (!res.ok) { setState('denied'); return; }
+        if (!res.ok) { setState('forbidden'); return; }
         const files = await res.json();
         if (cancelled) return;
-        const match = Array.isArray(files) ? files.find((f) => f && f.currentVersionId === versionId) : null;
-        if (!match) { setState('denied'); return; }
+        // review m1: match against ALL versions (versionIds), not just
+        // currentVersionId — a superseded-but-real version must still resolve.
+        const match = Array.isArray(files)
+          ? files.find((f) => f && (
+            f.currentVersionId === versionId
+            || (Array.isArray(f.versionIds) && f.versionIds.includes(versionId))
+          ))
+          : null;
+        if (!match) { setState('notfound'); return; }
         setName(match.originalName || null);
         setState('resolved');
       })
-      .catch(() => { if (!cancelled) setState('denied'); });
+      .catch(() => { if (!cancelled) setState('forbidden'); });
     return () => { cancelled = true; };
   }, [versionId, recordId]);
 
@@ -376,10 +387,26 @@ function FileCell({ versionId, recordId }) {
     );
   }
 
-  if (state === 'denied' || !name) {
+  if (state === 'empty') {
     return (
       <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
-        — / Нет доступа
+        —
+      </span>
+    );
+  }
+
+  if (state === 'forbidden') {
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+        Нет доступа
+      </span>
+    );
+  }
+
+  if (state === 'notfound' || !name) {
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+        Файл не найден
       </span>
     );
   }

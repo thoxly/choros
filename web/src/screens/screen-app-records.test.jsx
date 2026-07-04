@@ -73,3 +73,30 @@ describe('screen-app-records — create drawer reused for edit (T-0568)', () => 
     expect(src).toContain('recordDataToValues(formFields, existingRecord.data)');
   });
 });
+
+describe('screen-app-records — FileCell (T-0579, review M1/m1/m2)', () => {
+  it('never falls back to the raw fileVersionId — resolveState drives a human label instead', () => {
+    const idx = src.indexOf('function FileCell(');
+    expect(idx).toBeGreaterThan(-1);
+    const fnBody = src.slice(idx, idx + 2200);
+    // Distinct honest states, not one "denied" bucket (review m2).
+    expect(fnBody).toContain("useState(versionId && recordId ? 'loading' : 'empty')");
+    expect(fnBody).toMatch(/state === 'empty'/);
+    expect(fnBody).toMatch(/state === 'forbidden'/);
+    expect(fnBody).toMatch(/state === 'notfound' \|\| !name/);
+    // Never renders the raw versionId as the visible name fallback.
+    expect(fnBody).not.toMatch(/\{versionId\}\s*<\/span>/);
+  });
+
+  it('matches the stored value against ALL of a file\'s versions (versionIds), not just currentVersionId (review m1)', () => {
+    const idx = src.indexOf('function FileCell(');
+    expect(idx).toBeGreaterThan(-1);
+    const fnBody = src.slice(idx, idx + 1400);
+    expect(fnBody).toMatch(/f\.currentVersionId === versionId/);
+    expect(fnBody).toMatch(/Array\.isArray\(f\.versionIds\) && f\.versionIds\.includes\(versionId\)/);
+  });
+
+  it('threads recordId onto file-contract fields in the create/edit form (review M1)', () => {
+    expect(src).toContain("contractKind === 'file'\n            ? { ...f, recordId: isEdit ? existingRecord.id : undefined }");
+  });
+});

@@ -75,6 +75,7 @@ describe("VALID_ACTIONS", () => {
       "goto",
       "click",
       "fill",
+      "selectOption",  // T-0579: native <select> (fill() throws on it)
       "expectVisible",
       "expectText",
       "expectCount",
@@ -98,6 +99,7 @@ describe("validateStep — accepts well-formed steps", () => {
       awaitResponse: { urlIncludes: "/api/x", expectStatus: 201, captureJson: { id: "id" } },
     },
     { name: "fill", action: "fill", target: { css: "input" }, value: "hi" },
+    { name: "select", action: "selectOption", target: { css: "select" }, optionValue: "file" },
     { name: "vis", action: "expectVisible", target: { css: ".x" } },
     { name: "txt", action: "expectText", target: { css: ".x" }, text: "ok" },
     { name: "cnt", action: "expectCount", target: { css: ".x" }, count: 0 },
@@ -135,6 +137,8 @@ describe("validateStep — rejects malformed steps with a precise message", () =
     { step: { name: "x", action: "goto" }, rx: /goto needs path/ },
     { step: { name: "x", action: "click" }, rx: /click needs target/ },
     { step: { name: "x", action: "fill", target: { css: "i" } }, rx: /fill needs value/ },
+    { step: { name: "x", action: "selectOption", target: { css: "select" } }, rx: /selectOption needs optionValue/ },
+    { step: { name: "x", action: "selectOption", optionValue: "file" }, rx: /selectOption needs target/ },
     { step: { name: "x", action: "expectText", target: { css: ".x" } }, rx: /expectText needs text/ },
     {
       step: { name: "x", action: "expectCount", target: { css: ".x" } },

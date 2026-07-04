@@ -409,11 +409,22 @@ function RelationFieldValue({ targetId, recordId, appId }) {
 
 /** Preview-safe mime allowlist mirrored from src/http/files.ts (client display
  * decision only — the SERVER re-validates and is the actual security boundary;
- * this just decides whether to render an <img>/<embed> at all). */
+ * this just decides whether to render an <img>/<embed> at all).
+ *
+ * T-0579 fix-forward (review B1): normalize (trim + lowercase) before
+ * comparing — a stored/served mime of `image/SVG+xml` must still be excluded
+ * here, mirroring isInlineSafeMime server-side. Without this, the client
+ * would render an <img> for a registro-variant SVG mime whose ?disposition=
+ * inline request the (now-hardened) server correctly refuses — a broken
+ * image, not an XSS on its own, but the two allowlists must agree so the
+ * client's rendering DECISION never claims "safe" for something the server
+ * denies as unsafe. */
 function isPreviewSafeMime(mime) {
   if (typeof mime !== 'string') return false;
-  if (mime === 'image/svg+xml') return false; // anti-XSS: svg never inline (FR-8)
-  return mime.startsWith('image/') || mime === 'application/pdf';
+  const normalized = mime.trim().toLowerCase();
+  if (normalized.length === 0) return false;
+  if (normalized === 'image/svg+xml') return false; // anti-XSS: svg never inline (FR-8)
+  return normalized.startsWith('image/') || normalized === 'application/pdf';
 }
 
 /**
@@ -424,25 +435,40 @@ function isPreviewSafeMime(mime) {
  * @param {string} recordId   current record's id (listing fetch).
  */
 function FileFieldValue({ versionId, recordId }) {
-  const [state, setState] = useState('loading'); // 'loading'|'resolved'|'denied'
+  // review m2: distinct honest states instead of one "denied" bucket that
+  // conflated three different truths — 'empty' (no file attached at all,
+  // NOT an access problem), 'forbidden' (listing fetch itself failed —
+  // !res.ok, e.g. 403), 'notfound' (listing fetch succeeded but this
+  // versionId is not in it — could be a stale/foreign value; we don't invent
+  // a claim we can't verify, but at least don't call it "no access" when the
+  // listing DID load), 'loading', 'resolved'.
+  const [state, setState] = useState(versionId && recordId ? 'loading' : 'empty');
   const [meta, setMeta] = useState(null); // { originalName, mime }
 
   useEffect(() => {
-    if (!versionId || !recordId) { setState('denied'); return; }
+    if (!versionId || !recordId) { setState('empty'); return; }
     let cancelled = false;
     setState('loading');
     fetch(`/api/records/${encodeURIComponent(recordId)}/files`, { headers: devHeaders() })
       .then(async (res) => {
         if (cancelled) return;
-        if (!res.ok) { setState('denied'); return; }
+        if (!res.ok) { setState('forbidden'); return; }
         const files = await res.json();
         if (cancelled) return;
-        const match = Array.isArray(files) ? files.find((f) => f && f.currentVersionId === versionId) : null;
-        if (!match) { setState('denied'); return; }
+        // review m1: match against ALL versions of the file (versionIds), not
+        // just the CURRENT one — a superseded-but-real version must still
+        // resolve to its file's name, not be treated as unresolvable.
+        const match = Array.isArray(files)
+          ? files.find((f) => f && (
+            f.currentVersionId === versionId
+            || (Array.isArray(f.versionIds) && f.versionIds.includes(versionId))
+          ))
+          : null;
+        if (!match) { setState('notfound'); return; }
         setMeta({ originalName: match.originalName, mime: match.mime });
         setState('resolved');
       })
-      .catch(() => { if (!cancelled) setState('denied'); });
+      .catch(() => { if (!cancelled) setState('forbidden'); });
     return () => { cancelled = true; };
   }, [versionId, recordId]);
 
@@ -450,27 +476,41 @@ function FileFieldValue({ versionId, recordId }) {
     return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>…</span>;
   }
 
-  if (state === 'denied' || !meta) {
-    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>— / Нет доступа</span>;
+  if (state === 'empty') {
+    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>Файл не загружен</span>;
+  }
+
+  if (state === 'forbidden') {
+    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>Нет доступа</span>;
+  }
+
+  if (state === 'notfound' || !meta) {
+    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>Файл не найден</span>;
   }
 
   const downloadHref = `/api/files/${encodeURIComponent(versionId)}/download`;
   const previewHref = `${downloadHref}?disposition=inline`;
   const previewSafe = isPreviewSafeMime(meta.mime);
+  // T-0579 fix-forward (review B1): normalize once for the image-vs-embed
+  // branch below too — previewSafe already normalizes internally, but a
+  // registro-variant safe mime (e.g. `Image/PNG`) must still pick the image
+  // branch (not silently render neither preview element while previewSafe is
+  // true) — one normalized value used consistently everywhere it's compared.
+  const normalizedMime = typeof meta.mime === 'string' ? meta.mime.trim().toLowerCase() : '';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', alignItems: 'flex-start' }}>
       <a href={downloadHref} style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }} title="Скачать файл">
         {meta.originalName || 'Скачать файл'}
       </a>
-      {previewSafe && meta.mime && meta.mime.startsWith('image/') && (
+      {previewSafe && normalizedMime.startsWith('image/') && (
         <img
           src={previewHref}
           alt={meta.originalName || 'Превью файла'}
           style={{ maxWidth: '320px', maxHeight: '320px', borderRadius: 'var(--chs-radius-2)', border: '1px solid var(--chs-color-border)' }}
         />
       )}
-      {previewSafe && meta.mime === 'application/pdf' && (
+      {previewSafe && normalizedMime === 'application/pdf' && (
         <embed
           src={previewHref}
           type="application/pdf"

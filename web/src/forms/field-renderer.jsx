@@ -233,6 +233,39 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
 // ---------------------------------------------------------------------------
 
 /**
+ * uploadFileToRecord — the actual upload call FileField's handleFileSelect
+ * makes: POST /api/records/:recordId/files with the raw File as the body,
+ * Content-Type/X-File-Name headers derived from the File object, auth headers
+ * from devHeaders(). Extracted as a standalone, React-free async function
+ * (review M2 — codebase convention: "pure logic lives in a testable sibling",
+ * cf. this file's own header note re: field-contract.js) so the real
+ * upload-flow code path (headers built, endpoint hit, response parsed) is
+ * exercisable by a unit test WITHOUT a DOM/React render — this project's
+ * vitest tier runs "node" environment with no jsdom (web/vitest.config.js),
+ * so hooks-bearing components cannot be invoked directly; this function has
+ * none of that constraint.
+ *
+ * @param {{ recordId: string, file: File }} args
+ * @returns {Promise<{ fileId: string, versionId: string, versionNo: number }>}
+ * @throws {Error} formatError(status) message on a non-ok response
+ */
+export async function uploadFileToRecord({ recordId, file }) {
+  const res = await fetch(`/api/records/${encodeURIComponent(recordId)}/files`, {
+    method: 'POST',
+    headers: {
+      ...devHeaders(),
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-File-Name': file.name || 'upload',
+    },
+    body: file,
+  });
+  if (!res.ok) {
+    throw new Error(formatError(res.status));
+  }
+  return res.json();
+}
+
+/**
  * Upload/download control for a `file` contract field. Stores the uploaded
  * file's versionId as the field value; resolves the display name via the
  * record's file listing (GET /api/records/:recordId/files).
@@ -257,22 +290,50 @@ export function FileField({ field, value, onChange, error, idPrefix = 'field', i
   // fileMeta: { originalName, mime } for the CURRENT value's versionId, resolved
   // from the record's file listing. null = not yet resolved / no listing available.
   const [fileMeta, setFileMeta] = useState(null);
+  // resolveState (review M1/m2): distinguishes WHY fileMeta is null — never
+  // conflate "still loading", "listing came back but this version wasn't in
+  // it" (no read access to that specific file, or a stale/foreign
+  // fileVersionId) and "no record context at all" (true pre-save create).
+  // 'idle' = nothing to resolve (no value or no recordId); 'loading' =
+  // fetch in flight; 'resolved' = found in the listing; 'unresolved' = fetch
+  // completed (ok or not) but no matching version — honest, not "— / no
+  // access" conflated with "still loading".
+  const [resolveState, setResolveState] = useState('idle');
 
   // Resolve the display name + mime for the current value from the record's
   // file listing (the same endpoint the list/card cells use — one source of
   // metadata, no duplicate resolution logic).
+  //
+  // review m1: match against ALL versions of every file (not just
+  // currentVersionId) — `value` is whatever fileVersionId was stored at
+  // upload time, which may since have been superseded by a "Заменить"
+  // re-upload on the SAME file row (new currentVersionId, old value still
+  // valid history). Matching only the current version would falsely show
+  // "unresolved" for an old-but-real version.
   useEffect(() => {
-    if (!value || !recordId) { setFileMeta(null); return; }
+    if (!value || !recordId) { setFileMeta(null); setResolveState('idle'); return; }
     let cancelled = false;
+    setResolveState('loading');
     fetch(`/api/records/${encodeURIComponent(recordId)}/files`, { headers: devHeaders() })
       .then(async (res) => {
-        if (cancelled || !res.ok) return;
+        if (cancelled) return;
+        if (!res.ok) { setFileMeta(null); setResolveState('unresolved'); return; }
         const files = await res.json();
-        if (cancelled || !Array.isArray(files)) return;
-        const match = files.find((f) => f && f.currentVersionId === value);
-        if (match) setFileMeta({ originalName: match.originalName, mime: match.mime });
+        if (cancelled) return;
+        if (!Array.isArray(files)) { setFileMeta(null); setResolveState('unresolved'); return; }
+        const match = files.find((f) => f && (
+          f.currentVersionId === value
+          || (Array.isArray(f.versionIds) && f.versionIds.includes(value))
+        ));
+        if (match) {
+          setFileMeta({ originalName: match.originalName, mime: match.mime });
+          setResolveState('resolved');
+        } else {
+          setFileMeta(null);
+          setResolveState('unresolved');
+        }
       })
-      .catch(() => { /* honest degrade: fall back to showing the raw value below */ });
+      .catch(() => { if (!cancelled) { setFileMeta(null); setResolveState('unresolved'); } });
     return () => { cancelled = true; };
   }, [value, recordId]);
 
@@ -289,19 +350,7 @@ export function FileField({ field, value, onChange, error, idPrefix = 'field', i
     setUploading(true);
     setUploadError(null);
     try {
-      const res = await fetch(`/api/records/${encodeURIComponent(recordId)}/files`, {
-        method: 'POST',
-        headers: {
-          ...devHeaders(),
-          'Content-Type': file.type || 'application/octet-stream',
-          'X-File-Name': file.name || 'upload',
-        },
-        body: file,
-      });
-      if (!res.ok) {
-        throw new Error(formatError(res.status));
-      }
-      const body = await res.json();
+      const body = await uploadFileToRecord({ recordId, file });
       setFileMeta({ originalName: file.name, mime: file.type });
       onChange(field.key, body.versionId);
     } catch (err) {
@@ -332,7 +381,17 @@ export function FileField({ field, value, onChange, error, idPrefix = 'field', i
     </span>
   ) : null;
 
-  const displayName = fileMeta?.originalName || (typeof value === 'string' && value.length > 0 ? value : '');
+  // review M1(a)/m2: NEVER fall back to the raw fileVersionId (a meaningless
+  // uuid to a human) — always a human-legible label per honest resolveState.
+  // 'resolved' → the real name; 'loading' → "загрузка…"; 'unresolved' (fetch
+  // completed but no match — could be a listing miss OR no read access to
+  // that specific file; we cannot distinguish those two from this endpoint's
+  // response, so the label says "no access" rather than pretending it found
+  // nothing) → "нет доступа"; 'idle' with no recordId → generic "файл".
+  const displayName = fileMeta?.originalName
+    || (resolveState === 'loading' ? 'Загрузка…'
+      : resolveState === 'unresolved' ? 'Нет доступа'
+        : 'Файл');
   const downloadHref = value ? `/api/files/${encodeURIComponent(value)}/download` : null;
 
   let control;

@@ -19,6 +19,7 @@ export const VALID_ACTIONS: readonly StepAction[] = [
   "goto",
   "click",
   "fill",
+  "selectOption",
   "expectVisible",
   "expectText",
   "expectCount",
@@ -108,6 +109,14 @@ export function validateStep(step: Step, idx: number): void {
       assert(step.target !== undefined, `${where}: fill needs target`);
       validateLocator(step.target, where);
       assert(typeof step.value === "string", `${where}: fill needs value`);
+      break;
+    case "selectOption":
+      assert(step.target !== undefined, `${where}: selectOption needs target`);
+      validateLocator(step.target, where);
+      assert(
+        typeof step.optionValue === "string" && step.optionValue.length > 0,
+        `${where}: selectOption needs optionValue`,
+      );
       break;
     case "expectVisible":
       assert(step.target !== undefined, `${where}: expectVisible needs target`);

@@ -154,7 +154,9 @@ class FakeFileStore implements FileMetaSource {
     this.insertedFiles.push(fRow);
   }
 
-  /** List files for a record — used by the GET list route. */
+  /** List files for a record — used by the GET list route.
+   * T-0579 fix-forward (review m1): versionIds mirrors PgFileStore's
+   * behaviour — EVERY version id recorded for the file, not just current. */
   async listFilesByRecord(
     tenantId: string,
     recordId: string,
@@ -162,6 +164,7 @@ class FakeFileStore implements FileMetaSource {
     fileId: string;
     originalName: string;
     currentVersionId: string | null;
+    versionIds: string[];
     mime: string | null;
     sizeBytes: number | null;
     createdAt: number;
@@ -170,10 +173,15 @@ class FakeFileStore implements FileMetaSource {
     for (const f of this.files.values()) {
       if (f.tenantId === tenantId && f.recordId === recordId) {
         const v = f.currentVersion ? this.versions.get(`${tenantId}::${f.currentVersion}`) : undefined;
+        const versionIds: string[] = [];
+        for (const ver of this.versions.values()) {
+          if (ver.tenantId === tenantId && ver.fileId === f.id) versionIds.push(ver.id);
+        }
         (result as unknown[]).push({
           fileId: f.id,
           originalName: f.originalName,
           currentVersionId: f.currentVersion,
+          versionIds,
           mime: v?.mimeType ?? null,
           sizeBytes: v?.sizeBytes ?? null,
           createdAt: f.createdAt,
@@ -564,6 +572,35 @@ describe("POST /api/records/:recordId/files", () => {
     expect(key).toMatch(/^[0-9a-f-]+\/[0-9a-f-]+\/[0-9a-f-]+$/);
   });
 
+  it("AC-upload-8/FF-MIME-NORMALIZE (review B1): Content-Type is normalized (trim+lowercase) at the ONE ingestion boundary before it is stored", async () => {
+    // review B1: without normalizing on write, a case-variant Content-Type
+    // like `image/SVG+xml` would be stored verbatim, and isInlineSafeMime's
+    // exact `=== "image/svg+xml"` compare would then miss it — the
+    // startsWith("image/") branch would treat it as a safe image and allow
+    // inline rendering (stored-XSS, since an SVG can carry <script>). This
+    // proves the upload path itself canonicalizes the mime, so every reader
+    // downstream sees ONE normalized form.
+    const { server, fileStore, objectStore, baseUrl } = buildTestServer({});
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpPost(
+      `${baseUrl()}/api/records/${RECORD_ID}/files`,
+      {
+        "x-dev-user": ACTOR_A,
+        "Content-Type": "  Image/SVG+XML  ; charset=utf-8",
+        "X-File-Name": "evil.svg",
+      },
+      Buffer.from("<svg onload=alert(1)></svg>"),
+    );
+
+    expect(res.status).toBe(201);
+    expect(fileStore.insertedVersions).toHaveLength(1);
+    expect(fileStore.insertedVersions[0]!.mimeType).toBe("image/svg+xml");
+    expect(objectStore.putCalls).toHaveLength(1);
+    expect(objectStore.putCalls[0]!.mime).toBe("image/svg+xml");
+  });
+
   it("AC-upload-7: cross-tenant actor gets 403 (IDOR protection on upload)", async () => {
     // ACTOR_B resolves to TENANT_B; resolver returns cross_tenant → denied
     const { server, baseUrl } = buildTestServer({
@@ -613,8 +650,40 @@ describe("GET /api/records/:recordId/files", () => {
     expect(files[0]!["fileId"]).toBe(FILE_ID);
     expect(files[0]!["originalName"]).toBe("test.txt");
     expect(files[0]!["currentVersionId"]).toBe(VERSION_ID);
+    expect(files[0]!["versionIds"]).toEqual([VERSION_ID]);
     expect(files[0]!["mime"]).toBe("text/plain");
     expect(files[0]!["sizeBytes"]).toBe(5);
+  });
+
+  it("AC-list-5/FF-VERSION-HISTORY (review m1): versionIds includes a SUPERSEDED (non-current) version — a stale field value must still resolve", async () => {
+    // Simulates the "Заменить" (replace) flow: the file was first uploaded as
+    // OLD_VERSION_ID, then replaced by a newer NEW_VERSION_ID (currentVersionId
+    // advances). A record field whose stored value is still OLD_VERSION_ID (it
+    // captured the version id at the time it was set, and nothing rewrites it
+    // on a LATER unrelated replace of the same file by someone else) must be
+    // resolvable via versionIds even though it is no longer current.
+    const OLD_VERSION_ID = "11111111-1111-1111-1111-111111111111";
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ id: OLD_VERSION_ID, versionNo: 1 }));
+    fileStore.seedVersion(makeVersionRow({ id: VERSION_ID, versionNo: 2 }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(
+      `${baseUrl()}/api/records/${RECORD_ID}/files`,
+      { "x-dev-user": ACTOR_A },
+    );
+
+    expect(res.status).toBe(200);
+    const files = res.json as Array<Record<string, unknown>>;
+    expect(files).toHaveLength(1);
+    expect(files[0]!["currentVersionId"]).toBe(VERSION_ID);
+    const versionIds = files[0]!["versionIds"] as string[];
+    expect(versionIds).toContain(OLD_VERSION_ID);
+    expect(versionIds).toContain(VERSION_ID);
   });
 
   it("AC-list-2: empty record → 200 with []", async () => {
@@ -905,6 +974,60 @@ describe("GET /api/files/:fileVersionId/download?disposition=inline (T-0579)", (
 
     expect(res.status).toBe(200);
     expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  // review B1 (blocking): registro-variant svg mime must NOT slip through the
+  // exact-match/startsWith combo. Each row below simulates a version whose
+  // stored mime is a case/whitespace variant of image/svg+xml (e.g. a row
+  // written before the upload-side normalization fix, or by any writer that
+  // bypasses it) — isInlineSafeMime itself must still normalize on READ and
+  // refuse inline, so the anti-XSS boundary holds regardless of how the mime
+  // got into storage.
+  it.each([
+    ["image/SVG+xml", "uppercase SVG token"],
+    ["image/svg+XML", "uppercase xml token"],
+    ["image/Svg+xml", "mixed-case Svg"],
+    ["IMAGE/SVG+XML", "fully uppercase"],
+    [" image/svg+xml ", "leading/trailing whitespace"],
+    ["  Image/Svg+Xml  ", "mixed-case + whitespace"],
+  ])("AC-11/B1 anti-XSS regression: %s (%s) with ?disposition=inline → STILL attachment", async (variantMime) => {
+    const tmpFile = writeTempFile("<svg onload=alert(1)></svg>");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: variantMime }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  // Positive-side registro check: a safe image mime with unusual casing must
+  // STILL get inline (proves the normalization is not over-broad / does not
+  // accidentally reject legitimate variants — symmetry with the negative
+  // svg-variant checks above).
+  it('AC-11/B1: "Image/PNG" (registro-variant, safe) with ?disposition=inline → inline', async () => {
+    const tmpFile = writeTempFile("fake-png-bytes");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "Image/PNG" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^inline/);
   });
 
   it("AC-11 anti-XSS: text/html with ?disposition=inline → STILL attachment", async () => {

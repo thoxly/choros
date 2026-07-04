@@ -30,7 +30,10 @@ import { useToastContext } from '../app-shell/toast-context.jsx';
 // T-0399 [D7-K]: the inbox form field control is now the ONE unified renderer
 // (web/src/forms/field-renderer.jsx), keyed off the binding-contract catalog —
 // replacing the inline type→control map that silently dropped enum options.
-import { FieldControl, resolveFieldMode } from '../forms/field-renderer.jsx';
+// T-0579 (review M1): resolveFieldContract needed to detect file-contract
+// fields so recordId can be threaded onto them specifically (mirrors the
+// contractKind check screen-app-records.jsx already does for the same reason).
+import { FieldControl, resolveFieldMode, resolveFieldContract } from '../forms/field-renderer.jsx';
 
 // ---------------------------------------------------------------------------
 // T-0376: InboxTaskForm — renders the bound form for a userTask in the inbox
@@ -50,10 +53,18 @@ import { FieldControl, resolveFieldMode } from '../forms/field-renderer.jsx';
  * Props:
  *   processKey  — the process definition key (from detail.projection.procKey)
  *   stepKey     — the step name (from detail.item.step)
+ *   recordId    — T-0579 (review M1): the originating business record's id
+ *                 (detail.projection.recordId — present only when the process
+ *                 was started via on_create on a record). Threaded onto file
+ *                 contract fields so FileField can upload/list against the
+ *                 record it belongs to. undefined for processes NOT bound to
+ *                 a record (e.g. manually started) — FileField then shows its
+ *                 honest "no record context" message rather than a dead
+ *                 upload button that silently does nothing.
  *   onSubmit    — callback(values: Record<string,unknown>) when the user submits
  *   submitting  — bool: disable submit button while parent is completing the step
  */
-function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
+function InboxTaskForm({ processKey, stepKey, recordId, onSubmit, submitting }) {
   // null = loading; false = no binding (404); { fields } = loaded; 'error' = transient fetch error
   const [binding, setBinding] = useState(null);
   const [bindingError, setBindingError] = useState(null); // null | string
@@ -182,16 +193,25 @@ function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
         Форма задачи
       </h3>
       <form onSubmit={handleSubmit} noValidate>
-        {fields.map((f) => (
-          <FieldControl
-            key={f.key}
-            field={f}
-            value={values[f.key]}
-            onChange={handleChange}
-            error={fieldErrors[f.key]}
-            idPrefix="inbox-form-field"
-          />
-        ))}
+        {fields.map((f) => {
+          // T-0579 (review M1): thread the CURRENT record's id onto file-contract
+          // fields ONLY — same reasoning as screen-app-records.jsx's
+          // fieldWithRecordId. recordId is undefined when this task's process
+          // was not started on_create from a record; FileField surfaces that
+          // honestly (no dead upload affordance) rather than silently no-op'ing.
+          const { contractKind } = resolveFieldContract(f);
+          const fieldWithRecordId = contractKind === 'file' ? { ...f, recordId } : f;
+          return (
+            <FieldControl
+              key={f.key}
+              field={fieldWithRecordId}
+              value={values[f.key]}
+              onChange={handleChange}
+              error={fieldErrors[f.key]}
+              idPrefix="inbox-form-field"
+            />
+          );
+        })}
         {formError && (
           <div role="alert" style={{
             marginBottom: 'var(--chs-space-4)',
@@ -583,6 +603,7 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
             <InboxTaskForm
               processKey={detail.projection.procKey}
               stepKey={detail.item.step}
+              recordId={detail.projection.recordId}
               onSubmit={(values) => setFormData(values)}
               submitting={completing}
             />

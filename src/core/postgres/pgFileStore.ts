@@ -267,6 +267,15 @@ export class PgFileStore implements FileMetaSource {
    * file_version returns null size/mime when current_version is NULL (newly
    * created file with no version yet — should not normally appear on the list
    * route since POST /files immediately adds a version).
+   *
+   * T-0579 fix-forward (review m1): also returns `versionIds` — EVERY version
+   * id ever recorded for the file, not just the current one. A field's stored
+   * value is a fileVersionId captured at upload time; a later "Заменить"
+   * re-upload on the SAME file row advances current_version but the OLD
+   * versionId is still a legitimate historical version, not a dangling
+   * reference. Callers resolving a value to a display name must match against
+   * the FULL version set (versionIds.includes(value)), not just
+   * currentVersionId, or a valid old value falsely resolves as "not found".
    */
   async listFilesByRecord(
     tenantId: string,
@@ -276,6 +285,7 @@ export class PgFileStore implements FileMetaSource {
       fileId: string;
       originalName: string;
       currentVersionId: string | null;
+      versionIds: string[];
       mime: string | null;
       sizeBytes: number | null;
       createdAt: number;
@@ -298,10 +308,31 @@ export class PgFileStore implements FileMetaSource {
        ORDER BY f.created_at ASC`,
       [tenantId, recordId],
     );
+    if (rows.length === 0) return [];
+
+    // Second query: every version id for every file row above, grouped by
+    // file_id. One extra round-trip for the whole page (not per-row), same
+    // tenant-scoped RLS transaction.
+    const fileIds = rows.map((r) => r.id);
+    const { rows: versionRows } = await this.pool.query<{ file_id: string; id: string }>(
+      `SELECT file_id, id
+       FROM choros.file_version
+       WHERE tenant_id = $1 AND file_id = ANY($2::uuid[])
+       ORDER BY version_no ASC`,
+      [tenantId, fileIds],
+    );
+    const versionIdsByFile = new Map<string, string[]>();
+    for (const vr of versionRows) {
+      const list = versionIdsByFile.get(vr.file_id) ?? [];
+      list.push(vr.id);
+      versionIdsByFile.set(vr.file_id, list);
+    }
+
     return rows.map((r) => ({
       fileId: r.id,
       originalName: r.original_name,
       currentVersionId: r.current_version,
+      versionIds: versionIdsByFile.get(r.id) ?? [],
       mime: r.mime_type,
       sizeBytes: r.size_bytes !== null ? Number(r.size_bytes) : null,
       createdAt: Number(r.created_at),
