@@ -1,7 +1,7 @@
 {
-  "task_id": "T-0620",
+  "task_id": "T-0622",
   "status": "pr_open",
-  "branch": "task/T-0620-file-write-authz",
+  "branch": "task/T-0622-file-preview-auth",
   "ci_local": {
     "build": true,
     "lint": true,
@@ -10,30 +10,30 @@
     "fitness": true
   },
   "files_changed": [
-    "docs/design/ADR-T0620-file-write-authz-parity.md",
-    "src/server.ts",
-    "src/http/files.ts",
-    "src/__tests__/files-http.test.ts",
-    "ci/checks/db/file-write-authz.db.test.ts"
+    "docs/design/ADR-T0622-file-preview-auth.md",
+    "web/src/lib/authed-file.js",
+    "web/src/lib/authed-file.test.js",
+    "web/src/screens/screen-record-detail.jsx",
+    "web/src/screens/screen-record-detail.test.jsx",
+    "web/src/screens/screen-app-records.jsx",
+    "web/src/screens/screen-app-records.test.jsx",
+    "web/src/forms/field-renderer.jsx",
+    "web/src/forms/field-renderer-file.test.jsx"
   ],
   "ac_coverage": {
-    "owner-and-staff-upload-succeed": "test (ci/checks/db/file-write-authz.db.test.ts FF-620-PARITY, live HTTP+PG): tenant OWNER (holds NO record grant) uploads -> 201; plain role-reader (record/read only, migration-124 grant state, NO record/update) uploads -> 201 AND downloads own file -> 200 with the bytes. Both were 403 no_grant before T-0620.",
-    "tenant-isolation-held": "test (FF-620-TENANT, live): tenant-B reader cannot DOWNLOAD a tenant-A file version -> 404 (no bytes, no existence leak); tenant-B reader cannot UPLOAD to a tenant-A record -> not 201. The split resolver's WRITE arm tenant-gates fail-closed FIRST; the READ arm inherits resolveFor's cross_tenant gate.",
-    "orphan-not-committed": "test (FF-620-ORPHAN, live): a PDP-denied upload commits ZERO choros.file rows (count unchanged). Fix = authorize the record 'update' op BEFORE insertFile; on deny insertFile is never called.",
-    "success-atomic": "test (FF-620-ATOMIC, live): a successful upload commits file + version together (choros.file.current_version points at the just-inserted choros.file_version row).",
-    "download-read-auth-unchanged-and-at-parity": "code (server.ts fileReadResolver) + test (files-http.test.ts AC-download-2 resolver deny->403, AC-download-3 cross-tenant->404 stay green; DB FF-620-PARITY reader download 200). READ uses the SAME composite resource-ancestry oracle record-READ uses, so the RESOURCE_ROOT default-open read grant covers file download exactly as it covers record read (no less, no more).",
-    "no-second-authority": "fitness (ci/checks/file-attachment-isolation.sh FF-NOACL green): the file core still maps each file op to its record op and asks the injected resolver; the composition root decides the write op's authority exactly as it does for record-write.",
-    "anti-case-clean": "fitness (ci/checks/anti-case-lock.sh green: aggregate within baseline, no growth; no hardcoded tenant/case literal introduced)."
+    "preview-shows-real-image-not-broken-icon": "code (screen-record-detail.jsx FileFieldValue: fetchFileBlob→createObjectURL→<img src={previewUrl}>, honest loading/error states) + unit (authed-file.test.js: fetchFileBlob returns {ok:true,blob,mime} on 200) + structural (screen-record-detail.test.jsx asserts <img src={previewUrl}>, never src={previewHref})",
+    "download-works-via-click-not-dead-401": "code (all 3 components: FileFieldValue/FileCell/FileField now bind onClick to downloadFile() instead of a native href/src to the download API) + unit (authed-file.test.js downloadFile: builds object URL, clicks a[download], revokes) + structural (field-renderer-file.test.jsx, screen-app-records.test.jsx assert downloadFile(...) call + no bare href to the API)",
+    "svg-never-inline-rendered-as-img": "code (isPreviewSafeMime/PREVIEW_SAFE_IMAGE_SUBTYPES unchanged, now gates the preview fetch itself via isImagePreview/isPdfPreview before fetchFileBlob is even called) + unit (authed-file.test.js: downloadFile always sets download= regardless of mime, so svg/html blobs are saved not rendered) + existing T-0579 isPreviewSafeMime tests unchanged and still green",
+    "no-new-token-surface": "code review: fetchFileBlob/downloadFile take an injectable fetcher, wired at every call site to fetchWithAuthRetry (dev-auth.js, T-0608) — the SAME Bearer/X-Dev-User header builder every other screen uses; no query-string token, no cookie, no second auth mechanism introduced",
+    "honest-error-states-not-silence": "code (preview: idle/loading/ok/error with 401→'Сессия истекла', 403→'Нет доступа', 404→'Файл не найден', network→honest message; download: inline role=alert span on failure in all 3 components) + unit (authed-file.test.js covers 401/403/404/5xx/network-throw/blob-read-failure, all return honest messages, never throw)",
+    "no-second-file-route-surface": "fitness (ci/checks/file-field-catalog-isolation.sh FF-CATALOG/FF-UPLOAD-ROUTE-ONLY green, unmodified — field-renderer.jsx still contains the frozen literal URL patterns the check greps for; only the native href/src became a fetch call, no new route)",
+    "raw-uuid-never-shown": "unchanged from T-0579 — resolved originalName still used as the label/filename everywhere; downloadFile's suggested filename is meta.originalName/fileMeta.originalName/name, never the versionId"
   },
-  "deviations_from_adr": [
-    "ADR-committed orphan-fix was 'PDP-check BEFORE insertFile, OR throw/ROLLBACK in addVersion on deny'. Implemented the FORMER (pre-check) after live-proof showed the latter is INSUFFICIENT: PgFileStore.insertFile/insertVersion/setCurrentVersion each run on their OWN pooled connection (this.pool.query) OUTSIDE the withTenantTx client, so they autocommit and the tx ROLLBACK cannot undo the insertFile row. This is within the ADR's stated option set (chose option a of the two it listed), not a divergence.",
-    "IN-SCOPE ADDITION surfaced by live-proof (documented in ADR §2.1 / build commit): the file READ resolver was wired with the raw org-only SEED_ORACLE, which cannot resolve the RESOURCE_ROOT default-open read grant every staff member holds (migration 124 / T-0619) -> a plain reader's download 403'd (file-read gave LESS than record-read). Fixed by building the SAME composite resource-ancestry oracle (makeResourceAncestryOracle) record-read uses, per-call, keyed on the handle tenant. This is required by the task's 'download works' + 'no less than record read' + 'do not break PDP' clauses."
-  ],
+  "deviations_from_adr": [],
   "friction_events": [
-    "FE-T0620-1: worktree had no node_modules (known grab: npm install after merge / fresh worktree). Ran npm install --maxsockets=3 (root) before build; build then green.",
-    "FE-T0620-2: my first DB test wired grantsPool as choros_app (appUrl) which enforces RLS on PgFileStore.insertFile -> 500 RLS-policy-violation, because insertFile uses its own pool connection with no tenant GUC. Production DATABASE_URL = choros_migrator (BYPASSRLS), which is exactly why the orphan-commit bug reproduces in prod. Switched the test grantsPool to migratorUrl() to mirror production faithfully; tenant isolation on this path is then enforced by the explicit tenant_id params + the resolver tenant-gate (both under test), not RLS.",
-    "FE-T0620-3: initial DB-test read-grant seed used the wrong sentinel (nodeId all-zeros / nodeLevel 'root' / facet {fields:[]}) and omitted confirmed_by -> reader download 403. Fixed to the EXACT migration-124 grant shape: scope {resource, nodeLevel 'application', nodeId '00000000-0000-0000-0000-0000000000r0'}, resource_facet NULL, confirmed_by NON-NULL (getGrantsForSubject step 3 / T-0397 filters NULL-confirmed grants out).",
-    "FE-T0620-4: router.dispatch swallows non-HttpError into an opaque 500 envelope; added a temporary CHOROS_DEBUG_500 console.error to surface the RLS root cause, then FULLY reverted it (git diff src/http/router.ts is empty)."
-  ],
-  "notes": "No migration (fix is authz wiring, not grants). Gates on real PG :55432: build 0, tsc --noEmit 0, unit 5281 passed / 10 skipped / 0 failed, fitness:db 1157 passed across 119 files (incl 6 new file-write-authz.db.test.ts), npm run fitness exit 0 (file-attachment-isolation + anti-case-lock green). changes_product=1 -> LIVE_PROOF after merge: a rank-and-file employee uploads a png (name-link + inline preview) and an svg (attachment) through the product. Branch awaits founder promotion (GT-3); coder never merges."
+    "Worktree had no node_modules for either root or web/ (fresh worktree, dev branch checked out at 296ae1b) — required npm install at both root and web/ before any vitest/build/tsc command would run. Consistent with the durable memory note 'npm install после merge'.",
+    "Pre-existing structural tests (screen-record-detail.test.jsx, screen-app-records.test.jsx) encoded fixed-offset source slices (e.g. src.slice(idx, idx+2000)) sized for the OLD implementation; adding the new preview/download-error state fields pushed later assertions past the slice boundary, causing false failures unrelated to behavior. Fixed by widening the slices and adding new assertions for the T-0622 behavior — all original invariants still checked, now against the new source shape, none weakened.",
+    "Two eslint-disable-next-line jsx-a11y/anchor-is-valid comments I initially added triggered 'Definition for rule ... was not found' errors, because this repo's eslint.config.js never registers the jsx-a11y or react-hooks plugins (a pre-existing gap; screen-reports.jsx already carries one stale react-hooks/exhaustive-deps disable comment predating this task). Removed the two new jsx-a11y comments (zero benefit, pure noise); left the pre-existing pattern elsewhere untouched.",
+    "authed-file.test.js's downloadFile success test left a dangling setTimeout(() => URL.revokeObjectURL(...), 0) that fired AFTER afterEach() deleted the URL stub, producing an 'unhandled error: URL.revokeObjectURL is not a function' even though all assertions passed. Fixed by awaiting one macrotask tick at the end of that test before the stub teardown runs."
+  ]
 }
