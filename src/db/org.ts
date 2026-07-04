@@ -489,6 +489,21 @@ export async function getTenantInfo(
 // The anti-collision caller intentionally uses the SAME kind='human' filter:
 // human logins collide with human slugs; agent slugs are a disjoint namespace
 // gated separately (agent_card.kc_client_id).
+//
+// SECURITY — BYPASSRLS-POOL INVARIANT [T-0633 round-3, P1]: this query runs
+// CROSS-TENANT with NO tenant GUC set (the tenant is unknown at identity time).
+// It therefore REQUIRES a pool whose role can see choros.employee rows without
+// a tenant GUC — i.e. a BYPASSRLS role (choros_migrator). Under the NOBYPASSRLS
+// runtime role (choros_app) with no GUC, the employee-isolation RLS policy
+// filters ALL rows out, so EXISTS returns false for EVERY slug — which SILENTLY
+// turns BOTH callers into a no-op: (1) the anti-collision guard would stop
+// rejecting a colliding 'e-owner' login (the T-0633 escalation re-opens), and
+// (2) the identity resolver's preferred_username fallback returns null for
+// legitimate seed personas (the genesis owner can no longer log in). The
+// identity-resolution pool wired in server.ts MUST stay BYPASSRLS-class; do NOT
+// point it at choros_app. .env.prod.example carries the operator warning and
+// ci/checks/anti-collision-guard-rls-invariant.db.test.ts pins the behavior
+// (guard SEES a seed slug under migrator, is BLIND under app).
 // ---------------------------------------------------------------------------
 export async function humanEmployeeSlugExists(
   pool: pg.Pool,
