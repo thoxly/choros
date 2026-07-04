@@ -15,6 +15,8 @@ import {
   runBridgeOnce,
   makeExternalTaskDeliver,
   startBridgePollLoop,
+  makeErrorLogThrottle,
+  CHOROS_TENANT_VAR,
   type ExternalTaskBridgeConfig,
   type BridgePollResult,
 } from "../core/externalTaskBridge.js";
@@ -1314,5 +1316,306 @@ describe("Block D — startBridgePollLoop", () => {
     loop.stop();
     // No errors/throws — test passes
     expect(true).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Block G — T-0636 P0-6/F3/F4/F5: per-tenant GUC-scoped enqueue
+// ---------------------------------------------------------------------------
+describe("Block G — runBridgeOnce per-tenant enqueue (T-0636 P0-6/F3/F4/F5)", () => {
+  const TENANT_A = "11111111-1111-1111-1111-111111111111";
+  const TENANT_B = "22222222-2222-2222-2222-222222222222";
+
+  /**
+   * A fake pg.Pool whose connect() returns a client recording every query() call
+   * (text) in a shared log, so tests can assert ordering — specifically that
+   * `SET LOCAL choros.tenant_id` precedes every `enqueue`-shaped query on the
+   * SAME client (AC-4 / FF-4).
+   */
+  function makeFakePool(queryLog: string[]) {
+    const pool = {
+      connect: vi.fn(async () => ({
+        query: vi.fn(async (sql: string, _params?: unknown[]) => {
+          queryLog.push(sql.trim());
+          return { rows: [{ id: "job-fake", topic: "t", variables: {}, state: "CREATED", retries: 0, lock_owner: null, lock_expiry: null, created_at: "0", available_at: "0" }] };
+        }),
+        release: vi.fn(),
+      })),
+    };
+    return pool as unknown as import("pg").Pool;
+  }
+
+  /** A jobStore whose enqueue() records (topic, tenant marker via queryLog position). */
+  function makeEnqueueTrackingJobStore(queryLog: string[]) {
+    const calls: Array<{ topic: string; idempotencyKey?: string }> = [];
+    const jobStore = {
+      enqueue: vi.fn(async (
+        topic: string,
+        _variables: Record<string, unknown>,
+        _retries: number,
+        idempotencyKey?: string,
+        _processDefId?: string,
+        _instanceId?: string,
+        executor?: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
+      ) => {
+        calls.push({ topic, idempotencyKey });
+        // Route through the executor (if supplied) so the GUC-ordering assertion
+        // can see the enqueue's query landing in the SAME queryLog as SET LOCAL.
+        if (executor) {
+          queryLog.push(`ENQUEUE ${idempotencyKey ?? ""}`);
+          await executor.query("-- enqueue marker --");
+        }
+        return {
+          id: `job-${idempotencyKey}`,
+          topic,
+          variables: {},
+          state: "CREATED",
+          retries: 0,
+          createdAt: 0,
+          available_at: 0,
+        };
+      }),
+    };
+    return { jobStore: jobStore as unknown as PostgresJobStore, calls };
+  }
+
+  it("AC-4/FF-4: SET LOCAL choros.tenant_id precedes enqueue on the SAME client, per tenant", async () => {
+    const client = new MockFlowableClient();
+    const queryLog: string[] = [];
+    const pool = makeFakePool(queryLog);
+    const { jobStore, calls } = makeEnqueueTrackingJobStore(queryLog);
+
+    const taskA = makeExternalTask({
+      id: "ext-a",
+      topic: "agent-step",
+      variables: { [CHOROS_TENANT_VAR]: TENANT_A },
+    });
+    const taskB = makeExternalTask({
+      id: "ext-b",
+      topic: "agent-step",
+      variables: { [CHOROS_TENANT_VAR]: TENANT_B },
+    });
+    client.fetchResults.set("agent-step", { ok: true, tasks: [taskA, taskB] });
+
+    const result = await runBridgeOnce(
+      client, jobStore, ["agent-step"], WORKER_ID, LOCK_MS, MAX_TASKS, RETRIES, pool,
+    );
+
+    expect(result.enqueued).toBe(2);
+    expect(result.skipped).toBe(0);
+    expect(calls).toHaveLength(2);
+
+    // Two separate SET LOCAL statements (one per tenant), each followed by its
+    // OWN enqueue marker before any other tenant's SET LOCAL interleaves it.
+    const setLocalCalls = queryLog.filter((q) => q.includes("SET LOCAL choros.tenant_id"));
+    expect(setLocalCalls).toHaveLength(2);
+    expect(setLocalCalls.some((q) => q.includes(TENANT_A))).toBe(true);
+    expect(setLocalCalls.some((q) => q.includes(TENANT_B))).toBe(true);
+
+    // For EACH tenant, its SET LOCAL appears strictly before its own ENQUEUE marker.
+    const idxSetA = queryLog.findIndex((q) => q.includes(`SET LOCAL choros.tenant_id = '${TENANT_A}'`));
+    const idxEnqA = queryLog.findIndex((q) => q === "ENQUEUE ext-a");
+    expect(idxSetA).toBeGreaterThanOrEqual(0);
+    expect(idxEnqA).toBeGreaterThan(idxSetA);
+
+    const idxSetB = queryLog.findIndex((q) => q.includes(`SET LOCAL choros.tenant_id = '${TENANT_B}'`));
+    const idxEnqB = queryLog.findIndex((q) => q === "ENQUEUE ext-b");
+    expect(idxSetB).toBeGreaterThanOrEqual(0);
+    expect(idxEnqB).toBeGreaterThan(idxSetB);
+  });
+
+  it("AC-6: no enqueue call ever throws a current_setting/GUC error across a full pass with 2 tenants", async () => {
+    const client = new MockFlowableClient();
+    const queryLog: string[] = [];
+    const pool = makeFakePool(queryLog);
+    const { jobStore } = makeEnqueueTrackingJobStore(queryLog);
+
+    const taskA = makeExternalTask({ id: "ext-a2", topic: "t", variables: { [CHOROS_TENANT_VAR]: TENANT_A } });
+    const taskB = makeExternalTask({ id: "ext-b2", topic: "t", variables: { [CHOROS_TENANT_VAR]: TENANT_B } });
+    client.fetchResults.set("t", { ok: true, tasks: [taskA, taskB] });
+
+    await expect(
+      runBridgeOnce(client, jobStore, ["t"], WORKER_ID, LOCK_MS, MAX_TASKS, RETRIES, pool),
+    ).resolves.not.toThrow();
+  });
+
+  it("FF-6: task with NO choros_tenantId variable → skipped (fail-closed), NOT enqueued", async () => {
+    const client = new MockFlowableClient();
+    const queryLog: string[] = [];
+    const pool = makeFakePool(queryLog);
+    const { jobStore, calls } = makeEnqueueTrackingJobStore(queryLog);
+
+    const taskNoTenant = makeExternalTask({ id: "ext-no-tenant", topic: "t", variables: { amount: 100 } });
+    const taskWithTenant = makeExternalTask({ id: "ext-has-tenant", topic: "t", variables: { [CHOROS_TENANT_VAR]: TENANT_A } });
+    client.fetchResults.set("t", { ok: true, tasks: [taskNoTenant, taskWithTenant] });
+
+    const result = await runBridgeOnce(client, jobStore, ["t"], WORKER_ID, LOCK_MS, MAX_TASKS, RETRIES, pool);
+
+    expect(result.skipped).toBe(1);
+    expect(result.enqueued).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].idempotencyKey).toBe("ext-has-tenant");
+  });
+
+  it("FF-6: task with an INVALID (non-UUID) choros_tenantId → skipped, not enqueued", async () => {
+    const client = new MockFlowableClient();
+    const queryLog: string[] = [];
+    const pool = makeFakePool(queryLog);
+    const { jobStore, calls } = makeEnqueueTrackingJobStore(queryLog);
+
+    const taskBadTenant = makeExternalTask({ id: "ext-bad-tenant", topic: "t", variables: { [CHOROS_TENANT_VAR]: "not-a-uuid" } });
+    client.fetchResults.set("t", { ok: true, tasks: [taskBadTenant] });
+
+    const result = await runBridgeOnce(client, jobStore, ["t"], WORKER_ID, LOCK_MS, MAX_TASKS, RETRIES, pool);
+
+    expect(result.skipped).toBe(1);
+    expect(result.enqueued).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("legacy no-pool call-shape (7 args) still enqueues directly, unaffected by tenant-var requirement", async () => {
+    // Pre-T-0636 tests (Block A) call runBridgeOnce with exactly 7 args, and their
+    // tasks carry NO choros_tenantId variable. This must keep working exactly as
+    // before — the tenant-var requirement only applies when a pool is supplied.
+    const client = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+    const task = makeExternalTask({ id: "ext-legacy", topic: "legacy-topic" });
+    client.fetchResults.set("legacy-topic", { ok: true, tasks: [task] });
+
+    const result = await runBridgeOnce(
+      client, asJobStore(jobStore), ["legacy-topic"], WORKER_ID, LOCK_MS, MAX_TASKS, RETRIES,
+    );
+
+    expect(result.enqueued).toBe(1);
+    expect(result.skipped).toBe(0);
+  });
+
+  it("AC-10: fetchAndLock UNAUTHORIZED → visible logThrottle call with code + topic (not silent)", async () => {
+    const client = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+    client.fetchResults.set("secure-topic", { ok: false, code: "UNAUTHORIZED" });
+
+    const logged: Array<[string, string]> = [];
+    const throttle = (errorClass: string, detail: string) => logged.push([errorClass, detail]);
+
+    await runBridgeOnce(
+      client, asJobStore(jobStore), ["secure-topic"], WORKER_ID, LOCK_MS, MAX_TASKS, RETRIES,
+      undefined, throttle,
+    );
+
+    expect(logged).toHaveLength(1);
+    expect(logged[0][0]).toBe("FETCH_UNAUTHORIZED");
+    expect(logged[0][1]).toContain("secure-topic");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Block H — T-0636 F8/F9/F10: startBridgePollLoop visible log + makeErrorLogThrottle
+// ---------------------------------------------------------------------------
+describe("Block H — startBridgePollLoop visible log on pass failure (T-0636 F8)", () => {
+  it("AC-11: a runBridgeOnce pass that throws is now LOGGED (not silently swallowed); loop stays alive", async () => {
+    const client = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+    // Force fetchAndLock itself to throw synchronously inside the promise chain by
+    // making the mock's fetchAndLock reject.
+    client.fetchAndLock = async () => {
+      throw new Error("boom - simulated whole-pass failure");
+    };
+
+    const logged: Array<[string, string]> = [];
+    const throttle = (errorClass: string, detail: string) => logged.push([errorClass, detail]);
+
+    let scheduledFn: (() => void) | null = null;
+    const mockSetInterval = (fn: () => void, _ms: number) => {
+      scheduledFn = fn;
+      return 333 as unknown as ReturnType<typeof setInterval>;
+    };
+
+    const opts: ExternalTaskBridgeConfig = {
+      topics: ["boom-topic"],
+      workerId: WORKER_ID,
+      setIntervalFn: mockSetInterval,
+      logThrottle: throttle,
+    };
+
+    const loop = startBridgePollLoop(client, asJobStore(jobStore), opts);
+    scheduledFn!();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(logged.length).toBeGreaterThanOrEqual(1);
+    expect(logged.some(([cls]) => cls === "BRIDGE_PASS_FAILED")).toBe(true);
+
+    // Loop is still alive — firing again does not throw.
+    expect(() => scheduledFn!()).not.toThrow();
+    loop.stop();
+  });
+});
+
+describe("makeErrorLogThrottle (T-0636 F10 / AC-12)", () => {
+  it("first occurrence of a class emits immediately", () => {
+    const emitted: string[] = [];
+    const throttle = makeErrorLogThrottle((msg) => emitted.push(msg), { nowMs: () => 1000 });
+    throttle("UNAUTHORIZED", "topic=x");
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toContain("UNAUTHORIZED");
+  });
+
+  it("AC-12: N repeats of the SAME class within the throttle window emit only the first (bounded stream)", () => {
+    const emitted: string[] = [];
+    let clock = 1000;
+    const throttle = makeErrorLogThrottle((msg) => emitted.push(msg), {
+      minIntervalMs: 60_000,
+      nowMs: () => clock,
+    });
+
+    for (let i = 0; i < 10; i++) {
+      throttle("UNAUTHORIZED", `attempt ${i}`);
+      clock += 1000; // 1s between ticks — stays within the 60s window
+    }
+
+    // Only the FIRST occurrence emitted — the other 9 are suppressed (bounded).
+    expect(emitted).toHaveLength(1);
+  });
+
+  it("after the throttle window elapses, the next occurrence emits a summary with the suppressed count", () => {
+    const emitted: string[] = [];
+    let clock = 0;
+    const throttle = makeErrorLogThrottle((msg) => emitted.push(msg), {
+      minIntervalMs: 1000,
+      nowMs: () => clock,
+    });
+
+    throttle("UNAUTHORIZED", "first"); // emits immediately (t=0)
+    clock = 100;
+    throttle("UNAUTHORIZED", "suppressed-1"); // within window → suppressed
+    clock = 200;
+    throttle("UNAUTHORIZED", "suppressed-2"); // within window → suppressed
+    clock = 1500; // window elapsed since t=0
+    throttle("UNAUTHORIZED", "third-window"); // emits with suppressed count
+
+    expect(emitted).toHaveLength(2);
+    expect(emitted[1]).toMatch(/2 repeat/);
+  });
+
+  it("a DIFFERENT error class always emits immediately (independent per-class state)", () => {
+    const emitted: string[] = [];
+    const clock = 1000;
+    const throttle = makeErrorLogThrottle((msg) => emitted.push(msg), {
+      minIntervalMs: 60_000,
+      nowMs: () => clock,
+    });
+
+    throttle("UNAUTHORIZED", "a");
+    throttle("MISSING_TENANT_VAR", "b");
+    expect(emitted).toHaveLength(2);
+  });
+
+  it("NF-6: emitted messages never contain a raw password / Authorization header value", () => {
+    const emitted: string[] = [];
+    const throttle = makeErrorLogThrottle((msg) => emitted.push(msg));
+    throttle("FETCH_UNAUTHORIZED", "topic=secure-topic");
+    expect(emitted[0]).not.toMatch(/Basic /);
+    expect(emitted[0].toLowerCase()).not.toContain("password");
+    expect(emitted[0].toLowerCase()).not.toContain("authorization");
   });
 });

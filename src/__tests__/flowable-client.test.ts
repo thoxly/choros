@@ -233,7 +233,47 @@ describe("failTask", () => {
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(body["errorMessage"]).toBe("timeout");
     expect(body["retries"]).toBe(2);
-    expect(body["retryTimeout"]).toBe(5000);
+    // T-0636 (P0-7/AC-8): retryTimeout is now ISO-8601 duration on the wire —
+    // Flowable interprets a bare number as SECONDS, not ms (empirical 8h-lock
+    // diagnosis in T-0586 LIVE_PROOF). 5000ms → 'PT5S'.
+    expect(body["retryTimeout"]).toBe("PT5S");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0636 (P0-7/AC-7): fetchAndLock lockDuration wire format
+// ---------------------------------------------------------------------------
+describe("fetchAndLock — lockDuration wire format (T-0636 P0-7/AC-7)", () => {
+  it("AC-7: sends lockDuration as ISO-8601 duration (30000ms → 'PT30S'), not a raw number", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(200, []));
+    const client = testConfig();
+    await client.fetchAndLock("smoke-topic", "ci-worker", 30_000, 1);
+    const [, init] = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body["lockDuration"]).toBe("PT30S");
+    expect(typeof body["lockDuration"]).toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0636 (P0-7): msToIso8601Duration — pure-function unit coverage
+// ---------------------------------------------------------------------------
+describe("msToIso8601Duration (T-0636 P0-7)", () => {
+  it("converts whole-second millisecond counts to ISO-8601 'PT<n>S'", async () => {
+    const { msToIso8601Duration } = await import("../core/flowable-client.js");
+    expect(msToIso8601Duration(30_000)).toBe("PT30S");
+    expect(msToIso8601Duration(5_000)).toBe("PT5S");
+  });
+
+  it("0 or negative ms → 'PT0S' (never a negative/empty duration)", async () => {
+    const { msToIso8601Duration } = await import("../core/flowable-client.js");
+    expect(msToIso8601Duration(0)).toBe("PT0S");
+    expect(msToIso8601Duration(-100)).toBe("PT0S");
+  });
+
+  it("sub-second precision is preserved (500ms → 'PT0.5S')", async () => {
+    const { msToIso8601Duration } = await import("../core/flowable-client.js");
+    expect(msToIso8601Duration(500)).toBe("PT0.5S");
   });
 });
 

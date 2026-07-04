@@ -250,9 +250,12 @@ describe("process-start: 201 happy path", () => {
   });
 
   it("called startInstance with (processKey, variables)", () => {
+    // T-0636 (F5): startInstance's launch variables now always carry the
+    // choros_tenantId stamp alongside the caller-supplied variables (the
+    // tenant-resolution source the external-task bridge reads at enqueue).
     expect(vi.mocked(flowable.startInstance)).toHaveBeenCalledWith(
       "telLinear",
-      { amount: 5500000 },
+      { amount: 5500000, choros_tenantId: TENANT_ID },
     );
   });
 });

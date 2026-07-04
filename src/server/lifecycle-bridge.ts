@@ -258,10 +258,24 @@ export function startLifecycleBridge(
     return noopHandle();
   }
 
+  // T-0636 (P0-5): read the SAME env names src/server.ts:474-486 (process-start
+  // route), src/bridge-runner.ts, and every ci/checks/db/*.db.test.ts already use
+  // successfully — FLOWABLE_REST_APP_ADMIN_USER_ID / FLOWABLE_REST_APP_ADMIN_PASSWORD.
+  // The old FLOWABLE_ADMIN_USER/FLOWABLE_ADMIN_PASSWORD names are never set by any
+  // compose file (docker-compose.yml:136-137/199-202, .prod.yml:43, .arena.yml:87
+  // all set the REST_APP_* names) — reading them always fell through to the
+  // literal admin:test default, a permanent 401 in production. No default for the
+  // password: absent password → honest noop-degrade (NOT a throw, NOT a literal
+  // 'test' substitution — mirrors the FLOWABLE_BASE_URL degrade above, NF-5/AC-3).
+  const flowableAdminPassword = env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
+  if (!flowableAdminPassword) {
+    return noopHandle();
+  }
+
   const flowableClient = makeFlowableClient({
     baseUrl,
-    adminUser: env["FLOWABLE_ADMIN_USER"] ?? "admin",
-    adminPassword: env["FLOWABLE_ADMIN_PASSWORD"] ?? "test",
+    adminUser: env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
+    adminPassword: flowableAdminPassword,
     timeoutMs: 10_000,
     maxRetries: 3,
     retryBaseDelayMs: 500,
@@ -274,9 +288,12 @@ export function startLifecycleBridge(
     .filter((t) => t.length > 0);
 
   // (1) Poll loop: Flowable external tasks → outbox rows.
+  // T-0636 (P0-6/F3/F4): pass the pool so runBridgeOnce can enqueue each fetched
+  // task under its OWN tenant's GUC-scoped transaction (multi-tenant bridge).
   const pollLoop = startBridgePollLoop(flowableClient, deps.jobStore, {
     topics,
     workerId: env["FLOWABLE_WORKER_ID"] ?? "choros-bridge",
+    pool: deps.pool,
     ...(deps.intervalMs !== undefined ? { pollIntervalMs: deps.intervalMs } : {}),
     ...(deps.setIntervalFn !== undefined ? { setIntervalFn: deps.setIntervalFn } : {}),
   });

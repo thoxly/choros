@@ -87,6 +87,10 @@ import { getOnCreateBinding } from "../db/binding-trigger-dao.js";
 import { appendProcessStarted } from "./process-projection.js";
 import { flowableErrorToHttp, type FlowableClient, type ActiveUserTask } from "../core/flowable-client.js";
 import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
+// T-0636 (F5): stamp the owning tenant onto the process instance as a launch
+// variable (single point of truth — see externalTaskBridge.ts CHOROS_TENANT_VAR
+// doc-comment for the full rationale).
+import { CHOROS_TENANT_VAR } from "../core/externalTaskBridge.js";
 import {
   parsePaginationParams,
   encodeRecordsCursor,
@@ -977,9 +981,12 @@ async function createRecord(args: {
         // If startInstance fails the whole tx rolls back (no orphan record).
         // Known two-phase window: startInstance is a REST call outside this PG tx — an
         // engine-success + PG-COMMIT-fail leaves an orphan engine instance (best-effort).
+        // T-0636 (F5): stamp choros_tenantId onto the launch variables — tenantId is
+        // already in scope. Plain string, passes assertVariableValue trivially.
+        const stampedVariables = { ...variables, [CHOROS_TENANT_VAR]: tenantId };
         const startResult = await flowable.startInstance(
           binding.process_key,
-          Object.keys(variables).length > 0 ? variables : undefined,
+          stampedVariables,
         );
         if (!startResult.ok) {
           // Engine failure is propagated: no record without a process start (tx rolls back).

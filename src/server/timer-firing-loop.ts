@@ -45,6 +45,10 @@ import {
   type TimerReconcileEnginePort,
 } from "../http/process-projection.js";
 import { makeFlowableClient } from "../core/flowable-client.js";
+// T-0636 (F9/F10): reuse the SAME throttled-log primitive the external-task
+// bridge uses (single implementation, not a re-invented one) for the top-level
+// per-pass catch below.
+import { makeErrorLogThrottle, type ErrorLogThrottle } from "../core/externalTaskBridge.js";
 
 /** Handle returned by startTimerFiringLoop; stop() is idempotent. */
 export interface TimerFiringHandle {
@@ -149,15 +153,25 @@ export async function runTimerFiringOnce(
 }
 
 /**
+ * T-0636 (F9): module-level default throttle for startTimerFiringLoop's top-level
+ * per-pass catch (shared across the loop's lifetime, one throttle instance per
+ * process — mirrors externalTaskBridge's defaultRunBridgeOnceLogThrottle).
+ */
+const defaultTimerFiringLogThrottle = makeErrorLogThrottle((msg) => console.error(msg));
+
+/**
  * Start the timer-firing poll loop. Degraded no-op when no engine is configured.
  * First pass fires after one interval (server start stays non-blocking). stop() clears
- * the interval. Per-pass errors are swallowed (the loop stays alive).
+ * the interval. Per-pass errors are now VISIBLE (T-0636 F9: throttled console.error) —
+ * the loop still never throws out of the interval callback (NF-5: stays alive).
  */
 export function startTimerFiringLoop(
   deps: TimerFiringDeps | undefined,
   opts: {
     readonly intervalMs?: number;
     readonly setIntervalFn?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
+    /** T-0636 (F9/F10): injectable log throttle (defaults to a shared instance). */
+    readonly logThrottle?: ErrorLogThrottle;
   } = {},
 ): TimerFiringHandle {
   if (deps === undefined) {
@@ -165,10 +179,13 @@ export function startTimerFiringLoop(
   }
   const intervalMs = opts.intervalMs ?? 30_000;
   const setIntervalFn = opts.setIntervalFn ?? setInterval;
+  const logThrottle = opts.logThrottle ?? defaultTimerFiringLogThrottle;
 
   const handle = setIntervalFn(() => {
-    runTimerFiringOnce(deps).catch(() => {
-      /* swallow — degraded signal; loop continues on next interval */
+    runTimerFiringOnce(deps).catch((err: unknown) => {
+      // T-0636 (F9): a whole-pass failure is now visible (throttled) — never a
+      // silent swallow. The loop still does not throw out of this callback.
+      logThrottle("TIMER_PASS_FAILED", String(err));
     });
   }, intervalMs);
 
@@ -236,10 +253,19 @@ export function buildTimerFiringDeps(
   const baseUrl = env["FLOWABLE_BASE_URL"];
   if (baseUrl === undefined || baseUrl === "") return undefined;
 
+  // T-0636 (P0-5): read the SAME env names src/server.ts:474-486 already uses
+  // successfully (FLOWABLE_REST_APP_ADMIN_USER_ID / FLOWABLE_REST_APP_ADMIN_PASSWORD)
+  // instead of the never-set FLOWABLE_ADMIN_USER/FLOWABLE_ADMIN_PASSWORD names
+  // (which always fell through to the literal admin:test default → permanent
+  // 401). No password → honest noop-degrade (undefined), mirroring the
+  // FLOWABLE_BASE_URL check above — never a literal 'test' substitution.
+  const flowableAdminPassword = env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
+  if (!flowableAdminPassword) return undefined;
+
   const engine = makeFlowableClient({
     baseUrl,
-    adminUser: env["FLOWABLE_ADMIN_USER"] ?? "admin",
-    adminPassword: env["FLOWABLE_ADMIN_PASSWORD"] ?? "test",
+    adminUser: env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
+    adminPassword: flowableAdminPassword,
     timeoutMs: 10_000,
     maxRetries: 3,
     retryBaseDelayMs: 500,

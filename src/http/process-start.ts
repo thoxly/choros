@@ -45,6 +45,11 @@ import type { PgClientLike } from "../db/audit-writer.js";
 import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
 import { decideDraftVisibility } from "../core/sandbox-gate.js";
 import { resolveActorPrivilege, type ActorPrivilege } from "../db/sandbox-gate-dao.js";
+// T-0636 (F5): stamp the owning tenant onto the process instance as a launch
+// variable so the external-task bridge can resolve tenancy for a bare Flowable
+// ExternalTask BEFORE it is written to choros.job (see externalTaskBridge.ts
+// doc-comment on CHOROS_TENANT_VAR for the full rationale).
+import { CHOROS_TENANT_VAR } from "../core/externalTaskBridge.js";
 
 // ---------------------------------------------------------------------------
 // UUID guard — same shape as process-defs.ts withTenantTx
@@ -375,12 +380,13 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
         );
       }
 
-      const result = await flowable.startInstance(
-        processKey,
-        launchVariables !== undefined && Object.keys(launchVariables).length > 0
-          ? launchVariables
-          : undefined,
-      );
+      // T-0636 (F5): stamp choros_tenantId onto the launch variables — tenantId is
+      // already in scope (withTenantTx argument). This is a plain string value,
+      // trivially passes assertVariableValue's guard (string → ok) on both the
+      // outgoing startInstance guard and the bridge's incoming read.
+      const stampedLaunchVariables = { ...(launchVariables ?? {}), [CHOROS_TENANT_VAR]: tenantId };
+
+      const result = await flowable.startInstance(processKey, stampedLaunchVariables);
       if (result.ok) {
         // T-0575 [W1/деТЭЛ] BUG-015: resolve the REAL waiting user-task's
         // candidateGroups[0]/name from the live engine BEFORE the projection

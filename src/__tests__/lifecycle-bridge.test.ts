@@ -7,12 +7,15 @@
  *   subject=processInstanceId, payload.instanceId=processInstanceId).
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   startLifecycleBridge,
   auditInstanceStarted,
 } from "../server/lifecycle-bridge.js";
 import { InMemoryAuditWriter, inMemoryTx } from "../db/audit-writer.js";
+import { PostgresJobStore } from "../core/postgres/pgJobStore.js";
+import { PostgresOutboxStore } from "../core/postgres/pgOutboxStore.js";
+import * as flowableClientModule from "../core/flowable-client.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 
@@ -34,6 +37,76 @@ describe("startLifecycleBridge (FF-9 / AC-14)", () => {
     );
     expect(typeof handle.stop).toBe("function");
     expect(() => handle.stop()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0636 (P0-5 / AC-1 / AC-2 / AC-3): credential env names
+// ---------------------------------------------------------------------------
+describe("startLifecycleBridge — FLOWABLE credential env names (T-0636 P0-5)", () => {
+  // A minimal fake pg.Pool-shaped object — never actually queried in these tests
+  // (the poll loop's first pass fires after one interval, and we never advance
+  // fake timers here; PostgresJobStore/PostgresOutboxStore only store the pool
+  // reference at construction time).
+  const fakePool = { query: vi.fn(), connect: vi.fn() } as unknown as import("pg").Pool;
+
+  function fullDeps() {
+    return {
+      pool: fakePool,
+      jobStore: new PostgresJobStore(fakePool),
+      outboxStore: new PostgresOutboxStore(fakePool),
+    };
+  }
+
+  beforeEach(() => {
+    vi.spyOn(flowableClientModule, "makeFlowableClient");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("AC-2: builds FlowableClient from FLOWABLE_REST_APP_ADMIN_USER_ID/PASSWORD (not the old names)", () => {
+    const handle = startLifecycleBridge(fullDeps(), {
+      FLOWABLE_BASE_URL: "http://flowable:8082",
+      FLOWABLE_REST_APP_ADMIN_USER_ID: "real-admin",
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: "real-secret-pw",
+    } as unknown as NodeJS.ProcessEnv);
+
+    expect(flowableClientModule.makeFlowableClient).toHaveBeenCalledTimes(1);
+    const config = vi.mocked(flowableClientModule.makeFlowableClient).mock.calls[0][0];
+    expect(config?.adminUser).toBe("real-admin");
+    expect(config?.adminPassword).toBe("real-secret-pw");
+
+    handle.stop();
+  });
+
+  it("AC-3: FLOWABLE_BASE_URL set but FLOWABLE_REST_APP_ADMIN_PASSWORD absent → noop-degrade, no throw, makeFlowableClient never called", () => {
+    let handle: ReturnType<typeof startLifecycleBridge> | undefined;
+    expect(() => {
+      handle = startLifecycleBridge(fullDeps(), {
+        FLOWABLE_BASE_URL: "http://flowable:8082",
+        // FLOWABLE_REST_APP_ADMIN_PASSWORD intentionally absent.
+      } as unknown as NodeJS.ProcessEnv);
+    }).not.toThrow();
+
+    expect(flowableClientModule.makeFlowableClient).not.toHaveBeenCalled();
+    expect(handle).toBeDefined();
+    expect(typeof handle!.stop).toBe("function");
+    expect(() => handle!.stop()).not.toThrow();
+  });
+
+  it("AC-1: never falls back to the literal password 'test' when a real password IS configured", () => {
+    const handle = startLifecycleBridge(fullDeps(), {
+      FLOWABLE_BASE_URL: "http://flowable:8082",
+      FLOWABLE_REST_APP_ADMIN_USER_ID: "real-admin",
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: "real-secret-pw",
+    } as unknown as NodeJS.ProcessEnv);
+
+    const config = vi.mocked(flowableClientModule.makeFlowableClient).mock.calls[0][0];
+    expect(config?.adminPassword).not.toBe("test");
+
+    handle.stop();
   });
 });
 

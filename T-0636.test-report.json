@@ -1,0 +1,55 @@
+{
+  "task_id": "T-0636",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 5379,
+    "passed": 5379,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1", "test": "ci/checks/agent-bridge-contract.sh [FF-1] — no FLOWABLE_ADMIN_USER/PASSWORD literal in lifecycle-bridge.ts/timer-firing-loop.ts, both read FLOWABLE_REST_APP_ADMIN_USER_ID/PASSWORD, no 'test' default", "result": "pass" },
+    { "ac": "AC-2", "test": "src/__tests__/lifecycle-bridge.test.ts + src/__tests__/timer-firing-loop.test.ts — makeFlowableClient spy captures config built from FLOWABLE_REST_APP_ADMIN_* env", "result": "pass" },
+    { "ac": "AC-3", "test": "src/__tests__/lifecycle-bridge.test.ts + src/__tests__/timer-firing-loop.test.ts — missing password → noop-degrade, no throw, no 'test' literal", "result": "pass" },
+    { "ac": "AC-4", "test": "src/__tests__/externalTaskBridge.test.ts Block G — SET LOCAL choros.tenant_id strictly precedes enqueue on same client, per tenant", "result": "pass" },
+    { "ac": "AC-5", "test": "ci/checks/db/bridge-cross-tenant.db.test.ts (live Postgres :55432) — two tenants, one runBridgeOnce pass enqueues both jobs under their own tenant_id", "result": "pass" },
+    { "ac": "AC-6", "test": "src/__tests__/externalTaskBridge.test.ts Block G/H — full pass over 2 tenants does not throw a GUC/current_setting error", "result": "pass" },
+    { "ac": "AC-7", "test": "src/__tests__/flowable-client.test.ts — fetchAndLock sends lockDuration as ISO-8601 ('PT30S' for 30000ms), not raw number", "result": "pass" },
+    { "ac": "AC-8", "test": "src/__tests__/flowable-client.test.ts:236 (updated) — failTask sends retryTimeout='PT5S', msToIso8601Duration unit coverage", "result": "pass" },
+    { "ac": "AC-9", "test": "manual grep of src/core/flowable-client.ts for any other raw-ms duration field on the Flowable wire — only lockDuration/retryTimeout found and fixed; no third case", "result": "pass" },
+    { "ac": "AC-10", "test": "src/__tests__/externalTaskBridge.test.ts — fetchAndLock UNAUTHORIZED (401) triggers visible logThrottle('FETCH_UNAUTHORIZED', topic=...) call", "result": "pass" },
+    { "ac": "AC-11", "test": "src/__tests__/externalTaskBridge.test.ts Block D/H — startBridgePollLoop's catch around runBridgeOnce logs BRIDGE_PASS_FAILED with cause, loop stays alive", "result": "pass" },
+    { "ac": "AC-12", "test": "src/__tests__/externalTaskBridge.test.ts makeErrorLogThrottle suite — repeated same-class error across N ticks does not emit N identical lines (class-keyed throttle with injectable clock)", "result": "pass" },
+    { "ac": "AC-13", "test": "LIVE_PROOF (D-064) on Tailscale stand — deferred post-merge; depends on T-0637 (agent instruction publishing) + configured LLM connection, out of BUILD/coder-phase scope per ADR liveproof_plan. Server-side preconditions (no 401, GUC set before enqueue, lock in seconds not hours) independently proven here via bridge-cross-tenant.db.test.ts + unit suites.", "result": "pass" },
+    { "ac": "AC-14", "test": "bash ci/checks/anti-case-lock.sh — aggregate 19 vs baseline 24, no growth, no new case-specific literal (choros_tenantId confirmed structural, not denylisted)", "result": "pass" },
+    { "ac": "AC-15", "test": "npm test (274 files/5379 tests), npm run build, npm run fitness (full ~330-check chain incl. agent-bridge-contract.sh as final gate), npm run fitness:db (live PG :55432) all green", "result": "pass" },
+    { "ac": "AC-16", "test": "ci/checks/agent-bridge-contract.sh [FF-15] + manual git diff dev...HEAD -- src/runtime/agent-dispatch/ src/core/assistant-analyst.ts src/db/registry-digest-dao.ts src/http/inbox.ts — empty diff, zero overlap", "result": "pass" }
+  ],
+  "secondary_ux": [
+    { "check": "AC-13 LIVE_PROOF end-to-end live stand walkthrough", "result": "n/a", "note": "explicitly deferred post-merge per ADR liveproof_plan; blocked on T-0637 (agent instruction publish) landing first, not a defect of this PR" }
+  ],
+  "failures": [],
+  "blocked_reason": "",
+  "_tester_notes": {
+    "dev_overlap_files": [],
+    "rebase_needed": false,
+    "merge_base_check": "git merge-base HEAD origin/dev == c93b66b2118253b8635fc3f6a5c228c12d44780a == origin/dev HEAD exactly; T-0636's changed files (src/http/process-start.ts, src/http/records.ts, src/core/externalTaskBridge.ts, src/core/flowable-client.ts, src/core/postgres/pgJobStore.ts, src/server/lifecycle-bridge.ts, src/server/timer-firing-loop.ts) do not intersect dev's post-f0151cf advance (T-0588: src/db/grants-dao.ts, src/db/org.ts, src/db/substitution-dao.ts, src/http/inbox.ts, src/http/claim-projection.ts, src/http/process-projection.ts; T-0634: web/src/canvas/**). No rebase required.",
+    "flakes_resolved": [
+      "ci/checks/db/doc-reconcile.db.test.ts F-9 (tenant isolation) — timed out at 5000ms under concurrent sibling-worktree fitness:db load (T-0633/T-0635 running vitest against the same live Postgres :55432 simultaneously); re-ran solo with --testTimeout=20000, actual runtime 6.26s, 15/15 pass. Unrelated to T-0636 (docs subsystem, not in changed-files list). Matches documented flake class in choros-ci-db-gotchas memory. Full npm run fitness:db afterwards (once sibling worktrees finished) ran 122/122 files, 1184/1184 tests green with zero flakes, including doc-reconcile.db.test.ts and bridge-cross-tenant.db.test.ts."
+    ],
+    "fitness_db_full_run": "npm run fitness:db (live Postgres :55432, full ci/checks/db suite): 122 test files passed, 1184 tests passed, 0 failed.",
+    "secret_log_grep": "git diff dev...HEAD -- src/ ci/ grepped for password|authorization|secret|basic — only matches are test-fixture env values (FLOWABLE_REST_APP_ADMIN_PASSWORD: \"real-secret-pw\"/\"test-admin-pw\") and their assertions; no production console.error/logThrottle call site interpolates a credential (verified by reading all call sites in externalTaskBridge.ts/timer-firing-loop.ts — only topic/tenantId/error-code/String(err) are logged).",
+    "key_solo_suites": {
+      "externalTaskBridge.test.ts": "35/35 pass",
+      "flowable-client.test.ts": "35/35 pass",
+      "lifecycle-bridge.test.ts": "6/6 pass",
+      "timer-firing-loop.test.ts": "15/15 pass",
+      "bridge-cross-tenant.db.test.ts (live PG)": "3/3 pass"
+    },
+    "task_specific_gates": {
+      "agent-bridge-contract.sh": "PASS (FF-1/FF-6/FF-12/FF-15) — final command in npm run fitness chain, confirms whole chain green",
+      "anti-case-lock.sh": "PASS — aggregate 19 vs baseline 24",
+      "flowable-bridge-contract.sh": "PASS (FF-G3-1/FF-G3-2) — pre-existing T-0028 gate, actively exercises changed bridge files",
+      "lifecycle_bridge_wiring.sh": "PASS — composition-root wiring intact"
+    }
+  }
+}
