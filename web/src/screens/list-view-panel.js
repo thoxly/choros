@@ -252,6 +252,20 @@ export function toggleColumnVisible(columns, id) {
   return columns.map((c) => (c.id === id ? { ...c, visible: !c.visible } : c));
 }
 
+/**
+ * T-0581 UX-2: true when a NON-EMPTY column catalog has every column hidden —
+ * saving this draft would render a list showing only "Создано" + row actions
+ * (screen-app-records.jsx columns memo drops every c.visible === false entry).
+ * An EMPTY catalog (no columns at all) is a separate, already-honest EmptyState
+ * case (ColumnsEditor) and must NOT also trip this warning.
+ *
+ * @param {Array<{visible:boolean}>} columns
+ * @returns {boolean}
+ */
+export function allColumnsHidden(columns) {
+  return Array.isArray(columns) && columns.length > 0 && columns.every((c) => !c.visible);
+}
+
 /** Set a column's width (px) by its draft row id; null clears the override. */
 export function setColumnWidth(columns, id, width) {
   return columns.map((c) => (c.id === id ? { ...c, width } : c));

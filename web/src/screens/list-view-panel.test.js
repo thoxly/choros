@@ -44,6 +44,7 @@ import {
   validateViewName,
   encodeInlineParam,
   buildInlineQuerySuffix,
+  allColumnsHidden,
 } from './list-view-panel.js';
 
 // ---------------------------------------------------------------------------
@@ -439,5 +440,64 @@ describe('encodeInlineParam / buildInlineQuerySuffix — wire-format fidelity', 
     const decodedSort = JSON.parse(Buffer.from(decodeURIComponent(sortMatch[1]), 'base64url').toString('utf-8'));
     expect(decodedFilter).toEqual(config.filters);
     expect(decodedSort).toEqual(config.sort);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0581 UX-1 (blocking) — draftFromConfig(null, catalog) is a PROVISIONAL
+// "everything hidden" shape, never the real default. This documents the exact
+// dishonest shape the panel used to render before the real default arrived,
+// so a future change cannot silently reintroduce it without this test noticing.
+// ---------------------------------------------------------------------------
+describe('draftFromConfig(null, catalog) — the pre-default provisional shape (UX-1 regression guard)', () => {
+  const catalog = [
+    { key: 'amount', label: 'Сумма', type: 'money' },
+    { key: 'status', label: 'Статус', type: 'select' },
+    { key: 'created_at', label: 'Создано', type: 'created_at' },
+  ];
+
+  it('marks every column visible:false when config is null (the "still loading" shape)', () => {
+    const draft = draftFromConfig(null, catalog);
+    expect(draft.columns).toHaveLength(catalog.length);
+    expect(draft.columns.every((c) => c.visible === false)).toBe(true);
+  });
+
+  it('is NOT the server default (all-visible) — proving the panel must not treat null config as ready-to-edit', () => {
+    const draft = draftFromConfig(null, catalog);
+    // A real synthetic default has every catalog column visible (ADR §3.3);
+    // the null/loading shape is the OPPOSITE of that — asserting the two
+    // shapes differ documents why the panel needs an explicit loading gate
+    // rather than trusting draftFromConfig(null, ...) as if it were honest.
+    expect(draft.columns.some((c) => c.visible)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0581 UX-2 (minor) — allColumnsHidden: warn (not silently allow) saving a
+// view whose columns are ALL hidden (screen-app-records.jsx would then render
+// only "Создано" + row actions).
+// ---------------------------------------------------------------------------
+describe('allColumnsHidden — UX-2 empty-columns-set detector', () => {
+  it('true when every column in a NON-EMPTY set is hidden', () => {
+    expect(allColumnsHidden([
+      { field_key: 'a', visible: false },
+      { field_key: 'b', visible: false },
+    ])).toBe(true);
+  });
+
+  it('false when at least one column is visible', () => {
+    expect(allColumnsHidden([
+      { field_key: 'a', visible: false },
+      { field_key: 'b', visible: true },
+    ])).toBe(false);
+  });
+
+  it('false for an EMPTY column array (that is the separate, already-honest EmptyState case, not this warning)', () => {
+    expect(allColumnsHidden([])).toBe(false);
+  });
+
+  it('false for a non-array input (defensive)', () => {
+    expect(allColumnsHidden(null)).toBe(false);
+    expect(allColumnsHidden(undefined)).toBe(false);
   });
 });

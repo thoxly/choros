@@ -896,7 +896,7 @@ function AppRecordsScreen() {
   // T-0581: fetch this набор полей' saved views + synthetic default (ADR §3.3).
   const {
     views: savedViews, defaultView: defaultViewConfig, error: viewsError,
-    reload: reloadViews, saveView, deleteView,
+    loading: viewsLoading, reload: reloadViews, saveView, deleteView,
   } = useListViews(selectedDefId, appId);
 
   const activeView = useMemo(
@@ -1038,6 +1038,7 @@ function AppRecordsScreen() {
         onApply={setActiveViewId}
         views={savedViews}
         viewsError={viewsError}
+        viewsLoading={viewsLoading}
         reloadViews={reloadViews}
         saveView={saveView}
         deleteView={deleteView}

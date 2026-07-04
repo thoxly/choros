@@ -32,7 +32,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Button, Field, Select, KitIcon, Drawer, EmptyState, ErrorState, Notice,
+  Button, Field, Select, KitIcon, Drawer, EmptyState, ErrorState, LoadingState, Notice,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import {
@@ -42,7 +42,7 @@ import {
   addSortRow, removeSortRow, updateSortRow,
   availableFilterFields, availableSortFields,
   operatorsForFieldType, OP_LABELS,
-  validateViewName,
+  validateViewName, allColumnsHidden,
 } from './list-view-panel.js';
 
 // ---------------------------------------------------------------------------
@@ -58,11 +58,17 @@ function useListViews(registryDefId, applicationId) {
   const [views, setViews] = useState(null);       // null=loading, []=none, [...]=list
   const [defaultView, setDefaultView] = useState(null);
   const [error, setError] = useState(null);
+  // T-0581 UX-1 fix: explicit loading flag — `views === null` alone conflates
+  // "still loading" with "no registryDefId chosen yet" (both leave views
+  // null), which is not enough for the panel to know whether it is safe to
+  // seed a draft from defaultView (which is also still null while in flight).
+  const [loading, setLoading] = useState(Boolean(registryDefId));
 
   const load = useCallback(async () => {
-    if (!registryDefId) { setViews(null); setDefaultView(null); return; }
+    if (!registryDefId) { setViews(null); setDefaultView(null); setLoading(false); return; }
     setError(null);
     setViews(null);
+    setLoading(true);
     try {
       const res = await fetch(
         `/api/list-views?registry_def_id=${encodeURIComponent(registryDefId)}`,
@@ -74,6 +80,8 @@ function useListViews(registryDefId, applicationId) {
       setDefaultView(data.default_view || null);
     } catch (e) {
       setError(String(e?.message || e));
+    } finally {
+      setLoading(false);
     }
   }, [registryDefId]);
 
@@ -119,7 +127,7 @@ function useListViews(registryDefId, applicationId) {
     return { ok: false, error: `Не удалось удалить представление (HTTP ${res.status})` };
   }, [load]);
 
-  return { views, defaultView, error, reload: load, saveView, deleteView };
+  return { views, defaultView, error, loading, reload: load, saveView, deleteView };
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +476,7 @@ function SortEditor({ sort, fieldCatalog, onChange }) {
  *   onApply: (viewIdOrNull: string|null) => void,  // switch the list to this view (reload records)
  *   views: Array,
  *   viewsError: string|null,
+ *   viewsLoading: boolean,                      // T-0581 UX-1: true while GET /api/list-views is in flight
  *   reloadViews: () => Promise<void>,
  *   saveView: (args) => Promise<{ok,error?,view?}>,
  *   deleteView: (id) => Promise<{ok,error?}>,
@@ -475,13 +484,21 @@ function SortEditor({ sort, fieldCatalog, onChange }) {
  */
 export function ListViewPanel({
   open, onClose, schemaColumns, activeView, defaultViewConfig,
-  onApply, views, viewsError, saveView, deleteView,
+  onApply, views, viewsError, viewsLoading, saveView, deleteView,
 }) {
   const fieldCatalog = useMemo(() => buildFieldCatalog(schemaColumns), [schemaColumns]);
   const typeByKey = useMemo(() => new Map(fieldCatalog.map((f) => [f.key, f.type])), [fieldCatalog]);
   const fieldLabelByKey = useMemo(() => new Map(fieldCatalog.map((f) => [f.key, f.label])), [fieldCatalog]);
 
   const sourceConfig = (activeView && activeView.config) || defaultViewConfig;
+  // T-0581 UX-1: the synthetic default has not arrived yet (GET /api/list-views
+  // still in flight) when there is no saved view active AND defaultViewConfig
+  // is still null. Rendering an editable draft in this state is DISHONEST —
+  // draftFromConfig(null, catalog) marks every column visible:false, which is
+  // NOT the server's real default (all columns visible) — see list-view-panel.js
+  // draftFromConfig. The panel must show a Loading state and refuse to edit
+  // until the real default (or a real saved view) has arrived.
+  const stillAwaitingDefault = !activeView && defaultViewConfig == null && viewsLoading !== false;
   const [draft, setDraft] = useState(() => draftFromConfig(sourceConfig, fieldCatalog));
   const [name, setName] = useState(activeView ? activeView.name : '');
   const [markDefault, setMarkDefault] = useState(activeView ? Boolean(activeView.is_default) : false);
@@ -489,18 +506,39 @@ export function ListViewPanel({
   const [saveError, setSaveError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Tracks whether the user has touched the draft since it was last (re-)seeded
+  // — guards against the re-seed effect clobbering in-progress edits the
+  // instant defaultViewConfig/sourceConfig resolves (variant "а" of the UX-1
+  // fix: re-seed on the source-of-truth actually changing, not just on open/
+  // activeView, but never overwrite a draft the user has already started
+  // editing in this open session).
+  const [dirty, setDirty] = useState(false);
 
-  // Re-seed the draft whenever the panel opens or the active view changes —
-  // so re-opening always starts from the currently-applied source of truth.
+  // Re-seed the draft whenever the panel opens, the active view changes, OR
+  // the source config itself resolves/changes (T-0581 UX-1 fix, variant "а"):
+  // sourceConfig is null while defaultViewConfig hasn't arrived yet, so once
+  // it resolves this effect now re-runs and replaces the honest-but-provisional
+  // "all hidden" draft with the real default — UNLESS the user has already
+  // started editing (dirty), in which case we never clobber their work.
   useEffect(() => {
     if (!open) return;
+    if (dirty) return;
     setDraft(draftFromConfig(sourceConfig, fieldCatalog));
     setName(activeView ? activeView.name : '');
     setMarkDefault(activeView ? Boolean(activeView.is_default) : false);
     setNameError(null);
     setSaveError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, activeView && activeView.id]);
+  }, [open, activeView && activeView.id, sourceConfig, dirty]);
+
+  // Reset the dirty flag + re-seed whenever the panel transitions closed→open
+  // (a fresh editing session should always start clean, regardless of
+  // whatever was dirty from a previous open).
+  useEffect(() => {
+    if (open) setDirty(false);
+  }, [open]);
+
+  const markDirty = useCallback(() => setDirty(true), []);
 
   const handleSave = useCallback(async () => {
     setSaveError(null);
@@ -543,7 +581,19 @@ export function ListViewPanel({
     }
   }, [activeView, deleteView, onApply, onClose]);
 
-  const canEdit = fieldCatalog.length > 0;
+  // T-0581 UX-2: warn (not silently allow) saving a draft that hides every
+  // column — the rendered list would fall back to "Создано" + row actions
+  // only (screen-app-records.jsx columns memo). A warning, not a hard block —
+  // this can be a deliberate choice (e.g. a list meant to be filtered/sorted
+  // only, never displayed as a grid) — but the user must see it coming.
+  const columnsAllHidden = useMemo(() => allColumnsHidden(draft.columns), [draft.columns]);
+
+  // T-0581 UX-1: while the real default is still in flight, editing/saving is
+  // disabled — canEdit additionally requires the source config to have
+  // resolved (either a real saved view is active, or the synthetic default
+  // has arrived), so the Save button can never commit the provisional
+  // "all hidden" seed.
+  const canEdit = fieldCatalog.length > 0 && !stillAwaitingDefault;
 
   return (
     <Drawer
@@ -572,6 +622,13 @@ export function ListViewPanel({
     >
       {viewsError ? (
         <ErrorState message={`Не удалось загрузить представления: ${viewsError}`} />
+      ) : stillAwaitingDefault ? (
+        // T-0581 UX-1 fix (variant "б"): honest Loading state — the synthetic
+        // default (all columns visible) has not arrived yet, so there is
+        // nothing truthful to render as an editable draft. Never let the user
+        // edit/save the provisional "all hidden" seed (see stillAwaitingDefault
+        // above + list-view-panel.js draftFromConfig).
+        <LoadingState label="Загрузка представления…" />
       ) : !canEdit ? (
         <EmptyState
           title="В наборе полей нет колонок"
@@ -589,30 +646,38 @@ export function ListViewPanel({
           <Field
             label="Название представления"
             value={name}
-            onChange={(e) => { setName(e.target.value); setNameError(null); }}
+            onChange={(e) => { setName(e.target.value); setNameError(null); markDirty(); }}
             placeholder="Например: Мой активный список"
             invalid={Boolean(nameError)}
             hint={nameError || undefined}
           />
 
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', margin: 'var(--chs-space-2) 0 var(--chs-space-5) 0', fontSize: 'var(--chs-text-sm)' }}>
-            <input type="checkbox" checked={markDefault} onChange={(e) => setMarkDefault(e.target.checked)} />
+            <input type="checkbox" checked={markDefault} onChange={(e) => { setMarkDefault(e.target.checked); markDirty(); }} />
             Открывать это представление по умолчанию
           </label>
 
           <section style={{ marginBottom: 'var(--chs-space-6)' }}>
             <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Колонки</h3>
-            <ColumnsEditor columns={draft.columns} fieldLabelByKey={fieldLabelByKey} onChange={(columns) => setDraft((d) => ({ ...d, columns }))} />
+            <ColumnsEditor columns={draft.columns} fieldLabelByKey={fieldLabelByKey} onChange={(columns) => { markDirty(); setDraft((d) => ({ ...d, columns })); }} />
+            {columnsAllHidden && (
+              <div style={{ marginTop: 'var(--chs-space-3)' }}>
+                <Notice
+                  tone="warning"
+                  message="Все колонки скрыты — список будет показывать только «Создано» и действия над записью."
+                />
+              </div>
+            )}
           </section>
 
           <section style={{ marginBottom: 'var(--chs-space-6)' }}>
             <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Фильтры</h3>
-            <FiltersEditor filters={draft.filters} fieldCatalog={fieldCatalog} typeByKey={typeByKey} onChange={(filters) => setDraft((d) => ({ ...d, filters }))} />
+            <FiltersEditor filters={draft.filters} fieldCatalog={fieldCatalog} typeByKey={typeByKey} onChange={(filters) => { markDirty(); setDraft((d) => ({ ...d, filters })); }} />
           </section>
 
           <section style={{ marginBottom: 'var(--chs-space-6)' }}>
             <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Сортировка</h3>
-            <SortEditor sort={draft.sort} fieldCatalog={fieldCatalog} onChange={(sort) => setDraft((d) => ({ ...d, sort }))} />
+            <SortEditor sort={draft.sort} fieldCatalog={fieldCatalog} onChange={(sort) => { markDirty(); setDraft((d) => ({ ...d, sort })); }} />
           </section>
 
           {saveError && (

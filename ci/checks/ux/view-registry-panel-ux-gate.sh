@@ -7,8 +7,11 @@
 #   (a) consume ONLY kit components (Drawer/Button/Field/Select/EmptyState/
 #       ErrorState/Notice) — no hand-rolled overlay, no raw hex/rgba color
 #       (G2/G6, mirrors ux-g6-no-new-hardcode.sh's detector shape);
-#   (b) render honest Loading/Empty/Error states, never a silent blank panel
-#       (G4/AC-14);
+#   (b) render honest Loading/Empty/Error states (kit <LoadingState>/
+#       <EmptyState>/<ErrorState> all present), never a silent blank panel
+#       (G4/AC-14) — T-0581 UX-1 fix-forward: LoadingState specifically covers
+#       the window before GET /api/list-views resolves, so the panel never
+#       shows an editable "everything hidden" draft as if it were real;
 #   (c) never leak dev jargon ("view_id"/"list_view"/"JSONB"/raw op codes like
 #       "is_empty"/"eq") into a JSX text node or user-facing label (G5);
 #   (d) reorder columns via a keyboard-operable primitive (native <button>
@@ -70,7 +73,7 @@ check_kit_only() {
 check_honest_states() {
   local file="$1"
   local errors=0
-  for kit in "<EmptyState" "<ErrorState"; do
+  for kit in "<EmptyState" "<ErrorState" "<LoadingState"; do
     if ! grep -qF "${kit}" "${file}"; then
       echo "FAIL [FF-UX-VR-7b]: ${file} missing ${kit} (G4 honest state)"
       errors=$((errors + 1))
@@ -144,11 +147,12 @@ self_test() {
   trap 'rm -rf "${tmp}"' RETURN
 
   cat > "${tmp}/good.jsx" <<'EOF'
-import { Drawer, EmptyState, ErrorState, Button } from '../components/components.jsx';
+import { Drawer, EmptyState, ErrorState, LoadingState, Button } from '../components/components.jsx';
 function Panel() {
   const ops = operatorsForFieldType(fieldType);
   return (
     <Drawer>
+      <LoadingState label="Загрузка…" />
       <EmptyState title="Нет колонок" />
       <ErrorState message="Ошибка" />
       <Button aria-label={`Переместить «x» выше`}>up</Button>
