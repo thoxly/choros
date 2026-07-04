@@ -40,6 +40,8 @@ import {
   FIELD_TYPES,
   COLLECTION_SUB_FIELD_TYPES,
   ROLLUP_OPS,
+  COMPUTED_MODES,
+  formulaEligibleSiblings,
   validateFields,
   buildRecordSchema,
   parseRecordSchema,
@@ -434,6 +436,127 @@ function RollupConfigEditor({ field, errors, allFields, onChange }) {
 }
 
 /**
+ * FormulaConfigEditor — sub-row config for an «Итог» field in FORMULA mode
+ * (T-0580, alongside RollupConfigEditor's «Агрегат» mode).
+ *
+ * A single textarea for the expression, a reference list of eligible sibling
+ * fields (O-5 autocomplete-lite: click inserts the key), and inline validation
+ * via the SAME core parser/type-checker the server uses (apps-schema.js's
+ * validateFormulaField — one grammar, ADR §2.6/§4 D2).
+ *
+ * Honest empty: if the application has NO scalar field eligible as an operand
+ * yet (no number/integer/money/date/computed sibling), a guide message
+ * replaces the textarea (mirrors RollupConfigEditor's empty state).
+ *
+ * Product language only (NF-7/G5): «формула», «поле» — never «AST», «eval»,
+ * «parse error». Kit: .chs-input, token vars only (G2, G6).
+ *
+ * @param {{ field, errors, allFields, onChange }} props
+ */
+function FormulaConfigEditor({ field, errors, allFields, onChange }) {
+  const set = (patch) => onChange({ ...field, ...patch });
+
+  const siblings = formulaEligibleSiblings(allFields, field.key);
+
+  if (siblings.length === 0) {
+    return (
+      <div style={{
+        marginTop: 'var(--chs-space-4)',
+        padding: 'var(--chs-space-4)',
+        border: '1px solid var(--chs-color-border)',
+        borderRadius: 'var(--chs-radius-3)',
+        background: 'var(--chs-color-surface-raised)',
+      }}>
+        <span style={{
+          fontSize: 'var(--chs-text-xs)',
+          color: 'var(--chs-color-text-muted)',
+        }}>
+          Сначала добавьте числовое поле, поле «Сумма» или «Дата», по которому можно посчитать формулу
+        </span>
+      </div>
+    );
+  }
+
+  const insertSiblingKey = (key) => {
+    const current = field.formulaExpr || '';
+    const needsSpace = current.length > 0 && !current.endsWith(' ') && !current.endsWith('(');
+    set({ formulaExpr: `${current}${needsSpace ? ' ' : ''}${key}` });
+  };
+
+  return (
+    <div style={{
+      marginTop: 'var(--chs-space-4)',
+      paddingLeft: 'var(--chs-space-5)',
+      borderLeft: '3px solid var(--chs-color-border)',
+    }}
+      aria-label="Настройка формулы"
+    >
+      <span style={{
+        display: 'block', marginBottom: 'var(--chs-space-3)',
+        fontSize: 'var(--chs-text-xs)', fontWeight: 'var(--chs-weight-semibold)',
+        color: 'var(--chs-color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em',
+      }}>
+        Настройка формулы
+      </span>
+
+      <div style={{ marginBottom: 'var(--chs-space-3)', maxWidth: '480px' }}>
+        <span
+          className="chs-label"
+          style={{ display: 'block', marginBottom: 'var(--chs-space-2)' }}
+        >
+          Формула
+        </span>
+        <textarea
+          className={inputCls(Boolean(errors.formulaExpr))}
+          style={textareaStyle}
+          value={field.formulaExpr || ''}
+          onChange={(e) => set({ formulaExpr: e.target.value })}
+          placeholder="Например: summa * (1 + nds_rate)"
+          aria-label="Формула"
+          aria-invalid={Boolean(errors.formulaExpr) || undefined}
+          rows={3}
+        />
+        <span style={{
+          display: 'block', marginTop: 'var(--chs-space-2)',
+          fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)',
+        }}>
+          Поля записи по имени, операции + − * / ( ). Для дат: дата + число дней = дата; дата − дата = число дней.
+        </span>
+        {errors.formulaExpr && (
+          <span style={errStyle}>{errors.formulaExpr}</span>
+        )}
+      </div>
+
+      {/* O-5: clickable reference list of sibling fields — inserts the key at
+          the end of the expression. Nice-to-have, not blocking (the formula
+          validates regardless of whether this list was used). */}
+      <div style={{ marginBottom: 'var(--chs-space-2)' }}>
+        <span style={{
+          display: 'block', marginBottom: 'var(--chs-space-2)',
+          fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)',
+        }}>
+          Поля записи:
+        </span>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--chs-space-2)' }}>
+          {siblings.map((s) => (
+            <Button
+              key={s.key}
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => insertSiblingKey(s.key)}
+              title={`Вставить «${s.key}»`}
+            >
+              {s.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * FieldRow — one editable field: key · type · title · required · reorder/remove.
  * Controlled entirely by the parent (FieldEditor) via onChange/onMove/onRemove.
  *
@@ -495,7 +618,8 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
     || Boolean(errors.key) || Boolean(errors.type) || Boolean(errors.title)
     || Boolean(errors.options) || Boolean(errors.targetRegistryId)
     || Boolean(errors.rollupSource) || Boolean(errors.rollupOp)
-    || Boolean(errors.rollupValueField) || Boolean(errors.rollupFactorField);
+    || Boolean(errors.rollupValueField) || Boolean(errors.rollupFactorField)
+    || Boolean(errors.formulaExpr);
 
   return (
     <div role="group" aria-label={`Поле ${index + 1}`} style={fieldRowGrid}>
@@ -688,19 +812,37 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
               onChange={(nextSubFields) => set({ subFields: nextSubFields })}
             />
           )}
-          {/* T-0452: rollup config for «Итог» (computed) type.
-              Shows source (sibling collection field), op (sum/count/avg/min/max),
-              value field (numeric sub-field of source), and optional factor field.
-              All derived from the in-memory field list (no fetch).
-              Honest empty: if no collection field exists yet, show a guide message
-              instead of a broken config with no options. */}
+          {/* T-0452/T-0580: config for «Итог» (computed) type — TWO modes.
+              «Агрегат» → RollupConfigEditor (source collection + op, T-0452).
+              «Формула» → FormulaConfigEditor (scalar expression, T-0580).
+              The switch itself lives HERE (not inside either editor) so
+              switching modes is a single, obvious control shared by both. */}
           {field.type === 'computed' && (
-            <RollupConfigEditor
-              field={field}
-              errors={errors}
-              allFields={Array.isArray(allFields) ? allFields : []}
-              onChange={set}
-            />
+            <div style={{ marginTop: 'var(--chs-space-4)' }}>
+              <div style={{ maxWidth: '380px' }}>
+                <Select
+                  label="Режим"
+                  value={field.computedMode === 'formula' ? 'formula' : 'rollup'}
+                  onChange={(e) => set({ computedMode: e.target.value })}
+                  options={COMPUTED_MODES.map((m) => ({ value: m.value, label: m.label }))}
+                />
+              </div>
+              {field.computedMode === 'formula' ? (
+                <FormulaConfigEditor
+                  field={field}
+                  errors={errors}
+                  allFields={Array.isArray(allFields) ? allFields : []}
+                  onChange={set}
+                />
+              ) : (
+                <RollupConfigEditor
+                  field={field}
+                  errors={errors}
+                  allFields={Array.isArray(allFields) ? allFields : []}
+                  onChange={set}
+                />
+              )}
+            </div>
           )}
         </div>
       )}

@@ -51,6 +51,13 @@
  *                         emits an unsupported type, see apps-schema FIELD_TYPES).
  */
 
+// T-0580: import the SAME core formula parser/evaluator the server uses — ONE
+// grammar/evaluator, not a duplicated copy (ADR §2.6/§4 D2). The explicit
+// `.ts` extension resolves correctly under this repo's vite/vitest toolchain
+// (proven in apps-schema.js / apps-schema.test.js's identical pattern).
+import { parseFormula } from '../../../src/core/formula-parser.ts';
+import { evalFormula } from '../../../src/core/formula-eval.ts';
+
 // The input control a given JSON-Schema primitive type maps to in the form.
 //   text       → <input type="text">      (string)
 //   number     → <input type="number">    (number / integer)
@@ -76,6 +83,11 @@ export const INPUT_KIND = {
   collection: "collection",
   computed: "computed",
 };
+
+// T-0580: ISO calendar-date pattern (YYYY-MM-DD, no time component) — the
+// x-date storage convention (apps-schema.js:40) AND a formula field's
+// result_type:"date" shape (src/core/formula-eval.ts's ISO_DATE_RE mirror).
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * T-0552: Humanize a raw field key into a readable label fallback. Used wherever
@@ -184,6 +196,45 @@ export function computeRollup(field, data) {
   }
 
   return null; // unknown op: degrade silently
+}
+
+/**
+ * T-0580: compute a "computed" field's live preview value for EITHER mode —
+ * dispatches to computeRollup (rollup mode, T-0452) or the SHARED CORE
+ * evalFormula (formula mode) based on `field.computedMode`. This is the ONE
+ * call site the list/card UI should use for a computed field's readout going
+ * forward (computeRollup remains directly exported/used for backward
+ * compatibility and its own dedicated tests).
+ *
+ * NF-4 (client preview is OPTIONAL, server is the source of truth): this
+ * function mirrors the SAME grammar/evaluator the server uses
+ * (src/core/formula-eval.ts, imported directly — one evaluator, ADR §2.6/§4
+ * D2) — parsing the stored `formulaExpr` fresh on every call (no caching; a
+ * formula is a short string, re-parsing is cheap and avoids any staleness
+ * class of bug). A parse failure (should not happen for a schema the server
+ * already accepted) degrades to null, never throws.
+ *
+ * @param {{computedMode?: string, rollupSource?, rollupOp?, rollupValueField?,
+ *          rollupFactorField?, formulaExpr?: string}} field
+ * @param {Record<string, unknown>} data  record.data or live form values
+ * @returns {number | string | null}
+ */
+export function computeComputedFieldValue(field, data) {
+  if (!field || typeof field !== "object") return null;
+  if (field.computedMode === "formula") {
+    const expr = typeof field.formulaExpr === "string" ? field.formulaExpr : "";
+    if (expr.trim().length === 0) return null;
+    const parsed = parseFormula(expr);
+    if (!parsed.ok) return null;
+    const scope = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    return evalFormula(parsed.ast, scope);
+  }
+  // Default: rollup mode (also the backward-compatible path for any
+  // persisted field with no computedMode key at all — T-0452 fields saved
+  // before T-0580 have no computedMode, and default to "rollup" on load via
+  // apps-schema.js::parseRecordSchema anyway, but this dispatcher is
+  // defensive independent of that).
+  return computeRollup(field, data);
 }
 
 /**
@@ -319,6 +370,26 @@ export function schemaToFormFields(recordSchema) {
       };
     }
 
+    // T-0580: detect FORMULA-mode computed fields by the presence of
+    // x-formula extension (checked BEFORE x-rollup — mutually exclusive
+    // flavors, mirrors apps-schema.js::parseRecordSchema's discriminator
+    // order). Shape: { type:"number"|"string", "x-formula":{expr,result_type},
+    // "x-date"?:true }.
+    const xFormula = def && typeof def === "object" ? def["x-formula"] : undefined;
+    if (xFormula && typeof xFormula === "object" && !Array.isArray(xFormula) && typeof xFormula.expr === "string") {
+      return {
+        key,
+        type: "computed",
+        title,
+        label: title || humanizeKey(key),
+        required: false, // computed fields are NEVER required
+        inputKind: "computed",
+        computedMode: "formula",
+        formulaExpr: xFormula.expr,
+        formulaResultType: xFormula.result_type === "date" ? "date" : "number",
+      };
+    }
+
     // T-0453: detect computed (rollup) fields by the presence of x-rollup extension.
     // Shape: { type: "number", "x-rollup": { source, op, value_field, factor_field? } }.
     // These fields are NEVER required and NEVER appear in the submitted data
@@ -332,6 +403,7 @@ export function schemaToFormFields(recordSchema) {
         label: title || humanizeKey(key),
         required: false, // computed fields are NEVER required
         inputKind: "computed",
+        computedMode: "rollup",
         rollupSource: typeof xRollup.source === "string" ? xRollup.source : "",
         rollupOp: typeof xRollup.op === "string" ? xRollup.op : "",
         rollupValueField: typeof xRollup.value_field === "string" ? xRollup.value_field : "",
@@ -933,13 +1005,17 @@ export function serializeRecordData(formFields, values) {
 export function schemaToColumns(recordSchema) {
   return schemaToFormFields(recordSchema).map((f) => {
     const col = { key: f.key, label: f.label, type: f.type };
-    // T-0507: thread rollup props through for computed fields so that
-    // computeRollup(col, rowData) works correctly in the list cell renderer.
+    // T-0507/T-0580: thread rollup/formula props through for computed fields
+    // so that computeComputedFieldValue(col, rowData) works correctly in the
+    // list cell renderer, for EITHER mode.
     if (f.type === "computed") {
+      col.computedMode = f.computedMode;
       col.rollupSource = f.rollupSource;
       col.rollupOp = f.rollupOp;
       col.rollupValueField = f.rollupValueField;
       col.rollupFactorField = f.rollupFactorField;
+      col.formulaExpr = f.formulaExpr;
+      col.formulaResultType = f.formulaResultType;
     }
     // T-0512: thread options through for multi-select so formatCellValue can display values.
     if (f.type === "multi-select") {
@@ -1005,16 +1081,25 @@ export function formatCellValue(value, type) {
     if (typeof value === "string" && value.length > 0) return RELATION_CELL_ASYNC;
     return "—"; // blank or unexpected non-string → absent
   }
-  // T-0453: computed field value is a number (pre-computed before call) or null.
-  // Format as a string number (locale-neutral — consistent with number fields) or «—».
-  // This branch is ADDITIVE — the relation and collection branches above are NOT modified.
-  // Callers pass the already-computed number (from computeRollup) as `value`, not raw data.
+  // T-0453/T-0580: computed field value is a number (rollup mode; pre-computed
+  // before call) OR a string (T-0580 formula mode with result_type:"date" — an
+  // ISO YYYY-MM-DD date string, e.g. "deadline = data_podpisaniya + srok_dney").
+  // Format as a string number (locale-neutral — consistent with number fields),
+  // or pass an ISO date string through AS-IS (the SAME convention a real "date"
+  // field uses — records-form.js has no special date-locale formatting for
+  // type:"date" either; both fall back to the raw ISO string). null/anything-
+  // else → «—». This branch is ADDITIVE — the relation and collection branches
+  // above are NOT modified. Callers pass the already-computed value (from
+  // computeRollup, or the shared core evalFormula for formula mode) as `value`.
   if (type === "computed") {
     if (typeof value === "number" && Number.isFinite(value)) {
       // Round to at most 10 decimal places to avoid float display noise (e.g. 0.1+0.2)
       // while still supporting legitimate fractional results (avg, factor multiplication).
       const rounded = Math.round(value * 1e10) / 1e10;
       return String(rounded);
+    }
+    if (typeof value === "string" && ISO_DATE_RE.test(value)) {
+      return value; // formula result_type:"date" — ISO string, same as a plain date field
     }
     return "—";
   }

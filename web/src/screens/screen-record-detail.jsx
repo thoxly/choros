@@ -25,7 +25,7 @@ import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDia
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { formatDate, formatError, formatJsonReadable, formatPersonName } from '../lib/format.js';
-import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel, computeRollup } from './records-form.js';
+import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel, computeComputedFieldValue } from './records-form.js';
 // T-0608 (пункт г): resolve record.created_by (an employee SLUG — for a
 // Keycloak-registered human, slug === the KC user UUID) to a display name.
 import { fetchEmployees } from '../forms/field-renderer.jsx';
@@ -617,11 +617,14 @@ function RecordDetailScreen() {
               ) : (
                 <div>
                   {formFields.map((f) => {
-                    // T-0453: computed fields derive their value from the collection
-                    // field in the same record (data[rollupSource]). The value is
-                    // NEVER stored in data[f.key] — compute it on the fly here.
+                    // T-0453/T-0580: computed fields derive their value EITHER from
+                    // a sibling collection field (rollup mode, data[rollupSource])
+                    // OR from a scalar formula over sibling fields (formula mode,
+                    // T-0580) — computeComputedFieldValue dispatches on
+                    // f.computedMode. The value is NEVER stored in data[f.key] —
+                    // compute it on the fly here (client preview, NF-4).
                     if (f.type === 'computed') {
-                      const computed = computeRollup(f, data);
+                      const computed = computeComputedFieldValue(f, data);
                       const display = formatCellValue(computed, 'computed');
                       return (
                         <div key={f.key} style={fieldRowStyle}>

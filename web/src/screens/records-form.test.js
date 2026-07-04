@@ -32,6 +32,7 @@ import {
   mapRecordError,
   extractFieldErrors,
   computeRollup,
+  computeComputedFieldValue,
   humanizeKey,
 } from './records-form.js';
 
@@ -1266,6 +1267,55 @@ describe('T-0453: schemaToFormFields — computed field', () => {
   });
 });
 
+describe('T-0580: schemaToFormFields — computed field FORMULA mode', () => {
+  const schema = {
+    type: 'object',
+    properties: {
+      summa: { type: 'number', title: 'Сумма' },
+      nds_rate: { type: 'number', title: 'Ставка' },
+      itogo: {
+        type: 'number',
+        title: 'Итого',
+        'x-formula': { expr: 'summa * (1 + nds_rate)', result_type: 'number' },
+      },
+    },
+  };
+
+  it('detects a formula field from x-formula, emits descriptor with computedMode "formula"', () => {
+    const fields = schemaToFormFields(schema);
+    const itogo = fields.find((f) => f.key === 'itogo');
+    expect(itogo).toMatchObject({
+      key: 'itogo',
+      type: 'computed',
+      label: 'Итого',
+      required: false,
+      inputKind: 'computed',
+      computedMode: 'formula',
+      formulaExpr: 'summa * (1 + nds_rate)',
+      formulaResultType: 'number',
+    });
+  });
+
+  it('a date-result formula field carries formulaResultType "date"', () => {
+    const dateSchema = {
+      type: 'object',
+      properties: {
+        start_date: { type: 'string', 'x-date': true },
+        term_days: { type: 'number' },
+        deadline: {
+          type: 'string',
+          'x-formula': { expr: 'start_date + term_days', result_type: 'date' },
+          'x-date': true,
+        },
+      },
+    };
+    const fields = schemaToFormFields(dateSchema);
+    const deadline = fields.find((f) => f.key === 'deadline');
+    expect(deadline.computedMode).toBe('formula');
+    expect(deadline.formulaResultType).toBe('date');
+  });
+});
+
 describe('T-0453: computeRollup — op sum', () => {
   const field = {
     rollupSource: 'lines',
@@ -2358,5 +2408,135 @@ describe('T-0516: formatCellValue url/email', () => {
 
   it('email: returns "—" for empty string', () => {
     expect(formatCellValue('', 'email')).toBe('—');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0580: computed field FORMULA mode — computeComputedFieldValue dispatcher +
+// formatCellValue's date-string branch for a formula result.
+// ---------------------------------------------------------------------------
+
+describe('T-0580: computeComputedFieldValue — formula mode', () => {
+  it('computes a numeric formula (the ADR NDS example) from live data', () => {
+    const field = { computedMode: 'formula', formulaExpr: 'summa * (1 + nds_rate)' };
+    expect(computeComputedFieldValue(field, { summa: 100000, nds_rate: 0.2 })).toBe(120000);
+  });
+
+  it('computes a date formula (date + N days) from live data', () => {
+    const field = { computedMode: 'formula', formulaExpr: 'start_date + term_days' };
+    expect(computeComputedFieldValue(field, { start_date: '2026-07-01', term_days: 30 })).toBe('2026-07-31');
+  });
+
+  it('computes date − date → number of days', () => {
+    const field = { computedMode: 'formula', formulaExpr: 'end_date - start_date' };
+    expect(computeComputedFieldValue(field, { end_date: '2026-07-31', start_date: '2026-07-01' })).toBe(30);
+  });
+
+  it('returns null when a referenced field is null (honest, not 0)', () => {
+    const field = { computedMode: 'formula', formulaExpr: 'a + b' };
+    expect(computeComputedFieldValue(field, { a: 5, b: null })).toBeNull();
+  });
+
+  it('returns null for division by zero', () => {
+    const field = { computedMode: 'formula', formulaExpr: 'a / b' };
+    expect(computeComputedFieldValue(field, { a: 10, b: 0 })).toBeNull();
+  });
+
+  it('returns null for an empty formulaExpr', () => {
+    const field = { computedMode: 'formula', formulaExpr: '' };
+    expect(computeComputedFieldValue(field, {})).toBeNull();
+  });
+
+  it('returns null for a non-object field', () => {
+    expect(computeComputedFieldValue(null, {})).toBeNull();
+    expect(computeComputedFieldValue(undefined, {})).toBeNull();
+  });
+
+  it('dispatches to computeRollup for rollup mode (regression, same result as calling computeRollup directly)', () => {
+    const field = {
+      computedMode: 'rollup',
+      rollupSource: 'lines', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: 'qty',
+    };
+    const data = { lines: [{ price: 100000, qty: 3 }, { price: 250000, qty: 1 }] };
+    expect(computeComputedFieldValue(field, data)).toBe(computeRollup(field, data));
+    expect(computeComputedFieldValue(field, data)).toBe(550000);
+  });
+
+  it('dispatches to computeRollup when computedMode is ABSENT (backward-compatible default)', () => {
+    const field = { rollupSource: 'lines', rollupOp: 'count' };
+    const data = { lines: [{ x: 1 }, { x: 2 }] };
+    expect(computeComputedFieldValue(field, data)).toBe(2);
+  });
+
+  it('a formula referencing a rollup sibling value (already-computed, passed in data) works', () => {
+    // Mirrors how the record-entry drawer overlays computeRollup results into
+    // currentValues before rendering downstream ComputedReadout fields — this
+    // test proves the DISPATCHER's formula path can read such an overlaid value.
+    const field = { computedMode: 'formula', formulaExpr: 'total * (1 + nds_rate)' };
+    expect(computeComputedFieldValue(field, { total: 550000, nds_rate: 0.2 })).toBe(660000);
+  });
+});
+
+describe('T-0580: formatCellValue — computed field carrying a formula date-string result', () => {
+  it('displays an ISO date string as-is (same convention as a plain date field)', () => {
+    expect(formatCellValue('2026-07-31', 'computed')).toBe('2026-07-31');
+  });
+
+  it('still displays a number result correctly (regression, rollup mode unaffected)', () => {
+    expect(formatCellValue(120000, 'computed')).toBe('120000');
+  });
+
+  it('displays "—" for null (regression)', () => {
+    expect(formatCellValue(null, 'computed')).toBe('—');
+  });
+
+  it('displays "—" for a non-ISO-date, non-number string (defensive — never garbage-through)', () => {
+    expect(formatCellValue('not-a-date', 'computed')).toBe('—');
+  });
+});
+
+describe('T-0580: schemaToColumns threads formula props for list-cell rendering', () => {
+  it('a formula-mode computed column carries computedMode + formulaExpr', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        summa: { type: 'number' },
+        nds_rate: { type: 'number' },
+        itogo: { type: 'number', 'x-formula': { expr: 'summa * (1 + nds_rate)', result_type: 'number' } },
+      },
+    };
+    const columns = schemaToColumns(schema);
+    const col = columns.find((c) => c.key === 'itogo');
+    expect(col.computedMode).toBe('formula');
+    expect(col.formulaExpr).toBe('summa * (1 + nds_rate)');
+  });
+
+  it('computeComputedFieldValue(col, rowData) computes the correct formula result via the threaded column', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        summa: { type: 'number' },
+        nds_rate: { type: 'number' },
+        itogo: { type: 'number', 'x-formula': { expr: 'summa * (1 + nds_rate)', result_type: 'number' } },
+      },
+    };
+    const columns = schemaToColumns(schema);
+    const col = columns.find((c) => c.key === 'itogo');
+    const rowData = { summa: 100000, nds_rate: 0.2 };
+    expect(computeComputedFieldValue(col, rowData)).toBe(120000);
+  });
+
+  it('a rollup-mode computed column still round-trips correctly (regression)', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        lines: { type: 'array' },
+        total: { type: 'number', 'x-rollup': { source: 'lines', op: 'sum', value_field: 'price' } },
+      },
+    };
+    const columns = schemaToColumns(schema);
+    const col = columns.find((c) => c.key === 'total');
+    expect(col.computedMode).toBe('rollup');
+    expect(computeComputedFieldValue(col, { lines: [{ price: 100 }, { price: 200 }] })).toBe(300);
   });
 });

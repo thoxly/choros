@@ -622,3 +622,106 @@ describe("extractDerivedFields — flavor discrimination (T-0603 AC-6)", () => {
     expect(extractDerivedFields(schema)).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0580 [D-064 §A8 / К4] — formula flavor discrimination (AC-12, FF-11)
+// ---------------------------------------------------------------------------
+describe("extractDerivedFields — formula flavor (T-0580 AC-12)", () => {
+  it("T0580-1: a field with x-formula (no x-rollup) → kind 'formula'", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        summa: { type: "number" },
+        nds_rate: { type: "number" },
+        itogo: { type: "number", "x-formula": { expr: "summa * (1 + nds_rate)", result_type: "number" } },
+      },
+    };
+    const specs = extractDerivedFields(schema);
+    const formulaSpec = specs.find((s) => s.fieldKey === "itogo");
+    expect(formulaSpec).toBeDefined();
+    expect(formulaSpec?.kind).toBe("formula");
+    if (formulaSpec?.kind === "formula") {
+      expect(formulaSpec.def).toEqual({ expr: "summa * (1 + nds_rate)", result_type: "number" });
+      expect(formulaSpec.ast.kind).toBe("binary");
+    }
+  });
+
+  it("T0580-2: a field with x-rollup (no x-formula) still extracts as before (regression)", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        total: { type: "number", "x-rollup": { source: "lines", op: "sum", value_field: "price" } },
+      },
+    };
+    const specs = extractDerivedFields(schema);
+    expect(specs).toHaveLength(1);
+    expect(specs[0].kind).toBe("rollup-embedded");
+  });
+
+  it("T0580-3: a field carrying BOTH x-formula and x-rollup is REJECTED (skipped, never guessed)", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        lines: { type: "array" },
+        both: {
+          type: "number",
+          "x-formula": { expr: "1 + 1", result_type: "number" },
+          "x-rollup": { source: "lines", op: "sum", value_field: "price" },
+        },
+      },
+    };
+    expect(extractDerivedFields(schema)).toEqual([]);
+  });
+
+  it("T0580-4: a mixed schema extracts BOTH formula and rollup fields (different properties)", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        lines: { type: "array" },
+        total: { type: "number", "x-rollup": { source: "lines", op: "sum", value_field: "price" } },
+        nds_rate: { type: "number" },
+        itogo: { type: "number", "x-formula": { expr: "total * (1 + nds_rate)", result_type: "number" } },
+      },
+    };
+    const kinds = extractDerivedFields(schema).map((s) => s.kind).sort();
+    expect(kinds).toEqual(["formula", "rollup-embedded"]);
+  });
+
+  it("T0580-5: an invalid x-formula (missing expr) is silently skipped (defensive, mirrors corrupt x-rollup)", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        broken: { type: "number", "x-formula": { result_type: "number" } },
+      },
+    };
+    expect(extractDerivedFields(schema)).toEqual([]);
+  });
+
+  it("T0580-6: an x-formula with a syntactically invalid expr is silently skipped", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        broken: { type: "number", "x-formula": { expr: "a; b", result_type: "number" } },
+      },
+    };
+    expect(extractDerivedFields(schema)).toEqual([]);
+  });
+
+  it("T0580-7: a date-result formula field parses its ast and extracts as 'formula'", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        start_date: { type: "string", "x-date": true },
+        term_days: { type: "number" },
+        deadline: {
+          type: "string",
+          "x-formula": { expr: "start_date + term_days", result_type: "date" },
+          "x-date": true,
+        },
+      },
+    };
+    const specs = extractDerivedFields(schema);
+    const formulaSpec = specs.find((s) => s.fieldKey === "deadline");
+    expect(formulaSpec?.kind).toBe("formula");
+  });
+});

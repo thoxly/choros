@@ -60,6 +60,7 @@ import {
   type JsonSchemaForClassify,
 } from "../core/schema-change-classifier.js";
 import { validateRecordSchemaDefinition } from "../core/record-schema-validator.js";
+import { validateFormulaSchemaGate } from "../core/formula-schema-gate.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
 import {
@@ -926,6 +927,20 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
       );
     }
 
+    // T-0580 FR-7: validate every x-formula field (syntax, sibling-reference/
+    // type, result_type match, acyclicity, limits) BEFORE the schema is
+    // persisted — a formula that fails this gate is rejected with a
+    // human-readable, field-attributed error rather than silently degrading
+    // to null at every future read.
+    const formulaGate = validateFormulaSchemaGate(recordSchema);
+    if (!formulaGate.ok) {
+      throw new HttpError(
+        400,
+        "VALIDATION",
+        `invalid formula field(s): ${formulaGate.errors.map((e) => `${e.field}: ${e.message}`).join("; ")}`,
+      );
+    }
+
     const tenantId = await resolveActorTenant(actor);
     const row = await createRegistryDef({
       pool,
@@ -1055,6 +1070,20 @@ export function registerRegistryDefRoutes(
     const newSchema = body["record_schema"] as JsonSchemaForClassify;
     if (newSchema === null || typeof newSchema !== "object" || Array.isArray(newSchema)) {
       throw new HttpError(400, "VALIDATION", "record_schema must be a JSON object");
+    }
+
+    // T-0580 FR-7: validate every x-formula field (syntax, sibling-reference/
+    // type, result_type match, acyclicity, limits) BEFORE the schema-change
+    // guard runs — same gate as POST /api/registry-defs (createRegistryDef
+    // path above). Rejects with a human-readable, field-attributed 400 rather
+    // than persisting a formula that would only ever degrade to null.
+    const formulaGate = validateFormulaSchemaGate(newSchema);
+    if (!formulaGate.ok) {
+      throw new HttpError(
+        400,
+        "VALIDATION",
+        `invalid formula field(s): ${formulaGate.errors.map((e) => `${e.field}: ${e.message}`).join("; ")}`,
+      );
     }
 
     const force = body["force"] === true;
