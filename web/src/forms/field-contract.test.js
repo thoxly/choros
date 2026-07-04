@@ -342,6 +342,40 @@ describe('resolveFieldContract — T-0512 multi-select + person', () => {
 });
 
 // ---------------------------------------------------------------------------
+// T-0579: contractKindForFieldType + resolveFieldContract for the `file` type
+// (AC-4, FF-CATALOG). file was already declared in BINDING_CONTRACT_CATALOG
+// (both client field-contract.js and server binding-contract-catalog.ts) as a
+// stub; this task wires the dispatch functions — no new catalog kind added.
+// ---------------------------------------------------------------------------
+
+describe('contractKindForFieldType — T-0579 file', () => {
+  it('file → "file" (AC-4)', () => {
+    expect(contractKindForFieldType('file')).toBe('file');
+  });
+});
+
+describe('resolveFieldContract — T-0579 file', () => {
+  it('type="file" → file contract, presentation="file" (AC-4)', () => {
+    const result = resolveFieldContract({ type: 'file' });
+    expect(result.contractKind).toBe('file');
+    expect(result.presentation).toBe('file');
+    expect(result.editable).toBe(true);
+  });
+
+  it('explicit contract="file" wins', () => {
+    const result = resolveFieldContract({ contract: 'file', type: 'string' });
+    expect(result.contractKind).toBe('file');
+    expect(result.presentation).toBe('file');
+  });
+
+  it('FF-CATALOG: file is classified as structural BEFORE any options-based rule (no accidental enum)', () => {
+    const result = resolveFieldContract({ type: 'file' });
+    expect(result.contractKind).not.toBe('enum');
+    expect(result.contractKind).toBe('file');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T-0480 [D7-K]: resolveFieldContract routes records-form STRUCTURAL types
 // (relation/collection/computed) to their catalog contracts, so the record
 // screen dispatches off the catalog — not a parallel `inputKind` string chain.
@@ -378,5 +412,12 @@ describe('resolveFieldContract — records-form structural types', () => {
     // relation/collection/computed must classify BEFORE the options-force-enum rule.
     const result = resolveFieldContract({ type: 'relation' });
     expect(result.contractKind).toBe('relation');
+  });
+
+  it('records-form file descriptor → file contract, presentation="file" (T-0579, AC-4)', () => {
+    const result = resolveFieldContract({ key: 'doc', type: 'file', label: 'Договор' });
+    expect(result.contractKind).toBe('file');
+    expect(result.presentation).toBe('file');
+    expect(result.editable).toBe(true);
   });
 });

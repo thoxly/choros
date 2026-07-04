@@ -23,9 +23,12 @@
    What it renders:
      scalar  → text / textarea / number / checkbox / date  (per presentation)
      enum    → <select> (or radio)                          (options[] required)
-     relation / collection / date-range / money / file      → honest "not yet
-       authorable here" readout (D7-6/7/8 deliver their editable UI; the renderer
-       degrades visibly rather than pretending a text box captures them)
+     relation / collection / date-range / file (T-0579)     → dedicated structural
+       components (RelationPickerField / CollectionField / DateRangeField /
+       FileField) — each owns its own fetch/local state.
+     money / matrix-lookup not-yet-authorable contracts      → honest "not yet
+       authorable here" readout (degrades visibly rather than pretending a text
+       box captures them)
      rollup / matrix-lookup (editable:false)                → read-only readout
 
    Per-step field MODE (T-0404 [D7-9]): each renderable field may carry a `mode`
@@ -200,6 +203,266 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
     <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
       {labelNode}
       {control}
+      {errorNode}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// T-0579: FileField — upload/download control for a `file` contract.
+//
+// The ONLY new structural component this task adds. Talks EXCLUSIVELY to the
+// already-built file routes (src/http/files.ts, T-0518):
+//   POST /api/records/:recordId/files              — upload (raw body)
+//   GET  /api/records/:recordId/files               — list (resolve display name)
+//   GET  /api/files/:versionId/download[?disposition=inline] — download/preview
+//
+// Stored value: fileVersionId (a plain string — same pattern as person=id,
+// relation=uuid). No client-side S3/bucket/presign call, no client file-ACL
+// (FF-UPLOAD-ROUTE-ONLY / NF-2) — visibility/authorization is a pure derivative
+// of the owning record's PDP grant, enforced entirely server-side.
+//
+// field.recordId — the CURRENT record's id (required to know where to POST/GET
+// the file list; absent on a not-yet-created record → upload disabled with an
+// honest message, matching the "create record first" constraint any file-attach
+// UI has).
+//
+// Honest states (NF-5/D-062): Empty (upload affordance) / Loading (upload
+// in-flight, disabled) / Error (size_exceeded / mime rejection / network,
+// surfaced by message) / Populated (file name + Скачать + Заменить).
+// ---------------------------------------------------------------------------
+
+/**
+ * uploadFileToRecord — the actual upload call FileField's handleFileSelect
+ * makes: POST /api/records/:recordId/files with the raw File as the body,
+ * Content-Type/X-File-Name headers derived from the File object, auth headers
+ * from devHeaders(). Extracted as a standalone, React-free async function
+ * (review M2 — codebase convention: "pure logic lives in a testable sibling",
+ * cf. this file's own header note re: field-contract.js) so the real
+ * upload-flow code path (headers built, endpoint hit, response parsed) is
+ * exercisable by a unit test WITHOUT a DOM/React render — this project's
+ * vitest tier runs "node" environment with no jsdom (web/vitest.config.js),
+ * so hooks-bearing components cannot be invoked directly; this function has
+ * none of that constraint.
+ *
+ * @param {{ recordId: string, file: File }} args
+ * @returns {Promise<{ fileId: string, versionId: string, versionNo: number }>}
+ * @throws {Error} formatError(status) message on a non-ok response
+ */
+export async function uploadFileToRecord({ recordId, file }) {
+  const res = await fetch(`/api/records/${encodeURIComponent(recordId)}/files`, {
+    method: 'POST',
+    headers: {
+      ...devHeaders(),
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-File-Name': file.name || 'upload',
+    },
+    body: file,
+  });
+  if (!res.ok) {
+    throw new Error(formatError(res.status));
+  }
+  return res.json();
+}
+
+/**
+ * Upload/download control for a `file` contract field. Stores the uploaded
+ * file's versionId as the field value; resolves the display name via the
+ * record's file listing (GET /api/records/:recordId/files).
+ *
+ * @param {{ key, label?, title?, required?, recordId? }} field
+ * @param {string} value  current value (fileVersionId or "")
+ * @param {(key, value) => void} onChange
+ * @param {string|undefined} error
+ * @param {string} idPrefix
+ * @param {boolean} isRequired
+ * @param {boolean} readOnly
+ */
+export function FileField({ field, value, onChange, error, idPrefix = 'field', isRequired = false, readOnly = false }) {
+  const id = `${idPrefix}-${field.key}`;
+  const errorId = error ? `${id}-error` : undefined;
+  const label = field.label || field.title || field.key;
+  const invalid = Boolean(error);
+  const recordId = field.recordId;
+
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  // fileMeta: { originalName, mime } for the CURRENT value's versionId, resolved
+  // from the record's file listing. null = not yet resolved / no listing available.
+  const [fileMeta, setFileMeta] = useState(null);
+  // resolveState (review M1/m2): distinguishes WHY fileMeta is null — never
+  // conflate "still loading", "listing came back but this version wasn't in
+  // it" (no read access to that specific file, or a stale/foreign
+  // fileVersionId) and "no record context at all" (true pre-save create).
+  // 'idle' = nothing to resolve (no value or no recordId); 'loading' =
+  // fetch in flight; 'resolved' = found in the listing; 'unresolved' = fetch
+  // completed (ok or not) but no matching version — honest, not "— / no
+  // access" conflated with "still loading".
+  const [resolveState, setResolveState] = useState('idle');
+
+  // Resolve the display name + mime for the current value from the record's
+  // file listing (the same endpoint the list/card cells use — one source of
+  // metadata, no duplicate resolution logic).
+  //
+  // review m1: match against ALL versions of every file (not just
+  // currentVersionId) — `value` is whatever fileVersionId was stored at
+  // upload time, which may since have been superseded by a "Заменить"
+  // re-upload on the SAME file row (new currentVersionId, old value still
+  // valid history). Matching only the current version would falsely show
+  // "unresolved" for an old-but-real version.
+  useEffect(() => {
+    if (!value || !recordId) { setFileMeta(null); setResolveState('idle'); return; }
+    let cancelled = false;
+    setResolveState('loading');
+    fetch(`/api/records/${encodeURIComponent(recordId)}/files`, { headers: devHeaders() })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) { setFileMeta(null); setResolveState('unresolved'); return; }
+        const files = await res.json();
+        if (cancelled) return;
+        if (!Array.isArray(files)) { setFileMeta(null); setResolveState('unresolved'); return; }
+        const match = files.find((f) => f && (
+          f.currentVersionId === value
+          || (Array.isArray(f.versionIds) && f.versionIds.includes(value))
+        ));
+        if (match) {
+          setFileMeta({ originalName: match.originalName, mime: match.mime });
+          setResolveState('resolved');
+        } else {
+          setFileMeta(null);
+          setResolveState('unresolved');
+        }
+      })
+      .catch(() => { if (!cancelled) { setFileMeta(null); setResolveState('unresolved'); } });
+    return () => { cancelled = true; };
+  }, [value, recordId]);
+
+  const handleFileSelect = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    // Reset the input so selecting the SAME file again still fires onChange
+    // (replace flow) — browsers dedupe change events on identical selections.
+    e.target.value = '';
+    if (!file) return;
+    if (!recordId) {
+      setUploadError('Сначала сохраните запись, затем прикрепите файл');
+      return;
+    }
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const body = await uploadFileToRecord({ recordId, file });
+      setFileMeta({ originalName: file.name, mime: file.type });
+      onChange(field.key, body.versionId);
+    } catch (err) {
+      setUploadError(String(err?.message || err));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const inputStyle = { display: 'block', width: '100%', boxSizing: 'border-box' };
+
+  const labelNode = (
+    <label className="chs-label" htmlFor={id}>
+      {label}
+      {isRequired && (
+        <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+      )}
+    </label>
+  );
+  const errorNode = error ? (
+    <span id={errorId} role="alert" style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+      {error}
+    </span>
+  ) : null;
+  const uploadErrorNode = uploadError ? (
+    <span role="alert" style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+      {uploadError}
+    </span>
+  ) : null;
+
+  // review M1(a)/m2: NEVER fall back to the raw fileVersionId (a meaningless
+  // uuid to a human) — always a human-legible label per honest resolveState.
+  // 'resolved' → the real name; 'loading' → "загрузка…"; 'unresolved' (fetch
+  // completed but no match — could be a listing miss OR no read access to
+  // that specific file; we cannot distinguish those two from this endpoint's
+  // response, so the label says "no access" rather than pretending it found
+  // nothing) → "нет доступа"; 'idle' with no recordId → generic "файл".
+  const displayName = fileMeta?.originalName
+    || (resolveState === 'loading' ? 'Загрузка…'
+      : resolveState === 'unresolved' ? 'Нет доступа'
+        : 'Файл');
+  const downloadHref = value ? `/api/files/${encodeURIComponent(value)}/download` : null;
+
+  let control;
+  if (uploading) {
+    // Loading — upload in flight, control disabled (honest, no dead affordance).
+    control = (
+      <div id={id} className="chs-input" aria-live="polite" aria-busy="true"
+        style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-sm)' }}>
+        Загрузка файла…
+      </div>
+    );
+  } else if (value) {
+    // Populated — show the resolved name, a real download link, and (unless
+    // readOnly) a "Заменить" re-upload control.
+    control = (
+      <div id={id} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)', flexWrap: 'wrap' }}>
+          <a
+            href={downloadHref}
+            className="chs-input"
+            style={{ ...inputStyle, width: 'auto', flex: 1, textDecoration: 'none', color: 'var(--chs-color-accent)' }}
+            aria-describedby={errorId}
+          >
+            {displayName || 'Скачать файл'}
+          </a>
+          {!readOnly && (
+            <label
+              className="chs-label"
+              style={{ margin: 0, cursor: 'pointer', color: 'var(--chs-color-accent)', fontSize: 'var(--chs-text-sm)' }}
+            >
+              Заменить
+              <input
+                type="file"
+                onChange={handleFileSelect}
+                style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0,0,0,0)' }}
+                aria-label={`Заменить файл: ${label}`}
+              />
+            </label>
+          )}
+        </div>
+      </div>
+    );
+  } else if (readOnly) {
+    // Empty + read-only: no upload affordance (nothing to download either) — honest.
+    control = (
+      <div id={id} className="chs-input" aria-readonly="true"
+        style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-sm)' }}>
+        Файл не загружен
+      </div>
+    );
+  } else {
+    // Empty — the upload affordance (Empty state).
+    control = (
+      <input
+        id={id}
+        type="file"
+        className="chs-input"
+        onChange={handleFileSelect}
+        aria-required={isRequired || undefined}
+        aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
+        style={inputStyle}
+      />
+    );
+  }
+
+  return (
+    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+      {labelNode}
+      {control}
+      {uploadErrorNode}
       {errorNode}
     </div>
   );
@@ -859,6 +1122,25 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   if (presentation === 'table') {
     return (
       <CollectionField
+        field={field}
+        value={value}
+        onChange={onChange}
+        error={error}
+        idPrefix={idPrefix}
+        isRequired={isRequired}
+        readOnly={readOnly}
+      />
+    );
+  }
+
+  // T-0579: file (presentation='file') → FileField.
+  // Structural contract with fetch/local state (resolves the display name via
+  // the record's file listing) — same category as relation/collection, not a
+  // scalarish inline input. Talks ONLY to the existing file routes (§2.3/§2.4
+  // of the ADR); no client-side S3/bucket/presign, no client file-ACL.
+  if (presentation === 'file') {
+    return (
+      <FileField
         field={field}
         value={value}
         onChange={onChange}

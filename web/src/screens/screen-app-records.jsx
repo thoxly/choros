@@ -62,6 +62,7 @@ import {
   serializeRecordData,
   formatCellValue,
   RELATION_CELL_ASYNC,
+  FILE_CELL_ASYNC,
   deriveRecordLabel,
   mapRecordError,
   extractFieldErrors,
@@ -320,6 +321,105 @@ function RelationCell({ targetId, appId }) {
     >
       {label.text}
     </Link>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// T-0579: FileCell — async table cell that resolves a fileVersionId to a
+// display name + download link.
+//
+// formatCellValue returns FILE_CELL_ASYNC for a non-empty file value. The list
+// renders this component instead of a plain <td> string (never a raw uuid,
+// FF-CELL-NO-UUID). Resolution: GET /api/records/:recordId/files (the SAME
+// listing endpoint FileField itself uses — one source of metadata).
+//
+// Honest states:
+//   loading  → subtle italic placeholder
+//   resolved → file name as a download link (/api/files/:versionId/download)
+//   not found in listing / denied/error → «— / Нет доступа» redacted sentinel
+// ---------------------------------------------------------------------------
+
+/**
+ * Async table cell for a file field value.
+ *
+ * @param {string} versionId  The fileVersionId stored as the field value.
+ * @param {string} recordId   The record this cell belongs to (for the listing fetch).
+ */
+function FileCell({ versionId, recordId }) {
+  // review m2: 'empty' (no value — not an access problem) / 'forbidden'
+  // (listing fetch itself failed) / 'notfound' (listing loaded but this
+  // versionId isn't in it) are distinct honest truths — no longer merged
+  // into one "denied" bucket.
+  const [state, setState] = React.useState(versionId && recordId ? 'loading' : 'empty');
+  const [name, setName] = React.useState(null);
+
+  React.useEffect(() => {
+    if (!versionId || !recordId) { setState('empty'); return; }
+    let cancelled = false;
+    setState('loading');
+    fetch(`/api/records/${encodeURIComponent(recordId)}/files`, { headers: devHeaders() })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) { setState('forbidden'); return; }
+        const files = await res.json();
+        if (cancelled) return;
+        // review m1: match against ALL versions (versionIds), not just
+        // currentVersionId — a superseded-but-real version must still resolve.
+        const match = Array.isArray(files)
+          ? files.find((f) => f && (
+            f.currentVersionId === versionId
+            || (Array.isArray(f.versionIds) && f.versionIds.includes(versionId))
+          ))
+          : null;
+        if (!match) { setState('notfound'); return; }
+        setName(match.originalName || null);
+        setState('resolved');
+      })
+      .catch(() => { if (!cancelled) setState('forbidden'); });
+    return () => { cancelled = true; };
+  }, [versionId, recordId]);
+
+  if (state === 'loading') {
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-xs)' }}>
+        …
+      </span>
+    );
+  }
+
+  if (state === 'empty') {
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+        —
+      </span>
+    );
+  }
+
+  if (state === 'forbidden') {
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+        Нет доступа
+      </span>
+    );
+  }
+
+  if (state === 'notfound' || !name) {
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+        Файл не найден
+      </span>
+    );
+  }
+
+  return (
+    <a
+      href={`/api/files/${encodeURIComponent(versionId)}/download`}
+      style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }}
+      title="Скачать файл"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {name}
+    </a>
   );
 }
 
@@ -751,12 +851,18 @@ export function CreateRecordDrawer({ open, onClose, onCreated, applicationId, re
               relation   → RelationPicker (async fetch of target records)
               collection → LineItemsField (repeatable row table)
               rollup     → ComputedReadout (read-only live aggregate)
-              scalar/enum → FieldControl (the unified inline control: text /
-                            number / checkbox / date / <select> with options)
+              scalar/enum/file → FieldControl (the unified inline control: text /
+                            number / checkbox / date / <select> with options;
+                            file (T-0579) dispatches internally to FileField)
             The structural editors need fetch/local state FieldControl must not
             own, so they stay as dedicated components — but they are selected by
             the SAME catalog the inbox renderer uses, closing the parallel
-            `inputKind`-dictionary path (spec §2). */}
+            `inputKind`-dictionary path (spec §2).
+            T-0579: FileField needs the CURRENT record's id to upload/list its
+            files (POST/GET /api/records/:recordId/files) — threaded onto the
+            field descriptor here (existingRecord.id in edit mode; undefined on
+            a not-yet-created record, which FileField surfaces as an honest
+            "save the record first" message rather than a silent no-op). */}
         {formFields.map((f) => {
           const { contractKind } = resolveFieldContract(f);
           if (contractKind === 'rollup') {
@@ -788,10 +894,13 @@ export function CreateRecordDrawer({ open, onClose, onCreated, applicationId, re
               />
             );
           }
+          const fieldWithRecordId = contractKind === 'file'
+            ? { ...f, recordId: isEdit ? existingRecord.id : undefined }
+            : f;
           return (
             <FieldControl
               key={f.key}
-              field={f}
+              field={fieldWithRecordId}
               value={values[f.key]}
               onChange={setVal}
               error={fieldErrors[f.key]}
@@ -1094,6 +1203,14 @@ function AppRecordsScreen() {
                           return (
                             <td key={c.key}>
                               <RelationCell targetId={String(data[c.key])} appId={appId} />
+                            </td>
+                          );
+                        }
+                        // T-0579: file cells resolve async — use FileCell (never a raw uuid).
+                        if (rendered === FILE_CELL_ASYNC) {
+                          return (
+                            <td key={c.key}>
+                              <FileCell versionId={String(data[c.key])} recordId={rec.id} />
                             </td>
                           );
                         }

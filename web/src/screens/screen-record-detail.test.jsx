@@ -53,6 +53,146 @@ describe('screen-record-detail — author display name (T-0608 пункт г)', 
   });
 });
 
+describe('screen-record-detail — FileFieldValue (T-0579, AC-9)', () => {
+  // FileFieldValue is a local (non-exported) component; per this file's own
+  // convention (see header docstring) behaviour is asserted structurally
+  // against the source, mirroring RelationFieldValue's existing test pattern.
+
+  it('renders the resolved file name as a download link to /api/files/:versionId/download (never a raw uuid)', () => {
+    expect(src).toContain('const downloadHref = `/api/files/${encodeURIComponent(versionId)}/download`');
+    expect(src).toContain('{meta.originalName || \'Скачать файл\'}');
+  });
+
+  it('requests the inline-disposition variant for preview (?disposition=inline)', () => {
+    expect(src).toContain('const previewHref = `${downloadHref}?disposition=inline`');
+  });
+
+  it('inline <img> preview is gated on isPreviewSafeMime AND a normalized image/* mime (review B1: registro-safe)', () => {
+    // Anchor AFTER the FileFieldValue function's own definition (not the file's
+    // header docstring at line ~412, which also mentions "<img>" in prose).
+    const fnStart = src.indexOf('function FileFieldValue(');
+    expect(fnStart).toBeGreaterThan(-1);
+    const idx = src.indexOf('<img', fnStart);
+    expect(idx).toBeGreaterThan(-1);
+    const precedingText = src.slice(fnStart, idx);
+    // review B1 fix-forward: the img/embed gate now reads from a normalized
+    // (trim+lowercase) local, not the raw meta.mime — so a registro-variant
+    // safe mime (e.g. "Image/PNG") still renders the preview.
+    // review B1-residual fix-forward: the local also strips any `;param`
+    // suffix, so a parameterized safe mime (e.g. "image/png;charset=binary")
+    // still renders the preview too.
+    expect(precedingText).toMatch(/previewSafe\s*&&\s*normalizedMime\.startsWith\('image\/'\)/);
+    expect(precedingText).toContain("normalizedMime = typeof meta.mime === 'string' ? meta.mime.trim().toLowerCase().split(';')[0].trim() : ''");
+    expect(src.slice(idx, idx + 200)).toContain('src={previewHref}');
+  });
+
+  it('inline <embed> preview (PDF) is gated on isPreviewSafeMime AND exactly application/pdf (normalized)', () => {
+    const fnStart = src.indexOf('function FileFieldValue(');
+    expect(fnStart).toBeGreaterThan(-1);
+    const idx = src.indexOf('<embed', fnStart);
+    expect(idx).toBeGreaterThan(-1);
+    const precedingText = src.slice(fnStart, idx);
+    expect(precedingText).toMatch(/previewSafe\s*&&\s*normalizedMime\s*===\s*'application\/pdf'/);
+    expect(src.slice(idx, idx + 200)).toContain('src={previewHref}');
+  });
+
+  it('isPreviewSafeMime excludes image/svg+xml (anti-XSS, mirrors the server allowlist)', () => {
+    // eslint-disable-next-line no-new-func -- structural extraction of a pure
+    // helper from the .jsx source (no DOM/React needed to exercise its logic;
+    // mirrors the source-scan convention already used in this file).
+    // The helper closes over PREVIEW_SAFE_IMAGE_SUBTYPES, so both const
+    // declarations must be extracted together.
+    const setMatch = src.match(/const PREVIEW_SAFE_IMAGE_SUBTYPES = new Set\(\[[^\]]*\]\);/);
+    const fnMatch = src.match(/function isPreviewSafeMime\(mime\) \{[\s\S]*?\n\}/);
+    expect(setMatch).not.toBeNull();
+    expect(fnMatch).not.toBeNull();
+    // eslint-disable-next-line no-new-func
+    const isPreviewSafeMime = new Function(`${setMatch[0]}\n${fnMatch[0]}; return isPreviewSafeMime;`)();
+    expect(isPreviewSafeMime('image/svg+xml')).toBe(false);
+    expect(isPreviewSafeMime('image/png')).toBe(true);
+    expect(isPreviewSafeMime('application/pdf')).toBe(true);
+    expect(isPreviewSafeMime('text/html')).toBe(false);
+    expect(isPreviewSafeMime('text/plain')).toBe(false);
+    expect(isPreviewSafeMime(undefined)).toBe(false);
+  });
+
+  // review B1-residual (blocking, second round): trim+lowercase alone missed
+  // two bypasses — (a) a mime carrying a parameter
+  // (`image/svg+xml;charset=utf-8`) survives normalization as-is, fails the
+  // exact `=== 'image/svg+xml'` compare, yet still passed a bare
+  // `startsWith('image/')` check; (b) `image/svg` (no `+xml`) was never
+  // excluded by that single negative check at all. Both are closed by
+  // param-stripping at the compare boundary AND a POSITIVE allowlist of
+  // concrete-safe image subtypes (mirrors src/http/files.ts's
+  // INLINE_SAFE_IMAGE_SUBTYPES / isInlineSafeMime).
+  it('isPreviewSafeMime strips mime parameters AND uses a positive image-subtype allowlist (review B1-residual)', () => {
+    const setMatch = src.match(/const PREVIEW_SAFE_IMAGE_SUBTYPES = new Set\(\[[^\]]*\]\);/);
+    const fnMatch = src.match(/function isPreviewSafeMime\(mime\) \{[\s\S]*?\n\}/);
+    expect(setMatch).not.toBeNull();
+    expect(fnMatch).not.toBeNull();
+    // eslint-disable-next-line no-new-func
+    const isPreviewSafeMime = new Function(`${setMatch[0]}\n${fnMatch[0]}; return isPreviewSafeMime;`)();
+
+    // [A] parameterized svg variants must still be denied.
+    expect(isPreviewSafeMime('image/svg+xml;charset=utf-8')).toBe(false);
+    expect(isPreviewSafeMime('image/svg+xml;x=1')).toBe(false);
+    expect(isPreviewSafeMime('image/SVG+xml;charset=utf-8')).toBe(false);
+
+    // [B] image/svg (no +xml suffix) must be denied.
+    expect(isPreviewSafeMime('image/svg')).toBe(false);
+    expect(isPreviewSafeMime('IMAGE/SVG')).toBe(false);
+
+    // Positive allowlist: concrete safe subtypes → true, including with a
+    // parameter on a SAFE mime (proves stripping isn't over-broad).
+    expect(isPreviewSafeMime('image/png;charset=binary')).toBe(true);
+    expect(isPreviewSafeMime('image/jpeg')).toBe(true);
+    expect(isPreviewSafeMime('image/gif')).toBe(true);
+    expect(isPreviewSafeMime('image/webp')).toBe(true);
+    expect(isPreviewSafeMime('application/pdf;charset=binary')).toBe(true);
+
+    // Never-safe non-image types stay excluded.
+    expect(isPreviewSafeMime('application/xhtml+xml')).toBe(false);
+  });
+
+  it('has an honest loading state (not a silently blank/frozen render)', () => {
+    expect(src).toMatch(/state === 'loading'/);
+  });
+
+  it('has honest, DISTINCT non-resolved states — empty / forbidden / notfound — never one conflated "denied" bucket (review m2)', () => {
+    // review m2: the original single 'denied' state conflated "no file
+    // attached" (not an access problem), "listing fetch failed" (403/network),
+    // and "listing loaded but this versionId isn't in it" (stale/foreign
+    // value) into one "— / Нет доступа" label. Each is now a distinct state
+    // with its own honest label.
+    expect(src).toContain("useState(versionId && recordId ? 'loading' : 'empty')");
+    expect(src).toMatch(/state === 'empty'/);
+    expect(src).toMatch(/state === 'forbidden'/);
+    expect(src).toMatch(/state === 'notfound' \|\| !meta/);
+    expect(src).toContain('Файл не загружен');
+    expect(src).toContain('Нет доступа');
+    expect(src).toContain('Файл не найден');
+  });
+
+  it('is wired into the detail card ONLY for file fields with an async-resolved value (formatCellValue sentinel), never eagerly for every value', () => {
+    expect(src).toContain("const isFile = f.type === 'file'");
+    expect(src).toContain('formatCellValue(val, f.type) === FILE_CELL_ASYNC');
+    expect(src).toContain('<FileFieldValue');
+  });
+
+  it('matches the stored value against ALL of a file\'s versions (versionIds), not just currentVersionId (review m1)', () => {
+    // A field's stored value is whatever fileVersionId was captured at upload
+    // time; a LATER "Заменить" re-upload on the same file advances
+    // currentVersionId but the old value is still a legitimate historical
+    // version. Matching only currentVersionId would falsely resolve it as
+    // not-found.
+    const idx = src.indexOf('function FileFieldValue(');
+    expect(idx).toBeGreaterThan(-1);
+    const fnBody = src.slice(idx, idx + 2000);
+    expect(fnBody).toMatch(/f\.currentVersionId === versionId/);
+    expect(fnBody).toMatch(/Array\.isArray\(f\.versionIds\) && f\.versionIds\.includes\(versionId\)/);
+  });
+});
+
 describe('screen-record-detail — delete (T-0568)', () => {
   it('DELETEs /api/records/:id (frozen contract), 204/404 both "gone"', () => {
     expect(src).toContain('/api/records/${encodeURIComponent(id)}');

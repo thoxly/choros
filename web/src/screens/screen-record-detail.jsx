@@ -25,7 +25,7 @@ import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDia
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { formatDate, formatError, formatJsonReadable, formatPersonName } from '../lib/format.js';
-import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel, computeComputedFieldValue } from './records-form.js';
+import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, FILE_CELL_ASYNC, deriveRecordLabel, computeComputedFieldValue } from './records-form.js';
 // T-0608 (пункт г): resolve record.created_by (an employee SLUG — for a
 // Keycloak-registered human, slug === the KC user UUID) to a display name.
 import { fetchEmployees } from '../forms/field-renderer.jsx';
@@ -395,6 +395,147 @@ function RelationFieldValue({ targetId, recordId, appId }) {
 }
 
 // ---------------------------------------------------------------------------
+// T-0579: FileFieldValue — resolves a fileVersionId to a download link + (for
+// preview-safe mime types) an inline preview, in the record detail card.
+//
+// Resolution: GET /api/records/:recordId/files (the same listing FileField and
+// FileCell consume) to get the display name + mime. Preview uses the inline-
+// disposition route (?disposition=inline) which the server allowlists to a
+// POSITIVE set of concrete-safe image subtypes (png/jpeg/gif/webp) and
+// application/pdf — everything else (including any svg variant) is
+// download-only.
+//
+// Honest states: loading / denied (not found in listing) / resolved (name link
+// + optional preview).
+// ---------------------------------------------------------------------------
+
+/** Preview-safe mime allowlist mirrored from src/http/files.ts (client display
+ * decision only — the SERVER re-validates and is the actual security boundary;
+ * this just decides whether to render an <img>/<embed> at all).
+ *
+ * T-0579 fix-forward (review B1): normalize (trim + lowercase) before
+ * comparing — a stored/served mime of `image/SVG+xml` must still be excluded
+ * here, mirroring isInlineSafeMime server-side.
+ *
+ * T-0579 fix-forward (review B1-residual, blocking): trim+lowercase alone
+ * missed two bypasses that the server-side hardening also closes: (a) a mime
+ * carrying a parameter — `image/svg+xml;charset=utf-8` survives
+ * normalization as-is, fails the exact `=== 'image/svg+xml'` compare, yet
+ * still passed a bare `startsWith('image/')` check; (b) `image/svg` (no
+ * `+xml`) was never excluded by that single negative check at all — browsers
+ * still render it as SVG. Both are closed by stripping the `;param` suffix
+ * at the comparison boundary AND switching to a POSITIVE allowlist of
+ * concrete safe image subtypes (mirroring INLINE_SAFE_IMAGE_SUBTYPES
+ * server-side) instead of a negative svg-exclusion — anything not
+ * enumerated (svg, svg+xml, any future/unknown subtype) is denied by
+ * construction. The two allowlists must agree so the client's rendering
+ * DECISION never claims "safe" for something the server denies as unsafe. */
+const PREVIEW_SAFE_IMAGE_SUBTYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function isPreviewSafeMime(mime) {
+  if (typeof mime !== 'string') return false;
+  const base = mime.trim().toLowerCase().split(';')[0].trim();
+  if (base.length === 0) return false;
+  return PREVIEW_SAFE_IMAGE_SUBTYPES.has(base) || base === 'application/pdf';
+}
+
+/**
+ * Inline file field value for the record detail card: name-as-download-link,
+ * plus an inline preview for image/*(non-svg)/pdf.
+ *
+ * @param {string} versionId  fileVersionId stored as the field value.
+ * @param {string} recordId   current record's id (listing fetch).
+ */
+function FileFieldValue({ versionId, recordId }) {
+  // review m2: distinct honest states instead of one "denied" bucket that
+  // conflated three different truths — 'empty' (no file attached at all,
+  // NOT an access problem), 'forbidden' (listing fetch itself failed —
+  // !res.ok, e.g. 403), 'notfound' (listing fetch succeeded but this
+  // versionId is not in it — could be a stale/foreign value; we don't invent
+  // a claim we can't verify, but at least don't call it "no access" when the
+  // listing DID load), 'loading', 'resolved'.
+  const [state, setState] = useState(versionId && recordId ? 'loading' : 'empty');
+  const [meta, setMeta] = useState(null); // { originalName, mime }
+
+  useEffect(() => {
+    if (!versionId || !recordId) { setState('empty'); return; }
+    let cancelled = false;
+    setState('loading');
+    fetch(`/api/records/${encodeURIComponent(recordId)}/files`, { headers: devHeaders() })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) { setState('forbidden'); return; }
+        const files = await res.json();
+        if (cancelled) return;
+        // review m1: match against ALL versions of the file (versionIds), not
+        // just the CURRENT one — a superseded-but-real version must still
+        // resolve to its file's name, not be treated as unresolvable.
+        const match = Array.isArray(files)
+          ? files.find((f) => f && (
+            f.currentVersionId === versionId
+            || (Array.isArray(f.versionIds) && f.versionIds.includes(versionId))
+          ))
+          : null;
+        if (!match) { setState('notfound'); return; }
+        setMeta({ originalName: match.originalName, mime: match.mime });
+        setState('resolved');
+      })
+      .catch(() => { if (!cancelled) setState('forbidden'); });
+    return () => { cancelled = true; };
+  }, [versionId, recordId]);
+
+  if (state === 'loading') {
+    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>…</span>;
+  }
+
+  if (state === 'empty') {
+    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>Файл не загружен</span>;
+  }
+
+  if (state === 'forbidden') {
+    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>Нет доступа</span>;
+  }
+
+  if (state === 'notfound' || !meta) {
+    return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>Файл не найден</span>;
+  }
+
+  const downloadHref = `/api/files/${encodeURIComponent(versionId)}/download`;
+  const previewHref = `${downloadHref}?disposition=inline`;
+  const previewSafe = isPreviewSafeMime(meta.mime);
+  // T-0579 fix-forward (review B1 / B1-residual): normalize AND strip any
+  // `;param` once for the image-vs-embed branch below too — previewSafe
+  // already normalizes+strips internally, but a registro-variant or
+  // parameterized safe mime (e.g. `Image/PNG`, `image/png;charset=binary`)
+  // must still pick the correct branch (not silently render neither preview
+  // element while previewSafe is true) — one normalized, param-stripped
+  // value used consistently everywhere it's compared.
+  const normalizedMime = typeof meta.mime === 'string' ? meta.mime.trim().toLowerCase().split(';')[0].trim() : '';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', alignItems: 'flex-start' }}>
+      <a href={downloadHref} style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }} title="Скачать файл">
+        {meta.originalName || 'Скачать файл'}
+      </a>
+      {previewSafe && normalizedMime.startsWith('image/') && (
+        <img
+          src={previewHref}
+          alt={meta.originalName || 'Превью файла'}
+          style={{ maxWidth: '320px', maxHeight: '320px', borderRadius: 'var(--chs-radius-2)', border: '1px solid var(--chs-color-border)' }}
+        />
+      )}
+      {previewSafe && normalizedMime === 'application/pdf' && (
+        <embed
+          src={previewHref}
+          type="application/pdf"
+          style={{ width: '100%', maxWidth: '480px', height: '360px', border: '1px solid var(--chs-color-border)', borderRadius: 'var(--chs-radius-2)' }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // RecordDetailScreen
 // ---------------------------------------------------------------------------
 
@@ -658,6 +799,10 @@ function RecordDetailScreen() {
                     const hasValue = val !== undefined && val !== null;
                     const isAsyncRelation = isRelation && hasValue &&
                       formatCellValue(val, f.type) === RELATION_CELL_ASYNC;
+                    // T-0579: file fields render name-link + inline preview, not raw uuid.
+                    const isFile = f.type === 'file';
+                    const isAsyncFile = isFile && hasValue &&
+                      formatCellValue(val, f.type) === FILE_CELL_ASYNC;
                     return (
                       <div key={f.key} style={fieldRowStyle}>
                         <span style={labelStyle}>{f.label}</span>
@@ -672,7 +817,14 @@ function RecordDetailScreen() {
                                   appId={appId}
                                 />
                               )
-                              : formatCellValue(val, f.type)}
+                              : isAsyncFile
+                                ? (
+                                  <FileFieldValue
+                                    versionId={String(val)}
+                                    recordId={record.id}
+                                  />
+                                )
+                                : formatCellValue(val, f.type)}
                         </span>
                       </div>
                     );

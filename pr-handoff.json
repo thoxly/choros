@@ -1,7 +1,8 @@
 {
-  "task_id": "T-0580",
+  "task_id": "T-0579",
   "status": "pr_open",
-  "branch": "task/T-0580-scalar-formulas",
+  "branch": "task/T-0579-file-field",
+  "pr_url": "",
   "ci_local": {
     "build": true,
     "lint": true,
@@ -9,89 +10,86 @@
     "tests": true,
     "fitness": true
   },
-  "gate_results": {
-    "build": { "command": "npm run build", "exit_code": 0 },
-    "tsc_noEmit": { "command": "tsc --noEmit", "exit_code": 0 },
-    "vitest_server": {
-      "command": "npx vitest run (root)",
-      "exit_code": 0,
-      "test_files": "267 passed, 2 skipped (269)",
-      "tests": "5191 passed, 10 skipped (5201)"
-    },
-    "vitest_web": {
-      "command": "npx vitest run (web/)",
-      "exit_code": 0,
-      "test_files": "64 passed (64)",
-      "tests": "1782 passed (1782)"
-    },
-    "fitness": { "command": "npm run fitness", "exit_code": 0 },
-    "fitness_db": {
-      "command": "DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npm run fitness:db",
-      "note": "run solo (not parallel) per known doc-summary.db flake under parallelism; real PG :55432",
-      "exit_code": 0,
-      "test_files": "114 passed (114)",
-      "tests": "1131 passed (1131)"
-    },
-    "anti_case_lock": {
-      "command": "bash ci/checks/anti-case-lock.sh",
-      "exit_code": 0,
-      "aggregate": 19,
-      "baseline": 24,
-      "note": "unchanged by this fix — R-1 diff touches only formula-parser.ts depth accounting + its tests, no D-064 §5 literal"
-    }
-  },
   "files_changed": [
-    "src/core/formula-contract.ts",
-    "src/core/formula-parser.ts",
-    "src/core/formula-typecheck.ts",
-    "src/core/formula-cycles.ts",
-    "src/core/formula-eval.ts",
-    "src/core/formula-schema-gate.ts",
-    "src/core/rollup-contract.ts",
-    "src/db/derived-fields-dao.ts",
-    "src/http/registry-defs.ts",
-    "ci/checks/formula-evaluator-isolation.sh",
-    "ci/checks/db/formula-derived.db.test.ts",
-    "package.json",
-    "src/core/__tests__/formula-contract.test.ts",
-    "src/core/__tests__/formula-parser.test.ts",
-    "src/core/__tests__/formula-typecheck.test.ts",
-    "src/core/__tests__/formula-cycles.test.ts",
-    "src/core/__tests__/formula-eval.test.ts",
-    "src/core/__tests__/formula-limits.test.ts",
-    "src/core/__tests__/formula-schema-gate.test.ts",
-    "src/__tests__/rollup-contract.test.ts",
-    "src/__tests__/derived-fields-formula-order.test.ts",
-    "src/__tests__/registry-defs-formula-gate.test.ts",
     "web/src/screens/apps-schema.js",
     "web/src/screens/apps-schema.test.js",
-    "web/src/screens/screen-app-schema.jsx",
+    "web/src/forms/field-contract.js",
+    "web/src/forms/field-contract.test.js",
+    "web/src/forms/field-renderer.jsx",
+    "web/src/forms/field-renderer-file.test.jsx",
     "web/src/screens/records-form.js",
     "web/src/screens/records-form.test.js",
     "web/src/screens/screen-app-records.jsx",
-    "web/src/screens/screen-record-detail.jsx"
+    "web/src/screens/screen-app-records.test.jsx",
+    "web/src/screens/screen-record-detail.jsx",
+    "web/src/screens/screen-record-detail.test.jsx",
+    "web/src/screens/screen-inbox.jsx",
+    "web/src/screens/screen-inbox.test.jsx",
+    "src/http/files.ts",
+    "src/__tests__/files-http.test.ts",
+    "src/core/postgres/pgFileStore.ts",
+    "ci/checks/file-field-catalog-isolation.sh",
+    "ci/checks/db/file-field-cross-tenant.test.ts",
+    "e2e/journeys/types.ts",
+    "e2e/journeys/loader.ts",
+    "e2e/journeys/loader.test.ts",
+    "e2e/journeys/runner.ts",
+    "e2e/journeys/ux-file-field.ux.journey.ts",
+    "e2e/journeys/README.md",
+    "package.json"
   ],
   "deviations_from_adr": [
-    "ADR §2.6/§4 D2 preferred importing the compiled core module into the web bundle, with a shared-copy fallback under fitness-parity ('шаренная копия под fitness-паритетом'). The literal pattern the ADR text implies (a `.js`-suffixed import specifier resolving the sibling `.ts` source, as commented in web/src/forms/Floor2Viewer.jsx) does NOT actually resolve under this repo's vite/vitest toolchain — verified empirically (a `.js`-suffixed import of src/core/formula-parser.js failed with 'Cannot find module' under both `vitest run` and `vite build`; FormDocumentRenderer.test.jsx's own comment independently confirms the Floor2Viewer.jsx import is a 'build-only twin' its unit tests deliberately keep off the test module graph for the same reason). The ACTUAL working pattern was already established in this exact file's own test (apps-schema.test.js imports `../../../src/core/record-schema-validator.ts` with the explicit `.ts` extension) — switching apps-schema.js and records-form.js to that pattern resolves correctly in both vitest and the production `vite build`. This is the STRONGER form of the ADR's own preference (one true source, zero copy, zero parity-check surface to maintain) rather than a weaker fallback — no shared-copy web-mirror files exist in the final diff.",
-    "FF-1's denylist item 'обратных кавычек с ${' (backtick-with-interpolation) as a literal blanket ban produced false positives against every ordinary error-message string the new formula-*.ts files legitimately build (e.g. a template literal like `formula references unknown field \"${ast.field}\"`). Narrowed the bash-check's actual grep pattern to the injection-relevant shape only — a template literal IMMEDIATELY INVOKED as a function (the real template-tag-abuse vector, e.g. `` `...`() ``) — while every other FF-1 token (eval(/new Function/Function(/require(/import(/vm/process./globalThis/__proto__/child_process/constructor.constructor) is unchanged from the ADR spec. Documented the narrowing in the check's header comment; added both a positive self-test (the narrowed pattern still fires on a genuine invoked-template sample) and a negative self-test (an ordinary message-building template literal does NOT false-positive) so the narrowing itself is provably correct, not just asserted."
+    "AC-10/FF-CELL-NO-UUID (ADR §2.5): ADR-текст для formatCellValue(value,'file') читается как синхронный 'originalName | fallback id' (по паттерну person, который честно фолбэчит на id). Реализовано СТРОЖЕ: введён FILE_CELL_ASYNC-сентинел (records-form.js, зеркало RELATION_CELL_ASYNC) — formatCellValue НИКОГДА не возвращает сырой fileVersionId, только сентинел/имя/«—»; имя резолвится асинхронно через листинг записи (GET /api/records/:id/files) в новых компонентах FileCell (список) и FileFieldValue (карточка), по паттерну RelationCell/RelationFieldValue. Причина: AC-9/AC-10/FF-CELL-NO-UUID явно требуют «никогда не показывать сырой uuid», а person может честно фолбэчить на id (не такое же требование в его AC), file — нет. Это ужесточение приёмочного критерия в духе §4.3 (formatCellValue → resolved originalName), не ослабление и не расхождение по объёму.",
+    "Тестовый инфраструктурный фикс (src/__tests__/files-http.test.ts): существующий helper httpGet() отбрасывал query-string (path: parsed.pathname без parsed.search) — до T-0579 ни один тест этого файла не использовал query-параметры, поэтому баг был латентным. Без правки AC-11-тесты (?disposition=inline) не могли пройти ни при какой реализации маршрута (клиент их физически не отправлял бы). Правка аддитивна (path: pathname+search); все 19 существовавших тестов файла остаются зелёными без изменения ожиданий (перепроверено).",
+    "FIX-FORWARD (review B1): GET /api/records/:recordId/files response gains a `versionIds: string[]` field (PgFileStore.listFilesByRecord + FakeFileStore mirror) — EVERY version id a file has ever had, not just currentVersionId. Additive, non-breaking (existing consumers ignore unknown fields); required to close review m1 honestly (a superseded-but-real fileVersionId must still resolve to its file's name, not read as 'not found').",
+    "FIX-FORWARD (review C2/AC-15): the e2e journey-runner's closed StepAction vocabulary had no way to drive a native <select> (Playwright's fill() throws on it — verified empirically) or capture a value from the field-type dropdown needed to author a file-typed field for the new ux-file-field journey. Added ONE new closed-vocabulary action, `selectOption` (types.ts/loader.ts/runner.ts/loader.test.ts/README.md), per this file's own stated 'reviewed extension' convention — not an ad-hoc escape hatch. Also added `combobox` to the RoleName union (native <select> accessible role) so the new journey can target the dropdown by role+name.",
+    "FIX-FORWARD (review B1-residual, blocking, 2nd round): adversarial re-check of the review-B1 fix found the registro-only normalization (trim+lowercase, exact `=== \"image/svg+xml\"` exclusion) still had two live stored-XSS bypasses on BOTH the server read-time boundary (isInlineSafeMime, src/http/files.ts) and its client mirror (isPreviewSafeMime, web/src/screens/screen-record-detail.jsx): [A] a stored mime carrying a parameter (`image/svg+xml;charset=utf-8`, `image/svg+xml;x=1`) survives trim+lowercase AS-IS, fails the exact svg+xml compare, yet still passes a bare `startsWith(\"image/\")` → inline. [B] `image/svg` (no `+xml` suffix) was never covered by the single negative exclusion at all — browsers still render it as SVG. Threat model: the read-time boundary must hold independent of how the mime got into storage — src/core/document-render.ts's addVersion calls (text/html, text/csv, ...) are a SECOND writer that bypasses the upload route's own param-stripping, and `image/svg` needs no parameter to begin with, so any seed/import/writer storing either variant would otherwise leak. FIXED by (1) stripping any `;param` suffix at the comparison boundary on BOTH server and client (`mime.trim().toLowerCase().split(\";\")[0].trim()`), and (2) replacing the negative svg-exclusion with a POSITIVE allowlist of concrete-safe image subtypes (image/png, image/jpeg, image/gif, image/webp — INLINE_SAFE_IMAGE_SUBTYPES server-side, PREVIEW_SAFE_IMAGE_SUBTYPES client-side); application/pdf unchanged (inline, now also param-stripped). Any image/* NOT on the allowlist — svg, svg+xml, any parameterized variant, any future/unknown subtype — is denied by construction, closing [A]/[B] and any not-yet-imagined sibling in one move rather than by an exhaustive, ever-growing blocklist."
   ],
-  "resolutions": [
-    "R-1 (BLOCKING, REVIEW): formula-parser.ts's authoring-time assertDepth counted GRAMMATICAL recursive-descent frames (expr→term→factor→primary, ~4 frames per value-nesting level) while formula-eval.ts's evalNode runtime guard counts REAL AST depth (recursion only through unary.operand/binary.left/binary.right) — the two gates measured DIFFERENT quantities and diverged in both directions: (a) a left-deep flat chain (`price + 1 + ... + 33`, 1 ref, 161 chars, well under the 500-char/32-ref limits) was ACCEPTED at authoring (grammatical frame count still under the old threshold) but its real AST depth (34) exceeded FORMULA_MAX_DEPTH=32, so formula-eval.ts's evalNode silently returned null at runtime instead of 1561 — an AC-8/NF-5 violation (accepted-at-authoring must imply computed-at-runtime, never null-by-depth); (b) the mirror over-strictness — `((((((((1))))))))` (8 parens, real AST depth 1, since parsePrimary's `(`-branch returns `inner` unchanged and adds no AST node) was FALSELY REJECTED as max_depth_exceeded because 8 parens cost 8×4=32+ grammatical frames. FIX (option 1 from the two offered — cleanest, no evaluator rewrite): parseFormula (formula-parser.ts) now measures REAL AST depth via the existing astDepth(ast) helper (the SAME function formula-eval.ts's header comment already named as the runtime guard's semantic twin) in a single post-parse check, and rejects with 'max_depth_exceeded' + a human message if astDepth(ast) > FORMULA_MAX_DEPTH. The old grammatical-frame counter (assertDepth) is KEPT but demoted to a pure anti-stack-overflow backstop, renamed in intent via RECURSION_FRAME_GUARD = FORMULA_MAX_DEPTH*8 (a generous multiple, deliberately NOT equal to 32) so it can never fire before the real depth contract does — it only protects the JS call stack against a pathological input that manages to slip past the length gate. Invariant restored: astDepth(ast) is now bounded ≤ FORMULA_MAX_DEPTH for every AST parseFormula returns ok:true for, which is EXACTLY the quantity evalNode's own guard checks — so the two gates can no longer disagree by construction (there is only one depth contract now, checked once, using one function, referenced by both files' own doc comments as the source of truth).",
-    "R-1 test fix: the pre-existing formula-limits.test.ts / formula-parser.test.ts depth tests encoded the OLD (buggy) invariants as assertions — one test asserted a ~166-operand flat chain 'accepts... right up to FORMULA_MAX_LENGTH' (that chain's real AST depth is ~166, so it now correctly REJECTS at authoring — the test was rewritten to assert the rejection, per REVIEW's own framing: 'third [accepted+nulled] must not exist'), another asserted 40/50 levels of redundant parens are REJECTED as over-depth (real AST depth 1 for any paren-wrap — the test was rewritten to assert ACCEPTANCE). New tests added (formula-limits.test.ts 'authoring/runtime depth AGREEMENT' describe block): (1) REVIEW's exact repro (`price + 1 + ... + 33`) is rejected at authoring, never accepted-then-nulled; (2) REVIEW's exact false-positive repro (`((((((((1))))))))`) is accepted and evaluates to 1; (3) exact-boundary tests — a flat chain of exactly FORMULA_MAX_DEPTH operands (real astDepth===32) is accepted and computes the correct sum, one operand more (astDepth===33) is rejected with error 'max_depth_exceeded' and a non-empty human message; (4) a property check over operand counts 1..40 asserting NO accepted formula ever evaluates to null purely from the depth guard."
-  ],
-  "tails": [
-    "R-2 (MINOR, REVIEW, NOT fixed in this v1 — deliberately deferred): numbers beyond Number.MAX_SAFE_INTEGER silently lose precision (e.g. formatted as 1e+48-style scientific notation rather than an exact integer), and ordinary binary-float artifacts occur on decimal arithmetic (0.1 + 0.2 → 0.30000000000000004) — both are INHERENT to using the JS double-precision number type as the formula evaluator's sole numeric representation (formula-eval.ts's EvalValue 'number' tag), not a bug introduced by this task. Result-formatting/display rounding is explicitly out of scope for this task (O-2 in the ADR) — the evaluator returns the raw double, and any decimal-precision presentation is a display-layer concern. Flagging this as a KNOWN v1 LIMITATION for a future money-precision task (likely needs a decimal/BigInt-backed numeric type or a fixed-point money representation threaded through formula-eval.ts's number arithmetic, analogous to how x-money fields are already special-cased elsewhere in the schema — NOT a formula-parser/eval depth concern, unrelated to the R-1 fix in this build)."
-  ],
-  "ac_coverage": {
-    "AC-8": {
-      "status": "covered",
-      "note": "AC-8 requires: formula length>500 OR real AST depth>32 OR >32 refs → rejected at authoring; a corrupted/oversized AST reaching evalFormula directly (bypassing parseFormula) → null, never a stack overflow. Post-R-1-fix, 'AST depth' in AC-8 is now enforced as the SAME quantity in both parseFormula (formula-parser.ts, astDepth(ast) post-parse check) and evalNode (formula-eval.ts, unchanged recursive walk-depth guard) — previously these measured different quantities (see resolutions[0]), which is exactly what let a formula slip through 'accepted at authoring, null at runtime' despite AC-8's own wording. Tests: src/core/__tests__/formula-limits.test.ts ('authoring-time AST depth limit' + 'authoring/runtime depth AGREEMENT' describe blocks) and src/core/__tests__/formula-parser.test.ts ('parseFormula — limits (FP-3)' describe block) — both include the exact REVIEW repro (33-operand chain, rejected) and the exact false-positive repro (8-paren wrap, accepted+correct), plus the precise FORMULA_MAX_DEPTH / FORMULA_MAX_DEPTH+1 boundary and a property check across a range of operand counts proving no accepted formula ever nulls purely from depth."
-    }
-  },
+  "blocked_reason": "",
   "friction_events": [
-    "FE-T0580-1: root node_modules and web/node_modules were both fully absent in the freshly provisioned worktree (not merely a stale lockfile) — ran `npm install` in both directories to obtain vitest/tsc/eslint/vite binaries. package-lock.json in both places verified BYTE-IDENTICAL after install via `git status --short` (clean on both).",
-    "FE-T0580-2: the ADR's literally-worded preferred web-core-import pattern does not resolve under this repo's toolchain (see deviations_from_adr above for the full explanation) — the working alternative (explicit `.ts` extension on the specifier) was discovered by reading an existing test file's own import line rather than guessing, then verified against both the vitest runner and a real `vite build` before committing to it.",
-    "FE-T0580-3: PUT /api/registry-defs/:id resolves its DB pool (crudDeps.pool ?? poolHint ?? a lazy singleton that throws 503 without DATABASE_URL) BEFORE any request-body validation runs (pre-existing code order, unrelated to this task) — the new HTTP-level formula-gate unit tests for PUT needed an injected `poolHint` (a stub pool wired to throw if ever queried) to avoid a spurious 503 masking the 400 the formula gate is supposed to produce; using a throw-on-use stub also PROVED (rather than merely asserted) that the gate rejects an invalid formula before any real DB query is attempted.",
-    "FE-T0580-4 (BUILD/fix-forward, R-1): DATABASE_URL is not exported in the ambient shell — `npm run fitness:db` must be invoked with DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros explicitly set inline (per ci/checks/db/_helpers.ts's own migratorUrl() contract) or every db.test.ts silently skips with 'DATABASE_URL not set' rather than failing loudly — ran once without it (all skipped, false-green) then re-ran solo with the URL set to get the real 114-file/1131-test result."
+    "FE-T0579-1: свежий worktree — ни в корне, ни в web/ не было node_modules; выполнил npm install --maxsockets=3 в обоих корнях перед сборкой (известный паттерн из памяти фабрики).",
+    "FE-T0579-2: тестовый helper httpGet() в src/__tests__/files-http.test.ts терял query-string (path: parsed.pathname без .search) — скрытый баг тестовой инфраструктуры, вскрытый только новыми AC-11 (?disposition=inline) тестами; см. deviations_from_adr. Пофикшено аддитивно, регресс существующих 19 тестов файла проверен.",
+    "FE-T0579-3: первая версия fitness-гейта FF-CATALOG (ci/checks/file-field-catalog-isolation.sh) ложно-положительно ловила легитимное использование `contractKind === 'file'` в screen-app-records.jsx (нужно ТОЛЬКО чтобы прокинуть recordId в field-дескриптор перед вызовом единого <FieldControl>, не для выбора другого компонента-рендерера). Заменил grep-предикат на awk-паттерн, который ищет именно форму «contractKind===file» → «return (<НЕ-FieldControl»; проверено адверс-пробой (искусственно вставленный параллельный диспатч детектится, легитимный код — не детектится, ложных срабатываний нет).",
+    "FE-T0579-4 (fix-forward): the test tier for web/** is vitest 'node' environment with NO jsdom (web/vitest.config.js — explicit, documented architecture decision: 'no jsdom overhead, honest'). This means (a) React hooks (useState/useEffect) cannot be exercised by calling a component function directly outside a real render — verified empirically ('Invalid hook call' error) — and (b) there is no DOM to dispatch a real change-event with a File on an <input type=file>. Resolved AC-7/M2 by extracting the upload's core logic into a standalone, React-free, exported async function (uploadFileToRecord in field-renderer.jsx) that IS directly testable with a real `File` (Node 22 native global) + mocked fetch — genuinely exercises the request shape (method/headers/body) and the replace-flow (2nd call returns a new versionId), without needing jsdom or react-test-renderer (neither is installed; adding jsdom was judged out of proportion for a fix-forward pass given the repo's stated zero-dep-growth culture — see memory demiurge-conventions).",
+    "FE-T0579-5 (fix-forward, C2/AC-15): confirmed empirically (headless Chromium probe) that Playwright's locator.fill() throws 'Element is not an <input>, <textarea> or [contenteditable] element' on a native <select> — the field-type dropdown ('Тип поля', screen-app-schema.jsx) needed for the new file-field journey could not be driven by the existing `fill` action. Added a minimal `selectOption` action to the shared journey-runner vocabulary (see deviations_from_adr) rather than leave the journey undriveable."
+  ],
+  "spec_ref": "docs/specs/T-0579-file-field.spec.md",
+  "adr_ref": "docs/design/T-0579-file-field.adr.md",
+  "gate_results": {
+    "build_server": "green — npm run build (tsc + seed/tsconfig) exits 0 (re-verified after B1-residual fix)",
+    "build_web": "green — cd web && npm run build (vite build) exits 0, 523 modules transformed (re-verified after B1-residual fix)",
+    "typecheck": "green — npx tsc --noEmit exits 0, 0 errors (re-verified after B1-residual fix)",
+    "lint_server": "green — npx eslint src/http/files.ts src/core/postgres/pgFileStore.ts src/__tests__/files-http.test.ts e2e/journeys/*.ts exits 0 (1 pre-existing unrelated warning in e2e/journeys/runner.ts, untouched line)",
+    "lint_web_touched_files": "warnings-only, pre-existing infra gap: web/** has no matching eslint flat-config entry (root eslint.config.js scopes only src/**/*.ts) and web/package.json's own lint script references a wrong path (`eslint web/src` run from inside web/) wrapped in `|| true` — both pre-existing, unrelated to this change, unchanged from the prior BUILD pass",
+    "vitest_server": "green — npx vitest run src/__tests__/files-http.test.ts: 48/48 passed (was 36; +12 new B1-residual tests: 6 param/no-+xml svg-bypass regressions [A]/[B], 1 xhtml+xml exclusion, 1 param-stripping positive on png, 1 param-stripping positive on pdf, 3 positive-allowlist coverage for jpeg/gif/webp)",
+    "vitest_web": "green — cd web && npx vitest run src/screens/screen-record-detail.test.jsx src/forms/field-renderer-file.test.jsx: 39/39 passed (screen-record-detail.test.jsx 19, +1 net after B1-residual: 1 existing assertion updated for the new param-stripped normalizedMime literal, 1 new isPreviewSafeMime B1-residual behavioral test with 12 assertions covering [A]/[B]/positive-allowlist/param-stripping-not-over-broad; field-renderer-file.test.jsx 20, untouched — no mime-safety logic there)",
+    "fitness_static": "green — npm run fitness exits 0 (re-verified after B1-residual fix; full chain incl. embedded npm run build); anti-case aggregate 19 (baseline 24, unchanged by this pass — grep did NOT grow); file-field-catalog-isolation.sh (FF-CATALOG/FF-UPLOAD-ROUTE-ONLY) PASS",
+    "fitness_db": "green — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros; npm run fitness:db (solo, not parallel, re-verified after B1-residual fix): 114 test files passed, 1128 tests passed, 0 failed"
+  },
+  "ac_coverage": {
+    "AC-1": "apps-schema.test.js T-0579 block — FIELD_TYPES/FIELD_TYPE_VALUES/validateField",
+    "AC-2": "apps-schema.test.js — buildRecordSchema x-file emit",
+    "AC-3": "apps-schema.test.js + records-form.test.js — parseRecordSchema/schemaToFormFields round-trip + backward-compat (no x-file → not file)",
+    "AC-4": "field-contract.test.js — contractKindForFieldType/resolveFieldContract",
+    "AC-5": "apps-schema.test.js — validateRecordSchemaDefinition accepts x-file directly (validator untouched)",
+    "AC-6": "field-renderer-file.test.jsx — FieldControl dispatches to FileField, not readout/text-input",
+    "AC-7": "RESOLVED (review M2): uploadFileToRecord extracted as a standalone React-free async function (field-renderer.jsx) and genuinely exercised in field-renderer-file.test.jsx — real `File` objects, mocked fetch, asserts POST url/method/headers(Content-Type/X-File-Name)/body, onChange receives versionId, AND the 'Заменить' replace-flow (2nd upload call → new versionId). No longer source-grep-only.",
+    "AC-8": "records-form.test.js — validateRecordValues required/optional file branches",
+    "AC-9": "STRENGTHENED (review C1): screen-record-detail.test.jsx FileFieldValue block — behavioral test of the extracted isPreviewSafeMime helper (svg-exclusion, image/pdf allow) + structural tests confirming preview gating reads a NORMALIZED mime (review B1) + honest empty/forbidden/notfound states (review m2) + versionIds match (review m1). Full DOM render of the async fetch→state transition is NOT exercised (see tails — vitest web tier has no jsdom, verified empirically hooks cannot run outside a real render).",
+    "AC-10": "records-form.test.js formatCellValue file branch (FILE_CELL_ASYNC, never raw uuid) + schemaToColumns",
+    "AC-11": "files-http.test.ts — inline for png/pdf, attachment for svg/html/txt/no-param, PLUS (review B1) 6 registro-variant svg cases + 1 registro-variant-safe-image positive case, PLUS (review B1-residual, this pass — CLOSED) [A] parameterized-svg bypass (`image/svg+xml;charset=utf-8`, `;x=1`, uppercase+param) → attachment (6 it.each cases); [B] `image/svg` (no +xml) and `IMAGE/SVG` → attachment (covered in the same it.each); positive-side param-stripping is NOT over-broad — `image/png;charset=binary` → inline, `application/pdf;charset=binary` → inline; positive allowlist is a REAL allowlist, not startsWith('image/') in disguise — image/jpeg, image/gif, image/webp each independently → inline; application/xhtml+xml → attachment (never-safe non-image, unaffected by the allowlist change). Server (isInlineSafeMime/INLINE_SAFE_IMAGE_SUBTYPES) and client mirror (isPreviewSafeMime/PREVIEW_SAFE_IMAGE_SUBTYPES, screen-record-detail.jsx + .test.jsx) both fixed and covered — fix is a POSITIVE allowlist (png/jpeg/gif/webp + pdf) with param-stripping at the comparison boundary, not an extended negative blocklist, so [A]/[B] and any future SVG-like/unknown subtype are denied by construction.",
+    "AC-12": "files-http.test.ts — resolver deny → 403 even with ?disposition=inline (regression)",
+    "AC-13": "files-http.test.ts — cross-tenant actor → 404 even with ?disposition=inline (regression); PLUS NEW ci/checks/db/file-field-cross-tenant.test.ts (live Postgres) proving a tenant-A record carrying tenant-B's fileVersionId as an opaque string value is completely inert at read time (PgFileStore.getVersion under tenant A sees nothing)",
+    "AC-14": "ci/checks/anti-case-lock.sh green (verified standalone + as part of npm run fitness); aggregate unchanged (19, baseline 24)",
+    "AC-15": "RESOLVED (review C2): e2e/journeys/ux-file-field.ux.journey.ts added (login → create app → author a file-typed field via the NEW selectOption action → create-record drawer shows FileField's Empty state (real <input type=file>, human label, no raw key/uuid) → submit → reopen for edit → upload control is present and NOT disabled with a real recordId). Validated structurally (loader.validateJourney, all 9 journey files incl. this one pass). NOT run live against a deployed stand in this pass (requires the dev server + Postgres + Flowable stack) — see tails. A full upload-attach-and-see-populated round trip is out of scope (setInputFiles vocabulary addition, flagged as a tail).",
+    "AC-16": "traceability table in ADR §7 followed literally; file-field-catalog-isolation.sh (FF-CATALOG/FF-UPLOAD-ROUTE-ONLY) statically guards against a second permission mechanism / parallel renderer"
+  },
+  "tails": [
+    "B1-residual (this pass): CLOSED. Adversarial re-check of the prior review-B1 fix found two live stored-XSS bypasses surviving the registro-only normalization: [A] a stored mime carrying a parameter (`image/svg+xml;charset=utf-8`) fails the exact `=== \"image/svg+xml\"` compare but still passes `startsWith(\"image/\")` → inline; [B] `image/svg` (no `+xml`) was never covered by that single negative exclusion. Both closed on the server (src/http/files.ts isInlineSafeMime) and its client mirror (web/src/screens/screen-record-detail.jsx isPreviewSafeMime) by (1) stripping any `;param` suffix at the comparison boundary and (2) replacing the negative svg-exclusion with a POSITIVE allowlist of concrete-safe image subtypes (png/jpeg/gif/webp) — anything not enumerated (including any future SVG-like/unknown subtype) is denied by construction. 12 new regression tests added (files-http.test.ts: 6 param/no-+xml bypass cases, 1 xhtml+xml, 2 param-stripping-not-over-broad positives on png/pdf, 3 positive-allowlist coverage jpeg/gif/webp; screen-record-detail.test.jsx: 1 behavioral test with 12 assertions, 1 existing assertion updated for the new normalizedMime literal). Still NOT run as a live browser smoke test against a deployed stand in this pass (see the pre-existing tail below re: FsObjectStore/dev runtime target) — recommend visually confirming on the dev stand that uploading a real .svg or .svg with a spoofed `image/svg;charset=...` header still forces download, not inline render.",
+    "AC-9/AC-15 residual: the vitest web tier is a documented, intentional 'node' environment with NO jsdom (web/vitest.config.js: 'no jsdom overhead, honest') and neither jsdom nor react-test-renderer is installed. Verified empirically that calling a hooks-bearing component function directly throws ('Invalid hook call') — so FileFieldValue's/FileCell's/FileField's async fetch→setState transitions cannot be exercised end-to-end at the unit level without adding a new dependency (judged out of proportion for a fix-forward pass given the repo's zero-dep-growth culture). Mitigated for AC-7 by extracting the upload's pure logic (uploadFileToRecord) into a directly-testable function; AC-9's preview-safety logic is fully covered via the extracted isPreviewSafeMime helper. The REMAINING gap is the fetch/setState wiring itself (loading→resolved/notfound/forbidden transitions) — only structurally asserted, not behaviorally executed. Recommend: either add jsdom scoped to a new vitest workspace project for exactly this class of component, or a live browser smoke pass on the dev stand.",
+    "AC-15: e2e/journeys/ux-file-field.ux.journey.ts was authored and structurally validated (loader.validateJourney) but NOT run against a live deployed Choros stand in this BUILD pass (no dev server/Postgres/Flowable available in this worktree session). Recommend running `npm run acceptance` (or the journeys-only subset) against the dev stand before/during acceptance to confirm it actually goes green end-to-end, not just parses.",
+    "AC-15: the journey covers Empty (create-drawer, no recordId) and 'control present + enabled' (edit-drawer, real recordId) states honestly, but does NOT drive an actual file attach (Playwright's `setInputFiles()` — a different interaction class than the existing fill/selectOption/click vocabulary) — so the Populated/Loading states and the full upload→preview round trip are NOT covered by this journey. Adding `setInputFiles` as a further closed-vocabulary action (binary fixture handling, MIME control for the anti-XSS svg-exclusion path) is flagged as follow-up, not done here.",
+    "The FsObjectStore/dev runtime target (per ADR §9) was not exercised end-to-end against a live running server in this fix-forward pass either (unit + files-http.test.ts route-level tests, the new ci/checks/db/file-field-cross-tenant.test.ts against live Postgres, and the new e2e journey file — but the journey itself was not RUN live). Recommend a live smoke pass on the dev stand before/during acceptance, covering: upload a real image → inline preview renders; upload a real .svg → forced attachment/no inline render (visual confirmation of the B1 fix, not just header assertions); 'Заменить' on a saved record → old fileVersionId still resolves (m1) in the record-detail card.",
+    "m3 (UX nits, minor, not addressed in this pass — genuinely low-priority/cosmetic, deferred): focus-ring on 'Заменить' via :focus-within + --chs-color-focus-ring; a Russian caption for the empty native file input instead of the browser-default placeholder; vertical centering (display:flex; align-items:center) on the chs-input download-link row. None of these affect correctness/security; flagging honestly rather than silently dropping per the review's own 'дёшево' framing — did not implement to keep this fix-forward pass focused on B1/M1/M2/C1/C2 and avoid touching visually-adjacent code without a chance to verify in-browser."
   ]
 }

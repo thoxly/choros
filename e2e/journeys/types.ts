@@ -57,7 +57,7 @@ export interface Locator {
 }
 
 /** ARIA roles the journeys use (kept narrow on purpose — extend when needed). */
-export type RoleName = "button" | "dialog" | "link" | "textbox" | "heading" | "checkbox";
+export type RoleName = "button" | "dialog" | "link" | "textbox" | "heading" | "checkbox" | "combobox";
 
 /** WCAG conformance level for checkContrast. */
 export type WcagLevel = "AA" | "AAA";
@@ -92,11 +92,22 @@ export interface Step {
   /** goto: the path to navigate to (relative to baseURL), e.g. "/processes". */
   readonly path?: string;
 
-  // --- click / fill / expect* (element-targeting actions) ---------------
+  // --- click / fill / selectOption / expect* (element-targeting actions) --
   /** The element this step acts on / asserts. */
   readonly target?: Locator;
   /** fill: the value to type into the targeted input ({{slot}} interpolated). */
   readonly value?: string;
+  /**
+   * selectOption (T-0579, review C2): the OPTION VALUE to choose in a native
+   * <select> ({{slot}} interpolated). Playwright's `fill()` throws on a
+   * <select> ("Element is not an <input>, <textarea> or [contenteditable]
+   * element") — verified empirically — so a distinct action is needed for
+   * the field-type dropdown (screen-app-schema.jsx's "Тип поля" <select>,
+   * used to author a `file`-typed field for the FileField journey). Kept
+   * narrow: exactly one new closed-vocabulary action, per this file's own
+   * "reviewed extension" convention — not an ad-hoc escape hatch.
+   */
+  readonly optionValue?: string;
 
   // --- click + waitForResponse (a click that triggers a write) -----------
   /** When set, the step awaits this response (concurrently with the click). */
@@ -165,6 +176,7 @@ export type StepAction =
   | "goto" // navigate to a path
   | "click" // click an element (optionally awaiting a write response)
   | "fill" // type a value into an input
+  | "selectOption" // choose an option (by value) in a native <select> (T-0579)
   | "expectVisible" // assert an element is visible
   | "expectText" // assert an element contains text/regex
   | "expectCount" // assert a locator resolves to exactly N matches

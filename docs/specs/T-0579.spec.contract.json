@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0579",
+  "status": "ready",
+  "summary": "Тип поля «Файл/Вложение» подключается сквозняком к СУЩЕСТВУЮЩЕЙ таксономии типов полей (FIELD_TYPES + x-file-эмит/парс + каталог привязок + единый рендерер FieldControl→FileField) поверх УЖЕ ПОСТРОЕННОГО бэкенда файлов (модель choros.file/file_version, PDP-производность, ObjectStore/FsObjectStore, маршруты POST/GET/download в src/http/files.ts — доставлено T-0518/T-0201). Реально отсутствует и составляет объём T-0579: file нет в FIELD_TYPES, x-file не эмитится/парсится, компоненты FileField нет, контракт file — мёртвая заглушка в каталоге; плюс inline-режим download-маршрута для превью. Значение файлового поля в record.data — строка-идентификатор (как person=id, relation=uuid). Права/tenant-изоляция файла — производная записи через готовый PDP; кросс-тенант = P0-запрет, задача не разрывает.",
+  "functional": [
+    "FR-1 — «Файл» становится первоклассным типом в конструкторе набора полей: FIELD_TYPES/FIELD_TYPE_VALUES/validateField (web/src/screens/apps-schema.js) принимают value:'file'; верхнеуровневый тип (не collection sub-field).",
+    "FR-2 — round-trip схемы через x-file: buildRecordSchema эмитит { type:'string', 'x-file':{…}, title }; schemaToFormFields/schemaToColumns распознают x-file и восстанавливают type:'file' (детект ДО generic-string-fallthrough, как x-date/x-money); поле без x-file не детектится как file (backward-compatible).",
+    "FR-3 — разводка контракта file в едином каталоге привязок: contractKindForFieldType('file')→'file', resolveFieldContract классифицирует type:'file' как структурный (structuralKind)→presentation:'file'; клиентский field-contract.js и серверный binding-contract-catalog.ts (оба уже объявляют file-заглушку) оживают синхронно, второй каталог не вводится.",
+    "FR-4 — рендер в форме через ЕДИНЫЙ рендерер: FieldControl (field-renderer.jsx) при presentation:'file' рисует выделенную компоненту FileField (паттерн RelationPickerField/CollectionField — структурный контракт с fetch/состоянием), которая грузит на POST /api/records/:recordId/files, хранит возвращённый идентификатор строкой в значении, поддерживает замену (новая версия), readOnly, required, Empty/Loading/Error.",
+    "FR-5 — карточка записи показывает имя файла как ссылку «скачать» (не сырой uuid) + inline-превью для image/*, application/pdf.",
+    "FR-6 — список записей рендерит файловое поле колонкой (имя/иконка или «—») через schemaToColumns/formatCellValue; резолв имени по значению (async-cell или из листинга); не роняет таблицу при пустом.",
+    "FR-7 — права = производная прав записи: фронт ходит ТОЛЬКО через существующие /api/records/:id/files и /api/files/:id/download (гейт makeFileRecordResolver/PDP T-0021 по записи-владельцу); ноль клиентских file-ACL, ноль прямых S3-URL.",
+    "FR-8 — inline-disposition режим download-маршрута (?disposition=inline или /preview) отдаёт Content-Disposition:inline + nosniff ТОЛЬКО для image/*, application/pdf при пройденном PDP-read и tenant/actor-резолве из identity; дефолт — attachment (без изменения текущего поведения); svg/html → attachment (анти-XSS).",
+    "FR-9 — tenant-изоляция и anti-case сохранены, не разорваны: маршруты резолвят tenant/actor из identity (не header/body); в FIELD_TYPES/FileField/схеме — только generic-примитив «файл-поле» (label «Файл»), кейс К2 живёт в seed."
+  ],
+  "non_functional": [
+    "NF-1 — единый рендерер, не размножение: файл-поле дисpatchится через тот же каталог привязок (resolveFieldContract) и тот же FieldControl, что relation/collection/money, не через параллельный inputKind-словарь (иначе регресс корня A OBLIK/PD-18).",
+    "NF-2 — единый механизм прав (несущий): ноль клиентских file-ACL; видимость/скачивание файла = производная права записи через уже-подключённый PDP-бэкенд; один cross-tenant leak файла = смерть GTM (tenancy §5).",
+    "NF-3 — backward-compatible round-trip: наборы полей без файловых полей и схемы до T-0579 парсятся как прежде (файл детектится только по x-file).",
+    "NF-4 — пропорциональность (ось 5): переиспользует готовый бэкенд/API/PDP/хранилище; новый код — фронт-компонента + разводка типа + inline-режим маршрута; не переизобретает модель файлов T-0119.",
+    "NF-5 — UX honest-gate (D-062/OBLIK): файл-контрол имеет Empty/Loading/Error, контраст ≥ WCAG AA в обеих темах, нет мёртвых enabled-аффордансов, бейдж≡контент, нет дев-жаргона, слой/kit без хардкода цветов.",
+    "NF-6 — anti-case (D-064): ни одной кейс-строки денилиста карты §5 в добавленном/изменённом src/ и web/src/; label = generic «Файл».",
+    "NF-7 — egress-граница наследуется: file_version.data_class уже фиксирует классификацию; фронт-задача её не двигает и не обходит (runtime-гейт egress T-0041 = Stage-2)."
+  ],
+  "out_of_scope": [
+    "Модель хранения файлов, S3-адаптер, presign, миграция метаданных — доставлено (T-0119 дизайн → T-0518/T-0201 impl), не переделывается",
+    "Второй механизм прав / file-ACL — запрещён (NF-2); PDP-производность уже есть",
+    "Prod-S3-провайдер (AWS/Yandex/MinIO self-hosted), оплата, 152-ФЗ-локация — deploy-time за ObjectStore-портом, гейт фаундера GT-4; dev=FsObjectStore",
+    "UI истории версий (список/откат версий) — базовая замена=новая версия уже в addVersion; экран истории Stage-2",
+    "Ретенция/архивация файлов из UI и sweeper — Stage-2 (T-0119 FR-6)",
+    "Автонумерация (A9) / скаляр-формулы (A8) и прочие A-примитивы карты — отдельные задачи",
+    "Антивирус-скан, полнотекст, генерация thumbnails — не MVP (T-0119 §6)",
+    "Файл как sub-field коллекции (depth-cap как relation/computed) — не в этой задаче",
+    "document-on-demand снапшот (is_snapshot) — приёмная поверхность есть; UI генерации = T-0124",
+    "MinIO как docker-compose сервис — dev использует FsObjectStore, MinIO-сервис не требуется"
+  ],
+  "acceptance_criteria": [
+    { "id": "AC-1", "text": "FIELD_TYPES (web/src/screens/apps-schema.js) содержит запись value:'file' с непустым label; FIELD_TYPE_VALUES.includes('file'); validateField({key,type:'file',…}) не ставит errors.type.", "verifiable_as": "test" },
+    { "id": "AC-2", "text": "buildRecordSchema([{key:'doc',type:'file',title:'Договор'}]) эмитит properties.doc = { type:'string', 'x-file':{…}, title:'Договор' } (строковый слот + x-file-аннотация).", "verifiable_as": "test" },
+    { "id": "AC-3", "text": "schemaToFormFields/schemaToColumns на схеме с { type:'string','x-file':{…} } восстанавливают type:'file' (round-trip save→reload сохраняет тип); поле без x-file не детектится как file.", "verifiable_as": "test" },
+    { "id": "AC-4", "text": "contractKindForFieldType('file')==='file'; resolveFieldContract({type:'file'}).contractKind==='file' и .presentation==='file'.", "verifiable_as": "test" },
+    { "id": "AC-5", "text": "record_schema с файловым полем ({type:'string','x-file':…}) проходит серверный validateRecordSchemaDefinition (AJV-strict) валидным (generic x-strip уже покрывает x-file) — сохранение набора полей с файловым полем не отклоняется.", "verifiable_as": "test" },
+    { "id": "AC-6", "text": "Компонента FileField существует; FieldControl при presentation:'file' рендерит именно её (не generic readout «пока заполняется в другом месте», не text-input).", "verifiable_as": "test" },
+    { "id": "AC-7", "text": "В форме записи выбор файла → POST /api/records/:recordId/files (raw body, X-File-Name=имя, Content-Type=mime); по 201 значение поля = возвращённый идентификатор строкой; повторная загрузка = замена (новая версия).", "verifiable_as": "test" },
+    { "id": "AC-8", "text": "Обязательное файловое поле без значения → validateRecordValues ошибка по ключу; необязательное пустое → без ошибки; сохранённое значение — строка.", "verifiable_as": "test" },
+    { "id": "AC-9", "text": "Карточка записи показывает имя файла ссылкой «скачать» (не сырой uuid) и, для image/*/application/pdf, inline-превью; для прочих mime — только ссылку.", "verifiable_as": "test" },
+    { "id": "AC-10", "text": "formatCellValue(value,'file') возвращает имя файла/иконку (не uuid) при значении и «—» при отсутствии; колонка присутствует в schemaToColumns.", "verifiable_as": "test" },
+    { "id": "AC-11", "text": "GET /api/files/:fileVersionId/download?disposition=inline (или /preview) отдаёт Content-Disposition:inline + X-Content-Type-Options:nosniff ТОЛЬКО для image/*/application/pdf при пройденном PDP-read; без параметра — attachment как прежде; svg/html → attachment; tenant/actor из identity.", "verifiable_as": "test" },
+    { "id": "AC-12", "text": "Субъект без read-гранта на запись-владельца → 403 при GET /api/files/:id/download (и inline), 0 байт; с грантом — контент (PDP-производность; задача не разрывает существующий FF).", "verifiable_as": "test" },
+    { "id": "AC-13", "text": "Скачать файл записи tenant B из контекста tenant A → отказ (cross_tenant/404), 0 байт; фронт не конструирует cross-tenant путь.", "verifiable_as": "test" },
+    { "id": "AC-14", "text": "bash ci/checks/anti-case-lock.sh зелёный после изменений; в добавленном/изменённом коде нет кейс-строк денилиста; label файл-типа = «Файл» (generic).", "verifiable_as": "fitness" },
+    { "id": "AC-15", "text": "Файл-контрол проходит UX honest-gate G1–G7: Empty/Loading/Error, контраст ≥ WCAG AA (обе темы), нет мёртвых enabled-аффордансов, data-theme-совпадение, нет дев-жаргона, реализация через слой/kit.", "verifiable_as": "fitness" },
+    { "id": "AC-16", "text": "Трассируемость: каждое FR-1..FR-9 покрыто ≥1 решением ADR; ни одно не вводит второй permission-подсистемы/параллельный рендерер и не ослабляет tenant-изоляцию (ревью-гейт архитектора).", "verifiable_as": "manual" }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0579-file-field.spec.md"
+}

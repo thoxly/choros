@@ -11,12 +11,27 @@
  *
  *   GET /api/records/:recordId/files
  *     List all files attached to a record (tenant-scoped, read-gated).
- *     Returns [{ fileId, originalName, currentVersionId, mime, sizeBytes, createdAt }].
+ *     Returns [{ fileId, originalName, currentVersionId, versionIds, mime,
+ *     sizeBytes, createdAt }]. versionIds (T-0579 fix-forward, review m1) is
+ *     EVERY version id the file has ever had (not just the current one) — a
+ *     field's stored value is whatever fileVersionId was captured at upload
+ *     time, and a later re-upload advances currentVersionId while the OLD
+ *     value remains a legitimate historical version; callers resolving a
+ *     value to a display name must match against the full set.
  *
- *   GET /api/files/:fileVersionId/download
+ *   GET /api/files/:fileVersionId/download[?disposition=inline]
  *     Presign or stream the content of a specific file version (PDP read-gated).
  *     - FsObjectStore: streams bytes directly from disk.
  *     - http(s) presign url (S3): 302 redirect.
+ *     T-0579: ?disposition=inline requests Content-Disposition: inline instead
+ *     of attachment, for record-card preview (a POSITIVE allowlist of
+ *     concrete-safe image subtypes + application/pdf only — see
+ *     isInlineSafeMime / INLINE_SAFE_IMAGE_SUBTYPES). Only applies to the
+ *     FsObjectStore streaming path (the redirect/JSON-fallback paths are
+ *     unaffected — presign URLs carry no disposition header here). Without
+ *     the param, or for any mime not on the allowlist (including
+ *     image/svg+xml, image/svg, and any parameterized variant of either —
+ *     anti-XSS), behaviour is UNCHANGED: attachment.
  *
  * Authorization: every route delegates to the T-0021 PDP via makeFileRecordResolver
  * (the owner RECORD's grant governs; no separate file ACL — FF-NOACL). Tenant
@@ -61,6 +76,69 @@ const MAX_UPLOAD_BYTES = 26_214_400;
 
 /** Presign TTL in seconds (served or redirected). */
 const PRESIGN_TTL_SECONDS = 300;
+
+// ---------------------------------------------------------------------------
+// T-0579: inline-disposition allowlist (FR-8 / FF-INLINE-SAFE)
+//
+// GET /api/files/:fileVersionId/download?disposition=inline requests an inline
+// Content-Disposition (browser renders instead of downloads — needed for the
+// record-card preview, ADR §2.7). Only preview-SAFE mime types are honoured:
+// a POSITIVE allowlist of concrete safe image subtypes (png/jpeg/gif/webp)
+// and application/pdf. Every other mime — including any image/* NOT on the
+// allowlist (svg, svg+xml, and any future/unknown SVG-like subtype) — and the
+// absence of the query param, falls back to `attachment` — the existing
+// default behaviour is UNCHANGED (no regression on any pre-T-0579 test/caller).
+// ---------------------------------------------------------------------------
+
+/**
+ * Concrete image subtypes safe to render inline. Deliberately a POSITIVE
+ * allowlist (not "image/* except svg"): SVG can carry a <script> that would
+ * execute in the app's origin if rendered inline (stored-XSS), and a single
+ * negative exception for "image/svg+xml" misses siblings like "image/svg"
+ * (no +xml suffix) or any future SVG-like/unknown subtype. Enumerating the
+ * SAFE subtypes instead means anything not explicitly known-safe is denied
+ * by construction — no new image subtype can silently become inline-eligible.
+ */
+const INLINE_SAFE_IMAGE_SUBTYPES: ReadonlySet<string> = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
+/**
+ * True iff `mime` is safe to serve with Content-Disposition: inline.
+ *
+ * T-0579 fix-forward (review B1): normalize (trim + lowercase) BEFORE any
+ * comparison — this is the second line of defense (the upload path already
+ * stores a normalized mime; this function does not trust that as its ONLY
+ * guarantee, since it is also the read-time boundary for the inline decision
+ * and must not regress if a row was written before the upload-side fix, by a
+ * migration/import path, or by any future writer).
+ *
+ * T-0579 fix-forward (review B1-residual, blocking): normalizing case/
+ * whitespace alone is NOT enough — a stored mime carrying a parameter
+ * (`image/svg+xml;charset=utf-8`, `image/svg+xml;x=1`) survives
+ * trim()+toLowerCase() as `image/svg+xml;charset=utf-8`, which fails the
+ * exact `=== "image/svg+xml"` compare yet still passes a bare
+ * `startsWith("image/")` check → inline → stored-XSS. Separately, a stored
+ * `image/svg` (no `+xml` suffix at all) was never excluded by that single
+ * negative check in the first place — browsers still treat it as SVG. Both
+ * gaps are closed at once by (a) stripping the `;param` suffix at the
+ * comparison boundary and (b) switching from a negative svg-exclusion to a
+ * POSITIVE allowlist of concrete safe image subtypes — see
+ * INLINE_SAFE_IMAGE_SUBTYPES above.
+ */
+function isInlineSafeMime(mime: string | null | undefined): boolean {
+  if (typeof mime !== "string" || mime.length === 0) return false;
+  // Strip any `;charset=...`/`;x=1`/etc parameter BEFORE comparing — the
+  // media-type token itself is everything before the first ';'.
+  const base = mime.trim().toLowerCase().split(";")[0]!.trim();
+  if (base.length === 0) return false;
+  if (INLINE_SAFE_IMAGE_SUBTYPES.has(base)) return true;
+  if (base === "application/pdf") return true;
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Deps
@@ -177,8 +255,20 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
         const bodyBuf = await readRawBody(req, MAX_UPLOAD_BYTES);
 
         // Derive mime from Content-Type; strip parameters (e.g. ; charset=...).
+        // T-0579 fix-forward (review B1): normalize to lowercase at this
+        // ingestion boundary so every stored mime is canonical from here on —
+        // `image/SVG+xml` / `image/Svg+xml` etc. are stored as `image/svg+xml`.
+        // Normalizing (and stripping params) on WRITE is defense-in-depth, not
+        // the only guarantee: this is ONE writer among several (see
+        // src/core/document-render.ts's addVersion calls for text/html etc,
+        // plus any future seed/import/migration path) — isInlineSafeMime
+        // itself MUST re-normalize and re-strip params on READ regardless of
+        // what any writer stored (review B1-residual), and gates on a
+        // POSITIVE allowlist of concrete-safe subtypes rather than a negative
+        // svg-exclusion, so an unnormalized/un-stripped/unknown-subtype mime
+        // is denied by construction rather than by an exhaustive blocklist.
         const rawCt = req.headers["content-type"] ?? "application/octet-stream";
-        const mime = rawCt.split(";")[0]!.trim() || "application/octet-stream";
+        const mime = (rawCt.split(";")[0] ?? "").trim().toLowerCase() || "application/octet-stream";
 
         // Original name from X-File-Name header.
         let xFileName = req.headers["x-file-name"];
@@ -325,6 +415,14 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
         const fileVersionId = params["fileVersionId"] ?? "";
         assertUuidShape(fileVersionId, "fileVersionId");
 
+        // T-0579: parse ?disposition=inline. Additive — absence of the param
+        // (or any value other than "inline") preserves the exact prior
+        // behaviour (attachment), so every existing caller/test is unaffected.
+        const rawUrl = req.url ?? "";
+        const qIdx = rawUrl.indexOf("?");
+        const query = new URLSearchParams(qIdx >= 0 ? rawUrl.slice(qIdx + 1) : "");
+        const wantsInline = query.get("disposition") === "inline";
+
         const urlResult = await getFileContentUrl(
           {
             resolver,
@@ -367,11 +465,21 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
           const contentType = version?.mimeType ?? "application/octet-stream";
           const fileName = version ? `file-${fileVersionId}` : "download";
 
+          // T-0579 (FR-8/FF-INLINE-SAFE): inline ONLY when the caller asked for
+          // it AND the mime (param-stripped, case/whitespace-normalized) is on
+          // the POSITIVE preview-safe allowlist (png/jpeg/gif/webp,
+          // application/pdf). Everything else — no param, or a mime not on
+          // that allowlist (including image/svg+xml, image/svg, any
+          // `image/svg+xml;charset=...` variant, and text/html) — stays
+          // `attachment`, exactly as before T-0579 (anti-XSS: an inline
+          // SVG/HTML response would execute in the app's origin).
+          const disposition = wantsInline && isInlineSafeMime(contentType) ? "inline" : "attachment";
+
           res.statusCode = 200;
           res.setHeader("Content-Type", contentType);
           res.setHeader(
             "Content-Disposition",
-            `attachment; filename="${fileName}"`,
+            `${disposition}; filename="${fileName}"`,
           );
           // Prevent browsers from MIME-sniffing the response and executing it
           // as a different content type (e.g. treating an octet-stream as HTML).

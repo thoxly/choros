@@ -2368,6 +2368,123 @@ describe('apps-schema T-0512 · person field type', () => {
 });
 
 // ---------------------------------------------------------------------------
+// T-0579: file field type (AC-1, AC-2, AC-3, AC-5, AC-14 anti-case label)
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0579 · file field type', () => {
+  it('FF-FIELDTYPE / AC-1: FIELD_TYPES includes file with generic label "Файл"', () => {
+    const entry = FIELD_TYPES.find((t) => t.value === 'file');
+    expect(entry).toBeDefined();
+    expect(entry.label).toBe('Файл');
+  });
+
+  it('FF-FIELDTYPE / AC-1: FIELD_TYPE_VALUES includes "file"', () => {
+    expect(FIELD_TYPE_VALUES).toContain('file');
+  });
+
+  it('FF-FIELDTYPE / AC-1: validateField accepts file — no errors.type', () => {
+    const err = validateField({ key: 'doc', type: 'file' });
+    expect(err.type).toBeUndefined();
+  });
+
+  it('AC-2: buildRecordSchema emits { type:"string", "x-file": {…} }', () => {
+    const schema = buildRecordSchema([
+      { key: 'doc', type: 'file', title: 'Договор', required: false },
+    ]);
+    const prop = schema.properties.doc;
+    expect(prop.type).toBe('string');
+    expect(prop['x-file']).toBeTypeOf('object');
+    expect(prop.title).toBe('Договор');
+  });
+
+  it('buildRecordSchema: file with required → included in required array', () => {
+    const schema = buildRecordSchema([
+      { key: 'doc', type: 'file', required: true },
+    ]);
+    expect(schema.required).toContain('doc');
+  });
+
+  it('AC-5 / FF-SCHEMA-VALID: x-file schema compiles after x-* strip (mirrors validator)', () => {
+    const schema = buildRecordSchema([
+      { key: 'doc', type: 'file', required: false },
+    ]);
+    expect(backendAccepts(schema)).toBe(true);
+  });
+
+  it('x-file schema does NOT compile raw (proves the strip is load-bearing)', () => {
+    const schema = buildRecordSchema([
+      { key: 'doc', type: 'file', required: false },
+    ]);
+    expect(backendAcceptsRaw(schema)).toBe(false);
+  });
+
+  it('AC-5: validateRecordSchemaDefinition accepts a file property directly', () => {
+    const schema = buildRecordSchema([
+      { key: 'doc', type: 'file', title: 'Договор', required: false },
+    ]);
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(true);
+  });
+
+  it('AC-3: parseRecordSchema detects string+x-file → type file', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        doc: { type: 'string', 'x-file': {}, title: 'Договор' },
+      },
+      required: ['doc'],
+    };
+    const fields = parseRecordSchema(schema);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toMatchObject({
+      key: 'doc',
+      type: 'file',
+      title: 'Договор',
+      required: true,
+    });
+  });
+
+  it('AC-3: parseRecordSchema round-trips a file field (save→reload preserves type)', () => {
+    const original = [{ key: 'doc', type: 'file', title: 'Договор', required: true }];
+    const schema = buildRecordSchema(original);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0]).toMatchObject({ key: 'doc', type: 'file', title: 'Договор', required: true });
+  });
+
+  it('AC-3 / NF-3 / FF-BACKCOMPAT: a plain string property WITHOUT x-file is NOT detected as file', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        note: { type: 'string', title: 'Заметка' },
+      },
+    };
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0].type).toBe('string');
+  });
+
+  it('parseRecordSchema: file does NOT fall through to string alongside other fields', () => {
+    const schema = buildRecordSchema([
+      { key: 'doc', type: 'file', required: false },
+      { key: 'name', type: 'string', required: false },
+    ]);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed.find((f) => f.key === 'doc').type).toBe('file');
+    expect(parsed.find((f) => f.key === 'name').type).toBe('string');
+  });
+
+  it('validateFields: accepts a file field', () => {
+    const r = validateFields([{ key: 'doc', type: 'file', required: false }]);
+    expect(r.valid).toBe(true);
+  });
+
+  it('file is NOT a collection sub-field type (depth-cap = 1, like relation/computed)', () => {
+    expect(COLLECTION_SUB_FIELD_TYPES).not.toContain('file');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T-0516: url and email field types
 // ---------------------------------------------------------------------------
 

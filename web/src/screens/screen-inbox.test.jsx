@@ -195,3 +195,34 @@ describe('screen-inbox — honest action-CTA on empty state (AC-9/AC-10/AC-11)',
     expect(shellFs).toContain('path="/processes"');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0579 (review M1) — FileField was dead/lying in the inbox task form: no
+// recordId was ever threaded onto it here, so upload always showed "Сначала
+// сохраните запись" even when the task's process WAS bound to a real record
+// (detail.projection.recordId, surfaced by process-projection.ts for
+// on_create-started instances). Fixed: InboxTaskForm accepts a recordId prop,
+// threads it onto file-contract fields only, and the screen passes
+// detail.projection.recordId at the call site.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — InboxTaskForm threads recordId onto file fields (T-0579, review M1)', () => {
+  it('InboxTaskForm accepts a recordId prop', () => {
+    expect(src).toMatch(/function InboxTaskForm\(\{\s*processKey,\s*stepKey,\s*recordId,\s*onSubmit,\s*submitting\s*\}\)/);
+  });
+
+  it('imports resolveFieldContract (needed to detect file-contract fields)', () => {
+    expect(src).toContain("import { FieldControl, resolveFieldMode, resolveFieldContract } from '../forms/field-renderer.jsx'");
+  });
+
+  it('threads recordId onto file-contract fields only, not onto every field', () => {
+    const idx = src.indexOf("contractKind === 'file' ? { ...f, recordId } : f");
+    expect(idx).toBeGreaterThan(-1);
+  });
+
+  it('the call site passes detail.projection.recordId to InboxTaskForm', () => {
+    const idx = src.indexOf('<InboxTaskForm');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 300);
+    expect(block).toContain('recordId={detail.projection.recordId}');
+  });
+});

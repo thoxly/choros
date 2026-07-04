@@ -28,6 +28,7 @@ import {
   schemaToColumns,
   formatCellValue,
   RELATION_CELL_ASYNC,
+  FILE_CELL_ASYNC,
   deriveRecordLabel,
   mapRecordError,
   extractFieldErrors,
@@ -2204,6 +2205,150 @@ describe('T-0512: formatCellValue person', () => {
 
   it('returns "—" for empty string', () => {
     expect(formatCellValue('', 'person')).toBe('—');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0579: file field type (AC-3, AC-8, AC-10, FF-VALUE-STRING, FF-CELL-NO-UUID,
+// FF-BACKCOMPAT, FF-XFILE-ROUNDTRIP)
+// ---------------------------------------------------------------------------
+
+const FILE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    doc: { type: 'string', 'x-file': {}, title: 'Договор' },
+  },
+  required: ['doc'],
+};
+
+describe('T-0579: INPUT_KIND file', () => {
+  it('INPUT_KIND maps "file" to "file"', () => {
+    expect(INPUT_KIND['file']).toBe('file');
+  });
+});
+
+describe('T-0579: schemaToFormFields file', () => {
+  it('detects x-file → type file', () => {
+    const fields = schemaToFormFields(FILE_SCHEMA);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toMatchObject({
+      key: 'doc',
+      type: 'file',
+      label: 'Договор',
+      required: true,
+      inputKind: 'file',
+    });
+  });
+
+  it('FF-BACKCOMPAT / AC-3: a property WITHOUT x-file does NOT fall through to file', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        doc: { type: 'string', 'x-file': {} },
+        name: { type: 'string' },
+      },
+    };
+    const fields = schemaToFormFields(schema);
+    expect(fields.find((f) => f.key === 'doc').type).toBe('file');
+    expect(fields.find((f) => f.key === 'name').type).toBe('string');
+  });
+});
+
+describe('T-0579: blankRecordValues file', () => {
+  it('starts as empty string', () => {
+    const fields = schemaToFormFields(FILE_SCHEMA);
+    const values = blankRecordValues(fields);
+    expect(values.doc).toBe('');
+  });
+});
+
+describe('T-0579: recordDataToValues file', () => {
+  it('preserves a stored fileVersionId string', () => {
+    const fields = schemaToFormFields(FILE_SCHEMA);
+    const values = recordDataToValues(fields, { doc: 'ver-123' });
+    expect(values.doc).toBe('ver-123');
+  });
+
+  it('absent key → blank default', () => {
+    const fields = schemaToFormFields(FILE_SCHEMA);
+    const values = recordDataToValues(fields, {});
+    expect(values.doc).toBe('');
+  });
+});
+
+describe('T-0579: validateRecordValues file (AC-8)', () => {
+  const fields = schemaToFormFields(FILE_SCHEMA);
+
+  it('required file with empty string → error', () => {
+    const { valid, errors } = validateRecordValues(fields, { doc: '' });
+    expect(valid).toBe(false);
+    expect(errors.doc).toBeTruthy();
+  });
+
+  it('required file with a versionId → no error', () => {
+    const { valid, errors } = validateRecordValues(fields, { doc: 'ver-123' });
+    expect(valid).toBe(true);
+    expect(errors.doc).toBeUndefined();
+  });
+
+  it('optional file with empty string → no error', () => {
+    const optSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: { doc: { type: 'string', 'x-file': {} } },
+    };
+    const optFields = schemaToFormFields(optSchema);
+    const { valid } = validateRecordValues(optFields, { doc: '' });
+    expect(valid).toBe(true);
+  });
+});
+
+describe('T-0579: serializeRecordData file', () => {
+  const fields = schemaToFormFields(FILE_SCHEMA);
+
+  it('emits the fileVersionId string', () => {
+    const data = serializeRecordData(fields, { doc: 'ver-123' });
+    expect(data.doc).toBe('ver-123');
+    expect(typeof data.doc).toBe('string');
+  });
+
+  it('omits optional blank file', () => {
+    const optSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: { doc: { type: 'string', 'x-file': {} } },
+    };
+    const optFields = schemaToFormFields(optSchema);
+    const data = serializeRecordData(optFields, { doc: '' });
+    expect('doc' in data).toBe(false);
+  });
+});
+
+describe('T-0579: formatCellValue file (AC-10, FF-CELL-NO-UUID)', () => {
+  it('returns FILE_CELL_ASYNC for a non-empty value (never the raw id/uuid directly)', () => {
+    expect(formatCellValue('ver-123', 'file')).toBe(FILE_CELL_ASYNC);
+  });
+
+  it('returns "—" for null', () => {
+    expect(formatCellValue(null, 'file')).toBe('—');
+  });
+
+  it('returns "—" for undefined', () => {
+    expect(formatCellValue(undefined, 'file')).toBe('—');
+  });
+
+  it('returns "—" for empty string', () => {
+    expect(formatCellValue('', 'file')).toBe('—');
+  });
+});
+
+describe('T-0579: schemaToColumns includes the file field', () => {
+  it('carries key/label/type through for a file column', () => {
+    const columns = schemaToColumns(FILE_SCHEMA);
+    const col = columns.find((c) => c.key === 'doc');
+    expect(col).toMatchObject({ key: 'doc', label: 'Договор', type: 'file' });
   });
 });
 

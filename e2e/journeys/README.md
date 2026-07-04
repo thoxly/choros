@@ -50,7 +50,8 @@ Each step has a `name` (the human-readable acceptance line) and an `action`. Str
 | `login`         | `userId`                                         | writes the SPA dev-user session (localStorage), fetching the real record from `/api/users` |
 | `goto`          | `path`                                           | navigates to a path (relative to `baseURL`) |
 | `click`         | `target` (+ optional `awaitResponse`)            | clicks an element; optionally awaits a write response, asserts its status, and **captures** body fields |
-| `fill`          | `target`, `value`                                | types a value into an input |
+| `fill`          | `target`, `value`                                | types a value into an input (throws on a native `<select>` — use `selectOption`) |
+| `selectOption`  | `target`, `optionValue`                          | T-0579: chooses an option (by `value`) in a native `<select>` |
 | `expectVisible` | `target`                                         | asserts an element is visible |
 | `expectText`    | `target`, `text`                                 | asserts the element contains text (or a `/regex/i` literal) |
 | `expectCount`   | `target`, `count`                                | asserts a locator resolves to exactly N matches (e.g. `0`) |
