@@ -36,13 +36,14 @@ const ORIGINAL_IDS = new Set([
   'ops-overview', 'notifications', 'audit', 'spend', 'reports', 'process-analytics',
   'llm-connections', 'llm-config', 'assistant-prompt',
 ]);
-// FF-NAV-MAP also accepts 'reference' (T-0538 new grouping entry-point) and
-// 'operational-analytics' (T-0405 PD-20, added to observability zone after FF-NAV-MAP snapshot).
-const ALLOWED_NEW_IDS = new Set(['reference', 'operational-analytics', 'sections']);
+// FF-NAV-MAP also accepts 'reference' (T-0538 new grouping entry-point),
+// 'operational-analytics' (T-0405 PD-20, added to observability zone after
+// FF-NAV-MAP snapshot), and 'users' (T-0583: user-account management screen).
+const ALLOWED_NEW_IDS = new Set(['reference', 'operational-analytics', 'sections', 'users']);
 
 // Systems/admin ids that must NOT appear in zone='work' (FF-NAV-NOSYS).
 const NOSYS_IDS = new Set([
-  'org', 'agents', 'rights', 'reference',
+  'org', 'agents', 'users', 'rights', 'reference',
   'llm-connections', 'llm-config', 'assistant-prompt',
   'audit', 'spend',
 ]);

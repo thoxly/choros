@@ -39,6 +39,7 @@ import { registerRecordLinksRoutes } from "./http/record-links.js";
 import { registerAssistantRoutes } from "./http/assistant.js";
 import { makeHttpKeycloakAdminPort, makeHttpKeycloakUserPort } from "./keycloak/admin-port.js";
 import { registerRegisterRoutes } from "./http/register.js";
+import { registerUserMgmtRoutes } from "./http/user-mgmt.js";
 import { registerSeedWriteRoutes } from "./http/seed-write.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 import { type ResolverDeps } from "./core/grant-resolver.js";
@@ -995,6 +996,11 @@ function buildRouter(
   // config is read from env (KC_REGISTRAR_CLIENT_ID + KC_REGISTRAR_CLIENT_SECRET);
   // if absent, endpoint returns 503 AUTH_UNAVAILABLE (honest-degrade per ADR §8 step 4).
   // Do NOT wrap in withAuth — this is a PRE-LOGIN public endpoint (FF-1).
+  //
+  // T-0583: the SAME kcUserPort (live or honest-degrade) is reused by
+  // registerUserMgmtRoutes below — one KC-admin-port instance for both
+  // self-registration AND per-tenant "create user account" (N5, no second
+  // KC-integration module).
   if (grantsPool) {
     const registrarClientSecret = process.env["KC_REGISTRAR_CLIENT_SECRET"];
     const kcUserPort = registrarClientSecret
@@ -1009,8 +1015,22 @@ function buildRouter(
           async deleteUser(): Promise<void> {
             /* no-op compensation */
           },
+          async setUserEnabled(): Promise<void> {
+            // T-0583: honest-degrade — no registrar secret configured, so a
+            // deactivate/reactivate attempt must surface 503, not silently
+            // succeed. registerUserMgmtRoutes maps this thrown code to 503.
+            const err = new Error("AUTH_UNAVAILABLE");
+            (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+            throw err;
+          },
         };
     registerRegisterRoutes(router, { pool: grantsPool, kc: kcUserPort });
+    // T-0583: per-tenant "create user account" / list / deactivate — reuses
+    // the identical kcUserPort + the caller's own tenant (resolveActorTenant),
+    // never DEV_TENANT_ID (mirrors registerRightsIntentRoutes wiring above).
+    registerUserMgmtRoutes(router, grantsPool, kcUserPort, (actorSlug: string) =>
+      resolveActorTenant(getOrgPool(), actorSlug),
+    );
   }
 
   // T-0352 (E16): Register GET /api/records/:id/links — 1-hop LIVE cross-app

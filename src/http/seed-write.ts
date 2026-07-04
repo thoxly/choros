@@ -120,7 +120,11 @@ async function extractActor(req: import("node:http").IncomingMessage, pool: pg.P
 // loadAdminContext, so the auth ceiling and the proven authority tenant match.
 // ---------------------------------------------------------------------------
 
-async function authorizeOrgWrite(
+// Exported (T-0583, additive): src/http/user-mgmt.ts reuses this SAME
+// cross-tenant guard for POST /api/users / PATCH /api/users/:employee_id —
+// one org-write authorization seam, not a second copy of the tenant-resolution
+// + forest-owner-exemption logic (N5).
+export async function authorizeOrgWrite(
   req: import("node:http").IncomingMessage,
   pool: pg.Pool,
   targetTenantId: string,
@@ -244,7 +248,10 @@ import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 // ONLY — no employee:delete, no mgmt_object:grant, no freeform.
 // ---------------------------------------------------------------------------
 
-function assertOrgObjectAuthority(
+// Exported (T-0583, additive): src/http/user-mgmt.ts reuses this SAME
+// owner-or-covering-delegable-grant gate for account create/deactivate — the
+// identical check POST /api/employees already runs (N5, no second gate impl).
+export function assertOrgObjectAuthority(
   admin: AdminContext,
   mgmtKind:
     | "mgmt_object:department"

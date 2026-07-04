@@ -69,6 +69,15 @@ export interface KeycloakUserPort {
    * Swallows all errors (orphan cleanup; called only on DB failure after KC create).
    */
   deleteUser(userId: string): Promise<void>;
+  /**
+   * T-0583: enable/disable a human user's Keycloak login (account
+   * deactivation/reactivation) — PUT /admin/realms/<realm>/users/<userId>
+   * {enabled}. A disabled user cannot obtain a new token (KC rejects auth at
+   * the realm level regardless of role assignments). Throws
+   * HttpError(503, "AUTH_UNAVAILABLE") if KC is unreachable — callers must
+   * NOT flip the local `employee.deactivated_at` marker on failure (KC-first).
+   */
+  setUserEnabled(userId: string, enabled: boolean): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +403,33 @@ export function makeHttpKeycloakUserPort(cfg?: KcRegistrarConfig): KeycloakUserP
         });
       } catch {
         // Best-effort: swallow all errors (compensation only; FF-2)
+      }
+    },
+
+    // T-0583: setUserEnabled — PUT user {enabled} via the SAME registrar token
+    // path as createHumanUser/deleteUser (no second KC-integration module, N5).
+    // Unlike deleteUser this is NOT best-effort: a failed disable must not be
+    // masked as success (the caller decides deactivated_at only after this
+    // resolves), so KC-unreachable surfaces as AUTH_UNAVAILABLE (503 at the
+    // HTTP layer) rather than being swallowed.
+    async setUserEnabled(userId: string, enabled: boolean): Promise<void> {
+      let token: string;
+      try {
+        token = await getRegistrarToken(config);
+      } catch {
+        const err = new Error("AUTH_UNAVAILABLE");
+        (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+        throw err;
+      }
+      const userUrl = `${config.baseUrl}/admin/realms/${config.realm}/users/${userId}`;
+      const resp = await doRequest(userUrl, "PUT", JSON.stringify({ enabled }), {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      });
+      if (resp.status !== 204 && resp.status !== 200) {
+        const err = new Error(`KC setUserEnabled failed: ${resp.status} ${resp.body}`);
+        (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+        throw err;
       }
     },
   };

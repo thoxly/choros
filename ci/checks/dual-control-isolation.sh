@@ -198,6 +198,7 @@ _dc_mig121_failed=0                                                             
 _dc_mig122_failed=0                                                                # T0606-DC-MIG122-GUARD track when 122 triggers the FF-DC7 fail
 _dc_mig123_failed=0                                                                # T0581-DC-MIG123-GUARD track when 123 triggers the FF-DC7 fail
 _dc_mig124_failed=0                                                                # T0619-DC-MIG124-GUARD track when 124 triggers the FF-DC7 fail
+_dc_mig125_failed=0                                                                # T0583-DC-MIG125-GUARD track when 125 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -286,6 +287,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/124_read_grant_all_staff_backfill.sql" ]]; then # T0619-DC-MIG124-GUARD
       _dc_mig124_failed=1                                                     # T0619-DC-MIG124-GUARD
     fi                                                                        # T0619-DC-MIG124-GUARD
+    # Track specifically when 125 triggers this FAIL (and nothing else).     # T0583-DC-MIG125-GUARD
+    if [[ "${m}" == "migrations/125_employee_deactivated_at.sql" ]]; then     # T0583-DC-MIG125-GUARD
+      _dc_mig125_failed=1                                                     # T0583-DC-MIG125-GUARD
+    fi                                                                        # T0583-DC-MIG125-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -847,6 +852,31 @@ if [[ "${_dc_mig124_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0619-read-grant-staff]: migration 124_read_grant_all_staff_backfill.sql is pure INSERT…SELECT backfill (role-reader + read grant + human role_assignments, no CREATE TABLE/RLS/confirmed2_by) — does NOT touch dual-control authority domain — relief granted" # T0619-DC-MIG124-GUARD
   fi                                                                           # T0619-DC-MIG124-GUARD
 fi                                                                             # T0619-DC-MIG124-GUARD
+# T-0583: additive relief for migration 125_employee_deactivated_at.sql — a     # T0583-DC-MIG125-GUARD
+# single ADDITIVE ADD COLUMN (choros.employee.deactivated_at bigint NULL, a     # T0583-DC-MIG125-GUARD
+# generic account-deactivation marker, D-064). No CREATE/DROP TABLE, no RLS/    # T0583-DC-MIG125-GUARD
+# POLICY change (employee inherits its existing RLS policy unchanged), no      # T0583-DC-MIG125-GUARD
+# confirmed2_by — the T-0044 dual-control invariant (031 is the ONLY           # T0583-DC-MIG125-GUARD
+# dual-control migration; confirmed2_by stays derived-additive) is UNTOUCHED.  # T0583-DC-MIG125-GUARD
+# Like the sibling reliefs, this cancels ONLY the _dc_mig125_failed increment  # T0583-DC-MIG125-GUARD
+# (set exclusively in the loop above when 125 is the unexpected file), scoped  # T0583-DC-MIG125-GUARD
+# so it cannot absorb any other migration's FF-DC7 failure.                   # T0583-DC-MIG125-GUARD
+_dc_mig125_stem="migrations/125_employee_deactivated_at.sql"                  # T0583-DC-MIG125-GUARD
+if [[ "${_dc_mig125_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig125_stem}"; then # T0583-DC-MIG125-GUARD
+  _dc_mig125_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig125_stem}" 2>/dev/null || true)" # T0583-DC-MIG125-GUARD
+  _dc_mig125_bad=0                                                            # T0583-DC-MIG125-GUARD
+  if echo "${_dc_mig125_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0583-DC-MIG125-GUARD
+    _dc_mig125_bad=1                                                          # T0583-DC-MIG125-GUARD introduces DDL/RLS
+  fi                                                                          # T0583-DC-MIG125-GUARD
+  if echo "${_dc_mig125_content}" | grep -iqE "confirmed2_by"; then           # T0583-DC-MIG125-GUARD
+    _dc_mig125_bad=1                                                          # T0583-DC-MIG125-GUARD touches confirmed2_by invariant
+  fi                                                                          # T0583-DC-MIG125-GUARD
+  if [[ "${_dc_mig125_bad}" -eq 0 ]]; then                                   # T0583-DC-MIG125-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                  # T0583-DC-MIG125-GUARD cancel false-red
+    _dc_mig125_failed=0                                                       # T0583-DC-MIG125-GUARD
+    echo "PASS [FF-DC7-T0583-employee-deactivated-at]: migration 125_employee_deactivated_at.sql is a single additive ADD COLUMN (employee.deactivated_at bigint NULL, no CREATE TABLE/RLS/confirmed2_by) — does NOT touch dual-control authority domain — relief granted" # T0583-DC-MIG125-GUARD
+  fi                                                                          # T0583-DC-MIG125-GUARD
+fi                                                                            # T0583-DC-MIG125-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
