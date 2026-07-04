@@ -26,6 +26,16 @@
  * from the request body, passed ONLY to kc.createHumanUser, and never touches
  * a log line, the audit_event payload, or any HTTP response body (success or
  * error) below.
+ *
+ * T-0628 fix (follow-up on T-0625): `login` and `email` are two DISTINCT
+ * required fields — `login` is free-form (a non-email username like
+ * `ivan.petrov` is legitimate), `email` is validated as an email address
+ * BEFORE any Keycloak call. Before this fix, `email: login` duplicated the
+ * same string into both KC fields (T-0583 original), then T-0625 closed the
+ * resulting 503 by forcing `login` itself to be email-shaped — narrower than
+ * this task's own spec. `employee.email` (migration 127) stores the value
+ * distinct from `employee.login` (migration 126, unaffected by this change —
+ * the account list still shows `login`, not `email`).
  */
 
 import { randomUUID } from "node:crypto";
@@ -126,19 +136,23 @@ function kcErrCode(err: unknown): string | undefined {
 // Password validation — mirrors register.ts validateRequest (≥8 chars, NF-9).
 // Never logged; the raw value only ever flows into kc.createHumanUser below.
 //
-// EMAIL_RE (T-0625 fix): the spec (N9) is explicit — "login = username = the
-// KC email field, as in register.ts: username=email". Before this fix, login
-// was passed to kc.createHumanUser UNVALIDATED: a real Keycloak realm 400s on
-// a non-email username/email, which the live port then mapped to
-// AUTH_UNAVAILABLE (503) — the classic "ordinary login" LIVE_PROOF bug
-// (T-0583/T-0625). Validating the SAME shape here, BEFORE any KC call, turns
-// that into an honest 400 VALIDATION and never lets a bad value reach KC.
+// EMAIL_RE (T-0628 fix, follow-up on T-0625): T-0625 closed the 503-on-create
+// bug by making `login` itself mandatory-email-shaped. T-0628's own LIVE_PROOF
+// spec asks for a narrower fix: `login` stays FREE-FORM (an ordinary,
+// non-email login like `ivan.petrov` is legitimate) and `email` becomes its
+// OWN required field, validated on our side BEFORE any KC call — same "never
+// let a bad value reach KC" property T-0625 established, just anchored on the
+// right field. Passing a real KC realm a non-email `username` does not 400
+// (config/keycloak/realm-choros.json sets no registrationEmailAsUsername/
+// email-only constraint) — that requirement was this codebase's own choice,
+// not a Keycloak constraint.
 // ---------------------------------------------------------------------------
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function validateCreateBody(b: Record<string, unknown>): {
   login: string;
+  email: string;
   password: string;
   display_name: string;
   position_id: string | null;
@@ -149,8 +163,13 @@ function validateCreateBody(b: Record<string, unknown>): {
     throw new HttpError(400, "VALIDATION", "login is required");
   }
   const trimmedLogin = login.trim();
-  if (!EMAIL_RE.test(trimmedLogin)) {
-    throw new HttpError(400, "VALIDATION", "login must be a valid email address (e.g. name@company.ru)");
+  const email = b["email"];
+  if (typeof email !== "string" || email.trim().length === 0) {
+    throw new HttpError(400, "VALIDATION", "email is required");
+  }
+  const trimmedEmail = email.trim();
+  if (!EMAIL_RE.test(trimmedEmail)) {
+    throw new HttpError(400, "VALIDATION", "email must be a valid email address (e.g. name@company.ru)");
   }
   const password = b["password"];
   if (typeof password !== "string" || password.length < 8) {
@@ -164,7 +183,14 @@ function validateCreateBody(b: Record<string, unknown>): {
   if (position_id !== null) assertUuidShape(position_id, "position_id");
   const role_id = typeof b["role_id"] === "string" ? (b["role_id"] as string) : null;
   if (role_id !== null) assertUuidShape(role_id, "role_id");
-  return { login: trimmedLogin, password, display_name: display_name.trim(), position_id, role_id };
+  return {
+    login: trimmedLogin,
+    email: trimmedEmail,
+    password,
+    display_name: display_name.trim(),
+    position_id,
+    role_id,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -184,8 +210,10 @@ export function registerUserMgmtRoutes(
 
   // -------------------------------------------------------------------------
   // POST /api/users — create a user account (KC-first, create-then-link).
-  // body: { tenant_id, login, password, display_name, position_id?, role_id? }
+  // body: { tenant_id, login, email, password, display_name, position_id?, role_id? }
   // 201: { employee_id, login }  (password never in the response)
+  // T-0628: login is free-form (need not be an email); email is a separate
+  // required field, validated before any Keycloak call.
   // -------------------------------------------------------------------------
   router.register("POST", "/api/users", withAuth(async (req, res) => {
     const body = await readJsonBody(req);
@@ -208,16 +236,22 @@ export function registerUserMgmtRoutes(
       oracle,
     );
 
-    const { login, password, display_name, position_id, role_id } = validateCreateBody(b);
+    const { login, email, password, display_name, position_id, role_id } = validateCreateBody(b);
 
     // KC-first (N4): create the KC user BEFORE any DB write. The plaintext
     // password is passed here and NOWHERE else — never logged, never audited,
     // never echoed in a response (N1).
+    //
+    // T-0628 fix: `login` (free-form, may be a non-email username) and
+    // `email` (validated above, ALWAYS email-shaped) are now two DISTINCT
+    // values passed to KC — before this fix, `email: login` duplicated the
+    // same string into both fields, forcing login itself to be email-shaped
+    // (T-0625's narrower fix) to avoid a KC 400/our 503.
     let kcUserId: string;
     try {
       const result = await kc.createHumanUser({
         username: login,
-        email: login,
+        email,
         password,
         actorType: "human",
       });
@@ -225,16 +259,16 @@ export function registerUserMgmtRoutes(
     } catch (err) {
       const code = kcErrCode(err);
       if (code === "EMAIL_TAKEN") {
-        throw new HttpError(409, "EMAIL_TAKEN", "an account with that login already exists");
+        throw new HttpError(409, "EMAIL_TAKEN", "an account with that email already exists");
       }
-      // Defense-in-depth (T-0625): validateCreateBody already rejects a
-      // non-email login before this call, so a real KC realm should never
-      // 400 here in this product's own flow. If it somehow does (KC-side
-      // validation drift, e.g. Keycloak also rejecting a syntactically valid
-      // but realm-disallowed address), surface it as an honest 400 — NOT the
-      // generic 503 AUTH_UNAVAILABLE that masked this exact bug before.
+      // Defense-in-depth: validateCreateBody already rejects a non-email
+      // `email` before this call, so a real KC realm should never 400 here in
+      // this product's own flow. If it somehow does (KC-side validation
+      // drift, e.g. Keycloak also rejecting a syntactically valid but
+      // realm-disallowed address), surface it as an honest 400 — NOT the
+      // generic 503 AUTH_UNAVAILABLE that masked the original T-0583 bug.
       if (code === "EMAIL_INVALID") {
-        throw new HttpError(400, "VALIDATION", "login must be a valid email address (e.g. name@company.ru)");
+        throw new HttpError(400, "VALIDATION", "email must be a valid email address (e.g. name@company.ru)");
       }
       throw new HttpError(503, "AUTH_UNAVAILABLE", "account service unavailable — try again later");
     }
@@ -249,12 +283,14 @@ export function registerUserMgmtRoutes(
         // see src/db/org.ts resolveActorSlugFromAuth). The human-readable KC
         // username the owner typed goes in the SEPARATE `login` column
         // (migration 126, T-0625 fix) so GET /api/users/accounts can show
-        // the real login instead of this UUID.
+        // the real login instead of this UUID. `email` (migration 127,
+        // T-0628 fix) is its own column, distinct from login — the pair sent
+        // to Keycloak above (username=login, email=email) is preserved here.
         await client.query(
           `INSERT INTO choros.employee
-             (tenant_id, id, position_id, kind, slug, login, display_name, created_at, updated_at)
-           VALUES ($1, $2, $3, 'human', $4, $5, $6, $7, $7)`,
-          [tenant_id, employeeId, position_id, kcUserId, login, display_name, ts],
+             (tenant_id, id, position_id, kind, slug, login, email, display_name, created_at, updated_at)
+           VALUES ($1, $2, $3, 'human', $4, $5, $6, $7, $8, $8)`,
+          [tenant_id, employeeId, position_id, kcUserId, login, email, display_name, ts],
         );
 
         // Same hire-flow reader-grant helper T-0619 uses (F2) — the new
@@ -291,7 +327,7 @@ export function registerUserMgmtRoutes(
           via: null,
           proposed_by: null,
           confirmed_by: actorId,
-          payload: { login, display_name },
+          payload: { login, email, display_name },
           occurred_at: ts,
         });
       });

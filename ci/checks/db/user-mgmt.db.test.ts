@@ -157,10 +157,13 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
   it('FF-583-1/2: owner creates a user account → KC user + employee(slug=KC userId) + covering READ', async () => {
     const t = await registerOne('create');
     kc.reset();
-    const login = `t0583-create-${Date.now()}@example.com`;
+    // T-0628: login is free-form (NOT an email) — email is the separate
+    // required field. This is AC-1's exact shape.
+    const login = `t0583-create-${Date.now()}`;
+    const email = `t0583-create-${Date.now()}@example.com`;
 
     const res = await postUsers(
-      { tenant_id: t.tenantId, login, password: 'password12345', display_name: 'T-0583 Test Account' },
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'T-0583 Test Account' },
       t.ownerSlug,
     );
     expect(res.status, JSON.stringify(res.json)).toBe(201);
@@ -171,6 +174,11 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
 
     // FF-583-1: createHumanUser called exactly once; slug == returned userId.
     expect(kc.createCallCount).toBe(1);
+    // T-0628 (AC-1): username=login (free-form, unchanged) and email=email
+    // (the distinct required field) are passed as TWO separate values — not
+    // the same string duplicated into both KC fields.
+    expect(kc.created[0].spec.username).toBe(login);
+    expect(kc.created[0].spec.email).toBe(email);
     expect(kc.created).toHaveLength(1);
     const kcUserId = kc.created[0].userId;
 
@@ -179,12 +187,15 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
       await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
       const { rows } = await c.query(
-        `SELECT slug, kind, deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        `SELECT slug, login, email, kind, deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
         [t.tenantId, employeeId],
       );
       expect(rows).toHaveLength(1);
       expect(rows[0].kind).toBe('human');
       expect(rows[0].slug).toBe(kcUserId);
+      // T-0628 (AC-1): login and email are stored as DISTINCT column values.
+      expect(rows[0].login).toBe(login);
+      expect(rows[0].email).toBe(email);
       expect(rows[0].deactivated_at).toBeNull();
       await c.query('COMMIT');
     });
@@ -210,34 +221,80 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
   });
 
   // ---------------------------------------------------------------------
-  // T-0625: login must be email-shaped — honest 400, NOT the 503
-  // "AUTH_UNAVAILABLE" masquerade a real Keycloak realm produced for a
-  // non-email username/email (LIVE_PROOF root cause).
+  // T-0628 (AC-1, AC-2, AC-3): login is free-form (no longer email-shaped
+  // per T-0625's narrower fix) — a real ordinary login like `ivan.petrov`
+  // must now SUCCEED (not 400). email is the separate required field that
+  // must be a valid email address, validated BEFORE any KC call, with an
+  // honest 400 (never the 503 AUTH_UNAVAILABLE masquerade from the original
+  // T-0583 LIVE_PROOF bug).
   // ---------------------------------------------------------------------
-  it('T-0625: POST /api/users with a non-email login → honest 400 VALIDATION, not 503; no employee row, KC never called', async () => {
+  it('T-0628 (AC-1): POST /api/users with a non-email login (ivan.petrov-shaped) + valid email → 201, KC called with distinct username/email', async () => {
     const t = await registerOne('nonemail');
+    kc.reset();
+    const login = `ivan.petrov.${Date.now()}`; // deliberately NOT email-shaped
+    const email = `liveproof-${Date.now()}@example.com`;
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Ordinary Login' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    expect(res.json.login).toBe(login);
+    expect(kc.createCallCount).toBe(1);
+    expect(kc.created[0].spec.username).toBe(login);
+    expect(kc.created[0].spec.email).toBe(email);
+  });
+
+  it('T-0628 (AC-2): POST /api/users with an invalid email → honest 400 VALIDATION, not 503; no employee row, KC never called', async () => {
+    const t = await registerOne('bademail');
     kc.reset();
 
     const res = await postUsers(
-      { tenant_id: t.tenantId, login: `liveproof-${Date.now()}`, password: 'password12345', display_name: 'Ordinary Login' },
+      { tenant_id: t.tenantId, login: `liveproof-${Date.now()}`, email: 'not-an-email', password: 'password12345', display_name: 'Bad Email' },
       t.ownerSlug,
     );
     expect(res.status, JSON.stringify(res.json)).toBe(400);
     expect(res.json?.error?.code ?? res.json?.code).toBe('VALIDATION');
-    // Server-side validation runs BEFORE any KC call — the fix's whole point
-    // is that a bad login never reaches kc.createHumanUser at all.
+    // Server-side validation runs BEFORE any KC call — a bad email never
+    // reaches kc.createHumanUser at all.
     expect(kc.createCallCount).toBe(0);
 
     await withClient(migratorUrl(), async (c) => {
       await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
       const { rows } = await c.query(
-        `SELECT count(*)::int AS n FROM choros.employee WHERE tenant_id=$1 AND display_name='Ordinary Login'`,
+        `SELECT count(*)::int AS n FROM choros.employee WHERE tenant_id=$1 AND display_name='Bad Email'`,
         [t.tenantId],
       );
       expect(rows[0].n).toBe(0);
       await c.query('COMMIT');
     });
+  });
+
+  it('T-0628 (AC-2): POST /api/users with a missing email → honest 400 VALIDATION, KC never called', async () => {
+    const t = await registerOne('noemail');
+    kc.reset();
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: `liveproof-${Date.now()}`, password: 'password12345', display_name: 'No Email' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('VALIDATION');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it('T-0628 (AC-3): POST /api/users with an empty login → honest 400 VALIDATION (login still required, just not email-shaped)', async () => {
+    const t = await registerOne('nologin');
+    kc.reset();
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: '', email: `t0628-${Date.now()}@example.com`, password: 'password12345', display_name: 'No Login' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('VALIDATION');
+    expect(kc.createCallCount).toBe(0);
   });
 
   // ---------------------------------------------------------------------
@@ -249,7 +306,7 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     kc.failOnCreate = true;
 
     const res = await postUsers(
-      { tenant_id: t.tenantId, login: 'taken@example.com', password: 'password12345', display_name: 'Taken' },
+      { tenant_id: t.tenantId, login: 'taken-login', email: 'taken@example.com', password: 'password12345', display_name: 'Taken' },
       t.ownerSlug,
     );
     expect(res.status, JSON.stringify(res.json)).toBe(409);
@@ -272,7 +329,7 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     kc.failOnAuth = true;
 
     const res = await postUsers(
-      { tenant_id: t.tenantId, login: 'unavail@example.com', password: 'password12345', display_name: 'Unavail' },
+      { tenant_id: t.tenantId, login: 'unavail-login', email: 'unavail@example.com', password: 'password12345', display_name: 'Unavail' },
       t.ownerSlug,
     );
     expect(res.status, JSON.stringify(res.json)).toBe(503);
@@ -286,7 +343,8 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     const res = await postUsers(
       {
         tenant_id: t.tenantId,
-        login: `compensate-${Date.now()}@example.com`,
+        login: `compensate-login-${Date.now()}`,
+        email: `compensate-${Date.now()}@example.com`,
         password: 'password12345',
         display_name: 'Compensate Me',
         role_id: bogusRoleId, // FK violation on role_assignment insert -> tx rollback AFTER KC create
@@ -318,9 +376,10 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
   it('FF-583-4: PATCH {active:false} disables KC + sets deactivated_at; {active:true} reverses both', async () => {
     const t = await registerOne('deactivate');
     kc.reset();
-    const login = `t0583-deact-${Date.now()}@example.com`;
+    const login = `t0583-deact-${Date.now()}`;
+    const email = `t0583-deact-${Date.now()}@example.com`;
     const create = await postUsers(
-      { tenant_id: t.tenantId, login, password: 'password12345', display_name: 'Deactivate Me' },
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Deactivate Me' },
       t.ownerSlug,
     );
     expect(create.status).toBe(201);
@@ -359,14 +418,14 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
 
     // A's owner tries to create INTO tenant B -> 403.
     const crossCreate = await postUsers(
-      { tenant_id: b.tenantId, login: 'cross@example.com', password: 'password12345', display_name: 'Cross' },
+      { tenant_id: b.tenantId, login: 'cross-login', email: 'cross@example.com', password: 'password12345', display_name: 'Cross' },
       a.ownerSlug,
     );
     expect(crossCreate.status).toBe(403);
 
     // B creates their own account.
     const bCreate = await postUsers(
-      { tenant_id: b.tenantId, login: `bacct-${Date.now()}@example.com`, password: 'password12345', display_name: 'B Account' },
+      { tenant_id: b.tenantId, login: `bacct-login-${Date.now()}`, email: `bacct-${Date.now()}@example.com`, password: 'password12345', display_name: 'B Account' },
       b.ownerSlug,
     );
     expect(bCreate.status).toBe(201);
@@ -403,7 +462,7 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     });
 
     const createRes = await postUsers(
-      { tenant_id: t.tenantId, login: 'blocked@example.com', password: 'password12345', display_name: 'Blocked' },
+      { tenant_id: t.tenantId, login: 'blocked-login', email: 'blocked@example.com', password: 'password12345', display_name: 'Blocked' },
       plainSlug,
     );
     expect(createRes.status).toBe(403);
@@ -411,7 +470,7 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
 
     // Owner creates a target account, then the plain member tries to patch it.
     const ownerCreate = await postUsers(
-      { tenant_id: t.tenantId, login: `target-${Date.now()}@example.com`, password: 'password12345', display_name: 'Target' },
+      { tenant_id: t.tenantId, login: `target-login-${Date.now()}`, email: `target-${Date.now()}@example.com`, password: 'password12345', display_name: 'Target' },
       t.ownerSlug,
     );
     expect(ownerCreate.status).toBe(201);
@@ -434,12 +493,13 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     const t = await registerOne('pwleak');
     kc.reset();
     const SECRET = `t0583-super-secret-pw-${Date.now()}`;
-    const login = `t0583-pwleak-${Date.now()}@example.com`;
+    const login = `t0583-pwleak-${Date.now()}`;
+    const email = `t0583-pwleak-${Date.now()}@example.com`;
 
     // 1) 409 EMAIL_TAKEN path — body must not echo the password.
     kc.failOnCreate = true;
     const conflictRes = await postUsers(
-      { tenant_id: t.tenantId, login, password: SECRET, display_name: 'PwLeak Conflict' },
+      { tenant_id: t.tenantId, login, email, password: SECRET, display_name: 'PwLeak Conflict' },
       t.ownerSlug,
     );
     expect(conflictRes.status).toBe(409);
@@ -449,7 +509,7 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     kc.failOnCreate = false;
     kc.failOnAuth = true;
     const unavailRes = await postUsers(
-      { tenant_id: t.tenantId, login, password: SECRET, display_name: 'PwLeak Unavail' },
+      { tenant_id: t.tenantId, login, email, password: SECRET, display_name: 'PwLeak Unavail' },
       t.ownerSlug,
     );
     expect(unavailRes.status).toBe(503);
@@ -460,7 +520,7 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     // single-purpose AC-11/AC-12 test).
     kc.failOnAuth = false;
     const createRes = await postUsers(
-      { tenant_id: t.tenantId, login, password: SECRET, display_name: 'PwLeak Create' },
+      { tenant_id: t.tenantId, login, email, password: SECRET, display_name: 'PwLeak Create' },
       t.ownerSlug,
     );
     expect(createRes.status, JSON.stringify(createRes.json)).toBe(201);

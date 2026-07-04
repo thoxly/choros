@@ -19,11 +19,13 @@
 
 const PASSWORD_MIN = 8;
 const DISPLAY_NAME_MAX = 256;
-// T-0625 fix: login = username = KC email field (spec N9 — "как register.ts:
-// username=email"). Real Keycloak rejects a non-email username/email with a
-// 400 that the server previously (bug) mapped to a 503 "service unavailable"
-// — validating the same shape here, client-side, gives an honest inline
-// field error before the request is even sent (mirrors register.ts EMAIL_RE).
+// T-0628 fix (narrows T-0625): `login` is free-form again (an ordinary,
+// non-email login like `ivan.petrov` is legitimate — T-0625 had briefly made
+// login itself mandatory-email-shaped to fix the 503-on-create bug; this
+// task closes the SAME bug from the email side instead). `email` is now its
+// own required field, validated client-side with the same shape check the
+// server uses (mirrors register.ts EMAIL_RE) so a bad value never leaves the
+// browser.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function str(v) {
@@ -36,14 +38,17 @@ function str(v) {
 
 /**
  * Validate the "создать учётку" form.
- * @param {{login?, password?, display_name?}} f
+ * @param {{login?, email?, password?, display_name?}} f
  * @returns {{valid:boolean, errors:Record<string,string>}}
  */
 export function validateCreateUser(f) {
   const errors = {};
   const login = str(f?.login).trim();
   if (login.length === 0) errors.login = 'Укажите логин';
-  else if (!EMAIL_RE.test(login)) errors.login = 'Логин должен быть email-адресом (например, ivanov@company.ru)';
+
+  const email = str(f?.email).trim();
+  if (email.length === 0) errors.email = 'Укажите email';
+  else if (!EMAIL_RE.test(email)) errors.email = 'Email должен быть корректным адресом (например, ivanov@company.ru)';
 
   const password = str(f?.password);
   if (password.length === 0) errors.password = 'Укажите пароль';
@@ -69,6 +74,7 @@ export function buildCreateUserPayload(tenantId, f) {
   const body = {
     tenant_id: str(tenantId),
     login: str(f.login).trim(),
+    email: str(f.email).trim(),
     password: str(f.password),
     display_name: str(f.display_name).trim(),
   };
@@ -97,7 +103,7 @@ export function mapUserError(status, body, entity = 'операцию') {
   const serverMsg = obj ? (obj.error?.message || obj.message) : undefined;
 
   if (status === 409 && code === 'EMAIL_TAKEN') {
-    return { field: 'login', message: 'Такой логин уже занят.' };
+    return { field: 'email', message: 'Такой email уже занят.' };
   }
   if (status === 409) {
     return { field: 'login', message: 'Учётка с таким логином уже существует в этом тенанте.' };

@@ -1,5 +1,5 @@
 /**
- * web/src/screens/users-form.test.js (T-0583)
+ * web/src/screens/users-form.test.js (T-0583, updated T-0628)
  *
  * Unit tests for the pure logic backing screen-users.jsx — validation,
  * payload assembly, error mapping, display helpers. Mirrors agents-form.test.js.
@@ -12,17 +12,18 @@ import {
 } from './users-form.js';
 
 describe('validateCreateUser', () => {
-  it('rejects an empty form with all three field errors', () => {
+  it('rejects an empty form with all four field errors', () => {
     const { valid, errors } = validateCreateUser({});
     expect(valid).toBe(false);
     expect(errors.login).toBeTruthy();
+    expect(errors.email).toBeTruthy();
     expect(errors.password).toBeTruthy();
     expect(errors.display_name).toBeTruthy();
   });
 
   it('rejects a password shorter than 8 characters', () => {
     const { valid, errors } = validateCreateUser({
-      login: 'ivanov@company.ru', password: 'short1', display_name: 'Иванов Иван',
+      login: 'ivanov', email: 'ivanov@company.ru', password: 'short1', display_name: 'Иванов Иван',
     });
     expect(valid).toBe(false);
     expect(errors.password).toMatch(/8/);
@@ -30,7 +31,7 @@ describe('validateCreateUser', () => {
 
   it('accepts a well-formed form', () => {
     const { valid, errors } = validateCreateUser({
-      login: 'ivanov@company.ru', password: 'password123', display_name: 'Иванов Иван',
+      login: 'ivanov', email: 'ivanov@company.ru', password: 'password123', display_name: 'Иванов Иван',
     });
     expect(valid).toBe(true);
     expect(Object.keys(errors)).toHaveLength(0);
@@ -38,39 +39,58 @@ describe('validateCreateUser', () => {
 
   it('rejects an over-long display_name', () => {
     const { valid, errors } = validateCreateUser({
-      login: 'a@b.ru', password: 'password123', display_name: 'x'.repeat(300),
+      login: 'a', email: 'a@b.ru', password: 'password123', display_name: 'x'.repeat(300),
     });
     expect(valid).toBe(false);
     expect(errors.display_name).toBeTruthy();
   });
 
-  // T-0625 fix: an "ordinary" (non-email) login used to be accepted client-side
-  // and only fail on the real Keycloak stand with a confusing 503 "service
-  // unavailable" (LIVE_PROOF diagnosis). The client must reject it inline,
-  // the same way register.ts's EMAIL_RE does for org self-registration.
-  it('rejects a non-email login (e.g. a bare username) with an inline field error', () => {
+  // T-0628 fix (narrows T-0625): an "ordinary" (non-email) login is now a
+  // LEGITIMATE value — T-0625 had briefly required login to be email-shaped
+  // to fix the 503-on-create bug; T-0628 closes that same bug from the email
+  // side instead (email is its own required field, checked below), so login
+  // must stay free-form.
+  it('accepts a non-email login (e.g. a bare username) as long as email is well-formed', () => {
     const { valid, errors } = validateCreateUser({
-      login: 'liveproof-835201', password: 'password123', display_name: 'Ordinary Login',
+      login: 'liveproof-835201', email: 'liveproof-835201@example.com', password: 'password123', display_name: 'Ordinary Login',
+    });
+    expect(valid).toBe(true);
+    expect(errors.login).toBeUndefined();
+  });
+
+  it('rejects a missing email even when login is present', () => {
+    const { valid, errors } = validateCreateUser({
+      login: 'ivan.petrov', password: 'password123', display_name: 'Ivan Petrov',
+    });
+    expect(valid).toBe(false);
+    expect(errors.email).toBeTruthy();
+    expect(errors.login).toBeUndefined();
+  });
+
+  it('rejects an email with no @ or no domain part', () => {
+    expect(validateCreateUser({ login: 'x', email: 'no-at-sign', password: 'password123', display_name: 'X' }).valid).toBe(false);
+    expect(validateCreateUser({ login: 'x', email: 'no-domain@', password: 'password123', display_name: 'X' }).valid).toBe(false);
+  });
+
+  it('rejects an empty login even when email is well-formed', () => {
+    const { valid, errors } = validateCreateUser({
+      email: 'a@b.ru', password: 'password123', display_name: 'X',
     });
     expect(valid).toBe(false);
     expect(errors.login).toBeTruthy();
-    expect(errors.login).toMatch(/email/i);
-  });
-
-  it('rejects a login with no @ or no domain part', () => {
-    expect(validateCreateUser({ login: 'no-at-sign', password: 'password123', display_name: 'X' }).valid).toBe(false);
-    expect(validateCreateUser({ login: 'no-domain@', password: 'password123', display_name: 'X' }).valid).toBe(false);
+    expect(errors.email).toBeUndefined();
   });
 });
 
 describe('buildCreateUserPayload', () => {
   it('builds the exact POST /api/users body with tenant_id + trimmed fields', () => {
     const body = buildCreateUserPayload('tenant-1', {
-      login: '  ivanov@company.ru  ', password: 'password123', display_name: '  Иванов Иван  ',
+      login: '  ivan.petrov  ', email: '  ivanov@company.ru  ', password: 'password123', display_name: '  Иванов Иван  ',
     });
     expect(body).toEqual({
       tenant_id: 'tenant-1',
-      login: 'ivanov@company.ru',
+      login: 'ivan.petrov',
+      email: 'ivanov@company.ru',
       password: 'password123',
       display_name: 'Иванов Иван',
     });
@@ -78,7 +98,7 @@ describe('buildCreateUserPayload', () => {
 
   it('omits position_id/role_id when empty (server typeof-guard fallback)', () => {
     const body = buildCreateUserPayload('tenant-1', {
-      login: 'a@b.ru', password: 'password123', display_name: 'A B', position_id: '', role_id: '',
+      login: 'a', email: 'a@b.ru', password: 'password123', display_name: 'A B', position_id: '', role_id: '',
     });
     expect(body.position_id).toBeUndefined();
     expect(body.role_id).toBeUndefined();
@@ -86,7 +106,7 @@ describe('buildCreateUserPayload', () => {
 
   it('includes position_id/role_id when present', () => {
     const body = buildCreateUserPayload('tenant-1', {
-      login: 'a@b.ru', password: 'password123', display_name: 'A B',
+      login: 'a', email: 'a@b.ru', password: 'password123', display_name: 'A B',
       position_id: 'pos-1', role_id: 'role-1',
     });
     expect(body.position_id).toBe('pos-1');
@@ -95,7 +115,7 @@ describe('buildCreateUserPayload', () => {
 
   it('never includes the password anywhere but the password field itself', () => {
     const body = buildCreateUserPayload('tenant-1', {
-      login: 'a@b.ru', password: 'super-secret-pw', display_name: 'A B',
+      login: 'a', email: 'a@b.ru', password: 'super-secret-pw', display_name: 'A B',
     });
     const serialized = JSON.stringify(body);
     // The password appears exactly once (its own field value).
@@ -105,9 +125,9 @@ describe('buildCreateUserPayload', () => {
 });
 
 describe('mapUserError', () => {
-  it('maps 409 EMAIL_TAKEN to a login field error', () => {
+  it('maps 409 EMAIL_TAKEN to an email field error', () => {
     const r = mapUserError(409, { error: { code: 'EMAIL_TAKEN' } });
-    expect(r.field).toBe('login');
+    expect(r.field).toBe('email');
   });
   it('maps a generic 409 to a login field error', () => {
     const r = mapUserError(409, {});

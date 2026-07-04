@@ -44,7 +44,7 @@ const fieldGap = { display: 'flex', flexDirection: 'column', gap: 'var(--chs-spa
    Строка учётки — карточка читаема в ОБЕИХ темах (токены surface/text/muted).
    Кнопка деактивации/реактивации переключается по текущему active.
    --------------------------------------------------------------------------- */
-function AccountRow({ account, onToggleActive, busy }) {
+function AccountRow({ account, onToggleActive, busy, canWrite }) {
   const meta = accountStatusMeta(account.active);
   const orgPlace = account.position
     ? `${account.position}${account.department ? ` · ${account.department}` : ''}`
@@ -66,16 +66,21 @@ function AccountRow({ account, onToggleActive, busy }) {
       <Tooltip label={account.active ? 'Может войти в систему' : 'Вход заблокирован'}>
         <StatusChip status={meta.chip} label={meta.label} />
       </Tooltip>
-      <Button
-        variant={account.active ? 'secondary' : 'primary'}
-        size="sm"
-        disabled={busy}
-        loading={busy}
-        onClick={() => onToggleActive(account, !account.active)}
-        title={account.active ? 'Деактивировать учётку (заблокировать вход)' : 'Реактивировать учётку (разрешить вход)'}
-      >
-        {account.active ? 'Деактивировать' : 'Реактивировать'}
-      </Button>
+      {/* T-0628: деактивация/реактивация — контрол записи, скрыт для не-владельца
+          (canWrite=false) по паттерну screen-org.jsx; сервер всё равно честно
+          403-ит POST/PATCH — это чисто косметическая деградация. */}
+      {canWrite && (
+        <Button
+          variant={account.active ? 'secondary' : 'primary'}
+          size="sm"
+          disabled={busy}
+          loading={busy}
+          onClick={() => onToggleActive(account, !account.active)}
+          title={account.active ? 'Деактивировать учётку (заблокировать вход)' : 'Реактивировать учётку (разрешить вход)'}
+        >
+          {account.active ? 'Деактивировать' : 'Реактивировать'}
+        </Button>
+      )}
     </div>
   );
 }
@@ -84,7 +89,7 @@ function AccountRow({ account, onToggleActive, busy }) {
    Модал: создать учётку
    --------------------------------------------------------------------------- */
 function CreateUserModal({ positions, onClose, onDone }) {
-  const [values, setValues] = useState({ login: '', password: '', display_name: '', position_id: '' });
+  const [values, setValues] = useState({ login: '', email: '', password: '', display_name: '', position_id: '' });
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitErr, setSubmitErr] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -127,13 +132,23 @@ function CreateUserModal({ positions, onClose, onDone }) {
         <div style={fieldGap}>
           <Field
             label="Логин"
-            type="email"
+            type="text"
             value={values.login}
             onChange={set('login')}
-            placeholder="ivanov@company.ru"
+            placeholder="ivan.petrov"
             invalid={!!fieldErrors.login}
-            hint={fieldErrors.login || 'email-адрес — используется как логин для входа'}
+            hint={fieldErrors.login || 'используется для входа в систему'}
             autoFocus
+          />
+
+          <Field
+            label="Email"
+            type="email"
+            value={values.email}
+            onChange={set('email')}
+            placeholder="ivanov@company.ru"
+            invalid={!!fieldErrors.email}
+            hint={fieldErrors.email || undefined}
           />
 
           <Field
@@ -189,6 +204,14 @@ export default function UsersScreen() {
   const [createOpen, setCreateOpen] = useState(false);
   const [busyId, setBusyId] = useState(null);
   const [toggleErr, setToggleErr] = useState(null);
+  // T-0628 (минор — /users прямым URL рядовому): canWrite mirrors the
+  // screen-org.jsx pattern — GET /api/org/tenant-state is owner/covering-grant
+  // gated (200 ⇒ can write, 403 ⇒ read-only). This screen already calls that
+  // endpoint for the position dropdown, so no new request is introduced; a
+  // non-owner sees the account list but the write controls degrade to a
+  // banner, same as OrgTree does. The SERVER 403 on POST/PATCH stays the real
+  // gate (T-0469) — this is a cosmetic client-side degrade only.
+  const [canWrite, setCanWrite] = useState(false);
 
   const loadAccounts = useCallback(async () => {
     setError(null);
@@ -207,11 +230,19 @@ export default function UsersScreen() {
   const loadPositions = useCallback(async () => {
     try {
       const res = await fetch(`/api/org/tenant-state?tenant_id=${getActiveTenantId()}`, { headers: authHeaders() });
-      if (!res.ok) { setPositions([]); return; }
-      const data = await res.json();
-      setPositions(positionOptions(data.positions));
+      if (res.status === 200) {
+        const data = await res.json();
+        setPositions(positionOptions(data.positions));
+        setCanWrite(true);
+        return;
+      }
+      // 403 (not owner / no covering grant) or any other failure ⇒ read-only
+      // degrade — no fabricated write capability (mirrors screen-org.jsx).
+      setPositions([]);
+      setCanWrite(false);
     } catch {
       setPositions([]);
+      setCanWrite(false);
     }
   }, []);
 
@@ -247,14 +278,27 @@ export default function UsersScreen() {
           Учётки-пользователи тенанта. Каждая — логин и пароль для входа; создав учётку, сразу
           выдаётся право читать записи. Деактивация блокирует вход без удаления истории.
         </p>
-        <Button
-          variant="primary" size="sm"
-          glyph={<Icon name="plus" className="chs-btn__glyph" />}
-          onClick={() => setCreateOpen(true)}
-        >
-          Создать учётку
-        </Button>
+        {canWrite && (
+          <Button
+            variant="primary" size="sm"
+            glyph={<Icon name="plus" className="chs-btn__glyph" />}
+            onClick={() => setCreateOpen(true)}
+          >
+            Создать учётку
+          </Button>
+        )}
       </div>
+
+      {/* T-0628 (минор — /users прямым URL рядовому): не-владелец видит список
+          (честное чтение), но контрол создания скрыт и заменён поясняющим
+          баннером — тот же паттерн, что screen-org.jsx использует для
+          create/delete-панели оргструктуры (T-0538/T-0409 admin zone). */}
+      {!canWrite && (
+        <div style={{ ...bannerErrStyle, background: 'var(--chs-color-surface-muted, var(--chs-color-surface))', borderColor: 'var(--chs-color-border)', color: 'var(--chs-color-text-muted)' }}>
+          Создание и деактивация учёток доступны владельцу тенанта (или администратору с
+          соответствующим грантом). Список ниже — только для чтения.
+        </div>
+      )}
 
       {toggleErr && <div style={bannerErrStyle}>{toggleErr}</div>}
 
@@ -270,11 +314,11 @@ export default function UsersScreen() {
         <EmptyState
           title="Пользователей пока нет"
           description="Создайте первую учётку — логин и пароль для входа в систему."
-          action={
+          action={canWrite ? (
             <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
               Создать учётку
             </Button>
-          }
+          ) : undefined}
         />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-4)' }}>
@@ -284,6 +328,7 @@ export default function UsersScreen() {
               account={a}
               onToggleActive={toggleActive}
               busy={busyId === a.employee_id}
+              canWrite={canWrite}
             />
           ))}
         </div>
