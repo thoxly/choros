@@ -24,11 +24,14 @@
  *     - FsObjectStore: streams bytes directly from disk.
  *     - http(s) presign url (S3): 302 redirect.
  *     T-0579: ?disposition=inline requests Content-Disposition: inline instead
- *     of attachment, for record-card preview (image/*, application/pdf only —
- *     see isInlineSafeMime). Only applies to the FsObjectStore streaming path
- *     (the redirect/JSON-fallback paths are unaffected — presign URLs carry
- *     no disposition header here). Without the param, or for any other mime
- *     (including image/svg+xml — anti-XSS), behaviour is UNCHANGED: attachment.
+ *     of attachment, for record-card preview (a POSITIVE allowlist of
+ *     concrete-safe image subtypes + application/pdf only — see
+ *     isInlineSafeMime / INLINE_SAFE_IMAGE_SUBTYPES). Only applies to the
+ *     FsObjectStore streaming path (the redirect/JSON-fallback paths are
+ *     unaffected — presign URLs carry no disposition header here). Without
+ *     the param, or for any mime not on the allowlist (including
+ *     image/svg+xml, image/svg, and any parameterized variant of either —
+ *     anti-XSS), behaviour is UNCHANGED: attachment.
  *
  * Authorization: every route delegates to the T-0021 PDP via makeFileRecordResolver
  * (the owner RECORD's grant governs; no separate file ACL — FF-NOACL). Tenant
@@ -80,12 +83,28 @@ const PRESIGN_TTL_SECONDS = 300;
 // GET /api/files/:fileVersionId/download?disposition=inline requests an inline
 // Content-Disposition (browser renders instead of downloads — needed for the
 // record-card preview, ADR §2.7). Only preview-SAFE mime types are honoured:
-// image/* (EXCLUDING image/svg+xml — an SVG can carry a <script>, which would
-// execute in the app's origin if rendered inline: stored-XSS) and
-// application/pdf. Every other mime, and the absence of the query param,
-// falls back to `attachment` — the existing default behaviour is UNCHANGED
-// (no regression on any pre-T-0579 test/caller).
+// a POSITIVE allowlist of concrete safe image subtypes (png/jpeg/gif/webp)
+// and application/pdf. Every other mime — including any image/* NOT on the
+// allowlist (svg, svg+xml, and any future/unknown SVG-like subtype) — and the
+// absence of the query param, falls back to `attachment` — the existing
+// default behaviour is UNCHANGED (no regression on any pre-T-0579 test/caller).
 // ---------------------------------------------------------------------------
+
+/**
+ * Concrete image subtypes safe to render inline. Deliberately a POSITIVE
+ * allowlist (not "image/* except svg"): SVG can carry a <script> that would
+ * execute in the app's origin if rendered inline (stored-XSS), and a single
+ * negative exception for "image/svg+xml" misses siblings like "image/svg"
+ * (no +xml suffix) or any future SVG-like/unknown subtype. Enumerating the
+ * SAFE subtypes instead means anything not explicitly known-safe is denied
+ * by construction — no new image subtype can silently become inline-eligible.
+ */
+const INLINE_SAFE_IMAGE_SUBTYPES: ReadonlySet<string> = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
 
 /**
  * True iff `mime` is safe to serve with Content-Disposition: inline.
@@ -95,18 +114,29 @@ const PRESIGN_TTL_SECONDS = 300;
  * stores a normalized mime; this function does not trust that as its ONLY
  * guarantee, since it is also the read-time boundary for the inline decision
  * and must not regress if a row was written before the upload-side fix, by a
- * migration/import path, or by any future writer). Without normalizing here,
- * a stored `image/SVG+xml` would fail the exact `=== "image/svg+xml"` compare
- * yet still pass `startsWith("image/")` → inline → stored-XSS (SVG can carry
- * <script>, executed in the app's origin).
+ * migration/import path, or by any future writer).
+ *
+ * T-0579 fix-forward (review B1-residual, blocking): normalizing case/
+ * whitespace alone is NOT enough — a stored mime carrying a parameter
+ * (`image/svg+xml;charset=utf-8`, `image/svg+xml;x=1`) survives
+ * trim()+toLowerCase() as `image/svg+xml;charset=utf-8`, which fails the
+ * exact `=== "image/svg+xml"` compare yet still passes a bare
+ * `startsWith("image/")` check → inline → stored-XSS. Separately, a stored
+ * `image/svg` (no `+xml` suffix at all) was never excluded by that single
+ * negative check in the first place — browsers still treat it as SVG. Both
+ * gaps are closed at once by (a) stripping the `;param` suffix at the
+ * comparison boundary and (b) switching from a negative svg-exclusion to a
+ * POSITIVE allowlist of concrete safe image subtypes — see
+ * INLINE_SAFE_IMAGE_SUBTYPES above.
  */
 function isInlineSafeMime(mime: string | null | undefined): boolean {
   if (typeof mime !== "string" || mime.length === 0) return false;
-  const normalized = mime.trim().toLowerCase();
-  if (normalized.length === 0) return false;
-  if (normalized === "image/svg+xml") return false; // anti-XSS: SVG can carry <script>
-  if (normalized.startsWith("image/")) return true;
-  if (normalized === "application/pdf") return true;
+  // Strip any `;charset=...`/`;x=1`/etc parameter BEFORE comparing — the
+  // media-type token itself is everything before the first ';'.
+  const base = mime.trim().toLowerCase().split(";")[0]!.trim();
+  if (base.length === 0) return false;
+  if (INLINE_SAFE_IMAGE_SUBTYPES.has(base)) return true;
+  if (base === "application/pdf") return true;
   return false;
 }
 
@@ -225,18 +255,18 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
         const bodyBuf = await readRawBody(req, MAX_UPLOAD_BYTES);
 
         // Derive mime from Content-Type; strip parameters (e.g. ; charset=...).
-        // T-0579 fix-forward (review B1): normalize to lowercase at the ONE
+        // T-0579 fix-forward (review B1): normalize to lowercase at this
         // ingestion boundary so every stored mime is canonical from here on —
         // `image/SVG+xml` / `image/Svg+xml` etc. are stored as `image/svg+xml`.
-        // Without this, isInlineSafeMime's exact `=== "image/svg+xml"` compare
-        // (case-sensitive per the MIME grammar's subtype being case-preserved
-        // in this codebase's comparisons) would miss a registro-variant and
-        // `startsWith("image/")` would then let it through as inline —
-        // stored-XSS (an SVG can carry <script>, executed in the app's origin).
-        // Normalizing on WRITE means every reader (this route's own inline
-        // check, the client preview gate, any future consumer) sees one
-        // canonical form — one boundary, not N scattered case-insensitive
-        // compares.
+        // Normalizing (and stripping params) on WRITE is defense-in-depth, not
+        // the only guarantee: this is ONE writer among several (see
+        // src/core/document-render.ts's addVersion calls for text/html etc,
+        // plus any future seed/import/migration path) — isInlineSafeMime
+        // itself MUST re-normalize and re-strip params on READ regardless of
+        // what any writer stored (review B1-residual), and gates on a
+        // POSITIVE allowlist of concrete-safe subtypes rather than a negative
+        // svg-exclusion, so an unnormalized/un-stripped/unknown-subtype mime
+        // is denied by construction rather than by an exhaustive blocklist.
         const rawCt = req.headers["content-type"] ?? "application/octet-stream";
         const mime = (rawCt.split(";")[0] ?? "").trim().toLowerCase() || "application/octet-stream";
 
@@ -436,11 +466,13 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
           const fileName = version ? `file-${fileVersionId}` : "download";
 
           // T-0579 (FR-8/FF-INLINE-SAFE): inline ONLY when the caller asked for
-          // it AND the mime is on the preview-safe allowlist (image/* except
-          // svg, application/pdf). Everything else — no param, or an unsafe
-          // mime (including image/svg+xml and text/html) — stays `attachment`,
-          // exactly as before T-0579 (anti-XSS: an inline SVG/HTML response
-          // would execute in the app's origin).
+          // it AND the mime (param-stripped, case/whitespace-normalized) is on
+          // the POSITIVE preview-safe allowlist (png/jpeg/gif/webp,
+          // application/pdf). Everything else — no param, or a mime not on
+          // that allowlist (including image/svg+xml, image/svg, any
+          // `image/svg+xml;charset=...` variant, and text/html) — stays
+          // `attachment`, exactly as before T-0579 (anti-XSS: an inline
+          // SVG/HTML response would execute in the app's origin).
           const disposition = wantsInline && isInlineSafeMime(contentType) ? "inline" : "attachment";
 
           res.statusCode = 200;

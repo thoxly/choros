@@ -895,13 +895,15 @@ describe("GET /api/files/:fileVersionId/download", () => {
 // ---------------------------------------------------------------------------
 // T-0579 (AC-11, FF-INLINE-SAFE): ?disposition=inline on the download route.
 //
-// Only preview-safe mime types (image/* excluding svg, application/pdf) get
-// Content-Disposition: inline when the param is present; everything else
-// (including no param at all) stays `attachment` — the pre-T-0579 default is
-// UNCHANGED (verified by AC-download-8 above, which has no query param and
-// still asserts `attachment`). PDP gate, tenant/actor-from-identity, and
-// nosniff are untouched — only the file:// (FsObjectStore) streaming branch
-// gets the new header logic; these tests exercise exactly that branch.
+// Only preview-safe mime types (a POSITIVE allowlist of concrete-safe image
+// subtypes — png/jpeg/gif/webp — plus application/pdf) get Content-
+// Disposition: inline when the param is present; everything else (including
+// no param at all, and any image/* subtype NOT on the allowlist, e.g. svg,
+// svg+xml, image/svg with no +xml) stays `attachment` — the pre-T-0579
+// default is UNCHANGED (verified by AC-download-8 above, which has no query
+// param and still asserts `attachment`). PDP gate, tenant/actor-from-identity,
+// and nosniff are untouched — only the file:// (FsObjectStore) streaming
+// branch gets the new header logic; these tests exercise exactly that branch.
 // ---------------------------------------------------------------------------
 
 describe("GET /api/files/:fileVersionId/download?disposition=inline (T-0579)", () => {
@@ -940,11 +942,47 @@ describe("GET /api/files/:fileVersionId/download?disposition=inline (T-0579)", (
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
+  it("AC-11/B1-residual: application/xhtml+xml with ?disposition=inline → attachment (not on the allowlist)", async () => {
+    const tmpFile = writeTempFile("<html><script>alert(1)</script></html>");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "application/xhtml+xml" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
   it("AC-11: application/pdf with ?disposition=inline → Content-Disposition: inline", async () => {
     const tmpFile = writeTempFile("%PDF-1.4 fake");
     const fileStore = new FakeFileStore();
     fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
     fileStore.seedVersion(makeVersionRow({ mimeType: "application/pdf" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^inline/);
+  });
+
+  it("AC-11/B1-residual: \"application/pdf;charset=binary\" (parameterized, safe) with ?disposition=inline → inline", async () => {
+    const tmpFile = writeTempFile("%PDF-1.4 fake");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "application/pdf;charset=binary" }));
 
     const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
     servers.push(server);
@@ -1006,6 +1044,94 @@ describe("GET /api/files/:fileVersionId/download?disposition=inline (T-0579)", (
 
     expect(res.status).toBe(200);
     expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  // review B1-residual (blocking, second round): the registro-only fix above
+  // still missed two bypasses. (a) A stored mime carrying a PARAMETER —
+  // `image/svg+xml;charset=utf-8` — survives trim()+toLowerCase() as
+  // `image/svg+xml;charset=utf-8`, which fails the exact
+  // `=== "image/svg+xml"` compare yet still passes a bare
+  // `startsWith("image/")` check → inline → stored-XSS. (b) `image/svg`
+  // (no `+xml` suffix at all) was never covered by that single negative
+  // check to begin with — browsers still render it as SVG. Threat model:
+  // the read-time boundary must hold "independent of how the mime got into
+  // storage" — src/core/document-render.ts's addVersion calls (text/html,
+  // text/csv, ...) are a SECOND writer that does not go through the upload
+  // route's param-stripping, and `image/svg` requires no parameter at all —
+  // any seed/import/writer that stores either variant must still be denied
+  // on READ. Both are closed by param-stripping at the compare boundary AND
+  // switching to a POSITIVE allowlist of concrete-safe image subtypes.
+  it.each([
+    ["image/svg+xml;charset=utf-8", "svg+xml with charset param"],
+    ["image/svg+xml;x=1", "svg+xml with arbitrary param"],
+    ["image/SVG+xml;charset=utf-8", "svg+xml uppercase + param"],
+    ["image/svg", "svg WITHOUT +xml suffix"],
+    ["IMAGE/SVG", "svg without +xml, uppercase"],
+    [" image/svg ; charset=utf-8 ", "svg without +xml, param + whitespace"],
+  ])("AC-11/B1-residual anti-XSS regression: %s (%s) with ?disposition=inline → STILL attachment", async (variantMime) => {
+    const tmpFile = writeTempFile("<svg onload=alert(1)></svg>");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: variantMime }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  // Positive-side param-stripping check: a safe image mime CARRYING a
+  // parameter (e.g. from a client that sends `image/png;charset=binary`)
+  // must still get inline — proves the param-stripping is not over-broad /
+  // does not accidentally reject legitimate parameterized safe mimes.
+  it('AC-11/B1-residual: "image/png;charset=binary" (parameterized, safe) with ?disposition=inline → inline', async () => {
+    const tmpFile = writeTempFile("fake-png-bytes");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "image/png;charset=binary" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^inline/);
+  });
+
+  // Positive allowlist coverage: each concrete safe image subtype gets
+  // inline on its own (not just png, which the earlier AC-11 test already
+  // covers) — proves the allowlist is a real allowlist, not an accidental
+  // startsWith("image/") in disguise.
+  it.each([
+    ["image/jpeg"],
+    ["image/gif"],
+    ["image/webp"],
+  ])("AC-11/B1-residual positive allowlist: %s with ?disposition=inline → inline", async (mimeType) => {
+    const tmpFile = writeTempFile("fake-image-bytes");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^inline/);
   });
 
   // Positive-side registro check: a safe image mime with unusual casing must

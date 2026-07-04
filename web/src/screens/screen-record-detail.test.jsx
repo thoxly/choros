@@ -78,8 +78,11 @@ describe('screen-record-detail — FileFieldValue (T-0579, AC-9)', () => {
     // review B1 fix-forward: the img/embed gate now reads from a normalized
     // (trim+lowercase) local, not the raw meta.mime — so a registro-variant
     // safe mime (e.g. "Image/PNG") still renders the preview.
+    // review B1-residual fix-forward: the local also strips any `;param`
+    // suffix, so a parameterized safe mime (e.g. "image/png;charset=binary")
+    // still renders the preview too.
     expect(precedingText).toMatch(/previewSafe\s*&&\s*normalizedMime\.startsWith\('image\/'\)/);
-    expect(precedingText).toContain("normalizedMime = typeof meta.mime === 'string' ? meta.mime.trim().toLowerCase() : ''");
+    expect(precedingText).toContain("normalizedMime = typeof meta.mime === 'string' ? meta.mime.trim().toLowerCase().split(';')[0].trim() : ''");
     expect(src.slice(idx, idx + 200)).toContain('src={previewHref}');
   });
 
@@ -97,16 +100,58 @@ describe('screen-record-detail — FileFieldValue (T-0579, AC-9)', () => {
     // eslint-disable-next-line no-new-func -- structural extraction of a pure
     // helper from the .jsx source (no DOM/React needed to exercise its logic;
     // mirrors the source-scan convention already used in this file).
-    const match = src.match(/function isPreviewSafeMime\(mime\) \{[\s\S]*?\n\}/);
-    expect(match).not.toBeNull();
+    // The helper closes over PREVIEW_SAFE_IMAGE_SUBTYPES, so both const
+    // declarations must be extracted together.
+    const setMatch = src.match(/const PREVIEW_SAFE_IMAGE_SUBTYPES = new Set\(\[[^\]]*\]\);/);
+    const fnMatch = src.match(/function isPreviewSafeMime\(mime\) \{[\s\S]*?\n\}/);
+    expect(setMatch).not.toBeNull();
+    expect(fnMatch).not.toBeNull();
     // eslint-disable-next-line no-new-func
-    const isPreviewSafeMime = new Function(`${match[0]}; return isPreviewSafeMime;`)();
+    const isPreviewSafeMime = new Function(`${setMatch[0]}\n${fnMatch[0]}; return isPreviewSafeMime;`)();
     expect(isPreviewSafeMime('image/svg+xml')).toBe(false);
     expect(isPreviewSafeMime('image/png')).toBe(true);
     expect(isPreviewSafeMime('application/pdf')).toBe(true);
     expect(isPreviewSafeMime('text/html')).toBe(false);
     expect(isPreviewSafeMime('text/plain')).toBe(false);
     expect(isPreviewSafeMime(undefined)).toBe(false);
+  });
+
+  // review B1-residual (blocking, second round): trim+lowercase alone missed
+  // two bypasses — (a) a mime carrying a parameter
+  // (`image/svg+xml;charset=utf-8`) survives normalization as-is, fails the
+  // exact `=== 'image/svg+xml'` compare, yet still passed a bare
+  // `startsWith('image/')` check; (b) `image/svg` (no `+xml`) was never
+  // excluded by that single negative check at all. Both are closed by
+  // param-stripping at the compare boundary AND a POSITIVE allowlist of
+  // concrete-safe image subtypes (mirrors src/http/files.ts's
+  // INLINE_SAFE_IMAGE_SUBTYPES / isInlineSafeMime).
+  it('isPreviewSafeMime strips mime parameters AND uses a positive image-subtype allowlist (review B1-residual)', () => {
+    const setMatch = src.match(/const PREVIEW_SAFE_IMAGE_SUBTYPES = new Set\(\[[^\]]*\]\);/);
+    const fnMatch = src.match(/function isPreviewSafeMime\(mime\) \{[\s\S]*?\n\}/);
+    expect(setMatch).not.toBeNull();
+    expect(fnMatch).not.toBeNull();
+    // eslint-disable-next-line no-new-func
+    const isPreviewSafeMime = new Function(`${setMatch[0]}\n${fnMatch[0]}; return isPreviewSafeMime;`)();
+
+    // [A] parameterized svg variants must still be denied.
+    expect(isPreviewSafeMime('image/svg+xml;charset=utf-8')).toBe(false);
+    expect(isPreviewSafeMime('image/svg+xml;x=1')).toBe(false);
+    expect(isPreviewSafeMime('image/SVG+xml;charset=utf-8')).toBe(false);
+
+    // [B] image/svg (no +xml suffix) must be denied.
+    expect(isPreviewSafeMime('image/svg')).toBe(false);
+    expect(isPreviewSafeMime('IMAGE/SVG')).toBe(false);
+
+    // Positive allowlist: concrete safe subtypes → true, including with a
+    // parameter on a SAFE mime (proves stripping isn't over-broad).
+    expect(isPreviewSafeMime('image/png;charset=binary')).toBe(true);
+    expect(isPreviewSafeMime('image/jpeg')).toBe(true);
+    expect(isPreviewSafeMime('image/gif')).toBe(true);
+    expect(isPreviewSafeMime('image/webp')).toBe(true);
+    expect(isPreviewSafeMime('application/pdf;charset=binary')).toBe(true);
+
+    // Never-safe non-image types stay excluded.
+    expect(isPreviewSafeMime('application/xhtml+xml')).toBe(false);
   });
 
   it('has an honest loading state (not a silently blank/frozen render)', () => {

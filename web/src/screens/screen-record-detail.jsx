@@ -400,8 +400,10 @@ function RelationFieldValue({ targetId, recordId, appId }) {
 //
 // Resolution: GET /api/records/:recordId/files (the same listing FileField and
 // FileCell consume) to get the display name + mime. Preview uses the inline-
-// disposition route (?disposition=inline) which the server allowlists to
-// image/* (except svg) and application/pdf — everything else download-only.
+// disposition route (?disposition=inline) which the server allowlists to a
+// POSITIVE set of concrete-safe image subtypes (png/jpeg/gif/webp) and
+// application/pdf — everything else (including any svg variant) is
+// download-only.
 //
 // Honest states: loading / denied (not found in listing) / resolved (name link
 // + optional preview).
@@ -413,18 +415,28 @@ function RelationFieldValue({ targetId, recordId, appId }) {
  *
  * T-0579 fix-forward (review B1): normalize (trim + lowercase) before
  * comparing — a stored/served mime of `image/SVG+xml` must still be excluded
- * here, mirroring isInlineSafeMime server-side. Without this, the client
- * would render an <img> for a registro-variant SVG mime whose ?disposition=
- * inline request the (now-hardened) server correctly refuses — a broken
- * image, not an XSS on its own, but the two allowlists must agree so the
- * client's rendering DECISION never claims "safe" for something the server
- * denies as unsafe. */
+ * here, mirroring isInlineSafeMime server-side.
+ *
+ * T-0579 fix-forward (review B1-residual, blocking): trim+lowercase alone
+ * missed two bypasses that the server-side hardening also closes: (a) a mime
+ * carrying a parameter — `image/svg+xml;charset=utf-8` survives
+ * normalization as-is, fails the exact `=== 'image/svg+xml'` compare, yet
+ * still passed a bare `startsWith('image/')` check; (b) `image/svg` (no
+ * `+xml`) was never excluded by that single negative check at all — browsers
+ * still render it as SVG. Both are closed by stripping the `;param` suffix
+ * at the comparison boundary AND switching to a POSITIVE allowlist of
+ * concrete safe image subtypes (mirroring INLINE_SAFE_IMAGE_SUBTYPES
+ * server-side) instead of a negative svg-exclusion — anything not
+ * enumerated (svg, svg+xml, any future/unknown subtype) is denied by
+ * construction. The two allowlists must agree so the client's rendering
+ * DECISION never claims "safe" for something the server denies as unsafe. */
+const PREVIEW_SAFE_IMAGE_SUBTYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
 function isPreviewSafeMime(mime) {
   if (typeof mime !== 'string') return false;
-  const normalized = mime.trim().toLowerCase();
-  if (normalized.length === 0) return false;
-  if (normalized === 'image/svg+xml') return false; // anti-XSS: svg never inline (FR-8)
-  return normalized.startsWith('image/') || normalized === 'application/pdf';
+  const base = mime.trim().toLowerCase().split(';')[0].trim();
+  if (base.length === 0) return false;
+  return PREVIEW_SAFE_IMAGE_SUBTYPES.has(base) || base === 'application/pdf';
 }
 
 /**
@@ -491,12 +503,14 @@ function FileFieldValue({ versionId, recordId }) {
   const downloadHref = `/api/files/${encodeURIComponent(versionId)}/download`;
   const previewHref = `${downloadHref}?disposition=inline`;
   const previewSafe = isPreviewSafeMime(meta.mime);
-  // T-0579 fix-forward (review B1): normalize once for the image-vs-embed
-  // branch below too — previewSafe already normalizes internally, but a
-  // registro-variant safe mime (e.g. `Image/PNG`) must still pick the image
-  // branch (not silently render neither preview element while previewSafe is
-  // true) — one normalized value used consistently everywhere it's compared.
-  const normalizedMime = typeof meta.mime === 'string' ? meta.mime.trim().toLowerCase() : '';
+  // T-0579 fix-forward (review B1 / B1-residual): normalize AND strip any
+  // `;param` once for the image-vs-embed branch below too — previewSafe
+  // already normalizes+strips internally, but a registro-variant or
+  // parameterized safe mime (e.g. `Image/PNG`, `image/png;charset=binary`)
+  // must still pick the correct branch (not silently render neither preview
+  // element while previewSafe is true) — one normalized, param-stripped
+  // value used consistently everywhere it's compared.
+  const normalizedMime = typeof meta.mime === 'string' ? meta.mime.trim().toLowerCase().split(';')[0].trim() : '';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', alignItems: 'flex-start' }}>
