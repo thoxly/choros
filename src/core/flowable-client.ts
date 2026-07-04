@@ -579,6 +579,63 @@ function httpStatusToCode(status: number, isDeployBpmn = false): FlowableErrorCo
   return "UNKNOWN";
 }
 
+// ---------------------------------------------------------------------------
+// T-0635 [P0-4]: deployBpmn body-shaped BAD_BPMN detection.
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a Response body as JSON without throwing. deployBpmn calls this on the
+ * non-201 path purely to LOOK for Flowable's own {message, exception} error shape;
+ * a body that is absent / not JSON / doesn't parse simply yields null, and the
+ * caller falls back to the plain HTTP-status classification (httpStatusToCode) —
+ * this helper never turns a read failure into a thrown error.
+ */
+async function safeReadJson(resp: Response): Promise<unknown> {
+  try {
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Java exception class-name fragments Flowable's deployment servlet is
+ * LIVE-VERIFIED to report (docs/test-reports/T-0058.test-report.json probe-a:
+ * "HTTP 500 with XMLStreamException") when the posted BPMN document itself is
+ * unparsable/rejected — as opposed to the engine being unreachable/overloaded.
+ * "AttributePrefixUnbound" is the SAX/StAX message text for an undeclared
+ * namespace prefix (T-0635's root cause — flowable: stamped without xmlns:flowable);
+ * the exception class fragments cover the same failure family more broadly so a
+ * future variant (missing element, invalid schema, etc.) is not silently missed.
+ */
+const BPMN_PARSE_REJECTION_SIGNATURES = [
+  "XMLStreamException",
+  "SAXParseException",
+  "BpmnXMLException",
+  "AttributePrefixUnbound",
+  "XMLException",
+] as const;
+
+/**
+ * Inspect a deployBpmn error response body for Flowable's own deploy-rejection
+ * shape: `{"message": "...", "exception": "..."}` where the exception string names
+ * an XML-parsing failure. Flowable only emits this specific shape when it actually
+ * received and attempted to parse/deploy the posted document — i.e. the ENGINE
+ * responded (it is not "unavailable"); the document itself was rejected. Returns
+ * false for any other body shape (including no body / non-JSON / a body that
+ * doesn't mention one of the known signatures) so genuine outages (proxy errors,
+ * generic 5xx with no such body) still fall through to the status-code mapping.
+ */
+function isBpmnParseRejection(body: unknown): boolean {
+  if (body === null || typeof body !== "object") return false;
+  const rec = body as Record<string, unknown>;
+  const haystack = [rec["message"], rec["exception"]]
+    .filter((v): v is string => typeof v === "string")
+    .join(" ");
+  if (!haystack) return false;
+  return BPMN_PARSE_REJECTION_SIGNATURES.some((sig) => haystack.includes(sig));
+}
+
 /**
  * Convert a Record<string, unknown> to Flowable variable wire format:
  * [{ name, value, type? }]
@@ -680,7 +737,7 @@ export function makeFlowableClient(
   // FR-1: deployBpmn
   // -------------------------------------------------------------------------
   async function deployBpmn(xml: string): Promise<DeployResult> {
-    return withRetry(async () => {
+    return withRetry(async (): Promise<DeployResult> => {
       const form = new FormData();
       form.append("deployment", new Blob([xml], { type: "text/xml" }), "process.bpmn20.xml");
 
@@ -696,6 +753,26 @@ export function makeFlowableClient(
       if (resp.status === 201) {
         const body = (await resp.json()) as Record<string, unknown>;
         return { ok: true, deploymentId: String(body["id"] ?? "") };
+      }
+
+      // T-0635 [P0-4]: a Flowable-REJECTED-OUR-XML deploy (bad/unparsable BPMN — e.g.
+      // an unbound namespace prefix) is LIVE-VERIFIED (docs/test-reports/T-0058.
+      // test-report.json probe-a) to come back as HTTP 500 with a JSON body shaped
+      // `{"message": "...", "exception": "...XMLException/SAXParseException/..."}`
+      // — NOT a clean 400. httpStatusToCode alone would misclassify that as
+      // ENGINE_UNAVAILABLE (status>=500), so deployBpmn surfaced an honest "our XML
+      // is broken" as a dishonest "движок недоступен" (503) — and RETRIED it 3x
+      // first (wasted round-trips against an engine that was never actually down).
+      // Distinguish by reading the body: Flowable only emits this {message,
+      // exception} shape when it actually received the request and its own XML
+      // parser/deployer threw — that is a content problem, never an availability
+      // problem (T-0058 probe-a: engine health stayed 200 throughout). A genuine
+      // outage (proxy 502/503, connection refused) either never reaches this code
+      // path (network errors are caught before httpStatusToCode, in the outer
+      // withRetry catch) or returns a body with no such exception signature — those
+      // still fall through to the plain status-code classification below.
+      if (isBpmnParseRejection(await safeReadJson(resp))) {
+        return { ok: false, code: "BAD_BPMN" };
       }
 
       return { ok: false, code: httpStatusToCode(resp.status, true) };

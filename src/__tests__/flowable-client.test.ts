@@ -81,6 +81,89 @@ describe("deployBpmn", () => {
 });
 
 // ---------------------------------------------------------------------------
+// T-0635 [P0-4]: deployBpmn — a Flowable XML-rejection surfacing as HTTP 500
+// (live-verified shape: docs/test-reports/T-0058.test-report.json probe-a —
+// "HTTP 500 with XMLStreamException; engine health HTTP 200") must classify as
+// BAD_BPMN (our XML is broken), NOT ENGINE_UNAVAILABLE (honest "engine down" / 503).
+// Before this fix httpStatusToCode's blanket `status >= 500` rule mapped it to
+// ENGINE_UNAVAILABLE and withRetry then burned 3 retries against an engine that
+// was never actually down.
+// ---------------------------------------------------------------------------
+describe("deployBpmn — T-0635 P0-4: honest BAD_BPMN vs ENGINE_UNAVAILABLE on 5xx", () => {
+  it("HTTP 500 + XMLStreamException body → BAD_BPMN (AttributePrefixUnbound family)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      mockResponse(500, {
+        message: "Internal server error",
+        exception:
+          "org.flowable.bpmn.exceptions.XMLException: ParseError at [row,col]:[12,34]\n" +
+          "Message: http://flowable.org/bpmn:type: AttributePrefixUnbound",
+      }),
+    );
+    const client = testConfig({ maxRetries: 3 });
+    const result = await client.deployBpmn("<bpmn-with-unbound-prefix/>");
+    expect(result).toEqual({ ok: false, code: "BAD_BPMN" });
+  });
+
+  it("does NOT retry a body-detected BAD_BPMN (fail-fast, unlike a genuine 5xx)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      mockResponse(500, { message: "err", exception: "org.flowable.bpmn.exceptions.XMLException: bad" }),
+    );
+    const client = testConfig({ maxRetries: 3 });
+    const result = await client.deployBpmn("<bad/>");
+    expect(result).toEqual({ ok: false, code: "BAD_BPMN" });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1); // no retries burned
+  });
+
+  it("HTTP 500 + SAXParseException body → BAD_BPMN", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      mockResponse(500, { message: "Internal server error", exception: "org.xml.sax.SAXParseException: ..." }),
+    );
+    const client = testConfig();
+    const result = await client.deployBpmn("<malformed/>");
+    expect(result).toEqual({ ok: false, code: "BAD_BPMN" });
+  });
+
+  it("HTTP 500 with NO exception signature in the body → still ENGINE_UNAVAILABLE (genuine outage, retried)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      mockResponse(500, { message: "Internal server error", exception: "java.lang.OutOfMemoryError" }),
+    );
+    const client = testConfig({ maxRetries: 2 });
+    const result = await client.deployBpmn("<bpmn/>");
+    expect(result).toEqual({ ok: false, code: "ENGINE_UNAVAILABLE" });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3); // 1 + 2 retries — genuinely treated as an outage
+  });
+
+  it("HTTP 500 with an unparseable (non-JSON) body → falls back to ENGINE_UNAVAILABLE, does not throw", async () => {
+    const resp = {
+      status: 500,
+      json: async () => { throw new Error("not json"); },
+      text: async () => "<html>gateway error</html>",
+      ok: false,
+    } as unknown as Response;
+    vi.mocked(globalThis.fetch).mockResolvedValue(resp);
+    const client = testConfig({ maxRetries: 0 });
+    const result = await client.deployBpmn("<bpmn/>");
+    expect(result).toEqual({ ok: false, code: "ENGINE_UNAVAILABLE" });
+  });
+
+  it("HTTP 503 (no body) is still ENGINE_UNAVAILABLE — a real Flowable-down response is not misread as BAD_BPMN", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(mockResponse(503));
+    const client = testConfig({ maxRetries: 1 });
+    const result = await client.deployBpmn("<bpmn/>");
+    expect(result).toEqual({ ok: false, code: "ENGINE_UNAVAILABLE" });
+  });
+
+  it("HTTP 400 with an XML-exception-shaped body still classifies as BAD_BPMN (both paths agree)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      mockResponse(400, { message: "Bad request", exception: "org.flowable.bpmn.exceptions.XMLException: x" }),
+    );
+    const client = testConfig();
+    const result = await client.deployBpmn("<bad/>");
+    expect(result).toEqual({ ok: false, code: "BAD_BPMN" });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AC-4: startInstance → HTTP 201 → { ok: true, instanceId }
 // ---------------------------------------------------------------------------
 describe("startInstance", () => {
