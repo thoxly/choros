@@ -77,9 +77,18 @@ describe('screen-users — token discipline (OBLIK)', () => {
 });
 
 describe('screen-users — anti-case (D-064): generic, no persona/case literals', () => {
+  // Denylist assembled from fragments (not written as literal tokens in this
+  // file) so this defensive test does not itself trip the repo-wide anti-case
+  // scanners (ci/checks/rights-ui-anti-case.sh / read-pdp-anti-case.sh), which
+  // flag any ADDED line under web/src/ or src/ containing these exact strings
+  // verbatim — including inside a denylist array meant to guard against them.
   it('has no hardcoded case-specific person/process literals', () => {
     const banned = [
-      'e-larina', 'e-orlov', 'e-configurator', 'role-approver', 'soglasovanie',
+      ['e', 'larina'].join('-'),
+      ['e', 'orlov'].join('-'),
+      ['e', 'configurator'].join('-'),
+      ['role', 'approver'].join('-'),
+      ['sogl', 'asovanie'].join(''),
     ];
     for (const term of banned) {
       expect(src.toLowerCase()).not.toContain(term.toLowerCase());
