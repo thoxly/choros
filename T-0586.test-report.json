@@ -1,0 +1,78 @@
+{
+  "task_id": "T-0586",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 5346,
+    "passed": 5336,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/agent-live-flip-flag.sh (+ --self-test); manual grep confirms buildAgentDispatchDeps reads AGENT_LIVE_ENABLED, buildDegradedAgentDispatchDeps keeps documented liveEnabled:false",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "src/server/__tests__/agent-dispatch-loop-live-flag.test.ts (13 tests: 'true' -> live; absent/''/'/false'/'0'/'TRUE'/'True'/' true'/'true '/'yes'/'1' -> dormant)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "src/server/__tests__/agent-dispatch-loop-live-flag.test.ts ('live port built via shared resolver, not a copy' describe block) + ci/checks/agent-live-flip-flag.sh FF-586-3 grep (no llm_connection/secret_handle SQL literal in agent-dispatch-loop.ts, imports OpenAILlmPort + tenantSecretResolver)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "src/runtime/agent-dispatch/__tests__/agent-step-weld.live-stub.test.ts (2 tests) -- git diff vs merge-base 82ecc76 is EMPTY, file byte-identical, untouched",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "src/runtime/agent-dispatch/__tests__/agent-step-weld.dormant.test.ts (2 tests) -- git diff vs merge-base 82ecc76 is EMPTY, file byte-identical, untouched",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "bash ci/checks/precheck-no-network-in-core.sh (run standalone, exit 0, FF-LP-3 a/b/c all PASS)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "bash ci/checks/precheck-secret-custody.sh + bash ci/checks/secret-handle-isolation.sh (both run standalone, exit 0)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8 (LIVE_PROOF, D-064)",
+      "test": "manual, on deployed dev stand (100.121.76.86:3000) POST-merge+deploy -- out of scope for this deterministic test-phase run, per ADR SS8 plan. Not executed here.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9 (LIVE_PROOF fallback, D-064)",
+      "test": "mechanics covered deterministically by run-agent-step.test.ts (T-0586 FF-586-4 describe block: LlmUnavailableError -> defer-to-human signal=model, doubtReason human-readable, NOT fail-closed; ordering-before-generic test; dormant-unchanged regression test). Live-stand manual observation in Эскалации inbox is LIVE_PROOF, out of scope for this run per ADR SS8.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "bash ci/checks/anti-case-lock.sh + bash ci/checks/read-pdp-anti-case.sh (in full fitness chain, PASS) + manual grep -nE 'Нормоконтролёр|role-approver' over agent-dispatch-loop.ts/run-agent-step.ts/__tests__ = 0 hits",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "npx vitest run (full suite, standalone) = 5336 passed / 10 skipped / 0 failed; npm run fitness:db against real Postgres :55432 (standalone rerun) = 120 files / 1173 tests, all passed, 0 failed",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "residue_and_process_notes": [
+    "dev fetched at c57e1d6 (T-0628, migration 127, user-mgmt/employee zone) -- git diff --name-only over both branches vs merge-base 82ecc76 shows ZERO overlapping source files. Only pr-handoff.json is common to both diffs, which is an expected per-task artifact, not a merge hazard. No rebase needed; clean fast-forward-style union expected.",
+    "Full npm run fitness (the ~240+-check shell chain) run standalone: exit 0, 1221 PASS lines. The 4 lines matching '^FAIL' in the raw log are self-test fixtures for OTHER pre-existing gates (document-render-isolation, check-template-deps, doc-coherence, docpage-writeful-tools) deliberately probing planted violations on /tmp scratch files or nonexistent symbols, each immediately followed by 'PASS [self-test]' confirming correct detection -- inspected each one, none relate to T-0586's files.",
+    "First fitness:db attempt (run concurrently alongside a full `npx vitest run` and without DATABASE_URL set) produced two false signals: (a) an initial run with no DATABASE_URL silently skipped ~516 DB-gated tests and errored the rest (338 'failed') -- a tooling-gap in my own invocation, not a product signal, since the harness requires DATABASE_URL explicitly; (b) a second run WITH DATABASE_URL set but running concurrently with the full vitest suite produced 2 failing files (doc-reconcile.db.test.ts, applications_delete_cascade.db.test.ts) via 5000ms timeouts under resource contention -- confirmed FLAKE by re-running both files solo (18/18 green, cascade-delete completed in 147ms vs the 5170ms timeout it hit under load) and by a full solo fitness:db re-run (120/120 files, 1173/1173 tests, exit 0, zero failures). Neither flaking file touches T-0586's zone (agent-dispatch/LLM) -- consistent with prior memory note that parallel vitest+db runs flake and must be re-verified solo.",
+    "Independently re-ran the 4 key T-0586 test files solo (not part of a larger concurrent batch): agent-dispatch-loop-live-flag.test.ts (13), run-agent-step.test.ts (35), agent-step-weld.dormant.test.ts (2), agent-step-weld.live-stub.test.ts (2) -- 52/52 green, no flake.",
+    "docker compose config -q validated green in three states: no AGENT_LIVE_ENABLED set (uses :-false default), AGENT_LIVE_ENABLED=true, AGENT_LIVE_ENABLED=false -- all exit 0. grep confirms docker-compose.yml:214 'AGENT_LIVE_ENABLED: ${AGENT_LIVE_ENABLED:-false}' (safe default) and .env.prod.example:46 commented hint line.",
+    "package.json fitness-chain diff verified purely additive via set comparison (old vs new '&&'-split check list): zero removed checks, two added (agent-live-flip-flag.sh + its --self-test), appended at the end of the chain.",
+    "Read agent-dispatch-loop.ts and run-agent-step.ts diffs directly (not just trusting the review artifact): the implementation matches ADR SS4.1/SS4.2 verbatim -- env-flag read exactly like AGENT_TOPICS, additive optional llmPortFactory field, dormantLlmPort retained as defence-in-depth fallback, LlmUnavailableError classified in a narrow branch BEFORE the generic timeout/egress string-matching branches, canonicalizeLlmError used for the human-readable doubtReason.",
+    "AC-8/AC-9 LIVE_PROOF (manual, on the deployed dev stand, post-merge+deploy) are explicitly out of scope for this deterministic pre-merge test-phase run per ADR SS8 and the review's own note -- marked pass here only for the deterministic mechanics (unit-level fallback classification), NOT the live end-to-end browser proof. That LIVE_PROOF pass must happen after promotion+deploy, per D-064 discipline; do not treat this report as substituting for it."
+  ]
+}
