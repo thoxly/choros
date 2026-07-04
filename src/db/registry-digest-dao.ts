@@ -27,6 +27,14 @@
  *
  * PURE-DB: this module imports pg + the DB ancestry loaders + the pure
  * read-visibility predicate. It performs NO business writes.
+ *
+ * T-0587 (§1.4 ADR-T0587): per-registry NUMERIC AGGREGATES (count/sum/avg/
+ * min/max over one auto-detected numeric field) are accumulated INSIDE this
+ * SAME per-row loop, strictly AFTER `isRecordReadable(...) === true` — the
+ * identical branch that increments `visibleCount`/`samples`. No new SQL, no
+ * new PDP path, no second scan: the pure accumulation logic lives in
+ * src/core/visible-aggregate.ts (IO-free, independently unit-tested); this
+ * DAO only wires it into the existing bounded scan.
  */
 
 import pg from "pg";
@@ -35,6 +43,13 @@ import { loadTenantOrgAncestry } from "./org-ancestry.js";
 import { makeResourceAncestryOracle } from "./resource-ancestry.js";
 import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
 import { sandboxReadPredicate } from "../core/sandbox-gate.js";
+import {
+  initNumericAccumulators,
+  accumulateNumeric,
+  finalizeNumeric,
+  pickNumericFieldKeys,
+  type NumericFieldAggregate,
+} from "../core/visible-aggregate.js";
 
 // ---------------------------------------------------------------------------
 // Result shape
@@ -49,6 +64,16 @@ export interface ReadableRegistryEntry {
   readonly visibleCount: number;
   /** Up to sampleLimit short human-readable sample values (READ-PDP filtered). */
   readonly samples: readonly string[];
+  /**
+   * T-0587 (§1.4): per-registry numeric-field aggregates (count/sum/avg/min/
+   * max), computed ONLY over records that already passed `isRecordReadable`
+   * — the exact same visible subset that produced `visibleCount`/`samples`.
+   * `undefined` when the registry's record_schema has no numeric field, or
+   * no visible record contributed a finite value to any numeric field.
+   * Aggregate-shaped as an ADDITIVE field: existing callers reading only
+   * `slug`/`displayName`/`visibleCount`/`samples` are unaffected (AC-11).
+   */
+  readonly numericAggregates?: readonly NumericFieldAggregate[];
 }
 
 export interface ReadableRegistryDigest {
@@ -68,11 +93,18 @@ export interface RegistryDigestOptions {
   readonly sampleLimit?: number;
   /** Max records scanned per registry for the count+samples. Default 200. */
   readonly scanLimit?: number;
+  /**
+   * T-0587 (§1.4, NF-5): max number of auto-detected numeric fields to
+   * aggregate per registry (bounded — a schema with many numeric properties
+   * does not balloon the LLM context). Default 5.
+   */
+  readonly numericFieldLimit?: number;
 }
 
 const DEFAULT_REGISTRY_LIMIT = 25;
 const DEFAULT_SAMPLE_LIMIT = 3;
 const DEFAULT_SCAN_LIMIT = 200;
+const DEFAULT_NUMERIC_FIELD_LIMIT = 5;
 
 // ---------------------------------------------------------------------------
 // Sample-value extraction (generic — D-064: no case-specific field names).
@@ -130,6 +162,7 @@ export async function loadReadableRegistryDigest(
   const registryLimit = opts.registryLimit ?? DEFAULT_REGISTRY_LIMIT;
   const sampleLimit = opts.sampleLimit ?? DEFAULT_SAMPLE_LIMIT;
   const scanLimit = opts.scanLimit ?? DEFAULT_SCAN_LIMIT;
+  const numericFieldLimit = opts.numericFieldLimit ?? DEFAULT_NUMERIC_FIELD_LIMIT;
 
   try {
     // 1) Resolve the actor's covering READ grants + composite ancestry — the SAME
@@ -158,8 +191,9 @@ export async function loadReadableRegistryDigest(
         slug: string;
         display_name: string;
         application_id: string;
+        record_schema: unknown;
       }>(
-        `SELECT rd.id, rd.slug, rd.display_name, rd.application_id
+        `SELECT rd.id, rd.slug, rd.display_name, rd.application_id, rd.record_schema
            FROM choros.registry_def rd
            JOIN choros.application a
              ON a.tenant_id = rd.tenant_id AND a.id = rd.application_id
@@ -191,6 +225,12 @@ export async function loadReadableRegistryDigest(
           [tenantId, reg.id, scanLimit],
         );
 
+        // T-0587 (§1.4): numeric fields are derived ONCE per registry, from
+        // its OWN record_schema — generic (D-064), bounded (NF-5).
+        const numericFields = pickNumericFieldKeys(reg.record_schema, numericFieldLimit);
+        const numericAccs = initNumericAccumulators(numericFields.map((f) => f.key));
+        const numericLabels = new Map(numericFields.map((f) => [f.key, f.label]));
+
         let visibleCount = 0;
         const samples: string[] = [];
         for (const row of recRes.rows) {
@@ -200,18 +240,28 @@ export async function loadReadableRegistryDigest(
             applicationId: row.application_id,
           };
           if (!isRecordReadable(rowAncestry, grants, ancestry, nowMs)) continue;
+          // INVARIANT (FR-2/FF-2): everything below this line runs ONLY for a
+          // row that just passed the READ-PDP predicate — visibleCount,
+          // samples, and numericAggregates are all derived from the exact
+          // same visible subset.
           visibleCount++;
           if (samples.length < sampleLimit) {
             const sample = pickSampleValue(row.data);
             if (sample !== null) samples.push(sample);
           }
+          if (numericFields.length > 0) {
+            accumulateNumeric(numericAccs, row.data, numericFields.map((f) => f.key));
+          }
         }
+
+        const numericAggregates = finalizeNumeric(numericAccs, numericLabels);
 
         registries.push({
           slug: reg.slug,
           displayName: reg.display_name,
           visibleCount,
           samples,
+          ...(numericAggregates.length > 0 ? { numericAggregates } : {}),
         });
       }
 

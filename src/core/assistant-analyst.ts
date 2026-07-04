@@ -49,6 +49,8 @@ import type {
 // the entity data the asker may READ (счёт + примеры в правах), through the SAME
 // READ-PDP path the records LIST endpoint uses.
 import type { ReadableRegistryDigest } from "../db/registry-digest-dao.js";
+// T-0587 (§2.1 ADR-T0587): honest zero-visibility refusal text (FR-3/FR-5).
+import { ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE } from "./assistant-messages.js";
 
 // ---------------------------------------------------------------------------
 // ReportDraft — ephemeral in-memory shape; never persisted here.
@@ -309,25 +311,54 @@ function buildDraftContext(draft: ReportDraft): string {
     parts.push(
       "=== Не удалось прочитать разделы (временная ошибка чтения). НЕ утверждай, что записей нет ===",
     );
-  } else if (digest.registries.length === 0) {
-    parts.push("=== В доступных пользователю разделах нет ни одного раздела ===");
   } else {
     const totalVisible = digest.registries.reduce((s, r) => s + r.visibleCount, 0);
-    parts.push(
-      `=== Разделы и записи (в правах пользователя) — всего разделов: ${digest.registries.length}, ` +
-      `видимых записей суммарно: ${totalVisible} ===`,
+    const hasAnyAggregate = digest.registries.some(
+      (r) => (r.numericAggregates?.length ?? 0) > 0,
     );
-    for (const reg of digest.registries) {
-      const sampleStr =
-        reg.samples.length > 0 ? `; примеры: ${reg.samples.join(", ")}` : "";
+
+    // T-0587 (§2.2 ADR-T0587, FR-3/FR-5): ZERO-VISIBILITY — the digest is
+    // known (not null/degraded), but the asker sees NO visible record in ANY
+    // registry (and no registry contributed a numeric aggregate either).
+    // This merges the two previously-distinct "no data" cases into ONE
+    // honest, rights-framed refusal:
+    //   - no published registries exist at all (digest.registries.length===0)
+    //   - registries exist but every one is 0-visible to THIS asker
+    // Both read identically to the asker — neither is distinguishable from
+    // "you have no grant" vs "there is truly nothing" (FR-3: never leak
+    // which case it is). The OLD "в доступных разделах пока нет записей —
+    // это достоверный факт" framing asserted a SYSTEM-STATE fact, which is
+    // only true when registries are GLOBALLY empty; when they are non-empty
+    // but invisible to this asker specifically, that framing would be a lie
+    // about system state. The new framing is about the asker's OWN zone of
+    // visibility, true in both cases.
+    if (digest.registries.length === 0 || (totalVisible === 0 && !hasAnyAggregate)) {
       parts.push(
-        `  • «${reg.displayName}» (${reg.slug}): записей — ${reg.visibleCount}${sampleStr}`,
+        "=== В вашей зоне видимости данных по этому вопросу нет ===\n" +
+        `Ответь пользователю строго этим текстом: «${ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE}» ` +
+        "Не приводи числа, не утверждай, что конкретная запись существует или не существует, " +
+        "не утверждай, что данных в системе нет — речь только о зоне видимости спрашивающего.",
       );
-    }
-    if (totalVisible === 0) {
+    } else {
       parts.push(
-        "  (в доступных разделах пока нет записей — это достоверный факт, а не ограничение прав)",
+        `=== Разделы и записи (в правах пользователя) — всего разделов: ${digest.registries.length}, ` +
+        `видимых записей суммарно: ${totalVisible} ===`,
       );
+      for (const reg of digest.registries) {
+        const sampleStr =
+          reg.samples.length > 0 ? `; примеры: ${reg.samples.join(", ")}` : "";
+        parts.push(
+          `  • «${reg.displayName}» (${reg.slug}): записей — ${reg.visibleCount}${sampleStr}`,
+        );
+        if (reg.numericAggregates && reg.numericAggregates.length > 0) {
+          for (const agg of reg.numericAggregates) {
+            parts.push(
+              `      — «${agg.fieldLabel}»: сумма ${agg.sum}, среднее ${agg.avg.toFixed(2)}, ` +
+              `мин ${agg.min}, макс ${agg.max} (по ${agg.count} видимым записям)`,
+            );
+          }
+        }
+      }
     }
   }
 
