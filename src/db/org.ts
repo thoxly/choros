@@ -192,7 +192,7 @@ export async function findEmployeeById(
   pool: pg.Pool,
   tenantId: string,
   slug: string,
-): Promise<(OrgPerson & { position: string; department: string }) | null> {
+): Promise<(OrgPerson & { position: string; department: string; deactivatedAt: number | null }) | null> {
   return withTenant(pool, tenantId, async (client) => {
     const { rows } = await client.query<{
       slug: string;
@@ -200,11 +200,16 @@ export async function findEmployeeById(
       kind: string;
       position_title: string;
       department_name: string;
+      deactivated_at: string | null;
     }>(
       // T-0141: explicit WHERE tenant_id for BYPASSRLS pool connections.
+      // T-0588 (BLOCK-3): additive `e.deactivated_at` column — existing callers
+      // (process-projection.ts actorKind resolution, org.ts route) destructure
+      // only the fields they use, so this widened return shape is backward-compat.
       `SELECT e.slug, e.display_name, e.kind,
               p.title AS position_title,
-              d.display_name AS department_name
+              d.display_name AS department_name,
+              e.deactivated_at
          FROM choros.employee e
          LEFT JOIN choros.position p
                ON p.tenant_id = e.tenant_id AND p.id = e.position_id
@@ -223,6 +228,8 @@ export async function findEmployeeById(
       type: row.kind as "human" | "agent",
       position: row.position_title ?? "",
       department: row.department_name ?? "",
+      // T-0588 (BLOCK-3): epoch-ms of deactivation, NULL = active (migration 125).
+      deactivatedAt: row.deactivated_at != null ? Number(row.deactivated_at) : null,
     };
   });
 }
