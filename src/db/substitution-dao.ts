@@ -17,6 +17,12 @@
  *     → SubstitutionRule[] all active rules for a given role (used by the batch
  *       inbox path: resolveExecutorFallbackBatch). Keyed by absentEmployeeId (slug).
  *
+ *   getActiveSubstitutionsForSubstitute(pool, tenantId, substituteSlug, nowMs)
+ *     → SubstitutionRule[] (T-0588, FR-1) — mirror of getActiveSubstitutionsForEmployee,
+ *       keyed by substitute_employee_id instead of absent_employee_id. Used by the
+ *       claim-eligibility Tier-2 branch (inbox.ts POST /api/inbox/:id/claim) to find
+ *       the actor's own active substitution rules when the role-slug check misses.
+ *
  *   makeDbSubstitutionPort(pool) → ExecutorSubstitutionPort
  *     Adapter factory wiring this DAO to the ExecutorSubstitutionPort interface.
  *     getActiveSubstitutions(tenantId, absentSlug, nowMs) queries the absent
@@ -162,6 +168,15 @@ const SUBST_SELECT = `
   JOIN choros.employee e_sub
     ON e_sub.tenant_id = sr.tenant_id
    AND e_sub.id = sr.substitute_employee_id
+   -- T-0588 (BLOCK-2, review R-1 follow-up): a deactivated substitute must
+   -- never be usable as a stand-in — mirrors the FR-2 deactivation-filter
+   -- principle (grants-dao.ts getHoldersForRole/findTenantOwnerSlug) applied
+   -- to the substitution_rule read path. Applied in the SHARED SUBST_SELECT
+   -- fragment (not just the claim-eligibility reader) so ALL THREE readers
+   -- (ForEmployee/ByRole/ForSubstitute) agree: a fired employee is never an
+   -- effective substitute, whether looked up by absentee, by role, or by
+   -- themselves. Additive predicate only — no signature change.
+   AND e_sub.deactivated_at IS NULL
   JOIN choros.role r
     ON r.tenant_id = sr.tenant_id
    AND r.id = sr.role_id
@@ -243,6 +258,53 @@ export async function getActiveSubstitutionsByRole(
          AND (sr.valid_until IS NULL OR sr.valid_until  > $3)
        ORDER BY sr.valid_from DESC NULLS LAST`,
       [tenantId, roleId, nowMs],
+    );
+
+    return rows.map((row) => mapRow(tenantId, row));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// getActiveSubstitutionsForSubstitute — T-0588 (FR-1): rules where
+// `substituteSlug` is the STAND-IN (mirror of getActiveSubstitutionsForEmployee,
+// keyed by substitute_employee_id instead of absent_employee_id).
+//
+// Used by the claim-eligibility Tier-2 branch (inbox.ts POST /api/inbox/:id/claim):
+// when the actor does not hold the task's role via role_assignment, this reader
+// surfaces the actor's own active substitution rules (as substitute) so the
+// caller can additionally check roleId===taskRole + org-scope containment via
+// resolveSubstitution. Returns ALL confirmed + in-window rules for this
+// substitute (any role, any absent employee) — the caller narrows by roleId.
+//
+// Additive: does not change any existing export's signature or behaviour.
+// ---------------------------------------------------------------------------
+
+export async function getActiveSubstitutionsForSubstitute(
+  pool: pg.Pool,
+  tenantId: string,
+  substituteSlug: string,
+  nowMs: number,
+): Promise<SubstitutionRule[]> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    // Step 1: resolve substituteSlug → employee.id (RLS-scoped).
+    const { rows: empRows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.employee
+        WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+      [tenantId, substituteSlug],
+    );
+    if (empRows.length === 0) return [];
+    const substituteId = empRows[0]!.id;
+
+    // Step 2: all confirmed + in-window substitution rules for this substitute.
+    const { rows } = await client.query<SubstitutionRuleRow>(
+      `${SUBST_SELECT}
+       WHERE sr.tenant_id = $1
+         AND sr.substitute_employee_id = $2
+         AND sr.confirmed_by IS NOT NULL
+         AND (sr.valid_from  IS NULL OR sr.valid_from  <= $3)
+         AND (sr.valid_until IS NULL OR sr.valid_until  > $3)
+       ORDER BY sr.valid_from DESC NULLS LAST`,
+      [tenantId, substituteId, nowMs],
     );
 
     return rows.map((row) => mapRow(tenantId, row));

@@ -370,6 +370,33 @@ describe("resolveExecutor — step 5: unresolvable", () => {
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
     expect(result.kind).toBe("unresolvable");
   });
+
+  // T-0588 (FR-2/FR-4, AC-7): the DB-backed roleHolders/fallback ports now filter
+  // deactivated_at IS NULL (grants-dao.ts getHoldersForRole/findTenantOwnerSlug).
+  // From this pure resolver's point of view, a role whose sole holder was
+  // deactivated (with no active substitution) is INDISTINGUISHABLE from a role
+  // that was never filled: the DAO already excluded the deactivated employee,
+  // so roleHolders returns []. When the fallback owner is ALSO deactivated
+  // (findTenantOwnerSlug → null once T-0588 lands), the fallback port returns
+  // null too — the ladder's existing unresolvable branch fires with NO new code.
+  it("T-0588 AC-7: deactivated sole holder (no substitution) + deactivated/absent owner → kind=unresolvable", async () => {
+    const deps: ResolverDeps = {
+      // Mirrors getHoldersForRole post-T-0588: the deactivated holder is already
+      // excluded at the DAO layer, so the pure port sees an empty pool.
+      roleHolders: makeInMemoryRoleHolderSource({}),
+      // Mirrors findTenantOwnerSlug post-T-0588: a deactivated owner resolves to
+      // null (no fallback to a disabled account) — same shape as "no owner exists".
+      fallback: makeInMemoryFallbackPort(null),
+    };
+    const result = await resolveExecutor(TENANT_ID, "role-y", NOW_MS, deps);
+    expect(result.kind).toBe("unresolvable");
+    if (result.kind === "unresolvable") {
+      // The task is not silently swallowed — it carries the explicit
+      // role_unfilled marker (F7), never an implicit assignment to the
+      // deactivated holder or a disabled owner account.
+      expect(result.fallbackReason).toBe("role_unfilled");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

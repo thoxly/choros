@@ -1,0 +1,94 @@
+{
+  "task_id": "T-0588",
+  "status": "ready",
+  "summary": "Подключить substitution-порт к реальной маршрутизации задач (T-0035 модель данных и UI назначения замещения уже существуют — /rights/intents SubstituteForm/SelfAbsenceForm, resolveExecutorFallbackBatch уже читает substitution_rule) и закрыть две конкретные дыры: (1) claim-эндпоинт не пускает Tier-2 заместителя, у которого нет собственного role_assignment; (2) деактивация сотрудника (T-0583/T-0628 employee.deactivated_at) нигде не фильтруется в резолве держателей роли/fallback-owner, поэтому задачи продолжают литься уволенному. Полная иерархия подчинения людей (E2/E3, «мой руководитель», директор-вершина) сознательно вынесена в needs_design — требует новой модели данных, не входит в этот вертикальный срез.",
+  "functional": [
+    "FR-1: POST /api/inbox/:id/claim (и эквивалентный instance-task write-путь) разрешает claim, если актёр не держит роль напрямую, но покрыт эффективным substitution_rule (substitute_employee_id=актёр, role_id=роль задачи, confirmed_by NOT NULL, в окне nowMs, орг-область покрыта) — используя существующие getActiveSubstitutionsForEmployee/getActiveSubstitutionsByRole без изменения их контракта.",
+    "FR-2: getHoldersForRole и findTenantOwnerSlug (grants-dao.ts) дополнительно фильтруют e.deactivated_at IS NULL — деактивированный сотрудник никогда не входит в пул держателей роли и никогда не резолвится как fallback-owner.",
+    "FR-3: деактивация держателя роли с активным substitution_rule (он — absent_employee_id) немедленно перенаправляет его задачи на substitute_employee_id через существующий resolveExecutorFallbackBatch путь, усиленный FR-2.",
+    "FR-4: если после FR-2/FR-3 эффективный пул для роли пуст (не заполнена ИЛИ единственный держатель деактивирован без активного substitution_rule), задача маршрутизируется на fallback-owner (если тот не деактивирован); если и owner недоступен — явный unresolvable-маркер, задача не пропадает молча.",
+    "FR-5: реализация FR-1..FR-4 применяется в реально исполняемом прод-пути (resolveExecutorFallbackBatch в inbox.ts и/или claim-эндпоинт), а не только в pure-функциях executor-resolver.ts path A, который сегодня не вызывается ни одним прод write/read-путём с реальным deps.substitution.",
+    "FR-6: UI назначения замещения (SubstituteForm/SelfAbsenceForm на /rights/intents, уже status:live) подтверждается работающим сквозняком; новый экран не строится, минимально дополняется только индикация 'задача по замещению' в карточке, если приёмка это потребует."
+  ],
+  "non_functional": [
+    "NF-1 (D-064 анти-кейс): никаких кейс-литералов (слаги ролей/лиц/бизнес-порогов) в src/ — только структурные предикаты.",
+    "NF-2: изменения в getHoldersForRole/findTenantOwnerSlug/getRoleSlugsForActor/claim-эндпоинте — аддитивны, без смены сигнатур экспортируемых функций и без удаления существующих полей ответа.",
+    "NF-3: параллельная безопасность с T-0586 (src/runtime/agent-dispatch/**, не трогается) и T-0587 (assistant-analyst/registry-digest, не трогается); общие модули (grants-dao.ts, executor-resolver.ts, substitution.ts, substitution-dao.ts, inbox.ts) — только additive правки.",
+    "NF-4: миграции — следующий свободный номер после 127 на момент DESIGN; задача, по разведке, вероятно НЕ требует новой структурной миграции (это SQL-предикаты и код), architect обосновывает отдельно если найдёт иначе.",
+    "NF-5: tsc --noEmit, eslint, npm run fitness, npm run fitness:db зелёные после изменений.",
+    "NF-6: существующие тесты executor-resolver.test.ts, substitution.test.ts, инбокс claim/fallback-тесты остаются зелёными без модификации существующих ожиданий."
+  ],
+  "out_of_scope": [
+    "O1: иерархия подчинения ЛЮДЕЙ (manager_id/директор-вершина/многоролевой сотрудник с конфликтующими руководителями) — новая модель данных, needs_design ND-1, отдельная задача.",
+    "O2: унификация путей resolveExecutor (path A) и resolveExecutorFallbackBatch (path B) в единый резолвер — технический долг, не блокирует эту задачу.",
+    "O3: UI для просмотра/редактирования/отмены уже созданных substitution_rule (только форма СОЗДАНИЯ есть и остаётся) — future task.",
+    "O4: chained substitutions (A→B→C) — T-0035/T-0429 явно фиксируют single-hop-only, не переоткрывается.",
+    "O5: hard-delete сотрудника — задача работает с существующей мягкой деактивацией (deactivated_at), hard-delete остаётся отдельным owner-only путём.",
+    "O6: SLA-эскалация по таймауту — явно отклонена в executor-resolver.ts ('phase 3, D rejected'), не переоткрывается.",
+    "O7: email/уведомления о переходе задачи к заместителю — вне охвата (нет email-контура по прежним директивам)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Сотрудник A держит role-X через role_assignment. Создан Tier-2 substitution_rule (нет другого держателя role-X) с substitute_employee_id=B, эффективное окно покрывает nowMs. B без собственного role_assignment на role-X вызывает POST /api/inbox/:id/claim на pool-задаче с taskRole=role-X -> 200 (claim успешен), не 403 NOT_ELIGIBLE.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "Тот же сценарий, но substitution_rule не подтверждено (confirmed_by IS NULL) или вне окна (valid_until в прошлом) -> B получает 403 NOT_ELIGIBLE (регресс не допущен).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Сотрудник C — единственный держатель role-Y, role_assignment эффективен. C деактивируется (employee.deactivated_at устанавливается). getHoldersForRole(tenantId, 'role-Y', nowMs) возвращает пустой список (не включает C).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "C — единственный держатель role-tenant-owner. C деактивируется. findTenantOwnerSlug возвращает null (не резолвит деактивированного C как owner).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "C деактивирован (AC-3), существует активный Tier-1 substitution_rule (C absent -> D substitute, D уже держит role-Y независимо). Новая задача, адресованная role-Y, после деактивации C доступна для claim заместителем D, а не повисает у деактивированного C.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "C деактивирован (AC-3), без активного substitution_rule, есть активный tenant-owner O. Новая задача, адресованная role-Y, резолвится в kind:fallback на O (или routed_to_fallback:role_unfilled в path B), не пропадает и не остаётся у C.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "C деактивирован (AC-3), без substitution_rule, tenant-owner тоже деактивирован/отсутствует. Резолв возвращает kind:unresolvable (path A) или явный эквивалентный маркер 'нет исполнителя' в path B — задача не приписывается никакому активному аккаунту молча.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "LIVE_PROOF (браузер, стенд): владелец/сотрудник заполняет SubstituteForm или SelfAbsenceForm на /rights/intents, назначая живого заместителя на реальную роль реального BPMN-процесса. Новая userTask-задача этого процесса, адресованная замещаемой роли, появляется в инбоксе ЗАМЕСТИТЕЛЯ (видна и claim-абельна).",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-9",
+      "text": "LIVE_PROOF (браузер, стенд): владелец деактивирует учётку сотрудника-согласанта через /users (T-0583/T-0628 путь) БЕЗ предварительно созданного замещения. Новая задача процесса, адресованная роли деактивированного, не виснет у него — появляется у fallback-исполнителя с явной пометкой 'роль не заполнена'/эквивалент, доказано в браузере.",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-10",
+      "text": "Анти-кейс (D-064): grep по diff'у этой задачи в src/ не находит слагов конкретных ролей/сотрудников/бизнес-порогов кейса — только структурные предикаты и имена колонок/таблиц.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "Регрессия: все существующие тесты src/core/__tests__/executor-resolver.test.ts, src/__tests__/substitution.test.ts и инбокс claim/fallback-тесты остаются зелёными без изменения существующих ожиданий (только новые доп. кейсы).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "tsc --noEmit, eslint, npm run fitness, npm run fitness:db зелёные после изменений этой задачи.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0588-substitution-escalation.spec.md"
+}
