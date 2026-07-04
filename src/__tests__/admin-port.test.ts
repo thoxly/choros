@@ -21,8 +21,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { makeHttpKeycloakAdminPort } from "../keycloak/admin-port.js";
-import type { KcAdminConfig } from "../keycloak/admin-port.js";
+import { makeHttpKeycloakAdminPort, makeHttpKeycloakUserPort } from "../keycloak/admin-port.js";
+import type { KcAdminConfig, KcRegistrarConfig } from "../keycloak/admin-port.js";
 import * as http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -310,5 +310,103 @@ describe("AP-4 — explicit KcAdminConfig override bypasses env vars", () => {
 describe("AP-5 — makeHttpKeycloakAdminPort structural", () => {
   it("does not throw when called with no arguments", () => {
     expect(() => makeHttpKeycloakAdminPort()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AP-6 [T-0633 round-3]: createHumanUser disambiguates a KC 409 by its body —
+// a USERNAME conflict → LOGIN_TAKEN; an EMAIL conflict (or unparseable body) →
+// EMAIL_TAKEN (prior default, never a regression).
+// ---------------------------------------------------------------------------
+
+/**
+ * Stub that answers the token endpoint with a valid token, then answers the
+ * FIRST /users POST with a 409 carrying `conflictBody`. Lets us drive
+ * createHumanUser's 409 branch deterministically without a live KC.
+ */
+function startUserConflictStub(conflictBody: string): Promise<{
+  cfg: KcRegistrarConfig;
+  close: () => Promise<void>;
+}> {
+  const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+    const path = req.url ?? "";
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      if (path.includes("/protocol/openid-connect/token")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ access_token: "stub-token" }));
+      } else if (path.includes("/users") && req.method === "POST") {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(conflictBody);
+      } else {
+        res.writeHead(500);
+        res.end();
+      }
+    });
+    req.on("error", () => { res.writeHead(500); res.end(); });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+      resolve({
+        cfg: {
+          baseUrl: `http://127.0.0.1:${port}`,
+          realm: "choros",
+          clientId: "choros-registrar",
+          clientSecret: "stub-secret",
+        },
+        close: () => new Promise<void>((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+async function createExpectingCode(cfg: KcRegistrarConfig): Promise<string | undefined> {
+  const port = makeHttpKeycloakUserPort(cfg);
+  try {
+    await port.createHumanUser({
+      username: "someone",
+      email: "someone@example.com",
+      password: "password12345",
+      actorType: "human",
+    });
+    return undefined; // should not reach here
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code;
+  }
+}
+
+describe("AP-6 — createHumanUser 409 username-vs-email disambiguation (T-0633)", () => {
+  it("409 'User exists with same username' → LOGIN_TAKEN", async () => {
+    const stub = await startUserConflictStub(
+      JSON.stringify({ errorMessage: "User exists with same username" }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("LOGIN_TAKEN");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("409 'User exists with same email' → EMAIL_TAKEN", async () => {
+    const stub = await startUserConflictStub(
+      JSON.stringify({ errorMessage: "User exists with same email" }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("EMAIL_TAKEN");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("409 with an unparseable/empty body → EMAIL_TAKEN (safe default, no regression)", async () => {
+    const stub = await startUserConflictStub("not-json");
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("EMAIL_TAKEN");
+    } finally {
+      await stub.close();
+    }
   });
 });
