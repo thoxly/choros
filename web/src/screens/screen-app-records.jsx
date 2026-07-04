@@ -52,7 +52,8 @@ import {
   Button, Mono, Drawer, EmptyState, ErrorState, LoadingState, KitIcon, Select, ConfirmDialog,
 } from '../components/components.jsx';
 import { useToastContext } from '../app-shell/toast-context.jsx';
-import { devHeaders } from '../app-shell/dev-auth.js';
+import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js';
+import { downloadFile } from '../lib/authed-file.js';
 import {
   schemaToFormFields,
   schemaToColumns,
@@ -348,6 +349,12 @@ function RelationCell({ targetId, appId }) {
 /**
  * Async table cell for a file field value.
  *
+ * T-0622 (P0 fix): a native `<a href="...">` does not carry the SPA's auth
+ * headers (401 in keycloak mode) — download now goes through downloadFile
+ * (lib/authed-file.js): fetch WITH auth headers → blob → programmatic
+ * `<a download>` click. Honest inline error on failure (never a silent dead
+ * click); "Скачать" affordance stays a link-styled control either way.
+ *
  * @param {string} versionId  The fileVersionId stored as the field value.
  * @param {string} recordId   The record this cell belongs to (for the listing fetch).
  */
@@ -358,6 +365,7 @@ function FileCell({ versionId, recordId }) {
   // into one "denied" bucket.
   const [state, setState] = React.useState(versionId && recordId ? 'loading' : 'empty');
   const [name, setName] = React.useState(null);
+  const [downloadError, setDownloadError] = React.useState(null);
 
   React.useEffect(() => {
     if (!versionId || !recordId) { setState('empty'); return; }
@@ -384,6 +392,18 @@ function FileCell({ versionId, recordId }) {
       .catch(() => { if (!cancelled) setState('forbidden'); });
     return () => { cancelled = true; };
   }, [versionId, recordId]);
+
+  const handleDownload = React.useCallback(async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDownloadError(null);
+    const result = await downloadFile(
+      `/api/files/${encodeURIComponent(versionId)}/download`,
+      name,
+      fetchWithAuthRetry,
+    );
+    if (!result.ok) setDownloadError(result.message);
+  }, [versionId, name]);
 
   if (state === 'loading') {
     return (
@@ -418,14 +438,21 @@ function FileCell({ versionId, recordId }) {
   }
 
   return (
-    <a
-      href={`/api/files/${encodeURIComponent(versionId)}/download`}
-      style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }}
-      title="Скачать файл"
-      onClick={(e) => e.stopPropagation()}
-    >
-      {name}
-    </a>
+    <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 'var(--chs-space-1)' }}>
+      <a
+        href="#"
+        style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }}
+        title="Скачать файл"
+        onClick={handleDownload}
+      >
+        {name}
+      </a>
+      {downloadError && (
+        <span role="alert" style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-xs)' }}>
+          {downloadError}
+        </span>
+      )}
+    </span>
   );
 }
 

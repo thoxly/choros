@@ -53,7 +53,8 @@ import { formatError } from '../lib/format.js';
 // Auth headers — same helper every screen uses (mode-aware: dev X-Dev-User /
 // keycloak Bearer). RelationPickerField needs it to attach auth to the
 // tenant-scoped GET /api/records?registry_def_id= candidate fetch.
-import { devHeaders } from '../app-shell/dev-auth.js';
+import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js';
+import { downloadFile } from '../lib/authed-file.js';
 // deriveRecordLabel — first non-empty string value in record.data (T-0447).
 // Already in records-form.js (canonical); re-used here to avoid duplicating the
 // label-derivation logic. Cross-boundary import is intentional: field-renderer is
@@ -287,6 +288,10 @@ export function FileField({ field, value, onChange, error, idPrefix = 'field', i
 
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
+  // T-0622 (P0 fix): a native <a href="..."> load does not carry the SPA's
+  // auth headers (401 in keycloak mode) — download goes through downloadFile
+  // (fetch WITH auth headers → blob → programmatic <a download> click).
+  const [downloadError, setDownloadError] = useState(null);
   // fileMeta: { originalName, mime } for the CURRENT value's versionId, resolved
   // from the record's file listing. null = not yet resolved / no listing available.
   const [fileMeta, setFileMeta] = useState(null);
@@ -394,6 +399,14 @@ export function FileField({ field, value, onChange, error, idPrefix = 'field', i
         : 'Файл');
   const downloadHref = value ? `/api/files/${encodeURIComponent(value)}/download` : null;
 
+  const handleDownload = async (e) => {
+    e.preventDefault();
+    if (!downloadHref) return;
+    setDownloadError(null);
+    const result = await downloadFile(downloadHref, fileMeta?.originalName, fetchWithAuthRetry);
+    if (!result.ok) setDownloadError(result.message);
+  };
+
   let control;
   if (uploading) {
     // Loading — upload in flight, control disabled (honest, no dead affordance).
@@ -410,7 +423,8 @@ export function FileField({ field, value, onChange, error, idPrefix = 'field', i
       <div id={id} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)', flexWrap: 'wrap' }}>
           <a
-            href={downloadHref}
+            href="#"
+            onClick={handleDownload}
             className="chs-input"
             style={{ ...inputStyle, width: 'auto', flex: 1, textDecoration: 'none', color: 'var(--chs-color-accent)' }}
             aria-describedby={errorId}
@@ -432,6 +446,11 @@ export function FileField({ field, value, onChange, error, idPrefix = 'field', i
             </label>
           )}
         </div>
+        {downloadError && (
+          <span role="alert" style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+            {downloadError}
+          </span>
+        )}
       </div>
     );
   } else if (readOnly) {

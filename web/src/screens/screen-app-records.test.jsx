@@ -78,7 +78,7 @@ describe('screen-app-records — FileCell (T-0579, review M1/m1/m2)', () => {
   it('never falls back to the raw fileVersionId — resolveState drives a human label instead', () => {
     const idx = src.indexOf('function FileCell(');
     expect(idx).toBeGreaterThan(-1);
-    const fnBody = src.slice(idx, idx + 2200);
+    const fnBody = src.slice(idx, idx + 3200);
     // Distinct honest states, not one "denied" bucket (review m2).
     expect(fnBody).toContain("useState(versionId && recordId ? 'loading' : 'empty')");
     expect(fnBody).toMatch(/state === 'empty'/);
@@ -98,5 +98,33 @@ describe('screen-app-records — FileCell (T-0579, review M1/m1/m2)', () => {
 
   it('threads recordId onto file-contract fields in the create/edit form (review M1)', () => {
     expect(src).toContain("contractKind === 'file'\n            ? { ...f, recordId: isEdit ? existingRecord.id : undefined }");
+  });
+
+  // T-0622 (P0 fix): a native <a href="/api/files/:versionId/download"> load
+  // does not carry the SPA's auth headers — 401 in keycloak mode. Download
+  // now goes through downloadFile (authed fetch → blob → programmatic
+  // <a download> click), never a bare href to the API path.
+  it('downloads via an authed blob fetch (downloadFile), never a bare href to the download API (T-0622)', () => {
+    const idx = src.indexOf('function FileCell(');
+    expect(idx).toBeGreaterThan(-1);
+    const fnBody = src.slice(idx, idx + 3200);
+    expect(fnBody).toContain('downloadFile(');
+    expect(fnBody).toContain('`/api/files/${encodeURIComponent(versionId)}/download`');
+    expect(fnBody).toContain('fetchWithAuthRetry');
+    // never a native href straight to the download route.
+    expect(fnBody).not.toMatch(/href=\{`\/api\/files\/\$\{encodeURIComponent\(versionId\)\}\/download`\}/);
+  });
+
+  it('surfaces a download error inline instead of a silent dead click (T-0622)', () => {
+    const idx = src.indexOf('function FileCell(');
+    const fnBody = src.slice(idx, idx + 3200);
+    expect(fnBody).toContain('downloadError');
+    expect(fnBody).toContain("if (!result.ok) setDownloadError(result.message)");
+  });
+
+  it('the download click still stops propagation (never opens the row) — T-0622 preserves the pre-existing guard', () => {
+    const idx = src.indexOf('function FileCell(');
+    const fnBody = src.slice(idx, idx + 3200);
+    expect(fnBody).toMatch(/e\.preventDefault\(\);\s*\n\s*e\.stopPropagation\(\);/);
   });
 });

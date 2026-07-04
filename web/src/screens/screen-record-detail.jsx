@@ -23,8 +23,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDialog } from '../components/components.jsx';
 import { useToastContext } from '../app-shell/toast-context.jsx';
-import { devHeaders } from '../app-shell/dev-auth.js';
+import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js';
 import { formatDate, formatError, formatJsonReadable, formatPersonName } from '../lib/format.js';
+import { fetchFileBlob, downloadFile } from '../lib/authed-file.js';
 import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, FILE_CELL_ASYNC, deriveRecordLabel, computeComputedFieldValue } from './records-form.js';
 // T-0608 (пункт г): resolve record.created_by (an employee SLUG — for a
 // Keycloak-registered human, slug === the KC user UUID) to a display name.
@@ -443,6 +444,17 @@ function isPreviewSafeMime(mime) {
  * Inline file field value for the record detail card: name-as-download-link,
  * plus an inline preview for image/*(non-svg)/pdf.
  *
+ * T-0622 (P0 fix, re-LIVE_PROOF T-0579 real browser): a native `<img
+ * src="...?disposition=inline">` / `<a href="...">` does not carry the SPA's
+ * auth headers (Authorization: Bearer in keycloak mode) — 401. Both preview
+ * and download now go through fetchFileBlob/downloadFile (lib/authed-file.js):
+ * fetch WITH auth headers → blob → same-origin blob: object URL. The
+ * anti-XSS mime allowlist (isPreviewSafeMime, unchanged) still gates WHICH
+ * mimes get an <img> at all — this component only ever builds an <img> src
+ * from a blob whose mime it already checked against PREVIEW_SAFE_IMAGE_SUBTYPES;
+ * svg is never in that set, so it never reaches the <img> branch (it downloads
+ * via the honest "Скачать файл" link instead, same as any other file).
+ *
  * @param {string} versionId  fileVersionId stored as the field value.
  * @param {string} recordId   current record's id (listing fetch).
  */
@@ -456,6 +468,14 @@ function FileFieldValue({ versionId, recordId }) {
   // listing DID load), 'loading', 'resolved'.
   const [state, setState] = useState(versionId && recordId ? 'loading' : 'empty');
   const [meta, setMeta] = useState(null); // { originalName, mime }
+  // T-0622: preview blob state, resolved SEPARATELY from the listing fetch
+  // above (that fetch only gets name+mime; the actual bytes need their own
+  // authed fetch). 'idle' (not attempted / not preview-safe) / 'loading' /
+  // 'ok' (objectUrl ready) / 'error' (honest message, e.g. 401/403/404).
+  const [previewState, setPreviewState] = useState('idle');
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [previewError, setPreviewError] = useState(null);
+  const [downloadError, setDownloadError] = useState(null);
 
   useEffect(() => {
     if (!versionId || !recordId) { setState('empty'); return; }
@@ -484,6 +504,48 @@ function FileFieldValue({ versionId, recordId }) {
     return () => { cancelled = true; };
   }, [versionId, recordId]);
 
+  const normalizedMime = typeof meta?.mime === 'string' ? meta.mime.trim().toLowerCase().split(';')[0].trim() : '';
+  const previewSafe = state === 'resolved' && isPreviewSafeMime(meta?.mime);
+  const isImagePreview = previewSafe && normalizedMime.startsWith('image/');
+  const isPdfPreview = previewSafe && normalizedMime === 'application/pdf';
+
+  // T-0622: fetch the preview blob (authed) once the listing has resolved a
+  // preview-safe mime. Revokes its objectURL on versionId change/unmount so
+  // no blob: URL leaks (NF — memory hygiene).
+  useEffect(() => {
+    if (!isImagePreview && !isPdfPreview) { setPreviewState('idle'); return; }
+    let cancelled = false;
+    let objectUrl = null;
+    setPreviewState('loading');
+    setPreviewError(null);
+    const previewHref = `/api/files/${encodeURIComponent(versionId)}/download?disposition=inline`;
+    fetchFileBlob(previewHref, fetchWithAuthRetry).then((result) => {
+      if (cancelled) return;
+      if (!result.ok) {
+        setPreviewState('error');
+        setPreviewError(result.message);
+        return;
+      }
+      objectUrl = URL.createObjectURL(result.blob);
+      setPreviewUrl(objectUrl);
+      setPreviewState('ok');
+    });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setPreviewUrl(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [versionId, isImagePreview, isPdfPreview]);
+
+  const handleDownload = useCallback(async (e) => {
+    e.preventDefault();
+    setDownloadError(null);
+    const downloadHref = `/api/files/${encodeURIComponent(versionId)}/download`;
+    const result = await downloadFile(downloadHref, meta?.originalName, fetchWithAuthRetry);
+    if (!result.ok) setDownloadError(result.message);
+  }, [versionId, meta]);
+
   if (state === 'loading') {
     return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>…</span>;
   }
@@ -500,33 +562,41 @@ function FileFieldValue({ versionId, recordId }) {
     return <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>Файл не найден</span>;
   }
 
-  const downloadHref = `/api/files/${encodeURIComponent(versionId)}/download`;
-  const previewHref = `${downloadHref}?disposition=inline`;
-  const previewSafe = isPreviewSafeMime(meta.mime);
-  // T-0579 fix-forward (review B1 / B1-residual): normalize AND strip any
-  // `;param` once for the image-vs-embed branch below too — previewSafe
-  // already normalizes+strips internally, but a registro-variant or
-  // parameterized safe mime (e.g. `Image/PNG`, `image/png;charset=binary`)
-  // must still pick the correct branch (not silently render neither preview
-  // element while previewSafe is true) — one normalized, param-stripped
-  // value used consistently everywhere it's compared.
-  const normalizedMime = typeof meta.mime === 'string' ? meta.mime.trim().toLowerCase().split(';')[0].trim() : '';
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', alignItems: 'flex-start' }}>
-      <a href={downloadHref} style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }} title="Скачать файл">
+      <a
+        href="#"
+        onClick={handleDownload}
+        style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }}
+        title="Скачать файл"
+      >
         {meta.originalName || 'Скачать файл'}
       </a>
-      {previewSafe && normalizedMime.startsWith('image/') && (
+      {downloadError && (
+        <span role="alert" style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-xs)' }}>
+          {downloadError}
+        </span>
+      )}
+      {previewState === 'loading' && (
+        <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-xs)' }}>
+          Загрузка превью…
+        </span>
+      )}
+      {previewState === 'error' && (
+        <span role="alert" style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-xs)' }}>
+          {previewError || 'Не удалось загрузить превью'}
+        </span>
+      )}
+      {previewState === 'ok' && isImagePreview && (
         <img
-          src={previewHref}
+          src={previewUrl}
           alt={meta.originalName || 'Превью файла'}
           style={{ maxWidth: '320px', maxHeight: '320px', borderRadius: 'var(--chs-radius-2)', border: '1px solid var(--chs-color-border)' }}
         />
       )}
-      {previewSafe && normalizedMime === 'application/pdf' && (
+      {previewState === 'ok' && isPdfPreview && (
         <embed
-          src={previewHref}
+          src={previewUrl}
           type="application/pdf"
           style={{ width: '100%', maxWidth: '480px', height: '360px', border: '1px solid var(--chs-color-border)', borderRadius: 'var(--chs-radius-2)' }}
         />
