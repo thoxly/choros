@@ -29,6 +29,7 @@ import { readPublished } from "../db/agent-instruction-store.js";
 import {
   runAgentStep,
   type RunAgentStepDeps,
+  type LiveLlmConfig,
 } from "../runtime/agent-dispatch/run-agent-step.js";
 import {
   applyAgentOutcome,
@@ -39,11 +40,17 @@ import { makeDbGrantSource } from "../db/grants-dao.js";
 import { makeDbMcpToolSource } from "../db/mcp-tool-dao.js";
 import { makeDbRoleGrantSource } from "../db/role-grant-dao.js";
 import { makePgAuditWriter } from "../db/audit-writer.js";
-import { dormantLlmPort } from "../core/llm-port.js";
+import { dormantLlmPort, type LlmPort } from "../core/llm-port.js";
 import { stubBudgetPort } from "../runtime/agent-dispatch/agent-step-context.js";
 import type { PostgresJobStore } from "../core/jobStore.js";
 import type { PostgresOutboxStore } from "../core/postgres/pgOutboxStore.js";
 import { AGENT_STEP_TOPIC } from "../core/agent-task-external-mapper.js";
+// T-0586 (composition root — adapters allowed here, NOT in src/runtime/agent-dispatch/):
+// the SAME production OpenAI-compatible adapter + tenant secret resolver already used
+// by the assistant path (src/server.ts:makeLlmPortFactory). No second SQL resolver —
+// ctx.llm is already assembled per-job by readAgentCardLlmConfigById (agent-step-context.ts).
+import { OpenAILlmPort } from "../adapters/openai-llm-port.js";
+import { tenantSecretResolver } from "../server.js";
 
 /**
  * Concrete InstructionSource that delegates to the real agent-instruction-store DAO.
@@ -435,10 +442,13 @@ export function buildAgentWithTenantTx(pool: pg.Pool): WithTenantTx {
  * `["agent-step"]` (DEFAULT_AGENT_TOPIC) when the var is absent — so production
  * works out-of-the-box without extra configuration.
  *
- * LLM: dormant day-1 (liveEnabled=false). Motor defers every job to the human
- * inbox when no LLM is configured — safe-degrade (NF-5, T-0378 dormant keystone).
- * The live path (liveEnabled=true + BYO LLM key) is enabled by a config flip,
- * no code change (ADR §3 / RL-3).
+ * LLM: dormant by default (`AGENT_LIVE_ENABLED` unset/not exactly "true" →
+ * liveEnabled=false). Motor defers every job to the human inbox when no LLM
+ * is configured — safe-degrade (NF-5, T-0378 dormant keystone). T-0586: the
+ * live path (`AGENT_LIVE_ENABLED=true` + BYO LLM key on the agent's own
+ * `llm_connection`) is a config flip, no code change (ADR-T0586 §3 / RL-3) —
+ * `makeAgentLlmPortFactory` below builds a fresh per-job `OpenAILlmPort` via
+ * the same `tenantSecretResolver` the assistant path already uses.
  *
  * When `pool` or `jobStore` is absent (DATABASE_URL not set), returns `undefined`
  * — the caller should degrade to a no-op handle (topics=[]).
@@ -454,6 +464,15 @@ export interface AgentDispatchProductionDeps {
  * when DATABASE_URL is absent (no pool). `startAgentDispatchLoop` returns a
  * noopHandle immediately when `topics.length === 0` — none of the other deps
  * fields are ever reached so stub values are safe.
+ *
+ * T-0586 (AC-1): `liveEnabled: false` here is INTENTIONAL, not a forgotten
+ * literal — this is the degraded/no-DB path (`topics: []`), which
+ * `startAgentDispatchLoop` short-circuits to a `noopHandle()` BEFORE `runDeps`
+ * is ever read (see `startAgentDispatchLoop` above: `if (deps.topics.length
+ * === 0) return noopHandle()`). `runDeps` is therefore unreachable runtime
+ * state in this branch — same class of stub-safety as the fetcher/withTenantTx/
+ * applyDeps fields right above, which also throw/no-op rather than do
+ * anything real. Reading `AGENT_LIVE_ENABLED` here would be dead code.
  */
 export function buildDegradedAgentDispatchDeps(): AgentDispatchDeps {
   return {
@@ -479,6 +498,33 @@ export function buildDegradedAgentDispatchDeps(): AgentDispatchDeps {
     workerId: "choros-agent-dispatcher",
     topics: [], // degraded — startAgentDispatchLoop returns noopHandle immediately
   };
+}
+
+/**
+ * T-0586 ND-2: per-job live LlmPort factory. Builds a FRESH `OpenAILlmPort`
+ * from the agent's OWN resolved config (`ctx.llm`, threaded in via the
+ * `LiveLlmConfig` the motor passes at call time) using the SAME
+ * `tenantSecretResolver` as the assistant path (src/server.ts). No cache: a
+ * UI key/connection change is picked up on the very next job — nothing here
+ * is captured in a closure across calls, the pool/resolver reference is the
+ * only thing shared and both are safe to reuse for all tenants (the tenant
+ * scoping happens INSIDE the resolver, keyed by `cfg.tenantId`).
+ *
+ * `OpenAILlmPort`'s constructor itself validates the secret-handle SHAPE and
+ * throws `LlmUnavailableError` on an invalid one — that throw is caught by
+ * `runAgentStep`'s live-call try/catch (constructed then immediately used via
+ * `port.complete(...)`) and routed to defer-to-human (F6(b)); no additional
+ * validation needed here.
+ */
+function makeAgentLlmPortFactory(): (cfg: LiveLlmConfig) => LlmPort {
+  return (cfg: LiveLlmConfig): LlmPort =>
+    new OpenAILlmPort({
+      endpoint: cfg.endpoint,
+      model: cfg.model,
+      secretHandle: cfg.secretHandle,
+      tenantId: cfg.tenantId,
+      secretResolver: tenantSecretResolver,
+    });
 }
 
 export function buildAgentDispatchDeps(
@@ -514,11 +560,23 @@ export function buildAgentDispatchDeps(
     jobStore,
   };
 
+  // T-0586 F1/F2: AGENT_LIVE_ENABLED — deploy-time flag, read exactly like
+  // AGENT_TOPICS/AGENT_WORKER_ID just above. Default (absent / any value other
+  // than the exact string "true") is `false` — dormant, safe-by-default
+  // (NF1). When live, additively supply a per-job port factory (ND-2) — the
+  // `llm` field stays `dormantLlmPort` as the safe fallback if the factory is
+  // ever not consulted (defence-in-depth; the motor always prefers the
+  // factory when liveEnabled is true — see run-agent-step.ts live-gate).
+  const liveEnabled = env["AGENT_LIVE_ENABLED"] === "true";
+  const runDeps: RunAgentStepDeps = liveEnabled
+    ? { llm: dormantLlmPort, liveEnabled: true, llmPortFactory: makeAgentLlmPortFactory() }
+    : { llm: dormantLlmPort, liveEnabled: false };
+
   return {
     fetcher,
     withTenantTx,
     assembleDeps,
-    runDeps: { llm: dormantLlmPort, liveEnabled: false },
+    runDeps,
     applyDeps,
     workerId: env["AGENT_WORKER_ID"] ?? "choros-agent-dispatcher",
     topics,
