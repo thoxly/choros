@@ -21,6 +21,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
 import { migratorUrl, appUrl, uuid } from './_helpers.js';
 import { getHoldersForRole, findTenantOwnerSlug } from '../../../src/db/grants-dao.js';
+import { getActiveSubstitutionsForSubstitute } from '../../../src/db/substitution-dao.js';
 
 const NOW = 1_000_000; // fixed instant for deterministic window math
 
@@ -267,5 +268,130 @@ describe('T-0588 AC-4+ — findTenantOwnerSlug positive control (separate tenant
   it('ACTIVE tenant-owner → still resolved (no regression)', async () => {
     const owner = await findTenantOwnerSlug(getPool(), OWNER_TENANT, NOW);
     expect(owner).toBe(ownerSlug);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0588 (BLOCK-2, review R-1 follow-up) — getActiveSubstitutionsForSubstitute
+// (and, by the shared SUBST_SELECT fragment, every substitution_rule reader)
+// excludes a rule whose SUBSTITUTE is deactivated. Complements the HTTP-level
+// probe in inbox_claim_substitution.db.test.ts (BLOCK-2) with a direct DAO-unit
+// assertion: a deactivated substitute must never surface as an effective
+// stand-in, independent of the claim route's own gate.
+// ---------------------------------------------------------------------------
+
+describe('T-0588 BLOCK-2 — getActiveSubstitutionsForSubstitute excludes a deactivated substitute', () => {
+  const SUBST_TENANT = uuid();
+
+  const subFx: {
+    absent: { id: string; slug: string };
+    deactivatedSubstitute: { id: string; slug: string };
+    activeSubstitute: { id: string; slug: string };
+    roleId: string;
+  } = {
+    absent: { id: '', slug: '' },
+    deactivatedSubstitute: { id: '', slug: '' },
+    activeSubstitute: { id: '', slug: '' },
+    roleId: '',
+  };
+
+  async function seedEmp(c: pg.Client, slug: string, deactivatedAt: number | null): Promise<{ id: string; slug: string }> {
+    const deptId = uuid();
+    await c.query(
+      `INSERT INTO choros.department (tenant_id, id, parent_id, slug, display_name, created_at, updated_at)
+       VALUES ($1, $2, NULL, $3, $3, 0, 0)`,
+      [SUBST_TENANT, deptId, `t0588-dept-${deptId.slice(0, 8)}`],
+    );
+    const posId = uuid();
+    await c.query(
+      `INSERT INTO choros.position (tenant_id, id, department_id, slug, title, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $4, 0, 0)`,
+      [SUBST_TENANT, posId, deptId, `t0588-pos-${posId.slice(0, 8)}`],
+    );
+    const empId = uuid();
+    await c.query(
+      `INSERT INTO choros.employee
+         (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at, deactivated_at)
+       VALUES ($1, $2, $3, 'human', $4, $4, 0, 0, $5)`,
+      [SUBST_TENANT, empId, posId, slug, deactivatedAt],
+    );
+    return { id: empId, slug };
+  }
+
+  beforeAll(async () => {
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(
+        `INSERT INTO choros.tenant (tenant_id, id, slug, display_name, created_at)
+         VALUES ($1, $1, $2, $2, 0) ON CONFLICT DO NOTHING`,
+        [SUBST_TENANT, `t0588-gd-sub-${SUBST_TENANT.slice(0, 8)}`],
+      );
+      await c.query('COMMIT');
+
+      await c.query('BEGIN');
+      subFx.absent = await seedEmp(c, `t0588-absent-${uuid().slice(0, 6)}`, null);
+      subFx.deactivatedSubstitute = await seedEmp(c, `t0588-deactsub-${uuid().slice(0, 6)}`, 500_000);
+      subFx.activeSubstitute = await seedEmp(c, `t0588-activesub-${uuid().slice(0, 6)}`, null);
+
+      subFx.roleId = uuid();
+      const roleSlug = `t0588-role-substdeact-${uuid().slice(0, 6)}`;
+      await c.query(
+        `INSERT INTO choros.role (tenant_id, id, slug, display_name, description, created_at, updated_at)
+         VALUES ($1, $2, $3, $3, NULL, 0, 0)`,
+        [SUBST_TENANT, subFx.roleId, roleSlug],
+      );
+
+      const scope = JSON.stringify({ kind: 'node', hierarchy: 'org', nodeId: 'x', nodeLevel: 'department' });
+      // Rule 1: substitute is DEACTIVATED.
+      await c.query(
+        `INSERT INTO choros.substitution_rule
+           (tenant_id, id, absent_employee_id, substitute_employee_id, role_id, org_scope,
+            ttl_grant_id, non_inheritable_excluded, proposed_by, confirmed_by,
+            valid_from, valid_until, source, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb,
+                 NULL, TRUE, NULL, 'seed',
+                 NULL, NULL, 'manual', 'seed', 0, 0)`,
+        [SUBST_TENANT, uuid(), subFx.absent.id, subFx.deactivatedSubstitute.id, subFx.roleId, scope],
+      );
+      // Rule 2: substitute is ACTIVE (positive control, same absent employee/role).
+      await c.query(
+        `INSERT INTO choros.substitution_rule
+           (tenant_id, id, absent_employee_id, substitute_employee_id, role_id, org_scope,
+            ttl_grant_id, non_inheritable_excluded, proposed_by, confirmed_by,
+            valid_from, valid_until, source, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb,
+                 NULL, TRUE, NULL, 'seed',
+                 NULL, NULL, 'manual', 'seed', 0, 0)`,
+        [SUBST_TENANT, uuid(), subFx.absent.id, subFx.activeSubstitute.id, subFx.roleId, scope],
+      );
+      await c.query('COMMIT');
+    } finally {
+      await c.end();
+    }
+  });
+
+  it('deactivated substitute → getActiveSubstitutionsForSubstitute returns [] for them', async () => {
+    const rules = await getActiveSubstitutionsForSubstitute(
+      getPool(),
+      SUBST_TENANT,
+      subFx.deactivatedSubstitute.slug,
+      NOW,
+    );
+    expect(rules).toEqual([]);
+  });
+
+  it('positive control: active substitute → their rule IS returned (no regression)', async () => {
+    const rules = await getActiveSubstitutionsForSubstitute(
+      getPool(),
+      SUBST_TENANT,
+      subFx.activeSubstitute.slug,
+      NOW,
+    );
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.substituteEmployeeId).toBe(subFx.activeSubstitute.slug);
+    expect(rules[0]?.absentEmployeeId).toBe(subFx.absent.slug);
   });
 });

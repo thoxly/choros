@@ -121,7 +121,7 @@ afterAll(async () => {
 // this local/CI setup), so seeded rows are visible on the real read path.
 // ---------------------------------------------------------------------------
 
-type EmpFx = { id: string; slug: string };
+type EmpFx = { id: string; slug: string; deptId: string };
 
 async function seedTenant(c: pg.Client, tenantId: string): Promise<void> {
   await c.query(
@@ -131,7 +131,12 @@ async function seedTenant(c: pg.Client, tenantId: string): Promise<void> {
   );
 }
 
-async function seedEmployee(c: pg.Client, tenantId: string, slug: string): Promise<EmpFx> {
+async function seedEmployee(
+  c: pg.Client,
+  tenantId: string,
+  slug: string,
+  opts?: { deactivatedAt?: number },
+): Promise<EmpFx> {
   const deptId = uuid();
   await c.query(
     `INSERT INTO choros.department (tenant_id, id, parent_id, slug, display_name, created_at, updated_at)
@@ -146,11 +151,12 @@ async function seedEmployee(c: pg.Client, tenantId: string, slug: string): Promi
   );
   const empId = uuid();
   await c.query(
-    `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
-     VALUES ($1, $2, $3, 'human', $4, $4, 0, 0)`,
-    [tenantId, empId, posId, slug],
+    `INSERT INTO choros.employee
+       (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at, deactivated_at)
+     VALUES ($1, $2, $3, 'human', $4, $4, 0, 0, $5)`,
+    [tenantId, empId, posId, slug, opts?.deactivatedAt ?? null],
   );
-  return { id: empId, slug };
+  return { id: empId, slug, deptId };
 }
 
 async function seedRole(c: pg.Client, tenantId: string, slug: string): Promise<string> {
@@ -166,7 +172,7 @@ async function seedRole(c: pg.Client, tenantId: string, slug: string): Promise<s
 async function seedAssignment(
   c: pg.Client,
   tenantId: string,
-  args: { empId: string; roleId: string },
+  args: { empId: string; roleId: string; orgScope?: Record<string, unknown> },
 ): Promise<void> {
   await c.query(
     `INSERT INTO choros.role_assignment
@@ -178,7 +184,7 @@ async function seedAssignment(
              NULL, 'seed', NULL, 0, 0)`,
     [
       tenantId, uuid(), args.empId, args.roleId,
-      JSON.stringify({ kind: 'node', hierarchy: 'org', nodeId: 'x', nodeLevel: 'department' }),
+      JSON.stringify(args.orgScope ?? { kind: 'node', hierarchy: 'org', nodeId: 'x', nodeLevel: 'department' }),
     ],
   );
 }
@@ -213,10 +219,13 @@ async function seedSubstitutionRule(
     confirmed: boolean;
     validFrom?: number | null;
     validUntil?: number | null;
+    orgScope?: Record<string, unknown>;
   },
 ): Promise<string> {
   const id = uuid();
-  const scope = JSON.stringify({ kind: 'node', hierarchy: 'org', nodeId: 'x', nodeLevel: 'department' });
+  const scope = JSON.stringify(
+    args.orgScope ?? { kind: 'node', hierarchy: 'org', nodeId: 'x', nodeLevel: 'department' },
+  );
   await c.query(
     `INSERT INTO choros.substitution_rule
        (tenant_id, id, absent_employee_id, substitute_employee_id, role_id, org_scope,
@@ -472,5 +481,421 @@ describe('T-0588 AC-11 — regression: plain role-assignment claim is unaffected
     expect(payload).toBeDefined();
     expect(payload!['on_behalf_of']).toBeUndefined();
     expect('on_behalf_of' in payload!).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BLOCK-1 (review R-1, blocking) — org-scope containment is REAL, not a no-op.
+//
+// Prior code hardcoded the "task's org-scope" to BOTTOM (⊥, empty scope-set)
+// and checked isNarrowerOrEqual(BOTTOM, rule.orgScope, oracle) — but ⊥ ⊑
+// anything is vacuously TRUE (grant-lattice.ts isBottom(child) short-circuit),
+// so EVERY department-scoped rule passed regardless of department. The fix
+// checks containment against the ABSENT holder's OWN role_assignment.org_scope
+// for the role (the real, task-relevant scope) via the REAL tenant org tree
+// (loadTenantOrgAncestry), not a fake identity-only oracle.
+//
+//   cross-scope — rule scoped to the substitute's OWN department (dept B), but
+//     the absent holder's role_assignment is scoped to a DIFFERENT department
+//     (dept A) → the rule's scope is NOT contained by the assignment's real
+//     scope → 403 (the bug this fixes: this case used to wrongly return 200).
+//   same-scope  — rule scoped to EXACTLY the department the absent holder's
+//     assignment covers → containment holds → 200 (FR-1 stays alive: the fix
+//     does not turn Tier-2 substitution into a dead path).
+// ---------------------------------------------------------------------------
+
+describe('T-0588 BLOCK-1 — org-scope containment is real (review R-1 fix)', () => {
+  it('rule scoped to a DIFFERENT department than the absent holder\'s real assignment → 403 (was wrongly 200)', async () => {
+    if (!hasDb) return;
+
+    const tenantId = uuid();
+    const roleSlug = `t0588-role-xscope-${uuid().slice(0, 6)}`;
+    const absentSlug = `t0588-absent-xscope-${uuid().slice(0, 6)}`;
+    const substituteSlug = `t0588-sub-xscope-${uuid().slice(0, 6)}`;
+    let taskId = '';
+
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await seedTenant(c, tenantId);
+      const roleId = await seedRole(c, tenantId, roleSlug);
+      const absent = await seedEmployee(c, tenantId, absentSlug); // own dept = "dept A"
+      const substitute = await seedEmployee(c, tenantId, substituteSlug); // own dept = "dept B" (DIFFERENT)
+      // Absent holder's REAL assignment is scoped to THEIR OWN department (dept A).
+      await seedAssignment(c, tenantId, {
+        empId: absent.id,
+        roleId,
+        orgScope: { kind: 'node', hierarchy: 'org', nodeId: absent.deptId, nodeLevel: 'department' },
+      });
+      const grantId = await seedTier2Grant(c, tenantId, roleId);
+      // The rule is scoped to the SUBSTITUTE's department (dept B) — a DIFFERENT
+      // node than the absent holder's real assignment scope (dept A). Not
+      // contained: the rule licenses reach the absent holder's own assignment
+      // never had.
+      await seedSubstitutionRule(c, tenantId, {
+        absentEmpId: absent.id,
+        substituteEmpId: substitute.id,
+        roleId,
+        ttlGrantId: grantId,
+        confirmed: true,
+        validFrom: null,
+        validUntil: null,
+        orgScope: { kind: 'node', hierarchy: 'org', nodeId: substitute.deptId, nodeLevel: 'department' },
+      });
+      taskId = await seedPoolTask(c, tenantId, roleSlug);
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    } finally {
+      await c.end();
+    }
+
+    const resp = await makeRequest(baseUrl, 'POST', `/api/inbox/${taskId}/claim`, undefined, {
+      'x-dev-user': substituteSlug,
+    });
+
+    expect(resp.statusCode).toBe(403);
+    expect(JSON.parse(resp.body).error.code).toBe('NOT_ELIGIBLE');
+  });
+
+  it('rule scoped to EXACTLY the absent holder\'s real assignment department → 200 (containment holds)', async () => {
+    if (!hasDb) return;
+
+    const tenantId = uuid();
+    const roleSlug = `t0588-role-sscope-${uuid().slice(0, 6)}`;
+    const absentSlug = `t0588-absent-sscope-${uuid().slice(0, 6)}`;
+    const substituteSlug = `t0588-sub-sscope-${uuid().slice(0, 6)}`;
+    let taskId = '';
+
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await seedTenant(c, tenantId);
+      const roleId = await seedRole(c, tenantId, roleSlug);
+      const absent = await seedEmployee(c, tenantId, absentSlug);
+      const substitute = await seedEmployee(c, tenantId, substituteSlug);
+      const absentScope = { kind: 'node', hierarchy: 'org', nodeId: absent.deptId, nodeLevel: 'department' };
+      await seedAssignment(c, tenantId, { empId: absent.id, roleId, orgScope: absentScope });
+      const grantId = await seedTier2Grant(c, tenantId, roleId);
+      // Rule scoped to the SAME department as the absent holder's real assignment.
+      await seedSubstitutionRule(c, tenantId, {
+        absentEmpId: absent.id,
+        substituteEmpId: substitute.id,
+        roleId,
+        ttlGrantId: grantId,
+        confirmed: true,
+        validFrom: null,
+        validUntil: null,
+        orgScope: absentScope,
+      });
+      taskId = await seedPoolTask(c, tenantId, roleSlug);
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    } finally {
+      await c.end();
+    }
+
+    const resp = await makeRequest(baseUrl, 'POST', `/api/inbox/${taskId}/claim`, undefined, {
+      'x-dev-user': substituteSlug,
+    });
+
+    expect(resp.statusCode).toBe(200);
+    const payload = await readClaimedPayload(taskId);
+    expect(payload!['on_behalf_of']).toBe(absentSlug);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BLOCK-2 — a DEACTIVATED substitute must not be usable as a stand-in, even
+// with an otherwise-perfect (confirmed, in-window, same-scope) Tier-2 rule.
+// ---------------------------------------------------------------------------
+
+describe('T-0588 BLOCK-2 — deactivated substitute cannot claim via substitution', () => {
+  it('substitute account is DEACTIVATED → 403 NOT_ELIGIBLE despite a live Tier-2 rule', async () => {
+    if (!hasDb) return;
+
+    const tenantId = uuid();
+    const roleSlug = `t0588-role-deactsub-${uuid().slice(0, 6)}`;
+    const absentSlug = `t0588-absent-deactsub-${uuid().slice(0, 6)}`;
+    const substituteSlug = `t0588-sub-deactsub-${uuid().slice(0, 6)}`;
+    let taskId = '';
+
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await seedTenant(c, tenantId);
+      const roleId = await seedRole(c, tenantId, roleSlug);
+      const absent = await seedEmployee(c, tenantId, absentSlug);
+      // Substitute is DEACTIVATED (fired) — must never be an effective stand-in.
+      const substitute = await seedEmployee(c, tenantId, substituteSlug, { deactivatedAt: 500_000 });
+      const absentScope = { kind: 'node', hierarchy: 'org', nodeId: absent.deptId, nodeLevel: 'department' };
+      await seedAssignment(c, tenantId, { empId: absent.id, roleId, orgScope: absentScope });
+      const grantId = await seedTier2Grant(c, tenantId, roleId);
+      await seedSubstitutionRule(c, tenantId, {
+        absentEmpId: absent.id,
+        substituteEmpId: substitute.id,
+        roleId,
+        ttlGrantId: grantId,
+        confirmed: true,
+        validFrom: null,
+        validUntil: null,
+        orgScope: absentScope,
+      });
+      taskId = await seedPoolTask(c, tenantId, roleSlug);
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    } finally {
+      await c.end();
+    }
+
+    const resp = await makeRequest(baseUrl, 'POST', `/api/inbox/${taskId}/claim`, undefined, {
+      'x-dev-user': substituteSlug,
+    });
+
+    expect(resp.statusCode).toBe(403);
+    expect(JSON.parse(resp.body).error.code).toBe('NOT_ELIGIBLE');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BLOCK-3 — a DEACTIVATED actor cannot claim ANY pool task, even a plain
+// role_assignment task they still technically hold the role for (deactivation
+// disables the ACCOUNT independent of role_assignment.valid_until).
+// ---------------------------------------------------------------------------
+
+describe('T-0588 BLOCK-3 — deactivated actor cannot claim (even a plain role-assignment task)', () => {
+  it('holder account is DEACTIVATED → 403 NOT_ELIGIBLE despite an active role_assignment', async () => {
+    if (!hasDb) return;
+
+    const tenantId = uuid();
+    const roleSlug = `t0588-role-deactholder-${uuid().slice(0, 6)}`;
+    const holderSlug = `t0588-holder-deactholder-${uuid().slice(0, 6)}`;
+    let taskId = '';
+
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await seedTenant(c, tenantId);
+      const roleId = await seedRole(c, tenantId, roleSlug);
+      const holder = await seedEmployee(c, tenantId, holderSlug, { deactivatedAt: 500_000 });
+      await seedAssignment(c, tenantId, { empId: holder.id, roleId });
+      taskId = await seedPoolTask(c, tenantId, roleSlug);
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    } finally {
+      await c.end();
+    }
+
+    const resp = await makeRequest(baseUrl, 'POST', `/api/inbox/${taskId}/claim`, undefined, {
+      'x-dev-user': holderSlug,
+    });
+
+    expect(resp.statusCode).toBe(403);
+    expect(JSON.parse(resp.body).error.code).toBe('NOT_ELIGIBLE');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BLOCK-4 — a Tier-2 substitute who claimed a task must also be able to
+// APPROVE it (claim→approve→done end-to-end), or the substitution is
+// claim-only and the LIVE_PROOF "заместитель забирает задачу" flow dead-ends.
+//
+// Separate server instance wired with a REAL resolveActorTenant (db/org.ts) —
+// the approve route (unlike claim) calls writeDeps.resolveActorTenant directly,
+// and the shared server above stubs it to throw (claim resolves tenant via a
+// different internal path). No engine (flowableClient absent) — approve stays
+// audit-only / `engine: "not_configured"`, which is sufficient to prove the
+// authz gate + task.approved projection advance the task to `done`.
+// ---------------------------------------------------------------------------
+
+describe('T-0588 BLOCK-4 — Tier-2 substitute can claim AND approve (done end-to-end)', () => {
+  let approveServer: http.Server;
+  let approveBaseUrl = '';
+  let approvePool: pg.Pool;
+
+  beforeAll(async () => {
+    if (!hasDb) return;
+    // T-0588 note: production (server.ts) wires writeDeps.pool AND the
+    // resolveActorTenant closure to the SAME BYPASSRLS migrator pool
+    // (`grantsPool` = DATABASE_URL-based, via getOrgPool()) — resolveActorTenant's
+    // cross-tenant "which tenant does this slug belong to" lookup structurally
+    // needs BYPASSRLS (it has no tenant GUC to scope an RLS-subject connection
+    // by, by definition — it's finding the tenant FROM the slug). Mirror that
+    // here with migratorUrl() (NOT appUrl()/choros_app, which is RLS-subject
+    // and would return zero rows for a query with no SET LOCAL tenant GUC).
+    approvePool = new pg.Pool({ connectionString: migratorUrl() });
+    const router = new Router();
+    const { resolveActorTenant } = await import('../../../src/db/org.js');
+    const writeDeps: InboxWriteDeps = {
+      pool: approvePool,
+      resolveActorTenant: (actorSlug: string) => resolveActorTenant(approvePool, actorSlug),
+      // no flowableClient/outboxStore: audit-only approve (sufficient to prove
+      // the authz gate + task.approved projection advance to `done`).
+    };
+    registerInboxRoutes(router, undefined, writeDeps);
+    approveServer = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => {
+      approveServer.listen(0, 'localhost', () => {
+        const addr = approveServer.address();
+        if (addr && typeof addr !== 'string') approveBaseUrl = `http://localhost:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    if (!hasDb) return;
+    if (approvePool) await approvePool.end();
+    if (approveServer) await new Promise<void>((resolve) => approveServer.close(() => resolve()));
+  });
+
+  it('substitute claims (200) then approves (200, done) — on_behalf_of recorded on BOTH events', async () => {
+    if (!hasDb) return;
+
+    const tenantId = uuid();
+    const roleSlug = `t0588-role-b4-${uuid().slice(0, 6)}`;
+    const absentSlug = `t0588-absent-b4-${uuid().slice(0, 6)}`;
+    const substituteSlug = `t0588-sub-b4-${uuid().slice(0, 6)}`;
+    let taskId = '';
+
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await seedTenant(c, tenantId);
+      const roleId = await seedRole(c, tenantId, roleSlug);
+      const absent = await seedEmployee(c, tenantId, absentSlug);
+      const substitute = await seedEmployee(c, tenantId, substituteSlug);
+      const absentScope = { kind: 'node', hierarchy: 'org', nodeId: absent.deptId, nodeLevel: 'department' };
+      await seedAssignment(c, tenantId, { empId: absent.id, roleId, orgScope: absentScope });
+      const grantId = await seedTier2Grant(c, tenantId, roleId);
+      await seedSubstitutionRule(c, tenantId, {
+        absentEmpId: absent.id,
+        substituteEmpId: substitute.id,
+        roleId,
+        ttlGrantId: grantId,
+        confirmed: true,
+        validFrom: null,
+        validUntil: null,
+        orgScope: absentScope,
+      });
+      taskId = await seedPoolTask(c, tenantId, roleSlug);
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    } finally {
+      await c.end();
+    }
+
+    const claimResp = await makeRequest(approveBaseUrl, 'POST', `/api/inbox/${taskId}/claim`, undefined, {
+      'x-dev-user': substituteSlug,
+    });
+    expect(claimResp.statusCode).toBe(200);
+
+    const approveResp = await makeRequest(
+      approveBaseUrl,
+      'POST',
+      `/api/inbox/${taskId}/action`,
+      { action: 'approve' },
+      { 'x-dev-user': substituteSlug },
+    );
+    expect(approveResp.statusCode).toBe(200);
+    const approveBody = JSON.parse(approveResp.body);
+    expect(approveBody.status).toBe('done');
+
+    // task.approved audit payload also carries on_behalf_of (BLOCK-4 contract).
+    const approvedC = new pg.Client({ connectionString: migratorUrl() });
+    await approvedC.connect();
+    try {
+      await approvedC.query('SET search_path TO choros;');
+      const { rows } = await approvedC.query<{ payload: Record<string, unknown> }>(
+        `SELECT payload FROM choros.audit_event
+          WHERE type = 'task.approved' AND payload->>'inbox_task_id' = $1
+          ORDER BY occurred_at DESC LIMIT 1`,
+        [taskId],
+      );
+      expect(rows[0]?.payload['on_behalf_of']).toBe(absentSlug);
+    } finally {
+      await approvedC.end();
+    }
+  });
+
+  it('regression: normal holder claim→approve still works, NO on_behalf_of on either event', async () => {
+    if (!hasDb) return;
+
+    const tenantId = uuid();
+    const roleSlug = `t0588-role-b4-regr-${uuid().slice(0, 6)}`;
+    const holderSlug = `t0588-holder-b4-regr-${uuid().slice(0, 6)}`;
+    let taskId = '';
+
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await seedTenant(c, tenantId);
+      const roleId = await seedRole(c, tenantId, roleSlug);
+      const holder = await seedEmployee(c, tenantId, holderSlug);
+      await seedAssignment(c, tenantId, { empId: holder.id, roleId });
+      taskId = await seedPoolTask(c, tenantId, roleSlug);
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    } finally {
+      await c.end();
+    }
+
+    const claimResp = await makeRequest(approveBaseUrl, 'POST', `/api/inbox/${taskId}/claim`, undefined, {
+      'x-dev-user': holderSlug,
+    });
+    expect(claimResp.statusCode).toBe(200);
+
+    const approveResp = await makeRequest(
+      approveBaseUrl,
+      'POST',
+      `/api/inbox/${taskId}/action`,
+      { action: 'approve' },
+      { 'x-dev-user': holderSlug },
+    );
+    expect(approveResp.statusCode).toBe(200);
+
+    const approvedC = new pg.Client({ connectionString: migratorUrl() });
+    await approvedC.connect();
+    try {
+      await approvedC.query('SET search_path TO choros;');
+      const { rows } = await approvedC.query<{ payload: Record<string, unknown> }>(
+        `SELECT payload FROM choros.audit_event
+          WHERE type = 'task.approved' AND payload->>'inbox_task_id' = $1
+          ORDER BY occurred_at DESC LIMIT 1`,
+        [taskId],
+      );
+      expect('on_behalf_of' in (rows[0]?.payload ?? {})).toBe(false);
+    } finally {
+      await approvedC.end();
+    }
   });
 });
