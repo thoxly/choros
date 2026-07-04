@@ -28,6 +28,21 @@ import type { PostgresOutboxStore } from "./pgOutboxStore.js";
 // UUID validation regex (образец pgOutboxStore claimBatch — R-3 defence).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * T-0636 (P0-6): minimal structural shape enqueue needs from its query
+ * executor. Satisfied by both `pg.Pool` and `pg.PoolClient` — the caller
+ * supplies a GUC-scoped client (SET LOCAL choros.tenant_id already applied on
+ * it) when it needs enqueue's `current_setting('choros.tenant_id', false)`
+ * read to see a tenant that was set on a DIFFERENT connection than the pool's
+ * default. Omit the parameter to keep today's behaviour (query via this.pool —
+ * correct only when the GUC was set on a connection the pool itself owns,
+ * e.g. a single-connection pool or an already-scoped caller).
+ */
+export interface Queryable {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  query<T = any>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
+}
+
 // ---------------------------------------------------------------------------
 // Row shape from Postgres (snake_case DB → camelCase TS)
 // ---------------------------------------------------------------------------
@@ -92,6 +107,19 @@ export class PostgresJobStore {
    *   processDefId — the BPMN processDefinitionKey (e.g. "telLinear")
    *   instanceId   — the Flowable processInstanceId (correlation, audit)
    * Both nullable; omit to get legacy behaviour (columns left NULL).
+   *
+   * T-0636 (P0-6): optional 7th parameter `executor` — the query executor to run
+   * the INSERT/SELECT-back on. Defaults to `this.pool` (today's behaviour,
+   * unchanged for every existing caller). A caller that opened its OWN
+   * GUC-scoped client (SET LOCAL choros.tenant_id on a dedicated pg.PoolClient —
+   * because current_setting('choros.tenant_id', false) is a per-CONNECTION
+   * setting, not a pool-wide one) passes that client here so the INSERT's
+   * current_setting(...) read sees the GUC. Without this seam, a caller that
+   * sets the GUC on a client obtained from `pool.connect()` and then calls
+   * `jobStore.enqueue(...)` (which queries `this.pool` directly) would have its
+   * GUC invisible — `this.pool.query` may run on an entirely different
+   * connection. This is exactly the externalTaskBridge multi-tenant bug the
+   * seam closes (ADR T-0636 §P0-6).
    */
   async enqueue(
     topic: string,
@@ -100,14 +128,16 @@ export class PostgresJobStore {
     idempotencyKey?: string,
     processDefId?: string,
     instanceId?: string,
+    executor?: Queryable,
   ): Promise<Job> {
+    const q = executor ?? this.pool;
     const id = randomUUID();
     const now = this.clock.now();
     const pdi = processDefId?.trim().length ? processDefId.trim() : null;
     const iid = instanceId?.trim().length ? instanceId.trim() : null;
 
     if (idempotencyKey === undefined) {
-      const { rows } = await this.pool.query<JobRow>(
+      const { rows } = await q.query<JobRow>(
         `INSERT INTO choros.job
            (tenant_id, id, topic, variables, state, retries,
             lock_owner, lock_expiry, created_at, available_at, idempotency_key,
@@ -125,7 +155,7 @@ export class PostgresJobStore {
     }
 
     // Idempotent path: INSERT … ON CONFLICT DO NOTHING, then SELECT-back on conflict.
-    const ins = await this.pool.query<JobRow>(
+    const ins = await q.query<JobRow>(
       `INSERT INTO choros.job
          (tenant_id, id, topic, variables, state, retries,
           lock_owner, lock_expiry, created_at, available_at, idempotency_key,
@@ -146,7 +176,7 @@ export class PostgresJobStore {
     }
 
     // Conflict → the row already exists for this (tenant, key). Return it as-is.
-    const sel = await this.pool.query<JobRow>(
+    const sel = await q.query<JobRow>(
       `SELECT id, topic, variables, state, retries,
               lock_owner, lock_expiry, created_at, available_at
        FROM choros.job

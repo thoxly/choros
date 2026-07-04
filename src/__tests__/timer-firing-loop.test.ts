@@ -19,7 +19,7 @@
  * engine actually advancing the token when PT24H elapses) is server-gated — not here.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   appendProcessStarted,
   listInstanceInboxTasks,
@@ -30,9 +30,11 @@ import type { PgClientLike } from "../db/audit-writer.js";
 import {
   runTimerFiringOnce,
   startTimerFiringLoop,
+  buildTimerFiringDeps,
   type TimerFiringDeps,
   type TimerTenantSource,
 } from "../server/timer-firing-loop.js";
+import * as flowableClientModule from "../core/flowable-client.js";
 
 // ---------------------------------------------------------------------------
 // In-memory fake audit DB (mirrors inbox-engine-drive.test.ts harness exactly).
@@ -739,5 +741,66 @@ describe("T-0535 — startTimerFiringLoop scheduling + honest-degrade", () => {
     } finally {
       globalThis.clearInterval = realClear;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0636 (P0-5 / AC-1 / AC-2 / AC-3): buildTimerFiringDeps credential env names
+// ---------------------------------------------------------------------------
+describe("buildTimerFiringDeps — FLOWABLE credential env names (T-0636 P0-5)", () => {
+  const fakePool = {} as unknown as import("pg").Pool;
+
+  beforeEach(() => {
+    vi.spyOn(flowableClientModule, "makeFlowableClient");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("AC-2: builds FlowableClient from FLOWABLE_REST_APP_ADMIN_USER_ID/PASSWORD (not the old names)", () => {
+    const deps = buildTimerFiringDeps(fakePool, {
+      FLOWABLE_BASE_URL: "http://flowable:8082",
+      FLOWABLE_REST_APP_ADMIN_USER_ID: "real-admin",
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: "real-secret-pw",
+    } as unknown as NodeJS.ProcessEnv);
+
+    expect(deps).toBeDefined();
+    expect(flowableClientModule.makeFlowableClient).toHaveBeenCalledTimes(1);
+    const config = vi.mocked(flowableClientModule.makeFlowableClient).mock.calls[0][0];
+    expect(config?.adminUser).toBe("real-admin");
+    expect(config?.adminPassword).toBe("real-secret-pw");
+  });
+
+  it("AC-3: FLOWABLE_BASE_URL set but FLOWABLE_REST_APP_ADMIN_PASSWORD absent → undefined (noop-degrade), makeFlowableClient never called", () => {
+    let deps: TimerFiringDeps | undefined;
+    expect(() => {
+      deps = buildTimerFiringDeps(fakePool, {
+        FLOWABLE_BASE_URL: "http://flowable:8082",
+        // FLOWABLE_REST_APP_ADMIN_PASSWORD intentionally absent.
+      } as unknown as NodeJS.ProcessEnv);
+    }).not.toThrow();
+
+    expect(deps).toBeUndefined();
+    expect(flowableClientModule.makeFlowableClient).not.toHaveBeenCalled();
+  });
+
+  it("AC-1: never falls back to the literal password 'test' when a real password IS configured", () => {
+    buildTimerFiringDeps(fakePool, {
+      FLOWABLE_BASE_URL: "http://flowable:8082",
+      FLOWABLE_REST_APP_ADMIN_USER_ID: "real-admin",
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: "real-secret-pw",
+    } as unknown as NodeJS.ProcessEnv);
+
+    const config = vi.mocked(flowableClientModule.makeFlowableClient).mock.calls[0][0];
+    expect(config?.adminPassword).not.toBe("test");
+  });
+
+  it("no pool → undefined (unrelated to credentials — pre-existing degrade path)", () => {
+    const deps = buildTimerFiringDeps(undefined, {
+      FLOWABLE_BASE_URL: "http://flowable:8082",
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: "real-secret-pw",
+    } as unknown as NodeJS.ProcessEnv);
+    expect(deps).toBeUndefined();
   });
 });

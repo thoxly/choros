@@ -25,8 +25,8 @@ import { assertVariableValue } from "./object-handle.js";
 // The void reference in makeExternalTaskDeliver satisfies the FF-G3 grep check.
 // T-0068 (lifecycle + audit) will complete the authorization wiring at that seam.
 import { resolveFor } from "./grant-resolver.js";
-import type { FlowableClient } from "./flowable-client.js";
-import type { PostgresJobStore } from "./postgres/pgJobStore.js";
+import type { FlowableClient, ExternalTask } from "./flowable-client.js";
+import type { PostgresJobStore, Queryable } from "./postgres/pgJobStore.js";
 import type { Deliver, OnDispatched } from "./outboxDispatcher.js";
 import type { OutboxRow } from "./outboxTypes.js";
 // T-0340 [E15-S5] R-1 → T-0524 (constructor-foundation): GENERIC DMN gateway
@@ -38,6 +38,90 @@ import type { OutboxRow } from "./outboxTypes.js";
 // authored configuration; no process key, topic, variable name, or gateway id is
 // hard-coded in this seam — they all come from the authored rule tables.
 import { evaluateGatewayAtTriage, GATEWAY_ID_UNKNOWN } from "./dmn-gateway.js";
+
+// UUID validation regex (образец pgOutboxStore.claimBatch / pgJobStore — R-3 defence).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// ---------------------------------------------------------------------------
+// T-0636 (F5): CHOROS_TENANT_VAR — the tenant-stamp process-variable convention
+// ---------------------------------------------------------------------------
+/**
+ * The single point of truth for the process-variable name that carries the
+ * owning tenant on a Flowable process instance. Written by the two production
+ * startInstance call-sites (process-start.ts, records.ts) as a plain string
+ * value at launch time (inside their own withTenantTx, where tenantId is
+ * already in scope); read here at the bridge's enqueue boundary to resolve
+ * which tenant a bare Flowable ExternalTask belongs to BEFORE it is written to
+ * choros.job.
+ *
+ * This is a STRUCTURAL convention (same class as `choros_processKey` /
+ * `choros_instanceId` already used in this file) — not a case-specific literal;
+ * it names no tenant, process, or role of any particular demo case, so it does
+ * not grow the anti-case baseline (D-064 / NF-4).
+ */
+export const CHOROS_TENANT_VAR = "choros_tenantId";
+
+// ---------------------------------------------------------------------------
+// T-0636 (F10): makeErrorLogThrottle — bounded log stream for a repeating error class
+// ---------------------------------------------------------------------------
+/**
+ * Factory: returns a throttled emit function keyed by `errorClass`. The FIRST
+ * occurrence of a class is emitted immediately. Subsequent occurrences of the
+ * SAME class are suppressed until `minIntervalMs` has elapsed since the last
+ * emission of that class — at which point a summary line is emitted that
+ * includes how many repeats were suppressed in between. A DIFFERENT error class
+ * always emits immediately (per-class independence), and a class that recovers
+ * and later reoccurs starts counting from zero again.
+ *
+ * This exists so a persistent condition (stale credentials → repeated 401, or a
+ * legacy instance missing the tenant-stamp variable) logs ONE clear line per
+ * class instead of one line every 5s forever (F8/F9 without this would spam
+ * the log and drown real signal — AC-12).
+ *
+ * Clock is injectable (`opts.nowMs`) for deterministic tests.
+ */
+export interface ErrorLogThrottle {
+  (errorClass: string, detail: string): void;
+}
+
+export function makeErrorLogThrottle(
+  emit: (msg: string) => void,
+  opts: { minIntervalMs?: number; nowMs?: () => number } = {},
+): ErrorLogThrottle {
+  const minIntervalMs = opts.minIntervalMs ?? 60_000;
+  const nowMs = opts.nowMs ?? Date.now;
+
+  interface ClassState {
+    lastEmittedAt: number;
+    suppressedCount: number;
+  }
+  const states = new Map<string, ClassState>();
+
+  return (errorClass: string, detail: string): void => {
+    const now = nowMs();
+    const state = states.get(errorClass);
+
+    if (state === undefined) {
+      // First occurrence of this class — emit immediately.
+      states.set(errorClass, { lastEmittedAt: now, suppressedCount: 0 });
+      emit(`[externalTaskBridge] ${errorClass}: ${detail}`);
+      return;
+    }
+
+    if (now - state.lastEmittedAt < minIntervalMs) {
+      // Within the throttle window — suppress, count it.
+      state.suppressedCount += 1;
+      return;
+    }
+
+    // Window elapsed — emit a summary including the suppressed count, reset.
+    const suppressed = state.suppressedCount;
+    state.lastEmittedAt = now;
+    state.suppressedCount = 0;
+    const suffix = suppressed > 0 ? ` (${suppressed} repeat(s) suppressed)` : "";
+    emit(`[externalTaskBridge] ${errorClass}: ${detail}${suffix}`);
+  };
+}
 
 // ---------------------------------------------------------------------------
 // resolveAuthoredProcessKey — generic process-key resolution at the triage seam
@@ -113,6 +197,20 @@ export interface ExternalTaskBridgeConfig {
   setIntervalFn?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
   /** Observability hook invoked after each runBridgeOnce pass. Default no-op. */
   onPoll?: (result: BridgePollResult) => void;
+  /**
+   * T-0636 (P0-6/F3/F4/F5): pg.Pool for per-tenant GUC-scoped enqueue. When
+   * supplied, runBridgeOnce groups fetched tasks by their
+   * `task.variables[choros_tenantId]` stamp and enqueues each tenant's tasks
+   * under its own SET LOCAL choros.tenant_id transaction. When omitted, the loop
+   * falls back to the pre-T-0636 behaviour (direct enqueue, no GUC management —
+   * legacy/test call-shape).
+   */
+  pool?: pg.Pool;
+  /**
+   * T-0636 (F10): injectable error-log throttle (class-keyed, bounded stream).
+   * Defaults to a shared module-level throttle over console.error.
+   */
+  logThrottle?: ErrorLogThrottle;
 }
 
 /** Summary of one bridge poll pass. */
@@ -123,9 +221,14 @@ export interface BridgePollResult {
   fetched: number;
   /** Jobs successfully enqueued (including pre-existing idempotent returns). */
   enqueued: number;
-  /** Tasks skipped because assertVariableValue rejected a variable. */
+  /**
+   * Tasks skipped — either assertVariableValue rejected a variable, OR (T-0636
+   * F5, only when a pool is supplied) the task carried no valid
+   * `choros_tenantId` process-variable stamp (fail-closed: never enqueued under
+   * a guessed tenant).
+   */
   skipped: number;
-  /** Topics that returned an error from fetchAndLock. */
+  /** Topics that returned an error from fetchAndLock, OR (T-0636) a tenant whose enqueue tx failed. */
   errors: number;
 }
 
@@ -224,19 +327,52 @@ async function lookupJobTopicAndVariables(
 // ---------------------------------------------------------------------------
 
 /**
+ * T-0636 (P0-6/F3/F4/F5): default throttled logger used when the caller does not
+ * inject its own (production default — a fresh throttle per process lifetime, not
+ * per call, would be ideal; callers that want that must build+pass their own via
+ * `makeErrorLogThrottle` — this module-level instance is the pragmatic default for
+ * runBridgeOnce call-sites that never construct one explicitly).
+ */
+const defaultRunBridgeOnceLogThrottle = makeErrorLogThrottle((msg) => console.error(msg));
+
+/**
  * Run ONE bridge poll pass across all configured topics.
  *
  * Per-topic:
  *   1. fetchAndLock(topic, workerId, lockDurationMs, maxTasksPerTopic)
  *   2. For each ExternalTask:
  *      a. Validate variables via assertVariableValue (fail-closed, AC-3).
- *      b. jobStore.enqueue(topic, variables, retries, task.id) — idempotent.
- *   3. On fetchAndLock error: log, continue (no throw, poll-loop stays alive — AC-15).
+ *      b. enqueue — idempotent, per-tenant scoped (see below).
+ *   3. On fetchAndLock error: log (throttled), continue (no throw — AC-15).
  *
- * IMPORTANT: enqueue sets choros.tenant_id GUC only when the caller's context has
- * it set (bridge runs in a tenant-aware context).  For a single-tenant bridge setup,
- * the pool connection must have been initialised with the tenant GUC.  In a
- * multi-tenant harness the caller iterates tenants and sets the GUC before each call.
+ * T-0636 (P0-6/F3/F4/F5) TENANT SCOPING:
+ *
+ * fetchAndLock stays GLOBAL across topics (Flowable's external-job REST API is not
+ * partitioned by tenant). Tenancy is enforced at the ENQUEUE boundary instead:
+ *   1. Each fetched task's tenant is read from `task.variables[CHOROS_TENANT_VAR]`
+ *      (the process-variable stamp written by startInstance at launch — F5).
+ *   2. Tasks are grouped by that tenant id.
+ *   3. When `pool` IS supplied: for each tenant group, open a dedicated client,
+ *      BEGIN, SET LOCAL choros.tenant_id (+ search_path), enqueue every task of
+ *      that tenant with `executor=client` (so pgJobStore.enqueue's
+ *      `current_setting('choros.tenant_id', false)` sees the GUC on the SAME
+ *      connection it was set on — the enqueue seam added in this task), COMMIT.
+ *   4. A task with a MISSING or invalid (non-UUID) tenant stamp is NOT enqueued
+ *      (fail-closed — never guessed): `result.skipped` increments and a throttled
+ *      log records the class 'MISSING_TENANT_VAR' with the topic (no secrets).
+ *      This is the honest degrade for legacy instances started before this task
+ *      landed (they carry no stamp) — they do not silently jam the bridge, nor do
+ *      they get attributed to the wrong tenant.
+ *
+ * BACKWARD COMPATIBILITY: when `pool` is OMITTED (legacy call-shape — unit tests
+ * exercising pure enqueue/complete/fail logic without a live Postgres), the
+ * function falls back to the PRE-T-0636 behaviour: every fetched task (after the
+ * variable guard) is enqueued directly via `jobStore.enqueue(...)` with no GUC
+ * management and no tenant-var requirement. This preserves every existing caller
+ * that never threaded a pool through (in-memory / mock jobStore test doubles) and
+ * matches the documented pre-existing contract ("the caller's context already has
+ * the GUC set" — e.g. a single-tenant harness, or a jobStore whose mock/pool does
+ * not depend on the GUC at all).
  */
 export async function runBridgeOnce(
   flowableClient: FlowableClient,
@@ -246,9 +382,9 @@ export async function runBridgeOnce(
   lockDurationMs: number,
   maxTasksPerTopic: number,
   retries: number,
+  pool?: pg.Pool,
+  logThrottle: ErrorLogThrottle = defaultRunBridgeOnceLogThrottle,
 ): Promise<BridgePollResult> {
-  void workerId; // workerId passed to fetchAndLock — referenced below for clarity
-
   const result: BridgePollResult = {
     topics: topics.length,
     fetched: 0,
@@ -256,6 +392,10 @@ export async function runBridgeOnce(
     skipped: 0,
     errors: 0,
   };
+
+  // Tasks that passed the variable guard, collected across all topics before the
+  // (optional) per-tenant enqueue phase.
+  const validTasks: Array<{ topic: string; task: ExternalTask }> = [];
 
   for (const topic of topics) {
     const fetchResult = await flowableClient.fetchAndLock(
@@ -268,6 +408,7 @@ export async function runBridgeOnce(
     if (!fetchResult.ok) {
       // Poll errors are non-fatal; the loop continues on the next interval (AC-15).
       result.errors += 1;
+      logThrottle(`FETCH_${fetchResult.code}`, `topic=${topic}`);
       continue;
     }
 
@@ -293,6 +434,14 @@ export async function runBridgeOnce(
         continue;
       }
 
+      validTasks.push({ topic, task });
+    }
+  }
+
+  if (pool === undefined) {
+    // Legacy (no-pool) path: preserve pre-T-0636 behaviour exactly — enqueue
+    // directly via jobStore, no GUC management, no tenant-var requirement.
+    for (const { topic, task } of validTasks) {
       // Idempotent enqueue: idempotency_key = externalTask.id (FR-1 / ADR §2.A).
       // T-0534: pass processDefinitionKey + processInstanceId so the triage seam
       // can scope rule-table lookups by process (stored in job.process_def_id /
@@ -306,6 +455,60 @@ export async function runBridgeOnce(
         task.processInstanceId || undefined,
       );
       result.enqueued += 1;
+    }
+    return result;
+  }
+
+  // T-0636 (P0-6/F3/F4/F5): pool supplied — group by tenant stamp, enqueue
+  // per-tenant under a GUC-scoped client.
+  const byTenant = new Map<string, typeof validTasks>();
+  for (const entry of validTasks) {
+    const tenantRaw = entry.task.variables[CHOROS_TENANT_VAR];
+    const tenantId = typeof tenantRaw === "string" ? tenantRaw.trim() : "";
+    if (tenantId.length === 0 || !UUID_RE.test(tenantId)) {
+      // Fail-closed: never guess a tenant. Legacy instances (started before this
+      // task) carry no stamp — this is an HONEST, visible degrade, not a crash.
+      result.skipped += 1;
+      logThrottle("MISSING_TENANT_VAR", `topic=${entry.topic} task=${entry.task.id}`);
+      continue;
+    }
+    const group = byTenant.get(tenantId);
+    if (group === undefined) {
+      byTenant.set(tenantId, [entry]);
+    } else {
+      group.push(entry);
+    }
+  }
+
+  for (const [tenantId, entries] of byTenant) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL choros.tenant_id = '${tenantId.replace(/'/g, "''")}'`);
+      await client.query("SET LOCAL search_path TO choros");
+
+      for (const { topic, task } of entries) {
+        await jobStore.enqueue(
+          topic,
+          task.variables,
+          retries,
+          task.id,
+          task.processDefinitionKey || undefined,
+          task.processInstanceId || undefined,
+          client as unknown as Queryable,
+        );
+        result.enqueued += 1;
+      }
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {/* swallow */});
+      // Per-tenant failure is non-fatal — other tenants still get processed this
+      // pass (rotation, mirrors buildAgentWithTenantTx / PostgresAgentJobFetcher).
+      result.errors += 1;
+      logThrottle("ENQUEUE_TENANT_FAILED", `tenant=${tenantId}: ${String(err)}`);
+    } finally {
+      client.release();
     }
   }
 
@@ -527,7 +730,9 @@ export function makeExternalTaskDeliver(
  * Pattern: identical to startLockReclaimerLoop (T-0063):
  *   - First pass after one interval, NOT immediately (server start non-blocking — AC-13).
  *   - stop() calls clearInterval.
- *   - Per-pass errors swallowed (no unhandledRejection after stop — AC-14).
+ *   - Per-pass errors are LOGGED (throttled, T-0636 F8) — never silently swallowed.
+ *     The loop still never throws out of the interval callback (NF-5: it stays
+ *     alive for the next tick even after a pass-level failure).
  *
  * Returns { stop } for graceful shutdown.
  */
@@ -542,6 +747,7 @@ export function startBridgePollLoop(
   const retries = opts.retries ?? 3;
   const setIntervalFn = opts.setIntervalFn ?? setInterval;
   const onPoll = opts.onPoll ?? ((_r: BridgePollResult) => {/* no-op */});
+  const logThrottle = opts.logThrottle ?? defaultRunBridgeOnceLogThrottle;
 
   const handle = setIntervalFn(() => {
     runBridgeOnce(
@@ -552,9 +758,17 @@ export function startBridgePollLoop(
       lockDurationMs,
       maxTasksPerTopic,
       retries,
+      opts.pool,
+      logThrottle,
     )
       .then(onPoll)
-      .catch(() => {/* swallow — degraded signal; loop continues on next interval */});
+      .catch((err: unknown) => {
+        // T-0636 (F8): a whole-pass failure (e.g. the GUC-throw from P0-6, or a
+        // fetchAndLock 401 that somehow escaped runBridgeOnce's own try/catch) is
+        // now VISIBLE — never a silent swallow. The loop still does not throw out
+        // of this callback (NF-5: it survives to the next tick).
+        logThrottle("BRIDGE_PASS_FAILED", String(err));
+      });
   }, pollIntervalMs);
 
   return {

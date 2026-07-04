@@ -609,6 +609,31 @@ function fromFlowableVars(
 }
 
 // ---------------------------------------------------------------------------
+// T-0636 (P0-7): msToIso8601Duration — wire-format fix for lockDuration/retryTimeout
+//
+// EMPIRICAL DIAGNOSIS (T-0586 LIVE_PROOF): Flowable 7.x's external-job REST API
+// (POST {extJobUrl}/acquire/jobs and .../fail) treats a bare JSON number in the
+// lockDuration/retryTimeout fields as a count of SECONDS, not milliseconds — a
+// caller-intended 30_000ms lock (30s) was observed to hold for ~8h20m (30_000s).
+// The canonical, self-documenting wire format Flowable expects for a duration is
+// ISO-8601 ('PT30S'). This is a PURE function: no I/O, unit-testable in isolation.
+//
+// fetchAndLock/failTask's PUBLIC signatures are unchanged (lockDurationMs /
+// retryTimeoutMs remain milliseconds on the TS boundary — NF-2); the conversion
+// happens only when building the wire body.
+// ---------------------------------------------------------------------------
+export function msToIso8601Duration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "PT0S";
+  const totalSeconds = ms / 1000;
+  // Preserve sub-second precision when present (e.g. 500ms → PT0.5S), but avoid
+  // floating-point noise (e.g. 30000/1000 must render as "30", not "30.000000001").
+  // Round to 3 decimal places (ms-level precision) then strip trailing zeros/dot.
+  const rounded = Math.round(totalSeconds * 1000) / 1000;
+  const seconds = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  return `PT${seconds}S`;
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -747,7 +772,9 @@ export function makeFlowableClient(
           body: JSON.stringify({
             topic,
             workerId,
-            lockDuration: lockDurationMs,
+            // T-0636 (P0-7): ISO-8601 duration on the wire — Flowable interprets a
+            // bare number as SECONDS, not ms (empirical 8h-lock diagnosis).
+            lockDuration: msToIso8601Duration(lockDurationMs),
             numberOfTasks: maxTasks,
           }),
         },
@@ -866,7 +893,8 @@ export function makeFlowableClient(
             workerId,
             errorMessage,
             retries,
-            retryTimeout: retryTimeoutMs,
+            // T-0636 (P0-7): ISO-8601 duration on the wire (same fix as lockDuration).
+            retryTimeout: msToIso8601Duration(retryTimeoutMs),
           }),
         },
       );

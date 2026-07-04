@@ -116,7 +116,16 @@ describe("startMain wired-entry (R-1 / D-056): lifecycle event reaches audit_eve
 
     const handle = startMain({
       listen: false,
-      env: { FLOWABLE_BASE_URL: "http://flowable:8082" } as unknown as NodeJS.ProcessEnv,
+      // T-0636 (P0-5): startLifecycleBridge now honest-degrades (noopHandle) when
+      // FLOWABLE_REST_APP_ADMIN_PASSWORD is absent, instead of silently building a
+      // FlowableClient with the bogus admin:test default. This test drives the
+      // REAL wired composition (its whole point — D-056 integration-honesty), so
+      // it must supply the credential env the production composition root reads.
+      env: {
+        FLOWABLE_BASE_URL: "http://flowable:8082",
+        FLOWABLE_REST_APP_ADMIN_USER_ID: "test-admin",
+        FLOWABLE_REST_APP_ADMIN_PASSWORD: "test-admin-pw",
+      } as unknown as NodeJS.ProcessEnv,
       lifecycleDeps: {
         pool: fakePool() as never,
         jobStore: fakeJobStore(),

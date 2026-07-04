@@ -431,9 +431,12 @@ describe("T-0351 on_create: engine fail → tx rolled back (create = start atomi
         },
       );
       expect(res.status).toBe(201);
-      // Empty field_mapping → no variables (undefined, not {})
-      const [, calledVars] = (flowable.startInstance as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown];
-      expect(calledVars).toBeUndefined();
+      // Empty field_mapping → no PROJECTED variables, but T-0636 (F5) always
+      // stamps choros_tenantId onto the launch variables (tenant-resolution
+      // source for the external-task bridge) — so the object is never
+      // undefined/empty any more, it carries exactly the tenant stamp.
+      const [, calledVars] = (flowable.startInstance as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      expect(calledVars).toEqual({ choros_tenantId: "a0000000-0000-0000-0000-000000000001" });
     } finally {
       server.close();
     }
@@ -1125,7 +1128,11 @@ describe("T-0606 Part A: on_create trigger scope (bug #2 — phantom process spa
       );
       expect(res.status).toBe(201);
       expect(flowable.startInstance).toHaveBeenCalledOnce();
-      expect(flowable.startInstance).toHaveBeenCalledWith("telLinear", undefined);
+      // T-0636 (F5): startInstance always receives the choros_tenantId stamp
+      // now, even with an empty field_mapping (no projected variables).
+      expect(flowable.startInstance).toHaveBeenCalledWith("telLinear", {
+        choros_tenantId: TRIGGER_SCOPE_TENANT_ID,
+      });
     } finally {
       server.close();
     }
