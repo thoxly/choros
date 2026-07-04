@@ -325,6 +325,50 @@ describe("HTTP error mapping", () => {
     const body = JSON.parse(resp.body) as { error: { code: string } };
     expect(body.error.code).toBe("AUTH_UNAVAILABLE");
   });
+
+  // T-0633 [SECURITY, defense-in-depth]: if the chosen username/login collides
+  // with an existing HUMAN employee slug, registration is rejected 409
+  // LOGIN_RESERVED BEFORE any KC call — the same anti-collision invariant POST
+  // /api/users enforces. On today's flow the register username is forced to be
+  // the (email-shaped) req.email, so a seed-persona slug (never email-shaped)
+  // cannot collide; this test drives the guard directly via a fake pool that
+  // reports the username as an existing slug, proving the guard fires and does
+  // NOT reach Keycloak. (See src/core/register.ts anti-collision comment.)
+  it("E-3 [T-0633]: username collides with an existing employee slug → 409 LOGIN_RESERVED, KC never called", async () => {
+    const kcLocal = new InMemoryKeycloakUserPort();
+    // Fake pool whose EXISTS check returns true (simulating a colliding slug).
+    const collidingPool = {
+      connect: async () => ({
+        query: async (textOrConfig: string | { text: string }) => {
+          const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+          if (text.includes("EXISTS") && text.includes("choros.employee")) {
+            return { rows: [{ exists: true }] };
+          }
+          return { rows: [] };
+        },
+        release: () => { /* no-op */ },
+      }),
+    } as unknown as pg.Pool;
+
+    const router = new Router();
+    registerRegisterRoutes(router, { pool: collidingPool, kc: kcLocal });
+    const localServer = http.createServer(router.dispatch.bind(router));
+    await new Promise<void>((resolve) => localServer.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      const resp = await makeRequest(localServer, "POST", "/api/register", {
+        orgName: "Collision Org",
+        email: "reserved@example.com",
+        password: "password123",
+      });
+      expect(resp.status).toBe(409);
+      const body = JSON.parse(resp.body) as { error: { code: string } };
+      expect(body.error.code).toBe("LOGIN_RESERVED");
+      // KC must NOT have been called — the guard runs before createHumanUser.
+      expect(kcLocal.createCallCount).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => localServer.close(() => resolve()));
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

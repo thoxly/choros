@@ -198,3 +198,74 @@ describe("T-0372 resolveActorSlugFromAuth — (f) agent slug not in kind='human'
     expect(queryCalls).toEqual([sub, preferredUsername]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// (g) T-0633 [SECURITY]: the genesis-owner ('e-owner') login path.
+//
+// The genesis forest-owner is a kind='human' employee with slug='e-owner'
+// (migrations/026, 16 delegable mgmt-grants + tenant-owner). Its Keycloak user
+// is provisioned OUT-OF-BAND at install (NOT in realm-choros.json, NOT mintable
+// through any product route) with a random sub != 'e-owner', and presents
+// preferred_username='e-owner'. Legit login therefore depends on EXACTLY the
+// preferred_username fallback resolving 'e-owner' — so the fallback MUST keep
+// working. The escalation vector (minting a second KC user named 'e-owner') is
+// closed UPSTREAM by the mint-time anti-collision guard, NOT by narrowing this
+// resolver (which cannot distinguish a forged token from the genuine one). These
+// tests pin both halves of that contract.
+// ---------------------------------------------------------------------------
+
+describe("T-0633 resolveActorSlugFromAuth — (g) genesis-owner e-owner login is preserved", () => {
+  it("resolves the genuine genesis-owner: random sub (miss) + preferred_username 'e-owner' → 'e-owner'", async () => {
+    // The genesis-owner KC user: sub is a random UUID that is NOT any employee
+    // slug; its preferred_username is the human-readable slug 'e-owner'.
+    const sub = "b3f1c2d4-0000-4000-8000-genesis-owner-kc"; // not an employee slug
+    const preferredUsername = "e-owner";
+
+    // Only 'e-owner' exists as a kind='human' employee slug (its KC sub != slug).
+    const { pool, queryCalls } = makeFakePool(new Set([preferredUsername]));
+
+    const result = await resolveActorSlugFromAuth(pool, sub, preferredUsername);
+
+    // Legit owner MUST still resolve to 'e-owner' — the fix must NOT break this.
+    expect(result).toBe("e-owner");
+    expect(queryCalls).toEqual([sub, preferredUsername]);
+  });
+
+  it("SECURITY CONTRACT: the resolver alone cannot distinguish a forged 'e-owner' token — the mint guard is what makes it safe", async () => {
+    // This test documents WHY the escalation fix lives at mint time, not here:
+    // a token whose sub is a *different* random UUID but whose preferred_username
+    // is still 'e-owner' is BYTE-INDISTINGUISHABLE from the genuine owner token
+    // to this resolver, so it too resolves to 'e-owner'. That is expected and
+    // acceptable ONLY because no product path can mint a second KC user named
+    // 'e-owner' (POST /api/users / register.ts both 409 LOGIN_RESERVED). If this
+    // assertion ever needs to change to "returns null", the anti-collision guard
+    // has regressed and the escalation is reopened.
+    const forgedSub = "ffffffff-0000-4000-8000-attacker-kc-uuid";
+    const preferredUsername = "e-owner";
+    const { pool } = makeFakePool(new Set([preferredUsername]));
+
+    const result = await resolveActorSlugFromAuth(pool, forgedSub, preferredUsername);
+
+    // Same slug — the guarantee is upstream (mint), not here. See the DB test
+    // ci/checks/db/user-mgmt.db.test.ts (FF-633-*) for the enforced block.
+    expect(result).toBe("e-owner");
+  });
+
+  it("a registered attacker (slug == own sub) is short-circuited and NEVER reaches the 'e-owner' fallback", async () => {
+    // Defense: a minted account's employee row has slug == its KC userId == its
+    // sub, so sub-first matches its OWN row and short-circuits — even if it could
+    // somehow also carry preferred_username='e-owner', the fallback is unreachable.
+    const attackerSub = "aaaaaaaa-0000-4000-8000-minted-account-uuid";
+    const preferredUsername = "e-owner";
+
+    // Both the attacker's own slug AND 'e-owner' exist; sub-first must win.
+    const { pool, queryCalls } = makeFakePool(new Set([attackerSub, preferredUsername]));
+
+    const result = await resolveActorSlugFromAuth(pool, attackerSub, preferredUsername);
+
+    // Resolves to the attacker's OWN employee, never escalates to 'e-owner'.
+    expect(result).toBe(attackerSub);
+    // Short-circuit: only the sub lookup ran; the 'e-owner' fallback was skipped.
+    expect(queryCalls).toEqual([attackerSub]);
+  });
+});
