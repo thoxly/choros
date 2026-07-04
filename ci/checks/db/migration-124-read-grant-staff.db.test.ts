@@ -1,11 +1,11 @@
-// ci/checks/db/migration-123-read-grant-staff.db.test.ts — T-0619
+// ci/checks/db/migration-124-read-grant-staff.db.test.ts — T-0619
 // (ADR-T0619 §2.4, FF-619-4/FF-619-5/FF-619-7)
 //
 // Run in the `db` CI job / locally (solo — no parallel):
 //   DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros \
 //     npm run fitness:db
 //
-// migrations/123_read_grant_all_staff_backfill.sql extends the covering READ
+// migrations/124_read_grant_all_staff_backfill.sql extends the covering READ
 // grant (role-reader) to EVERY EXISTING human staff member of EVERY tenant —
 // not just the owner. Before this migration a rank-and-file human hired before
 // the release held NO covering READ grant → src/http/records.ts served an empty
@@ -41,7 +41,7 @@ import { RESOURCE_ROOT_NODE_ID, READER_ROLE_SLUG, type RowAncestry } from '../..
 const LIVE = !!process.env['DATABASE_URL'];
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const MIGRATION_123_PATH = path.resolve(HERE, '../../../migrations/123_read_grant_all_staff_backfill.sql');
+const MIGRATION_124_PATH = path.resolve(HERE, '../../../migrations/124_read_grant_all_staff_backfill.sql');
 
 // Slugs used as x-dev-user actors; resolveActorTenant maps them to their tenant.
 const HUMAN_A_SLUG = 'a-t0619-staff-human';
@@ -215,7 +215,7 @@ async function readerAssignmentCount(c: pg.Client, tenantId: string, empId: stri
   return rows[0]!.n;
 }
 
-describe.skipIf(!LIVE)('T-0619 — migration 123 backfills covering READ to all human staff (live Postgres)', () => {
+describe.skipIf(!LIVE)('T-0619 — migration 124 backfills covering READ to all human staff (live Postgres)', () => {
   let migPool: pg.Pool;
   let appPool: pg.Pool;
   let migrationSql: string;
@@ -240,7 +240,7 @@ describe.skipIf(!LIVE)('T-0619 — migration 123 backfills covering READ to all 
     if (!LIVE) return;
     migPool = new pg.Pool({ connectionString: migratorUrl() });
     appPool = new pg.Pool({ connectionString: appUrl() });
-    migrationSql = fs.readFileSync(MIGRATION_123_PATH, 'utf-8');
+    migrationSql = fs.readFileSync(MIGRATION_124_PATH, 'utf-8');
 
     await withClient(migratorUrl(), async (c) => {
       await seedTenantRow(c, TENANT_A);
@@ -303,7 +303,7 @@ describe.skipIf(!LIVE)('T-0619 — migration 123 backfills covering READ to all 
     await appPool?.end();
   });
 
-  it('FF-619-7 static: migration 123 has no literal tenant UUID and iterates FROM choros.tenant / employee', () => {
+  it('FF-619-7 static: migration 124 has no literal tenant UUID and iterates FROM choros.tenant / employee', () => {
     const uuidRe = /'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'/;
     const codeOnly = migrationSql.replace(/--.*$/gm, '');
     // The ONLY UUID-shaped literal allowed is the RESOURCE_ROOT sentinel (non-hex
@@ -322,7 +322,7 @@ describe.skipIf(!LIVE)('T-0619 — migration 123 backfills covering READ to all 
     expect(grants.filter((g) => g.operation === 'read' && g.resourceType === 'record')).toHaveLength(0);
   });
 
-  it('FF-619-4: after migration 123 the rank-and-file human reads records (200); idempotent; agent NOT assigned', async () => {
+  it('FF-619-4: after migration 124 the rank-and-file human reads records (200); idempotent; agent NOT assigned', async () => {
     await migPool.query(migrationSql);
 
     // The human now holds exactly ONE confirmed role-reader assignment.

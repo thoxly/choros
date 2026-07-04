@@ -94,9 +94,9 @@ register.ts/117 — его контур не трогаем. Массовой р
 всё ещё редактируется. `role-reader` — covering READ на RESOURCE_ROOT, как у
 владельца, НЕ super-grant.
 
-### 2.4 Догоняющая миграция 123 — охват ВСЕГО персонала
+### 2.4 Догоняющая миграция 124 — охват ВСЕГО персонала
 
-`migrations/123_read_grant_all_staff_backfill.sql` — идемпотентная, tenant-scoped,
+`migrations/124_read_grant_all_staff_backfill.sql` — идемпотентная, tenant-scoped,
 повторяет паттерн 117 частей B/C, но с ПОЛНЫМ охватом:
 
 - **B'.** ensure `role-reader` роль для каждого тенанта (ON CONFLICT DO NOTHING —
@@ -126,7 +126,7 @@ register.ts/117 — его контур не трогаем. Массовой р
   `field-visibility.ts`.
 - Пинованные к 117/118 гейты `ci/checks/read-pdp-no-hardcoded-tenant.sh` и
   `ci/checks/migrations/no-hardcoded-tenant-uuid.sh` (они сканируют ИМЕННО
-  117/118 — не расширяем чужой frozen-предикат под своё имя; новая миграция 123
+  117/118 — не расширяем чужой frozen-предикат под своё имя; новая миграция 124
   соблюдает ту же анти-хардкод-дисциплину и покрыта СВОИМ db-тестом).
 - Контур прав агентов.
 
@@ -152,7 +152,7 @@ register.ts/117 — его контур не трогаем. Массовой р
   RESOURCE_ROOT, ON CONFLICT/NOT EXISTS) + `role_assignment(human → role-reader)`
   CONFIRMED (WHERE NOT EXISTS). Импорт `READER_ROLE_SLUG`, `RESOURCE_ROOT_NODE_ID`
   из `../core/read-visibility.js`. Публичная поверхность модуля не меняется.
-- `migrations/123_read_grant_all_staff_backfill.sql`: три `INSERT … SELECT …
+- `migrations/124_read_grant_all_staff_backfill.sql`: три `INSERT … SELECT …
   FROM choros.tenant` / `FROM choros.employee` блока (ensure role, ensure grant,
   assign all humans), идемпотентно, без хардкода tenant-UUID.
 - FROZEN (только импорт): read-visibility.ts, records.ts, grants-dao.ts,
@@ -167,7 +167,7 @@ register.ts/117 — его контур не трогаем. Массовой р
 > поэтому фронт-1 реализуется в rights-intents.ts, а не правкой 3n/3o. Это НЕ
 > отклонение от диагноза: «два места-близнеца» (register.ts + migration 117)
 > задавали ОХВАТ существующего владельца; T-0619 расширяет охват на ВЕСЬ персонал
-> — новых через hire-флоу (код), существующих через миграцию 123 (backfill).
+> — новых через hire-флоу (код), существующих через миграцию 124 (backfill).
 
 ---
 
@@ -178,10 +178,10 @@ register.ts/117 — его контур не трогаем. Массовой р
 | FF-619-1 | Hire-флоу: нанятый `kind='human'` получает CONFIRMED `role_assignment` на `role-reader` + covering READ-грант существует; читает свою запись (LIST содержит, DETAIL 200). | `ci/checks/db/hire-read-grant.db.test.ts` (live PG): hire → getGrantsForSubject(hired) содержит read/record/RESOURCE_ROOT; GET /api/records видит запись. |
 | FF-619-2 | Hire-флоу для `kind='agent'` НЕ добавляет `role-reader` (граница §2.2). | тот же db-тест: hire kind='agent' → нет role_assignment на role-reader. |
 | FF-619-3 | `role-reader` НЕ обходит field-visibility: актор с role-reader видит запись, но скрытое field-visibility-поле редактируется (физически отсутствует). | `ci/checks/db/hire-read-grant.db.test.ts`: запись со скрытым полем + fvPolicy → record present, скрытый ключ absent. |
-| FF-619-4 | Миграция 123: существующий рядовой человек-сотрудник ПОСЛЕ миграции читает запись (GET 200, не 404); WHERE NOT EXISTS ⇒ повторный прогон no-op; агент НЕ получает role-reader. | `ci/checks/db/migration-123-read-grant-staff.db.test.ts` (live PG): seed pre-fix тенант (owner+role-reader, рядовой человек БЕЗ назначения) → до миграции 0 грантов у рядового → применить 123 → 1 covering грант; идемпотентность; агент не затронут. |
-| FF-619-5 | Tenant-изоляция граната не ослаблена: рядовой сотрудник тенанта A не читает записи тенанта B. | `ci/checks/db/migration-123-read-grant-staff.db.test.ts`: актор A c role-reader → запись B невидима/404 (RLS первичен). |
+| FF-619-4 | Миграция 124: существующий рядовой человек-сотрудник ПОСЛЕ миграции читает запись (GET 200, не 404); WHERE NOT EXISTS ⇒ повторный прогон no-op; агент НЕ получает role-reader. | `ci/checks/db/migration-124-read-grant-staff.db.test.ts` (live PG): seed pre-fix тенант (owner+role-reader, рядовой человек БЕЗ назначения) → до миграции 0 грантов у рядового → применить 124 → 1 covering грант; идемпотентность; агент не затронут. |
+| FF-619-5 | Tenant-изоляция граната не ослаблена: рядовой сотрудник тенанта A не читает записи тенанта B. | `ci/checks/db/migration-124-read-grant-staff.db.test.ts`: актор A c role-reader → запись B невидима/404 (RLS первичен). |
 | FF-619-6 | Анти-кейс (D-064): в diff `src/` нет кейс-слагов персон (e-larina/e-orlov/e-configurator/role-approver/…); охват — generic по kind='human'. | существующий `ci/checks/read-pdp-anti-case.sh` (git-diff scoped по src/) — зелёный на этом diff. |
-| FF-619-7 | Миграция 123 итерирует `FROM choros.tenant`/`FROM choros.employee`, без хардкода tenant-UUID. | статический assert внутри `migration-123-read-grant-staff.db.test.ts` (нет literal tenant-UUID кроме RESOURCE_ROOT-сентинела; есть FROM choros.tenant). |
+| FF-619-7 | Миграция 124 итерирует `FROM choros.tenant`/`FROM choros.employee`, без хардкода tenant-UUID. | статический assert внутри `migration-124-read-grant-staff.db.test.ts` (нет literal tenant-UUID кроме RESOURCE_ROOT-сентинела; есть FROM choros.tenant). |
 
 ---
 
@@ -192,7 +192,7 @@ register.ts/117 — его контур не трогаем. Массовой р
 | Нанятый человек получает role-reader и читает свою запись | §2.1 hire-флоу + FF-619-1 |
 | Агент не получает role-reader массово | §2.2 + FF-619-2 |
 | role-reader не обходит field-visibility (композитный гейт) | §2.3 + FF-619-3 |
-| Существующий рядовой сотрудник читает записи после миграции | §2.4 миграция 123 + FF-619-4 |
+| Существующий рядовой сотрудник читает записи после миграции | §2.4 миграция 124 + FF-619-4 |
 | Tenant-изоляция не ослаблена | §2.4/§3 RLS + FF-619-5 |
 | Анти-кейс (generic-механизм, без имён персон) | §2.4 + FF-619-6 |
 | Идемпотентность + анти-хардкод миграции | §2.4 + FF-619-4/FF-619-7 |
@@ -202,7 +202,7 @@ register.ts/117 — его контур не трогаем. Массовой р
 ## 8. runtime_target
 
 `runtime:node` + Postgres. TS/HTTP-слой (`src/http/rights-intents.ts`) + backfill
-Postgres-миграция (`migrations/123_read_grant_all_staff_backfill.sql`). Fitness:
+Postgres-миграция (`migrations/124_read_grant_all_staff_backfill.sql`). Fitness:
 live-PG vitest (`npm run fitness:db` на реальном PG :55432) + существующие
 shell-линтеры (read-pdp-anti-case.sh). Внешний ресурс не требуется — миграция
 применяется штатным `migrations/run.mjs` при деплое (гейт фаундера — сам деплой).

@@ -14,18 +14,18 @@
     "docs/adr/ADR-T0619-read-grant-staff.md",
     "docs/adr/T-0619.adr.contract.json",
     "src/http/rights-intents.ts",
-    "migrations/123_read_grant_all_staff_backfill.sql",
+    "migrations/124_read_grant_all_staff_backfill.sql",
     "ci/checks/db/hire-read-grant.db.test.ts",
-    "ci/checks/db/migration-123-read-grant-staff.db.test.ts",
+    "ci/checks/db/migration-124-read-grant-staff.db.test.ts",
     "ci/checks/role-criticality-migration-excludes.txt",
     "ci/checks/dual-control-isolation.sh",
     "ci/checks/data/frozen-sanctions.jsonl"
   ],
   "deviations_from_adr": [
-    "Нет отклонений от ADR-T0619. Уточнение реализации фронта-1 (задокументировано в ADR §5): охват НОВЫХ нанятых людей живёт в hire-флоу (src/http/rights-intents.ts registerHire), а не в register.ts шагах 3n/3o — register.ts исполняется только при СОЗДАНИИ тенанта и сидирует лишь владельца+ассистента (он не нанимает рядовых сотрудников). Диагноз называл 3n/3o + migration 117 частей B/C как «два места-близнеца охвата ВЛАДЕЛЬЦА»; T-0619 расширяет охват на ВЕСЬ персонал — новых через hire-флоу (код), существующих через миграцию 123 (backfill). Сам механизм role-reader/covering-грант переиспользован без изменений."
+    "Нет отклонений от ADR-T0619. Уточнение реализации фронта-1 (задокументировано в ADR §5): охват НОВЫХ нанятых людей живёт в hire-флоу (src/http/rights-intents.ts registerHire), а не в register.ts шагах 3n/3o — register.ts исполняется только при СОЗДАНИИ тенанта и сидирует лишь владельца+ассистента (он не нанимает рядовых сотрудников). Диагноз называл 3n/3o + migration 117 частей B/C как «два места-близнеца охвата ВЛАДЕЛЬЦА»; T-0619 расширяет охват на ВЕСЬ персонал — новых через hire-флоу (код), существующих через миграцию 124 (backfill). Сам механизм role-reader/covering-грант переиспользован без изменений."
   ],
   "friction_events": [
-    "FF-SUB5 (substitution-isolation.sh) — commit-timing false-red: гейт флагает любую миграцию ≥038, введённую текущим uncommitted-диффом; зеленеет после коммита файла (git diff --quiet HEAD + ls-files трактует его как baseline). Разрешено коммитом миграции 123. Тот же класс, что sibling-frozen-check (coder.md §8б).",
+    "FF-SUB5 (substitution-isolation.sh) — commit-timing false-red: гейт флагает любую миграцию ≥038, введённую текущим uncommitted-диффом; зеленеет после коммита файла (git diff --quiet HEAD + ls-files трактует его как baseline). Разрешено коммитом миграции 124. Тот же класс, что sibling-frozen-check (coder.md §8б).",
     "FF-RC5/RC6 (role-criticality-isolation.sh) — merge-base-diff флагает любую новую миграцию как касание frozen-foundation; штатно разрешено добавлением строки в data-файл ci/checks/role-criticality-migration-excludes.txt (аддитивно, тот же паттерн, что siblings 115-122).",
     "FF-DC7 (dual-control-isolation.sh) — merge-base-diff флагает любую новую миграцию (кроме 031); штатно разрешено per-migration relief-guard (пустой INSERT/backfill, нет CREATE/DROP TABLE/RLS/confirmed2_by) + auto_additive-санкция в ci/checks/data/frozen-sanctions.jsonl (A-1..A-4 + Враг-attestation TENANT-ISO/efa4b97, проверено auto-sanction-additive.sh; FF-FCI13 bypass). Тот же паттерн, что siblings 115-122.",
     "npm install требовался после старта worktree (node_modules отсутствовал; @types/node → build красный) — DURABLE-урок памяти подтверждён; npm install --maxsockets=3."
@@ -35,11 +35,11 @@
     "types": "tsc --noEmit → exit 0",
     "lint": "eslint src → exit 0",
     "unit_integration_tests": "vitest run → 267 files, 5223 passed, 10 skipped, 0 failed (exit 0)",
-    "fitness_db": "npm run fitness:db (реальный PG :55432, соло) → 117 files, 1139 passed, 0 failed (exit 0); включает new hire-read-grant.db.test.ts (3) + migration-123-read-grant-staff.db.test.ts (4)",
+    "fitness_db": "npm run fitness:db (реальный PG :55432, соло) → 117 files, 1139 passed, 0 failed (exit 0); включает new hire-read-grant.db.test.ts (3) + migration-124-read-grant-staff.db.test.ts (4)",
     "fitness_shell": "npm run fitness → exit 0 (весь набор 230+ гейтов; FAIL-строки в логе = только --self-test negative-фикстуры + немедленно-снятый FF-DC7 relief)"
   },
-  "key_proof_staff_reads_after_fix": "ci/checks/db/migration-123-read-grant-staff.db.test.ts: рядовой человек-сотрудник (kind='human', БЕЗ назначения role-reader) → GET /api/records/:id ДО миграции = 404 (0 covering-грантов) → применить миграцию 123 → GET = 200, LIST содержит запись; идемпотентно (2-й/3-й прогон дублей нет); агент role-reader НЕ получает; владелец не затронут. ci/checks/db/hire-read-grant.db.test.ts: нанятый через POST /api/rights/intents/hire человек читает запись (200); агент НЕ получает role-reader; field-visibility всё ещё режет скрытое поле (композитный гейт).",
+  "key_proof_staff_reads_after_fix": "ci/checks/db/migration-124-read-grant-staff.db.test.ts: рядовой человек-сотрудник (kind='human', БЕЗ назначения role-reader) → GET /api/records/:id ДО миграции = 404 (0 covering-грантов) → применить миграцию 124 → GET = 200, LIST содержит запись; идемпотентно (2-й/3-й прогон дублей нет); агент role-reader НЕ получает; владелец не затронут. ci/checks/db/hire-read-grant.db.test.ts: нанятый через POST /api/rights/intents/hire человек читает запись (200); агент НЕ получает role-reader; field-visibility всё ещё режет скрытое поле (композитный гейт).",
   "boundaries_preserved": "field-visibility НЕ обойдён (FF-619-3: role-scoped поле физически отсутствует у актора с role-reader — applyFieldVisibilityRedaction сработал независимо поверх); tenant-изоляция НЕ ослаблена (FF-619-5: сотрудник тенанта A не читает записи B, RLS первичен, 404); role-reader — covering READ на RESOURCE_ROOT как у владельца, не super-grant; агентам role-reader не раздаётся; сам READ-PDP гейт/frozen-ядро/field-visibility.ts байтово не тронуты (read-pdp-frozen-core.sh PASS).",
-  "runtime_target": "runtime:node + Postgres. Миграция 123 применяется штатным migrations/run.mjs при деплое (гейт фаундера = сам деплой, GT-4). changes_product=1 → после мержа LIVE_PROOF на стенде: сотрудник-человек логинится и видит записи.",
+  "runtime_target": "runtime:node + Postgres. Миграция 124 применяется штатным migrations/run.mjs при деплое (гейт фаундера = сам деплой, GT-4). changes_product=1 → после мержа LIVE_PROOF на стенде: сотрудник-человек логинится и видит записи.",
   "blocked_reason": ""
 }

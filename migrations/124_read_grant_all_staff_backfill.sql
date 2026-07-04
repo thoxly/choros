@@ -1,4 +1,4 @@
--- 123 · read_grant_all_staff_backfill (T-0619, ADR-T0619 §2.4) — extend the
+-- 124 · read_grant_all_staff_backfill (T-0619, ADR-T0619 §2.4) — extend the
 -- covering READ grant (role-reader) to EVERY EXISTING human staff member of
 -- EVERY tenant, not just the owner.
 --
