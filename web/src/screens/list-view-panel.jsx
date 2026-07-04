@@ -44,6 +44,12 @@ import {
   operatorsForFieldType, OP_LABELS,
   validateViewName, allColumnsHidden,
 } from './list-view-panel.js';
+// T-0582 (kanban view): the panel's SECOND view-type mode — group_by_field +
+// card_fields pickers, reusing the SAME FiltersEditor/SortEditor below (the
+// kanban draft carries filters/sort with the identical row shape as 'list').
+import {
+  draftFromKanbanConfig, kanbanConfigFromDraft, availableGroupByFields,
+} from './kanban-board.js';
 
 // ---------------------------------------------------------------------------
 // useListViews — fetch + CRUD hook for /api/list-views (a small data hook, kept
@@ -87,7 +93,12 @@ function useListViews(registryDefId, applicationId) {
 
   useEffect(() => { load(); }, [load]);
 
-  const saveView = useCallback(async ({ id, name, config, isDefault }) => {
+  // T-0582: `type` ('list'|'kanban') is only meaningful on CREATE (POST) — the
+  // server's patchView re-validates config against the EXISTING row's type
+  // (list-views.ts) and has no field to change type on PUT, so it is only sent
+  // when creating a brand-new view. Defaults to 'list' when omitted (unchanged
+  // pre-T-0582 behaviour for the "Настроить список" list flow).
+  const saveView = useCallback(async ({ id, name, config, isDefault, type }) => {
     const body = { name, config, is_default: Boolean(isDefault) };
     const res = id
       ? await fetch(`/api/list-views/${encodeURIComponent(id)}`, {
@@ -98,7 +109,7 @@ function useListViews(registryDefId, applicationId) {
       : await fetch('/api/list-views', {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...devHeaders() },
-          body: JSON.stringify({ ...body, registry_def_id: registryDefId, application_id: applicationId }),
+          body: JSON.stringify({ ...body, type: type || 'list', registry_def_id: registryDefId, application_id: applicationId }),
         });
     if (res.status === 200 || res.status === 201) {
       await load();
@@ -461,6 +472,81 @@ function SortEditor({ sort, fieldCatalog, onChange }) {
 }
 
 // ---------------------------------------------------------------------------
+// KanbanConfigEditor — T-0582: group_by_field picker (select-typed fields
+// only) + card_fields checkboxes (ordered, mirrors ColumnsEditor's field list
+// styling). filters/sort for kanban mode are rendered by the SAME
+// FiltersEditor/SortEditor as 'list' (identical row shape — reused, not
+// duplicated, NF-2).
+// ---------------------------------------------------------------------------
+
+function KanbanConfigEditor({ kanbanDraft, groupByFields, fieldCatalog, fieldLabelByKey, onChange }) {
+  const cardFieldsSet = useMemo(() => new Set(kanbanDraft.card_fields), [kanbanDraft.card_fields]);
+
+  if (groupByFields.length === 0) {
+    return (
+      <EmptyState
+        compact
+        title="Нет подходящих полей"
+        description="Для канбана нужно поле со списком значений (тип «Список»). Добавьте такое поле в конструкторе полей."
+      />
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: 'var(--chs-space-4)' }}>
+        <label className="chs-label" htmlFor="kanban-group-by-field">Группировать по полю</label>
+        <select
+          id="kanban-group-by-field"
+          className="chs-input chs-select"
+          value={kanbanDraft.group_by_field}
+          onChange={(e) => onChange({ ...kanbanDraft, group_by_field: e.target.value })}
+          aria-label="Поле группировки (значения этого поля станут колонками доски)"
+        >
+          <option value="">— выберите поле —</option>
+          {groupByFields.map((f) => (
+            <option key={f.key} value={f.key}>{f.label}</option>
+          ))}
+        </select>
+      </div>
+
+      <div>
+        <span style={{ display: 'block', marginBottom: 'var(--chs-space-2)', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>
+          Поля на карточке
+        </span>
+        {fieldCatalog.length === 0 ? (
+          <EmptyState compact title="В этом наборе полей пока нет полей" />
+        ) : (
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)' }}>
+            {fieldCatalog.map((f) => {
+              const checked = cardFieldsSet.has(f.key);
+              return (
+                <li key={f.key}>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', fontSize: 'var(--chs-text-sm)' }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => {
+                        const next = checked
+                          ? kanbanDraft.card_fields.filter((k) => k !== f.key)
+                          : [...kanbanDraft.card_fields, f.key];
+                        onChange({ ...kanbanDraft, card_fields: next });
+                      }}
+                      aria-label={`Показать «${fieldLabelByKey.get(f.key) || f.key}» на карточке`}
+                    />
+                    {f.label}
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // ListViewPanel — the top-level Drawer. Owns the draft + save/apply flow.
 // ---------------------------------------------------------------------------
 
@@ -489,6 +575,7 @@ export function ListViewPanel({
   const fieldCatalog = useMemo(() => buildFieldCatalog(schemaColumns), [schemaColumns]);
   const typeByKey = useMemo(() => new Map(fieldCatalog.map((f) => [f.key, f.type])), [fieldCatalog]);
   const fieldLabelByKey = useMemo(() => new Map(fieldCatalog.map((f) => [f.key, f.label])), [fieldCatalog]);
+  const groupByFields = useMemo(() => availableGroupByFields(fieldCatalog), [fieldCatalog]);
 
   const sourceConfig = (activeView && activeView.config) || defaultViewConfig;
   // T-0581 UX-1: the synthetic default has not arrived yet (GET /api/list-views
@@ -500,6 +587,20 @@ export function ListViewPanel({
   // until the real default (or a real saved view) has arrived.
   const stillAwaitingDefault = !activeView && defaultViewConfig == null && viewsLoading !== false;
   const [draft, setDraft] = useState(() => draftFromConfig(sourceConfig, fieldCatalog));
+  // T-0582: kanban mode has ITS OWN draft shape (group_by_field/card_fields/
+  // columns_order + filters/sort) — kept alongside the 'list' draft rather
+  // than replacing it, so switching the type picker back and forth in the SAME
+  // editing session never loses either draft's in-progress edits.
+  const [kanbanDraft, setKanbanDraft] = useState(() => draftFromKanbanConfig(
+    activeView && activeView.type === 'kanban' ? activeView.config : null,
+    fieldCatalog,
+  ));
+  // viewType: 'list' | 'kanban'. Only meaningful/changeable for a BRAND-NEW
+  // view (activeView === null) — an EXISTING view's type is immutable (the
+  // server has no field to change it on PUT, list-views.ts patchView
+  // re-validates against existing.type), so editing a saved view locks the
+  // picker to that view's own type.
+  const [viewType, setViewType] = useState(activeView ? (activeView.type || 'list') : 'list');
   const [name, setName] = useState(activeView ? activeView.name : '');
   const [markDefault, setMarkDefault] = useState(activeView ? Boolean(activeView.is_default) : false);
   const [nameError, setNameError] = useState(null);
@@ -524,6 +625,11 @@ export function ListViewPanel({
     if (!open) return;
     if (dirty) return;
     setDraft(draftFromConfig(sourceConfig, fieldCatalog));
+    setKanbanDraft(draftFromKanbanConfig(
+      activeView && activeView.type === 'kanban' ? activeView.config : null,
+      fieldCatalog,
+    ));
+    setViewType(activeView ? (activeView.type || 'list') : 'list');
     setName(activeView ? activeView.name : '');
     setMarkDefault(activeView ? Boolean(activeView.is_default) : false);
     setNameError(null);
@@ -545,14 +651,19 @@ export function ListViewPanel({
     const err = validateViewName(name);
     setNameError(err);
     if (err) return;
+    if (viewType === 'kanban' && !kanbanDraft.group_by_field) {
+      setSaveError('Выберите поле группировки (со списком значений)');
+      return;
+    }
     setSaving(true);
     try {
-      const config = configFromDraft(draft);
+      const config = viewType === 'kanban' ? kanbanConfigFromDraft(kanbanDraft) : configFromDraft(draft);
       const result = await saveView({
         id: activeView ? activeView.id : undefined,
         name,
         config,
         isDefault: markDefault,
+        type: activeView ? activeView.type : viewType,
       });
       if (result.ok) {
         onApply(result.view.id);
@@ -563,7 +674,7 @@ export function ListViewPanel({
     } finally {
       setSaving(false);
     }
-  }, [name, draft, markDefault, activeView, saveView, onApply, onClose]);
+  }, [name, draft, kanbanDraft, viewType, markDefault, activeView, saveView, onApply, onClose]);
 
   const handleDelete = useCallback(async () => {
     if (!activeView) return;
@@ -652,33 +763,83 @@ export function ListViewPanel({
             hint={nameError || undefined}
           />
 
+          {/* T-0582: view-TYPE picker — only changeable for a brand-new view
+              (activeView === null). An existing view's type is fixed (the
+              server has no PUT field to change it), so editing a saved view
+              shows the type as a read-only label instead of a picker. */}
+          <div style={{ marginBottom: 'var(--chs-space-4)' }}>
+            <span className="chs-label" style={{ display: 'block', marginBottom: 'var(--chs-space-2)' }}>Тип представления</span>
+            {activeView ? (
+              <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
+                {activeView.type === 'kanban' ? 'Канбан-доска' : 'Список'}
+              </span>
+            ) : (
+              <select
+                className="chs-input chs-select"
+                value={viewType}
+                onChange={(e) => { setViewType(e.target.value); markDirty(); }}
+                aria-label="Тип представления"
+              >
+                <option value="list">Список</option>
+                <option value="kanban">Канбан-доска</option>
+              </select>
+            )}
+          </div>
+
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', margin: 'var(--chs-space-2) 0 var(--chs-space-5) 0', fontSize: 'var(--chs-text-sm)' }}>
             <input type="checkbox" checked={markDefault} onChange={(e) => { setMarkDefault(e.target.checked); markDirty(); }} />
             Открывать это представление по умолчанию
           </label>
 
-          <section style={{ marginBottom: 'var(--chs-space-6)' }}>
-            <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Колонки</h3>
-            <ColumnsEditor columns={draft.columns} fieldLabelByKey={fieldLabelByKey} onChange={(columns) => { markDirty(); setDraft((d) => ({ ...d, columns })); }} />
-            {columnsAllHidden && (
-              <div style={{ marginTop: 'var(--chs-space-3)' }}>
-                <Notice
-                  tone="warning"
-                  message="Все колонки скрыты — список будет показывать только «Создано» и действия над записью."
+          {viewType === 'kanban' ? (
+            <>
+              <section style={{ marginBottom: 'var(--chs-space-6)' }}>
+                <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Доска</h3>
+                <KanbanConfigEditor
+                  kanbanDraft={kanbanDraft}
+                  groupByFields={groupByFields}
+                  fieldCatalog={fieldCatalog}
+                  fieldLabelByKey={fieldLabelByKey}
+                  onChange={(next) => { markDirty(); setKanbanDraft(next); }}
                 />
-              </div>
-            )}
-          </section>
+              </section>
 
-          <section style={{ marginBottom: 'var(--chs-space-6)' }}>
-            <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Фильтры</h3>
-            <FiltersEditor filters={draft.filters} fieldCatalog={fieldCatalog} typeByKey={typeByKey} onChange={(filters) => { markDirty(); setDraft((d) => ({ ...d, filters })); }} />
-          </section>
+              <section style={{ marginBottom: 'var(--chs-space-6)' }}>
+                <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Фильтры</h3>
+                <FiltersEditor filters={kanbanDraft.filters} fieldCatalog={fieldCatalog} typeByKey={typeByKey} onChange={(filters) => { markDirty(); setKanbanDraft((d) => ({ ...d, filters })); }} />
+              </section>
 
-          <section style={{ marginBottom: 'var(--chs-space-6)' }}>
-            <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Сортировка</h3>
-            <SortEditor sort={draft.sort} fieldCatalog={fieldCatalog} onChange={(sort) => { markDirty(); setDraft((d) => ({ ...d, sort })); }} />
-          </section>
+              <section style={{ marginBottom: 'var(--chs-space-6)' }}>
+                <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Сортировка внутри колонки</h3>
+                <SortEditor sort={kanbanDraft.sort} fieldCatalog={fieldCatalog} onChange={(sort) => { markDirty(); setKanbanDraft((d) => ({ ...d, sort })); }} />
+              </section>
+            </>
+          ) : (
+            <>
+              <section style={{ marginBottom: 'var(--chs-space-6)' }}>
+                <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Колонки</h3>
+                <ColumnsEditor columns={draft.columns} fieldLabelByKey={fieldLabelByKey} onChange={(columns) => { markDirty(); setDraft((d) => ({ ...d, columns })); }} />
+                {columnsAllHidden && (
+                  <div style={{ marginTop: 'var(--chs-space-3)' }}>
+                    <Notice
+                      tone="warning"
+                      message="Все колонки скрыты — список будет показывать только «Создано» и действия над записью."
+                    />
+                  </div>
+                )}
+              </section>
+
+              <section style={{ marginBottom: 'var(--chs-space-6)' }}>
+                <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Фильтры</h3>
+                <FiltersEditor filters={draft.filters} fieldCatalog={fieldCatalog} typeByKey={typeByKey} onChange={(filters) => { markDirty(); setDraft((d) => ({ ...d, filters })); }} />
+              </section>
+
+              <section style={{ marginBottom: 'var(--chs-space-6)' }}>
+                <h3 style={{ margin: '0 0 var(--chs-space-3) 0', fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)' }}>Сортировка</h3>
+                <SortEditor sort={draft.sort} fieldCatalog={fieldCatalog} onChange={(sort) => { markDirty(); setDraft((d) => ({ ...d, sort })); }} />
+              </section>
+            </>
+          )}
 
           {saveError && (
             <div role="alert" style={{

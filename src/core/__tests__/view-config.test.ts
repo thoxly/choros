@@ -19,6 +19,7 @@ import {
   operatorsForFieldType,
   isServerSortable,
   resolveFieldTypes,
+  enumValuesForSelectField,
 } from "../view-config.js";
 
 const RECORD_SCHEMA = {
@@ -174,8 +175,8 @@ describe("AC-5: validateViewConfig sort server-sortability", () => {
 });
 
 describe("AC-11/FF-VR-4: validateViewConfig is a type-dispatcher", () => {
-  it("rejects an unknown type (not silently treated as 'list')", () => {
-    const result = validateViewConfig("kanban", { columns: [] }, RECORD_SCHEMA);
+  it("rejects a truly unknown type (not silently treated as 'list')", () => {
+    const result = validateViewConfig("gantt", { columns: [] }, RECORD_SCHEMA);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toMatch(/unknown view type/);
   });
@@ -189,6 +190,214 @@ describe("AC-11/FF-VR-4: validateViewConfig is a type-dispatcher", () => {
     expect(validateViewConfig("list", null, RECORD_SCHEMA).valid).toBe(false);
     expect(validateViewConfig("list", "nope", RECORD_SCHEMA).valid).toBe(false);
     expect(validateViewConfig("list", [], RECORD_SCHEMA).valid).toBe(false);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// T-0582 (kanban view) — validateKanbanViewConfig ('kanban' branch, AC-2/AC-10).
+// -----------------------------------------------------------------------------
+
+describe("T-0582 AC-2/AC-11: validateViewConfig('kanban', …) — dispatcher branch added, not rewritten", () => {
+  it("case 'kanban' now exists (no longer falls into the unknown-type default)", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", card_fields: ["notes"] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("'list' branch is untouched by the kanban addition", () => {
+    expect(validateViewConfig("list", {}, RECORD_SCHEMA).valid).toBe(true);
+  });
+
+  it("a genuinely unknown type is still rejected by the default: branch", () => {
+    const result = validateViewConfig("gantt", {}, RECORD_SCHEMA);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toMatch(/unknown view type/);
+  });
+});
+
+describe("T-0582 AC-2: validateKanbanViewConfig — group_by_field", () => {
+  it("rejects a missing group_by_field", () => {
+    const result = validateViewConfig("kanban", { card_fields: [] }, RECORD_SCHEMA);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("group_by_field"))).toBe(true);
+  });
+
+  it("rejects an empty-string group_by_field", () => {
+    const result = validateViewConfig("kanban", { group_by_field: "" }, RECORD_SCHEMA);
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects a group_by_field that is not a known record_schema key", () => {
+    const result = validateViewConfig("kanban", { group_by_field: "ghost" }, RECORD_SCHEMA);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("ghost"))).toBe(true);
+  });
+
+  it("rejects a group_by_field that is a known field but NOT select-typed (e.g. boolean/money/computed)", () => {
+    for (const key of ["is_active", "amount", "total", "notes"]) {
+      const result = validateViewConfig("kanban", { group_by_field: key }, RECORD_SCHEMA);
+      expect(result.valid, `expected group_by_field='${key}' to be rejected`).toBe(false);
+      expect(result.errors.some((e) => e.includes(key))).toBe(true);
+    }
+  });
+
+  it("accepts a select-typed group_by_field", () => {
+    const result = validateViewConfig("kanban", { group_by_field: "status" }, RECORD_SCHEMA);
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects group_by_field of the wrong type (number instead of string)", () => {
+    const result = validateViewConfig("kanban", { group_by_field: 42 }, RECORD_SCHEMA);
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe("T-0582 AC-2: validateKanbanViewConfig — card_fields", () => {
+  it("accepts card_fields that all exist in the schema (including created_at pseudo-column)", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", card_fields: ["amount", "notes", "created_at"] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects card_fields with a non-existent key", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", card_fields: ["amount", "not_a_real_field"] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("not_a_real_field"))).toBe(true);
+  });
+
+  it("rejects card_fields that is not an array", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", card_fields: "amount" },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("card_fields is optional (absent is fine)", () => {
+    const result = validateViewConfig("kanban", { group_by_field: "status" }, RECORD_SCHEMA);
+    expect(result.valid).toBe(true);
+  });
+});
+
+describe("T-0582 AC-2: validateKanbanViewConfig — columns_order", () => {
+  it("accepts an absent columns_order", () => {
+    expect(validateViewConfig("kanban", { group_by_field: "status" }, RECORD_SCHEMA).valid).toBe(true);
+  });
+
+  it("accepts a string-array columns_order (values outside the current enum are a UI/build-time concern, not a validator rejection)", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", columns_order: ["won", "open", "lost", "stale_value_not_in_enum"] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects a non-array columns_order", () => {
+    const result = validateViewConfig("kanban", { group_by_field: "status", columns_order: "won" }, RECORD_SCHEMA);
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects a columns_order array with a non-string entry", () => {
+    const result = validateViewConfig("kanban", { group_by_field: "status", columns_order: ["won", 5] }, RECORD_SCHEMA);
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe("T-0582 AC-2/NF-2: validateKanbanViewConfig — filters/sort REUSE the 'list' table (no second copy)", () => {
+  it("rejects an operator invalid for the field's type — same table as 'list'", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", filters: [{ field_key: "is_active", op: "gt", value: true }] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("is_active"))).toBe(true);
+  });
+
+  it("rejects ANY filter on a computed/collection field — mirrors 'list'", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", filters: [{ field_key: "total", op: "eq", value: 1 }] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("accepts a valid filter", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", filters: [{ field_key: "amount", op: "gte", value: 100 }] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects sort on a non-server-sortable field — mirrors 'list'", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", sort: [{ field_key: "linked", dir: "asc" }] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("accepts sort on a server-sortable field (orders cards within a column)", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", sort: [{ field_key: "amount", dir: "desc" }] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects a malformed sort dir — mirrors 'list'", () => {
+    const result = validateViewConfig(
+      "kanban",
+      { group_by_field: "status", sort: [{ field_key: "amount", dir: "ascending" }] },
+      RECORD_SCHEMA,
+    );
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe("T-0582: validateKanbanViewConfig — malformed top-level config", () => {
+  it("rejects a non-object config", () => {
+    expect(validateViewConfig("kanban", null, RECORD_SCHEMA).valid).toBe(false);
+    expect(validateViewConfig("kanban", "nope", RECORD_SCHEMA).valid).toBe(false);
+    expect(validateViewConfig("kanban", [], RECORD_SCHEMA).valid).toBe(false);
+  });
+});
+
+describe("T-0582 AC-3: enumValuesForSelectField — reads record_schema.properties[key].enum", () => {
+  it("returns the enum array for a select field", () => {
+    expect(enumValuesForSelectField(RECORD_SCHEMA, "status")).toEqual(["open", "won", "lost"]);
+  });
+
+  it("returns [] for a non-select field", () => {
+    expect(enumValuesForSelectField(RECORD_SCHEMA, "amount")).toEqual([]);
+  });
+
+  it("returns [] for an unknown field key", () => {
+    expect(enumValuesForSelectField(RECORD_SCHEMA, "ghost")).toEqual([]);
+  });
+
+  it("never throws on a malformed schema", () => {
+    expect(enumValuesForSelectField(null, "status")).toEqual([]);
+    expect(enumValuesForSelectField("garbage", "status")).toEqual([]);
+    expect(enumValuesForSelectField({}, "status")).toEqual([]);
   });
 });
 
