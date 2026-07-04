@@ -1,0 +1,84 @@
+{
+  "task_id": "T-0583",
+  "status": "ready",
+  "decision": "Новый тонкий модуль управления учётками src/http/user-mgmt.ts с тремя эндпоинтами, ПЕРЕИСПОЛЬЗУЮЩИЙ существующий KeycloakUserPort (src/keycloak/admin-port.ts, T-0342 — тот же KC-admin-порт, что и agent-hire, объединённый T-0470 на choros-registrar/env), hire-flow-выдачу role-reader T-0619 и org-object authority гейт T-0469. (1) POST /api/users {tenant_id, login, password, display_name, position_id?, role_id?}: гейт assertOrgObjectAuthority('mgmt_object:employee','create') (владелец ИЛИ делегируемый covering-грант + орг-ось) ДО side-effect; валидация (password>=8, БЕЗ email-верификации); KC-first createHumanUser(actor_type=['human'], emailVerified:true) → {userId}; в одной withTenantTx INSERT employee(kind='human', slug=userId, display_name) + ПЕРЕИСПОЛЬЗОВАННЫЙ hire-flow-хелпер выдачи role-reader (тот же путь, что registerHire для kind='human' — извлечь ensureReaderRoleAndAssignHuman в общий модуль, чтобы rights-intents.ts и user-mgmt.ts звали ОДНУ реализацию) + опц. role_assignment на role_id + audit (без пароля); падение БД после KC → best-effort deleteUser (компенсация); EMAIL_TAKEN→409, KC недоступен→503; 201 {employee_id, login}, пароль не в ответе/логе. (2) GET /api/users/accounts: tenant-scoped список kind='human' {employee_id, login, display_name, position, department, active}, active = deactivated_at IS NULL. (3) PATCH /api/users/:employee_id {active}: гейт mgmt_object:employee/update; {active:false} → setUserEnabled(userId,false) + employee.deactivated_at=now; {active:true} → enabled:true + deactivated_at=NULL; KC-first (KC упал→503). Расширения-примитивы (минимальные, additive): KeycloakUserPort.setUserEnabled (PUT user {enabled}) в интерфейсе+живом адаптере+фейке; migrations/<NNN>_employee_deactivated_at.sql (ALTER employee ADD COLUMN deactivated_at bigint NULL — generic признак, НЕ enum-статус, D-064). Wiring в server.ts переиспользует тот же kcUserPort (registrar-secret gate → живой/honest-degrade 503). Связка employee<->KC = slug=KC userId (инвариант T-0342, совместимо с resolveActorSlugFromAuth sub-first). Web-экран (список+форма+деактивация) на --chs- (OBLIK), паттерн screen-agents.jsx. Итог: человека нанять не сложнее агента — агент=POST /api/agents/hire (KC client), человек=POST /api/users (KC user), оба через ОДИН KC-admin-порт.",
+  "rejected_alternatives": [
+    {"option": "Новый параллельный KC-интеграционный модуль/HTTP-логика для создания пользователя.", "why_not": "Дублирование T-0342 KeycloakUserPort. Задача прямо требует переиспустить KC-admin-порт agent-hire (N5). Второй KC-путь = вторая точка дрейфа кредов/realm."},
+    {"option": "Расширить hire-flow POST /api/rights/intents/hire, чтобы он создавал KC-логин при kind='human'.", "why_not": "rights-intents — выдача ПРАВ (preset-гранты + role_assignment), семантика 'нанять роль', не 'завести учётку'. registerHire создаёт employee с произвольным slug; смена на slug=KC-UUID регрессировала бы контракт. role-reader-выдачу переиспользуем как ХЕЛПЕР, а не как хост."},
+    {"option": "Расширить POST /api/employees (seed-write.ts), чтобы опционально создавал KC-логин.", "why_not": "seed-write.ts несёт org-CRUD и isGenesisOwner-пути; KC-first+компенсация утяжелит его. Отдельный тонкий user-mgmt.ts single-purpose не трогает org-CRUD контракты."},
+    {"option": "Хранить статус учётки в role_assignment.valid_until (как отзыв ролей).", "why_not": "Отзыв роли != деактивация учётки. Деактивированный пользователь должен НЕ ЛОГИНИТЬСЯ (KC enabled:false) независимо от ролей; valid_until не влияет на KC-логин. Нужен явный признак на employee + KC-disable."},
+    {"option": "Enum-столбец employee.status text.", "why_not": "Строка-статус приглашает кейс-специфичные значения (D-064). deactivated_at bigint NULL generic; timestamp несёт и 'когда', и 'активна ли' (NULL=active), в bigint-epoch стиле таблицы."},
+    {"option": "Hard-delete учётки из UI вместо деактивации.", "why_not": "Необратимо, ломает историю/аудит/FK; hard-delete остаётся owner-only DELETE /api/employees/:id (O7). Деактивация обратима и безопасна."},
+    {"option": "slug = login (человекочитаемый), KC sub отдельно.", "why_not": "Нарушает инвариант T-0342 (slug=sub). Резолвер resolveActorSlugFromAuth sub-first ожидает slug=KC UUID; login-slug сломал бы вход нового пользователя. slug=userId — единственный совместимый выбор."}
+  ],
+  "object_model": [
+    {
+      "entity": "employee (additive-изменение существующей choros.employee)",
+      "fields": [
+        {"name": "deactivated_at", "type": "bigint NULL — epoch-ms деактивации учётки; NULL=активна. ЕДИНСТВЕННОЕ изменение таблицы"},
+        {"name": "kind", "type": "text (существующий) = 'human' для учётки этой задачи"},
+        {"name": "slug", "type": "text (существующий) = KC user UUID (связка employee<->KC, инвариант T-0342)"},
+        {"name": "display_name", "type": "text (существующий) из тела запроса"}
+      ]
+    },
+    {
+      "entity": "KeycloakUserPort (расширение интерфейса в src/keycloak/admin-port.ts)",
+      "fields": [
+        {"name": "createHumanUser", "type": "(spec:KcHumanUserSpec)=>Promise<{userId}> — СУЩЕСТВУЕТ (T-0342), переиспускается"},
+        {"name": "deleteUser", "type": "(userId:string)=>Promise<void> — СУЩЕСТВУЕТ, компенсация"},
+        {"name": "setUserEnabled", "type": "(userId:string, enabled:boolean)=>Promise<void> — НОВЫЙ, PUT user {enabled}"}
+      ]
+    },
+    {
+      "entity": "role/role_assignment/grant (существующие, переиспускаются hire-flow-хелпером — НЕ меняются)",
+      "fields": [
+        {"name": "role-reader (choros.role)", "type": "ensure ON CONFLICT DO NOTHING"},
+        {"name": "role_assignment(employee->role-reader)", "type": "CONFIRMED, org_scope={kind:set,members:[]}, WHERE NOT EXISTS"},
+        {"name": "grant (read/record/RESOURCE_ROOT на role-reader)", "type": "covering READ, ensure идемпотентно"}
+      ]
+    }
+  ],
+  "contracts": [
+    "src/http/user-mgmt.ts (новый): registerUserMgmtRoutes(router,{pool, kc:KeycloakUserPort, resolveActorTenant}). POST /api/users {tenant_id,login,password,display_name,position_id?,role_id?}->201{employee_id,login} (гейт mgmt_object:employee/create, KC-first createHumanUser + withTenantTx INSERT employee slug=userId + reader-grant хелпер + опц role_assignment + audit, компенсация deleteUser, EMAIL_TAKEN->409/AUTH_UNAVAILABLE->503, пароль не в ответе). GET /api/users/accounts->{accounts:[{employee_id,login,display_name,position,department,active}]} (tenant-scoped, active=deactivated_at IS NULL). PATCH /api/users/:employee_id {active}->200{employee_id,active} (гейт mgmt_object:employee/update, setUserEnabled + UPDATE deactivated_at, KC-first).",
+    "Извлечение hire-flow-хелпера (FE-W23-0008 контракт совместимости): приватная ensureReaderRoleAndAssignHuman из src/http/rights-intents.ts выносится в общий модуль (src/core/reader-grant.ts или экспорт из read-visibility-контура); rights-intents.ts (registerHire) И user-mgmt.ts зовут ОДНУ реализацию. registerHire сохраняет поведение (регрессия hire-flow T-0619 запрещена — hire-read-grant.db.test.ts остаётся зелёным). Публичная поверхность rights-intents.ts не меняется.",
+    "src/keycloak/admin-port.ts (additive): KeycloakUserPort.setUserEnabled(userId,enabled) в интерфейсе + makeHttpKeycloakUserPort (PUT /admin/realms/<realm>/users/<userId> {enabled} через registrar-токен, паттерн deleteUser) + InMemoryKeycloakUserPort.setUserEnabled (fake-user-port.ts, capture enabled на CapturedUser). createHumanUser/deleteUser не трогаются.",
+    "migrations/<NNN>_employee_deactivated_at.sql: ALTER TABLE choros.employee ADD COLUMN deactivated_at bigint NULL — additive, обратно совместимо, наследует RLS employee; номер присвоить при мерже.",
+    "src/server.ts (wiring): registerUserMgmtRoutes рядом с registerRegisterRoutes, ПЕРЕИСПОЛЬЗУЯ тот же kcUserPort (registrar-secret gate -> живой/honest-degrade 503). Deps-gated на grantsPool. setUserEnabled в honest-degrade-заглушке = no-op.",
+    "web/ (новый экран управления пользователями): список учёток + форма создания + деактивация/реактивация на --chs-* (tokens.css), паттерн screen-agents.jsx, Empty/Loading/Error, поле пароля type=password + autoComplete=off + label/aria.",
+    "FROZEN (только чтение/импорт): src/core/register.ts (KC-first-паттерн-образец), src/http/records.ts / src/core/read-visibility.ts / src/db/grants-dao.ts (READ-PDP гейт), src/core/scoped-admin.ts (гейт-логика), frozen rights-write grants.ts/rights.ts.",
+    "BUILD-фазные test-seam правки (coder): новая колонка employee -> обновить ci/checks/db/* схема-ассерты по employee (колоночные счётчики, cross_tenant seed) — тот же класс правки, что T-0020 §4.4."
+  ],
+  "fitness_functions": [
+    {"id": "FF-583-1", "rule": "POST /api/users под владельцем создаёт KC-user (createHumanUser 1×) + employee(kind='human', slug=<KC userId>); 201; slug==возвращённый userId (связка).", "ci_check": "ci/checks/db/user-mgmt.db.test.ts (live PG + InMemoryKeycloakUserPort): POST -> capture.created.length==1, employee.slug==capture userId, kind='human'."},
+    {"id": "FF-583-2", "rule": "Созданный пользователь получает role-reader + covering READ (тот же результат, что hire-flow T-0619); getGrantsForSubject содержит read/record/RESOURCE_ROOT; GET /api/records видит запись.", "ci_check": "тот же db-тест: после POST getGrantsForSubject(employee) содержит read-грант; prod-shaped resolver отдаёт запись."},
+    {"id": "FF-583-3", "rule": "KC-first + компенсация: падение БД после KC-create -> deleteUser 1× тем же userId; 201 НЕ возвращается; EMAIL_TAKEN -> 409, employee не создан.", "ci_check": "db-тест с инъекцией сбоя (fake failAfterCreate/failOnCreate): deleteCallCount==1; на EMAIL_TAKEN 0 строк employee."},
+    {"id": "FF-583-4", "rule": "Деактивация: PATCH {active:false} -> setUserEnabled(userId,false) 1× + employee.deactivated_at!=NULL; список active:false; {active:true} -> enabled:true + deactivated_at=NULL, active:true.", "ci_check": "db-тест: PATCH false -> fake.enabled==false + deactivated_at set; PATCH true -> enabled==true + deactivated_at NULL."},
+    {"id": "FF-583-5", "rule": "tenant-изоляция: актёр A на POST с tenant_id B -> 403; PATCH по employee B -> 403/404; GET /accounts A не содержит сотрудников B (RLS первичен под choros_app NOBYPASSRLS).", "ci_check": "db-тест live PG: два тенанта; кросс-действия 403/404; список scoped."},
+    {"id": "FF-583-6", "rule": "Авторизация: непривилегированный член (без mgmt_object:employee) на POST/PATCH -> 403 ADMIN_GATE_REJECTED, не 500/тихий успех; владелец -> 201/200.", "ci_check": "db-тест: актёр без гранта -> 403; владелец -> успех."},
+    {"id": "FF-583-7", "rule": "Пароль не утекает: греп всех тел HTTP-ответов прогона + серверного лога + audit_event на известную тестовую строку пароля -> 0; греп src/ на захардкоженный пароль/KC-registrar-секрет -> 0 (только process.env).", "ci_check": "ci/checks/user-mgmt-no-secret-leak.sh (греп прогона + статик-скан src/)."},
+    {"id": "FF-583-8", "rule": "Переиспользование, НЕ дублирование: user-mgmt.ts НЕ содержит собственных KC-HTTP-вызовов (admin/realms/.../users) — импортирует KeycloakUserPort; reader-grant хелпер общий (звонится из rights-intents.ts и user-mgmt.ts).", "ci_check": "ci/checks/user-mgmt-reuses-kc-port.sh: греп — в src/http/user-mgmt.ts нет literal '/admin/realms', есть import KeycloakUserPort; общий reader-grant хелпер импортируется в обоих."},
+    {"id": "FF-583-9", "rule": "Анти-кейс (D-064): git-diff src/ без имён персон/кейс-слагов; механизм generic (login/display_name из тела).", "ci_check": "существующий ci/checks/read-pdp-anti-case.sh (git-diff scoped src/) зелёный на diff."},
+    {"id": "FF-583-10", "rule": "hire-flow T-0619 НЕ регрессировал после извлечения общего хелпера: registerHire kind='human' по-прежнему выдаёт role-reader; kind='agent' — нет.", "ci_check": "существующий ci/checks/db/hire-read-grant.db.test.ts остаётся зелёным."},
+    {"id": "FF-583-11", "rule": "UX honest-gate экрана управления пользователями: контраст >= WCAG AA в обеих темах, потребление --chs-* (нет hardcoded hex), Empty/Loading/Error, поле пароля type=password + autoComplete=off + label/aria, статус-чип 'деактивирован' ≡ данным, нет dev-жаргона.", "ci_check": "ci/checks/ux/* + e2e/journeys/user-mgmt.ux.journey.ts (G1-G7)."}
+  ],
+  "traceability": [
+    {"ac": "AC-1 create -> employee(kind=human, slug=KC userId)", "covered_by": "ADR §2.1 + FF-583-1"},
+    {"ac": "AC-2 slug == KC userId (связка)", "covered_by": "ADR §2.1 + FF-583-1"},
+    {"ac": "AC-3 covering READ через hire-flow T-0619", "covered_by": "ADR §2.1 переиспуск хелпера + FF-583-2"},
+    {"ac": "AC-4 EMAIL_TAKEN -> 409, нет частичного", "covered_by": "ADR §2.1 п.4/6 + FF-583-3"},
+    {"ac": "AC-5 компенсация deleteUser 1×", "covered_by": "ADR §2.1 п.6 + FF-583-3"},
+    {"ac": "AC-6 список tenant-scoped, active", "covered_by": "ADR §2.2 + FF-583-5"},
+    {"ac": "AC-7 деактивация (KC disable + deactivated_at)", "covered_by": "ADR §2.3/§2.4/§2.5 + FF-583-4"},
+    {"ac": "AC-8 реактивация", "covered_by": "ADR §2.3 + FF-583-4"},
+    {"ac": "AC-9 кросс-тенант блокирован", "covered_by": "ADR §2.1/§2.3 гейт+RLS + FF-583-5"},
+    {"ac": "AC-10 непривилегированный -> 403", "covered_by": "ADR §2.1/§2.3 гейт + FF-583-6"},
+    {"ac": "AC-11 пароль не в ответах", "covered_by": "ADR §2.1 N1 + FF-583-7"},
+    {"ac": "AC-12 пароль/секрет не в логе/аудите/коде", "covered_by": "ADR §2.1/§2.6 N1/N2 + FF-583-7"},
+    {"ac": "AC-13 анти-кейс", "covered_by": "ADR N7 + FF-583-9"},
+    {"ac": "AC-14 LIVE_PROOF вход/деактивация", "covered_by": "ADR §2 сквозной путь"},
+    {"ac": "AC-15 UX_REVIEW", "covered_by": "ADR §2.6 web + FF-583-11"}
+  ],
+  "runtime_target": "runtime:node — TS/HTTP-слой (src/http/user-mgmt.ts) + additive-миграция (migrations/<NNN>_employee_deactivated_at.sql, штатный migrations/run.mjs) + web-экран. Внешний ресурс = уже работающий на dev-стенде Keycloak (KC admin :8180, realm choros; registrar-креды в env контейнера, T-0470) — новый провижн НЕ требуется. Fitness: live-PG vitest (npm run fitness:db на PG :55432, соло) с InMemoryKeycloakUserPort (без живого KC в CI) + shell-линтеры (no-secret-leak, reuses-kc-port, anti-case) + UX-journey. LIVE_PROOF (AC-14) на задеплоенном стенде с реальным KC (гейт фаундера = деплой).",
+  "adr_artifact_path": "docs/adr/ADR-T0583-user-mgmt.md",
+  "escalation": ""
+}
