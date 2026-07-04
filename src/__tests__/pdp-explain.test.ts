@@ -18,7 +18,7 @@
  *   - authz: 403 for non-admin caller about foreign subject (HTTP layer)
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   type Grant,
   type AncestryOracle,
@@ -440,9 +440,12 @@ describe("backward compat: no trace = no behaviour change", () => {
 // ---------------------------------------------------------------------------
 
 import * as http from "node:http";
+import * as crypto from "node:crypto";
+import { AddressInfo } from "node:net";
 import pg from "pg";
 import { Router } from "../http/router.js";
 import { registerPdpExplainRoutes } from "../http/pdp-explain.js";
+import { _resetJwksCache } from "../http/auth.js";
 
 // Shared constants matching server DEV_TENANT_ID default
 const HTTP_TENANT = "a0000000-0000-0000-0000-000000000001";
@@ -860,4 +863,264 @@ describe("property: endpoint-level verdict parity (R-5)", () => {
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// T-0633 — identity resolution regression (rec­urrence of T-0371).
+//
+// extractCaller (this file's route) used to return the RAW keycloak JWT `sub`
+// as `caller`. For a seeded persona (e.g. genesis-owner) whose employee.slug
+// differs from its KC sub (a random UUID), that raw sub was then compared
+// against subjectId (self-query check) and passed to loadAdminContext as the
+// admin-lookup key — both keyed on the WRONG identity. A self-query by such a
+// persona would spuriously miss the `caller === subjectId` self-check and
+// fall through to the (also-failing) admin path.
+//
+// The fix resolves `caller` via resolveActorSlugFromAuth(pool, sub,
+// preferredUsername) BEFORE it is used — sub-first, preferred_username
+// fallback (the T-0371 canonical contract) — so a seeded persona's self-query
+// now correctly resolves to "self" instead of misfiring into the admin branch.
+//
+// This harness stands up a local JWKS server (mirrors floor1-editor.test.ts)
+// so a REAL signed Bearer JWT drives withAuth in keycloak mode — no live
+// Keycloak, no live Postgres (stub pool answers both the identity-existence
+// query and the explain queries).
+// ---------------------------------------------------------------------------
+
+describe("T-0633: extractCaller resolves keycloak sub → real employee slug", () => {
+  const KID = "pdp-explain-test-key-1";
+  let kcPrivateKey: crypto.KeyObject;
+  let kcPublicJwk: crypto.JsonWebKey & { kid: string; alg: string; use: string };
+  let jwksServer: http.Server;
+  let jwksPort: number;
+  const savedAuthEnv: Record<string, string | undefined> = {};
+
+  function base64urlJson(obj: unknown): string {
+    return Buffer.from(JSON.stringify(obj))
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=/g, "");
+  }
+
+  /** Sign a Bearer JWT with an arbitrary sub/preferred_username pair. */
+  function bearerToken(sub: string, preferredUsername: string): string {
+    const claims = {
+      iss: `http://127.0.0.1:${jwksPort}/realms/choros`,
+      aud: "choros-api",
+      exp: Math.floor(Date.now() / 1000) + 300,
+      sub,
+      preferred_username: preferredUsername,
+      actor_type: "human",
+    };
+    const header = base64urlJson({ alg: "RS256", kid: KID, typ: "JWT" });
+    const payload = base64urlJson(claims);
+    const signingInput = `${header}.${payload}`;
+    const sig = crypto
+      .sign("RSA-SHA256", Buffer.from(signingInput, "utf8"), kcPrivateKey)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=/g, "");
+    return `${signingInput}.${sig}`;
+  }
+
+  beforeAll(async () => {
+    const { generateKeyPairSync } = crypto;
+    const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    kcPrivateKey = privateKey;
+    kcPublicJwk = {
+      ...publicKey.export({ format: "jwk" }),
+      kid: KID,
+      alg: "RS256",
+      use: "sig",
+    };
+
+    await new Promise<void>((resolve) => {
+      jwksServer = http.createServer((req, res) => {
+        if (req.url === "/realms/choros/.well-known/openid-configuration") {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              issuer: `http://127.0.0.1:${jwksPort}/realms/choros`,
+              jwks_uri: `http://127.0.0.1:${jwksPort}/realms/choros/protocol/openid-connect/certs`,
+            }),
+          );
+        } else if (req.url === "/realms/choros/protocol/openid-connect/certs") {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ keys: [kcPublicJwk] }));
+        } else {
+          res.statusCode = 404;
+          res.end();
+        }
+      });
+      jwksServer.listen(0, "127.0.0.1", () => {
+        jwksPort = (jwksServer.address() as AddressInfo).port;
+        resolve();
+      });
+    });
+
+    for (const k of ["KEYCLOAK_URL", "KEYCLOAK_REALM", "KEYCLOAK_AUDIENCE", "KC_ISSUER"]) {
+      savedAuthEnv[k] = process.env[k];
+    }
+    process.env["KEYCLOAK_URL"] = `http://127.0.0.1:${jwksPort}`;
+    process.env["KEYCLOAK_REALM"] = "choros";
+    process.env["KEYCLOAK_AUDIENCE"] = "choros-api";
+    delete process.env["KC_ISSUER"];
+    _resetJwksCache();
+  });
+
+  afterAll(async () => {
+    for (const [k, v] of Object.entries(savedAuthEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    _resetJwksCache();
+    await new Promise<void>((resolve) => jwksServer.close(() => resolve()));
+  });
+
+  async function withKeycloakMode<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = process.env["CHOROS_AUTH_MODE"];
+    process.env["CHOROS_AUTH_MODE"] = "keycloak";
+    try {
+      return await fn();
+    } finally {
+      if (prev === undefined) delete process.env["CHOROS_AUTH_MODE"];
+      else process.env["CHOROS_AUTH_MODE"] = prev;
+    }
+  }
+
+  /**
+   * Extends makeExplainPool's stub with the resolveActorSlugFromAuth existence
+   * query: `SELECT EXISTS (SELECT 1 FROM choros.employee WHERE slug = $1 AND
+   * kind = 'human')`. `humanSlugs` is the set of slugs that resolve as a known
+   * human employee (mirrors the seeded-persona population).
+   */
+  function makeIdentityAwarePool(
+    humanSlugs: Set<string>,
+    inner: pg.Pool,
+  ): pg.Pool {
+    return {
+      connect: async () => {
+        const client = await inner.connect();
+        const originalQuery = client.query.bind(client);
+        (client as unknown as { query: typeof client.query }).query = (async (
+          text: unknown,
+          values?: unknown[],
+        ) => {
+          const sql = (typeof text === "string" ? text : (text as { text: string }).text).trim();
+          if (/SELECT EXISTS/.test(sql) && /FROM choros\.employee/.test(sql) && /kind = 'human'/.test(sql)) {
+            const slug = (values as string[] | undefined)?.[0];
+            return { rows: [{ exists: !!slug && humanSlugs.has(slug) }] };
+          }
+          return originalQuery(text as string, values as never);
+        }) as typeof client.query;
+        return client;
+      },
+    } as unknown as pg.Pool;
+  }
+
+  it("seeded persona (sub != slug): self-query resolves to 'self', not a spurious admin/forbidden path", async () => {
+    // Persona: employee.slug = 'e-owner-t0633' (human-readable, mirrors a
+    // genesis-owner-style seeded persona), KC sub = a random UUID (KC user id
+    // never equals the slug for a seeded persona — only self-registered users
+    // satisfy slug === sub, T-0342).
+    const OWNER_SLUG = "e-owner-t0633";
+    const OWNER_SUB = "b3f1a2c4-11e2-4a9d-9b7e-000000000001"; // random KC UUID != slug
+    const basePool = makeExplainPool({ subjectHasGrant: true, callerIsAdmin: false, recordExists: true });
+    const pool = makeIdentityAwarePool(new Set([OWNER_SLUG]), basePool);
+
+    await withKeycloakMode(async () => {
+      const { baseUrl, close } = await startExplainServer(pool);
+      try {
+        const token = bearerToken(OWNER_SUB, OWNER_SLUG);
+        const body = makeExplainBody({ subjectId: OWNER_SLUG });
+        const resp = await new Promise<{ statusCode: number; parsed: Record<string, unknown> }>(
+          (resolve, reject) => {
+            const data = JSON.stringify(body);
+            const url = new URL(`${baseUrl}/api/pdp/explain`);
+            const req = http.request(
+              url,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${token}`,
+                  "Content-Length": Buffer.byteLength(data),
+                },
+              },
+              (res) => {
+                let raw = "";
+                res.on("data", (chunk: Buffer) => { raw += chunk.toString(); });
+                res.on("end", () => {
+                  let parsed: Record<string, unknown> = {};
+                  try { parsed = JSON.parse(raw) as Record<string, unknown>; } catch { /* empty */ }
+                  resolve({ statusCode: res.statusCode ?? 0, parsed });
+                });
+              },
+            );
+            req.on("error", reject);
+            req.write(data);
+            req.end();
+          },
+        );
+        // Before the fix: caller (raw sub) !== subjectId (OWNER_SLUG) → falls to
+        // the admin path → loadAdminContext keyed on the WRONG actor (the raw
+        // sub, unknown to role_assignment) → EXPLAIN_FORBIDDEN (403), never 200.
+        // After the fix: caller resolves to OWNER_SLUG via
+        // resolveActorSlugFromAuth (preferred_username fallback, since sub does
+        // not match any known human slug) → caller === subjectId → self-query
+        // → 200 allow (masking step has no maskedFields, the self-query shape).
+        expect(resp.statusCode, "self-query by a seeded persona must succeed, not 403").toBe(200);
+        expect(resp.parsed["verdict"]).toBe("allow");
+        const steps = resp.parsed["steps"] as Array<Record<string, unknown>>;
+        const maskStep = steps.find((s) => s["step"] === "masking");
+        if (maskStep) {
+          expect(maskStep, "self-query must not expose maskedFields (anti-oracle)").not.toHaveProperty("maskedFields");
+        }
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  it("unknown identity (neither sub nor preferred_username matches any employee) → 401, not 403 ACTOR_TENANT_UNRESOLVED-class failure", async () => {
+    const basePool = makeExplainPool({ subjectHasGrant: false, callerIsAdmin: false, recordExists: true });
+    const pool = makeIdentityAwarePool(new Set(["some-other-employee"]), basePool);
+
+    await withKeycloakMode(async () => {
+      const { baseUrl, close } = await startExplainServer(pool);
+      try {
+        const token = bearerToken("ghost-uuid-no-match", "also-no-match");
+        const body = makeExplainBody({ subjectId: "also-no-match" });
+        const resp = await new Promise<{ statusCode: number }>((resolve, reject) => {
+          const data = JSON.stringify(body);
+          const url = new URL(`${baseUrl}/api/pdp/explain`);
+          const req = http.request(
+            url,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+                "Content-Length": Buffer.byteLength(data),
+              },
+            },
+            (res) => {
+              res.on("data", () => {});
+              res.on("end", () => resolve({ statusCode: res.statusCode ?? 0 }));
+            },
+          );
+          req.on("error", reject);
+          req.write(data);
+          req.end();
+        });
+        expect(resp.statusCode, "no matching employee → honest 401, not a silent wrong-identity 403").toBe(401);
+      } finally {
+        await close();
+      }
+    });
+  });
 });

@@ -27,6 +27,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { KeycloakUserPort } from "../keycloak/admin-port.js";
+import { humanEmployeeSlugExists } from "../db/org.js";
 import { RESOURCE_ROOT_NODE_ID, READER_ROLE_SLUG } from "./read-visibility.js";
 
 // ---------------------------------------------------------------------------
@@ -191,19 +192,56 @@ export async function registerTenant(
   const orgName = req.orgName.trim();
   const baseSlug = slugifyOrgName(orgName);
 
-  // Step 2: KC-first — create human user
+  // SECURITY — case-fold normalization (T-0633 round-3). Keycloak 25.0.6
+  // LOWERCASES a username at creation. Self-registration uses the email as the
+  // Keycloak username, so we case-fold it ONCE here and use the SAME normalized
+  // value for the anti-collision guard, the KC `username`, the stored
+  // employee.slug's sibling email, and the response — guard side and the form
+  // KC actually stores can never diverge. (RFC-5321 leaves the local part
+  // case-sensitive, but KC folds it regardless; recording the folded form is
+  // what keeps the later login — which KC also folds — resolvable.)
+  const normalizedEmail = req.email.trim().toLowerCase();
+
+  // SECURITY — anti-collision (T-0633, defense-in-depth). Self-registration
+  // sets the Keycloak username to `normalizedEmail`, which validateRequest
+  // already constrains to an email (always contains '@'), while seeded persona
+  // slugs (e-owner, e-orlov, e-configurator …) are never email-shaped — so a
+  // collision is structurally impossible on today's flow. This guard makes the
+  // invariant EXPLICIT and future-proofs it: should self-registration ever
+  // accept a free-form username, it must NOT be able to mint a KC user whose
+  // username == a seeded persona's employee slug (which the cross-tenant
+  // preferred_username → slug identity fallback would then resolve to the
+  // forest-owner). Keyed on the NORMALIZED (lowercased) value for the same
+  // case-collision reason POST /api/users lowercases its login. Same guard,
+  // same canonical query as POST /api/users.
+  if (await humanEmployeeSlugExists(deps.pool, normalizedEmail)) {
+    throw new RegisterError(
+      "LOGIN_RESERVED",
+      "This login is already in use — choose a different one",
+    );
+  }
+
+  // Step 2: KC-first — create human user. username == email == normalizedEmail
+  // (lowercased above) so the KC username matches what KC would fold to anyway
+  // and the anti-collision guard checked the identical string.
   let kcUserId: string;
   try {
     const result = await deps.kc.createHumanUser({
-      username: req.email,
-      email: req.email,
+      username: normalizedEmail,
+      email: normalizedEmail,
       password: req.password,
       actorType: "human",
     });
     kcUserId = result.userId;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? (err as { code?: string }).code;
-    if (code === "EMAIL_TAKEN") {
+    // Self-registration uses the (normalized) email AS the KC username, so a KC
+    // LOGIN_TAKEN (username clash) and EMAIL_TAKEN (email clash) are the SAME
+    // user-facing condition here — the account with that email already exists.
+    // Fold both into EMAIL_TAKEN so the message stays honest for this flow
+    // (T-0633 round-3). POST /api/users, where login ≠ email, keeps them
+    // distinct.
+    if (code === "EMAIL_TAKEN" || code === "LOGIN_TAKEN") {
       throw new RegisterError("EMAIL_TAKEN", "An account with that email already exists");
     }
     throw new RegisterError("AUTH_UNAVAILABLE", "Registration service unavailable — try again later");
@@ -299,7 +337,7 @@ export async function registerTenant(
       await client.query(
         `INSERT INTO choros.employee (tenant_id, id, slug, kind, display_name, position_id, created_at, updated_at)
          VALUES ($1, $2, $3, 'human', $4, NULL, $5, $5)`,
-        [tenantId, employeeId, kcUserId, req.email, ts],
+        [tenantId, employeeId, kcUserId, normalizedEmail, ts],
       );
 
       // 3d. Insert confirmed role_assignment (org_scope=set([]), confirmed_by=employeeId for self-bootstrap)
@@ -722,6 +760,6 @@ export async function registerTenant(
     tenantId,
     tenantSlug: tenantSlug!,
     userId: kcUserId,
-    email: req.email,
+    email: normalizedEmail,
   };
 }

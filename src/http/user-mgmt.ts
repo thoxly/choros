@@ -42,7 +42,11 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { KeycloakUserPort } from "../keycloak/admin-port.js";
 import { ensureReaderRoleAndAssignHuman } from "../core/reader-grant.js";
-import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
+import {
+  loadAdminContext,
+  resolveActorSlugFromAuth,
+  humanEmployeeSlugExists,
+} from "../db/org.js";
 import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import { authorizeOrgWrite, assertOrgObjectAuthority } from "./seed-write.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
@@ -124,7 +128,7 @@ function isConflict(err: unknown): boolean {
   return false;
 }
 
-/** KC port errors carry .code (EMAIL_TAKEN / EMAIL_INVALID / AUTH_UNAVAILABLE) — see admin-port.ts. */
+/** KC port errors carry .code (LOGIN_TAKEN / EMAIL_TAKEN / EMAIL_INVALID / AUTH_UNAVAILABLE) — see admin-port.ts. */
 function kcErrCode(err: unknown): string | undefined {
   if (err && typeof err === "object" && "code" in err) {
     return (err as { code?: string }).code;
@@ -162,7 +166,23 @@ function validateCreateBody(b: Record<string, unknown>): {
   if (typeof login !== "string" || login.trim().length === 0) {
     throw new HttpError(400, "VALIDATION", "login is required");
   }
-  const trimmedLogin = login.trim();
+  // SECURITY — case-fold normalization (T-0633 round-3 fix). Keycloak 25.0.6
+  // LOWERCASES a username at creation (proven live against KC 25.0.6). If we
+  // let a mixed-case `login` through unchanged, two forms diverge and the
+  // anti-collision guard below is bypassable: `login='E-Configurator'` misses
+  // the byte-exact guard query (no employee.slug == 'E-Configurator') so the
+  // guard PASSES, but KC then stores username='e-configurator' → the token's
+  // preferred_username='e-configurator' → the cross-tenant preferred_username→
+  // slug fallback (resolveActorSlugFromAuth) resolves it to the SEED persona
+  // 'e-configurator' (role-configurator authoring) — a vertical privilege
+  // escalation for ANY seed kind='human' slug lacking a KC user at install.
+  // We normalize ONCE here, at the single point where `login` is produced, so
+  // the guard side (humanEmployeeSlugExists), the KC `username`, the stored
+  // `employee.login` column, the response, and the audit ALL see the identical
+  // lowercase form Keycloak will store — guard-side and token-side can no
+  // longer diverge. Seed persona slugs (e-owner/e-configurator/e-orlov …) are
+  // already lowercase, so the normalized login collides with them exactly.
+  const trimmedLogin = login.trim().toLowerCase();
   const email = b["email"];
   if (typeof email !== "string" || email.trim().length === 0) {
     throw new HttpError(400, "VALIDATION", "email is required");
@@ -214,6 +234,9 @@ export function registerUserMgmtRoutes(
   // 201: { employee_id, login }  (password never in the response)
   // T-0628: login is free-form (need not be an email); email is a separate
   // required field, validated before any Keycloak call.
+  // T-0633: 409 LOGIN_RESERVED if login collides with an existing HUMAN
+  // employee slug in ANY tenant (anti-collision — blocks minting a KC user
+  // whose preferred_username would resolve to a seeded persona like e-owner).
   // -------------------------------------------------------------------------
   router.register("POST", "/api/users", withAuth(async (req, res) => {
     const body = await readJsonBody(req);
@@ -238,6 +261,35 @@ export function registerUserMgmtRoutes(
 
     const { login, email, password, display_name, position_id, role_id } = validateCreateBody(b);
 
+    // SECURITY — anti-collision (T-0633, privilege-escalation fix). The chosen
+    // `login` becomes the Keycloak username, which surfaces as the token's
+    // `preferred_username`. Identity resolution (resolveActorSlugFromAuth)
+    // resolves a token to an employee via a CROSS-TENANT preferred_username →
+    // employee.slug fallback for seeded personas whose KC sub ≠ slug. Several
+    // kind='human' seed personas exist as employees WITHOUT a Keycloak user at
+    // install time — notably genesis 'e-owner' (16 delegable mgmt-grants +
+    // tenant-owner, migrations/026) and 'e-configurator' (migrations/088) —
+    // so Keycloak does NOT reject creating a user named 'e-owner'. Without this
+    // guard, a holder of mgmt_object:employee:create (NOT the owner) could mint
+    // a KC user login='e-owner', log in, miss sub-first, and be resolved to the
+    // forest-owner via that fallback — a vertical privilege escalation.
+    // Reject, cross-tenant, any login that collides with an existing HUMAN
+    // employee slug BEFORE any Keycloak call (no side-effect, no orphan). The
+    // check is cross-tenant precisely because the fallback it protects is
+    // cross-tenant. 409 with a human reason — never the generic 503.
+    //
+    // `login` is already LOWERCASED here (validateCreateBody, T-0633 round-3):
+    // that is what closes the case-collision bypass — the guard now checks the
+    // SAME form Keycloak will store, so 'E-Configurator' can no longer slip
+    // past a byte-exact query while KC lowercases it into a seed-persona slug.
+    if (await humanEmployeeSlugExists(pool, login)) {
+      throw new HttpError(
+        409,
+        "LOGIN_RESERVED",
+        "this login is already in use — choose a different login",
+      );
+    }
+
     // KC-first (N4): create the KC user BEFORE any DB write. The plaintext
     // password is passed here and NOWHERE else — never logged, never audited,
     // never echoed in a response (N1).
@@ -258,6 +310,15 @@ export function registerUserMgmtRoutes(
       kcUserId = result.userId;
     } catch (err) {
       const code = kcErrCode(err);
+      if (code === "LOGIN_TAKEN") {
+        // T-0633 round-3 (minor): a KC USERNAME conflict — the login, not the
+        // email, is taken. Distinct human reason so the owner fixes the right
+        // field. (The anti-collision guard above already rejects a login that
+        // collides with a SEED slug; this covers a collision with a
+        // previously-minted ordinary login, whose KC username uniqueness is the
+        // relevant guard — see FF-633-4's note.)
+        throw new HttpError(409, "LOGIN_TAKEN", "this login is already taken — choose a different login");
+      }
       if (code === "EMAIL_TAKEN") {
         throw new HttpError(409, "EMAIL_TAKEN", "an account with that email already exists");
       }

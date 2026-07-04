@@ -40,6 +40,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import {
   listInstanceProjections,
   type InstanceProjection,
@@ -101,12 +102,21 @@ async function withTenantTx<T>(
 }
 
 // ---------------------------------------------------------------------------
-// extractActor — mode-aware (keycloak: AuthContext set by withAuth; dev: x-dev-user)
+// extractActor — mode-aware (mirrors agents.ts::extractActor — T-0371/T-0633:
+// keycloak resolves the JWT sub/preferred_username to the REAL employee slug
+// via resolveActorSlugFromAuth before it drives tenant resolution). dev mode
+// (x-dev-user) unchanged.
 // ---------------------------------------------------------------------------
 
-function extractActor(req: IncomingMessage): string {
+async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -261,7 +271,7 @@ export function registerProcessCatalogRoutes(
     "GET",
     "/api/process-catalog",
     withAuth(async (req: IncomingMessage, res: ServerResponse) => {
-      const actor = extractActor(req);
+      const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
 
       // Modeler definitions + bindings: one tenant-scoped tx (FORCE RLS).
@@ -292,7 +302,7 @@ export function registerProcessCatalogRoutes(
     "GET",
     "/api/process-app-bindings",
     withAuth(async (req: IncomingMessage, res: ServerResponse) => {
-      const actor = extractActor(req);
+      const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
 
       const rows = await withTenantTx(pool, tenantId, (client) =>
@@ -315,7 +325,7 @@ export function registerProcessCatalogRoutes(
     "POST",
     "/api/process-app-bindings",
     withAuth(async (req: IncomingMessage, res: ServerResponse) => {
-      const actor = extractActor(req);
+      const actor = await extractActor(req, pool);
 
       const rawBody = await readJsonBody(req);
       if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {

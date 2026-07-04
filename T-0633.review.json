@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0633",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "T-0633.spec.md:33 (AC-7) vs ci/checks/db/actor-resolve-seeded-persona.db.test.ts:29",
+      "issue": "AC-7 promises 'регресс-тест подтверждает, что роут [PUT /api/agents/:id/llm-connection] НЕ менялся и продолжает работать' (verifiable_as: test), but no such test exists — only a code comment in the new test file stating the route is out of scope because it was already correct. pr-handoff.json's traceability section does not mention AC-7 at all.",
+      "suggestion": "Either add one lightweight regression assertion hitting PUT /api/agents/:id/llm-connection with a seeded persona (sub != slug) expecting non-403-ACTOR_TENANT_UNRESOLVED, or downgrade AC-7's verifiable_as to 'code-read' in the spec to match what was actually delivered. Non-blocking: independently re-read src/http/agents.ts:106-124 during this review and confirmed the route already calls resolveActorSlugFromAuth correctly and was genuinely left untouched (git diff dev...HEAD -- src/http/agents.ts is empty)."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": false},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true}
+  ],
+  "role_gap_evidence": [],
+  "review_notes": {
+    "base_check": "Branch task/T-0633-actor-resolve based on dev@f0151cf. dev has since advanced to T-0588 (merged e8e9709, touches src/db/org.ts only) and T-0634 (merged c93b66b, web/modeler only). Verified via `git log f0151cf..dev -- src/http/org.ts` (empty — dev never touched src/http/org.ts) and `git diff f0151cf HEAD --stat -- src/db/org.ts` (empty — T-0633 never touches src/db/org.ts). The two branches touch disjoint org.ts files (src/http/org.ts vs src/db/org.ts) despite the shared basename.",
+    "merge_dry_run": "git merge-tree $(git merge-base dev HEAD) dev HEAD produced exactly ONE 'changed in both' file: pr-handoff.json (a per-task metadata/handoff artifact, not product code — trivially resolved by keeping T-0633's version at merge time). Zero conflicts in any src/ file. rebase_needed=no in the structural-conflict sense; a routine pr-handoff.json resolution is expected and not a rebase.",
+    "canonical_pattern_check": "All 9 route modules (agents-list.ts, app-secret.ts, grant-trail.ts, llm-config.ts, llm-connection-test.ts, llm-connections.ts, pdp-explain.ts, process-catalog.ts, spend.ts) + org.ts's inline GET /api/org block were diffed individually against src/http/agents.ts::extractActor (lines 106-124, the T-0371 canon). Every fixed extractActor/extractCaller/inline-block is now async, takes pool, calls resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername), and throws HttpError(401, UNAUTHENTICATED, ...) on null — byte-for-byte the same shape as the canon, just localized per file. PUT /api/agents/:id/llm-connection (src/http/agents.ts) confirmed untouched by this diff (git diff dev...HEAD --stat -- src/http/agents.ts is empty) and independently re-verified already-correct by reading the canon block itself.",
+    "authz_not_weakened": "Grepped every added (+) line across src/http/*.ts for authz predicate calls (canConfigureLlmConnection, loadAdminContext, holdsAgentMgmtUpdate, checkExplainAuthz, validateAdminDelegation) — none added/altered, only comments and a combined import line. Grepped removed (-) lines for the same predicates — only an import-line removal that is really a merge into the same import statement (loadAdminContext + resolveActorSlugFromAuth from '../db/org.js'), not a deletion of the symbol. Confirmed by grep that all predicate CALL SITES (app-secret.ts:159/273/313, llm-connections.ts:201/243, llm-connection-test.ts:246, llm-config.ts:244/354, pdp-explain.ts:367/393/459) are present and unchanged downstream of the now-correctly-resolved actor/caller variable. New test file's MEMBER-persona assertions (resolvable identity, zero grant) explicitly assert a SPECIFIC 403 authz code (LLM_CONNECTION_CONFIGURE_REQUIRED / ADMIN_GATE_REJECTED) on every stricter-gated route, never 200 and never the identity-failure code — this is the load-bearing adversarial proof that the fix only changes WHO the actor is, not what they're allowed to do.",
+    "dev_mode_check": "Diffed the x-dev-user branch (the `let devUser = req.headers[...]` block and everything after it, down to `return devUser`) in all 10 files — every occurrence is unchanged context (no +/- lines inside that block). dev mode is verified byte-identical to before the fix in all 10 spots.",
+    "adversarial_reverify": "Independently re-ran the adversarial check the coder claims in pr-handoff.json: extracted a patch of only the src/http/*.ts changes (git diff dev...HEAD -- src/http/*.ts), applied `git apply -R` to revert JUST the fix while keeping the new test file, re-ran actor-resolve-seeded-persona.db.test.ts against live Postgres :55432 — all 17/17 tests failed exactly as predicted (403 ACTOR_TENANT_UNRESOLVED where 200/401 was expected). Re-applied the patch, re-ran — 17/17 green again. Confirms the new test is not tautological and genuinely detects the T-0371 recurrence class.",
+    "gates_independently_rerun": "bash ci/checks/anti-case-lock.sh -> PASS (Phase 1+2, all counts within baseline, org.ts's pre-existing e-larina/e-orlov literals confirmed untouched by this diff via git diff). bash ci/checks/http-route-auth-coverage.sh -> PASS (FF-0328-1/2/3). npx tsc --noEmit -> exit 0. npx eslint on all 10 touched src/http files -> exit 0, clean. npx vitest run (full suite) -> 274 files / 5358 tests passed, 2/10 skipped, matches pr-handoff.json's claimed numbers exactly. npx vitest run --dir ci/checks/db --no-file-parallelism ci/checks/db/actor-resolve-seeded-persona.db.test.ts -> 17/17 passed. npx vitest run src/__tests__/pdp-explain.test.ts -> 33/33 passed (31 pre-existing + 2 new).",
+    "ci_checks_frozen_thaw_precheck": "git diff dev...HEAD --stat -- ci/checks/ shows exactly one NEW file (ci/checks/db/actor-resolve-seeded-persona.db.test.ts, 520 insertions, 0 existing lines touched). No frozen check owned by another task was edited. Precheck clean.",
+    "minor_gap": "AC-7 (see R-1, nit, non-blocking) — spec promised a regression test for the already-correct PUT /api/agents/:id/llm-connection route; delivery only has a code comment. Underlying claim re-verified true by this reviewer independently. Does not affect verdict."
+  }
+}

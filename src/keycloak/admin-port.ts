@@ -63,7 +63,11 @@ export interface KeycloakUserPort {
   /**
    * Create a human user in Keycloak.
    * Sets actor_type=["human"] attribute so verifyClaims passes (FF-3).
-   * Throws HttpError(409, "EMAIL_TAKEN") if the email already exists.
+   * Throws err.code="EMAIL_TAKEN" if the email already exists, or
+   *   err.code="LOGIN_TAKEN" if the USERNAME/login already exists (T-0633
+   *   round-3 — KC returns 409 for both; the caller maps LOGIN_TAKEN to a
+   *   "login is taken" message and EMAIL_TAKEN to "email is taken"). A 409 body
+   *   that cannot be disambiguated defaults to EMAIL_TAKEN (prior behavior).
    * Throws HttpError(400, "EMAIL_INVALID") if email is not a valid email
    *   address (T-0625 fix: KC rejects a non-email `email` with its own 400 —
    *   this must surface as an honest 400, NOT be folded into
@@ -161,6 +165,25 @@ function doRequest(
 // ---------------------------------------------------------------------------
 // Admin token acquisition
 // ---------------------------------------------------------------------------
+
+/**
+ * extractKcErrorMessage — pull Keycloak's human error string out of a JSON error
+ * body ({"errorMessage":"User exists with same username"} or {"error":"..."})
+ * for the 409 username-vs-email disambiguation (T-0633 round-3). Returns "" when
+ * the body is empty or not JSON — the caller then falls back to EMAIL_TAKEN, so
+ * a parse miss NEVER changes behavior (it stays the prior default).
+ */
+function extractKcErrorMessage(body: string): string {
+  if (!body) return "";
+  try {
+    const j = JSON.parse(body) as { errorMessage?: unknown; error?: unknown };
+    if (typeof j.errorMessage === "string") return j.errorMessage;
+    if (typeof j.error === "string") return j.error;
+    return "";
+  } catch {
+    return "";
+  }
+}
 
 async function getAdminToken(cfg: KcAdminConfig): Promise<string> {
   const tokenUrl = `${cfg.baseUrl}/realms/${cfg.realm}/protocol/openid-connect/token`;
@@ -371,8 +394,20 @@ export function makeHttpKeycloakUserPort(cfg?: KcRegistrarConfig): KeycloakUserP
       });
 
       if (createResp.status === 409) {
-        const err = new Error("EMAIL_TAKEN");
-        (err as NodeJS.ErrnoException).code = "EMAIL_TAKEN";
+        // T-0633 round-3 (minor): Keycloak returns 409 for BOTH a username
+        // conflict AND an email conflict. Mapping every 409 to EMAIL_TAKEN
+        // ("email already exists") is MISLEADING when the real clash is the
+        // username/login — the owner is told to change the email while the
+        // login is what's taken. KC's 409 body carries an `errorMessage` that
+        // distinguishes them ("User exists with same username" vs "...same
+        // email"). Parse it and surface LOGIN_TAKEN for a username clash;
+        // DEFAULT to EMAIL_TAKEN when the body is absent/unparseable/ambiguous
+        // (preserves the prior behavior — never a regression on the email path).
+        const msg = extractKcErrorMessage(createResp.body).toLowerCase();
+        const isUsernameClash = msg.includes("username");
+        const code = isUsernameClash ? "LOGIN_TAKEN" : "EMAIL_TAKEN";
+        const err = new Error(code);
+        (err as NodeJS.ErrnoException).code = code;
         throw err;
       }
       // T-0625 fix (narrowed by T-0628): a real Keycloak realm rejects a

@@ -55,7 +55,7 @@ import {
 import {
   validateAdminDelegation,
 } from "../core/scoped-admin.js";
-import { loadAdminContext } from "../db/org.js";
+import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
 import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
@@ -322,12 +322,25 @@ function parseExplainBody(body: unknown): ExplainBody {
 }
 
 // ---------------------------------------------------------------------------
-// extractCaller — read X-Dev-User (matches grants.ts pattern)
+// extractCaller — mode-aware caller identity (mirrors agents.ts::extractActor
+// — T-0371/T-0633). keycloak mode resolves the JWT sub/preferred_username to
+// the REAL employee slug via resolveActorSlugFromAuth BEFORE it is used as
+// `caller` downstream (the self-query check `caller === subjectId` and the
+// admin-grant lookup in checkExplainAuthz both key on this identity — a
+// seeded persona's KC sub is a random UUID, not its slug, so comparing the
+// raw sub against a slug-shaped subjectId would spuriously fail self-query
+// and mis-resolve admin grants). dev mode (x-dev-user) unchanged.
 // ---------------------------------------------------------------------------
 
-function extractCaller(req: IncomingMessage): string {
+async function extractCaller(req: IncomingMessage, pool: pg.Pool): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -411,7 +424,7 @@ export function registerPdpExplainRoutes(router: Router, pool: pg.Pool | null): 
       throw new HttpError(503, "NO_DATABASE", "DATABASE_URL not set; explain requires live grant data");
     }
 
-    const caller = extractCaller(req);
+    const caller = await extractCaller(req, pool);
     const nowMs = Date.now();
     const tenantId = DEV_TENANT_ID;
 

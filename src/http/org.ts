@@ -211,11 +211,30 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
   router.register("GET", "/api/org", withAuth(async (req, res) => {
     let departments: OrgDepartment[];
     if (hasDb()) {
-      // Mode-aware actor resolution (T-0327): keycloak → JWT sub; dev → x-dev-user.
+      // Mode-aware actor resolution (T-0327; T-0371/T-0633 fix): keycloak mode
+      // resolves the JWT sub/preferred_username to the REAL employee slug via
+      // resolveActorSlugFromAuth — mirrors /api/my-tenant and
+      // /api/me/nav-capabilities below in this same file. Returning the raw
+      // JWT sub here (the former bug) sends an unresolvable UUID into
+      // resolveActorTenant for any seeded persona (KC sub != employee.slug),
+      // which fail-closes with 403 ACTOR_TENANT_UNRESOLVED even for a
+      // legitimate owner. dev mode (x-dev-user) is unchanged.
       const authCtx = getAuthContext(req);
       let actorSlug: string | undefined;
       if (authCtx !== undefined) {
-        actorSlug = authCtx.sub;
+        const resolved = await resolveActorSlugFromAuth(
+          getOrgPool(),
+          authCtx.sub,
+          authCtx.preferredUsername,
+        );
+        if (!resolved) {
+          throw new HttpError(
+            401,
+            "UNAUTHENTICATED",
+            "no employee matches authenticated identity",
+          );
+        }
+        actorSlug = resolved;
       } else {
         let h = req.headers[DEV_USER_HEADER];
         if (Array.isArray(h)) h = h[0];

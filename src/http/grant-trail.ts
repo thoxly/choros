@@ -22,7 +22,7 @@ import pg from "pg";
 import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { queryGrantTrail, type GrantTrailRow } from "../db/audit-grant-trail.js";
-import { getOrgPool, DEV_TENANT_ID } from "../db/org.js";
+import { getOrgPool, DEV_TENANT_ID, resolveActorSlugFromAuth } from "../db/org.js";
 
 // ---------------------------------------------------------------------------
 // Deps — injectable for tests and server.ts wiring.
@@ -218,13 +218,22 @@ function extractQueryParams(req: IncomingMessage): ParsedGrantTrailParams {
 }
 
 // ---------------------------------------------------------------------------
-// extractActor — mode-aware actor resolution (mirrors spend.ts).
-// Keycloak mode: JWT sub. Dev mode: x-dev-user header.
+// extractActor — mode-aware actor resolution (mirrors agents.ts::extractActor
+// — T-0371/T-0633: keycloak mode resolves the JWT sub/preferred_username to
+// the REAL employee slug via resolveActorSlugFromAuth before it drives tenant
+// resolution — a seeded persona's KC sub is a random UUID, not its slug).
+// Dev mode: x-dev-user header, unchanged.
 // ---------------------------------------------------------------------------
 
-function extractActor(req: IncomingMessage): string {
+async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -256,7 +265,7 @@ export function registerGrantTrailRoutes(router: Router, deps?: GrantTrailRouteD
       // T-0514: resolve actor's REAL tenant via resolveActorTenant (fail-closed).
       // Falls back to DEV_TENANT_ID only when no resolver is wired (no-DB degrade).
       // Mirrors the pattern established in registry-defs.ts (T-0177 fix) and spend.ts.
-      const actor = extractActor(req);
+      const actor = await extractActor(req, dbPool);
       const tenantId = deps?.resolveActorTenant
         ? await deps.resolveActorTenant(actor)
         : DEV_TENANT_ID;

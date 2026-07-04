@@ -562,4 +562,323 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
       await c.query('COMMIT');
     });
   });
+
+  // ---------------------------------------------------------------------
+  // T-0633 [SECURITY]: anti-collision on mint — a login that collides with an
+  // existing HUMAN employee slug (in ANY tenant) is rejected 409 LOGIN_RESERVED
+  // BEFORE any Keycloak call. This is the load-bearing block for the vertical
+  // privilege-escalation vector: without it, a holder of
+  // mgmt_object:employee:create (NOT the owner) could mint a KC user named
+  // 'e-owner' (genesis forest-owner, 16 delegable mgmt-grants + tenant-owner,
+  // migrations/026 — a kind='human' employee with NO KC user at install, so KC
+  // does not 409), log in, miss sub-first identity resolution, and be resolved
+  // to the forest-owner via the cross-tenant preferred_username → employee.slug
+  // fallback (src/db/org.ts resolveActorSlugFromAuth). The seed personas below
+  // ('e-owner', 'e-configurator') live in the always-migrated genesis tenant
+  // a0000000-…-001; 'e-orlov' is a seeded persona too. The check is cross-tenant
+  // (matches the fallback it protects), so it fires even though the actor mints
+  // into their OWN tenant.
+  // ---------------------------------------------------------------------
+  it('FF-633-1 [SECURITY]: POST /api/users with login=e-owner (genesis forest-owner slug) → 409 LOGIN_RESERVED, KC never called, no employee row', async () => {
+    const t = await registerOne('escalate-owner');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'e-owner', // collides with the genesis forest-owner slug
+        email: `escalate-owner-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Escalation Attempt',
+      },
+      t.ownerSlug,
+    );
+
+    // Rejected BEFORE any side-effect — the escalation vector is closed.
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    // KC user was NEVER created (guard runs before createHumanUser) — no orphan.
+    expect(kc.createCallCount, 'KC must not be called when the login collides').toBe(0);
+
+    // No employee row named 'e-owner' was created in the actor's own tenant.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT 1 FROM choros.employee WHERE tenant_id=$1 AND (slug='e-owner' OR login='e-owner')`,
+        [t.tenantId],
+      );
+      expect(rows).toHaveLength(0);
+      await c.query('COMMIT');
+    });
+  });
+
+  it('FF-633-2 [SECURITY]: POST /api/users with login=e-configurator (role-configurator authoring persona) → 409 LOGIN_RESERVED, KC never called', async () => {
+    const t = await registerOne('escalate-config');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'e-configurator', // seeded human persona slug (migrations/088)
+        email: `escalate-config-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Escalation Attempt 2',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it('FF-633-3 [SECURITY]: POST /api/users with login=e-orlov (any existing human employee slug) → 409 LOGIN_RESERVED, KC never called', async () => {
+    const t = await registerOne('escalate-orlov');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'e-orlov', // an existing seeded human employee slug
+        email: `escalate-orlov-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Escalation Attempt 3',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it('FF-633-4 [SECURITY]: a freshly-created account\'s login is itself reserved — a SECOND POST with the same login → 409 LOGIN_RESERVED', async () => {
+    const t = await registerOne('escalate-dup');
+    kc.reset();
+    const login = `dup-login-${Date.now()}`;
+    const email1 = `dup1-${Date.now()}@example.com`;
+
+    // First create succeeds (non-colliding login).
+    const first = await postUsers(
+      { tenant_id: t.tenantId, login, email: email1, password: 'password12345', display_name: 'First' },
+      t.ownerSlug,
+    );
+    expect(first.status, JSON.stringify(first.json)).toBe(201);
+    expect(kc.createCallCount).toBe(1);
+
+    // Note: the created employee's slug is the KC userId (a UUID), but its
+    // `login` column holds the human-readable login. Anti-collision keys on the
+    // employee *slug*, so a same-login retry is NOT blocked by THIS guard — the
+    // KC layer's own username uniqueness (EMAIL_TAKEN/username-exists) is the
+    // relevant guard for a duplicate real login. To prove the SLUG collision is
+    // what's reserved, we retry with the just-minted account's SLUG as a login.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query<{ slug: string }>(
+        `SELECT slug FROM choros.employee WHERE tenant_id=$1 AND login=$2`,
+        [t.tenantId, login],
+      );
+      expect(rows).toHaveLength(1);
+      const mintedSlug = rows[0].slug; // = KC userId (a UUID)
+      await c.query('COMMIT');
+
+      kc.reset();
+      const second = await postUsers(
+        {
+          tenant_id: t.tenantId,
+          login: mintedSlug, // colliding with an existing employee slug
+          email: `dup2-${Date.now()}@example.com`,
+          password: 'password12345',
+          display_name: 'Second',
+        },
+        t.ownerSlug,
+      );
+      expect(second.status, JSON.stringify(second.json)).toBe(409);
+      expect(second.json?.error?.code ?? second.json?.code).toBe('LOGIN_RESERVED');
+      expect(kc.createCallCount).toBe(0);
+    });
+  });
+
+  it('FF-633-5 (regression): a NON-colliding, seed-slug-adjacent login (e.g. "e-owner-external") still mints → 201; the guard is exact-match, not a prefix ban', async () => {
+    const t = await registerOne('nearmiss');
+    kc.reset();
+    // Deliberately NEAR a seed slug but not equal — must NOT be false-positived.
+    const login = `e-owner-external-${Date.now()}`;
+    const email = `nearmiss-${Date.now()}@example.com`;
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Ordinary External' },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    expect(res.json.login).toBe(login);
+    expect(kc.createCallCount).toBe(1);
+    expect(kc.created[0].spec.username).toBe(login);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0633 ROUND-3 [SECURITY] — case-collision bypass of the anti-collision
+  // guard. RE-VERIFY finding (live against KC 25.0.6): Keycloak LOWERCASES the
+  // username at creation, but the pre-round-3 guard compared byte-exact, so a
+  // MIXED-CASE login ('E-Configurator') MISSED the guard's SQL (no
+  // employee.slug == 'E-Configurator') → guard PASSED → KC stored
+  // 'e-configurator' → token preferred_username='e-configurator' → resolved to
+  // the SEED persona 'e-configurator' (role-configurator authoring) via the
+  // cross-tenant fallback. A vertical privilege escalation for ANY seed
+  // kind='human' slug lacking a KC user at install. The round-3 fix lowercases
+  // `login` BEFORE the guard and before the KC username so both sides see the
+  // one form KC stores. These tests are the load-bearing RE-VERIFY: each MUST
+  // fail on pre-round-3 code (mixed-case would 201) and pass after.
+  // ---------------------------------------------------------------------
+  it("FF-633-6 [SECURITY]: POST /api/users with login='E-Owner' (mixed-case of a seed slug) → 409 LOGIN_RESERVED, KC never called — case-collision bypass closed", async () => {
+    const t = await registerOne('escalate-owner-case');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'E-Owner', // KC would fold to 'e-owner' → the genesis forest-owner slug
+        email: `escalate-owner-case-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Case Escalation Attempt',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount, 'KC must not be called when the folded login collides').toBe(0);
+  });
+
+  it("FF-633-7 [SECURITY]: POST /api/users with login='E-Configurator' (mixed-case seed persona) → 409 LOGIN_RESERVED, KC never called", async () => {
+    const t = await registerOne('escalate-config-case');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'E-Configurator', // KC folds to 'e-configurator' (migrations/088 authoring persona)
+        email: `escalate-config-case-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Case Escalation Attempt 2',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it("FF-633-8 [SECURITY]: POST /api/users with login='eL-orLoV' (arbitrary casing of a seed slug) → 409 LOGIN_RESERVED", async () => {
+    const t = await registerOne('escalate-orlov-case');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'eL-orLoV', // folds to 'el-orlov'? no — case-only variant of 'e-orlov'
+        email: `escalate-orlov-case-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Case Escalation Attempt 3',
+      },
+      t.ownerSlug,
+    );
+
+    // 'eL-orLoV'.toLowerCase() === 'el-orlov' which is NOT a seed slug — this is
+    // a genuine near-miss, so it must MINT (201). Kept as a discriminating
+    // control: the fix folds case, it does NOT collapse distinct strings.
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    // The stored login/username is the FOLDED form (matches what KC stores).
+    expect(res.json.login).toBe('el-orlov');
+    expect(kc.createCallCount).toBe(1);
+    expect(kc.created[0].spec.username).toBe('el-orlov');
+  });
+
+  it("FF-633-9 [SECURITY]: exact mixed-case of a seed slug 'E-Orlov' → 409 LOGIN_RESERVED", async () => {
+    const t = await registerOne('escalate-orlov-exactcase');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'E-Orlov', // folds to 'e-orlov' — a seeded human employee slug
+        email: `escalate-orlov-exactcase-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Case Escalation Attempt 4',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it('FF-633-10 (policy): a legit NON-colliding MIXED-CASE login normalizes to lowercase on both the KC username and the stored/returned login (KC-honest, no divergence)', async () => {
+    const t = await registerOne('mixedcase-legit');
+    kc.reset();
+    const suffix = `${Date.now()}`;
+    const mixed = `Ivan.Petrov-${suffix}`;
+    const expectedFolded = mixed.toLowerCase();
+    const email = `ivan-${suffix}@example.com`;
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: mixed, email, password: 'password12345', display_name: 'Иван Петров' },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    // Policy DECISION (T-0633 round-3): a mixed-case login is NOT rejected — it
+    // is FOLDED to lowercase (the one form KC stores), so guard/token/storage
+    // never diverge. Response, stored column, and KC username are all the
+    // folded form.
+    expect(res.json.login).toBe(expectedFolded);
+    expect(kc.createCallCount).toBe(1);
+    expect(kc.created[0].spec.username).toBe(expectedFolded);
+    expect(kc.created[0].spec.email).toBe(email);
+
+    // The employee.login column persists the folded form (so a later login,
+    // which KC also folds, resolves to the same row).
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query<{ login: string }>(
+        `SELECT login FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, res.json.employee_id as string],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].login).toBe(expectedFolded);
+      await c.query('COMMIT');
+    });
+  });
+
+  it('FF-633-11 (minor): a KC USERNAME conflict → 409 LOGIN_TAKEN with a "login is taken" message (not the misleading "email already exists")', async () => {
+    const t = await registerOne('login-taken');
+    kc.reset();
+    kc.failOnLoginTaken = true; // next createHumanUser throws LOGIN_TAKEN (KC username clash)
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `login-clash-${Date.now()}`, // non-colliding with any SEED slug → passes anti-collision guard
+        email: `login-taken-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Login Clash',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_TAKEN');
+    // The message must point at the LOGIN, not the email.
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '').toLowerCase();
+    expect(msg).toContain('login');
+    expect(msg).not.toContain('email');
+    // KC was reached (guard passed for a non-seed login) then reported the clash.
+    expect(kc.createCallCount).toBe(1);
+  });
 });

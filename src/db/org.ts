@@ -430,73 +430,136 @@ export async function getTenantInfo(
 // slug existence test is cross-tenant by necessity (we don't yet know the tenant),
 // but it only ever RETURNS A SLUG STRING — it confers no authority on its own.
 //
-// SECURITY — impersonation vector (preferred_username fallback):
-//   Could a self-registered user set preferred_username = 'e-orlov' and, because
-//   no employee has slug == their-own-sub-UUID, fall through to the e-orlov
-//   employee and impersonate a seeded persona?  NO:
-//     - The `sub` lookup is ALWAYS performed first and short-circuits. A
-//       registered user satisfies slug == sub (T-0342), so the fallback is never
-//       reached for them — they can only ever resolve to THEIR OWN employee.
-//     - The fallback only activates when slug == sub matches NO employee. For a
-//       legitimately registered user that never happens (their employee row has
-//       slug == sub). So the fallback path is reachable only for a token whose
-//       sub matches no employee at all.
-//     - `preferred_username` defaults to the Keycloak username, and Keycloak
-//       enforces USERNAME UNIQUENESS PER REALM. The seeded personas (e-orlov,
-//       e-larina, …, e-configurator) ARE provisioned as KC users with those exact
-//       usernames, so a second user CANNOT register/claim username 'e-orlov'.
-//       Therefore an attacker cannot mint a token whose preferred_username is a
-//       seeded persona's slug — KC would reject the duplicate username at
-//       registration. The only principal that can present preferred_username
-//       'e-orlov' is the genuine e-orlov KC user.
-//   Net: the resolved slug always maps to the real employee owned by the
-//   authenticated principal. On ambiguity (neither lookup matches) we fail closed
-//   (null) rather than widen authority.
+// SECURITY — impersonation vector (preferred_username fallback) [T-0633]:
+//   Could a principal present preferred_username = 'e-owner' and, because no
+//   employee has slug == their-own-sub-UUID, fall through to the genesis
+//   forest-owner employee and escalate to super-admin?  The fallback is
+//   INTENTIONALLY minimal — a bare slug-existence lookup — and DOES NOT and
+//   CANNOT distinguish a genuine seeded persona from a forged token bearing the
+//   same preferred_username (both carry a random sub and the same username).
+//   The resolver is therefore NOT the place that closes this vector; the
+//   invariant that makes the fallback safe is enforced UPSTREAM, at the two
+//   points where a Keycloak username can be minted:
+//     - Self-registration (src/core/register.ts) and admin account creation
+//       (POST /api/users, src/http/user-mgmt.ts) both REJECT any login/username
+//       that collides with an existing HUMAN employee slug in ANY tenant
+//       (assertLoginNotSeededSlug, keyed on humanEmployeeSlugExists below). No
+//       app path can mint a KC user named 'e-owner'/'e-orlov'/'e-configurator'
+//       — so no forged token with that preferred_username can be produced
+//       through the product.
+//     - The ONE principal that may legitimately present preferred_username
+//       'e-owner' is the genuine genesis-owner KC user, which is provisioned
+//       DELIBERATELY and OUT-OF-BAND by an operator during install (it is NOT
+//       seeded by migrations and NOT mintable through any product route — see
+//       T-0633.spec.md "kc_provision_note"). That is the sole intended holder
+//       of a seeded-persona username, and the fallback resolves it correctly.
+//   HISTORY / why this comment changed: the previous version asserted that
+//   "Keycloak username uniqueness per realm" made a seeded-persona slug
+//   un-mintable. That is FALSE for the seeded personas that lack a KC user at
+//   install time — genesis 'e-owner' (migrations/026, 16 delegable mgmt-grants
+//   + tenant-owner) and 'e-configurator' (migrations/088) are kind='human'
+//   employees with NO row in config/keycloak/realm-choros.json. KC would NOT
+//   409 on creating username='e-owner', so before T-0633 a holder of
+//   mgmt_object:employee:create (NOT the owner) could mint that KC user, log
+//   in, miss sub-first, and be resolved to the forest-owner via this fallback —
+//   a vertical privilege escalation. The mint-time anti-collision guard closes
+//   it at the source; this fallback is left un-narrowed BECAUSE narrowing it
+//   (tenant-scope / allow-list / UUID-shape) would break the legitimate
+//   genesis-owner login, which depends on exactly this preferred_username→slug
+//   path (its sub is a random UUID ≠ its human-readable slug 'e-owner').
+//   Net: the resolved slug maps to the real employee of the authenticated
+//   principal precisely because no OTHER principal can obtain that username.
+//   On ambiguity (neither lookup matches) we fail closed (null), never widen.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// humanEmployeeSlugExists [T-0633] — does ANY tenant have a kind='human'
+// employee with this exact slug? Cross-tenant BYPASSRLS EXISTENCE check on
+// choros.employee.slug (no tenant GUC needed — mirrors resolveActorTenant's
+// query pattern; the tenant is scoped later on the resolved slug). Returns a
+// boolean only; confers no authority on its own.
+//
+// This is THE single canonical query for "is this string already a human
+// employee slug?", shared by two callers so the security property has ONE
+// implementation, not two that can drift:
+//   (1) resolveActorSlugFromAuth (identity resolution — the sub-first /
+//       preferred_username fallback).
+//   (2) the mint-time anti-collision guard (src/core/register.ts,
+//       src/http/user-mgmt.ts) that rejects a login/username colliding with a
+//       seeded persona's slug (e.g. 'e-owner') BEFORE creating the Keycloak
+//       user — the upstream invariant that keeps the fallback in (1) safe.
+//
+// SECURITY — kind='human' restriction (T-0372): agents authenticate via their
+// Keycloak client_id (service-account JWT), never via preferred_username.
+// Restricting to kind='human' ensures a forged/stolen preferred_username can
+// never resolve to a no-KC-user agent or seed slug (e.g. 'config-agent-seed').
+// The anti-collision caller intentionally uses the SAME kind='human' filter:
+// human logins collide with human slugs; agent slugs are a disjoint namespace
+// gated separately (agent_card.kc_client_id).
+//
+// SECURITY — BYPASSRLS-POOL INVARIANT [T-0633 round-3, P1]: this query runs
+// CROSS-TENANT with NO tenant GUC set (the tenant is unknown at identity time).
+// It therefore REQUIRES a pool whose role can see choros.employee rows without
+// a tenant GUC — i.e. a BYPASSRLS role (choros_migrator). Under the NOBYPASSRLS
+// runtime role (choros_app) with no GUC, the employee-isolation RLS policy
+// filters ALL rows out, so EXISTS returns false for EVERY slug — which SILENTLY
+// turns BOTH callers into a no-op: (1) the anti-collision guard would stop
+// rejecting a colliding 'e-owner' login (the T-0633 escalation re-opens), and
+// (2) the identity resolver's preferred_username fallback returns null for
+// legitimate seed personas (the genesis owner can no longer log in). The
+// identity-resolution pool wired in server.ts MUST stay BYPASSRLS-class; do NOT
+// point it at choros_app. .env.prod.example carries the operator warning and
+// ci/checks/anti-collision-guard-rls-invariant.db.test.ts pins the behavior
+// (guard SEES a seed slug under migrator, is BLIND under app).
+// ---------------------------------------------------------------------------
+export async function humanEmployeeSlugExists(
+  pool: pg.Pool,
+  slug: string,
+): Promise<boolean> {
+  if (!slug) return false;
+  const client = await pool.connect();
+  try {
+    return await humanEmployeeSlugExistsOnClient(client, slug);
+  } finally {
+    client.release();
+  }
+}
+
+async function humanEmployeeSlugExistsOnClient(
+  client: pg.PoolClient,
+  slug: string,
+): Promise<boolean> {
+  const { rows } = await client.query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM choros.employee WHERE slug = $1 AND kind = 'human'
+     ) AS exists`,
+    [slug],
+  );
+  return rows.length > 0 && rows[0]!.exists === true;
+}
 
 export async function resolveActorSlugFromAuth(
   pool: pg.Pool,
   sub: string,
   preferredUsername: string | undefined,
 ): Promise<string | null> {
-  // Existence check helper: does ANY tenant have a HUMAN employee with this slug?
-  // Cross-tenant BYPASSRLS — mirrors resolveActorTenant (no tenant GUC; the
-  // tenant is scoped later by resolveActorTenant on the returned slug).
-  //
-  // SECURITY — kind='human' restriction (T-0372):
-  //   Agents authenticate via their Keycloak client_id (service-account JWT), never
-  //   via preferred_username. Restricting to kind='human' ensures that a forged or
-  //   stolen preferred_username can never resolve to a no-KC-user agent or seed slug
-  //   (e.g. 'config-agent-seed', which holds authoring_draft grants). All registered
-  //   users (T-0342 invariant: slug == sub) and seeded human personas (e-orlov,
-  //   e-larina, e-configurator…) are kind='human', so this restriction is non-breaking
-  //   for the existing population while closing the agent-impersonation vector.
-  async function employeeSlugExists(
-    client: pg.PoolClient,
-    slug: string,
-  ): Promise<boolean> {
-    const { rows } = await client.query<{ exists: boolean }>(
-      `SELECT EXISTS (
-         SELECT 1 FROM choros.employee WHERE slug = $1 AND kind = 'human'
-       ) AS exists`,
-      [slug],
-    );
-    return rows.length > 0 && rows[0]!.exists === true;
-  }
-
   const client = await pool.connect();
   try {
     // 1. sub-first: registered-user invariant (slug == sub). Short-circuits so a
     //    registered user NEVER reaches the preferred_username fallback.
-    if (sub && (await employeeSlugExists(client, sub))) {
+    if (sub && (await humanEmployeeSlugExistsOnClient(client, sub))) {
       return sub;
     }
     // 2. preferred_username fallback: seeded persona whose KC sub ≠ slug.
     //    Skipped when it equals sub (same lookup → same miss) or is empty.
+    //    SAFE ONLY because the mint-time anti-collision guard (see
+    //    humanEmployeeSlugExists doc) prevents any product path from creating a
+    //    KC user whose username == a seeded persona slug — so no forged token
+    //    with such a preferred_username can be produced. [T-0633]
     if (
       preferredUsername &&
       preferredUsername !== sub &&
-      (await employeeSlugExists(client, preferredUsername))
+      (await humanEmployeeSlugExistsOnClient(client, preferredUsername))
     ) {
       return preferredUsername;
     }
