@@ -57,6 +57,7 @@ import {
   type FileMetaSource,
   type FileRecordResolver,
 } from "../core/file-attachment.js";
+import { makeHandle, type ResourceRef } from "../core/object-handle.js";
 import type { PgFileStore } from "../core/postgres/pgFileStore.js";
 
 // ---------------------------------------------------------------------------
@@ -211,6 +212,41 @@ function sha256(body: Uint8Array): string {
 }
 
 // ---------------------------------------------------------------------------
+// loadRecordRegistryId — the owner record's registry_id, tenant-scoped.
+//
+// T-0620: the upload write pre-check builds a `record` ResourceRef, which needs
+// the owner record's registry_id (the PDP keys the record scope on recordId;
+// registryId is the structural sibling the ref type requires). Read it under a
+// tenant tx (SET LOCAL choros.tenant_id + RLS). Returns null when the record is
+// not visible in this tenant (cross-tenant / absent) → the caller treats that as
+// a deny WITHOUT inserting any file row (no orphan, no existence leak).
+// ---------------------------------------------------------------------------
+
+async function loadRecordRegistryId(
+  pool: pg.Pool,
+  tenantId: string,
+  recordId: string,
+): Promise<string | null> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const { rows } = await client.query<{ registry_id: string }>(
+      `SELECT registry_id FROM choros.record WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+      [tenantId, recordId],
+    );
+    await client.query("COMMIT");
+    return rows.length > 0 ? rows[0]!.registry_id : null;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // registerFileRoutes
 // ---------------------------------------------------------------------------
 
@@ -228,13 +264,17 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
   //             X-File-Name  → original filename (defaults to "upload")
   //   Returns : 201 { fileId, versionId, versionNo }
   //
-  // Atomicity: insertFile + addVersion (which calls insertVersion +
-  // setCurrentVersion) run inside ONE withTenantTx. If addVersion fails
-  // (PDP deny, S3 put error, DB error), ROLLBACK undoes the file row too.
-  // The S3 put (store.put) runs inside the tx fn, so an S3 failure rolls
-  // back DB side; an S3 success followed by DB failure leaves an orphaned
-  // object on disk/S3 — acceptable as idempotent orphan (no metadata row
-  // visible to users). This is the standard behaviour for the pattern.
+  // Orphan-free authz (T-0620): the write authority is decided BEFORE any DB
+  // write (loadRecordRegistryId → resolver.resolveRecordOp(record, "update")).
+  // On deny → 403 and insertFile is NEVER called, so no orphan choros.file row
+  // can exist (before T-0620 the deny fired INSIDE addVersion, AFTER insertFile
+  // had already autocommitted on its own PgFileStore connection — the tx's
+  // ROLLBACK could not undo it, leaving a current_version=NULL orphan). On allow,
+  // insertFile + addVersion run and, on the success path, commit file + version
+  // together. The S3 put (store.put) happens inside addVersion; an S3 success
+  // followed by a DB write failure leaves an orphaned OBJECT on disk/S3 (no
+  // metadata row) — addVersion best-effort erases it, and a server-side S3
+  // lifecycle GC is the production backstop (see core/file-attachment.ts).
   // -------------------------------------------------------------------------
   router.register(
     "POST",
@@ -281,7 +321,60 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
         const fileId = randomUUID();
         const now = Date.now();
 
-        // Run insertFile + addVersion atomically inside a single tenant tx.
+        // T-0620 [P0/orphan-fix]: AUTHORIZE THE WRITE **BEFORE** insertFile.
+        //
+        // Why not rely on addVersion's own deny to roll back: PgFileStore.insertFile
+        // / insertVersion / setCurrentVersion each run on their OWN pooled connection
+        // (this.pool.query), NOT on the withTenantTx client — so they autocommit
+        // independently and the tx's ROLLBACK cannot undo the insertFile row. A deny
+        // that fires INSIDE addVersion (after insertFile) therefore left an orphan
+        // choros.file row (current_version=NULL, 0 versions) regardless of any throw.
+        //
+        // The fix: decide the write authority up front, on the OWNER RECORD, via the
+        // SAME resolver addVersion would consult (authorizeFileOp maps upload→`update`
+        // on the record). On deny we return 403 and NEVER call insertFile — zero
+        // orphan by construction. On allow we proceed; addVersion re-checks the same
+        // authority (belt-and-suspenders) and, on the success path, both agree.
+        const reg = await loadRecordRegistryId(pool, tenantId, recordId);
+        if (reg === null) {
+          // Record not visible in this tenant → treat as a deny (no leak, no insert).
+          res.statusCode = 403;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: { code: "FORBIDDEN", reason: "not_found" } }));
+          return;
+        }
+        const recordRef: ResourceRef = {
+          kind: "record",
+          tenantId,
+          registryId: reg,
+          recordId,
+        };
+        let writeHandle;
+        try {
+          writeHandle = makeHandle(recordRef, tenantId);
+        } catch {
+          // makeHandle throws only on a cross-tenant ref (unreachable here — tenant
+          // is the actor's own) — treat defensively as a deny, no insert.
+          res.statusCode = 403;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: { code: "FORBIDDEN", reason: "cross_tenant" } }));
+          return;
+        }
+        // Upload = a `update` op on the owner record (authorizeFileOp mapping).
+        const writeVerdict = await resolver.resolveRecordOp(
+          writeHandle,
+          { tenantId, subjectId: actor },
+          "update",
+        );
+        if (writeVerdict.denied) {
+          res.statusCode = 403;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: { code: "FORBIDDEN", reason: writeVerdict.reason } }));
+          return;
+        }
+
+        // Authorized. Now insert the file + first version. (withTenantTx sets the
+        // tenant GUC; the PgFileStore ops are tenant-scoped by explicit tenant_id.)
         const result = await withTenantTx(pool, tenantId, async (_client) => {
           // Insert the choros.file metadata row (current_version NULL until addVersion).
           await fileStore.insertFile({
@@ -299,11 +392,11 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
 
           // addVersion internally calls store.put (FsObjectStore: write to disk;
           // S3: PutObject) BEFORE the DB insertVersion row is committed. If the
-          // subsequent DB write or the outer COMMIT fails, addVersion performs a
-          // best-effort erase of the uploaded object (honest-cleanup, T-0521 п.3).
-          // A best-effort erase after a network failure may still leave an orphan;
-          // a server-side S3 lifecycle GC is the backstop for production (see
-          // addVersion in core/file-attachment.ts for the full note).
+          // subsequent DB write fails, addVersion best-effort erases the uploaded
+          // object (honest-cleanup, T-0521 п.3); a server-side S3 lifecycle GC is
+          // the production backstop (see addVersion in core/file-attachment.ts).
+          // The authority was already granted above; addVersion re-checks it (same
+          // resolver) and agrees on the success path.
           const vResult = await addVersion(
             {
               resolver,
@@ -316,11 +409,14 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
             new Uint8Array(bodyBuf),
             { mime },
           );
-
           return vResult;
         });
 
         if (result.denied) {
+          // Defensive: the pre-check allowed but addVersion denied (should not happen
+          // on the success path). Return 403 honestly — the file row's orphan window
+          // is closed by the pre-check above (deny never reaches insertFile in the
+          // normal path). This branch only triggers on a race/limit inside addVersion.
           res.statusCode = 403;
           res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: { code: "FORBIDDEN", reason: result.reason } }));

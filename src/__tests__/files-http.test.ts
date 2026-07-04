@@ -63,7 +63,16 @@ class FakePoolClient {
     this.rowSets = rowSets;
   }
 
-  async query(_sql: string, _params?: unknown[]): Promise<FakeQueryResult> {
+  async query(sql: string, _params?: unknown[]): Promise<FakeQueryResult> {
+    // T-0620: the upload write pre-check reads the owner record's registry_id
+    // (loadRecordRegistryId in files.ts) before authorizing. Answer that lookup
+    // SQL-awarely so the fake pool models a record that IS visible in the tenant
+    // (the resolver — allow/deny — is what these tests actually exercise). The
+    // cross-tenant test overrides tenantForActor; the record still resolves and
+    // the DENY resolver is what returns cross_tenant, mirroring production.
+    if (/registry_id\s+FROM\s+choros\.record/i.test(sql)) {
+      return { rows: [{ registry_id: REGISTRY_ID }], rowCount: 1 };
+    }
     const rows = (this.rowSets[this.queryIndex] ?? []) as unknown[];
     this.queryIndex++;
     return { rows, rowCount: rows.length };
