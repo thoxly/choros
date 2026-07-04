@@ -175,20 +175,6 @@ function blockedAuditEvent(
 // shape). Enqueued in the SAME tx; delivered out-of-band by makeExternalTaskDeliver
 // → completeTask in Flowable (which still runs evaluateGatewayAtTriage for the DMN
 // seam, so the gateway late-compute is preserved — ADR §8 risk 3).
-//
-// T-0644 (P0/столп4) — IMPORTANT: `workerId` here is the AGENT DISPATCHER's own
-// identity (deps.workerId in agent-dispatch-loop.ts, default
-// "choros-agent-dispatcher") — the identity that holds the choros.job ROW LOCK
-// (a Postgres-level lock, completely separate from Flowable's external-task
-// lock). It is carried into `payload.workerId` for audit/observability ONLY
-// ("who/what decided this Choros-side outcome"). makeExternalTaskDeliver
-// (externalTaskBridge.ts) does NOT read this field when calling Flowable's
-// completeTask/failTask — the Flowable lock is always held by the BRIDGE
-// (fetchAndLock's own workerId), and the bridge uses its own configured
-// bridgeWorkerId for the Flowable call regardless of what a job-outcome
-// producer (this dispatcher, or any future producer) writes here. Do not
-// repurpose this field as a Flowable-lock identity — see the doc-comment on
-// makeExternalTaskDeliver for the full mismatch this separation prevents.
 // ---------------------------------------------------------------------------
 
 async function enqueueTaskCompleted(
