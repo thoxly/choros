@@ -151,6 +151,8 @@ export const ZONES = [
       // Исполнители
       { id: "org",               label: "Оргструктура",       icon: "org",       zone: "admin", subgroup: "Исполнители",        audience: "admin", capability: "mgmt_object:*", frequency: "rare", order: 1, screen: true, status: "live" },
       { id: "agents",            label: "Агенты",             icon: "org",       zone: "admin", subgroup: "Исполнители",        audience: "admin", capability: "mgmt_object:*", frequency: "rare", order: 2, screen: true, status: "live" },
+      // T-0583: user accounts (human logins) — "нанять человека не сложнее агента".
+      { id: "users",             label: "Пользователи",       icon: "org",       zone: "admin", subgroup: "Исполнители",        audience: "admin", capability: "mgmt_object:*", frequency: "rare", order: 3, screen: true, status: "live" },
       // Доступ (T-0538): операционный просмотр грантов (overview + журнал).
       // Ярлык изменён с «Права и доступ» → «Доступ» (scope сужен после выноса справочников в 'reference').
       { id: "rights",            label: "Доступ",             icon: "rights",    zone: "admin", subgroup: "Доступ",             audience: "admin", capability: "mgmt_object:*", frequency: "rare", order: 3, screen: true, status: "live" },

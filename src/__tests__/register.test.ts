@@ -416,6 +416,9 @@ describe("R-2 — createHumanUser: userId from Location header; compensation sti
       async deleteUser(_userId: string) {
         // no-op for this test (no DB failure path)
       },
+      async setUserEnabled(_userId: string, _enabled: boolean) {
+        // not exercised by this test (T-0583 addition to the port interface)
+      },
     };
 
     const routerL = new Router();
@@ -459,6 +462,9 @@ describe("R-2 — createHumanUser: userId from Location header; compensation sti
       },
       async deleteUser(userId: string) {
         deleteCalledWithId = userId;
+      },
+      async setUserEnabled(_userId: string, _enabled: boolean) {
+        // not exercised by this test (T-0583 addition to the port interface)
       },
     };
 

@@ -37,6 +37,8 @@ import FormsScreen from '../screens/screen-forms.jsx';
 import NotificationsScreen from '../screens/screen-notifications.jsx';
 import ProcessEditorScreen from '../screens/screen-process-editor.jsx';
 import AgentsScreen from '../screens/screen-agents.jsx';
+// T-0583: user accounts (human logins) management — /users
+import UsersScreen from '../screens/screen-users.jsx';
 import RecordDetailScreen from '../screens/screen-record-detail.jsx';
 import AssistantScreen from '../screens/screen-assistant.jsx';
 // T-0382 (D5): LLM connection screen — per-tenant BYO LLM configuration.
@@ -107,6 +109,8 @@ const SCREEN_META = {
   // Администрирование
   org:   { crumb: ["Администрирование", "Оргструктура"] },
   agents: { crumb: ["Администрирование", "Агенты"] },
+  // T-0583: user accounts (human logins) — create/list/deactivate.
+  users: { crumb: ["Администрирование", "Пользователи"] },
   // T-0538: «Права и доступ» → «Доступ» (scope сужен после выноса справочников).
   rights: { crumb: ["Администрирование", "Доступ"] },
   // T-0538: Справочники — новая точка входа (id='reference', path=/rights/criticality).
@@ -1165,6 +1169,8 @@ function AppShell() {
             <Route path="/processes/:instanceId" element={<ProcessInstanceScreen />} />
             {/* T-0271: agents list + hire + LLM secret-handle bind */}
             <Route path="/agents" element={<AgentsScreen />} />
+            {/* T-0583: user accounts (human logins) — create/list/deactivate */}
+            <Route path="/users" element={<UsersScreen />} />
             <Route path="/notifications" element={<NotificationsScreen />} />
             <Route path="/audit" element={<AuditScreen />} />
             <Route path="/rights" element={<RightsScreen initialRole={rightsFocus} />} />
