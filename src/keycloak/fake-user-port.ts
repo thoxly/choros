@@ -10,18 +10,24 @@
  *   failAfterCreate — createHumanUser succeeds but caller's DB then fails;
  *                     deleteUser is called for orphan cleanup (FF-2).
  *
- * FAKE-FIDELITY (T-0625 fix): a real Keycloak realm REJECTS createHumanUser
- * when `spec.email` (= username, per KcHumanUserSpec) is not a valid email
- * address — it returns 400 error-invalid-email, which the live adapter
- * (admin-port.ts makeHttpKeycloakUserPort) maps to EMAIL_INVALID. Before this
- * fix, this fake did NOT validate the email shape at all, so
+ * FAKE-FIDELITY (T-0625 fix, narrowed by T-0628): a real Keycloak realm
+ * REJECTS createHumanUser when `spec.email` is not a valid email address — it
+ * returns 400 error-invalid-email, which the live adapter (admin-port.ts
+ * makeHttpKeycloakUserPort) maps to EMAIL_INVALID. Before the T-0625 fix, this
+ * fake did NOT validate the email shape at all, so
  * `createHumanUser({username: 'plain-login', email: 'plain-login', ...})`
  * succeeded here while a real KC realm would 400 — a fake/real fidelity gap
  * that let the T-0583 non-email-login regression (503 on the real stand) ship
- * green through unit tests (T-0625 LIVE_PROOF root cause). This fake now
- * enforces the SAME email-format check the live port enforces, throwing the
- * same EMAIL_INVALID error code, so "create with a non-email login" is red in
- * the unit suite without needing a live Keycloak.
+ * green through unit tests (T-0625 LIVE_PROOF root cause). This fake enforces
+ * the SAME email-format check the live port enforces on `spec.email`.
+ *
+ * T-0628 fix: the ORIGINAL T-0625 fake also required `spec.username` to be
+ * email-shaped. That mirrored this codebase's OWN choice at the time (caller
+ * passed the same value for both fields) — it is not a real Keycloak realm
+ * constraint (config/keycloak/realm-choros.json sets no
+ * registrationEmailAsUsername/email-only flag), and T-0628's own spec
+ * requires `username`/`login` to stay free-form. This fake now validates
+ * ONLY `spec.email`, matching the live port and a real KC realm.
  *
  * This file lives OUTSIDE src/core/ so the live adapter and the fake are both
  * injectable substitutes — neither bleeds into the pure core (FF-HIRE-6).
@@ -90,15 +96,18 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
   async createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }> {
     this.createCallCount++;
 
-    // T-0625 fix (fake-fidelity): a real KC realm validates the REQUEST BODY
-    // SHAPE (is username/email a valid email?) before it ever gets to
-    // per-realm-state outcomes like "username already taken" or being
+    // T-0625 fix (fake-fidelity), narrowed by T-0628: a real KC realm
+    // validates the REQUEST BODY SHAPE (is `email` a valid email?) before it
+    // ever gets to per-realm-state outcomes like "already taken" or being
     // unreachable. This check runs FIRST, unconditionally — NOT gated by the
     // failOnCreate/failOnAuth one-shot switches below — so a caller passing a
-    // non-email login is rejected the same way regardless of what other
+    // non-email `email` is rejected the same way regardless of what other
     // failure the test also armed, matching a real Keycloak realm's own
-    // request-validation-before-state-check ordering.
-    if (!FAKE_EMAIL_RE.test(spec.email) || !FAKE_EMAIL_RE.test(spec.username)) {
+    // request-validation-before-state-check ordering. T-0628: `username` is
+    // NOT checked here — a real KC realm (this product's realm config) does
+    // not require the username to be email-shaped, and callers may now pass a
+    // free-form login distinct from email.
+    if (!FAKE_EMAIL_RE.test(spec.email)) {
       const err = new Error("EMAIL_INVALID");
       (err as NodeJS.ErrnoException).code = "EMAIL_INVALID";
       throw err;

@@ -200,6 +200,7 @@ _dc_mig123_failed=0                                                             
 _dc_mig124_failed=0                                                                # T0619-DC-MIG124-GUARD track when 124 triggers the FF-DC7 fail
 _dc_mig125_failed=0                                                                # T0583-DC-MIG125-GUARD track when 125 triggers the FF-DC7 fail
 _dc_mig126_failed=0                                                                # T0625-DC-MIG126-GUARD track when 126 triggers the FF-DC7 fail
+_dc_mig127_failed=0                                                                # T0628-DC-MIG127-GUARD track when 127 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -296,6 +297,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/126_employee_login.sql" ]]; then              # T0625-DC-MIG126-GUARD
       _dc_mig126_failed=1                                                     # T0625-DC-MIG126-GUARD
     fi                                                                        # T0625-DC-MIG126-GUARD
+    # Track specifically when 127 triggers this FAIL (and nothing else).     # T0628-DC-MIG127-GUARD
+    if [[ "${m}" == "migrations/127_employee_email.sql" ]]; then               # T0628-DC-MIG127-GUARD
+      _dc_mig127_failed=1                                                     # T0628-DC-MIG127-GUARD
+    fi                                                                        # T0628-DC-MIG127-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -908,6 +913,32 @@ if [[ "${_dc_mig126_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0625-employee-login]: migration 126_employee_login.sql is a single additive ADD COLUMN (employee.login text NULL, no CREATE TABLE/RLS/confirmed2_by) — does NOT touch dual-control authority domain — relief granted" # T0625-DC-MIG126-GUARD
   fi                                                                          # T0625-DC-MIG126-GUARD
 fi                                                                            # T0625-DC-MIG126-GUARD
+# T-0628: additive relief for migration 127_employee_email.sql — a single      # T0628-DC-MIG127-GUARD
+# ADDITIVE ADD COLUMN (choros.employee.email text NULL, the separate required  # T0628-DC-MIG127-GUARD
+# email field POST /api/users now stores distinct from `login`, so a non-email # T0628-DC-MIG127-GUARD
+# login is no longer forced into the KC email field). No CREATE/DROP TABLE,    # T0628-DC-MIG127-GUARD
+# no RLS/POLICY change (employee inherits its existing RLS policy unchanged), # T0628-DC-MIG127-GUARD
+# no confirmed2_by — the T-0044 dual-control invariant (031 is the ONLY       # T0628-DC-MIG127-GUARD
+# dual-control migration; confirmed2_by stays derived-additive) is UNTOUCHED. # T0628-DC-MIG127-GUARD
+# Like the sibling reliefs, this cancels ONLY the _dc_mig127_failed increment  # T0628-DC-MIG127-GUARD
+# (set exclusively in the loop above when 127 is the unexpected file), scoped # T0628-DC-MIG127-GUARD
+# so it cannot absorb any other migration's FF-DC7 failure.                   # T0628-DC-MIG127-GUARD
+_dc_mig127_stem="migrations/127_employee_email.sql"                           # T0628-DC-MIG127-GUARD
+if [[ "${_dc_mig127_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig127_stem}"; then # T0628-DC-MIG127-GUARD
+  _dc_mig127_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig127_stem}" 2>/dev/null || true)" # T0628-DC-MIG127-GUARD
+  _dc_mig127_bad=0                                                            # T0628-DC-MIG127-GUARD
+  if echo "${_dc_mig127_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0628-DC-MIG127-GUARD
+    _dc_mig127_bad=1                                                          # T0628-DC-MIG127-GUARD introduces DDL/RLS
+  fi                                                                          # T0628-DC-MIG127-GUARD
+  if echo "${_dc_mig127_content}" | grep -iqE "confirmed2_by"; then           # T0628-DC-MIG127-GUARD
+    _dc_mig127_bad=1                                                          # T0628-DC-MIG127-GUARD touches confirmed2_by invariant
+  fi                                                                          # T0628-DC-MIG127-GUARD
+  if [[ "${_dc_mig127_bad}" -eq 0 ]]; then                                   # T0628-DC-MIG127-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                  # T0628-DC-MIG127-GUARD cancel false-red
+    _dc_mig127_failed=0                                                       # T0628-DC-MIG127-GUARD
+    echo "PASS [FF-DC7-T0628-employee-email]: migration 127_employee_email.sql is a single additive ADD COLUMN (employee.email text NULL, no CREATE TABLE/RLS/confirmed2_by) — does NOT touch dual-control authority domain — relief granted" # T0628-DC-MIG127-GUARD
+  fi                                                                          # T0628-DC-MIG127-GUARD
+fi                                                                            # T0628-DC-MIG127-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

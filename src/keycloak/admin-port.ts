@@ -45,7 +45,10 @@ import type { KeycloakAdminPort, KcClientSpec } from "../core/agent-hire.js";
 
 /** Specification for creating a human user in Keycloak (T-0342 / FF-3). */
 export interface KcHumanUserSpec {
-  username: string;     // = email
+  // T-0628: `username` is free-form (a non-email login, e.g. `ivan.petrov`,
+  // is legitimate) and DISTINCT from `email` — the caller (user-mgmt.ts) no
+  // longer duplicates the same value into both fields (T-0583/T-0625 history).
+  username: string;
   email: string;
   password: string;
   actorType: "human";  // MANDATORY: verifyClaims checks for actor_type (FF-3)
@@ -60,11 +63,12 @@ export interface KeycloakUserPort {
   /**
    * Create a human user in Keycloak.
    * Sets actor_type=["human"] attribute so verifyClaims passes (FF-3).
-   * Throws HttpError(409, "EMAIL_TAKEN") if username/email already exists.
-   * Throws HttpError(400, "EMAIL_INVALID") if username/email is not a valid
-   *   email address (T-0625 fix: KC rejects a non-email username/email with
-   *   its own 400 — this must surface as an honest 400, NOT be folded into
-   *   AUTH_UNAVAILABLE/503 like every other non-201/409 status).
+   * Throws HttpError(409, "EMAIL_TAKEN") if the email already exists.
+   * Throws HttpError(400, "EMAIL_INVALID") if email is not a valid email
+   *   address (T-0625 fix: KC rejects a non-email `email` with its own 400 —
+   *   this must surface as an honest 400, NOT be folded into
+   *   AUTH_UNAVAILABLE/503 like every other non-201/409 status). T-0628:
+   *   `username` is free-form and NOT subject to this check.
    * Throws HttpError(503, "AUTH_UNAVAILABLE") if KC is unreachable.
    */
   createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }>;
@@ -371,16 +375,18 @@ export function makeHttpKeycloakUserPort(cfg?: KcRegistrarConfig): KeycloakUserP
         (err as NodeJS.ErrnoException).code = "EMAIL_TAKEN";
         throw err;
       }
-      // T-0625 fix: a real Keycloak realm rejects a non-email username/email
-      // with 400 error-invalid-email. Before this fix, that 400 fell through
-      // to the generic "createResp.status !== 201" branch below and was
-      // mapped to AUTH_UNAVAILABLE — the caller (POST /api/users) then
-      // returned 503 "account service unavailable" for what is actually a
-      // client validation error. Surface it honestly as EMAIL_INVALID (400)
-      // instead. (In practice user-mgmt.ts now validates the email format
-      // BEFORE calling this port, so a real KC realm should never reach this
-      // branch in the product's own flow — this is defense-in-depth for any
-      // other caller of the port and for KC-side validation drift.)
+      // T-0625 fix (narrowed by T-0628): a real Keycloak realm rejects a
+      // non-email `email` with 400 error-invalid-email. Before this fix, that
+      // 400 fell through to the generic "createResp.status !== 201" branch
+      // below and was mapped to AUTH_UNAVAILABLE — the caller (POST
+      // /api/users) then returned 503 "account service unavailable" for what
+      // is actually a client validation error. Surface it honestly as
+      // EMAIL_INVALID (400) instead. (In practice user-mgmt.ts now validates
+      // the email format BEFORE calling this port, so a real KC realm should
+      // never reach this branch in the product's own flow — this is
+      // defense-in-depth for any other caller of the port and for KC-side
+      // validation drift. `username` is free-form since T-0628 and is not
+      // expected to trigger this branch.)
       if (createResp.status === 400) {
         const err = new Error("EMAIL_INVALID");
         (err as NodeJS.ErrnoException).code = "EMAIL_INVALID";
