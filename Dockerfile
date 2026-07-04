@@ -19,6 +19,13 @@ COPY web/package*.json ./
 # Retry transient network failures (host npmjs resolution flakes over IPv6 — T-0502).
 RUN for a in 1 2 3 4 5 6; do NODE_OPTIONS=--dns-result-order=ipv4first npm ci --maxsockets=3 --fetch-retries=5 --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=120000 && exit 0; echo "npm ci attempt $a failed; retry in 12s"; sleep 12; done; exit 1
 COPY web/ ./
+# Shared pure-core modules the web bundle imports directly (single-source: UI==server,
+# BUG-016). web/src/screens/{apps-schema,records-form}.js import ../../../src/core/formula-*.ts;
+# the web-builder stage is otherwise isolated to web/, so those specifiers would not resolve
+# (D-056 integration honesty — this stage must mirror what the full-tree local build sees).
+# src/core is a self-contained, zero-dep cluster (verified: web bundles it standalone), so
+# copying it in does not drag server-only code into the browser bundle.
+COPY src/core/ /app/src/core/
 RUN npm run build
 
 # ---------------------------------------------------------------------------
