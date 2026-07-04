@@ -414,17 +414,19 @@ export function registerProcessDefsRoutes(
     // additive: hand-authored bodies and explicit roles are preserved; a diagram with
     // no timer events is returned unchanged. Runs BEFORE lint so the linter validates
     // the materialised body.
-    const timeredBpmnXml = mapTimerEscalation(lanedBpmnXml);
+    const bpmnXml = mapTimerEscalation(lanedBpmnXml);
 
-    // T-0460 [D8-R5]: agentTask → live agent-step external task. After lanes + timers,
-    // convert each authored agent serviceTask (choros:executorType="agent") into a
-    // Flowable external task on the agent-step topic and stamp the dispatcher variables
-    // (agentEmployeeId←choros:agentRef, roleId, stepName, read/write fields) so the
-    // already-wired D4 dispatcher fires on it. Without this the bridge never enqueues an
-    // agent job. Idempotent + additive: a serviceTask already external is left untouched,
-    // and a diagram with no agent tasks is returned unchanged. Runs BEFORE lint so the
-    // agent_task_incoherent coherence guard validates the materialised external shape.
-    const bpmnXml = mapAgentTaskToExternal(timeredBpmnXml);
+    // T-0635 [P0-4 / LIVE_PROOF T-0586] fix: mapAgentTaskToExternal is DELIBERATELY
+    // NOT applied here. It used to run at draft-save time and its transformed output
+    // (carrying flowable:type/flowable:topic/<flowable:field> — attributes the
+    // modeler's choros-only moddle extension does not know) was persisted straight
+    // into choros.process_definition.bpmn_xml. The next time the SAME draft was
+    // opened in the modeler, importXML() choked on the unrecognised flowable:field
+    // extension content ("unparsable content") — publishing silently corrupted the
+    // draft. The draft must stay the AUTHOR's XML (choros:* only); the agent-step
+    // externalisation is a publish-time-only concern now, applied in
+    // publishProcessByKey (right before lint/deploy) on a local variable that is
+    // never written back to bpmn_xml. See agent-task-external-mapper.ts header.
 
     // T-0377: resolve the final key — explicit or auto-generated.
     let resolvedKey: string;
@@ -663,6 +665,21 @@ export async function publishProcessByKey(
     return { status: "not_found" };
   }
 
+  // T-0635 [P0-4]: agentTask → live agent-step external task, applied HERE
+  // (publish time) instead of at draft-save time. Convert each authored agent
+  // serviceTask (choros:executorType="agent") into a Flowable external task on the
+  // agent-step topic + stamp the dispatcher variables (agentEmployeeId←choros:agentRef,
+  // roleId, stepName, read/write fields), so the already-wired D4 dispatcher fires on
+  // it — same transform as before, just relocated. Idempotent + additive: a
+  // serviceTask already external is left untouched, a diagram with no agent tasks is
+  // returned unchanged. publishXml is a LOCAL variable used for lint/deploy ONLY —
+  // it is NEVER persisted back onto row.bpmn_xml / the process_definition row, so the
+  // draft the modeler re-opens stays the AUTHOR's XML (choros:* only). Previously this
+  // ran at draft-save time and its output (carrying flowable:* the modeler's
+  // choros-only moddle extension cannot parse back) was persisted straight into the
+  // draft, so re-opening a published draft failed with "unparsable content".
+  const publishXml = mapAgentTaskToExternal(row.bpmn_xml);
+
   // Step 2: Lint — fail-closed gate (T-0027). Load published rule tables (advisory).
   let ruleTables: import("../core/dmn-middle.js").DmnRuleTable[] | undefined;
   try {
@@ -678,7 +695,7 @@ export async function publishProcessByKey(
     ruleTables = undefined;
   }
 
-  const lintResult = lintBpmn(row.bpmn_xml, ruleTables !== undefined ? { ruleTables } : undefined);
+  const lintResult = lintBpmn(publishXml, ruleTables !== undefined ? { ruleTables } : undefined);
   if (!lintResult.ok) {
     return { status: "lint_failed", violations: lintResult.violations };
   }
@@ -689,7 +706,7 @@ export async function publishProcessByKey(
   // pure transform/linter). Runs AFTER lint (which guarantees each agent step has a
   // present ref + the external-task shape) and BEFORE deploy — never deploy a
   // process whose executor is unresolved. Mirrors the lint-failed 422 envelope.
-  const agentRefViolations = await buildUnresolvedAgentRefViolations(pool, tenantId, row.bpmn_xml);
+  const agentRefViolations = await buildUnresolvedAgentRefViolations(pool, tenantId, publishXml);
   if (agentRefViolations.length > 0) {
     return { status: "agent_unresolved", violations: agentRefViolations };
   }
@@ -724,7 +741,7 @@ export async function publishProcessByKey(
   // escape — the id must stay byte-equal to the key the start path sends.
   let deployBpmnXml: string;
   try {
-    deployBpmnXml = normalizeBpmnForDeploy(row.bpmn_xml, row.process_key);
+    deployBpmnXml = normalizeBpmnForDeploy(publishXml, row.process_key);
   } catch (err) {
     if (err instanceof InvalidProcessKeyForDeployError) {
       throw new HttpError(422, "INVALID_PROCESS_KEY", err.message);
