@@ -1,0 +1,33 @@
+{
+  "task_id": "T-0588",
+  "verdict": "changes_requested",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "src/http/inbox.ts:1372-1380 (claim route, Tier-2 substitution branch)",
+      "issue": "Org-scope containment check is a no-op that always passes — the ADR's claimed 'org-scope sverka honest' does not hold. `BOTTOM` (src/core/grant-lattice.ts:117-120) is the EMPTY/narrowest scope-set (⊥, zero authority), not 'root scope' as the inbox.ts comment states. `isNarrowerOrEqual(child, parent, oracle)` (grant-lattice.ts:242-250) short-circuits `if (isBottom(child)) return true` UNCONDITIONALLY, before the ancestry oracle is ever consulted. The new code hardcodes `taskOrgScope = BOTTOM` as the `child` argument (`isNarrowerOrEqual(taskOrgScope, r.orgScope, ancestry)`), so the containment check returns true for ANY `r.orgScope`, regardless of department. This is not a theoretical edge case: both `SubstituteForm` and `SelfAbsenceForm` (web/src/screens/rights/ra-intents.jsx:249,314) MANDATORILY submit a department-scoped `org_scope` (`{kind:'node', hierarchy:'org', nodeId, nodeLevel:'department'}`) — org_scope is a required field server-side (rights-intents.ts:743-746,1212-1215), never BOTTOM. So every real substitution_rule created via the shipped UI is department-scoped, and the new claim-eligibility check silently ignores that scoping: a Tier-2 substitute granted to stand in for role-Y ONLY within department A can claim ANY role-Y pool task tenant-wide, in any department, via this branch — the org-scope narrowing that T-0035/`validateNarrowing` deliberately enforces at grant-mint time is defeated at claim-check time. `resolveExecutor` (path A, dormant) has the SAME `opts.orgScope ?? BOTTOM` idiom with the same misleading docstring ('a root scope is assumed', executor-resolver.ts:177), so this is a pre-existing conceptual confusion in unused code — but T-0588 is what activates it into a live, production-reachable path (the claim endpoint), and the ADR/pr-handoff.json ('org-scope sverka честная') explicitly asserts correctness that isn't there. Neither ci/checks/db/inbox_claim_substitution.db.test.ts nor grants-dao-deactivated.db.test.ts exercises a cross-department mismatch (both seed identical placeholder `nodeId: 'x'` scope on every row), so this gap passed CI undetected.",
+      "suggestion": "Either (a) derive the task's real org-scope from the pool task/role-assignment record and pass it as `child` (so containment is actually checked against the rule's department), or (b) if the pool-task shape genuinely carries no org-scope today (per the comment), invert the direction of the check or use the rule's own scope only to gate on a scope the endpoint CAN observe (e.g. the task-defining role_assignment's org_scope, which IS in the schema) — but do not use BOTTOM as the 'unscoped task, matches anything' sentinel, since it inverts the intended narrowing semantics. At minimum, fix the misleading comment/ADR claim and add a test case with two rules scoped to different departments (or a rule scoped narrower than a task's real department) proving the check actually denies a cross-department claim, or explicitly downgrade the ADR's invariant claim if this is accepted as an out-of-scope limitation for this slice."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": false},
+    {"ac": "AC-6", "covered": false},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": false},
+    {"ac": "AC-9", "covered": false},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "AC-5/AC-6 (path-B batch fallback routing via GET inbox projection: deactivated holder + Tier-1 substitute routes correctly; deactivated holder + no rule routes to routed_to_fallback) are claimed in the spec traceability table as covered by FF-T0588-4 ('npm run fitness:db (path B, resolveExecutorFallbackBatch via GET inbox projection)'), but no test file in this diff exercises GET /api/inbox projection with a deactivated holder scenario — only AC-7 (pure resolveExecutor unit test) and AC-3/AC-4 (direct DAO calls) are actually present. AC-5/AC-6 rely entirely on the FR-2 deactivation filter propagating correctly through resolveExecutorFallbackBatch's existing logic, which is a reasonable inference but is untested by this diff — not fabricated coverage claim, but the traceability table overstates what FF-T0588-4's ci_check actually runs (it runs executor-resolver.test.ts for AC-7 only, no inbox-projection integration test for AC-5/AC-6 exists in the file list). This is a coverage-honesty gap worth flagging as a pattern for future spec/ADR traceability tables, distinct from the R-1 blocking issue.",
+    "AC-8/AC-9 are explicitly manual/LIVE_PROOF (browser on stand) per spec — correctly not claimed as automated-test-covered; no evidence in this diff (or pr-handoff.json) that the LIVE_PROOF browser pass was actually executed before opening this PR. pr-handoff.json's ci_local block only lists build/lint/types/tests/fitness — no live-proof/manual field. If LIVE_PROOF is a hard gate before merge per this project's D-064 discipline, its absence from the handoff artifact should be confirmed with the coder/architect before promotion, not silently treated as done."
+  ]
+}
