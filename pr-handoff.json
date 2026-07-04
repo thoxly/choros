@@ -1,7 +1,8 @@
 {
-  "task_id": "T-0342",
+  "task_id": "T-0579",
   "status": "pr_open",
-  "branch": "task/T-0342",
+  "branch": "task/T-0579-file-field",
+  "pr_url": "",
   "ci_local": {
     "build": true,
     "lint": true,
@@ -10,65 +11,65 @@
     "fitness": true
   },
   "files_changed": [
-    "src/keycloak/admin-port.ts",
-    "src/keycloak/fake-user-port.ts",
-    "src/core/register.ts",
-    "src/http/register.ts",
-    "src/server.ts",
-    "src/__tests__/register.test.ts",
-    "config/keycloak/realm-choros.json",
-    "docker-compose.yml"
+    "web/src/screens/apps-schema.js",
+    "web/src/screens/apps-schema.test.js",
+    "web/src/forms/field-contract.js",
+    "web/src/forms/field-contract.test.js",
+    "web/src/forms/field-renderer.jsx",
+    "web/src/forms/field-renderer-file.test.jsx",
+    "web/src/screens/records-form.js",
+    "web/src/screens/records-form.test.js",
+    "web/src/screens/screen-app-records.jsx",
+    "web/src/screens/screen-record-detail.jsx",
+    "src/http/files.ts",
+    "src/__tests__/files-http.test.ts",
+    "ci/checks/file-field-catalog-isolation.sh",
+    "package.json"
   ],
-  "review_fixes": [
-    "R-1 (BLOCKING): ValidationError now extends RegisterError so the HTTP route's instanceof RegisterError guard catches it and emits 400 VALIDATION. Before: ValidationError fell through to 500 INTERNAL. Fix is in src/core/register.ts — swapped class declaration order, ValidationError extends RegisterError with super('VALIDATION', message).",
-    "R-2 (orphan KC user): createHumanUser in src/keycloak/admin-port.ts now reads the user UUID from the Location response header of the 201 (extractIdFromLocation helper). Falls back to GET-by-username only when Location is absent. doRequest return type extended with responseHeaders. If DB fails after id is obtained, deleteUser is called with the Location-derived id — no orphan possible.",
-    "R-3 (LIVE-SCHEMA BUG FIX): register.ts DB transaction omitted NOT-NULL columns required by the real choros schema, causing 500 on the live stack (unit tests used a fake pool and missed this). Fixed: (1) role INSERT now includes updated_at=$3; (2) employee INSERT now includes updated_at=$5; (3) role_assignment INSERT now includes granted_by=$6 (= employeeId, self-bootstrap genesis owner) and updated_at=$7. SQL param lists and value arrays adjusted consistently. Test guard added: new describe 'SQL column guard' in register.test.ts asserts the SQL strings passed to the fake pool include updated_at (role/employee/role_assignment) and granted_by (role_assignment).",
-    "R-4 (i18n BUG FIX — live e2e verified): slugifyOrgName stripped all Cyrillic characters, collapsing 'Браузер Приёмка'/'Браузер Два'/'Приёмка Три' all to '' → 'org', causing spurious 409 ORG_TAKEN on every Cyrillic org name after the first. Two-part fix: (a) Cyrillic→latin transliteration map applied before [^a-z0-9-] filter so distinct names get distinct base slugs; (b) registerTenant retries the DB tx on 23505 unique-violation up to 5 times with a random base36 suffix, guaranteeing two companies with the same display name can both register. kc.deleteUser compensation only fires after all retries are exhausted."
+  "deviations_from_adr": [
+    "AC-10/FF-CELL-NO-UUID (ADR §2.5): ADR-текст для formatCellValue(value,'file') читается как синхронный 'originalName | fallback id' (по паттерну person, который честно фолбэчит на id). Реализовано СТРОЖЕ: введён FILE_CELL_ASYNC-сентинел (records-form.js, зеркало RELATION_CELL_ASYNC) — formatCellValue НИКОГДА не возвращает сырой fileVersionId, только сентинел/имя/«—»; имя резолвится асинхронно через листинг записи (GET /api/records/:id/files) в новых компонентах FileCell (список) и FileFieldValue (карточка), по паттерну RelationCell/RelationFieldValue. Причина: AC-9/AC-10/FF-CELL-NO-UUID явно требуют «никогда не показывать сырой uuid», а person может честно фолбэчить на id (не такое же требование в его AC), file — нет. Это ужесточение приёмочного критерия в духе §4.3 (formatCellValue → resolved originalName), не ослабление и не расхождение по объёму.",
+    "Тестовый инфраструктурный фикс (src/__tests__/files-http.test.ts): существующий helper httpGet() отбрасывал query-string (path: parsed.pathname без parsed.search) — до T-0579 ни один тест этого файла не использовал query-параметры, поэтому баг был латентным. Без правки AC-11-тесты (?disposition=inline) не могли пройти ни при какой реализации маршрута (клиент их физически не отправлял бы). Правка аддитивна (path: pathname+search); все 19 существовавших тестов файла остаются зелёными без изменения ожиданий (перепроверено)."
   ],
-  "deviations_from_adr": [],
-  "blocked_reason": null,
+  "blocked_reason": "",
   "friction_events": [
-    "FE-T0342-1: worktree has no node_modules symlink — ran npm install to get vitest/tsc/eslint binaries; consistent with choros-ci-db-gotchas.md isolation pattern",
-    "FE-T0342-2: global tsc reports pre-existing errors (module not found for pg/node:* — pre-existing in all existing files); node_modules/.bin/tsc --noEmit is clean for all files including ours"
+    "FE-T0579-1: свежий worktree — ни в корне, ни в web/ не было node_modules; выполнил npm install --maxsockets=3 в обоих корнях перед сборкой (известный паттерн из памяти фабрики).",
+    "FE-T0579-2: тестовый helper httpGet() в src/__tests__/files-http.test.ts терял query-string (path: parsed.pathname без .search) — скрытый баг тестовой инфраструктуры, вскрытый только новыми AC-11 (?disposition=inline) тестами; см. deviations_from_adr. Пофикшено аддитивно, регресс существующих 19 тестов файла проверен.",
+    "FE-T0579-3: первая версия fitness-гейта FF-CATALOG (ci/checks/file-field-catalog-isolation.sh) ложно-положительно ловила легитимное использование `contractKind === 'file'` в screen-app-records.jsx (нужно ТОЛЬКО чтобы прокинуть recordId в field-дескриптор перед вызовом единого <FieldControl>, не для выбора другого компонента-рендерера). Заменил grep-предикат на awk-паттерн, который ищет именно форму «contractKind===file» → «return (<НЕ-FieldControl»; проверено адверс-пробой (искусственно вставленный параллельный диспатч детектится, легитимный код — не детектится, ложных срабатываний нет)."
   ],
+  "spec_ref": "docs/specs/T-0579-file-field.spec.md",
+  "adr_ref": "docs/design/T-0579-file-field.adr.md",
   "gate_results": {
-    "build": "green — npm run -s build exits 0 (tsc + seed compilation)",
-    "tsc": "green — node_modules/.bin/tsc --noEmit 0 errors",
-    "eslint": "green — 0 errors in new files; 3 pre-existing warnings in unrelated files",
-    "vitest": "green — 2936 passed / 8 skipped / 0 failed (133 test files; no regression); register.test.ts 38 passed 2 skipped (live DB) — 17 new tests added (R-1 HTTP validation ×5, R-2 Location header ×2, R-3 SQL column guard ×1, R-4 Cyrillic i18n ×7, pre-existing 18→38 total)",
-    "fitness": "ALL GREEN (exit 0); FAIL lines in output are expected self-test artifacts (immediately followed by PASS [self-test] confirming check correctly detected planted violation)",
-    "any_red": false
+    "build_server": "green — npm run build (tsc + seed/tsconfig) exits 0",
+    "build_web": "green — cd web && npm run build (vite build) exits 0, 523 modules transformed",
+    "typecheck": "green — npx tsc --noEmit exits 0, 0 errors",
+    "lint_server": "green — npx eslint src exits 0 (41 pre-existing no-console warnings, 0 errors; src/http/files.ts itself: 0 findings)",
+    "lint_web_touched_files": "green — npx eslint on the 4 touched .jsx/.js files (field-renderer.jsx, field-contract.js, apps-schema.js, records-form.js, screen-app-records.jsx, screen-record-detail.jsx): 0 errors (repo-wide web lint has ~90 pre-existing unrelated errors in untouched files; web/package.json's own lint script is pre-existing-broken path-wise and wrapped in `|| true`, unrelated to this change)",
+    "vitest_server": "green — npx vitest run (excluding ci/checks/db): 258 files passed / 2 skipped, 4995 tests passed / 10 skipped, 0 failed",
+    "vitest_web": "green — cd web && npx vitest run: 65 files passed, 1776 tests passed, 0 failed (includes new field-renderer-file.test.jsx: 10/10, and updated apps-schema.test.js 221/221, field-contract.test.js 58/58, records-form.test.js 253/253)",
+    "vitest_files_http": "green — npx vitest run src/__tests__/files-http.test.ts: 27/27 passed (19 pre-existing regression + 8 new AC-11/inline-disposition tests)",
+    "fitness_static": "green — npm run fitness exits 0 (full ~230-check chain incl. embedded npm run build); new ci/checks/file-field-catalog-isolation.sh (FF-CATALOG + FF-UPLOAD-ROUTE-ONLY) runs and PASSes as part of the chain; anti-case-lock.sh (AC-14) green",
+    "fitness_db": "green — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros; npm run fitness:db:setup-template then npm run fitness:db (solo, not parallel): 113 test files passed, 1127 tests passed, 0 failed"
   },
-  "scope_clean_backend_only": true,
-  "touched_out_of_scope": [],
-  "tests_added": 34,
-  "fitness_db_status": "written-for-server — FF-4/FF-6 tests skip when DATABASE_URL absent (local Mac); annotated to run on homeserver-vm dev stack",
-  "endpoint_contract": {
-    "method": "POST",
-    "path": "/api/register",
-    "public": true,
-    "no_auth": true,
-    "request_body": { "orgName": "string (1..120)", "email": "string (valid email)", "password": "string (>=8)" },
-    "success_201": { "tenantId": "uuid", "tenantSlug": "string", "userId": "uuid (KC sub)", "email": "string" },
-    "error_envelope": { "error": { "code": "string", "message": "string" } },
-    "errors": {
-      "400": "VALIDATION",
-      "409": "EMAIL_TAKEN | ORG_TAKEN",
-      "503": "AUTH_UNAVAILABLE (KC registrar unreachable or KC_REGISTRAR_CLIENT_SECRET missing)",
-      "500": "INTERNAL (DB failure after KC create — compensation attempted)"
-    }
+  "ac_coverage": {
+    "AC-1": "apps-schema.test.js T-0579 block — FIELD_TYPES/FIELD_TYPE_VALUES/validateField",
+    "AC-2": "apps-schema.test.js — buildRecordSchema x-file emit",
+    "AC-3": "apps-schema.test.js + records-form.test.js — parseRecordSchema/schemaToFormFields round-trip + backward-compat (no x-file → not file)",
+    "AC-4": "field-contract.test.js — contractKindForFieldType/resolveFieldContract",
+    "AC-5": "apps-schema.test.js — validateRecordSchemaDefinition accepts x-file directly (validator untouched)",
+    "AC-6": "field-renderer-file.test.jsx — FieldControl dispatches to FileField, not readout/text-input",
+    "AC-7": "field-renderer.jsx FileField implementation (POST .../files, versionId in value) — structural/component-shape test in field-renderer-file.test.jsx; live upload flow is server-gated (existing files-http.test.ts covers the route itself)",
+    "AC-8": "records-form.test.js — validateRecordValues required/optional file branches",
+    "AC-9": "screen-record-detail.jsx FileFieldValue (name-link + inline preview for image/*, application/pdf)",
+    "AC-10": "records-form.test.js formatCellValue file branch (FILE_CELL_ASYNC, never raw uuid) + schemaToColumns",
+    "AC-11": "files-http.test.ts new describe block — inline for png/pdf, attachment for svg/html/txt/no-param",
+    "AC-12": "files-http.test.ts — resolver deny → 403 even with ?disposition=inline (regression)",
+    "AC-13": "files-http.test.ts — cross-tenant actor → 404 even with ?disposition=inline (regression)",
+    "AC-14": "ci/checks/anti-case-lock.sh green (verified standalone + as part of npm run fitness)",
+    "AC-15": "FileField honest states (Empty/Loading/Error) implemented per NF-5; no dedicated e2e ux-journey added (out of proportional scope for this pass — flagged as a tail below)",
+    "AC-16": "traceability table in ADR §7 followed literally; file-field-catalog-isolation.sh (FF-CATALOG/FF-UPLOAD-ROUTE-ONLY) statically guards against a second permission mechanism / parallel renderer"
   },
-  "signatures_unchanged": true,
-  "realm_registrar_added": true,
-  "compose_env_added": true,
-  "compensation_tested": true,
-  "kc_user_port": "makeHttpKeycloakUserPort(cfg?) in src/keycloak/admin-port.ts. Uses choros-registrar client_credentials at KEYCLOAK_BASE_URL/realms/choros/protocol/openid-connect/token. POST /admin/realms/choros/users with username=email, emailVerified:true, attributes.actor_type:['human'], credentials:[{type:'password',value,temporary:false}]. GET by username&exact=true to resolve userId. deleteUser does DELETE /admin/realms/choros/users/:id best-effort (swallows all errors).",
-  "notes_for_reviewer": "BACKEND ONLY — web/ untouched per scope. SPA coder to implement RegisterScreen + shell.jsx wiring (ADR §6/§7). Key invariant: employee.slug=kcSub in new tenant ensures resolveActorTenant auto-resolves the logged-in user to their fresh tenant (ADR Q1 — no hot-path change needed). owner-membership: role tenant-owner + confirmed role_assignment with org_scope=set([]) — sufficient for create-app/record (tenant-scoped), insufficient for org-structure management (per-tenant genesis-grant follow-up per ADR §10). Infra blocker for live e2e: founder must deploy dev with updated realm-import so choros-registrar gets manage-users grant; then KC_REGISTRAR_CLIENT_SECRET env is wired. Until then POST /api/register returns 503 (honest-degrade).",
-  "spa_coder_handoff": {
-    "endpoint": "POST /api/register (public, 201 → {tenantId, tenantSlug, userId, email})",
-    "after_201": "call kc.login(authConfig.keycloak) to start PKCE flow — user gets redirected to KC login, authenticates with their new password, KC JWT issued, app resolves their new tenant automatically",
-    "error_handling": "409 EMAIL_TAKEN, 409 ORG_TAKEN, 503 AUTH_UNAVAILABLE (show friendly message), 400 VALIDATION (show field error)",
-    "pre_auth_gate": "shell.jsx:566 pre-auth gate must branch on window.location.pathname==='/register' before rendering LoginScreen",
-    "ux_checks": ["FF-UX-1 contrast >=WCAG AA both themes", "FF-UX-2 Loading+Error states", "FF-UX-3 no inline colors — use kit/tokens"]
-  }
+  "tails": [
+    "AC-15/FF-UX-FILE: no dedicated e2e ux-journey (ci/checks/ux/*.ux.journey.ts) was added for the file field specifically. FileField's honest Empty/Loading/Error states, chs-* token usage, and aria wiring were written to match the established RelationPickerField/PersonPicker pattern (which DO pass the existing UX gates: ux-g2-theme-pairing, ux-g5-jargon-denylist, ux-g6-no-new-hardcode, ux-g8-scroll-reachable — all ran green as part of npm run fitness), but a manual/automated UX-journey walk of the file upload/download/preview flow was not performed live in-browser in this pass.",
+    "The FsObjectStore/dev runtime target (per ADR §9) was not exercised end-to-end against a live running server in this BUILD pass (unit + files-http.test.ts route-level tests only, no browser-driven upload). Recommend a live smoke pass on the dev stand before/during acceptance."
+  ]
 }
