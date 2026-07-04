@@ -46,8 +46,21 @@
 #         who can act, instead of a dead pointer;
 #     (c) NO dev-jargon denylist tokens (AC-7 unchanged).
 #
+# T-0587 (ADR-T0587 §2.1, FF-8/AC-9): a THIRD constant joins the checked set —
+# ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE (the analyst's honest FR-3/FR-5
+# zone-of-visibility refusal). Its contract is DIFFERENT from the two LLM-
+# unavailable constants above (no admin/non-admin split, no /llm-connections
+# deep-link) — it is checked for:
+#   (a) the SAME dev-jargon DENYLIST (no reason a refusal message should ever
+#       carry OpenAILlmPort/endpoint/secretHandle/stack/LLM_NOT_CONFIGURED);
+#   (b) FR-5: must NOT claim "данных в системе нет" (a false SYSTEM-STATE
+#       claim) — the message is about the ASKER's own zone of visibility,
+#       phrased "в вашей зоне видимости";
+#   (c) genericity (D-064): no case-specific business term (registry/record
+#       name) baked into the constant.
+#
 # Exit 0 on clean, non-zero on any violation. --self-test exercises the
-# detector against planted good/bad fixtures for BOTH constants (mirrors
+# detector against planted good/bad fixtures for ALL THREE constants (mirrors
 # ux-g5-jargon-denylist.sh discipline).
 set -euo pipefail
 
@@ -144,6 +157,40 @@ count_non_admin_message_violations() {
   echo "${errors}"
 }
 
+count_no_visible_data_message_violations() {
+  local file="$1" errors=0
+  local msg
+  msg="$(extract_message "${file}" 'ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE')"
+  if [[ -z "${msg}" ]]; then
+    echo "FAIL [FF-8/T-0587]: ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE not found in ${file}" >&2
+    echo 1
+    return
+  fi
+
+  # FR-5 (T-0587): must NOT claim system-wide absence as fact — only the
+  # asker's own zone of visibility. Checked as the CAPITALISED/asserted form
+  # (mirrors the existing "Записей нет" vs "записей нет" convention in
+  # src/core/assistant-analyst.ts — the instruction text may legitimately
+  # MENTION the banned phrase inside a negative directive to the LLM without
+  # itself being a violation of the constant's own contract).
+  if echo "${msg}" | grep -qF 'Данных в системе нет'; then
+    echo "FAIL [FR-5/T-0587]: ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE asserts system-wide absence as fact ('Данных в системе нет') — must be framed as the asker's OWN zone of visibility" >&2
+    errors=$((errors + 1))
+  fi
+  # FR-5 positive check: the message DOES frame this as the asker's own zone
+  # of visibility.
+  if ! echo "${msg}" | grep -qF 'зоне видимости'; then
+    echo "FAIL [FR-5/T-0587]: ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE does not frame the refusal as the asker's OWN zone of visibility ('зоне видимости')" >&2
+    errors=$((errors + 1))
+  fi
+
+  local denylist_errors
+  denylist_errors="$(count_denylist_violations "${msg}" "ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE")"
+  errors=$((errors + denylist_errors))
+
+  echo "${errors}"
+}
+
 check_file() {
   local file="$1" errors=0
   if [[ ! -f "${file}" ]]; then
@@ -151,10 +198,11 @@ check_file() {
     return 1
   fi
 
-  local admin_errors non_admin_errors
+  local admin_errors non_admin_errors no_visible_data_errors
   admin_errors="$(count_admin_message_violations "${file}")"
   non_admin_errors="$(count_non_admin_message_violations "${file}")"
-  errors=$((admin_errors + non_admin_errors))
+  no_visible_data_errors="$(count_no_visible_data_message_violations "${file}")"
+  errors=$((admin_errors + non_admin_errors + no_visible_data_errors))
 
   return ${errors}
 }
@@ -174,6 +222,11 @@ export const ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN =
   "Ассистент пока не может ответить — не подключён рабочий LLM-ключ. " +
   "Обратитесь к администратору вашей организации, чтобы подключить ключ — " +
   "когда ключ подключат, ассистент начнёт отвечать.";
+
+export const ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE =
+  "В вашей зоне видимости данных по этому вопросу нет. " +
+  "Если данные должны быть вам доступны — обратитесь к администратору вашей " +
+  "организации, чтобы он выдал доступ.";
 EOF
 
   cat >"${tmp}/bad.ts" <<'EOF'
@@ -182,6 +235,9 @@ export const ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN =
 
 export const ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN =
   "LLM_NOT_CONFIGURED: go to /llm-connections yourself. OpenAILlmPort endpoint secretHandle stack";
+
+export const ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE =
+  "Данных в системе нет. LLM_NOT_CONFIGURED OpenAILlmPort endpoint secretHandle stack";
 EOF
 
   set +e
@@ -208,7 +264,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
   exit $?
 fi
 
-echo "[T-0573/T-0595] assistant-llm-message-jargon: FF-UX-7 dev-jargon denylist + T-0595 admin/non-admin split contract"
+echo "[T-0573/T-0595/T-0587] assistant-llm-message-jargon: FF-UX-7 dev-jargon denylist + T-0595 admin/non-admin split + T-0587 FR-5 zone-of-visibility contract"
 set +e
 check_file "${TARGET}"
 errors=$?
@@ -217,5 +273,5 @@ if [[ ${errors} -gt 0 ]]; then
   echo "FAIL: assistant-llm-message-jargon found ${errors} violation(s)"
   exit 1
 fi
-echo "PASS: assistant-llm-message-jargon — both ADMIN/NON_ADMIN messages clean, no dev-jargon, no dead doors"
+echo "PASS: assistant-llm-message-jargon — ADMIN/NON_ADMIN/NO_VISIBLE_DATA messages all clean, no dev-jargon, no dead doors, no false system-state claims"
 exit 0
