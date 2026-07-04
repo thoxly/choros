@@ -570,7 +570,7 @@ function KanbanConfigEditor({ kanbanDraft, groupByFields, fieldCatalog, fieldLab
  */
 export function ListViewPanel({
   open, onClose, schemaColumns, activeView, defaultViewConfig,
-  onApply, views, viewsError, viewsLoading, saveView, deleteView,
+  onApply, viewsError, viewsLoading, saveView, deleteView,
 }) {
   const fieldCatalog = useMemo(() => buildFieldCatalog(schemaColumns), [schemaColumns]);
   const typeByKey = useMemo(() => new Map(fieldCatalog.map((f) => [f.key, f.type])), [fieldCatalog]);

@@ -45,7 +45,7 @@ check_kit_only() {
     echo "FAIL [FF-UX-K-8a]: ${file} contains a raw hex/rgba color literal (tokens only, G2/G6)"
     errors=$((errors + 1))
   fi
-  return "${errors}"
+  echo "${errors}"
 }
 
 check_honest_states() {
@@ -57,7 +57,7 @@ check_honest_states() {
       errors=$((errors + 1))
     fi
   done
-  return "${errors}"
+  echo "${errors}"
 }
 
 check_keyboard_alternative() {
@@ -71,7 +71,7 @@ check_keyboard_alternative() {
     echo "FAIL [FF-UX-K-8c]: ${file} uses drag with NO keyboard alternative (accessibility defect)"
     errors=$((errors + 1))
   fi
-  return "${errors}"
+  echo "${errors}"
 }
 
 check_empty_column_visible() {
@@ -81,7 +81,7 @@ check_empty_column_visible() {
     echo "FAIL [FF-UX-K-8d]: ${file} does not check for an empty column (cards.length === 0) — empty columns must stay visible"
     errors=$((errors + 1))
   fi
-  return "${errors}"
+  echo "${errors}"
 }
 
 check_rollback_on_failure() {
@@ -99,7 +99,7 @@ check_rollback_on_failure() {
     echo "FAIL [FF-UX-K-8e]: ${file} has no role=\"alert\" honest error surface"
     errors=$((errors + 1))
   fi
-  return "${errors}"
+  echo "${errors}"
 }
 
 check_no_jargon() {
@@ -134,18 +134,29 @@ check_no_jargon() {
     echo "${jargon_hits}"
     errors=$((errors + 1))
   fi
-  return "${errors}"
+  echo "${errors}"
 }
 
+# run_all_checks: each check_* function prints its FAIL lines (if any) to
+# stdout and echoes its numeric error count as its LAST line. We capture that
+# last line with `tail -1` and accumulate it — NEVER `$?` (every check_*
+# function ends in `echo`, so under `set -euo pipefail` its exit status is
+# always echo's success, i.e. 0, regardless of how many violations it found;
+# that was the original masking bug, FF-UX-K-8 gate honesty fix). The FAIL
+# lines (everything but the last line) are re-echoed so callers still see the
+# diagnostics; the per-check count line itself is swallowed here — only the
+# grand TOTAL (this function's own last-line echo) is meant to be read back.
 run_all_checks() {
   local file="$1"
   local total=0
-  check_kit_only "${file}"; total=$((total + $?))
-  check_honest_states "${file}"; total=$((total + $?))
-  check_keyboard_alternative "${file}"; total=$((total + $?))
-  check_empty_column_visible "${file}"; total=$((total + $?))
-  check_rollback_on_failure "${file}"; total=$((total + $?))
-  check_no_jargon "${file}"; total=$((total + $?))
+  local out n
+  for fn in check_kit_only check_honest_states check_keyboard_alternative \
+            check_empty_column_visible check_rollback_on_failure check_no_jargon; do
+    out="$("${fn}" "${file}")"
+    n="$(echo "${out}" | tail -1)"
+    echo "${out}" | sed '$d'
+    total=$((total + n))
+  done
   echo "${total}"
 }
 
@@ -210,13 +221,9 @@ if [[ ! -f "${BOARD_FILE}" ]]; then
   exit 0
 fi
 
-TOTAL_ERRORS=0
-check_kit_only "${BOARD_FILE}" || true; TOTAL_ERRORS=$((TOTAL_ERRORS + $?))
-check_honest_states "${BOARD_FILE}" || true; TOTAL_ERRORS=$((TOTAL_ERRORS + $?))
-check_keyboard_alternative "${BOARD_FILE}" || true; TOTAL_ERRORS=$((TOTAL_ERRORS + $?))
-check_empty_column_visible "${BOARD_FILE}" || true; TOTAL_ERRORS=$((TOTAL_ERRORS + $?))
-check_rollback_on_failure "${BOARD_FILE}" || true; TOTAL_ERRORS=$((TOTAL_ERRORS + $?))
-check_no_jargon "${BOARD_FILE}" || true; TOTAL_ERRORS=$((TOTAL_ERRORS + $?))
+RUN_OUTPUT="$(run_all_checks "${BOARD_FILE}")"
+echo "${RUN_OUTPUT}" | sed '$d'
+TOTAL_ERRORS="$(echo "${RUN_OUTPUT}" | tail -1)"
 
 if [[ "${TOTAL_ERRORS}" -gt 0 ]]; then
   echo "FAIL: kanban-ux-gate found ${TOTAL_ERRORS} violation(s)"

@@ -34,7 +34,7 @@
 
 import React, { useCallback, useMemo, useState } from 'react';
 import {
-  Card, Badge, Button, Select, EmptyState, LoadingState, ErrorState, KitIcon,
+  Card, Badge, EmptyState, LoadingState, ErrorState,
 } from '../components/components.jsx';
 import { formatCellValue, computeComputedFieldValue } from './records-form.js';
 import { buildKanbanColumns, buildMovePayload, isFieldRequired } from './kanban-board.js';
@@ -126,7 +126,7 @@ function KanbanCard({
 function KanbanColumnView({
   column, cardFields, fieldMetaByKey, columnValues, movingId, onMove, dragOverValue, onDragOver, onDragLeave, onDrop, draggingId,
 }) {
-  const isDragOver = dragOverValue === column.value || (column.value === null && dragOverValue === null && dragOverValue !== undefined);
+  const isDragOver = dragOverValue !== undefined && dragOverValue === column.value;
   return (
     <div
       role="group"
@@ -219,10 +219,15 @@ export function KanbanBoard({
   );
 
   // The list of {value,label} options offered by every card's keyboard "Колонка"
-  // select: every real column value + the "Без значения" pseudo-column.
+  // select: every real column value + the "Без значения" pseudo-column — UNLESS
+  // groupByField is required (AC-8), in which case "Без значения" is a dead-end
+  // option (buildMovePayload always rejects it) and is hidden rather than
+  // offered-then-refused.
   const columnValues = useMemo(
-    () => [...columns.map((c) => ({ value: c.value, label: c.label }))],
-    [columns],
+    () => columns
+      .filter((c) => !(groupByRequired && c.value === null))
+      .map((c) => ({ value: c.value, label: c.label })),
+    [columns, groupByRequired],
   );
 
   const handleDragOverTrack = useCallback((value, cardId) => {
