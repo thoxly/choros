@@ -1,0 +1,33 @@
+{
+  "task_id": "T-0628",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/screens/users-form.js:10",
+      "issue": "Module doc-comment's 'WIRED CONTRACTS' block still shows the pre-fix POST /api/users body shape ({ tenant_id, login, password, display_name, position_id?, role_id? }) without the new required `email` field, even though the code below (validateCreateUser, buildCreateUserPayload) fully implements it. Purely a stale-comment drift, no functional impact.",
+      "suggestion": "Add `email` to the documented body shape in the header comment (one-line fix, can ride with any future touch to this file)."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/keycloak/admin-port.ts:391 / ci/checks/db/user-mgmt.db.test.ts",
+      "issue": "The EMAIL_INVALID defense-in-depth branch in user-mgmt.ts (line 270-272, triggered if kc.createHumanUser somehow throws EMAIL_INVALID despite our own pre-validation) has no direct test forcing the fake port to throw that code and asserting the resulting 400. This gap is inherited unchanged from T-0625 (same untested branch, just re-anchored from `login` to `email`), not a regression introduced by this task.",
+      "suggestion": "Optional follow-up: add a fake-port injection test (kc.failOnCreate-style switch) that forces EMAIL_INVALID and asserts POST /api/users maps it to 400, closing AC-7's KC-side wording for real."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
