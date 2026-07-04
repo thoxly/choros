@@ -10,10 +10,11 @@
  *   const stub = new StubLlmPort({ mode: "low_confidence" });   // → defer
  *   const stub = new StubLlmPort({ mode: "error" });             // → fail-closed
  *   const stub = new StubLlmPort({ mode: "dormant" });           // → LlmDormantError
+ *   const stub = new StubLlmPort({ mode: "unavailable" });       // → LlmUnavailableError (T-0586)
  */
 
 import type { ChatLlmRequest, ChatLlmResult, LlmPort, LlmRequest, LlmResult, PrecheckAnswer } from "../llm-port.js";
-import { LlmDormantError } from "../llm-port.js";
+import { LlmDormantError, LlmUnavailableError } from "../llm-port.js";
 
 // ---------------------------------------------------------------------------
 // Demo fixture — a contract ≥ 5M₽ with identified red flags (AC-2/AC-15).
@@ -73,7 +74,8 @@ export type StubMode =
   | "error"          // throws generic LLM error → fail-closed
   | "timeout"        // throws timeout error → fail-closed(llm_timeout)
   | "egress_block"   // throws egress error → fail-closed(egress_block)
-  | "dormant";       // throws LlmDormantError → defer/fail-closed
+  | "dormant"        // throws LlmDormantError → defer/fail-closed
+  | "unavailable";   // T-0586: throws LlmUnavailableError → defer-to-human (signal=model)
 
 export interface StubLlmPortConfig {
   readonly mode?: StubMode;
@@ -108,6 +110,11 @@ export class StubLlmPort implements LlmPort {
     switch (this.mode) {
       case "dormant":
         throw new LlmDormantError("stub: llm dormant (mode=dormant)");
+
+      case "unavailable":
+        // T-0586: simulates a CONFIGURED provider whose call failed (bad key /
+        // HTTP error / timeout / network) — mirrors what OpenAILlmPort throws.
+        throw new LlmUnavailableError("stub: llm unavailable (mode=unavailable, simulated provider rejection)");
 
       case "error":
         throw new Error("stub: llm_error (simulated)");
