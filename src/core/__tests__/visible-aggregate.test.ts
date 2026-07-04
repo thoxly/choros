@@ -89,6 +89,21 @@ describe("accumulateNumeric / finalizeNumeric — basic aggregation", () => {
     expect(result[0]!.sum).toBe(150);
   });
 
+  it("adversary-honesty fix (T-0587): an empty/whitespace-only string is SKIPPED, not coerced to 0", () => {
+    // Number("") === 0 and Number("   ") === 0 in JS — an unfilled text field
+    // must not silently count as a real zero contribution (would drag down
+    // avg/min and corrupt count with values that were never actually entered).
+    const accs = initNumericAccumulators(["amount"]);
+    accumulateNumeric(accs, { amount: "" }, ["amount"]);
+    accumulateNumeric(accs, { amount: "   " }, ["amount"]);
+    accumulateNumeric(accs, { amount: 100 }, ["amount"]);
+    const result = finalizeNumeric(accs, new Map());
+    expect(result[0]!.count).toBe(1);
+    expect(result[0]!.sum).toBe(100);
+    expect(result[0]!.min).toBe(100);
+    expect(result[0]!.max).toBe(100);
+  });
+
   it("finalizeNumeric drops fields with zero contributing values (not zero-rendered)", () => {
     const accs = initNumericAccumulators(["amount", "quantity"]);
     accumulateNumeric(accs, { amount: 10 }, ["amount", "quantity"]); // quantity absent

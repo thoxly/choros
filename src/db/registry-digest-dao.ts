@@ -74,6 +74,24 @@ export interface ReadableRegistryEntry {
    * `slug`/`displayName`/`visibleCount`/`samples` are unaffected (AC-11).
    */
   readonly numericAggregates?: readonly NumericFieldAggregate[];
+  /**
+   * T-0587 (adversary-honesty fix, non-blocking): true when the per-registry
+   * record scan hit `scanLimit` exactly — i.e. there MAY be more readable
+   * records than this digest saw. `visibleCount`/`samples`/`numericAggregates`
+   * are then only over the first `scannedLimit` records (by created_at DESC),
+   * not necessarily the registry's full readable set. Additive/optional field
+   * (existing callers reading only slug/displayName/visibleCount/samples are
+   * unaffected). `undefined`/absent when the scan read fewer rows than
+   * `scanLimit` (the scan therefore saw every record in the registry).
+   */
+  readonly truncated?: boolean;
+  /**
+   * T-0587 (adversary-honesty fix): the exact `scanLimit` bound in effect for
+   * THIS scan — carried alongside `truncated` so a renderer never has to
+   * duplicate the DAO's default/override scan bound as a second literal.
+   * Present only when `truncated` is true (paired field).
+   */
+  readonly scannedLimit?: number;
 }
 
 export interface ReadableRegistryDigest {
@@ -256,12 +274,21 @@ export async function loadReadableRegistryDigest(
 
         const numericAggregates = finalizeNumeric(numericAccs, numericLabels);
 
+        // Adversary-honesty fix (non-blocking, T-0587): the scan is bounded by
+        // `scanLimit` (LIMIT $3 above). When the DB returned EXACTLY that many
+        // rows, there may be MORE readable records this digest never saw —
+        // visibleCount/samples/numericAggregates would then understate the
+        // true readable set. Flag it so the caller can render an honest
+        // "possibly incomplete" note instead of implying a complete count.
+        const truncated = recRes.rows.length === scanLimit;
+
         registries.push({
           slug: reg.slug,
           displayName: reg.display_name,
           visibleCount,
           samples,
           ...(numericAggregates.length > 0 ? { numericAggregates } : {}),
+          ...(truncated ? { truncated: true, scannedLimit: scanLimit } : {}),
         });
       }
 

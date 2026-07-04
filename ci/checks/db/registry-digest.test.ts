@@ -312,4 +312,43 @@ describe.skipIf(!LIVE)('T-0607 (AC-3) — analyst registry digest in actor right
       await cleanup(tenantId);
     }
   }, 30_000);
+
+  // ---------------------------------------------------------------------------
+  // Adversary-honesty fix (non-blocking, T-0587): the digest's per-registry
+  // scan is bounded (scanLimit). When a registry has MORE readable records
+  // than the scan bound, visibleCount/samples/numericAggregates silently
+  // understated the true readable set — with no signal to the caller that the
+  // count could be a partial one. `truncated`/`scannedLimit` close that gap.
+  // Uses a tiny scanLimit override (2) so the test seeds only 3 records
+  // instead of the production default (200) + 1.
+  // ---------------------------------------------------------------------------
+
+  it('adversary-honesty fix: scan hits scanLimit exactly → truncated:true + scannedLimit echoes the bound; fewer rows → no flag', async () => {
+    const { tenantId, ownerSlug } = await registerOne('Truncation');
+    try {
+      const { regId, regSlug } = await seedRegistryWithTwoNumericRecords(tenantId, ownerSlug);
+      // A third record pushes this registry to 3 readable rows.
+      await seedSecondRecord(tenantId, regId, ownerSlug, { title: 'Запись-3', amount: 1 });
+
+      // scanLimit:2 (< 3 readable rows) → the scan reads EXACTLY 2 rows → truncated.
+      const truncatedDigest = await loadReadableRegistryDigest(migPool, tenantId, ownerSlug, NOW(), { scanLimit: 2 });
+      expect(truncatedDigest.degraded).toBe(false);
+      const truncatedEntry = truncatedDigest.registries.find((r) => r.slug === regSlug);
+      expect(truncatedEntry).toBeDefined();
+      expect(truncatedEntry!.visibleCount).toBe(2);
+      expect(truncatedEntry!.truncated).toBe(true);
+      expect(truncatedEntry!.scannedLimit).toBe(2);
+
+      // scanLimit:10 (> 3 readable rows) → the scan reads all 3, fewer than the
+      // bound → NOT truncated (flag absent/false).
+      const fullDigest = await loadReadableRegistryDigest(migPool, tenantId, ownerSlug, NOW(), { scanLimit: 10 });
+      const fullEntry = fullDigest.registries.find((r) => r.slug === regSlug);
+      expect(fullEntry).toBeDefined();
+      expect(fullEntry!.visibleCount).toBe(3);
+      expect(fullEntry!.truncated).toBeFalsy();
+      expect(fullEntry!.scannedLimit).toBeUndefined();
+    } finally {
+      await cleanup(tenantId);
+    }
+  }, 30_000);
 });

@@ -180,6 +180,51 @@ describe("analyst registry digest (T-0607 а)", () => {
     expect(sent).not.toContain("Записей нет");
     expect(sent).toMatch(/недоступны для чтения/);
   });
+
+  it("adversary-honesty fix (T-0587): reg.truncated → context carries an honest 'possibly incomplete' note with the DAO's own scannedLimit, not a fabricated one", async () => {
+    const digest: ReadableRegistryDigest = {
+      degraded: false,
+      registries: [
+        {
+          slug: "vendors",
+          displayName: "Каталог контрагентов",
+          visibleCount: 200,
+          samples: ["Пример-1"],
+          truncated: true,
+          scannedLimit: 200,
+        },
+      ],
+    };
+    const ports: AnalystPorts = { loadRegistryDigest: async () => digest };
+    const stub = new StubChatLlmPort();
+    await runAnalyst("сколько заведено", ctx(stub), ports);
+
+    const sent = contextSentToLlm(stub);
+    expect(sent).toContain("записей — 200");
+    // Human-readable, no jargon ("scanLimit"/"truncated" etc. are internal
+    // names — the rendered note must read as prose, and must cite the DAO's
+    // OWN scannedLimit (200), not a second hardcoded literal.
+    expect(sent).toContain("по первым 200 просканированным видимым записям");
+    expect(sent).toContain("итог может быть неполным");
+    expect(sent).not.toMatch(/scanLimit|truncated/i);
+  });
+
+  it("adversary-honesty fix (T-0587): reg.truncated absent/false → NO truncation note rendered", async () => {
+    const digest: ReadableRegistryDigest = {
+      degraded: false,
+      registries: [
+        { slug: "vendors", displayName: "Каталог контрагентов", visibleCount: 5, samples: ["Пример-1"] },
+      ],
+    };
+    const ports: AnalystPorts = { loadRegistryDigest: async () => digest };
+    const stub = new StubChatLlmPort();
+    await runAnalyst("сколько заведено", ctx(stub), ports);
+
+    const sent = contextSentToLlm(stub);
+    expect(sent).toContain("записей — 5");
+    expect(sent).not.toContain("просканированным");
+    expect(sent).not.toContain("может быть неполным");
+  });
 });
 
 describe("S3 telemetry gate (T-0607 д)", () => {

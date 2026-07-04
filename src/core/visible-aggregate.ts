@@ -122,6 +122,12 @@ export function accumulateNumeric(
     // (Number([5]) === 5 in JS — a single-element array must NOT silently
     // count as a numeric contribution).
     if (typeof raw === "object") continue;
+    // Adversary-honesty fix (non-blocking, T-0587): an empty/whitespace-only
+    // string must be skipped, NOT coerced. `Number("")` (and `Number("  ")`)
+    // is `0` in JS — an unfilled text field would otherwise silently count as
+    // a real zero contribution, dragging down avg/min and corrupting count.
+    // Checked BEFORE the Number() coercion below, so it never reaches it.
+    if (typeof raw === "string" && raw.trim() === "") continue;
 
     const n = Number(raw);
     if (!Number.isFinite(n)) continue;

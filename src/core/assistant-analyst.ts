@@ -347,8 +347,18 @@ function buildDraftContext(draft: ReportDraft): string {
       for (const reg of digest.registries) {
         const sampleStr =
           reg.samples.length > 0 ? `; примеры: ${reg.samples.join(", ")}` : "";
+        // Adversary-honesty fix (non-blocking, T-0587): when the DAO's
+        // per-registry scan hit its bound (reg.truncated), the visibleCount/
+        // samples/aggregates below are over the first N scanned records, not
+        // necessarily the registry's full readable set. Say so plainly, so
+        // the LLM never presents a partial count as a complete one. N comes
+        // from the DAO's own `scannedLimit` (the exact bound in effect for
+        // that scan) — never a second hardcoded literal here.
+        const truncatedNote = reg.truncated
+          ? ` (по первым ${reg.scannedLimit} просканированным видимым записям; итог может быть неполным)`
+          : "";
         parts.push(
-          `  • «${reg.displayName}» (${reg.slug}): записей — ${reg.visibleCount}${sampleStr}`,
+          `  • «${reg.displayName}» (${reg.slug}): записей — ${reg.visibleCount}${sampleStr}${truncatedNote}`,
         );
         if (reg.numericAggregates && reg.numericAggregates.length > 0) {
           for (const agg of reg.numericAggregates) {
