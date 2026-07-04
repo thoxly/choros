@@ -47,3 +47,24 @@ export const ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN =
   "Ассистент пока не может ответить — не подключён рабочий LLM-ключ. " +
   "Обратитесь к администратору вашей организации, чтобы подключить ключ — " +
   "когда ключ подключат, ассистент начнёт отвечать.";
+
+/**
+ * T-0587 (ADR-T0587 §2.1): the analyst's honest refusal when the asker has
+ * NO visible data for the subject of their question — FR-3/FR-5.
+ *
+ * Two invariants this string must hold (checked by
+ * ci/checks/ux/assistant-llm-message-jargon.sh, extended for T-0587):
+ *   FR-5 — it states the asker's OWN zone of visibility ("в вашей зоне
+ *     видимости"), NEVER a claim about the system's overall state (it must
+ *     NOT say "данных в системе нет" — that would be a false statement about
+ *     the system, not the asker's rights).
+ *   FR-3 — it is IDENTICAL whether the underlying registry is genuinely empty
+ *     or merely invisible to this asker — the wording never distinguishes
+ *     the two, so it cannot be used to infer whether a hidden record exists.
+ * Generic/platform-level (D-064): no case-literal, no registry name, no
+ * error code, no internal jargon.
+ */
+export const ASSISTANT_ANALYST_NO_VISIBLE_DATA_MESSAGE =
+  "В вашей зоне видимости данных по этому вопросу нет. " +
+  "Если данные должны быть вам доступны — обратитесь к администратору вашей " +
+  "организации, чтобы он выдал доступ.";

@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0587",
+  "verdict": "pass",
+  "ci_seen": {"green": true},
+  "deterministic": {
+    "total": 6523,
+    "passed": 6513,
+    "failed": 0,
+    "note": "6523 = 5345 (npm test: 5335 passed + 10 intentionally skipped) + 1178 (npm run fitness:db, all green after doc-reconcile solo re-verify). passed=6513 excludes the 10 intentional skips (not failures) from the passed count; failed=0 across both suites. npm run fitness (bash gate chain, ~300 checks incl. anti-case-lock/jargon-gate/build) is tracked separately in suites[] as it is not a vitest test count."
+  },
+  "suites": [
+    {"name": "npm run fitness (full, zero-dep gate chain incl. anti-case-lock, jargon gate, http-route-auth-coverage, read-pdp gates)", "result": "pass"},
+    {"name": "npm run fitness:db (vitest --dir ci/checks/db, live PG :55432, 121 files / 1178 tests)", "result": "pass", "note": "doc-reconcile.db.test.ts flaked 8/15 under full-package parallel load (timeout under resource contention); re-run solo (--dir ci/checks/db doc-reconcile) = 15/15 green. File is out of T-0587's diff scope (docs-author zone, T-0587 does not touch it). Counted as pass per solo-number policy (memory: doc-*/seed-pack изолированно, соло-числа при коллизии)."},
+    {"name": "npm test (vitest run, default config, 275 files)", "result": "pass", "raw": "273 passed | 2 skipped test files; 5335 passed | 10 skipped tests"},
+    {"name": "solo: src/core/__tests__/visible-aggregate.test.ts", "result": "pass", "raw": "13/13"},
+    {"name": "solo: src/core/__tests__/assistant-analyst.test.ts", "result": "pass", "raw": "14/14"},
+    {"name": "solo: src/__tests__/assistant-analyst-digest.test.ts", "result": "pass", "raw": "13/13"},
+    {"name": "solo (live PG): ci/checks/db/registry-digest.test.ts", "result": "pass", "raw": "3/3"},
+    {"name": "solo (live PG): ci/checks/db/analyst-pdp-chat.test.ts", "result": "pass", "raw": "3/3"},
+    {"name": "bash ci/checks/anti-case-lock.sh (AC-8)", "result": "pass"},
+    {"name": "bash ci/checks/ux/assistant-llm-message-jargon.sh + --self-test (AC-9)", "result": "pass"}
+  ],
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "src/core/__tests__/assistant-analyst.test.ts > runAnalyst — identity anti-regression (T-0587 FF-1/AC-1)", "result": "pass"},
+    {"ac": "AC-2", "test": "ci/checks/db/analyst-pdp-chat.test.ts > FF-3/AC-2: owner sees the FULL sum; narrow-grant employee sees STRICTLY the visible subset; ci/checks/db/registry-digest.test.ts > T-0587 (FF-3/AC-2): narrow-grant employee strictly a subset", "result": "pass"},
+    {"ac": "AC-3", "test": "ci/checks/db/analyst-pdp-chat.test.ts > FF-4/AC-3: zero-grant employee gets the honest FR-5 refusal; ci/checks/db/registry-digest.test.ts > AC-3a/AC-3b owner vs non-reader", "result": "pass"},
+    {"ac": "AC-4", "test": "src/core/__tests__/visible-aggregate.test.ts > FF-2/AC-4: rows NOT passed to accumulateNumeric have ZERO effect; src/__tests__/assistant-analyst-digest.test.ts > T-0587 FF-2/AC-4 numericAggregates rendered, not wiped", "result": "pass"},
+    {"ac": "AC-5", "test": "src/__tests__/assistant-analyst-digest.test.ts > T-0587 (§2.2 ADR-T0587, FR-3/FR-5): digest known but zero-visible everywhere → honest zone-of-visibility refusal, NOT a system-state claim", "result": "pass"},
+    {"ac": "AC-6", "test": "ci/checks/db/analyst-pdp-chat.test.ts > FF-5/AC-6: dormant LLM on the analyst path — 503 LLM_UNAVAILABLE, NOT 500 INTERNAL", "result": "pass"},
+    {"ac": "AC-7", "test": "LIVE_PROOF browser walkthrough per spec §5 (two real users + third zero-grant user + LLM-key-off path, screenshots) — MANUAL/deferred, not machine-verifiable in this pass", "result": "fail", "note": "DEFERRED, not a real failure: AC-7 is verifiable_as=manual (LIVE_PROOF browser), requires a live deployed stand + real browser session per D-064 discipline — cannot be executed inside this deterministic TEST pass. review.json also marks AC-7 covered:false for the same reason. Deferred to post-merge acceptance per task instructions. Marked 'fail' only because the schema enum has no 'deferred' value; see failures[] entry with is_product_defect:false, root_class:tooling-gap for the authoritative classification."},
+    {"ac": "AC-8", "test": "bash ci/checks/anti-case-lock.sh", "result": "pass"},
+    {"ac": "AC-9", "test": "bash ci/checks/ux/assistant-llm-message-jargon.sh (+ --self-test)", "result": "pass"},
+    {"ac": "AC-10", "test": "npm test + npm run build (via npm run fitness) + npm run fitness:db", "result": "pass"},
+    {"ac": "AC-11", "test": "git diff merge-base..HEAD -- src/http/assistant.ts is empty (route untouched); public types HandlerResult/AnalystPorts/LlmPort/HandlerContext signatures unchanged", "result": "pass"},
+    {"ac": "AC-12", "test": "git diff --name-only merge-base..HEAD | grep runtime/agent-dispatch → 0 matches", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "web/ diff footprint", "result": "n/a", "note": "T-0587 touches zero files under web/ — not a UI task, UX honest-gate G1-G7 not applicable"}
+  ],
+  "failures": [
+    {"test": "AC-7 LIVE_PROOF (manual, browser)", "is_product_defect": false, "root_class": "tooling-gap", "note": "Not a code defect — AC-7 is spec-designated verifiable_as=manual (D-064 LIVE_PROOF), requiring a live deployed stand and real browser session with two distinct human identities. Out of reach of this deterministic TEST pass by design. All 11 machine-verifiable AC (AC-1..6, AC-8..12) pass. Deferred to post-merge acceptance."}
+  ],
+  "flakes_resolved": [
+    {"test": "ci/checks/db/doc-reconcile.db.test.ts (F-1..F-9, 8 of 15 assertions)", "root_class": "tooling-gap", "note": "Timed out (5000ms) under full fitness:db parallel package run (resource contention with 120 other db-suite files sharing the local PG instance). Solo re-run via `vitest run --dir ci/checks/db doc-reconcile` (isolated) = 15/15 green, no code changes. File is entirely outside T-0587's diff (docs-author/T-0555 zone); not touched by this task's commits."}
+  ],
+  "dev_overlap_files": ["pr-handoff.json"],
+  "report_path": "/Users/shoxy/Code/choros-wt/T-0587/T-0587.test-report.json"
+}

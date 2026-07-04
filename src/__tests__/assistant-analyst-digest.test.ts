@@ -91,7 +91,7 @@ describe("analyst registry digest (T-0607 а)", () => {
     expect(sent).not.toContain("Записей нет");
   });
 
-  it("AC-2: digest known-and-empty (registries with 0 records) → honest zero, still no false «нет данных»", async () => {
+  it("T-0587 (§2.2 ADR-T0587, FR-3/FR-5): digest known but zero-visible everywhere → honest zone-of-visibility refusal, NOT a system-state claim", async () => {
     const digest: ReadableRegistryDigest = {
       degraded: false,
       registries: [{ slug: "vendors", displayName: "Каталог", visibleCount: 0, samples: [] }],
@@ -101,9 +101,64 @@ describe("analyst registry digest (T-0607 а)", () => {
     await runAnalyst("сколько заведено", ctx(stub), ports);
 
     const sent = contextSentToLlm(stub);
-    // The registry itself is listed with a truthful zero count.
-    expect(sent).toContain("записей — 0");
-    expect(sent).toMatch(/достоверный факт/);
+    // FR-5: the honest refusal text is present, framed as the ASKER's zone of
+    // visibility — NOT a claim about the system's overall state.
+    expect(sent).toContain("В вашей зоне видимости данных по этому вопросу нет");
+    // FR-5 anti-regression: must NOT claim system-wide absence as fact.
+    // (Established convention, mirrors the pre-existing "НЕ утверждай, что
+    // записей нет" instruction pattern at the `degraded` branch below: the
+    // instruction text legitimately MENTIONS the banned phrase inside a
+    // negative directive to the LLM — "не утверждай, что данных в системе
+    // нет" — so the anti-regression check targets the ASSERTED/capitalised
+    // form a system-state CLAIM would use, not the instruction's embedded
+    // lowercase mention.)
+    expect(sent).not.toContain("Данных в системе нет");
+    expect(sent).not.toMatch(/^В системе (нет|отсутствует)/m);
+    expect(sent).not.toMatch(/достоверный факт/);
+  });
+
+  it("T-0587 (§2.2, FR-5): NO published registries at all (registries.length===0) folds into the SAME honest refusal", async () => {
+    const digest: ReadableRegistryDigest = { degraded: false, registries: [] };
+    const ports: AnalystPorts = { loadRegistryDigest: async () => digest };
+    const stub = new StubChatLlmPort();
+    await runAnalyst("сколько заведено", ctx(stub), ports);
+
+    const sent = contextSentToLlm(stub);
+    expect(sent).toContain("В вашей зоне видимости данных по этому вопросу нет");
+    // (Established convention, mirrors the pre-existing "НЕ утверждай, что
+    // записей нет" instruction pattern at the `degraded` branch below: the
+    // instruction text legitimately MENTIONS the banned phrase inside a
+    // negative directive to the LLM — "не утверждай, что данных в системе
+    // нет" — so the anti-regression check targets the ASSERTED/capitalised
+    // form a system-state CLAIM would use, not the instruction's embedded
+    // lowercase mention.)
+    expect(sent).not.toContain("Данных в системе нет");
+    expect(sent).not.toMatch(/^В системе (нет|отсутствует)/m);
+  });
+
+  it("T-0587 (§1.4, FF-2/AC-4): numericAggregates are rendered under the registry when present, and NOT wiped by the zero-visibility branch", async () => {
+    const digest: ReadableRegistryDigest = {
+      degraded: false,
+      registries: [
+        {
+          slug: "deals",
+          displayName: "Раздел",
+          visibleCount: 2,
+          samples: ["Пример-1"],
+          numericAggregates: [
+            { fieldKey: "amount", fieldLabel: "Сумма", count: 2, sum: 350000, avg: 175000, min: 100000, max: 250000 },
+          ],
+        },
+      ],
+    };
+    const ports: AnalystPorts = { loadRegistryDigest: async () => digest };
+    const stub = new StubChatLlmPort();
+    await runAnalyst("сколько записей и на какую сумму", ctx(stub), ports);
+
+    const sent = contextSentToLlm(stub);
+    expect(sent).toContain("Сумма");
+    expect(sent).toContain("350000");
+    expect(sent).not.toContain("В вашей зоне видимости данных по этому вопросу нет");
   });
 
   it("AC-2: degraded digest → context must NOT claim «записей нет»", async () => {
@@ -124,6 +179,51 @@ describe("analyst registry digest (T-0607 а)", () => {
     const sent = contextSentToLlm(stub);
     expect(sent).not.toContain("Записей нет");
     expect(sent).toMatch(/недоступны для чтения/);
+  });
+
+  it("adversary-honesty fix (T-0587): reg.truncated → context carries an honest 'possibly incomplete' note with the DAO's own scannedLimit, not a fabricated one", async () => {
+    const digest: ReadableRegistryDigest = {
+      degraded: false,
+      registries: [
+        {
+          slug: "vendors",
+          displayName: "Каталог контрагентов",
+          visibleCount: 200,
+          samples: ["Пример-1"],
+          truncated: true,
+          scannedLimit: 200,
+        },
+      ],
+    };
+    const ports: AnalystPorts = { loadRegistryDigest: async () => digest };
+    const stub = new StubChatLlmPort();
+    await runAnalyst("сколько заведено", ctx(stub), ports);
+
+    const sent = contextSentToLlm(stub);
+    expect(sent).toContain("записей — 200");
+    // Human-readable, no jargon ("scanLimit"/"truncated" etc. are internal
+    // names — the rendered note must read as prose, and must cite the DAO's
+    // OWN scannedLimit (200), not a second hardcoded literal.
+    expect(sent).toContain("по первым 200 просканированным видимым записям");
+    expect(sent).toContain("итог может быть неполным");
+    expect(sent).not.toMatch(/scanLimit|truncated/i);
+  });
+
+  it("adversary-honesty fix (T-0587): reg.truncated absent/false → NO truncation note rendered", async () => {
+    const digest: ReadableRegistryDigest = {
+      degraded: false,
+      registries: [
+        { slug: "vendors", displayName: "Каталог контрагентов", visibleCount: 5, samples: ["Пример-1"] },
+      ],
+    };
+    const ports: AnalystPorts = { loadRegistryDigest: async () => digest };
+    const stub = new StubChatLlmPort();
+    await runAnalyst("сколько заведено", ctx(stub), ports);
+
+    const sent = contextSentToLlm(stub);
+    expect(sent).toContain("записей — 5");
+    expect(sent).not.toContain("просканированным");
+    expect(sent).not.toContain("может быть неполным");
   });
 });
 
