@@ -1,7 +1,7 @@
 {
-  "task_id": "T-0623",
+  "task_id": "T-0586",
   "status": "pr_open",
-  "branch": "task/T-0623-grant-asymmetry",
+  "branch": "task/T-0586-agent-live",
   "pr_url": "",
   "ci_local": {
     "build": true,
@@ -11,43 +11,36 @@
     "fitness": true
   },
   "files_changed": [
-    "src/core/sandbox-gate.ts",
-    "src/http/records.ts",
-    "src/core/__tests__/sandbox-gate.test.ts",
-    "ci/checks/db/records-sandbox-gate.test.ts"
+    "src/runtime/agent-dispatch/run-agent-step.ts",
+    "src/server/agent-dispatch-loop.ts",
+    "src/core/__tests__/stub-llm-port.ts",
+    "src/runtime/agent-dispatch/__tests__/run-agent-step.test.ts",
+    "src/server/__tests__/agent-dispatch-loop-live-flag.test.ts",
+    "ci/checks/agent-live-flip-flag.sh",
+    "package.json",
+    "docker-compose.yml",
+    ".env.prod.example"
   ],
-  "root_cause": "Diagnosed LIVE on the stand (ooo-akson tenant, real Keycloak token for ivanov-i, real Postgres :55432). Same user, same token: GET /api/records/:id of a 'clients' record ivanov CREATED → 404; GET of a 'supplier' record → 200; LIST clients count=0, LIST supplier count=1; DELETE clients → 403. The asymmetry is NOT the T-0619 role-reader grant: role-reader confers read/record on the RESOURCE_ROOT sentinel, which the composite resource-ancestry oracle (src/db/resource-ancestry.ts rule 2) treats as covering EVERY record in the tenant — universal across all apps, and ivanov-i HOLDS a confirmed role-reader assignment (verified by SQL). The real cause is the T-0558 SANDBOX GATE keyed on application.tier: apps 'clients'/'catalog-items' are tier='draft', apps 'supplier'/'budget-item'/'purchase-request' are tier='published'. src/http/records.ts sandboxReadPredicate hides draft-tier records from a caller who is not owner/admin and holds no authoring_draft grant (ivanov-i: is_owner=f, authoring_draft=f, proven by SQL). But POST /api/records (createRecord) has NO tier gate — a non-privileged user CAN write a record into a draft-tier app, then can neither read it back (GET 404 / list empty) nor delete it (DELETE required owner/admin|authoring_draft). Net: a user creates an object invisible AND undeletable to themselves — a столп-4 (rights-circuit) break. Classification: DATA (app tiers) + a create/read-consistency gap in code (create not sandbox-gated while read/delete are).",
-  "fix_summary": {
-    "creator_own_floor": "src/core/sandbox-gate.ts sandboxReadPredicate gains an OPTIONAL creatorEscape { ownerColumn, ownerParam }. For a non-privileged actor the sandbox restriction becomes ( <tierColumn> = 'published' OR <ownerColumn> = <ownerParam> ) instead of published-only — so the actor keeps sight of records they created themselves even in a draft-tier app. The actor slug is passed as a BOUND $N param (never inlined as a literal — the only caller-derived value in the fragment); tierColumn/ownerColumn are trusted code-level constants. Omitting creatorEscape yields the byte-identical pre-T-0623 fragment (no behavioral change for callers that don't opt in). The pure module stays IO-free (no new imports) so tier-isolation/floor2-sandbox-isolation stay green.",
-    "records_read_paths": "src/http/records.ts LIST (listRecordsPaginated) and GET-by-id (getRecordDetail) now pass creatorEscape = { ownerColumn: 'r.created_by', ownerParam: <bound $N> } with the resolved actor slug bound as a param, but ONLY for a non-privileged actor (privileged already sees all tiers). This is additive AND — never relaxes the tenant scope (withTenantTx + RLS + the explicit r.tenant_id guard are untouched) and never reveals another actor's draft row.",
-    "records_delete_authz": "src/http/records.ts DELETE: the route no longer 403s every non-privileged actor up front. It resolves config privilege (owner/admin | authoring_draft) and passes actorIsConfigPrivileged into deleteRecord, which enforces the ownership floor INSIDE the FOR UPDATE locked read (atomic, no TOCTOU): a config-privileged actor may delete ANY record; a non-privileged actor may delete ONLY a record they created (created_by = actor), else { forbidden } → 403. Existence is confirmed first so a non-existent id stays an honest 404 (never a 403 that would leak existence)."
-  },
-  "invariants_preserved": {
-    "tenant_isolation": "The creator escape matches only the actor's OWN resolved slug within their OWN tenant (RLS + r.tenant_id). Live-proved on the stand: the fixed predicate with created_by='sidorov-s' returns 0 rows for ivanov's draft record; cross-tenant B rows remain invisible (DB test 'TENANT ISOLATION preserved').",
-    "field_visibility": "Unchanged — applyFieldVisibilityRedaction is a separate composite gate applied on top of the sandbox/record-read gates; not touched.",
-    "read_pdp": "Unchanged — role-reader (covering read/record grant) is still required; isRecordReadable still runs after the sandbox filter. A user WITHOUT role-reader still gets 404. The fix only relaxes the SANDBOX overlay for the creator's own records, never the PDP grant math (grant-lattice.ts / read-visibility.ts untouched).",
-    "hire_flow_T0619": "Untouched — reader-grant.ts / register.ts / migration 117/124 unchanged; no migration added."
-  },
+  "summary": "Implements ADR-T0586 (commit ca1b8d6) exactly: replaces the two hard-coded `liveEnabled: false` literals in src/server/agent-dispatch-loop.ts's composition root with a read of the deploy-time AGENT_LIVE_ENABLED env flag (default false, dormant/safe — ND-1 Variant A). When live, buildAgentDispatchDeps additively supplies runDeps.llmPortFactory (ND-2 Variant B) — a per-job factory that builds a fresh OpenAILlmPort from the agent's own ctx.llm config via the SAME tenantSecretResolver the assistant path already uses (src/server.ts), no duplicated SQL resolver. run-agent-step.ts's live-gate now prefers deps.llmPortFactory?.(cfg) ?? deps.llm (frozen fallback when the factory is absent, e.g. unit tests / degraded deps). A new typed classification branch routes LlmUnavailableError (configured-but-failed call: bad key/HTTP/timeout/network) to defer-to-human(signal=model, doubtReason=canonicalizeLlmError(err)) BEFORE the generic/timeout/egress fail-closed branches, so a broken key lands in the human inbox instead of parking the job. buildDegradedAgentDispatchDeps keeps its literal liveEnabled:false with an added doc-comment explaining it is an intentionally-unreachable degraded path (topics=[] short-circuits to noopHandle before runDeps is ever read).",
+  "adr_ref": "T-0586.adr.md (commit ca1b8d6), spec T-0586.spec.md",
+  "new_gate": "ci/checks/agent-live-flip-flag.sh (FF-586-1/FF-586-3, --self-test supported): function-scoped grep (awk brace-depth extraction) asserts buildAgentDispatchDeps reads AGENT_LIVE_ENABLED and contains no unconditional liveEnabled:false; asserts buildDegradedAgentDispatchDeps's OWN liveEnabled:false is doc-commented as the degraded/unreachable path (function-isolated, not conflated with buildAgentDispatchDeps); asserts no llm_connection/secret_handle SQL literal on a CODE line (comment-only mentions excluded, same comment-strip convention as anti-case-lock.sh) and that OpenAILlmPort + tenantSecretResolver are imported. Wired additively at the end of package.json's fitness chain (npm run fitness now also runs this gate + its --self-test).",
   "gates": {
-    "npm_run_build": "green, exit 0 (tsc + seed/tsconfig.json)",
-    "tsc_noEmit": "green, exit 0",
-    "vitest_unit_root": "272 files passed, 2 skipped; 5316 tests passed, 10 skipped, 0 failed — includes src/core/__tests__/sandbox-gate.test.ts 17/17 (4 new T-0623 creatorEscape cases).",
-    "vitest_fitness_db": "Solo run against live Postgres :55432 (template 78bc2377, 112 migrations). ci/checks/db/records-sandbox-gate.test.ts 10/10 (5 original T-0558 + 5 new T-0623: own-draft-visible, others'-draft-hidden, tenant-isolation, own-delete-204/others'-delete-403, nonexistent-404). records_delete.db + records-read-pdp.db green. One unrelated flake (audit-writer.chain.test.ts timeout under parallelism) passes solo (293ms) — not from this diff.",
-    "npm_run_fitness": "exit 0 end-to-end (full ~240-check chain) AFTER committing the db-test edit. FF-T147-2 (db-isolation-no-test-change) diffs `git diff HEAD` and only reads clean once test edits are committed — confirmed green post-commit. tier-isolation / floor2-sandbox-isolation / read-pdp-frozen-core / read-pdp-anti-case / anti-case-lock / frozen-checks-immutable all pass."
+    "vitest": "full suite green: 273 files passed, 2 skipped; 5336 tests passed, 10 skipped, 0 failed (npx vitest run). Includes the 6 new AC-4/AC-5 weld tests (agent-step-weld.dormant.test.ts + agent-step-weld.live-stub.test.ts, UNCHANGED assertions), 35 tests in run-agent-step.test.ts (10 new: llmPortFactory DI x4, LlmUnavailableError->defer x3, existing 28 untouched-in-substance), 13 new tests in agent-dispatch-loop-live-flag.test.ts (table-driven env values + factory-identity).",
+    "build": "npm run build green (tsc + seed/tsconfig.json), zero errors.",
+    "fitness_db": "npm run fitness:db (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros against the real running Postgres :55432 container 'choros-postgres-1'): 120 test files passed, 1173 tests passed, 0 failed — confirms migrations 032/094 and agent_card/llm_connection RLS unaffected (AC-11). Ran once, clean (no flake observed, no solo re-check needed).",
+    "flip_flag_selftest": "bash ci/checks/agent-live-flip-flag.sh --self-test green (4 self-test assertions) AND bash ci/checks/agent-live-flip-flag.sh (production check against the real file) green.",
+    "secret_custody": "bash ci/checks/precheck-secret-custody.sh green; bash ci/checks/secret-handle-isolation.sh green (FF-25-1..8, including the byte-unchanged frozen-file check) — neither run-agent-step.ts nor agent-dispatch-loop.ts references the raw llm_secret_handle column name (ADR §4.4 respected: only opaque ctx.llm.secretHandle / LiveLlmConfig.secretHandle are used).",
+    "anti_case": "bash ci/checks/anti-case-lock.sh green (Phase 1 delegate gates + Phase 2 full denylist scan, all within/under baseline, several literals eroded further than baseline during this diff's neighborhood). No case-specific literals (persona/role/tenant-slug) added in src/.",
+    "compose": "docker compose -f docker-compose.yml config -q exits 0; docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file <placeholder-substituted .env.prod.example> config -q exits 0; bash ci/checks/compose-prod-config.sh green (all FF-T61-1..11); grep -E 'AGENT_LIVE_ENABLED.*:-false' docker-compose.yml matches.",
+    "full_fitness_chain": "npm run fitness (the entire ~240-check chain incl. npm run build inline) completed with exit code 0. All 'FAIL' lines appearing in the raw log are INTERNAL --self-test fixtures of OTHER gates (e.g. docpage-writeful-tools, FF-T0572-*) intentionally planting violations to prove their own detectors fire — not real failures.",
+    "llm_port_injectable": "bash ci/checks/llm-port-injectable.sh green — LlmPort stays a pure injectable type; no SDK imports leaked into src/core/** or src/runtime/legal-precheck/**.",
+    "no_network_in_core": "bash ci/checks/precheck-no-network-in-core.sh green — LlmUnavailableError/canonicalizeLlmError imported into run-agent-step.ts are pure (no network), core/legal-precheck untouched.",
+    "eslint": "npx eslint on all changed .ts files: 0 errors, 1 pre-existing warning (console.error in the untouched per-job catch block of runAgentDispatchOnce, unrelated to this diff)."
   },
-  "test_proof_of_fix": [
-    "ci/checks/db/records-sandbox-gate.test.ts 'T-0623 creator-own floor over the sandbox gate' — live RLS against the real choros_app (NOBYPASSRLS) role: unprivileged author GETs their own draft-app record (200), NOT another author's (404) nor a seed-authored one (404); LIST includes own draft + published, excludes others' draft; DELETE own → 204, others' → 403; nonexistent id → 404.",
-    "src/core/__tests__/sandbox-gate.test.ts 'T-0623 sandboxReadPredicate — creatorEscape' — pure: non-privileged + creatorEscape emits ( a.tier = 'published' OR r.created_by = $N ) with the slug as a bind param (never inlined); privileged ignores it; omitting it is byte-identical to pre-T-0623."
-  ],
-  "deviations_from_adr": [
-    "No migration added and no new grant — the fix is a code-level read/delete ownership floor over the existing T-0558 sandbox gate, not a change to the grant model (role-reader/RESOURCE_ROOT untouched). The alternative 'block create into a draft app' was rejected: regular staff legitimately submit records into draft/sandbox apps during внедрение (the Закупки case runs while apps are still draft), so the correct столп-4 fix is 'you can always see and delete what you created', not 'you cannot create'."
-  ],
-  "blocked_reason": "",
-  "friction_events": [
-    "ci/checks/db-isolation-no-test-change.sh (FF-T147-2) false-positives on any UNCOMMITTED edit to ci/checks/db/*.test.ts (it diffs `git diff HEAD`). Adding the T-0623 regression coverage to records-sandbox-gate.test.ts tripped it during a pre-commit `npm run fitness`; it reads clean the moment the edit is committed (confirmed by re-running fitness post-commit → exit 0). Not a real gate failure — the T-0147 rule targets implementing isolation INSIDE tests, not adding legitimate coverage.",
-    "audit-writer.chain.test.ts timed out (5000ms) under full-suite parallelism but passes solo in 293ms — the documented 'parallel vitest+db flakes → trust solo numbers' pattern; unrelated to this diff."
-  ],
-  "live_proof_followups": [
-    "Diagnostic reproduction done LIVE on the stand (ivanov-i real KC token: clients GET 404 / supplier GET 200 / clients DELETE 403 / clients LIST 0 / supplier LIST 1). The FIX behavior was proved on real stand data via the identical RLS-scoped SQL predicate (pre-fix published-only → 0 rows for ivanov's clients record; post-fix published-OR-own → 1 row; same predicate for sidorov-s → 0 rows, no leak). END-TO-END LIVE_PROOF through the running app still pending a promotion of task/T-0623-grant-asymmetry to the dev stand (founder-gated deploy): after deploy, ivanov-i GET+DELETE of their own clients record should return 200/204 while sidorov-s still gets 404/403 on it. (Diagnostic KC password set on ivanov-i during reproduction was retired — user flagged UPDATE_PASSWORD.)"
+  "handoff_path": "pr-handoff.json",
+  "deviations_from_adr": [],
+  "open_questions": [
+    "AC-8/AC-9 (LIVE_PROOF) are explicitly out of coder scope per ADR §8 ('исполнит tester ПОСЛЕ мержа + деплоя') — not attempted here. The deploy prerequisite from ADR §9 (set AGENT_LIVE_ENABLED=true in the dev stand's env and redeploy) is also not part of this PR's diff (docker-compose.yml ships the flag with a SAFE default of false; flipping the runtime env value on the actual stand is a separate deploy action, consistent with 'runtime target = container, deploy by the factory, not GT-4').",
+    "ND-2's ADR text offered two equivalent implementation shapes for the LlmUnavailableError catch handling (option (a): early return in the catch branch, vs option (b): a deferUnavailable flag threaded through the post-catch block). Implemented option (a) as the ADR explicitly recommended ('минимальнее и предпочтителен') — noted here only for traceability, not a deviation."
   ]
 }
