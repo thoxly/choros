@@ -60,10 +60,17 @@ export function buildFieldKeyWhitelist(recordSchema: unknown): FieldKeyWhitelist
  * Quote a JSONB-path SQL identifier for a whitelisted field_key. The key has
  * ALREADY been verified to be a Map member by the caller (translateFilters/
  * translateSort) before this is invoked — this function only shapes the SQL
- * text for a key we control, with defensive quote-escaping should a tenant ever
- * choose a field_key containing a literal `'` (record-schema field keys are
- * constrained to FIELD_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/ at authoring
- * time — apps-schema.js — so this is belt-and-suspenders, not the primary gate).
+ * text for a key we control. The quote-escaping below (`replace(/'/g, "''")`)
+ * is the PRIMARY injection gate for this function, not a defensive backstop:
+ * record-schema-validator.ts compiles `record_schema` with a bare `new
+ * Ajv().compile(...)` and never applies FIELD_KEY_RE to property names, so the
+ * server does NOT enforce the `/^[A-Za-z_][A-Za-z0-9_]{0,63}$/` charset —
+ * FIELD_KEY_RE (apps-schema.js) is a BROWSER-ONLY authoring-time constraint in
+ * the field-constructor UI, bypassable by any direct API caller. A field_key
+ * containing a literal `'` therefore reaches this function in practice, not
+ * only in theory, and the escaping here (plus every field_key first passing
+ * through the whitelist Map lookup, never being concatenated unchecked) is
+ * what actually prevents it from widening the emitted SQL.
  */
 function jsonbTextPath(fieldKey: string): string {
   const escaped = fieldKey.replace(/'/g, "''");
