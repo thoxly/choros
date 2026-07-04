@@ -1319,6 +1319,24 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'list_view': {
+      // T-0581 (migration 123) — view registry. Composite FK (tenant_id,
+      // registry_def_id) → registry_def + (tenant_id, application_id) →
+      // application; KNOWN_TENANT_TABLES order guarantees both are already
+      // seeded (application, registry_def come before list_view).
+      const appId = tenantId === TENANT_A ? seedState.appIdA : seedState.appIdB;
+      const regId = tenantId === TENANT_A ? seedState.regIdA : seedState.regIdB;
+      const id = uuid();
+      await c.query(
+        `INSERT INTO choros.list_view
+           (tenant_id, id, registry_def_id, application_id, type, name,
+            is_default, config, created_at, updated_at, created_by)
+         VALUES ($1, $2, $3, $4, 'list', $5, false, '{}'::jsonb, 0, 0, 'ct-seed')
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, regId, appId, `ct-view-${id.slice(0, 8)}`],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1682,6 +1700,7 @@ const SEEDED_TABLES = new Set<string>([
   'matrix_lookup_table',
   'matrix_lookup_cell',
   'section',
+  'list_view',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {

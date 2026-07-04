@@ -196,6 +196,7 @@ _dc_mig119_failed=0                                                             
 _dc_mig120_failed=0                                                                # T0594-DC-MIG120-GUARD track when 120 triggers the FF-DC7 fail
 _dc_mig121_failed=0                                                                # T0604-DC-MIG121-GUARD track when 121 triggers the FF-DC7 fail
 _dc_mig122_failed=0                                                                # T0606-DC-MIG122-GUARD track when 122 triggers the FF-DC7 fail
+_dc_mig123_failed=0                                                                # T0581-DC-MIG123-GUARD track when 123 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -276,6 +277,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/122_approval_registry_guard.sql" ]]; then     # T0606-DC-MIG122-GUARD
       _dc_mig122_failed=1                                                     # T0606-DC-MIG122-GUARD
     fi                                                                        # T0606-DC-MIG122-GUARD
+    # Track specifically when 123 triggers this FAIL (and nothing else).     # T0581-DC-MIG123-GUARD
+    if [[ "${m}" == "migrations/123_list_view_registry.sql" ]]; then          # T0581-DC-MIG123-GUARD
+      _dc_mig123_failed=1                                                     # T0581-DC-MIG123-GUARD
+    fi                                                                        # T0581-DC-MIG123-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -782,6 +787,37 @@ if [[ "${_dc_mig122_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0606-approval-registry-guard]: migration 122_approval_registry_guard.sql adds ONE nullable/boolean column to EACH of process_app_binding + registry_def + a keyed data-completion UPDATE — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0606-DC-MIG122-GUARD
   fi                                                                           # T0606-DC-MIG122-GUARD
 fi                                                                             # T0606-DC-MIG122-GUARD
+# T-0581: additive relief for migration 123_list_view_registry.sql.            # T0581-DC-MIG123-GUARD
+# UNLIKE the 082..122 reliefs above (all ADD-COLUMN-only), 123 legitimately     # T0581-DC-MIG123-GUARD
+# CREATE TABLEs + ENABLE/FORCE ROW LEVEL SECURITY + CREATE POLICY — it is a     # T0581-DC-MIG123-GUARD
+# NEW tenant-scoped table (choros.list_view, the view-registry primitive,      # T0581-DC-MIG123-GUARD
+# T-0013 contract: tenant_id-leading PK, FORCE RLS, default-DENY policy).      # T0581-DC-MIG123-GUARD
+# The bad-check below therefore does NOT reuse the 082..122 "no CREATE/DROP    # T0581-DC-MIG123-GUARD
+# TABLE / no RLS" predicate (that predicate would correctly flag a NEW table   # T0581-DC-MIG123-GUARD
+# migration as bad — this one legitimately IS a new-table migration). The      # T0581-DC-MIG123-GUARD
+# actual FF-DC7 invariant this check protects is narrower: T-0044's own        # T0581-DC-MIG123-GUARD
+# authority domain (the confirmed2_by column + its dual-control semantics on   # T0581-DC-MIG123-GUARD
+# choros."grant"/role_assignment) is untouched — migration 123 touches NEITHER # T0581-DC-MIG123-GUARD
+# the confirmed2_by column NOR the choros."grant"/role_assignment tables at    # T0581-DC-MIG123-GUARD
+# all (it is a wholly separate, self-contained tenant table with its own PK/   # T0581-DC-MIG123-GUARD
+# policy/GRANT, unrelated to grant confirmation). Relief fires only after      # T0581-DC-MIG123-GUARD
+# independently verifying that.                                               # T0581-DC-MIG123-GUARD
+_dc_mig123_stem="migrations/123_list_view_registry.sql"                       # T0581-DC-MIG123-GUARD
+if [[ "${_dc_mig123_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig123_stem}"; then # T0581-DC-MIG123-GUARD
+  _dc_mig123_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig123_stem}" 2>/dev/null || true)" # T0581-DC-MIG123-GUARD
+  _dc_mig123_bad=0                                                             # T0581-DC-MIG123-GUARD
+  if echo "${_dc_mig123_content}" | grep -iqE "confirmed2_by"; then            # T0581-DC-MIG123-GUARD
+    _dc_mig123_bad=1                                                           # T0581-DC-MIG123-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0581-DC-MIG123-GUARD
+  if echo "${_dc_mig123_content}" | grep -iqE '(ALTER|DROP)[[:space:]]+TABLE[[:space:]]+choros\."?grant"?|ALTER[[:space:]]+TABLE[[:space:]]+choros\.role_assignment'; then # T0581-DC-MIG123-GUARD
+    _dc_mig123_bad=1                                                           # T0581-DC-MIG123-GUARD touches the grant/role_assignment authority tables
+  fi                                                                           # T0581-DC-MIG123-GUARD
+  if [[ "${_dc_mig123_bad}" -eq 0 ]]; then                                    # T0581-DC-MIG123-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0581-DC-MIG123-GUARD cancel false-red
+    _dc_mig123_failed=0                                                        # T0581-DC-MIG123-GUARD
+    echo "PASS [FF-DC7-T0581-view-registry]: migration 123_list_view_registry.sql CREATEs a wholly new, self-contained tenant table (choros.list_view, own PK/RLS/policy/GRANT) — does NOT touch confirmed2_by or the choros.\"grant\"/role_assignment authority tables (dual-control domain) — relief granted" # T0581-DC-MIG123-GUARD
+  fi                                                                           # T0581-DC-MIG123-GUARD
+fi                                                                             # T0581-DC-MIG123-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

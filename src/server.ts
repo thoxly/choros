@@ -34,6 +34,7 @@ import { registerRightsResourcesRoute } from "./http/rights-resources.js";
 import { registerSolutionPublishRoutes } from "./http/solution-publish.js";
 import { registerSectionRoutes } from "./http/sections.js";
 import { registerRecordRoutes } from "./http/records.js";
+import { registerListViewRoutes } from "./http/list-views.js";
 import { registerRecordLinksRoutes } from "./http/record-links.js";
 import { registerAssistantRoutes } from "./http/assistant.js";
 import { makeHttpKeycloakAdminPort, makeHttpKeycloakUserPort } from "./keycloak/admin-port.js";
@@ -787,6 +788,19 @@ function buildRouter(
   // slug / KC sub, never from headers. Same deps as applications.
   if (grantsPool) {
     registerSectionRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register list-view (сохранённые представления списка) CRUD API (T-0581 —
+  // view registry, столп 2/К1). Tenant-scoped via withTenantTx + RLS (policy
+  // list_view_tenant_isolation, migration 123); mutation requires the SAME
+  // configurator privilege as record/schema edits (owner/admin | authoring_draft,
+  // resolveActorPrivilege — honest-degrade when omitted, mirrors records.ts).
+  if (grantsPool) {
+    registerListViewRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
