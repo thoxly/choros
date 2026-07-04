@@ -24,7 +24,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
-import { loadAdminContext } from "../db/org.js";
+import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
 import { isNarrowerOrEqual, type ScopeElement, type AncestryOracle } from "../core/grant-lattice.js";
 import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import type { AdminContext } from "../core/scoped-admin.js";
@@ -60,12 +60,24 @@ export interface LlmConfigRouteDeps {
 }
 
 // ---------------------------------------------------------------------------
-// Auth helpers (same pattern as agents-list.ts)
+// Auth helpers (mirrors agents.ts::extractActor — T-0371/T-0633: resolve the
+// keycloak sub to the REAL employee slug via resolveActorSlugFromAuth before
+// it drives tenant/grant resolution; a seeded persona's KC sub is a random
+// UUID, not its slug). dev mode (x-dev-user) unchanged.
 // ---------------------------------------------------------------------------
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+async function extractActor(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -222,7 +234,7 @@ async function handleGetLlmConfig(
   req: import("node:http").IncomingMessage,
   res: import("node:http").ServerResponse,
 ): Promise<void> {
-  const actor = extractActor(req);
+  const actor = await extractActor(req, pool);
   const tenantId = await resolveActorTenant(actor);
   const nowMs = Date.now();
 
@@ -284,7 +296,7 @@ async function handlePutLlmConfig(
   req: import("node:http").IncomingMessage,
   res: import("node:http").ServerResponse,
 ): Promise<void> {
-  const actor = extractActor(req);
+  const actor = await extractActor(req, pool);
   const tenantId = await resolveActorTenant(actor);
   const nowMs = Date.now();
 

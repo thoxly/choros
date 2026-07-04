@@ -37,6 +37,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import { canConfigureLlmConnection } from "../db/capability-grants-dao.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
@@ -73,12 +74,25 @@ function assertUuidShape(value: string, label: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Auth helper (same pattern as llm-config.ts / agents-list.ts)
+// Auth helper (mirrors agents.ts::extractActor — T-0371/T-0633: keycloak sub
+// must be resolved to the REAL employee slug via resolveActorSlugFromAuth
+// before it is used for tenant/grant resolution; a seeded persona's KC sub is
+// a random UUID, not its slug, so returning the raw sub here would fail-close
+// (ACTOR_TENANT_UNRESOLVED) even for a legitimate owner). dev mode unchanged.
 // ---------------------------------------------------------------------------
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+async function extractActor(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -177,7 +191,7 @@ async function handleList(
   req: import("node:http").IncomingMessage,
   res: import("node:http").ServerResponse,
 ): Promise<void> {
-  const actor = extractActor(req);
+  const actor = await extractActor(req, pool);
   const tenantId = await resolveActorTenant(actor);
   const nowMs = Date.now();
 
@@ -222,7 +236,7 @@ async function handleCreate(
   req: import("node:http").IncomingMessage,
   res: import("node:http").ServerResponse,
 ): Promise<void> {
-  const actor = extractActor(req);
+  const actor = await extractActor(req, pool);
   const tenantId = await resolveActorTenant(actor);
   const nowMs = Date.now();
 

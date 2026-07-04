@@ -43,6 +43,7 @@
 import pg from "pg";
 import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 
 // ---------------------------------------------------------------------------
 // Constants / helpers
@@ -93,13 +94,27 @@ async function withTenantTx<T>(
 }
 
 // ---------------------------------------------------------------------------
-// extractActor — mode-aware (mirrors registry-defs.ts)
-// keycloak mode reads AuthContext (set by withAuth); dev mode reads x-dev-user.
+// extractActor — mode-aware (mirrors agents.ts).
+// keycloak mode: JWT sub/preferred_username → REAL employee slug via
+// resolveActorSlugFromAuth (T-0371/T-0633 — sub-first, preferred_username
+// fallback; a seeded persona like genesis-owner has employee.slug != KC sub,
+// so returning the raw sub here would send an unresolvable slug into
+// resolveActorTenant → 403 ACTOR_TENANT_UNRESOLVED even for a legitimate owner).
+// dev mode reads x-dev-user, UNCHANGED.
 // ---------------------------------------------------------------------------
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+async function extractActor(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -300,7 +315,7 @@ export function registerAgentListRoutes(router: Router, deps: AgentListDeps): vo
     "GET",
     "/api/agents",
     withAuth(async (req, res) => {
-      const actor = extractActor(req);
+      const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
       const rows = await listAgentsTx(pool, tenantId, null);
       res.statusCode = 200;
@@ -316,7 +331,7 @@ export function registerAgentListRoutes(router: Router, deps: AgentListDeps): vo
     withAuth(async (req, res, params) => {
       const id = params["id"] ?? "";
       assertUuidShape(id, "agent id");
-      const actor = extractActor(req);
+      const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
       const rows = await listAgentsTx(pool, tenantId, id);
       if (rows.length === 0) {

@@ -38,6 +38,7 @@
 import pg from "pg";
 import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import { canConfigureLlmConnection } from "../db/capability-grants-dao.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 import { getLlmConnection, type LlmConnectionRow } from "../db/llm-connection-dao.js";
@@ -82,12 +83,23 @@ function assertUuidShape(value: string, label: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Auth helper (same pattern as llm-connections.ts / app-secret.ts)
+// Auth helper (mirrors agents.ts::extractActor — T-0371/T-0633: resolve the
+// keycloak sub to the REAL employee slug via resolveActorSlugFromAuth before
+// it drives tenant/grant resolution). dev mode unchanged.
 // ---------------------------------------------------------------------------
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+async function extractActor(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -225,7 +237,7 @@ async function handleTest(
   connectionId: string,
 ): Promise<void> {
   const { pool, resolveActorTenant, makeLlmPort } = deps;
-  const actor = extractActor(req);
+  const actor = await extractActor(req, pool);
   assertUuidShape(connectionId, "connectionId");
   const tenantId = await resolveActorTenant(actor);
   const nowMs = Date.now();
