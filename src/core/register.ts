@@ -27,6 +27,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { KeycloakUserPort } from "../keycloak/admin-port.js";
+import { humanEmployeeSlugExists } from "../db/org.js";
 import { RESOURCE_ROOT_NODE_ID, READER_ROLE_SLUG } from "./read-visibility.js";
 
 // ---------------------------------------------------------------------------
@@ -190,6 +191,23 @@ export async function registerTenant(
   validateRequest(req);
   const orgName = req.orgName.trim();
   const baseSlug = slugifyOrgName(orgName);
+
+  // SECURITY — anti-collision (T-0633, defense-in-depth). Self-registration
+  // sets the Keycloak username to `req.email`, which validateRequest already
+  // constrains to an email (always contains '@'), while seeded persona slugs
+  // (e-owner, e-orlov, e-configurator …) are never email-shaped — so a
+  // collision is structurally impossible on today's flow. This guard makes the
+  // invariant EXPLICIT and future-proofs it: should self-registration ever
+  // accept a free-form username, it must NOT be able to mint a KC user whose
+  // username == a seeded persona's employee slug (which the cross-tenant
+  // preferred_username → slug identity fallback would then resolve to the
+  // forest-owner). Same guard, same canonical query as POST /api/users.
+  if (await humanEmployeeSlugExists(deps.pool, req.email)) {
+    throw new RegisterError(
+      "LOGIN_RESERVED",
+      "This login is already in use — choose a different one",
+    );
+  }
 
   // Step 2: KC-first — create human user
   let kcUserId: string;

@@ -42,7 +42,11 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { KeycloakUserPort } from "../keycloak/admin-port.js";
 import { ensureReaderRoleAndAssignHuman } from "../core/reader-grant.js";
-import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
+import {
+  loadAdminContext,
+  resolveActorSlugFromAuth,
+  humanEmployeeSlugExists,
+} from "../db/org.js";
 import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import { authorizeOrgWrite, assertOrgObjectAuthority } from "./seed-write.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
@@ -214,6 +218,9 @@ export function registerUserMgmtRoutes(
   // 201: { employee_id, login }  (password never in the response)
   // T-0628: login is free-form (need not be an email); email is a separate
   // required field, validated before any Keycloak call.
+  // T-0633: 409 LOGIN_RESERVED if login collides with an existing HUMAN
+  // employee slug in ANY tenant (anti-collision — blocks minting a KC user
+  // whose preferred_username would resolve to a seeded persona like e-owner).
   // -------------------------------------------------------------------------
   router.register("POST", "/api/users", withAuth(async (req, res) => {
     const body = await readJsonBody(req);
@@ -237,6 +244,30 @@ export function registerUserMgmtRoutes(
     );
 
     const { login, email, password, display_name, position_id, role_id } = validateCreateBody(b);
+
+    // SECURITY — anti-collision (T-0633, privilege-escalation fix). The chosen
+    // `login` becomes the Keycloak username, which surfaces as the token's
+    // `preferred_username`. Identity resolution (resolveActorSlugFromAuth)
+    // resolves a token to an employee via a CROSS-TENANT preferred_username →
+    // employee.slug fallback for seeded personas whose KC sub ≠ slug. Several
+    // kind='human' seed personas exist as employees WITHOUT a Keycloak user at
+    // install time — notably genesis 'e-owner' (16 delegable mgmt-grants +
+    // tenant-owner, migrations/026) and 'e-configurator' (migrations/088) —
+    // so Keycloak does NOT reject creating a user named 'e-owner'. Without this
+    // guard, a holder of mgmt_object:employee:create (NOT the owner) could mint
+    // a KC user login='e-owner', log in, miss sub-first, and be resolved to the
+    // forest-owner via that fallback — a vertical privilege escalation.
+    // Reject, cross-tenant, any login that collides with an existing HUMAN
+    // employee slug BEFORE any Keycloak call (no side-effect, no orphan). The
+    // check is cross-tenant precisely because the fallback it protects is
+    // cross-tenant. 409 with a human reason — never the generic 503.
+    if (await humanEmployeeSlugExists(pool, login)) {
+      throw new HttpError(
+        409,
+        "LOGIN_RESERVED",
+        "this login is already in use — choose a different login",
+      );
+    }
 
     // KC-first (N4): create the KC user BEFORE any DB write. The plaintext
     // password is passed here and NOWHERE else — never logged, never audited,

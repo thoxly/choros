@@ -8,6 +8,7 @@
  *   400 VALIDATION    — missing/invalid/short fields
  *   409 EMAIL_TAKEN   — KC user with that email already exists
  *   409 ORG_TAKEN     — tenant slug already exists
+ *   409 LOGIN_RESERVED — login collides with a reserved seeded-persona slug (T-0633)
  *   503 AUTH_UNAVAILABLE — KC registrar unreachable / misconfigured
  *   500 INTERNAL      — DB failure after KC create (compensation attempted)
  *
@@ -73,6 +74,10 @@ export function registerRegisterRoutes(router: Router, deps: RegisterRouteDeps):
         }
         if (code === "ORG_TAKEN") {
           throw new HttpError(409, "ORG_TAKEN", err.message);
+        }
+        // T-0633: chosen login collides with a reserved seeded-persona slug.
+        if (code === "LOGIN_RESERVED") {
+          throw new HttpError(409, "LOGIN_RESERVED", err.message);
         }
         if (code === "AUTH_UNAVAILABLE") {
           throw new HttpError(503, "AUTH_UNAVAILABLE", err.message);
