@@ -369,6 +369,59 @@ describe("HTTP error mapping", () => {
       await new Promise<void>((resolve) => localServer.close(() => resolve()));
     }
   });
+
+  // T-0633 ROUND-3 [SECURITY]: register case-folds the email before BOTH the
+  // anti-collision guard query and the KC username. A real KC 25.0.6 folds the
+  // username at creation; the pre-round-3 guard compared byte-exact, so a
+  // mixed-case value could diverge (guard sees the raw form, KC stores the
+  // folded form). Self-registration can only ever mint an email-shaped username
+  // (never a seed slug), so this is defense-in-depth — but the case-fold must
+  // still be observable: the guard is asked for the LOWERCASED value and the KC
+  // username is stored LOWERCASED, so the two can never diverge in future.
+  it("E-4 [T-0633 round-3]: mixed-case email is lowercased before the guard query AND the KC username", async () => {
+    const kcLocal = new InMemoryKeycloakUserPort();
+    const askedSlugs: string[] = [];
+    // Fake pool: records every EXISTS-check argument (the guard's slug) and
+    // reports NO collision, so registration proceeds to the KC create. We only
+    // stub the guard's EXISTS query; the tenant-insert path is not exercised
+    // because we assert the KC username BEFORE any DB write matters here — but
+    // to keep the tx from throwing we return empty rows for everything else and
+    // let the (single-attempt) insert succeed against a permissive fake.
+    const recordingPool = {
+      connect: async () => ({
+        query: async (textOrConfig: string | { text: string }, values?: unknown[]) => {
+          const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+          if (text.includes("EXISTS") && text.includes("choros.employee")) {
+            askedSlugs.push(String(values?.[0]));
+            return { rows: [{ exists: false }] };
+          }
+          return { rows: [] };
+        },
+        release: () => { /* no-op */ },
+      }),
+    } as unknown as pg.Pool;
+
+    const router = new Router();
+    registerRegisterRoutes(router, { pool: recordingPool, kc: kcLocal });
+    const localServer = http.createServer(router.dispatch.bind(router));
+    await new Promise<void>((resolve) => localServer.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      await makeRequest(localServer, "POST", "/api/register", {
+        orgName: "Casing Org",
+        email: "Mixed.Case@Example.COM",
+        password: "password123",
+      });
+      // The guard was asked for the FOLDED email, not the raw mixed-case value.
+      expect(askedSlugs).toContain("mixed.case@example.com");
+      expect(askedSlugs).not.toContain("Mixed.Case@Example.COM");
+      // KC received the folded username (matches what a real KC would store).
+      expect(kcLocal.createCallCount).toBe(1);
+      expect(kcLocal.created[0].spec.username).toBe("mixed.case@example.com");
+      expect(kcLocal.created[0].spec.email).toBe("mixed.case@example.com");
+    } finally {
+      await new Promise<void>((resolve) => localServer.close(() => resolve()));
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

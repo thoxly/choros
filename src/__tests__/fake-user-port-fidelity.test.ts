@@ -86,4 +86,41 @@ describe("T-0625/T-0628 — InMemoryKeycloakUserPort email-format fidelity", () 
       }),
     ).rejects.toMatchObject({ code: "EMAIL_INVALID" });
   });
+
+  // T-0633 round-3 [SECURITY, fake-fidelity]: a real Keycloak 25.0.6 LOWERCASES
+  // the username at creation. The fake must model this, else a case-collision
+  // privilege-escalation bug in production could ship green (the guard passes a
+  // mixed-case login that real KC then folds into a seed-persona slug, but the
+  // fake would capture the un-folded form and hide the divergence).
+  it("T-0633: captures the username LOWERCASED (models real KC 25.0.6 username case-folding); email case is preserved", async () => {
+    const kc = new InMemoryKeycloakUserPort();
+    const { userId } = await kc.createHumanUser({
+      username: "Mixed-Login-Case",   // a mixed-case login (NOT a seed slug)
+      email: "Mixed.Case@Example.com",
+      password: "password12345",
+      actorType: "human",
+    });
+    expect(userId).toBeTruthy();
+    expect(kc.created).toHaveLength(1);
+    // Username folded to lowercase (what a real KC stores → what the token's
+    // preferred_username would carry → what the guard must match).
+    expect(kc.created[0].spec.username).toBe("mixed-login-case");
+    // Email is a distinct field; its case is left as-passed.
+    expect(kc.created[0].spec.email).toBe("Mixed.Case@Example.com");
+  });
+
+  it("T-0633: LOGIN_TAKEN one-shot switch throws a distinct code from EMAIL_TAKEN", async () => {
+    const kc = new InMemoryKeycloakUserPort();
+    kc.failOnLoginTaken = true;
+    await expect(
+      kc.createHumanUser({
+        username: "taken-login",
+        email: "ok@example.com",
+        password: "password12345",
+        actorType: "human",
+      }),
+    ).rejects.toMatchObject({ code: "LOGIN_TAKEN" });
+    // one-shot: resets after firing
+    expect(kc.failOnLoginTaken).toBe(false);
+  });
 });

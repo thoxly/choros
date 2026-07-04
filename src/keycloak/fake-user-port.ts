@@ -70,6 +70,13 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
   failOnCreate = false;
 
   /**
+   * T-0633 round-3: if true, the NEXT createHumanUser call throws LOGIN_TAKEN
+   * (409 USERNAME conflict — distinct from EMAIL_TAKEN). Models a real KC 409
+   * whose errorMessage names the username. One-shot.
+   */
+  failOnLoginTaken = false;
+
+  /**
    * If true, the NEXT createHumanUser call throws AUTH_UNAVAILABLE (KC unreachable).
    * Resets to false after each failed call (one-shot).
    */
@@ -119,6 +126,12 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
       (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
       throw err;
     }
+    if (this.failOnLoginTaken) {
+      this.failOnLoginTaken = false;
+      const err = new Error("LOGIN_TAKEN");
+      (err as NodeJS.ErrnoException).code = "LOGIN_TAKEN";
+      throw err;
+    }
     if (this.failOnCreate) {
       this.failOnCreate = false;
       const err = new Error("EMAIL_TAKEN");
@@ -126,9 +139,26 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
       throw err;
     }
 
-    // Generate a deterministic fake KC UUID from the username
-    const userId = `kc-user-${this.created.length + 1}-${spec.username.replace(/[^a-z0-9]/gi, "-")}`.slice(0, 64);
-    const entry: CapturedUser = { spec, userId, deleted: false, enabled: true };
+    // FAKE-FIDELITY (T-0633 round-3): a real Keycloak 25.0.6 LOWERCASES a
+    // username at creation (proven live). Before this, the fake captured
+    // `spec.username` verbatim — so a mixed-case username stored 'E-Config'
+    // here while a real KC realm would store 'e-config'. That fidelity gap is
+    // exactly what let the case-collision privilege-escalation slip past unit
+    // tests: the production anti-collision guard could pass a mixed-case login
+    // (byte-exact SQL miss) that a real KC then folded into a seed-persona
+    // slug, and no fake-backed test could observe the fold. The fake now folds
+    // `username` to lowercase in the CAPTURED spec, matching real KC, so
+    // (a) any future regression that removes the production case-normalization
+    // is caught by a test asserting the captured username, and (b) the
+    // deterministic userId derives from the same folded form. `email` is left
+    // as-passed (a real KC realm preserves the email attribute's case even
+    // while folding the username — the two are distinct fields).
+    const foldedUsername = spec.username.toLowerCase();
+    const captured: KcHumanUserSpec = { ...spec, username: foldedUsername };
+
+    // Generate a deterministic fake KC UUID from the (folded) username
+    const userId = `kc-user-${this.created.length + 1}-${foldedUsername.replace(/[^a-z0-9]/gi, "-")}`.slice(0, 64);
+    const entry: CapturedUser = { spec: captured, userId, deleted: false, enabled: true };
     this.created.push(entry);
     return { userId };
   }
@@ -172,6 +202,7 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
     this.deleteCalls.length = 0;
     this.setEnabledCalls.length = 0;
     this.failOnCreate = false;
+    this.failOnLoginTaken = false;
     this.failOnAuth = false;
     this.failOnSetEnabled = false;
     this.createCallCount = 0;
