@@ -57,14 +57,21 @@ describe('screen-record-detail — FileFieldValue (T-0579, AC-9)', () => {
   // FileFieldValue is a local (non-exported) component; per this file's own
   // convention (see header docstring) behaviour is asserted structurally
   // against the source, mirroring RelationFieldValue's existing test pattern.
+  //
+  // T-0622 (P0 fix): download/preview no longer set a native href/src to the
+  // bare API path directly (that load carries no auth headers — 401 in
+  // keycloak mode). Both now go through fetchFileBlob/downloadFile
+  // (lib/authed-file.js): authed fetch → blob → same-origin blob: object URL.
 
-  it('renders the resolved file name as a download link to /api/files/:versionId/download (never a raw uuid)', () => {
+  it('downloads via an authed blob fetch to /api/files/:versionId/download (never a bare href, never a raw uuid)', () => {
     expect(src).toContain('const downloadHref = `/api/files/${encodeURIComponent(versionId)}/download`');
+    expect(src).toContain('downloadFile(downloadHref, meta?.originalName, fetchWithAuthRetry)');
     expect(src).toContain('{meta.originalName || \'Скачать файл\'}');
   });
 
   it('requests the inline-disposition variant for preview (?disposition=inline)', () => {
-    expect(src).toContain('const previewHref = `${downloadHref}?disposition=inline`');
+    expect(src).toContain("const previewHref = `/api/files/${encodeURIComponent(versionId)}/download?disposition=inline`");
+    expect(src).toContain('fetchFileBlob(previewHref, fetchWithAuthRetry)');
   });
 
   it('inline <img> preview is gated on isPreviewSafeMime AND a normalized image/* mime (review B1: registro-safe)', () => {
@@ -81,9 +88,11 @@ describe('screen-record-detail — FileFieldValue (T-0579, AC-9)', () => {
     // review B1-residual fix-forward: the local also strips any `;param`
     // suffix, so a parameterized safe mime (e.g. "image/png;charset=binary")
     // still renders the preview too.
-    expect(precedingText).toMatch(/previewSafe\s*&&\s*normalizedMime\.startsWith\('image\/'\)/);
-    expect(precedingText).toContain("normalizedMime = typeof meta.mime === 'string' ? meta.mime.trim().toLowerCase().split(';')[0].trim() : ''");
-    expect(src.slice(idx, idx + 200)).toContain('src={previewHref}');
+    expect(precedingText).toMatch(/isImagePreview = previewSafe && normalizedMime\.startsWith\('image\/'\)/);
+    expect(precedingText).toContain("normalizedMime = typeof meta?.mime === 'string' ? meta.mime.trim().toLowerCase().split(';')[0].trim() : ''");
+    // T-0622: the <img> src is the BLOB object URL (previewUrl), resolved from
+    // an authed fetch — never the bare API href (that would 401 in keycloak mode).
+    expect(src.slice(idx, idx + 200)).toContain('src={previewUrl}');
   });
 
   it('inline <embed> preview (PDF) is gated on isPreviewSafeMime AND exactly application/pdf (normalized)', () => {
@@ -92,8 +101,17 @@ describe('screen-record-detail — FileFieldValue (T-0579, AC-9)', () => {
     const idx = src.indexOf('<embed', fnStart);
     expect(idx).toBeGreaterThan(-1);
     const precedingText = src.slice(fnStart, idx);
-    expect(precedingText).toMatch(/previewSafe\s*&&\s*normalizedMime\s*===\s*'application\/pdf'/);
-    expect(src.slice(idx, idx + 200)).toContain('src={previewHref}');
+    expect(precedingText).toMatch(/isPdfPreview = previewSafe && normalizedMime === 'application\/pdf'/);
+    expect(src.slice(idx, idx + 200)).toContain('src={previewUrl}');
+  });
+
+  it('never sets a native <img src>/<a href> directly to the bare download API path (that load carries no auth headers — the P0 bug)', () => {
+    const fnStart = src.indexOf('function FileFieldValue(');
+    const fnEnd = src.indexOf('\n// ---', fnStart);
+    const fnSrc = src.slice(fnStart, fnEnd > -1 ? fnEnd : undefined);
+    expect(fnSrc).not.toMatch(/<img\s+src=\{previewHref\}/);
+    expect(fnSrc).not.toMatch(/<embed\s+src=\{previewHref\}/);
+    expect(fnSrc).not.toMatch(/<a\s+href=\{downloadHref\}/);
   });
 
   it('isPreviewSafeMime excludes image/svg+xml (anti-XSS, mirrors the server allowlist)', () => {
@@ -187,9 +205,29 @@ describe('screen-record-detail — FileFieldValue (T-0579, AC-9)', () => {
     // not-found.
     const idx = src.indexOf('function FileFieldValue(');
     expect(idx).toBeGreaterThan(-1);
-    const fnBody = src.slice(idx, idx + 2000);
+    const fnBody = src.slice(idx, idx + 3000);
     expect(fnBody).toMatch(/f\.currentVersionId === versionId/);
     expect(fnBody).toMatch(/Array\.isArray\(f\.versionIds\) && f\.versionIds\.includes\(versionId\)/);
+  });
+
+  it('revokes the preview blob object URL on versionId change/unmount (no memory leak)', () => {
+    const idx = src.indexOf("useEffect(() => {\n    if (!isImagePreview && !isPdfPreview)");
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 900);
+    expect(block).toMatch(/URL\.createObjectURL\(result\.blob\)/);
+    expect(block).toMatch(/if \(objectUrl\) URL\.revokeObjectURL\(objectUrl\)/);
+  });
+
+  it('honest preview error state (401/403/404/network) instead of a silently broken <img>', () => {
+    expect(src).toContain("previewState === 'error'");
+    expect(src).toContain("previewError || 'Не удалось загрузить превью'");
+  });
+
+  it('honest download error surfaces inline (never a silent dead click)', () => {
+    const fnStart = src.indexOf('function FileFieldValue(');
+    const idx = src.indexOf('handleDownload', fnStart);
+    expect(idx).toBeGreaterThan(-1);
+    expect(src).toContain('{downloadError && (');
   });
 });
 

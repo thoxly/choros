@@ -23,6 +23,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { FieldControl, FileField, uploadFileToRecord } from './field-renderer.jsx';
+import { downloadFile } from '../lib/authed-file.js';
 
 // ---------------------------------------------------------------------------
 // Tree-walk helpers (same pattern as field-renderer.test.jsx / -d76.test.jsx)
@@ -323,5 +324,88 @@ describe('FileField T-0579 · FF-UPLOAD-ROUTE-ONLY (structural)', () => {
     expect(codeOnly).not.toMatch(/presign/i);
     expect(codeOnly).not.toMatch(/PutObject/);
     expect(codeOnly).not.toMatch(/aws-sdk/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0622 (P0 fix, re-LIVE_PROOF real browser): a native <a href="...download">
+// does not carry the SPA's auth headers (Authorization: Bearer in keycloak
+// mode) — 401. Download now goes through fetchFileBlob/downloadFile
+// (lib/authed-file.js): authed fetch → blob → programmatic <a download>
+// click. Structural checks below mirror the FF-UPLOAD-ROUTE-ONLY convention
+// (source-text assertions against field-renderer.jsx, no DOM/React render
+// needed — this test tier is "node" environment, no jsdom).
+// ---------------------------------------------------------------------------
+
+describe('FileField T-0622 · downloads via an authed blob fetch, never a bare href to the API', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, 'field-renderer.jsx'), 'utf8');
+
+  it('the download control is a click handler (downloadFile), NOT a native href to the download API', () => {
+    expect(source).toContain('downloadFile(downloadHref, fileMeta?.originalName, fetchWithAuthRetry)');
+    // The <a> for the populated/downloadable state must NOT set href to the
+    // API path directly — that native load carries no auth headers.
+    expect(source).not.toMatch(/<a\s*\n?\s*href=\{downloadHref\}/);
+  });
+
+  it('imports downloadFile from the shared lib/authed-file.js helper (reused, not reimplemented)', () => {
+    expect(source).toContain("import { downloadFile } from '../lib/authed-file.js'");
+  });
+
+  it('uses fetchWithAuthRetry (the mode-aware, self-healing fetch every screen already has) — not a raw fetch for the download', () => {
+    expect(source).toContain("import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js'");
+  });
+
+  it('surfaces a download error inline instead of a silent dead click', () => {
+    const idx = source.indexOf('const handleDownload = async (e) => {');
+    expect(idx).toBeGreaterThan(-1);
+    const block = source.slice(idx, idx + 400);
+    expect(block).toContain('setDownloadError(result.message)');
+    expect(source).toContain('{downloadError && (');
+  });
+});
+
+describe('FileField T-0622 · downloadFile/fetchFileBlob behavioral contract (mocked fetch)', () => {
+  let fetchCalls;
+
+  beforeEach(() => {
+    fetchCalls = [];
+    global.URL.createObjectURL = vi.fn(() => 'blob:fake');
+    global.URL.revokeObjectURL = vi.fn();
+    global.document = {
+      createElement: vi.fn(() => ({ href: '', download: '', click: vi.fn(), remove: vi.fn() })),
+      body: { appendChild: vi.fn() },
+    };
+  });
+
+  afterEach(() => {
+    delete global.URL.createObjectURL;
+    delete global.URL.revokeObjectURL;
+    delete global.document;
+  });
+
+  it('downloadFile calls the injected fetcher with the exact download URL and succeeds on 200', async () => {
+    const fetcher = vi.fn(async (url) => {
+      fetchCalls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/pdf' },
+        blob: async () => ({ type: 'application/pdf' }),
+      };
+    });
+    const result = await downloadFile('/api/files/ver-1/download', 'contract.pdf', fetcher);
+    expect(result.ok).toBe(true);
+    expect(fetchCalls).toEqual(['/api/files/ver-1/download']);
+    // downloadFile schedules URL.revokeObjectURL on the next tick (Safari-safe
+    // deferred revoke) — flush it before afterEach tears down the URL stub,
+    // otherwise the timeout fires against a deleted global (unhandled error).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  it('downloadFile surfaces an honest 401 message (session expired) instead of a broken download', async () => {
+    const fetcher = vi.fn(async () => ({ ok: false, status: 401 }));
+    const result = await downloadFile('/api/files/ver-1/download', 'contract.pdf', fetcher);
+    expect(result).toEqual({ ok: false, status: 401, message: 'Сессия истекла — войдите снова' });
   });
 });
