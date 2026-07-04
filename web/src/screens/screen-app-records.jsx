@@ -75,6 +75,11 @@ import {
 // second parallel read-path (FF-VR-1).
 import { ListViewPanel, ViewSwitcher, useListViews } from './list-view-panel.jsx';
 import { buildFieldCatalog } from './list-view-panel.js';
+// T-0582 (kanban view): the SECOND display mode — activeView.type === 'kanban'
+// renders <KanbanBoard> instead of the autogen table below, over the SAME
+// records/GET fetch (no second read path, FF-K-4).
+import { KanbanBoard } from './kanban-board.jsx';
+import { readSelectEnum, isFieldRequired } from './kanban-board.js';
 // T-0399/T-0480 [D7-K]: record-entry fields render through the ONE unified
 // renderer (catalog-driven). FieldControl draws the scalar/enum controls;
 // structural contracts (relation/collection/rollup) dispatch to their dedicated
@@ -1153,6 +1158,54 @@ function AppRecordsScreen() {
   }, [schemaColumns, activeView, defaultViewConfig]);
   const recordList = records || [];
 
+  // T-0582 (kanban view): derive the board's inputs from the active kanban
+  // config. isKanban gates the display-mode branch below (screen-app-records
+  // does not change what/how records are FETCHED — GET /api/records?view_id=
+  // is identical either way; only the RENDER differs, FF-K-4).
+  const isKanban = Boolean(activeView && activeView.type === 'kanban');
+  const kanbanConfig = isKanban ? activeView.config || {} : null;
+  const kanbanGroupByField = kanbanConfig ? kanbanConfig.group_by_field || '' : '';
+  const kanbanCardFields = useMemo(
+    () => (kanbanConfig && Array.isArray(kanbanConfig.card_fields) ? kanbanConfig.card_fields : []),
+    [kanbanConfig],
+  );
+  const kanbanEnumValues = useMemo(
+    () => (selectedDef && kanbanGroupByField ? readSelectEnum(selectedDef.record_schema, kanbanGroupByField) : []),
+    [selectedDef, kanbanGroupByField],
+  );
+  const kanbanGroupByRequired = useMemo(
+    () => (selectedDef && kanbanGroupByField ? isFieldRequired(selectedDef.record_schema, kanbanGroupByField) : false),
+    [selectedDef, kanbanGroupByField],
+  );
+  const kanbanFieldMetaByKey = useMemo(() => new Map(buildFieldCatalog(schemaColumns).map((f) => [f.key, f])), [schemaColumns]);
+
+  // Optimistic local patch — applied BEFORE the PUT resolves (and rolled back
+  // by the SAME setter if the PUT fails, kanban-board.jsx's handleMove).
+  const applyLocalRecordPatch = useCallback((recordId, nextData) => {
+    setRecords((prev) => (prev || []).map((r) => (r.id === recordId ? { ...r, data: nextData } : r)));
+  }, []);
+
+  // T-0582 FR-5/FR-6: the ONLY write path a kanban move uses — the EXISTING
+  // PUT /api/records/:id (tenant-membership + field write-mask guard + audit
+  // record.update, identical to the record editor, parity T-0620). No new
+  // write endpoint.
+  const handleMoveRecord = useCallback(async (recordId, nextData) => {
+    try {
+      const res = await fetch(`/api/records/${encodeURIComponent(recordId)}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', ...devHeaders() },
+        body: JSON.stringify({ data: nextData }),
+      });
+      if (res.status === 200) return { ok: true };
+      let parsed = null;
+      try { parsed = await res.json(); } catch { /* ignore parse error */ }
+      const mapped = mapRecordError(res.status, parsed);
+      return { ok: false, error: mapped.message };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }, []);
+
   // ---- header --------------------------------------------------------------
   const defList = defs || [];
 
@@ -1270,6 +1323,25 @@ function AppRecordsScreen() {
               title="Выберите набор полей"
               description="У приложения несколько наборов полей. Выберите набор выше, чтобы увидеть и создавать его записи."
             />
+          ) : isKanban ? (
+            // T-0582: second display mode — same records/loading/error already
+            // fetched above; KanbanBoard owns its own honest Loading/Empty/Error
+            // (recordsError/records===null are threaded through, not duplicated).
+            <div style={{ padding: 'var(--chs-space-5) var(--chs-space-6)' }}>
+              <KanbanBoard
+                records={records}
+                recordsError={recordsError}
+                onRetry={loadRecords}
+                groupByField={kanbanGroupByField}
+                groupByRequired={kanbanGroupByRequired}
+                enumValues={kanbanEnumValues}
+                columnsOrder={kanbanConfig ? kanbanConfig.columns_order : undefined}
+                cardFields={kanbanCardFields}
+                fieldMetaByKey={kanbanFieldMetaByKey}
+                onMoveRecord={handleMoveRecord}
+                onLocalUpdate={applyLocalRecordPatch}
+              />
+            </div>
           ) : recordsError ? (
             <ErrorState message={`Не удалось загрузить записи: ${recordsError}`} onRetry={loadRecords} />
           ) : records === null ? (

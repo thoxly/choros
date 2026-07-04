@@ -303,6 +303,8 @@ export function validateViewConfig(
   switch (type) {
     case "list":
       return validateListViewConfig(config, recordSchema);
+    case "kanban":
+      return validateKanbanViewConfig(config, recordSchema);
     default:
       return { valid: false, errors: [`unknown view type '${type}'`] };
   }
@@ -378,6 +380,158 @@ function validateListViewConfig(config: unknown, recordSchema: unknown): Validat
   }
 
   // --- sort ---
+  const sortRaw = config["sort"];
+  if (sortRaw !== undefined) {
+    if (!Array.isArray(sortRaw)) {
+      errors.push("sort must be an array");
+    } else {
+      sortRaw.forEach((s, i) => {
+        if (!isPlainObject(s)) {
+          errors.push(`sort[${i}] must be an object`);
+          return;
+        }
+        const fieldKey = s["field_key"];
+        const dir = s["dir"];
+        if (typeof fieldKey !== "string" || fieldKey.length === 0) {
+          errors.push(`sort[${i}].field_key must be a non-empty string`);
+          return;
+        }
+        const fieldType = fieldTypeFor(fieldKey, fieldTypes);
+        if (fieldType === null) {
+          errors.push(`sort[${i}].field_key '${fieldKey}' is not a known field of this record_schema`);
+        } else if (!isServerSortable(fieldType)) {
+          errors.push(`sort[${i}].field_key '${fieldKey}' (type '${fieldType}') is not server-sortable in v1`);
+        }
+        if (dir !== "asc" && dir !== "desc") {
+          errors.push(`sort[${i}].dir must be 'asc' or 'desc'`);
+        }
+      });
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+// ---------------------------------------------------------------------------
+// KanbanViewConfig contract (type='kanban') — T-0582 ADR §object_model.
+//
+// SECOND branch of the type dispatcher (FF-VR-4/FF-K-2): a kanban board reuses
+// the SAME filters[]/sort[] shapes + operator table as 'list' — only
+// group_by_field/card_fields/columns_order are new. No DDL/CRUD change (FR-1).
+// ---------------------------------------------------------------------------
+
+export interface KanbanViewConfig {
+  readonly group_by_field: string;
+  readonly card_fields: string[];
+  readonly columns_order?: string[];
+  readonly filters: ViewFilter[];
+  readonly sort: ViewSort[];
+}
+
+/**
+ * enumValuesForSelectField — read the enum array of a select-typed
+ * record_schema property (ADR: "Экспортировать хелпер enumValuesForSelectField").
+ * Pure, never throws. Returns [] when the schema/property/enum is malformed or
+ * the field is not present — callers treat an empty result as "no columns".
+ */
+export function enumValuesForSelectField(recordSchema: unknown, fieldKey: string): string[] {
+  if (!isPlainObject(recordSchema)) return [];
+  const props = recordSchema["properties"];
+  if (!isPlainObject(props)) return [];
+  const def = props[fieldKey];
+  if (!isPlainObject(def)) return [];
+  const enumRaw = def["enum"];
+  if (!Array.isArray(enumRaw)) return [];
+  return enumRaw.filter((v): v is string => typeof v === "string");
+}
+
+function validateKanbanViewConfig(config: unknown, recordSchema: unknown): ValidateViewConfigResult {
+  const errors: string[] = [];
+  if (!isPlainObject(config)) {
+    return { valid: false, errors: ["config must be a JSON object"] };
+  }
+
+  const fieldTypes = resolveFieldTypes(recordSchema);
+  const knownFieldKeys = new Set<string>([...fieldTypes.typeByKey.keys(), PSEUDO_COLUMN_CREATED_AT]);
+
+  // --- group_by_field (required, must be a select-typed field) -------------
+  const groupByField = config["group_by_field"];
+  if (typeof groupByField !== "string" || groupByField.length === 0) {
+    errors.push("group_by_field is required and must be a non-empty string");
+  } else {
+    const fieldType = fieldTypes.typeByKey.get(groupByField);
+    if (fieldType === undefined) {
+      errors.push(`group_by_field '${groupByField}' is not a known field of this record_schema`);
+    } else if (fieldType !== "select") {
+      errors.push(`group_by_field '${groupByField}' must be a select-type field (found '${fieldType}')`);
+    }
+  }
+
+  // --- card_fields (each key must exist) ------------------------------------
+  const cardFieldsRaw = config["card_fields"];
+  if (cardFieldsRaw !== undefined) {
+    if (!Array.isArray(cardFieldsRaw)) {
+      errors.push("card_fields must be an array");
+    } else {
+      cardFieldsRaw.forEach((key, i) => {
+        if (typeof key !== "string" || key.length === 0) {
+          errors.push(`card_fields[${i}] must be a non-empty string`);
+        } else if (!knownFieldKeys.has(key)) {
+          errors.push(`card_fields[${i}] '${key}' is not a known field of this record_schema`);
+        }
+      });
+    }
+  }
+
+  // --- columns_order (optional; each entry must be a string) ---------------
+  const columnsOrderRaw = config["columns_order"];
+  if (columnsOrderRaw !== undefined) {
+    if (!Array.isArray(columnsOrderRaw)) {
+      errors.push("columns_order must be an array when present");
+    } else {
+      columnsOrderRaw.forEach((v, i) => {
+        if (typeof v !== "string") {
+          errors.push(`columns_order[${i}] must be a string`);
+        }
+      });
+    }
+  }
+
+  // --- filters (AND, same structure/operator table as 'list') --------------
+  const filtersRaw = config["filters"];
+  if (filtersRaw !== undefined) {
+    if (!Array.isArray(filtersRaw)) {
+      errors.push("filters must be an array");
+    } else {
+      filtersRaw.forEach((f, i) => {
+        if (!isPlainObject(f)) {
+          errors.push(`filters[${i}] must be an object`);
+          return;
+        }
+        const fieldKey = f["field_key"];
+        const op = f["op"];
+        if (typeof fieldKey !== "string" || fieldKey.length === 0) {
+          errors.push(`filters[${i}].field_key must be a non-empty string`);
+          return;
+        }
+        const fieldType = fieldTypeFor(fieldKey, fieldTypes);
+        if (fieldType === null) {
+          errors.push(`filters[${i}].field_key '${fieldKey}' is not a known field of this record_schema`);
+          return;
+        }
+        const allowedOps = operatorsForFieldType(fieldType);
+        if (typeof op !== "string" || !allowedOps.includes(op as ViewFilterOp)) {
+          errors.push(
+            `filters[${i}].op '${String(op)}' is not valid for field '${fieldKey}' of type '${fieldType}'` +
+              (allowedOps.length === 0 ? " (field type is never filterable on the server)" : ""),
+          );
+        }
+      });
+    }
+  }
+
+  // --- sort (same structure/sortability table as 'list'; orders cards WITHIN
+  // a column, per KanbanViewConfig.sort semantics) ---------------------------
   const sortRaw = config["sort"];
   if (sortRaw !== undefined) {
     if (!Array.isArray(sortRaw)) {
