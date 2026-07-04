@@ -10,11 +10,29 @@
  *   failAfterCreate — createHumanUser succeeds but caller's DB then fails;
  *                     deleteUser is called for orphan cleanup (FF-2).
  *
+ * FAKE-FIDELITY (T-0625 fix): a real Keycloak realm REJECTS createHumanUser
+ * when `spec.email` (= username, per KcHumanUserSpec) is not a valid email
+ * address — it returns 400 error-invalid-email, which the live adapter
+ * (admin-port.ts makeHttpKeycloakUserPort) maps to EMAIL_INVALID. Before this
+ * fix, this fake did NOT validate the email shape at all, so
+ * `createHumanUser({username: 'plain-login', email: 'plain-login', ...})`
+ * succeeded here while a real KC realm would 400 — a fake/real fidelity gap
+ * that let the T-0583 non-email-login regression (503 on the real stand) ship
+ * green through unit tests (T-0625 LIVE_PROOF root cause). This fake now
+ * enforces the SAME email-format check the live port enforces, throwing the
+ * same EMAIL_INVALID error code, so "create with a non-email login" is red in
+ * the unit suite without needing a live Keycloak.
+ *
  * This file lives OUTSIDE src/core/ so the live adapter and the fake are both
  * injectable substitutes — neither bleeds into the pure core (FF-HIRE-6).
  */
 
 import type { KeycloakUserPort, KcHumanUserSpec } from "./admin-port.js";
+
+// Mirrors the RFC-lite check register.ts/user-mgmt.ts use (EMAIL_RE) — kept
+// as an independent literal here (not imported) so this fake has zero
+// dependency on src/core/ or src/http/ (FF-HIRE-6 isolation).
+const FAKE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // ---------------------------------------------------------------------------
 // Capture types
@@ -71,6 +89,20 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
 
   async createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }> {
     this.createCallCount++;
+
+    // T-0625 fix (fake-fidelity): a real KC realm validates the REQUEST BODY
+    // SHAPE (is username/email a valid email?) before it ever gets to
+    // per-realm-state outcomes like "username already taken" or being
+    // unreachable. This check runs FIRST, unconditionally — NOT gated by the
+    // failOnCreate/failOnAuth one-shot switches below — so a caller passing a
+    // non-email login is rejected the same way regardless of what other
+    // failure the test also armed, matching a real Keycloak realm's own
+    // request-validation-before-state-check ordering.
+    if (!FAKE_EMAIL_RE.test(spec.email) || !FAKE_EMAIL_RE.test(spec.username)) {
+      const err = new Error("EMAIL_INVALID");
+      (err as NodeJS.ErrnoException).code = "EMAIL_INVALID";
+      throw err;
+    }
 
     if (this.failOnAuth) {
       this.failOnAuth = false;

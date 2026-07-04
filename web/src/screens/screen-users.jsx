@@ -127,11 +127,12 @@ function CreateUserModal({ positions, onClose, onDone }) {
         <div style={fieldGap}>
           <Field
             label="Логин"
+            type="email"
             value={values.login}
             onChange={set('login')}
             placeholder="ivanov@company.ru"
             invalid={!!fieldErrors.login}
-            hint={fieldErrors.login || 'используется как логин для входа'}
+            hint={fieldErrors.login || 'email-адрес — используется как логин для входа'}
             autoFocus
           />
 

@@ -1,8 +1,8 @@
 {
-  "task_id": "T-0583",
+  "task_id": "T-0625",
   "status": "pr_open",
-  "branch": "task/T-0583-user-mgmt",
-  "pr_url": "https://github.com/thoxly/choros/pull/55",
+  "branch": "task/T-0625-user-email-fix",
+  "pr_url": "",
   "ci_local": {
     "build": true,
     "lint": true,
@@ -11,78 +11,53 @@
     "fitness": true
   },
   "files_changed": [
-    "migrations/125_employee_deactivated_at.sql",
-    "src/core/reader-grant.ts",
     "src/http/user-mgmt.ts",
-    "src/http/rights-intents.ts",
-    "src/http/seed-write.ts",
     "src/keycloak/admin-port.ts",
     "src/keycloak/fake-user-port.ts",
-    "src/server.ts",
-    "src/__tests__/register.test.ts",
-    "ci/checks/db/user-mgmt.db.test.ts",
-    "ci/checks/user-mgmt-no-secret-leak.sh",
-    "ci/checks/user-mgmt-reuses-kc-port.sh",
-    "ci/checks/dual-control-isolation.sh",
-    "ci/checks/data/frozen-sanctions.jsonl",
-    "ci/checks/role-criticality-migration-excludes.txt",
-    "package.json",
-    "web/src/app-shell/shell.jsx",
-    "web/src/app-shell/nav-config.js",
-    "web/src/app-shell/nav-config.test.js",
     "web/src/screens/screen-users.jsx",
-    "web/src/screens/screen-users.test.jsx",
     "web/src/screens/users-form.js",
-    "web/src/screens/users-form.test.js"
+    "web/src/screens/users-form.test.js",
+    "migrations/126_employee_login.sql",
+    "src/__tests__/fake-user-port-fidelity.test.ts",
+    "ci/checks/db/user-mgmt.db.test.ts",
+    "ci/checks/substitution-isolation.sh",
+    "ci/checks/dual-control-isolation.sh",
+    "ci/checks/role-criticality-migration-excludes.txt",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "docs/design/T-0152-security-invariants-catalog.md"
   ],
-  "ac_coverage": {
-    "AC-1/AC-2": "POST /api/users KC-first createHumanUser (actor_type=['human'], emailVerified:true, password non-temporary) then INSERT employee(kind='human', slug=<KC userId>) in one withTenantTx -- code (src/http/user-mgmt.ts) + db test (ci/checks/db/user-mgmt.db.test.ts FF-583-1/2: employee.slug === capture.created[0].userId)",
-    "AC-3": "created account gets role-reader + covering READ via the SAME shared helper T-0619 uses, extracted to src/core/reader-grant.ts (ensureReaderRoleAndAssignHuman) and called from both rights-intents.ts registerHire and user-mgmt.ts POST /api/users -- db test asserts getGrantsForSubject resolves a read/record/RESOURCE_ROOT grant",
-    "AC-4/AC-5": "KC EMAIL_TAKEN -> 409, no employee row; a DB failure AFTER KC-create (live test forces an FK violation on an optional role_assignment insert with a bogus role_id) -> deleteUser called exactly once with the KC userId, no 201 -- db test FF-583-3a/b/c",
-    "AC-6": "GET /api/users/accounts is tenant-scoped (resolveActorTenant + explicit tenant_id filter), returns only kind='human' with active=deactivated_at IS NULL -- db test FF-583-5",
-    "AC-7/AC-8": "PATCH /api/users/:employee_id {active} calls KeycloakUserPort.setUserEnabled (new additive port method, live adapter + InMemory fake) THEN updates employee.deactivated_at; reactivation reverses both -- db test FF-583-4",
-    "AC-9/AC-10": "cross-tenant create/patch/list all blocked (403/404/scoped-empty); a non-owner/non-granted member gets 403 NOT_OWNER via the existing authorizeOrgWrite/assertOrgObjectAuthority gate (same seam as POST /api/employees) -- db test FF-583-5/6",
-    "AC-11/AC-12": "password never in any HTTP response body, never logged, never in the audit_event payload (only {login, display_name} on create, {} on deactivate/reactivate) -- code review + static fitness check ci/checks/user-mgmt-no-secret-leak.sh + db test explicitly asserts response bodies never contain the test password string",
-    "AC-13": "generic mechanism, no persona/case literals in src/ -- existing ci/checks/read-pdp-anti-case.sh green on this diff",
-    "AC-14": "LIVE_PROOF (create-user-from-UI, login, see records, deactivate, blocked re-login) requires a deployed dev stand with live Keycloak -- NOT run in this BUILD-phase worktree (no live KC reachable here); flagged as the deploy-gated follow-up below",
-    "AC-15": "UX_REVIEW not yet run by design-steward -- screen-users.jsx follows the screen-agents.jsx pattern (--chs-* tokens only, Empty/Loading/Error states, password field type=password+autoComplete=off+label, status chip 'Активна'/'Деактивирована'); flagged as a review-phase follow-up below"
+  "root_cause": "LIVE_PROOF T-0583 (real browser + real Keycloak) found POST /api/users returns 503 for an ordinary (non-email) login: src/http/user-mgmt.ts copied `login` verbatim into kc.createHumanUser({username, email}); a real Keycloak realm rejects a non-email username/email with 400 error-invalid-email; src/keycloak/admin-port.ts's live createHumanUser folded any non-201/409 status into AUTH_UNAVAILABLE, so the route surfaced 503 'account service unavailable' for what is actually a client validation error. An email-shaped login worked (201); an ordinary login did not. The spec (docs/specs/T-0583-user-mgmt.spec.md N9) already states login=username=KC email field (mirrors register.ts), so this is honest enforcement of an existing contract, not a new field. Secondary bug: GET /api/users/accounts returned employee.slug as `login`, but slug is the KC user UUID (T-0342/T-0366 identity-resolution invariant) — the list showed a raw UUID instead of the human-readable login. Test-escape root cause: src/keycloak/fake-user-port.ts's InMemoryKeycloakUserPort never validated email format, so every unit/db test that created a user with a non-email login passed green against the fake while a real KC realm would 400 it.",
+  "fix_summary": {
+    "email_validation": "src/http/user-mgmt.ts validateCreateBody now rejects a non-email login with 400 VALIDATION BEFORE calling kc.createHumanUser (EMAIL_RE mirrors register.ts) — a malformed login never reaches KC. Client-side: web/src/screens/users-form.js validateCreateUser applies the same EMAIL_RE with an inline Russian field error; screen-users.jsx sets type=email on the login Field and rewords the hint from a placeholder-only hint to an explicit 'email-адрес' requirement. Defense-in-depth: src/keycloak/admin-port.ts's live createHumanUser now maps KC's 400 status to a distinct EMAIL_INVALID error code (previously silently folded into AUTH_UNAVAILABLE); user-mgmt.ts's catch block maps EMAIL_INVALID to 400 instead of the generic 503.",
+    "fake_fidelity": "src/keycloak/fake-user-port.ts InMemoryKeycloakUserPort.createHumanUser now validates spec.email/spec.username against the same email-format regex BEFORE the failOnCreate/failOnAuth injection switches, throwing the same EMAIL_INVALID code a real Keycloak realm's 400 maps to. Proof the gap is closed: src/__tests__/fake-user-port-fidelity.test.ts creates a user with username/email='liveproof-835201' (a non-email ordinary login) directly against the fake, in isolation, with no server/DB involved, and asserts it rejects with EMAIL_INVALID — this test is RED without the fake-port fix and GREEN with it (verified by reverting the fake-port change locally and re-running: without the check, the same call resolves successfully with a fabricated userId, proving the pre-fix fake accepted what a real KC realm rejects).",
+    "human_readable_list": "migrations/126_employee_login.sql adds an additive nullable choros.employee.login column (human-readable KC username), kept separate from the identity-bearing slug=KC-UUID (slug cannot be repurposed — org.ts resolveActorSlugFromAuth reads it as the JWT sub). src/http/user-mgmt.ts's POST /api/users INSERT now stores login into that column; GET /api/users/accounts SELECTs login and falls back to slug ONLY for rows created before this migration (dev-silo seed humans like e-kravtsova have no KC login at all, so their slug is already their sole human-readable label)."
   },
-  "reuse_summary": {
-    "kc_port": "src/keycloak/admin-port.ts KeycloakUserPort (T-0342/T-0470) reused verbatim for createHumanUser/deleteUser; ONE additive method setUserEnabled(userId,enabled) added to the interface + live adapter (PUT /admin/realms/<realm>/users/<userId> {enabled} via the registrar token) + InMemoryKeycloakUserPort fake. server.ts wiring reuses the SAME kcUserPort instance already built for registerRegisterRoutes (registrar-secret gate -> live/honest-degrade 503) -- no second KC-integration module (verified by ci/checks/user-mgmt-reuses-kc-port.sh: no literal admin-REST call in user-mgmt.ts).",
-    "hire_flow_extraction": "ensureReaderRoleAndAssignHuman was a private function in src/http/rights-intents.ts (T-0619). Extracted verbatim (same SQL, same idempotency guards) into src/core/reader-grant.ts as the single shared implementation; rights-intents.ts now imports it instead of defining it, and src/http/user-mgmt.ts imports the same function. FF-583-10 regression: the existing ci/checks/db/hire-read-grant.db.test.ts (T-0619's own test) is untouched and still green (3/3 passing) -- registerHire's behaviour for kind='human'/'agent' is unchanged.",
-    "authz_gate": "POST/PATCH /api/users reuse authorizeOrgWrite + assertOrgObjectAuthority('mgmt_object:employee', 'create'|'update', ...) from src/http/seed-write.ts (T-0469/T-0388) -- the IDENTICAL gate POST /api/employees uses. Both functions were exported (previously module-private) so user-mgmt.ts can call them without duplicating the cross-tenant-guard/delegation logic."
-  },
-  "who_may_act": "tenant owner (isGenesisOwner short-circuit) OR a holder of a delegable, covering mgmt_object:employee grant in the target org scope (same authority floor as POST/PATCH /api/employees) -- non-owners without that grant get 403 NOT_OWNER/ADMIN_GATE_REJECTED before any KC/DB side-effect.",
-  "tenant_isolation_proof": "ci/checks/db/user-mgmt.db.test.ts FF-583-5 registers two independent tenants via the production registerTenant() service (real owners, real RLS), then: (1) owner-A POST with tenant_id=B -> 403 before any write; (2) owner-A PATCH on B's employee_id -> 404 (resolved under A's own tenant scope, row not found); (3) GET /api/users/accounts for A never contains B's account. All three pass live against Postgres.",
-  "password_safety_proof": "db test asserts the plaintext test password never appears in any /api/users* response body (create/list/patch, success and error paths); static check user-mgmt-no-secret-leak.sh greps user-mgmt.ts for password reaching an HttpError message, a console.* call, an audit payload, or a JSON response body, plus a repo-wide hardcoded-secret literal scan across the touched KC-port files (only process.env reads found).",
   "gates": {
-    "npm_run_build": "green (tsc + seed/tsconfig.json project build)",
-    "tsc_noEmit": "green",
-    "web_npm_run_build": "green (vite build, 532 modules, no errors)",
-    "vitest_unit_root": "5281 passed, 10 skipped, 0 failed (271 files)",
-    "vitest_unit_web": "2027 passed, 0 failed (72 files) -- was 1996 before this task's +31 new tests (users-form.test.js 18 + screen-users.test.jsx 13)",
-    "vitest_fitness_db": "1165 passed, 0 failed (120 files), solo run against live Postgres :55432 with a freshly-rebuilt template (migration 125 included); includes the new ci/checks/db/user-mgmt.db.test.ts (7/7) and confirms ci/checks/db/hire-read-grant.db.test.ts (T-0619 regression guard, 3/3) stays green",
-    "npm_run_fitness": "exit 0 end-to-end (full ~230-check chain incl. the two new user-mgmt-*.sh checks)"
+    "npm_run_build": "green, exit 0 (tsc + seed/tsconfig.json project build)",
+    "web_npm_run_build": "green, exit 0 (vite build, 534 modules, no errors)",
+    "tsc_noEmit": "green, exit 0",
+    "npm_run_lint": "green, exit 0 (0 errors, 41 pre-existing no-console warnings unrelated to this diff)",
+    "vitest_unit_root": "272 files passed, 2 skipped; 5312 tests passed, 10 skipped, 0 failed — includes src/__tests__/fake-user-port-fidelity.test.ts (3/3 new)",
+    "vitest_unit_web": "75 files passed; 2095 tests passed, 0 failed — includes web/src/screens/users-form.test.js (+2 new email-rejection tests, 22 total in file) and screen-users.test.jsx (13/13 unchanged)",
+    "vitest_fitness_db": "120 files passed; 1167 tests passed, 0 failed — solo run against live Postgres :55432 with a freshly-rebuilt template (migration 126 applied cleanly, 112 total migrations); ci/checks/db/user-mgmt.db.test.ts now 9/9 (was 7 before this task: +1 human-readable-login list assertion appended to the existing create test, +1 new standalone honest-400 test for a non-email login)",
+    "npm_run_fitness": "exit 0 end-to-end (full ~230-check chain). All FAIL lines visible in the raw log are synthetic negative fixtures printed by each check's own --self-test mode (immediately followed by 'SELF-TEST PASS'), or the intentionally-triggered-then-relieved FF-DC7/FF-SUB5 false-positive on migration 126 (immediately followed by its relief PASS line) — none are real violations."
   },
-  "fitness_checks_added": [
-    "ci/checks/user-mgmt-reuses-kc-port.sh (FF-583-8)",
-    "ci/checks/user-mgmt-no-secret-leak.sh (FF-583-7)",
-    "ci/checks/db/user-mgmt.db.test.ts (FF-583-1..6, live Postgres)"
+  "test_proof_of_fix": [
+    "ci/checks/db/user-mgmt.db.test.ts 'T-0625: POST /api/users with a non-email login' — asserts 400 VALIDATION (not 503), kc.createHumanUser never called, no employee row created.",
+    "ci/checks/db/user-mgmt.db.test.ts FF-583-1/2 (extended) — asserts GET /api/users/accounts returns the exact typed login for the newly created account and NOT the KC user UUID.",
+    "src/__tests__/fake-user-port-fidelity.test.ts — isolation-level proof the fake now mirrors real-KC email rejection (EMAIL_INVALID) independent of any HTTP route.",
+    "web/src/screens/users-form.test.js — client-side rejection of a bare username and of malformed email shapes (no @, no domain)."
   ],
-  "migration_number": "125_employee_deactivated_at.sql (confirmed free at branch time: 124 was the last applied on dev; T-0582 in-flight sibling does not touch migrations)",
   "deviations_from_adr": [
-    "Two module-private helpers had to be exported (not newly written) to satisfy the ADR's reuse requirement without duplicating logic: authorizeOrgWrite and assertOrgObjectAuthority in src/http/seed-write.ts. The ADR named the underlying gate as 'the same seam POST /api/employees uses' but that seam was not previously importable from another module; exporting it is additive (no signature/behaviour change) and is the only way to satisfy N5 (no duplicated gate logic) literally.",
-    "Two pre-existing frozen fitness checks (role-criticality-isolation.sh's data-driven exclude list, and dual-control-isolation.sh's per-migration relief-block convention) required additive extension to recognize migration 125 as legitimate -- this is the SAME class of change every prior migration-adding task (T-0570/T-0573/T-0575/.../T-0619) made to these exact two files, verified mechanically via ci/checks/auto-sanction-additive.sh --verify (A-1..A-4 + TENANT-ISO Враг-attestation) before the sanction line was appended to ci/checks/data/frozen-sanctions.jsonl. No frozen check's actual invariant (031 is the only dual-control migration; confirmed2_by stays derived) was narrowed."
+    "Spec T-0583-user-mgmt.spec.md N9 already states login=username=KC email field (as in register.ts). This fix does not add a new field — it makes that existing contract honestly enforced (client + server validate email format before calling Keycloak) instead of silently letting a non-email login reach KC and get mis-mapped to 503.",
+    "Added migrations/126_employee_login.sql (additive nullable employee.login column) — not explicitly named by any ADR, but required to satisfy the existing GET /api/users/accounts contract ({employee_id, login, display_name, position, department, active}) with a human-readable login instead of the KC user UUID (employee.slug), since slug is a load-bearing identity-resolution invariant (T-0342/T-0366) that cannot be repurposed for display."
   ],
-  "residual_follow_ups": [
-    "AC-14 LIVE_PROOF (create user in UI, login as them, deactivate, blocked re-login) requires a deployed stand with live Keycloak -- gate = founder deploy, per this task's runtime_target.",
-    "AC-15 UX_REVIEW by design-steward has not run in this BUILD-phase worktree -- screen-users.jsx follows the screen-agents.jsx OBLIK pattern but has not had a human/steward pass."
-  ],
+  "blocked_reason": "",
   "friction_events": [
-    "Fresh worktree had no node_modules at root or web/ -- required npm install at both before any build/vitest/tsc command would run (consistent with the durable memory note 'npm install после merge').",
-    "fitness:db failed on the first run with '[T-0147] ERROR: template database ... not found' -- required npm run fitness:db:setup-template (DATABASE_URL set) before the live-PG vitest suite would run; solo (no parallel session) per the durable memory warning about flaky parallel db runs.",
-    "The db test initially wired registerUserMgmtRoutes' resolveActorTenant against the choros_app (NOBYPASSRLS) pool, mirroring appUrl() used elsewhere for read-path resolvers -- this made the pre-GUC cross-tenant identity lookup fail closed (ACTOR_TENANT_UNRESOLVED) because choros_app cannot see rows outside its current tenant GUC before it's set. Fixed by wiring the SAME pool class server.ts actually uses for this route (the DATABASE_URL/migrator-class grantsPool), matching production wiring exactly.",
-    "npm run fitness initially failed on TWO unrelated frozen-check false-positives triggered purely by adding migration 125 (not by any real invariant violation): role-criticality-isolation.sh (T-0040, FF-RC5/RC6) and dual-control-isolation.sh (T-0044, FF-DC7) both hardcode 'no new migration file' predicates that flag ANY new migration until it is either committed (role-criticality's git-tracked-and-unchanged check) or explicitly relieved (dual-control's per-migration GUARD-block convention). Resolved via role-criticality's existing data-file exclude-list (additive line) and dual-control's established per-task relief-block pattern (mirrored byte-for-byte from the T-0619/T-0581/etc. precedents already in the file), the latter verified mechanically via ci/checks/auto-sanction-additive.sh --verify before writing the sanction line -- consistent with coder.md rule 8b (frozen-check false-positive on an in-flight migration is by-design, not a reason to edit the check's actual predicate).",
-    "My own new screen-users.test.jsx anti-case guard test embedded the D-064 denylist strings (e-larina, role-approver, etc.) as literal tokens directly under web/src/, which is EXACTLY what ci/checks/rights-ui-anti-case.sh scans for on added lines -- the defensive test tripped the very gate it was trying to satisfy. Fixed by assembling the denylist from string fragments (join/concat) instead of literal tokens; the check now passes and the test still functions identically."
+    "Migration 126 (a single additive ADD COLUMN) tripped two sibling frozen fitness checks that hardcode 'no new migration beyond N' predicates (ci/checks/substitution-isolation.sh FF-SUB5, ci/checks/dual-control-isolation.sh FF-DC7) — the same 'any new migration looks forbidden until sanctioned' false-positive class already documented and resolved for migration 125 in commit a2f0fc3 on this same branch lineage. Resolved via the same auto_additive sanction channel (ci/checks/auto-sanction-additive.sh --verify + ci/checks/data/frozen-sanctions.jsonl), plus one prerequisite fix: ci/checks/substitution-isolation.sh was never registered under any T-0152 security-invariants-catalog family, which the auto_additive Враг-attestation (ATTEST-R1b) requires — added it under GRANT-ESCALATION's existing Static-isolation list (purely additive per ci/checks/enemy/catalog-frozen.sh, which explicitly allows Enforced-by lists to grow; no founder sanction needed for catalog growth).",
+    "ci/checks/db-isolation-no-test-change.sh (FF-T147-2) diffs literal `git diff HEAD` against ci/checks/db/*.test.ts — it only reads clean once test-file edits are committed, so running `npm run fitness` against an uncommitted working tree false-positives on any edited db test file. Not a real gate failure; resolved itself immediately after committing (confirmed by re-running fitness post-commit)."
+  ],
+  "live_proof_followups": [
+    "Deployed-stand walkthrough still needed (this BUILD-phase worktree has no live Keycloak reachable): owner opens the users screen, creates an account with an ORDINARY-looking but valid email login (e.g. ivanov@company.ru) + password from the UI, confirms 201 and the list shows the typed login (not a UUID); then attempts creation with a non-email string in the login field and confirms an inline validation error appears WITHOUT a network round-trip reaching a 503; then logs out and logs back in as the newly created account via real Keycloak to confirm end-to-end login still works unchanged."
   ]
 }

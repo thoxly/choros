@@ -43,6 +43,24 @@ describe('validateCreateUser', () => {
     expect(valid).toBe(false);
     expect(errors.display_name).toBeTruthy();
   });
+
+  // T-0625 fix: an "ordinary" (non-email) login used to be accepted client-side
+  // and only fail on the real Keycloak stand with a confusing 503 "service
+  // unavailable" (LIVE_PROOF diagnosis). The client must reject it inline,
+  // the same way register.ts's EMAIL_RE does for org self-registration.
+  it('rejects a non-email login (e.g. a bare username) with an inline field error', () => {
+    const { valid, errors } = validateCreateUser({
+      login: 'liveproof-835201', password: 'password123', display_name: 'Ordinary Login',
+    });
+    expect(valid).toBe(false);
+    expect(errors.login).toBeTruthy();
+    expect(errors.login).toMatch(/email/i);
+  });
+
+  it('rejects a login with no @ or no domain part', () => {
+    expect(validateCreateUser({ login: 'no-at-sign', password: 'password123', display_name: 'X' }).valid).toBe(false);
+    expect(validateCreateUser({ login: 'no-domain@', password: 'password123', display_name: 'X' }).valid).toBe(false);
+  });
 });
 
 describe('buildCreateUserPayload', () => {

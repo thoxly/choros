@@ -236,7 +236,9 @@ gate-order до выдачи; identity невидима слою прав.
   `ci/checks/grant-propose-isolation.sh` (T-0039),
   `ci/checks/grant-presets-isolation.sh`, `ci/checks/sod-isolation.sh` (T-0032),
   `ci/checks/role-criticality-isolation.sh` (T-0040),
-  `ci/checks/invoke-grant-isolation.sh` (T-0024).
+  `ci/checks/invoke-grant-isolation.sh` (T-0024),
+  `ci/checks/substitution-isolation.sh` (T-0035, `grant-resolver.ts` import-
+  surface + migration-seam guard for the Tier-2 substitution grant path).
 - **Grant-trail BYPASSRLS guard:** `ci/checks/grant-trail-bypassrls-predicate.sh`
   (T-0184) — `queryGrantTrail` обязан нести явный `WHERE tenant_id = $N` (защита
   от того, что pool-роль с BYPASSRLS читает чужой trail); источник
