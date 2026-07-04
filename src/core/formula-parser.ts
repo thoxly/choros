@@ -31,10 +31,33 @@
  * Priority: `* /` > `+ -`; left-associative; parentheses override. Unary minus.
  *
  * LIMITS (NF-5, defense-in-depth, enforced HERE at parse time — not relying on
- * authoring-only checks): source length ≤ FORMULA_MAX_LENGTH; AST depth ≤
- * FORMULA_MAX_DEPTH (an explicit depth counter threaded through the recursive
- * descent — NOT relying on the JS call stack to overflow gracefully); FIELD_REF
- * count ≤ FORMULA_MAX_REFS.
+ * authoring-only checks): source length ≤ FORMULA_MAX_LENGTH; REAL AST depth
+ * (as measured by astDepth — the exact same walk formula-eval.ts's runtime
+ * guard performs) ≤ FORMULA_MAX_DEPTH, checked ONCE on the completed tree
+ * (see the post-parse `astDepth(ast) > FORMULA_MAX_DEPTH` check in
+ * parseFormula below); FIELD_REF count ≤ FORMULA_MAX_REFS.
+ *
+ * WHY A SEPARATE RECURSION-FRAME GUARD EXISTS TOO (fix R-1, T-0580 REVIEW):
+ * the recursive-descent call chain (expr→term→factor→primary, one extra
+ * frame per grammar rule) is NOT the same quantity as AST depth — a single
+ * level of *value* nesting costs ~4 GRAMMATICAL frames, but a left-deep chain
+ * of N `+` operands costs ~4N grammatical frames while the resulting AST is
+ * only N levels deep (recursion in parseExpr/parseTerm's `for(;;)` loops does
+ * NOT nest the AST — it walks LEFT-associatively, building `left` iteratively
+ * — only parsePrimary's `(`-branch and parseFactor's unary-minus branch
+ * actually deepen the tree). Enforcing FORMULA_MAX_DEPTH directly against the
+ * grammatical frame counter therefore measures the WRONG quantity: it both
+ * (a) FALSELY REJECTS a shallow-AST formula with many parenthesized groups
+ * (each paren pair costs 4 grammatical frames but only 1 AST level), and
+ * (b) FALSELY ACCEPTS a long flat operand chain that parses fine
+ * grammatically (frame count bounded by the length limit long before 32*4)
+ * but produces a REAL AST deeper than FORMULA_MAX_DEPTH once every `+`
+ * folds — which formula-eval.ts's depth guard then silently nulls at
+ * runtime (AC-8/NF-5 violation: "accepted at authoring" must imply
+ * "computed at runtime", never silently null-by-depth).
+ * `recursionGuard` below is now PURELY an anti-stack-overflow backstop (a
+ * generous multiple of FORMULA_MAX_DEPTH, not equal to it) — the actual
+ * authoring-time depth CONTRACT is the single post-parse astDepth check.
  *
  * PURITY: no pg, no node:*, no process.env, no network, no eval/Function/vm.
  * Zero-dep (only imports from src/core/formula-contract.ts).
@@ -288,11 +311,25 @@ function parsePrimary(state: ParseState, depth: number): FormulaAst {
   throw new FormulaSyntaxError("unexpected_token", `unexpected token "${tok.text}"`);
 }
 
+/**
+ * Anti-stack-overflow backstop ONLY (fix R-1, T-0580 REVIEW) — this is NOT the
+ * authoring-time depth contract (that is the post-parse `astDepth(ast) >
+ * FORMULA_MAX_DEPTH` check in parseFormula, which measures the SAME quantity
+ * formula-eval.ts's runtime guard measures). This counter tracks grammatical
+ * recursive-descent FRAMES (expr→term→factor→primary), a strictly larger and
+ * differently-shaped quantity than real AST depth (see the module-header note
+ * above) — it exists only so a pathological input (e.g. thousands of `(`)
+ * cannot exhaust the JS call stack before the length/astDepth checks get a
+ * chance to reject it cleanly. Deliberately a large multiple of
+ * FORMULA_MAX_DEPTH so it never fires before the real depth contract does.
+ */
+const RECURSION_FRAME_GUARD = FORMULA_MAX_DEPTH * 8;
+
 function assertDepth(depth: number): void {
-  if (depth > FORMULA_MAX_DEPTH) {
+  if (depth > RECURSION_FRAME_GUARD) {
     throw new FormulaSyntaxError(
       "max_depth_exceeded",
-      `formula AST depth exceeds ${FORMULA_MAX_DEPTH}`,
+      `formula is too deeply nested to parse safely`,
     );
   }
 }
@@ -339,6 +376,24 @@ export function parseFormula(src: string): ParseFormulaResult {
         ok: false,
         error: "unexpected_token",
         message: `unexpected trailing token "${trailing?.text ?? ""}"`,
+      };
+    }
+    // THE authoring-time depth contract (fix R-1, T-0580 REVIEW): measure the
+    // REAL AST depth — the exact same quantity formula-eval.ts's runtime
+    // depth guard measures (recursion only through unary.operand /
+    // binary.left / binary.right) — and reject it here, at authoring time,
+    // if it exceeds FORMULA_MAX_DEPTH. This is the ONLY place depth is
+    // enforced as a hard authoring contract; the grammatical
+    // RECURSION_FRAME_GUARD above is a differently-shaped anti-DoS backstop,
+    // not this contract. Invariant this restores: a formula ACCEPTED here is
+    // guaranteed to never be null-by-depth at runtime (evalNode's guard can
+    // only ever see this same astDepth(ast), which is now ≤ FORMULA_MAX_DEPTH
+    // by construction).
+    if (astDepth(ast) > FORMULA_MAX_DEPTH) {
+      return {
+        ok: false,
+        error: "max_depth_exceeded",
+        message: `formula AST depth exceeds ${FORMULA_MAX_DEPTH}`,
       };
     }
     return { ok: true, ast };
