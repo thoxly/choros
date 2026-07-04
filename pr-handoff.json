@@ -2,6 +2,7 @@
   "task_id": "T-0583",
   "status": "pr_open",
   "branch": "task/T-0583-user-mgmt",
+  "pr_url": "https://github.com/thoxly/choros/pull/55",
   "ci_local": {
     "build": true,
     "lint": true,
