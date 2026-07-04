@@ -1623,6 +1623,27 @@ export function registerInboxRoutes(
         throw new HttpError(404, "NOT_FOUND", "no waiting instance task with this id");
       }
 
+      // T-0588 (RE-VERIFY, symmetry with BLOCK-3): a deactivated actor must not
+      // be able to APPROVE any task either — not even one addressed to a role
+      // they still hold a live role_assignment for. Deactivation disables the
+      // ACCOUNT (T-0583/migration 125) independently of role_assignment.valid_until
+      // (ADR §"Дыра №2" — "деактивированный = не держатель"); getRoleSlugsForActor
+      // does not filter on employee.deactivated_at, so without this check a fired
+      // employee whose role_assignment was not separately revoked could still
+      // approve tasks up to that point (same privilege-escalation class as the
+      // claim-path gap fixed in BLOCK-3, ~line 1413). Mirrors that gate exactly:
+      // fail-closed on DB error (this IS the security gate, not telemetry), and
+      // runs BEFORE the myRoles/Tier-2-substitution PDP check below.
+      // Uses writeDeps.pool (NOT getOrgPool()) — same reasoning as the actor-tenant
+      // resolution above: this route is wired to an injected pool, and every other
+      // DB call in this handler consistently uses that same connection.
+      if (hasDb()) {
+        const actingEmp = await findEmployeeById(pool, tenantId, actor);
+        if (actingEmp?.deactivatedAt != null) {
+          throw new HttpError(403, "NOT_ELIGIBLE", "actor account is deactivated and cannot approve tasks");
+        }
+      }
+
       // T-0336 (E15-S2): PDP resolveFor(op=approve) gate.
       //
       // approve-grant check (deny-by-default): the actor must hold the role the task

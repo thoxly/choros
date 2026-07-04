@@ -899,3 +899,153 @@ describe('T-0588 BLOCK-4 — Tier-2 substitute can claim AND approve (done end-t
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// RE-VERIFY (2nd round) — symmetry with BLOCK-3: the claim route gates a
+// deactivated actor (BLOCK-3 above), but the approve route (POST
+// /api/inbox/:id/action) had NO equivalent gate. getRoleSlugsForActor does not
+// filter employee.deactivated_at, so a deactivated holder with a still-live
+// (in-window) role_assignment passed myRoles.includes(task.role) and could
+// approve — same privilege-escalation class as BLOCK-3. Fixed by mirroring the
+// BLOCK-3 gate into the approve route, before the myRoles/Tier-2 PDP check.
+//
+// Reuses the approveServer/approvePool harness from BLOCK-4 above (real
+// resolveActorTenant — the approve route needs it, unlike claim).
+// ---------------------------------------------------------------------------
+
+describe('T-0588 RE-VERIFY — deactivated actor cannot approve (symmetry with BLOCK-3 claim gate)', () => {
+  let approveServer2: http.Server;
+  let approveBaseUrl2 = '';
+  let approvePool2: pg.Pool;
+
+  beforeAll(async () => {
+    if (!hasDb) return;
+    approvePool2 = new pg.Pool({ connectionString: migratorUrl() });
+    const router = new Router();
+    const { resolveActorTenant } = await import('../../../src/db/org.js');
+    const writeDeps: InboxWriteDeps = {
+      pool: approvePool2,
+      resolveActorTenant: (actorSlug: string) => resolveActorTenant(approvePool2, actorSlug),
+    };
+    registerInboxRoutes(router, undefined, writeDeps);
+    approveServer2 = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => {
+      approveServer2.listen(0, 'localhost', () => {
+        const addr = approveServer2.address();
+        if (addr && typeof addr !== 'string') approveBaseUrl2 = `http://localhost:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    if (!hasDb) return;
+    if (approvePool2) await approvePool2.end();
+    if (approveServer2) await new Promise<void>((resolve) => approveServer2.close(() => resolve()));
+  });
+
+  it('holder account is DEACTIVATED (after claiming while still active) → approve gets 403 NOT_ELIGIBLE (was 200)', async () => {
+    if (!hasDb) return;
+
+    const tenantId = uuid();
+    const roleSlug = `t0588-role-deactapprove-${uuid().slice(0, 6)}`;
+    const holderSlug = `t0588-holder-deactapprove-${uuid().slice(0, 6)}`;
+    let taskId = '';
+    let holderId = '';
+
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await seedTenant(c, tenantId);
+      const roleId = await seedRole(c, tenantId, roleSlug);
+      // Seed the holder ACTIVE first so the claim below (which must succeed to
+      // reach a waiting instance task in `claimed` state) is a legitimate claim
+      // by an actor who was eligible at claim-time — deactivation happens AFTER,
+      // simulating "employee claimed a task, then got fired before approving".
+      const holder = await seedEmployee(c, tenantId, holderSlug);
+      holderId = holder.id;
+      await seedAssignment(c, tenantId, { empId: holder.id, roleId });
+      taskId = await seedPoolTask(c, tenantId, roleSlug);
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    } finally {
+      await c.end();
+    }
+
+    // Claim while still active — must succeed (proves the task really is
+    // claimable and the 403 below is caused by deactivation, not a seeding bug).
+    const claimResp = await makeRequest(approveBaseUrl2, 'POST', `/api/inbox/${taskId}/claim`, undefined, {
+      'x-dev-user': holderSlug,
+    });
+    expect(claimResp.statusCode).toBe(200);
+
+    // Now deactivate the holder (fired between claim and approve).
+    const deactC = new pg.Client({ connectionString: migratorUrl() });
+    await deactC.connect();
+    try {
+      await deactC.query('SET search_path TO choros;');
+      await deactC.query(`UPDATE choros.employee SET deactivated_at = 500000 WHERE id = $1`, [holderId]);
+    } finally {
+      await deactC.end();
+    }
+
+    const approveResp = await makeRequest(
+      approveBaseUrl2,
+      'POST',
+      `/api/inbox/${taskId}/action`,
+      { action: 'approve' },
+      { 'x-dev-user': holderSlug },
+    );
+
+    expect(approveResp.statusCode).toBe(403);
+    expect(JSON.parse(approveResp.body).error.code).toBe('NOT_ELIGIBLE');
+  });
+
+  it('regression: active holder claim→approve still works end-to-end (done, no false-positive block)', async () => {
+    if (!hasDb) return;
+
+    const tenantId = uuid();
+    const roleSlug = `t0588-role-deactapprove-regr-${uuid().slice(0, 6)}`;
+    const holderSlug = `t0588-holder-deactapprove-regr-${uuid().slice(0, 6)}`;
+    let taskId = '';
+
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await seedTenant(c, tenantId);
+      const roleId = await seedRole(c, tenantId, roleSlug);
+      const holder = await seedEmployee(c, tenantId, holderSlug);
+      await seedAssignment(c, tenantId, { empId: holder.id, roleId });
+      taskId = await seedPoolTask(c, tenantId, roleSlug);
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    } finally {
+      await c.end();
+    }
+
+    const claimResp = await makeRequest(approveBaseUrl2, 'POST', `/api/inbox/${taskId}/claim`, undefined, {
+      'x-dev-user': holderSlug,
+    });
+    expect(claimResp.statusCode).toBe(200);
+
+    const approveResp = await makeRequest(
+      approveBaseUrl2,
+      'POST',
+      `/api/inbox/${taskId}/action`,
+      { action: 'approve' },
+      { 'x-dev-user': holderSlug },
+    );
+    expect(approveResp.statusCode).toBe(200);
+    expect(JSON.parse(approveResp.body).status).toBe('done');
+  });
+});
