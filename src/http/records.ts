@@ -1191,6 +1191,7 @@ async function listRecordsPaginated(
   limit: number,
   cursor: { createdAt: number; id: string } | null,
   actorIsPrivileged: boolean,
+  actorSlug: string,
   viewApplication?: ViewApplication,
   offsetCursor?: OffsetCursor | null,
 ): Promise<RecordsPage<RecordJoinedRow>> {
@@ -1201,11 +1202,25 @@ async function listRecordsPaginated(
     // T-0558 (sandbox gate): hide records of a DRAFT (sandbox) application from a
     // non-privileged caller. The gate is on the OWNING APPLICATION's tier (records
     // inherit the app's sandbox state — see the `JOIN choros.application a` below).
-    // sandboxReadPredicate emits a $-placeholder-FREE fragment (TRUE for privileged,
-    // `a.tier = 'published'` otherwise) so it is an ADDITIONAL `AND` that never shifts
-    // the caller's parameter indices and never relaxes the tenant scope (RLS + the
-    // r.tenant_id guard remain). `a.tier` is a trusted code-level column constant.
-    conds.push(sandboxReadPredicate({ tierColumn: "a.tier", actorIsPrivileged }).sql);
+    // sandboxReadPredicate emits a fragment (TRUE for privileged, `a.tier = 'published'`
+    // otherwise) that is an ADDITIONAL `AND` and never relaxes the tenant scope
+    // (RLS + the r.tenant_id guard remain). `a.tier` is a trusted code-level column.
+    //
+    // T-0623 (столп-4): a non-privileged actor ALSO keeps sight of the rows they
+    // created themselves (created_by = actor) — create is not sandbox-gated, so a
+    // draft-tier row of one's own must not become invisible to its author. The
+    // actor slug is bound as a PARAM ($N), never a literal (the only caller-derived
+    // value in the fragment); `r.created_by` is a trusted code-level column. This is
+    // an ADDITIVE OR — it never reveals any OTHER actor's draft row.
+    const creatorEscape = actorIsPrivileged
+      ? undefined
+      : (() => {
+          params.push(actorSlug);
+          return { ownerColumn: "r.created_by", ownerParam: `$${params.length}` };
+        })();
+    conds.push(
+      sandboxReadPredicate({ tierColumn: "a.tier", actorIsPrivileged, creatorEscape }).sql,
+    );
 
     if (applicationId !== null) {
       params.push(applicationId);
@@ -1323,6 +1338,7 @@ async function getRecordDetail(
   tenantId: string,
   id: string,
   actorIsPrivileged: boolean,
+  actorSlug: string,
 ): Promise<RecordDetailRow | null> {
   return withTenantTx(pool, tenantId, async (client) => {
     // T-0558 (sandbox gate): a non-privileged caller cannot OPEN a record whose
@@ -1330,7 +1346,18 @@ async function getRecordDetail(
     // route returns the same honest 404 as a cross-tenant / missing record. Appended
     // as an EXTRA `AND` (gated on the owning application's tier via `JOIN
     // choros.application a`), never relaxing the tenant scope (RLS + r.tenant_id).
-    const sandboxPred = sandboxReadPredicate({ tierColumn: "a.tier", actorIsPrivileged });
+    //
+    // T-0623 (столп-4): the creator-own escape — a non-privileged caller can OPEN a
+    // draft-tier record they created themselves (created_by = actor, bound as $3),
+    // so a record you authored is never invisible to you. Additive OR; never widens
+    // to any other actor's draft row, never relaxes the tenant scope.
+    const sandboxPred = sandboxReadPredicate({
+      tierColumn: "a.tier",
+      actorIsPrivileged,
+      creatorEscape: actorIsPrivileged
+        ? undefined
+        : { ownerColumn: "r.created_by", ownerParam: "$3" },
+    });
     const res = await client.query<RecordDetailRow>(
       `SELECT ${RECORD_DETAIL_SELECT_JOIN}
          FROM choros.record r
@@ -1339,7 +1366,7 @@ async function getRecordDetail(
          JOIN choros.application a
            ON a.tenant_id = rd.tenant_id AND a.id = rd.application_id
         WHERE r.tenant_id = $1 AND r.id = $2 AND ${sandboxPred.sql}`,
-      [tenantId, id],
+      actorIsPrivileged ? [tenantId, id] : [tenantId, id, actorSlug],
     );
     return res.rows[0] ?? null;
   });
@@ -1445,9 +1472,13 @@ async function updateRecord(args: {
 // DELETE (T-0566): hard-delete one record (+ its files), audited.
 // ---------------------------------------------------------------------------
 
-/** deleteRecord outcome: not-found (404), FK-conflict (409), or deleted (204). */
+/**
+ * deleteRecord outcome: not-found (404), forbidden (403), FK-conflict (409), or
+ * deleted (204).
+ */
 type DeleteRecordOutcome =
   | { kind: "not_found" }
+  | { kind: "forbidden" }
   | { kind: "conflict"; message: string }
   | { kind: "deleted"; registryDefId: string };
 
@@ -1459,20 +1490,30 @@ type DeleteRecordOutcome =
  * (T-0016 hash-chain). 404 if the record is not in the caller's tenant (RLS). A
  * residual FK conflict (the record is referenced by another record's relation)
  * surfaces as { kind: "conflict" } → HTTP 409 with an honest message, never a 500.
+ *
+ * AUTHZ (T-0566 + T-0623 столп-4): the config-edit privilege (owner/admin OR
+ * authoring_draft) may delete ANY record; a NON-privileged actor may delete ONLY a
+ * record THEY created (created_by = actor) — the ownership floor that closes «create
+ * an object you cannot then delete». The check is made INSIDE the locked read (FOR
+ * UPDATE), atomic with the delete, so there is no TOCTOU window and no separate
+ * pre-read. A non-privileged actor deleting someone else's record → { forbidden }.
+ * The `created_by` comparison is on the actor's own resolved slug (never a header),
+ * within the tenant-scoped tx, so it can never reach another tenant's row.
  */
 async function deleteRecord(args: {
   pool: pg.Pool;
   tenantId: string;
   id: string;
   actor: string;
+  actorIsConfigPrivileged: boolean;
   nowMs: number;
 }): Promise<DeleteRecordOutcome> {
-  const { pool, tenantId, id, actor, nowMs } = args;
+  const { pool, tenantId, id, actor, actorIsConfigPrivileged, nowMs } = args;
   try {
     return await withTenantTx(pool, tenantId, async (client) => {
       // 1. Lock + read the record (tenant-scoped). Absent → 404.
-      const cur = await client.query<{ registry_id: string }>(
-        `SELECT registry_id FROM choros.record
+      const cur = await client.query<{ registry_id: string; created_by: string | null }>(
+        `SELECT registry_id, created_by FROM choros.record
           WHERE tenant_id = $1 AND id = $2
           FOR UPDATE`,
         [tenantId, id],
@@ -1481,6 +1522,16 @@ async function deleteRecord(args: {
         return { kind: "not_found" as const };
       }
       const registryId = cur.rows[0]!.registry_id;
+
+      // 1a. AUTHZ (T-0623 столп-4): a non-privileged actor may delete ONLY their
+      // own record. A config-privileged actor (owner/admin | authoring_draft) may
+      // delete any. This is enforced AFTER the row exists (so a non-existent id is
+      // still an honest 404, never a 403 that would leak existence) and BEFORE any
+      // files/record are touched. 404-vs-403 ordering mirrors the existing pattern:
+      // existence is confirmed first, then the ownership floor.
+      if (!actorIsConfigPrivileged && cur.rows[0]!.created_by !== actor) {
+        return { kind: "forbidden" as const };
+      }
 
       // 1b. T-0606 [approval-registry-guard]: reject delete of a record that
       // belongs to an engine-managed registry (e.g. a "Согласование" decision
@@ -1897,6 +1948,7 @@ export function registerRecordRoutes(
       limit,
       cursor,
       actorIsPrivileged,
+      actor,
       viewApplication,
       offsetCursor,
     );
@@ -1974,7 +2026,7 @@ export function registerRecordRoutes(
       // T-0558: resolve sandbox privilege; a non-privileged caller cannot open a
       // record whose owning application is still DRAFT (returns the same honest 404).
       const actorIsPrivileged = await sandboxPrivilegedFor(actor, tenantId, nowMs);
-      const row = await getRecordDetail(pool, tenantId, id, actorIsPrivileged);
+      const row = await getRecordDetail(pool, tenantId, id, actorIsPrivileged, actor);
       if (row === null) {
         // Not in the caller's tenant (RLS-filtered), draft-hidden (sandbox gate),
         // OR does not exist → 404.
@@ -2139,7 +2191,8 @@ export function registerRecordRoutes(
   // DELETE /api/records/:id — T-0566: hard-delete one record (+ its files), audited.
   //   204 on success (+ record.deleted audit);
   //   404 if the record is not in the caller's tenant (RLS-filtered or absent);
-  //   403 if the caller lacks the config-edit privilege (owner/admin | authoring_draft);
+  //   403 if a non-privileged caller tries to delete a record they did NOT create
+  //       (config-privileged owner/admin | authoring_draft may delete any; T-0623);
   //   409 if the record is referenced by another record's relation (honest, not 500).
   router.register(
     "DELETE",
@@ -2152,18 +2205,24 @@ export function registerRecordRoutes(
       const tenantId = await resolveActorTenant(actor);
       const nowMs = Date.now();
 
-      // Authz: same privilege level as editing — owner/admin OR authoring_draft.
-      // Reuses the SAME resolveActorPrivilege path the sandbox gate uses.
+      // Authz (T-0566 + T-0623 столп-4): config privilege (owner/admin OR
+      // authoring_draft) may delete ANY record; a non-privileged actor may delete
+      // ONLY a record they created themselves. The ownership decision is enforced
+      // INSIDE deleteRecord (atomic with the FOR UPDATE read — no TOCTOU, and a
+      // non-existent id stays an honest 404 rather than leaking existence via 403).
+      // We still resolve the config privilege here via the SAME resolveActorPrivilege
+      // path the sandbox gate uses.
       const priv = resolveSandboxPrivilege
         ? await resolveSandboxPrivilege(actor, tenantId, nowMs)
         : await resolveActorPrivilege(pool, tenantId, actor, nowMs);
-      if (!priv.isOwnerOrAdmin && !priv.hasAuthoringDraftGrant) {
-        throw new HttpError(403, "FORBIDDEN", "not permitted to delete this record");
-      }
+      const actorIsConfigPrivileged = priv.isOwnerOrAdmin || priv.hasAuthoringDraftGrant;
 
-      const outcome = await deleteRecord({ pool, tenantId, id, actor, nowMs });
+      const outcome = await deleteRecord({ pool, tenantId, id, actor, actorIsConfigPrivileged, nowMs });
       if (outcome.kind === "not_found") {
         throw new HttpError(404, "NOT_FOUND", "record not found");
+      }
+      if (outcome.kind === "forbidden") {
+        throw new HttpError(403, "FORBIDDEN", "not permitted to delete this record");
       }
       if (outcome.kind === "conflict") {
         throw new HttpError(409, "CONFLICT", outcome.message);
