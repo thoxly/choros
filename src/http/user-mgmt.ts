@@ -114,7 +114,7 @@ function isConflict(err: unknown): boolean {
   return false;
 }
 
-/** KC port errors carry .code (EMAIL_TAKEN / AUTH_UNAVAILABLE) — see admin-port.ts. */
+/** KC port errors carry .code (EMAIL_TAKEN / EMAIL_INVALID / AUTH_UNAVAILABLE) — see admin-port.ts. */
 function kcErrCode(err: unknown): string | undefined {
   if (err && typeof err === "object" && "code" in err) {
     return (err as { code?: string }).code;
@@ -125,7 +125,17 @@ function kcErrCode(err: unknown): string | undefined {
 // ---------------------------------------------------------------------------
 // Password validation — mirrors register.ts validateRequest (≥8 chars, NF-9).
 // Never logged; the raw value only ever flows into kc.createHumanUser below.
+//
+// EMAIL_RE (T-0625 fix): the spec (N9) is explicit — "login = username = the
+// KC email field, as in register.ts: username=email". Before this fix, login
+// was passed to kc.createHumanUser UNVALIDATED: a real Keycloak realm 400s on
+// a non-email username/email, which the live port then mapped to
+// AUTH_UNAVAILABLE (503) — the classic "ordinary login" LIVE_PROOF bug
+// (T-0583/T-0625). Validating the SAME shape here, BEFORE any KC call, turns
+// that into an honest 400 VALIDATION and never lets a bad value reach KC.
 // ---------------------------------------------------------------------------
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function validateCreateBody(b: Record<string, unknown>): {
   login: string;
@@ -137,6 +147,10 @@ function validateCreateBody(b: Record<string, unknown>): {
   const login = b["login"];
   if (typeof login !== "string" || login.trim().length === 0) {
     throw new HttpError(400, "VALIDATION", "login is required");
+  }
+  const trimmedLogin = login.trim();
+  if (!EMAIL_RE.test(trimmedLogin)) {
+    throw new HttpError(400, "VALIDATION", "login must be a valid email address (e.g. name@company.ru)");
   }
   const password = b["password"];
   if (typeof password !== "string" || password.length < 8) {
@@ -150,7 +164,7 @@ function validateCreateBody(b: Record<string, unknown>): {
   if (position_id !== null) assertUuidShape(position_id, "position_id");
   const role_id = typeof b["role_id"] === "string" ? (b["role_id"] as string) : null;
   if (role_id !== null) assertUuidShape(role_id, "role_id");
-  return { login: login.trim(), password, display_name: display_name.trim(), position_id, role_id };
+  return { login: trimmedLogin, password, display_name: display_name.trim(), position_id, role_id };
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +227,15 @@ export function registerUserMgmtRoutes(
       if (code === "EMAIL_TAKEN") {
         throw new HttpError(409, "EMAIL_TAKEN", "an account with that login already exists");
       }
+      // Defense-in-depth (T-0625): validateCreateBody already rejects a
+      // non-email login before this call, so a real KC realm should never
+      // 400 here in this product's own flow. If it somehow does (KC-side
+      // validation drift, e.g. Keycloak also rejecting a syntactically valid
+      // but realm-disallowed address), surface it as an honest 400 — NOT the
+      // generic 503 AUTH_UNAVAILABLE that masked this exact bug before.
+      if (code === "EMAIL_INVALID") {
+        throw new HttpError(400, "VALIDATION", "login must be a valid email address (e.g. name@company.ru)");
+      }
       throw new HttpError(503, "AUTH_UNAVAILABLE", "account service unavailable — try again later");
     }
 
@@ -221,12 +244,17 @@ export function registerUserMgmtRoutes(
 
     try {
       await withTenantTx(pool, tenant_id, async (client) => {
-        // slug = KC userId — the T-0342 connective invariant (employee<->KC).
+        // slug = KC userId — the T-0342 connective invariant (employee<->KC),
+        // NOT human-readable (identity resolution reads it as the JWT sub —
+        // see src/db/org.ts resolveActorSlugFromAuth). The human-readable KC
+        // username the owner typed goes in the SEPARATE `login` column
+        // (migration 126, T-0625 fix) so GET /api/users/accounts can show
+        // the real login instead of this UUID.
         await client.query(
           `INSERT INTO choros.employee
-             (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
-           VALUES ($1, $2, $3, 'human', $4, $5, $6, $6)`,
-          [tenant_id, employeeId, position_id, kcUserId, display_name, ts],
+             (tenant_id, id, position_id, kind, slug, login, display_name, created_at, updated_at)
+           VALUES ($1, $2, $3, 'human', $4, $5, $6, $7, $7)`,
+          [tenant_id, employeeId, position_id, kcUserId, login, display_name, ts],
         );
 
         // Same hire-flow reader-grant helper T-0619 uses (F2) — the new
@@ -293,6 +321,7 @@ export function registerUserMgmtRoutes(
     let rows: Array<{
       id: string;
       slug: string;
+      login: string | null;
       display_name: string;
       position_title: string | null;
       department_name: string | null;
@@ -305,12 +334,13 @@ export function registerUserMgmtRoutes(
       const result = await client.query<{
         id: string;
         slug: string;
+        login: string | null;
         display_name: string;
         position_title: string | null;
         department_name: string | null;
         deactivated_at: string | null;
       }>(
-        `SELECT e.id, e.slug, e.display_name,
+        `SELECT e.id, e.slug, e.login, e.display_name,
                 p.title AS position_title,
                 d.display_name AS department_name,
                 e.deactivated_at
@@ -332,9 +362,17 @@ export function registerUserMgmtRoutes(
       client.release();
     }
 
+    // T-0625 fix: `slug` is the KC user UUID (identity-resolution invariant,
+    // NOT human-readable — see the INSERT comment above). The list must show
+    // the human-readable login the owner typed, which lives in the new
+    // `login` column. Rows created before migration 126 (dev-silo seed
+    // humans, or any account created before this fix shipped) have
+    // login=NULL — for those ONLY, fall back to `slug` (their sole label;
+    // the seed's slugs like `e-kravtsova` are already human-readable, not
+    // KC UUIDs, since seed humans have no KC login at all).
     const accounts = rows.map((row) => ({
       employee_id: row.id,
-      login: row.slug,
+      login: row.login ?? row.slug,
       display_name: row.display_name,
       position: row.position_title ?? "",
       department: row.department_name ?? "",

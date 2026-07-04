@@ -19,6 +19,12 @@
 
 const PASSWORD_MIN = 8;
 const DISPLAY_NAME_MAX = 256;
+// T-0625 fix: login = username = KC email field (spec N9 — "как register.ts:
+// username=email"). Real Keycloak rejects a non-email username/email with a
+// 400 that the server previously (bug) mapped to a 503 "service unavailable"
+// — validating the same shape here, client-side, gives an honest inline
+// field error before the request is even sent (mirrors register.ts EMAIL_RE).
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function str(v) {
   return typeof v === 'string' ? v : '';
@@ -37,6 +43,7 @@ export function validateCreateUser(f) {
   const errors = {};
   const login = str(f?.login).trim();
   if (login.length === 0) errors.login = 'Укажите логин';
+  else if (!EMAIL_RE.test(login)) errors.login = 'Логин должен быть email-адресом (например, ivanov@company.ru)';
 
   const password = str(f?.password);
   if (password.length === 0) errors.password = 'Укажите пароль';

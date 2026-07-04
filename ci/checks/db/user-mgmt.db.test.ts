@@ -196,6 +196,48 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
         && (g.scope as { nodeId?: string })?.nodeId === RESOURCE_ROOT_NODE_ID,
     );
     expect(covering.length, 'created account must resolve the RESOURCE_ROOT covering READ grant').toBeGreaterThanOrEqual(1);
+
+    // T-0625 fix: GET /api/users/accounts must show the HUMAN-READABLE login
+    // the owner typed (not employee.slug, which is the KC user UUID). Before
+    // the fix, `login: row.slug` made this list show a raw KC UUID instead of
+    // the login — this is the secondary bug from the T-0625 LIVE_PROOF diagnosis.
+    const list = await getAccounts(t.ownerSlug);
+    expect(list.status, JSON.stringify(list.json)).toBe(200);
+    const listedRow = list.json.accounts.find((a: any) => a.employee_id === employeeId);
+    expect(listedRow, 'created account must appear in the list').toBeTruthy();
+    expect(listedRow.login).toBe(login);
+    expect(listedRow.login).not.toBe(kcUserId);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0625: login must be email-shaped — honest 400, NOT the 503
+  // "AUTH_UNAVAILABLE" masquerade a real Keycloak realm produced for a
+  // non-email username/email (LIVE_PROOF root cause).
+  // ---------------------------------------------------------------------
+  it('T-0625: POST /api/users with a non-email login → honest 400 VALIDATION, not 503; no employee row, KC never called', async () => {
+    const t = await registerOne('nonemail');
+    kc.reset();
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: `liveproof-${Date.now()}`, password: 'password12345', display_name: 'Ordinary Login' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('VALIDATION');
+    // Server-side validation runs BEFORE any KC call — the fix's whole point
+    // is that a bad login never reaches kc.createHumanUser at all.
+    expect(kc.createCallCount).toBe(0);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT count(*)::int AS n FROM choros.employee WHERE tenant_id=$1 AND display_name='Ordinary Login'`,
+        [t.tenantId],
+      );
+      expect(rows[0].n).toBe(0);
+      await c.query('COMMIT');
+    });
   });
 
   // ---------------------------------------------------------------------

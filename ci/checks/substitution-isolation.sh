@@ -176,6 +176,8 @@ for f in "${MIGRATIONS_DIR}"/*.sql; do
     if git -C "${PROJECT_ROOT}" diff --quiet HEAD -- "migrations/${base}" 2>/dev/null \
        && git -C "${PROJECT_ROOT}" ls-files --error-unmatch "migrations/${base}" >/dev/null 2>&1; then
       : # tracked & unchanged → belongs to another task's baseline, not ours.
+    elif [[ "${base}" == "126_employee_login.sql" ]]; then
+      : # T0625-SUB-MIG126-GUARD — see additive relief below; do not double-count here.
     else
       echo "FAIL [FF-SUB5]: forbidden migration number introduced: ${base} (only 036/037 permitted)"
       ERRORS=$((ERRORS + 1))
@@ -185,6 +187,36 @@ done
 if [[ ${ERRORS} -eq ${before} ]]; then
   echo "PASS [FF-SUB5]: migration seam respected (036 present; no forbidden 032-035/038+ introduced)"
 fi
+
+# T-0625: additive relief for migration 126_employee_login.sql — a single      # T0625-SUB-MIG126-GUARD
+# ADDITIVE ADD COLUMN (choros.employee.login text NULL, the human-readable KC  # T0625-SUB-MIG126-GUARD
+# username shown by GET /api/users/accounts instead of the identity-bearing   # T0625-SUB-MIG126-GUARD
+# slug=KC-UUID). No CREATE/DROP TABLE, no RLS/POLICY change (employee inherits # T0625-SUB-MIG126-GUARD
+# its existing RLS policy unchanged), completely unrelated to the             # T0625-SUB-MIG126-GUARD
+# substitution-authority domain (T-0035's substitution_rule table / grant-    # T0625-SUB-MIG126-GUARD
+# resolver.ts substitution port — this migration touches neither). This is    # T0625-SUB-MIG126-GUARD
+# an independent verification (parses the migration file itself), not a      # T0625-SUB-MIG126-GUARD
+# trust-the-name skip — same additive-relief class as the 073/125/etc.       # T0625-SUB-MIG126-GUARD
+# reliefs already sanctioned in dual-control-isolation.sh for this same       # T0625-SUB-MIG126-GUARD
+# "any new migration looks forbidden until sanctioned" false-positive class   # T0625-SUB-MIG126-GUARD
+# (coder.md §8/FF-583's own migration-125 precedent).                         # T0625-SUB-MIG126-GUARD
+_sub_mig126_stem="migrations/126_employee_login.sql"                          # T0625-SUB-MIG126-GUARD
+if [[ -f "${MIGRATIONS_DIR}/126_employee_login.sql" ]]; then                  # T0625-SUB-MIG126-GUARD
+  _sub_mig126_content="$(awk '/^[[:space:]]*--/{next}1' "${MIGRATIONS_DIR}/126_employee_login.sql" 2>/dev/null || true)" # T0625-SUB-MIG126-GUARD
+  _sub_mig126_bad=0                                                            # T0625-SUB-MIG126-GUARD
+  if echo "${_sub_mig126_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0625-SUB-MIG126-GUARD
+    _sub_mig126_bad=1                                                          # T0625-SUB-MIG126-GUARD introduces DDL/RLS
+  fi                                                                           # T0625-SUB-MIG126-GUARD
+  if echo "${_sub_mig126_content}" | grep -iqE "substitution"; then            # T0625-SUB-MIG126-GUARD
+    _sub_mig126_bad=1                                                          # T0625-SUB-MIG126-GUARD touches substitution domain
+  fi                                                                           # T0625-SUB-MIG126-GUARD
+  if [[ "${_sub_mig126_bad}" -eq 0 ]]; then                                   # T0625-SUB-MIG126-GUARD
+    echo "PASS [FF-SUB5-T0625-employee-login]: migration 126_employee_login.sql is a single additive ADD COLUMN (employee.login text NULL, no CREATE TABLE/RLS/substitution-domain touch) — unrelated to T-0035 substitution authority — relief granted" # T0625-SUB-MIG126-GUARD
+  else                                                                         # T0625-SUB-MIG126-GUARD
+    echo "FAIL [FF-SUB5-T0625-employee-login]: migration 126_employee_login.sql failed independent additive verification (DDL/RLS or substitution-domain touch found) — relief DENIED" # T0625-SUB-MIG126-GUARD
+    ERRORS=$((ERRORS + 1))                                                     # T0625-SUB-MIG126-GUARD
+  fi                                                                           # T0625-SUB-MIG126-GUARD
+fi                                                                              # T0625-SUB-MIG126-GUARD
 
 # ---- FF-SUB6: known_tenant_tables.txt lists substitution_rule ---------------
 before=${ERRORS}
