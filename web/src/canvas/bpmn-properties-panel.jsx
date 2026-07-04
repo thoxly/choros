@@ -207,7 +207,7 @@ const EXEC_OPTIONS = [
    Sub-components (reuse bio-properties-panel-* CSS classes from bpmn-theme.css)
    -------------------------------------------------------------------------- */
 
-function PanelGroup({ title, defaultOpen = true, children }) {
+export function PanelGroup({ title, defaultOpen = true, children }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="bio-properties-panel-group">
@@ -224,11 +224,27 @@ function PanelGroup({ title, defaultOpen = true, children }) {
           </svg>
         </span>
       </div>
-      {open && (
-        <div className="bio-properties-panel-group-entries">
-          {children}
-        </div>
-      )}
+      {/* T-0634 [P0-3] fix: editor.css requires the literal `.open` class on
+          `.bio-properties-panel-group-entries` to override its base
+          `display: none` (see editor.css: `.bio-properties-panel-group-entries
+          { display: none }` + `.open { display: flex }`). This div was
+          previously rendered WITHOUT that class whenever `open` was true —
+          conditionally mounting the node (`{open && (...)}`) is not the same
+          as toggling the class the stylesheet keys off, so the section stayed
+          display:none-by-default even while "open" and in the DOM, hiding
+          every executor-type / agent / role control inside it. We now always
+          render the container and toggle the class name directly, mirroring
+          how every other toggle in this codebase drives CSS off a class
+          (chs-exec-*, bio-properties-panel-arrow rotate, etc.). */}
+      <div
+        className={
+          open
+            ? 'bio-properties-panel-group-entries open'
+            : 'bio-properties-panel-group-entries'
+        }
+      >
+        {children}
+      </div>
     </div>
   );
 }
