@@ -68,6 +68,12 @@ import {
   extractFieldErrors,
   computeComputedFieldValue,
 } from './records-form.js';
+// T-0581 (view registry) FR-4: the "Настроить список" panel + view-switcher.
+// The autogen table below IS the synthetic default view (ADR §3.3) — the
+// panel/switcher are an ADDITIVE layer on top of the same fetch, never a
+// second parallel read-path (FF-VR-1).
+import { ListViewPanel, ViewSwitcher, useListViews } from './list-view-panel.jsx';
+import { buildFieldCatalog } from './list-view-panel.js';
 // T-0399/T-0480 [D7-K]: record-entry fields render through the ONE unified
 // renderer (catalog-driven). FieldControl draws the scalar/enum controls;
 // structural contracts (relation/collection/rollup) dispatch to their dedicated
@@ -946,6 +952,11 @@ function AppRecordsScreen() {
   const [nextCursor, setNextCursor] = useState(null);
   const [loadingMoreRecords, setLoadingMoreRecords] = useState(false);
 
+  // T-0581 (view registry) FR-4: active saved view (null = synthetic default,
+  // ADR §3.3 — byte-identical to pre-T-0581 behaviour, NF-2/AC-9) + panel open state.
+  const [activeViewId, setActiveViewId] = useState(null);
+  const [viewPanelOpen, setViewPanelOpen] = useState(false);
+
   // ---- load registry_defs for the application -----------------------------
   const loadDefs = useCallback(async () => {
     if (!appId) { setDefsError('Не указано приложение'); return; }
@@ -989,6 +1000,27 @@ function AppRecordsScreen() {
     [defs, selectedDefId],
   );
 
+  // T-0581 (view registry): a saved view belongs to ONE набор полей — reset
+  // to the default whenever the chosen набор полей changes.
+  useEffect(() => { setActiveViewId(null); }, [selectedDefId]);
+
+  // T-0581: fetch this набор полей' saved views + synthetic default (ADR §3.3).
+  const {
+    views: savedViews, defaultView: defaultViewConfig, error: viewsError,
+    loading: viewsLoading, reload: reloadViews, saveView, deleteView,
+  } = useListViews(selectedDefId, appId);
+
+  const activeView = useMemo(
+    () => (savedViews || []).find((v) => v.id === activeViewId) || null,
+    [savedViews, activeViewId],
+  );
+
+  // T-0581 (view registry): a saved view is applied via ?view_id= — mutually
+  // exclusive with inline ?filter=/?sort= on the server (ADR §4), so switching
+  // to a saved view never sends inline params. The default (activeViewId=null)
+  // keeps the request IDENTICAL to pre-T-0581 (NF-2/AC-9).
+  const viewQuerySuffix = activeViewId ? `&view_id=${encodeURIComponent(activeViewId)}` : '';
+
   // ---- load records for the chosen registry_def ---------------------------
   // T-0401: consumes paginated response { records, nextCursor }. Initial load
   // resets the list; loadMoreRecords appends via ?after=<cursor>.
@@ -999,7 +1031,7 @@ function AppRecordsScreen() {
     setNextCursor(null);
     try {
       const res = await fetch(
-        `/api/records?application_id=${encodeURIComponent(appId)}&registry_def_id=${encodeURIComponent(selectedDefId)}`,
+        `/api/records?application_id=${encodeURIComponent(appId)}&registry_def_id=${encodeURIComponent(selectedDefId)}${viewQuerySuffix}`,
         { headers: devHeaders() },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1009,15 +1041,19 @@ function AppRecordsScreen() {
     } catch (e) {
       setRecordsError(e.message);
     }
-  }, [appId, selectedDefId]);
+  }, [appId, selectedDefId, viewQuerySuffix]);
 
   // T-0401: fetch the next cursor page and append to the existing list.
+  // T-0581: re-sends the SAME view_id on every page — the server does not
+  // embed it in the opaque cursor (records.ts resolves the view fresh per
+  // request), so pagination would silently fall back to the default order
+  // without this.
   const loadMoreRecords = useCallback(async () => {
     if (!appId || !selectedDefId || !nextCursor || loadingMoreRecords) return;
     setLoadingMoreRecords(true);
     try {
       const res = await fetch(
-        `/api/records?application_id=${encodeURIComponent(appId)}&registry_def_id=${encodeURIComponent(selectedDefId)}&after=${encodeURIComponent(nextCursor)}`,
+        `/api/records?application_id=${encodeURIComponent(appId)}&registry_def_id=${encodeURIComponent(selectedDefId)}&after=${encodeURIComponent(nextCursor)}${viewQuerySuffix}`,
         { headers: devHeaders() },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1029,7 +1065,7 @@ function AppRecordsScreen() {
     } finally {
       setLoadingMoreRecords(false);
     }
-  }, [appId, selectedDefId, nextCursor, loadingMoreRecords]);
+  }, [appId, selectedDefId, nextCursor, loadingMoreRecords, viewQuerySuffix]);
 
   useEffect(() => { loadRecords(); }, [loadRecords]);
 
@@ -1065,10 +1101,29 @@ function AppRecordsScreen() {
     }
   }, [toDelete, push]);
 
-  const columns = useMemo(
+  const schemaColumns = useMemo(
     () => (selectedDef ? schemaToColumns(selectedDef.record_schema) : []),
     [selectedDef],
   );
+
+  // T-0581 (view registry) FR-2 §1: apply the active view's (or synthetic
+  // default's) column visibility + order + width on top of the schema-derived
+  // column catalog. No saved/default config yet (still loading) → fall back to
+  // schemaColumns unfiltered — byte-identical to pre-T-0581 (NF-2/AC-9).
+  const columns = useMemo(() => {
+    const viewConfig = (activeView && activeView.config) || defaultViewConfig;
+    if (!viewConfig || !Array.isArray(viewConfig.columns) || viewConfig.columns.length === 0) {
+      return schemaColumns;
+    }
+    const fieldCatalog = buildFieldCatalog(schemaColumns);
+    const byKey = new Map(fieldCatalog.map((c) => [c.key, c]));
+    return viewConfig.columns
+      .filter((c) => c && c.visible !== false && byKey.has(c.field_key))
+      .map((c) => {
+        const base = byKey.get(c.field_key);
+        return typeof c.width === 'number' ? { ...base, width: c.width } : base;
+      });
+  }, [schemaColumns, activeView, defaultViewConfig]);
   const recordList = records || [];
 
   // ---- header --------------------------------------------------------------
@@ -1082,6 +1137,22 @@ function AppRecordsScreen() {
         onCreated={handleCreated}
         applicationId={appId}
         registryDef={selectedDef}
+      />
+      {/* T-0581 (view registry) FR-4: columns/filters/sort panel — the
+          обязательный UI contract over the already-approved backend. */}
+      <ListViewPanel
+        open={viewPanelOpen}
+        onClose={() => setViewPanelOpen(false)}
+        schemaColumns={schemaColumns}
+        activeView={activeView}
+        defaultViewConfig={defaultViewConfig}
+        onApply={setActiveViewId}
+        views={savedViews}
+        viewsError={viewsError}
+        viewsLoading={viewsLoading}
+        reloadViews={reloadViews}
+        saveView={saveView}
+        deleteView={deleteView}
       />
       {/* T-0568: destructive record delete — confirm-gated (kit ConfirmDialog). */}
       <ConfirmDialog
@@ -1125,6 +1196,18 @@ function AppRecordsScreen() {
                 ))}
               </Select>
             )}
+            {/* T-0581 (view registry) FR-4: switch among saved представления
+                (the набор полей' schema-derived default is always option 0). */}
+            {selectedDef && <ViewSwitcher views={savedViews} activeViewId={activeViewId} onChange={setActiveViewId} />}
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!selectedDef}
+              onClick={() => setViewPanelOpen(true)}
+              title={selectedDef ? 'Настроить список: колонки, фильтры, сортировка' : 'Сначала выберите набор полей'}
+            >
+              Настроить список
+            </Button>
             <Button
               variant="primary"
               size="sm"

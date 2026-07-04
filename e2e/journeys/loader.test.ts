@@ -28,6 +28,7 @@ import { journey as uxG1Journey } from "./ux-g1-contrast.ux.journey.js";
 import { journey as uxG3Journey } from "./ux-g3-dead-buttons.ux.journey.js";
 import { journey as uxG4Journey } from "./ux-g4-empty-loading-error.ux.journey.js";
 import { journey as uxCreationLight } from "./ux-creation-path-light.ux.journey.js";
+import { journey as uxViewRegistryPanel } from "./ux-view-registry-panel.ux.journey.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -213,6 +214,7 @@ describe("T-0314 UX honest-gate journeys", () => {
     { name: "ux-g3-dead-buttons", j: uxG3Journey },
     { name: "ux-g4-empty-loading-error", j: uxG4Journey },
     { name: "ux-creation-path-light", j: uxCreationLight },
+    { name: "ux-view-registry-panel", j: uxViewRegistryPanel },
   ];
 
   uxJourneys.forEach(({ name, j }) => {

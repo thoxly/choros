@@ -101,6 +101,9 @@ import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
 import { sandboxReadPredicate } from "../core/sandbox-gate.js";
 import { resolveActorPrivilege, type ActorPrivilege } from "../db/sandbox-gate-dao.js";
 import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
+import { roleFieldVisibility } from "../core/field-visibility.js";
+import { buildFieldKeyWhitelist, translateFilters, translateSort } from "../core/view-query.js";
+import type { ViewFilter, ViewSort } from "../core/view-config.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1124,6 +1127,62 @@ async function createRecord(args: {
  *   - limit clamped to [1, MAX_PAGE_SIZE] at the call site (parsePaginationParams).
  *   - Query fetches limit+1 rows to detect hasNextPage without a COUNT(*).
  */
+/**
+ * T-0581 (view registry): the view-application inputs listRecordsPaginated
+ * accepts, ALL optional (undefined/empty ⇒ byte-identical to pre-T-0581,
+ * NF-2/AC-9/FF-VR-6). `whitelist` + `visibleFieldKeys` come from the SAME
+ * record_schema/field-visibility resolution the route handler already does —
+ * no second authority path (FR-7/FR-8).
+ */
+interface ViewApplication {
+  readonly filters: readonly ViewFilter[];
+  readonly sort: readonly ViewSort[];
+  readonly whitelist: ReturnType<typeof buildFieldKeyWhitelist>;
+  readonly visibleFieldKeys: ReadonlySet<string> | undefined;
+}
+
+/**
+ * T-0581 (R-2 decision, ADR §5): keyset cursor OFFSET fallback for a CUSTOM
+ * sort. The frozen `RecordsCursor` shape (data-access-port.ts) encodes
+ * (createdAt, id) — the DEFAULT ordering's keyset. A custom `sort` (by an
+ * arbitrary JSONB scalar) cannot reuse that keyset without teaching the
+ * cursor about every possible sort key's value type, so v1 uses the ADR's
+ * documented alternative: OFFSET-based "показать ещё" for the view-sort path,
+ * encoded in its OWN opaque cursor shape (`{ offset: number }`) — distinct
+ * from and never confused with the default RecordsCursor (different JSON
+ * shape; decodeRecordsCursor's shape-guard would reject an offset-cursor,
+ * and this decoder rejects a createdAt-cursor, so the two cannot cross-parse).
+ * Trade-off (documented, non-blocking per ADR): an OFFSET page can duplicate/
+ * skip a row if rows are inserted/deleted between page fetches — acceptable at
+ * PD-20 scale (hundreds of rows per list) and explicitly the ADR's "minimum"
+ * option; the DEFAULT (no custom sort) path is completely unaffected and keeps
+ * the exact keyset semantics it has today.
+ */
+export interface OffsetCursor {
+  readonly offset: number;
+}
+
+export function encodeOffsetCursor(cursor: OffsetCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+export function decodeOffsetCursor(raw: string): OffsetCursor | null {
+  try {
+    const decoded = JSON.parse(Buffer.from(raw, "base64url").toString("utf-8")) as unknown;
+    if (
+      decoded === null ||
+      typeof decoded !== "object" ||
+      Array.isArray(decoded) ||
+      typeof (decoded as Record<string, unknown>)["offset"] !== "number"
+    ) {
+      return null;
+    }
+    return { offset: (decoded as Record<string, unknown>)["offset"] as number };
+  } catch {
+    return null;
+  }
+}
+
 async function listRecordsPaginated(
   pool: pg.Pool,
   tenantId: string,
@@ -1132,6 +1191,8 @@ async function listRecordsPaginated(
   limit: number,
   cursor: { createdAt: number; id: string } | null,
   actorIsPrivileged: boolean,
+  viewApplication?: ViewApplication,
+  offsetCursor?: OffsetCursor | null,
 ): Promise<RecordsPage<RecordJoinedRow>> {
   return withTenantTx(pool, tenantId, async (client) => {
     const conds: string[] = ["r.tenant_id = $1"];
@@ -1155,11 +1216,30 @@ async function listRecordsPaginated(
       conds.push(`r.registry_id = $${params.length}`);
     }
 
-    // Keyset pagination: for DESC created_at + ASC id, "after cursor" means:
+    // T-0581 (view registry, FR-7/NF-3/NF-6): the view-WHERE is ADDED to the
+    // tenant+sandbox conds ABOVE — never replaces them (NF-3). translateFilters
+    // is a pure, parameterized-SQL-fragment builder (view-query.ts); field_key
+    // is whitelist-checked there, values are ALWAYS bind params (NF-6/AC-13).
+    const hasCustomSort = viewApplication !== undefined && viewApplication.sort.length > 0;
+    if (viewApplication !== undefined && viewApplication.filters.length > 0) {
+      const viewWhere = translateFilters(
+        viewApplication.filters,
+        viewApplication.whitelist,
+        params.length,
+        viewApplication.visibleFieldKeys,
+      );
+      if (viewWhere.conds.length > 0) {
+        conds.push(...viewWhere.conds);
+        params.push(...viewWhere.params);
+      }
+    }
+
+    // Keyset pagination (DEFAULT ordering only — unaffected by a custom sort,
+    // R-2/NF-2): for DESC created_at + ASC id, "after cursor" means:
     //   rows with created_at < cursor.createdAt
     //   OR (created_at = cursor.createdAt AND id > cursor.id)
     // This implements a stable page boundary that does not re-read previously seen rows.
-    if (cursor !== null) {
+    if (!hasCustomSort && cursor !== null) {
       params.push(cursor.createdAt);
       const cAtParam = `$${params.length}`;
       params.push(cursor.id);
@@ -1171,8 +1251,26 @@ async function listRecordsPaginated(
 
     // Fetch limit+1 to detect whether a next page exists (avoid COUNT(*)).
     const clampedLimit = Math.min(Math.max(1, limit), MAX_PAGE_SIZE);
+    // R-2: a custom sort uses OFFSET pagination — fetch limit+1 rows starting
+    // at the requested offset (still avoids COUNT(*)).
+    const offsetValue = hasCustomSort && offsetCursor !== null && offsetCursor !== undefined
+      ? Math.max(0, offsetCursor.offset)
+      : 0;
     params.push(clampedLimit + 1);
     const limitParam = `$${params.length}`;
+    let offsetParam = "";
+    if (hasCustomSort) {
+      params.push(offsetValue);
+      offsetParam = ` OFFSET $${params.length}`;
+    }
+
+    // T-0581 (view registry, FR-6/R-3): view-ORDER BY replaces the default
+    // `created_at DESC, id ASC` ONLY when a custom sort is present; the
+    // secondary `r.id ASC` key is always appended by translateSort itself for
+    // determinism (matches the default path's own secondary key).
+    const orderBy = hasCustomSort
+      ? translateSort(viewApplication!.sort, viewApplication!.whitelist).orderBy
+      : "r.created_at DESC, r.id ASC";
 
     const res = await client.query<RecordJoinedRow>(
       `SELECT ${RECORD_SELECT_JOIN}
@@ -1182,8 +1280,8 @@ async function listRecordsPaginated(
          JOIN choros.application a
            ON a.tenant_id = rd.tenant_id AND a.id = rd.application_id
         WHERE ${conds.join(" AND ")}
-        ORDER BY r.created_at DESC, r.id ASC
-        LIMIT ${limitParam}`,
+        ORDER BY ${orderBy}
+        LIMIT ${limitParam}${offsetParam}`,
       params,
     );
 
@@ -1193,11 +1291,16 @@ async function listRecordsPaginated(
     // Build next cursor from the last row on this page.
     let nextCursor: string | null = null;
     if (hasMore && pageRows.length > 0) {
-      const last = pageRows[pageRows.length - 1]!;
-      nextCursor = encodeRecordsCursor({
-        createdAt: Number(last.created_at),
-        id: last.id,
-      });
+      if (hasCustomSort) {
+        // R-2: OFFSET-cursor continuation (distinct shape from RecordsCursor).
+        nextCursor = encodeOffsetCursor({ offset: offsetValue + pageRows.length });
+      } else {
+        const last = pageRows[pageRows.length - 1]!;
+        nextCursor = encodeRecordsCursor({
+          createdAt: Number(last.created_at),
+          id: last.id,
+        });
+      }
     }
 
     return {
@@ -1444,12 +1547,38 @@ async function deleteRecord(args: {
 // Query-param parsing
 // ---------------------------------------------------------------------------
 
+/**
+ * T-0581 (view registry): decode a base64url-JSON `?filter=`/`?sort=` query
+ * param into its raw array. Returns `null` when the param is absent; throws
+ * 400 VALIDATION when present but malformed (not base64url-JSON, or not an
+ * array) — a malformed inline view-param is a caller error, not a silent
+ * no-op (distinct from the internal `translateFilters`/`translateSort`
+ * per-item drop, which only applies to items that pass this outer shape
+ * check but fail field/op/type validation deeper in the pipeline).
+ */
+function decodeBase64UrlJsonArray(raw: string | null, label: string): unknown[] | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf-8"));
+  } catch {
+    throw new HttpError(400, "VALIDATION", `${label} query param must be base64url-encoded JSON`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new HttpError(400, "VALIDATION", `${label} query param must decode to a JSON array`);
+  }
+  return parsed;
+}
+
 /** Parse all query params for the records list endpoint. */
 function parseRecordsListQuery(req: IncomingMessage): {
   applicationId: string | null;
   registryDefId: string | null;
   limit: number;
   cursor: { createdAt: number; id: string } | null;
+  viewId: string | null;
+  inlineFilters: ViewFilter[] | null;
+  inlineSort: ViewSort[] | null;
 } {
   const rawUrl = req.url ?? "";
   const qIdx = rawUrl.indexOf("?");
@@ -1468,11 +1597,25 @@ function parseRecordsListQuery(req: IncomingMessage): {
   // Pagination params (T-0401 D7-3)
   const { limit, cursor } = parsePaginationParams(searchParams);
 
+  // T-0581 (view registry): ?view_id= XOR (?filter=/?sort=) — ADR §4.
+  const viewIdRaw = searchParams.get("view_id");
+  if (viewIdRaw !== null && !UUID_RE.test(viewIdRaw)) {
+    throw new HttpError(400, "VALIDATION", "view_id query param must be a valid UUID");
+  }
+  const inlineFilters = decodeBase64UrlJsonArray(searchParams.get("filter"), "filter") as ViewFilter[] | null;
+  const inlineSort = decodeBase64UrlJsonArray(searchParams.get("sort"), "sort") as ViewSort[] | null;
+  if (viewIdRaw !== null && (inlineFilters !== null || inlineSort !== null)) {
+    throw new HttpError(400, "VALIDATION", "view_id is mutually exclusive with inline filter/sort");
+  }
+
   return {
     applicationId: applicationIdRaw,
     registryDefId: registryDefIdRaw,
     limit,
     cursor,
+    viewId: viewIdRaw,
+    inlineFilters,
+    inlineSort,
   };
 }
 
@@ -1591,6 +1734,92 @@ export function registerRecordRoutes(
     res.end(JSON.stringify(serializeRecord(outcome.row)));
   }));
 
+  /**
+   * T-0581 (view registry): resolve the ViewApplication (filters + sort +
+   * field whitelist) for a GET /api/records call carrying `?view_id=` or
+   * inline `?filter=`/`?sort=`. Returns `undefined` when NONE of these params
+   * are present (NF-2: the caller falls back to the exact pre-T-0581 query
+   * path). `fvPolicy`/`fvGrants` are the SAME per-request field-visibility
+   * resolution the route already performs — reused here to build
+   * `visibleFieldKeys` (FR-8/AC-7), never a second authority path.
+   *
+   * Requires a registry_def_id: either passed explicitly (`?registry_def_id=`)
+   * or implied by the saved view's own `registry_def_id`. Without one, view
+   * application is impossible (a view's config is only meaningful against ONE
+   * record_schema) — this throws 400 rather than silently ignoring the param.
+   */
+  async function resolveViewApplication(args: {
+    tenantId: string;
+    registryDefIdParam: string | null;
+    viewId: string | null;
+    inlineFilters: ViewFilter[] | null;
+    inlineSort: ViewSort[] | null;
+    fvGrants: Grant[];
+    fvPolicy: FieldVisibilityPolicy;
+  }): Promise<ViewApplication | undefined> {
+    const { tenantId, registryDefIdParam, viewId, inlineFilters, inlineSort, fvGrants, fvPolicy } = args;
+    if (viewId === null && inlineFilters === null && inlineSort === null) {
+      return undefined;
+    }
+
+    let effectiveRegistryDefId = registryDefIdParam;
+    let filters: ViewFilter[] = inlineFilters ?? [];
+    let sort: ViewSort[] = inlineSort ?? [];
+
+    if (viewId !== null) {
+      const viewRow = await withTenantTx(pool, tenantId, async (client) => {
+        const res = await client.query<{ registry_def_id: string; type: string; config: unknown }>(
+          `SELECT registry_def_id, type, config FROM choros.list_view WHERE tenant_id = $1 AND id = $2`,
+          [tenantId, viewId],
+        );
+        return res.rows[0] ?? null;
+      });
+      if (viewRow === null) {
+        throw new HttpError(404, "NOT_FOUND", "view not found");
+      }
+      effectiveRegistryDefId = viewRow.registry_def_id;
+      const cfg = viewRow.config as { filters?: ViewFilter[]; sort?: ViewSort[] } | null;
+      filters = Array.isArray(cfg?.filters) ? cfg!.filters! : [];
+      sort = Array.isArray(cfg?.sort) ? cfg!.sort! : [];
+    }
+
+    if (effectiveRegistryDefId === null) {
+      throw new HttpError(
+        400,
+        "VALIDATION",
+        "registry_def_id is required to apply a filter/sort (pass ?registry_def_id= or ?view_id=)",
+      );
+    }
+
+    const recordSchema = await withTenantTx(pool, tenantId, async (client) => {
+      const res = await client.query<{ record_schema: unknown }>(
+        `SELECT record_schema FROM choros.registry_def WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, effectiveRegistryDefId],
+      );
+      if (res.rows.length === 0) {
+        throw new HttpError(404, "NOT_FOUND", `registry_def '${effectiveRegistryDefId}' not found in this tenant`);
+      }
+      return res.rows[0]!.record_schema;
+    });
+
+    const whitelist = buildFieldKeyWhitelist(recordSchema);
+
+    // FR-8/AC-7: visibleFieldKeys = the record_schema's OWN field keys, run
+    // through the SAME roleFieldVisibility most-restrictive filter the LIST
+    // path already applies to row data — independent of any single row's
+    // actual keys (a schema-level visibility set, not a per-row one), so a
+    // filter over a role-hidden field is excluded from the query universally,
+    // not merely when the row happens to omit that key.
+    let visibleFieldKeys: ReadonlySet<string> | undefined;
+    if (fvPolicy.roleScopedFields.size > 0) {
+      const allSchemaKeys = new Set(whitelist.typeByKey.keys());
+      const { effectiveVisible } = roleFieldVisibility(fvGrants, allSchemaKeys, fvPolicy);
+      visibleFieldKeys = effectiveVisible;
+    }
+
+    return { filters, sort, whitelist, visibleFieldKeys };
+  }
+
   // GET /api/records — list the caller-tenant's records, optionally filtered by
   // ?application_id= and/or ?registry_def_id=.
   //
@@ -1599,6 +1828,10 @@ export function registerRecordRoutes(
   //   ?after=<tok>   — opaque cursor from previous page's `nextCursor` field
   //   ?application_id= — filter by application (UUID)
   //   ?registry_def_id= — filter by registry_def (UUID)
+  //
+  // T-0581 (view registry): OPTIONAL ?view_id=<uuid> (apply a saved view) XOR
+  //   inline ?filter=<base64url-json>&?sort=<base64url-json> — additive, never
+  //   changes behaviour when absent (NF-2/AC-9). See resolveViewApplication.
   //
   // Response shape changed (additive):
   //   { records: [...], nextCursor: string|null, limit: number }
@@ -1616,7 +1849,7 @@ export function registerRecordRoutes(
   //   PHYSICALLY ABSENT from the response (not null, ADR §6.1 F-3).
   router.register("GET", "/api/records", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = await extractActor(req, pool);
-    const { applicationId, registryDefId, limit, cursor } = parseRecordsListQuery(req);
+    const { applicationId, registryDefId, limit, cursor, viewId, inlineFilters, inlineSort } = parseRecordsListQuery(req);
 
     const tenantId = await resolveActorTenant(actor);
     const nowMs = Date.now();
@@ -1634,7 +1867,39 @@ export function registerRecordRoutes(
 
     // T-0558: resolve sandbox privilege once per request; drives the read gate below.
     const actorIsPrivileged = await sandboxPrivilegedFor(actor, tenantId, nowMs);
-    const page = await listRecordsPaginated(pool, tenantId, applicationId, registryDefId, limit, cursor, actorIsPrivileged);
+
+    // T-0581 (view registry): resolve the view application (saved view OR
+    // inline filter/sort), if any of those params were passed. undefined when
+    // none were — the query below then behaves EXACTLY as pre-T-0581 (NF-2).
+    const viewApplication = await resolveViewApplication({
+      tenantId,
+      registryDefIdParam: registryDefId,
+      viewId,
+      inlineFilters,
+      inlineSort,
+      fvGrants,
+      fvPolicy,
+    });
+    // R-2: a custom sort switches pagination to the OFFSET-cursor scheme; the
+    // DEFAULT keyset cursor (`cursor`, parsed above) is reused unchanged when
+    // no custom sort is present.
+    const hasCustomSort = viewApplication !== undefined && viewApplication.sort.length > 0;
+    const rawAfter = new URLSearchParams(
+      (req.url ?? "").includes("?") ? (req.url as string).slice((req.url as string).indexOf("?") + 1) : "",
+    ).get("after");
+    const offsetCursor = hasCustomSort && rawAfter !== null ? decodeOffsetCursor(rawAfter) : null;
+
+    const page = await listRecordsPaginated(
+      pool,
+      tenantId,
+      applicationId,
+      registryDefId,
+      limit,
+      cursor,
+      actorIsPrivileged,
+      viewApplication,
+      offsetCursor,
+    );
 
     // T-0570 (D3, READ-PDP): filter the already-loaded page to rows the actor
     // holds a covering READ grant for. Grants + ancestry are resolved ONCE per

@@ -1,0 +1,106 @@
+{
+  "task_id": "T-0581",
+  "status": "ready",
+  "decision": "Ввести новую tenant-scoped сущность choros.list_view — строку реестра представлений: type (открытый enum, v1 'list', T-0582 добавит 'kanban'), привязка к набору полей (registry_def) внутри приложения, name, is_default, JSONB config c рантайм-валидацией через диспетчер по type. CRUD — новый модуль src/http/list-views.ts (зеркало sections.ts/report-pages.ts: withTenantTx + RLS + audit + honest-degrade без БД). Применение представления к списку идёт ТЕМ ЖЕ путём GET /api/records, который уже несёт RLS + sandbox-gate + READ-PDP (isRecordReadable) + field-visibility: добавляются опциональные параметры (?view_id= ИЛИ инлайн ?filter=&sort=), из которых чистый транслятор src/core/view-query.ts собирает ПАРАМЕТРИЗОВАННЫЙ WHERE data->>… / ORDER BY data->>… на скалярных JSONB-путях; курсор-пагинация и in-memory READ-PDP-фильтр остаются как есть. Автоген-список сегодня = синтетический default-view (когда сохранённых нет). Новый прямой SQL-путь к choros.record мимо PDP НЕ создаётся. Механизм соразмерен: одна tenant-таблица по шаблону report_page (051)/section (113), один чистый транслятор-ядро, переиспользование всего data-слоя, PDP и курсор-пагинации. Реестр — несущий фундамент: T-0582 (канбан) и будущие страницы-из-блоков вешаются на list_view.type, не плодя параллельных таблиц.",
+  "rejected_alternatives": [
+    { "option": "Колонка views jsonb на registry_def (как form_binding.layout, migration 105)", "why_not": "представлений на набор МНОГО (именованные, is_default, независимо создаются/удаляются/переименовываются); массив-в-колонке даёт гонки на конкурентных правках, нет per-view RLS/аудита/уникальности имени. Отдельная сущность — правильный примитив (как section реверснул application.section-строку, migration 113)." },
+    { "option": "Клиентская фильтрация/сортировка (грузим всё, режем в браузере)", "why_not": "ломает курсор-пагинацию и бюджет строк (MAX_PAGE_SIZE=200), не масштабируется, обходит требование задачи «сервер фильтрует». Сервер обязан фильтровать до пагинации." },
+    { "option": "Новый эндпоинт GET /api/list-views/:id/records со своим SELECT", "why_not": "дублировал бы весь стек records.ts (RLS+sandbox+READ-PDP+field-visibility+курсор+derived) и стал бы вторым дрейфующим READ-путём мимо PDP (нарушение FR-7). Применение представления — параметры существующего GET /api/records." },
+    { "option": "Материализованные представления / индексы на JSONB-поля в v1", "why_not": "преждевременная оптимизация (PD-20: сотни записей на список, seq-scan приемлем). Индексы — additive-позже по профилю, не в этой задаче." },
+    { "option": "Валидация config через CHECK-констрейнт в БД", "why_not": "валидатор — диспетчер по type с типо-зависимыми правилами (операторы по типу поля, серверно-сортируемость), сверяется с record_schema (БД-констрейнт его не видит), даёт человекочитаемую 400. Валидация — в TS-ядре view-config.ts; в БД лишь CHECK jsonb_typeof(config)='object'." },
+    { "option": "Per-user приватные представления в v1", "why_not": "не соответствует модели прав (конфигурация приложения — общая для тенанта, spec §6), раздувает объём; добавляется поверх той же таблицы позже (nullable owner_actor)." }
+  ],
+  "object_model": [
+    {
+      "entity": "list_view (choros.list_view — новая tenant-таблица, миграция ~123, шаблон report_page/section: tenant_id-leading PK, ENABLE+FORCE RLS, default-DENY policy, GRANT choros_app, регистрация в known_tenant_tables.txt)",
+      "fields": [
+        { "name": "tenant_id", "type": "uuid NOT NULL (scope; ведёт PK; из актора, не из тела)" },
+        { "name": "id", "type": "uuid NOT NULL (server-generated)" },
+        { "name": "registry_def_id", "type": "uuid NOT NULL (владелец-набор; составной FK (tenant_id,registry_def_id)->registry_def, ON DELETE CASCADE)" },
+        { "name": "application_id", "type": "uuid NOT NULL (владелец-приложение; составной FK->application; согласован с registry_def.application_id)" },
+        { "name": "type", "type": "text NOT NULL DEFAULT 'list' (ОТКРЫТЫЙ дискриминатор; v1 принимает только 'list' валидатором, НЕ CHECK — чтобы T-0582 добавил 'kanban' без DDL-миграции)" },
+        { "name": "name", "type": "text NOT NULL (отображаемое имя; данные тенанта, не константа)" },
+        { "name": "is_default", "type": "boolean NOT NULL DEFAULT false (≤1 true на (tenant,registry_def_id) — частичный UNIQUE-индекс)" },
+        { "name": "config", "type": "jsonb NOT NULL (конфиг вида; CHECK jsonb_typeof='object'; семантика — в TS-валидаторе)" },
+        { "name": "created_at", "type": "bigint NOT NULL (epoch ms)" },
+        { "name": "updated_at", "type": "bigint NOT NULL (epoch ms)" },
+        { "name": "created_by", "type": "text NOT NULL (actor slug)" }
+      ]
+    },
+    {
+      "entity": "list_view constraints/indexes",
+      "fields": [
+        { "name": "PRIMARY KEY (tenant_id, id)", "type": "PK" },
+        { "name": "UNIQUE (tenant_id, registry_def_id, name)", "type": "одно имя на набор в тенанте" },
+        { "name": "list_view_registry_fk (tenant_id, registry_def_id)->registry_def ON DELETE CASCADE", "type": "FK" },
+        { "name": "list_view_app_fk (tenant_id, application_id)->application", "type": "FK" },
+        { "name": "list_view_one_default UNIQUE INDEX (tenant_id, registry_def_id) WHERE is_default", "type": "частичный unique — ≤1 default (AC-10)" },
+        { "name": "list_view_config_obj CHECK (jsonb_typeof(config)='object')", "type": "CHECK" }
+      ]
+    },
+    {
+      "entity": "ViewConfig (config для type='list' — контракт данных, валидируется TS)",
+      "fields": [
+        { "name": "columns", "type": "Array<{ field_key: string, visible: boolean, width?: number }> — порядок массива = порядок колонок; field_key = ключ record_schema ИЛИ псевдо 'created_at'" },
+        { "name": "filters", "type": "Array<{ field_key: string, op: string, value: unknown }> — AND (v1); op зависит от типа поля" },
+        { "name": "sort", "type": "Array<{ field_key: string, dir: 'asc'|'desc' }> — многоключевой ORDER BY по серверно-сортируемым полям" }
+      ]
+    },
+    {
+      "entity": "view-query translator (src/core/view-query.ts — чистое ядро, без pg/http, как data-access-port.ts)",
+      "fields": [
+        { "name": "translateFilters(filters, recordSchema, visibleFields)", "type": "(ViewFilter[], schema, Set<string>) -> { sql: string[], params: unknown[] } — параметризованные предикаты data->>'k'; поле из whitelist ключей схемы; предикат по невидимому полю НЕ транслируется (FR-8)" },
+        { "name": "translateSort(sort, recordSchema)", "type": "(ViewSort[], schema) -> { orderBy: string } — data->>'k' с тип-зависимым кастом ((..)::numeric для числовых), только серверно-сортируемые поля, вторичный r.id ASC" },
+        { "name": "operatorsForFieldType(fieldType)", "type": "(type) -> string[] — карта тип поля -> допустимые операторы (FR-5)" },
+        { "name": "isServerSortable(fieldType)", "type": "(type) -> boolean — string/number/integer/money/date/boolean/select/created_at = true; computed/collection/multi-select/relation/person = false (FR-6)" }
+      ]
+    },
+    {
+      "entity": "view-config validator (src/core/view-config.ts — диспетчер по type)",
+      "fields": [
+        { "name": "validateViewConfig(type, config, recordSchema)", "type": "(string, unknown, schema) -> { valid: boolean, errors: string[] } — switch/map по type; для 'list' валидирует columns/filters/sort против record_schema и operatorsForFieldType; неизвестный type/недопустимый оператор/фильтр по computed|collection -> valid:false (AC-4)" },
+        { "name": "defaultViewConfig(recordSchema)", "type": "(schema) -> ViewConfig — синтетический default: все поля visible в порядке x-field-order + created_at, filters=[], sort=[{created_at,desc}] — байт-эквивалент сегодня (NF-2)" }
+      ]
+    }
+  ],
+  "contracts": [
+    "src/http/list-views.ts :: registerListViewRoutes(router: Router, deps?: { pool: pg.Pool, resolveActorTenant: (slug)=>Promise<string>, resolveActorPrivilege?: ... }): void — при отсутствии pool роуты не регистрируются (honest-degrade, зеркало registerSectionRoutes/registerRecordRoutes)",
+    "GET /api/list-views?registry_def_id=<uuid>[&application_id=<uuid>] -> 200 { views: ViewRow[], default_view: ViewConfig } (views может быть пуст; default_view — синтетический)",
+    "POST /api/list-views body { registry_def_id, application_id?, type?, name, config, is_default? } -> 201 { ...view } | 400 VIEW_CONFIG_INVALID | 404 (набор не в тенанте) | 409 CONFLICT (дубль имени). Мутация — привилегия конфигуратора (owner/admin | authoring_draft, resolveActorPrivilege)",
+    "GET /api/list-views/:id -> 200 { ...view } | 404 (RLS-неотличимо от отсутствия)",
+    "PUT /api/list-views/:id body { name?, config?, is_default? } -> 200 { ...view } | 400 VIEW_CONFIG_INVALID | 404",
+    "DELETE /api/list-views/:id -> 204 | 404",
+    "GET /api/records расширяется аддитивно: [&view_id=<uuid>] ИЛИ [&filter=<base64url-json>][&sort=<base64url-json>] (взаимоисключимо с view_id). Ответ { records, nextCursor, limit } — FROZEN-контракт БЕЗ ИЗМЕНЕНИЙ (NF-2/AC-9)",
+    "listRecordsPaginated (records.ts) применяет: (1) RLS+r.tenant_id+sandbox — как сейчас; (2) view-WHERE из translateFilters (AND, параметризовано); (3) view-ORDER BY из translateSort (+вторичный r.id); (4) курсор-пагинация; (5) READ-PDP isRecordReadable in-memory + field-visibility redaction — как сейчас. Порядок: PDP ПОСЛЕ фильтра (FR-7/AC-6)",
+    "Композиция (server.ts): registerListViewRoutes(router, { pool: grantsPool, resolveActorTenant: s=>resolveActorTenant(getOrgPool(), s), resolveActorPrivilege }) рядом с registerRecordRoutes; view-параметры GET /api/records проходят через уже-инъецированные resolveReadVisibility/resolveFieldVisibility (без нового authority-пути)"
+  ],
+  "fitness_functions": [
+    { "id": "FF-VR-1", "rule": "Новый прямой READ-путь к choros.record мимо PDP запрещён: единственный SELECT из choros.record в списочном пути — в listRecordsPaginated; фильтр/сортировка не создают второго SELECT-модуля из record. list-views.ts не селектит choros.record.", "ci_check": "ci/checks/view-registry-no-pdp-bypass.sh — grep: 'FROM choros.record' встречается только в records.ts; src/core/view-query.ts и src/http/list-views.ts не содержат SELECT ... FROM choros.record" },
+    { "id": "FF-VR-2", "rule": "list_view — tenant-таблица по контракту T-0013: зарегистрирована в known_tenant_tables.txt, несёт ENABLE+FORCE ROW LEVEL SECURITY + default-DENY policy на current_setting('choros.tenant_id').", "ci_check": "ci/checks/cross-tenant-fitness.sh + добавить 'list_view' в ci/checks/known_tenant_tables.txt; grep миграции на ENABLE+FORCE RLS + CREATE POLICY list_view_tenant_isolation USING+WITH CHECK (мирроринг registry-defs-pdp-isolation.sh)" },
+    { "id": "FF-VR-3", "rule": "Динамический ORDER BY/WHERE безопасен: field_key не попадает в строку SQL иначе как через whitelist ключей record_schema; значения фильтра — только bind-параметры. Нет шаблонной интерполяции field_key/value в строку запроса.", "ci_check": "ci/checks/view-query-injection-safe.sh — линтер на src/core/view-query.ts: field_key используется только как ключ во внутренней whitelisted-мапе колонок→JSONB-путь; нет `${...field_key...}` / string-concat пользовательского значения в sql-фрагмент; + unit-тест на попытку инъекции через имя поля и значение" },
+    { "id": "FF-VR-4", "rule": "type — открытый под kanban: НЕ CHECK-констрейнт значений в DDL; валидатор — диспетчер по type (validateViewConfig — switch/map по type). Добавление 'kanban' не требует DDL-миграции, изменения CRUD-роутов и общего контракта.", "ci_check": "ci/checks/view-registry-type-open.sh — grep: миграция list_view НЕ содержит CHECK (type IN (...)); validateViewConfig ветвится по type (наличие dispatch-структуры, не единственной list-ветки без диспетчера) — проверка формы контракта" },
+    { "id": "FF-VR-5", "rule": "Анти-кейс (D-064 §5): в добавленном коде задачи (src/ + web/src/) нет кейс-констант 'сделка'/'стадия'/'deal'/'stage'/'CRM' как платформенных строк; type/имена представлений — данные тенанта. Общий agent anti-case-lock.sh не растёт.", "ci_check": "ci/checks/anti-case-lock.sh (агрегат не растёт) + добавить denylist-проверку case-строк списочного домена в diff задачи (git-diff-scoped, как read-pdp-anti-case.sh)" },
+    { "id": "FF-VR-6", "rule": "Обратная совместимость: GET /api/records без view-параметров даёт ответ, байт-эквивалентный поведению до задачи (default-путь = синтетический default = текущий автоген).", "ci_check": "vitest src/__tests__/records-view-backcompat.test.ts — снапшот ответа GET /api/records без view_id/filter/sort до и после = идентичен; default_view из defaultViewConfig байт-совпадает с текущим schemaToColumns-порядком" },
+    { "id": "FF-UX-VR-7", "rule": "UI панели настройки колонок/фильтров/сортировки проходит UX honest-gate G1-G7: контраст ≥ WCAG AA в обеих темах, совпадение data-theme, нет мёртвых enabled-аффордансов, есть Empty/Loading/Error, нет дев-жаргона (view/registry/JSONB → «представление списка»/«колонки»/«фильтр»/«сортировка»), стиль через слой (--chs-* токены/kit), не хардкод цвета.", "ci_check": "ci/checks/ux/* + e2e/journeys/list-view-config.ux.journey.ts — прогон honest-gate G1-G7 на новых панелях; design-steward фиксирует паттерн в web/src/design/principles.md" }
+  ],
+  "traceability": [
+    { "ac": "AC-1", "covered_by": "ADR §3.1 сущность list_view + §4 POST/GET /api/list-views" },
+    { "ac": "AC-2", "covered_by": "ADR §3.1 RLS (tenant_id-leading PK, FORCE RLS, default-DENY) + FF-VR-2" },
+    { "ac": "AC-3", "covered_by": "ADR §4 применение через GET /api/records + §3.4 транслятор; default-путь §3.3" },
+    { "ac": "AC-4", "covered_by": "ADR §3.2/§3.4 диспетчер-валидатор операторов по типу (validateViewConfig)" },
+    { "ac": "AC-5", "covered_by": "ADR §3.4 таблица «серверно-сортируем» + §4 translateSort отклоняет несортируемые" },
+    { "ac": "AC-6", "covered_by": "ADR §4 шаг 5: READ-PDP isRecordReadable ПОСЛЕ фильтра (FR-7) + FF-VR-1" },
+    { "ac": "AC-7", "covered_by": "ADR §4 field-visibility: предикат по невидимому полю не транслируется (FR-8)" },
+    { "ac": "AC-8", "covered_by": "ADR §4 шаги 1-5 в одном tenant-tx, O(1) резолюция грантов (наследует T-0570 NF-1)" },
+    { "ac": "AC-9", "covered_by": "ADR §3.3 default-view + §4 frozen-контракт ответа + FF-VR-6" },
+    { "ac": "AC-10", "covered_by": "ADR §3.1 частичный UNIQUE list_view_one_default WHERE is_default" },
+    { "ac": "AC-11", "covered_by": "ADR §3.2 kanban-расширяемость + FF-VR-4 (открытый type, диспетчер-валидатор)" },
+    { "ac": "AC-12", "covered_by": "ADR §5 R-5 + FF-VR-5 (анти-кейс denylist, agent lock не растёт)" },
+    { "ac": "AC-13", "covered_by": "ADR §4 bind-параметры + whitelist field_key + FF-VR-3 (транслятор-линтер)" },
+    { "ac": "AC-14", "covered_by": "ADR §6 FF-UX-VR-7 (UX honest-gate G1-G7)" },
+    { "ac": "AC-15", "covered_by": "LIVE_PROOF manual: живой стенд, произвольное приложение, второй актор, READ-PDP-невидимая строка" }
+  ],
+  "runtime_target": "сервер (dev-стек Choros /srv/choros) — одна additive idempotent-миграция на существующем single-Postgres + новый HTTP-модуль в существующем сервере; внешних ресурсов не требует, GT-4-провижн не нужен",
+  "adr_artifact_path": "docs/design/T-0581-view-registry.adr.md",
+  "escalation": ""
+}
