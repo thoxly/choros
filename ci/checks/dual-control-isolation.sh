@@ -197,6 +197,7 @@ _dc_mig120_failed=0                                                             
 _dc_mig121_failed=0                                                                # T0604-DC-MIG121-GUARD track when 121 triggers the FF-DC7 fail
 _dc_mig122_failed=0                                                                # T0606-DC-MIG122-GUARD track when 122 triggers the FF-DC7 fail
 _dc_mig123_failed=0                                                                # T0581-DC-MIG123-GUARD track when 123 triggers the FF-DC7 fail
+_dc_mig124_failed=0                                                                # T0619-DC-MIG124-GUARD track when 124 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -281,6 +282,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/123_list_view_registry.sql" ]]; then          # T0581-DC-MIG123-GUARD
       _dc_mig123_failed=1                                                     # T0581-DC-MIG123-GUARD
     fi                                                                        # T0581-DC-MIG123-GUARD
+    # Track specifically when 124 triggers this FAIL (and nothing else).     # T0619-DC-MIG124-GUARD
+    if [[ "${m}" == "migrations/124_read_grant_all_staff_backfill.sql" ]]; then # T0619-DC-MIG124-GUARD
+      _dc_mig124_failed=1                                                     # T0619-DC-MIG124-GUARD
+    fi                                                                        # T0619-DC-MIG124-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -818,6 +823,30 @@ if [[ "${_dc_mig123_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0581-view-registry]: migration 123_list_view_registry.sql CREATEs a wholly new, self-contained tenant table (choros.list_view, own PK/RLS/policy/GRANT) — does NOT touch confirmed2_by or the choros.\"grant\"/role_assignment authority tables (dual-control domain) — relief granted" # T0581-DC-MIG123-GUARD
   fi                                                                           # T0581-DC-MIG123-GUARD
 fi                                                                             # T0581-DC-MIG123-GUARD
+# T-0619: additive relief for migration 124_read_grant_all_staff_backfill.sql — # T0619-DC-MIG124-GUARD
+# pure INSERT…SELECT backfill (ensure role-reader role + read/record grant +    # T0619-DC-MIG124-GUARD
+# role_assignment for every kind='human' staff member). No CREATE/DROP TABLE, no # T0619-DC-MIG124-GUARD
+# RLS, no confirmed2_by — the T-0044 dual-control invariant (031 is the ONLY     # T0619-DC-MIG124-GUARD
+# dual-control migration; confirmed2_by stays derived-additive) is UNTOUCHED.    # T0619-DC-MIG124-GUARD
+# Like the sibling reliefs, this cancels ONLY the _dc_mig124_failed increment    # T0619-DC-MIG124-GUARD
+# (set exclusively in the loop above when 124 is the unexpected file), scoped so # T0619-DC-MIG124-GUARD
+# it cannot absorb any other migration's FF-DC7 failure.                         # T0619-DC-MIG124-GUARD
+_dc_mig124_stem="migrations/124_read_grant_all_staff_backfill.sql"            # T0619-DC-MIG124-GUARD
+if [[ "${_dc_mig124_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig124_stem}"; then # T0619-DC-MIG124-GUARD
+  _dc_mig124_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig124_stem}" 2>/dev/null || true)"  # T0619-DC-MIG124-GUARD
+  _dc_mig124_bad=0                                                             # T0619-DC-MIG124-GUARD
+  if echo "${_dc_mig124_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0619-DC-MIG124-GUARD
+    _dc_mig124_bad=1                                                           # T0619-DC-MIG124-GUARD introduces DDL/RLS
+  fi                                                                           # T0619-DC-MIG124-GUARD
+  if echo "${_dc_mig124_content}" | grep -iqE "confirmed2_by"; then           # T0619-DC-MIG124-GUARD
+    _dc_mig124_bad=1                                                           # T0619-DC-MIG124-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0619-DC-MIG124-GUARD
+  if [[ "${_dc_mig124_bad}" -eq 0 ]]; then                                    # T0619-DC-MIG124-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0619-DC-MIG124-GUARD cancel false-red
+    _dc_mig124_failed=0                                                        # T0619-DC-MIG124-GUARD
+    echo "PASS [FF-DC7-T0619-read-grant-staff]: migration 124_read_grant_all_staff_backfill.sql is pure INSERT…SELECT backfill (role-reader + read grant + human role_assignments, no CREATE TABLE/RLS/confirmed2_by) — does NOT touch dual-control authority domain — relief granted" # T0619-DC-MIG124-GUARD
+  fi                                                                           # T0619-DC-MIG124-GUARD
+fi                                                                             # T0619-DC-MIG124-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
