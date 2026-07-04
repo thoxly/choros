@@ -34,7 +34,9 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant, resolveActorSlugFromAuth } from "../db/org.js";
 import { findEmployeeById } from "../db/org.js";
 import { getRoleSlugsForActor, getHoldersForRole, findTenantOwnerSlug } from "../db/grants-dao.js";
-import { getActiveSubstitutionsByRole } from "../db/substitution-dao.js";
+import { getActiveSubstitutionsByRole, getActiveSubstitutionsForSubstitute } from "../db/substitution-dao.js";
+import { isRuleEffective } from "../core/substitution.js";
+import { BOTTOM, isNarrowerOrEqual, type AncestryOracle, type ScopeElement } from "../core/grant-lattice.js";
 import { parsePaginationParams, paginateInMemory } from "../core/data-access-port.js";
 // executor-resolver: the batch path (resolveExecutorFallbackBatch below) calls
 // DAO functions directly for performance (avoids port-wrapper overhead at scale).
@@ -1350,8 +1352,56 @@ export function registerInboxRoutes(
     // T-0365: fail-closed — drop the `myRoles.length > 0 &&` guard that let a
     // zero-role actor skip the check. Now empty roles (or role-mismatch) ⇒ 403.
     // Keep `taskRole !== undefined` guard: unaddressed tasks have no role to check.
+    //
+    // T-0588 (FR-1): when the direct role-slug check misses, ADDITIONALLY consult
+    // Tier-2 substitution_rule — a substitute holds a TTL'd grant (NOT a
+    // role_assignment), so myRoles.includes(taskRole) is false for them even with a
+    // live, confirmed, in-window rule. This branch is local to the claim endpoint
+    // (does NOT widen getRoleSlugsForActor / myRoles — see ADR rejected-alternatives):
+    // it only ever ALLOWS this one claim, and only records who was substituted for.
+    let onBehalfOfSlug: string | undefined;
     if (taskRole !== undefined && !myRoles.includes(taskRole)) {
-      throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
+      let substitutionAllowed = false;
+      if (hasDb()) {
+        try {
+          const substRules = await getActiveSubstitutionsForSubstitute(
+            getOrgPool(),
+            tenantId,
+            devUserId,
+            nowMs,
+          );
+          // Task org-scope is not modelled on the pool-task shape here; default to
+          // BOTTOM (root scope) — mirrors resolveExecutor's `opts.orgScope ?? BOTTOM`
+          // default so an unscoped task is covered by any org-scoped rule.
+          const taskOrgScope: ScopeElement = BOTTOM;
+          const ancestry: AncestryOracle = {
+            isDescendantOrSelf(_hierarchy, descendantId, ancestorId) {
+              return descendantId === ancestorId;
+            },
+          };
+          // Select the first rule where: this actor IS the substitute (already the
+          // query predicate), roleId === taskRole, effective at nowMs (confirmed +
+          // in-window), and the task's org-scope is contained by the rule's org-scope.
+          const matched = substRules.find(
+            (r) =>
+              r.roleId === taskRole &&
+              r.ttlGrantId !== null && // Tier-2 only — Tier-1 substitutes already hold the role via role_assignment
+              isRuleEffective(r, nowMs) &&
+              isNarrowerOrEqual(taskOrgScope, r.orgScope, ancestry),
+          );
+          if (matched !== undefined) {
+            substitutionAllowed = true;
+            onBehalfOfSlug = matched.absentEmployeeId;
+          }
+        } catch {
+          // Degrade gracefully: substitution lookup failure does NOT grant a claim
+          // that the base role-check already rejected — falls through to 403.
+          substitutionAllowed = false;
+        }
+      }
+      if (!substitutionAllowed) {
+        throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
+      }
     }
 
     // T-0338 (E15-S2-claim): Emit task.claimed audit event + insert DB claim-lock.
@@ -1395,6 +1445,9 @@ export function registerInboxRoutes(
           });
           // Step (b): Audit event — source of truth for claim-state.
           // Only reached when insertClaimLock won the lock (returned ≥1 row).
+          // T-0588: onBehalfOfSlug is set ONLY when this claim was authorized via
+          // the Tier-2 substitution branch above; undefined for a normal
+          // role-assignment claim (payload key omitted, byte-identical to today).
           await appendTaskClaimed(txClient, {
             taskId,
             actor: devUserId,
@@ -1402,6 +1455,7 @@ export function registerInboxRoutes(
             tenantId,
             role: taskRole ?? "",
             nowMs,
+            onBehalfOf: onBehalfOfSlug,
           });
         });
       } catch (err: unknown) {

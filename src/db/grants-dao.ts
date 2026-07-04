@@ -474,7 +474,8 @@ export async function getHoldersForRole(
           AND r.slug = $2
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
-          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)`,
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND e.deactivated_at IS NULL`,
       [tenantId, roleSlug, nowMs],
     );
     return rows.map((r) => r.slug);
@@ -510,6 +511,7 @@ export async function findTenantOwnerSlug(
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+          AND e.deactivated_at IS NULL
         LIMIT 1`,
       [tenantId, nowMs],
     );
@@ -554,7 +556,8 @@ export async function getAuthoringDraftHolderEmployeeIds(
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
           AND (g.valid_from  IS NULL OR g.valid_from  <= $2)
-          AND (g.valid_until IS NULL OR g.valid_until  > $2)`,
+          AND (g.valid_until IS NULL OR g.valid_until  > $2)
+          AND e.deactivated_at IS NULL`,
       [tenantId, nowMs],
     );
     return rows.map((r) => r.id);
@@ -583,6 +586,7 @@ export async function findTenantOwnerEmployeeId(
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+          AND e.deactivated_at IS NULL
         LIMIT 1`,
       [tenantId, nowMs],
     );

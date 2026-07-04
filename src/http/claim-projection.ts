@@ -88,6 +88,16 @@ export async function appendTaskClaimed(
     readonly role: string;
     /** Epoch-ms of the claim. */
     readonly nowMs: number;
+    /**
+     * T-0588 (FR-1): when the claim was authorized via a Tier-2 substitution_rule
+     * (the actor does not hold `role` directly, but stands in for an absent
+     * holder), the absent holder's employee SLUG. Optional — defaults to
+     * undefined, in which case the payload key is OMITTED (byte-identical to the
+     * pre-T-0588 payload for a normal role-assignment claim). Recorded in the
+     * JSONB payload (not a new audit_event column — see ADR §"Семантика
+     * on_behalf_of"): zero migration, zero change to the hash-chain preimage.
+     */
+    readonly onBehalfOf?: string;
   },
 ): Promise<void> {
   // actor_type from PDP employee.kind — the spec invariant (§5 / T-0336).
@@ -108,6 +118,8 @@ export async function appendTaskClaimed(
       role: args.role,
       // actor_type from PDP employee.kind (not from engine kind — spec §5).
       actor_type: actorType,
+      // T-0588: on_behalf_of is present ONLY for a substitution-authorized claim.
+      ...(args.onBehalfOf !== undefined ? { on_behalf_of: args.onBehalfOf } : {}),
       [TRANSITION_PAYLOAD_KEY]: buildTransitionPayload({
         tenantId: args.tenantId,
         instanceId: null, // claim is a pool-task event; instance unknown at claim time
