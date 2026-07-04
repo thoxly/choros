@@ -16,7 +16,26 @@
 
    The provider injects into bpmn-js' DI container via $inject. bpmn-js v17
    supports multiple palette providers (highest priority wins for duplicate keys).
+
+   T-0634 [W3/P0-2] fix note:
+     elementFactory.createShape(attrs) does NOT copy arbitrary keys onto the
+     created element's businessObject — bpmn-js's ElementFactory.createElement
+     (node_modules/bpmn-js/lib/features/modeling/ElementFactory.js) only lifts a
+     small allow-list of attrs (processRef / isInterrupting / eventDefinitionType /
+     isExpanded / …) onto the businessObject; everything else (including a raw
+     'choros:executorType' key) is assigned onto the returned SHAPE object itself
+     via the final `assign({id...}, size, attrs, {businessObject, di})` in
+     diagram-js — never onto businessObject.$attrs. So the previous
+     `{ 'choros:executorType': 'agent' }` passed straight into createShape() was
+     silently inert: the exported XML was an untyped serviceTask.
+     Fix: create the shape first, then write the executorType onto
+     shape.businessObject using the SAME dual-write pattern as every other
+     choros:* attribute in this codebase (writeConfigAttr in
+     element-config-contract.js — registered moddle property + $attrs fallback),
+     so saveXML() actually serialises choros:executorType="agent"/"service".
    ============================================================================ */
+
+import { writeConfigAttr } from './element-config-contract.js';
 
 /* --------------------------------------------------------------------------
    ChorosPaletteProvider — the custom module class
@@ -43,12 +62,35 @@ ChorosPaletteProvider.prototype.getPaletteEntries = function () {
   const elementFactory = this._elementFactory;
   const translate = this._translate;
 
-  /* Helper: create a palette drag/click action for a BPMN shape with attrs */
-  function createAction(type, group, cssClass, title, attrs) {
+  /* Helper: create a palette drag/click action for a BPMN shape.
+
+     `shapeAttrs` — extra options forwarded verbatim into
+       elementFactory.createShape({ type, ...shapeAttrs }). ONLY use this for
+       keys bpmn-js' ElementFactory actually understands (e.g.
+       eventDefinitionType, isExpanded, processRef — see the allow-list in
+       node_modules/bpmn-js/lib/features/modeling/ElementFactory.js). Anything
+       NOT on that allow-list is silently dropped onto the shape instead of the
+       businessObject — that was exactly the T-0634 [P0-2] bug for
+       'choros:executorType'.
+
+     `executorType` — when given ("agent" | "service"), the choros:executorType
+       value to stamp onto the CREATED shape's businessObject *after* creation,
+       via the same dual-write helper every other choros:* property uses
+       (writeConfigAttr — registered moddle property + $attrs fallback), so
+       saveXML() actually emits choros:executorType="…" in the XML. */
+  function createAction(type, group, cssClass, title, shapeAttrs, executorType) {
     function createListener(event) {
       const shape = elementFactory.createShape(
-        Object.assign({ type }, attrs || {})
+        Object.assign({ type }, shapeAttrs || {}),
       );
+      if (executorType && shape.businessObject) {
+        writeConfigAttr(
+          shape.businessObject,
+          'executorType',
+          'choros:executorType',
+          executorType,
+        );
+      }
       create.start(event, shape);
     }
 
@@ -117,9 +159,12 @@ ChorosPaletteProvider.prototype.getPaletteEntries = function () {
       'choros-tasks',
       'bpmn-icon-service-task chs-palette-agent',
       'Agent Task — ИИ-агент',
-      // Pre-stamp the choros:executorType attribute.
-      // bpmn-js stores this in businessObject.$attrs at creation time.
-      { 'choros:executorType': 'agent' }
+      /* shapeAttrs */ undefined,
+      // Stamps choros:executorType="agent" onto the created shape's
+      // businessObject (see createAction / writeConfigAttr above) — the
+      // attribute publish-transform (agent-task-external-mapper) and
+      // agent-dispatch read to route this step to the agent runtime.
+      /* executorType */ 'agent',
     ),
 
     'create.choros-service-task': createAction(
@@ -127,7 +172,8 @@ ChorosPaletteProvider.prototype.getPaletteEntries = function () {
       'choros-tasks',
       'bpmn-icon-service-task chs-palette-service',
       'External Task — сервис',
-      { 'choros:executorType': 'service' }
+      /* shapeAttrs */ undefined,
+      /* executorType */ 'service',
     ),
 
     // Keep a separator between Choros tasks and the rest
