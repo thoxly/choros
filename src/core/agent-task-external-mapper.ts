@@ -62,6 +62,20 @@
  *   - Reads structure via the shared tokenizer (bpmn-xml-parser) so parsing is robust to
  *     attribute order / self-closing / whitespace; degrades to a no-op on malformed XML
  *     (lintBpmn is the authoritative fail-closed gate for malformed documents).
+ *
+ * T-0635 [P0-4 / LIVE_PROOF T-0586] AttributePrefixUnbound fix
+ *   The modeler's choros-moddle-extension.js registers ONLY the `choros` namespace
+ *   (associations: [] — it does not import/associate `flowable`), so saveXML() NEVER
+ *   emits `xmlns:flowable` on `<definitions>`. Before this fix, this transform stamped
+ *   `flowable:type` / `flowable:topic` / `<flowable:field>` onto the document WITHOUT
+ *   ensuring that namespace was declared — an authored agent step therefore produced
+ *   XML with an unbound `flowable` prefix, which real XML parsers (and Flowable's own
+ *   deployment SAX parser) reject with "AttributePrefixUnbound". ensureFlowableNamespace
+ *   below injects `xmlns:flowable="http://flowable.org/bpmn"` (the exact URI the
+ *   hand-authored seed processes under config/flowable/processes/ already use, e.g.
+ *   choros-smoke.bpmn20.xml) onto the `<definitions>` root, but ONLY when this
+ *   transform is about to emit `flowable:*` content and the declaration is not
+ *   already present — idempotent and additive, same discipline as the rest of the file.
  */
 
 import { tokenize, type Attr } from "./bpmn-xml-parser.js";
@@ -178,12 +192,64 @@ export function mapAgentTaskToExternal(bpmnXml: string): string {
   if (configs.length === 0) return bpmnXml;
 
   let result = bpmnXml;
+  let wired = false;
   for (const cfg of configs) {
     if (!cfg.id) continue; // an id-less agent task cannot be addressed; linter flags it
     if (cfg.alreadyExternal) continue; // explicit external (author / prior run) wins
     result = wireAgentServiceTask(result, cfg);
+    wired = true;
+  }
+  // T-0635: only inject the namespace declaration when we actually emitted new
+  // flowable:* content in THIS call — a diagram whose agent tasks were all
+  // already-external / id-less is returned untouched (additive, matches the
+  // no-agent-tasks early return above).
+  if (wired) {
+    result = ensureFlowableNamespace(result);
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// T-0635 [P0-4]: xmlns:flowable root-declaration guard.
+// ---------------------------------------------------------------------------
+
+/** The Flowable BPMN extension namespace URI (matches the seeded hand-authored
+ *  processes under config/flowable/processes/, e.g. choros-smoke.bpmn20.xml —
+ *  and Flowable 7.1's own bundled `flowable` moddle extension). */
+export const FLOWABLE_NAMESPACE_URI = "http://flowable.org/bpmn";
+
+/**
+ * Ensure the `<definitions>` root declares `xmlns:flowable="http://flowable.org/bpmn"`.
+ *
+ * The bpmn-js modeler's choros-moddle-extension.js registers ONLY the `choros`
+ * namespace (no `associations` importing `flowable`), so a modeler-authored diagram's
+ * `<definitions>` root NEVER carries `xmlns:flowable` — even though the properties
+ * panel lets an author mark a serviceTask as an agent step. Once this transform
+ * stamps `flowable:type` / `flowable:topic` / `<flowable:field>` onto that document,
+ * the `flowable` prefix would be UNBOUND unless this root declaration exists —
+ * exactly the "AttributePrefixUnbound" failure a real XML parser (and Flowable's own
+ * deployment SAX parser) raises.
+ *
+ * Idempotent: a document that already declares `xmlns:flowable` (any URI — an
+ * explicit author/prior-run declaration wins, mirroring the attribute-level
+ * precedence rules elsewhere in this module) is returned untouched. Pure string
+ * injection on the FIRST `<definitions>` (or namespaced `<bpmn:definitions>`/
+ * `<xxx:definitions>`) open tag; degrades to a no-op when no such tag is found
+ * (malformed input — lintBpmn is the authoritative fail-closed gate).
+ */
+export function ensureFlowableNamespace(bpmnXml: string): string {
+  // Already declared (any prefix binding target) — explicit wins, no-op.
+  if (/\bxmlns:flowable\s*=/.test(bpmnXml)) return bpmnXml;
+
+  // Match the opening `<definitions …>` tag (optionally namespace-prefixed, e.g.
+  // `<bpmn:definitions>`), same convention as bpmn-deploy-normalizer's process-tag
+  // matcher. `[^>]*?` keeps the match inside a single tag (no '>' inside).
+  const definitionsRe = /(<(?:\w+:)?definitions\b)([^>]*?)(\s*>)/;
+  if (!definitionsRe.test(bpmnXml)) return bpmnXml; // no <definitions> — no-op
+
+  return bpmnXml.replace(definitionsRe, (_full, openName: string, attrs: string, close: string) => {
+    return `${openName} xmlns:flowable="${FLOWABLE_NAMESPACE_URI}"${attrs}${close}`;
+  });
 }
 
 /**
