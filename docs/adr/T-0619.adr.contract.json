@@ -1,0 +1,116 @@
+{
+  "task_id": "T-0619",
+  "status": "ready",
+  "decision": "Базовый covering READ-грант выдаётся КАЖДОМУ нанятому человеку-сотруднику тенанта через назначение существующей платформенной роли role-reader (той самой, что держит default-open READ-грант владельца: read/record, scope RESOURCE_ROOT сентинел, resource_facet=NULL, confirmed). Дефект T-0570 — не гейт (он активен и корректен), а ОХВАТ назначения role-reader: роль назначалась ТОЛЬКО владельцу (register.ts 3n) и assistant-agent (3o); ни один нанятый человек не получал role-reader → getGrantsForSubject 0 грантов → records LIST пусто, DETAIL 404. Два фронта. ФРОНТ-1 HIRE-ФЛОУ, вариант (а): в hire-флоу (src/http/rights-intents.ts registerHire, POST /api/rights/intents/hire) при kind='human' — ensure role-reader (роль ON CONFLICT DO NOTHING + covering READ-грант на RESOURCE_ROOT идемпотентно) + role_assignment(human→role-reader) CONFIRMED, WHERE NOT EXISTS (повторный найм не плодит дубль). ФРОНТ-2 ДОГОНЯЮЩАЯ МИГРАЦИЯ 123 (migrations/123_read_grant_all_staff_backfill.sql): ensure role-reader + covering грант + role_assignment КАЖДОМУ employee.kind='human' КАЖДОГО тенанта (не только owner), set-driven FROM choros.tenant/FROM choros.employee, идемпотентно WHERE NOT EXISTS, без хардкода tenant-UUID (паттерн 117/118). ГРАНИЦЫ: role-reader только человекам (kind='human'), не агентам массово — agent-права отдельный контур, assistant-agent уже покрыт 117-C; role-reader НЕ обходит field-visibility — гейт композитный (record-visibility isRecordReadable решает видимость строки, applyFieldVisibilityRedaction НЕЗАВИСИМО режет поля по fvGrants; скрытое поле физически отсутствует); role-reader — covering READ на RESOURCE_ROOT как у владельца, не super-grant; анти-кейс D-064 — охват generic по kind='human', без имён персон. НЕ трогаем сам гейт (records.ts/read-visibility.ts/grants-dao.ts/server.ts), frozen-ядро, пинованные к 117/118 анти-хардкод-гейты. Выбор (а) над (б) привязать-READ-к-роли-позиции: covering READ — свойство сотрудника, не позиции; (б) размазал бы default-open по каждой кейс-специфичной роли позиции, нарушив D-064 и сделав грант неотзываемым; (а) переиспускает ОДИН платформенный role-reader — минимальная честная поверхность, sujenie остаётся grant-config актом поверх.",
+  "rejected_alternatives": [
+    {
+      "option": "(б) Привязать covering READ к базовой роли позиции, которую получают все hires.",
+      "why_not": "covering READ — свойство 'сотрудник', не 'эта позиция/роль'. Размазало бы default-open по КАЖДОЙ роли позиции (их много, они кейс-специфичны — role-approver и т.п.), сделав грант неотзываемым без переработки роли и нарушив D-064 (роли позиций несут кейс-слаги — не место платформенному примитиву). (а) переиспользует ОДИН платформенный role-reader — минимальная поверхность."
+    },
+    {
+      "option": "Массово раздать role-reader ВСЕМ employee (включая kind='agent') в hire-флоу и миграции 123.",
+      "why_not": "Security-граница: бизнес-агентам read полагается по ИХ СОБСТВЕННЫМ грантам (отдельный контур agent-прав). Массовая раздача role-reader агентам расширила бы охват сверх задачи. assistant-agent уже покрыт register.ts 3o / migration 117-C; бизнес-агенты — не в этом фиксе."
+    },
+    {
+      "option": "Править register.ts шаги 3n/3o, чтобы они назначали role-reader всему персоналу.",
+      "why_not": "register.ts исполняется РОВНО при создании тенанта и сидирует только владельца+ассистента (он не нанимает рядовых сотрудников). Охват НОВЫХ нанятых людей живёт в hire-флоу — там и место фронту-1. 3n/3o корректны для своей роли (self-bootstrap владельца); их правка не покрыла бы людей, нанятых ПОСЛЕ регистрации."
+    },
+    {
+      "option": "Новая роль/грант-тип 'staff-reader' отдельно от role-reader.",
+      "why_not": "Дублирование платформенного примитива. role-reader УЖЕ держит ровно нужный covering READ-грант (владелец им пользуется). Вторая роль = вторая точка дрейфа + рассинхрон с T-0570-доктриной. Переиспользуем существующую."
+    },
+    {
+      "option": "Расширить пинованный ci/checks/read-pdp-no-hardcoded-tenant.sh (117) на миграцию 123.",
+      "why_not": "Frozen-thaw чужого предиката под своё имя (нарушение T-0146 / контракт мержа §8б coder.md). Гейт 117 сканирует ИМЕННО 117. Миграция 123 соблюдает ту же анти-хардкод-дисциплину и покрыта СВОИМ db-тестом (FF-619-7 статический assert внутри migration-123-read-grant-staff.db.test.ts)."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "role (role-reader) — существующая choros.role, НЕ новая",
+      "fields": [
+        {"name": "tenant_id/id", "type": "uuid"},
+        {"name": "slug", "type": "text = 'role-reader' (READER_ROLE_SLUG, платформенный примитив, НЕ кейс-строка)"},
+        {"name": "display_name", "type": "text = 'Читатель (по умолчанию)'"},
+        {"name": "created_at/updated_at", "type": "bigint"}
+      ]
+    },
+    {
+      "entity": "role_assignment (human → role-reader) — существующая choros.role_assignment, НЕ новая",
+      "fields": [
+        {"name": "tenant_id/id/employee_id/role_id", "type": "uuid"},
+        {"name": "org_scope", "type": "jsonb = {kind:'set',members:[]} (⊥, как owner-assignment T-0570)"},
+        {"name": "granted_by/confirmed_by", "type": "text (confirmed_by выставлен — назначение активно; proposed_by=NULL, routine, не escalating)"},
+        {"name": "source", "type": "text = 'intent:hire' (hire-флоу) / 'backfill' (миграция 123)"},
+        {"name": "created_at/updated_at", "type": "bigint"}
+      ]
+    },
+    {
+      "entity": "grant (default-open read на role-reader) — существующая choros.\"grant\", НЕ новая",
+      "fields": [
+        {"name": "tenant_id/id/role_id", "type": "uuid"},
+        {"name": "resource_type", "type": "text = 'record'"},
+        {"name": "resource_facet", "type": "jsonb = NULL (whole-resource на уровне ВИДИМОСТИ ЗАПИСИ; field-redaction идёт НЕЗАВИСИМО поверх)"},
+        {"name": "operation", "type": "text = 'read'"},
+        {"name": "scope", "type": "jsonb = {kind:'node',hierarchy:'resource',nodeLevel:'application',nodeId:RESOURCE_ROOT_NODE_ID}"},
+        {"name": "delegable", "type": "boolean = true (сужаемо потомками через validateNarrowing)"},
+        {"name": "confirmed_by", "type": "text (выставлен — грант эффективен)"},
+        {"name": "valid_from/valid_until", "type": "bigint = NULL"}
+      ]
+    }
+  ],
+  "contracts": [
+    "src/http/rights-intents.ts (additive, внутри существующей withTenantTx hire-флоу registerHire): при kind==='human' — ensureReaderRoleAndGrant(client, tenantId, ts) (INSERT role role-reader ON CONFLICT DO NOTHING; INSERT covering READ-грант read/record/RESOURCE_ROOT на role-reader WHERE NOT EXISTS) + INSERT role_assignment(employeeId → role-reader) CONFIRMED WHERE NOT EXISTS (tenant_id, employee_id, role_id). Импорт READER_ROLE_SLUG, RESOURCE_ROOT_NODE_ID из ../core/read-visibility.js. Публичная поверхность модуля (registerRightsIntentRoutes и др.) НЕ меняется.",
+    "migrations/123_read_grant_all_staff_backfill.sql: (B') INSERT role role-reader SELECT FROM choros.tenant LEFT JOIN role WHERE r.id IS NULL ON CONFLICT DO NOTHING; (C') INSERT grant read/record/RESOURCE_ROOT на role-reader SELECT FROM choros.tenant JOIN role WHERE NOT EXISTS; (D') INSERT role_assignment SELECT FROM choros.employee e JOIN role reader_role WHERE e.kind='human' AND NOT EXISTS (tenant_id, employee_id, role_id). Set-driven, идемпотентно, без хардкода tenant-UUID (кроме RESOURCE_ROOT сентинела).",
+    "FROZEN (только импорт/чтение): src/core/read-visibility.ts (READER_ROLE_SLUG, RESOURCE_ROOT_NODE_ID), src/http/records.ts, src/db/grants-dao.ts, src/db/resource-ancestry.ts, src/server.ts wiring, src/core/register.ts (сид владельца/ассистента корректен), frozen-ядро grant-resolver.ts/grant-lattice.ts/object-handle.ts/field-visibility.ts.",
+    "Пинованные к 117/118 гейты ci/checks/read-pdp-no-hardcoded-tenant.sh и ci/checks/migrations/no-hardcoded-tenant-uuid.sh НЕ трогаются (сканируют ИМЕННО 117/118; 123 покрыта своим db-тестом)."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-619-1",
+      "rule": "Hire-флоу: нанятый kind='human' получает CONFIRMED role_assignment на role-reader + covering READ-грант существует; читает свою запись (LIST содержит, DETAIL 200).",
+      "ci_check": "ci/checks/db/hire-read-grant.db.test.ts (live PG): registerHire kind='human' → getGrantsForSubject(hired) содержит read/record/RESOURCE_ROOT грант; GET /api/records через prod-shaped resolver видит запись."
+    },
+    {
+      "id": "FF-619-2",
+      "rule": "Hire-флоу для kind='agent' НЕ добавляет role-reader (граница: agent-права отдельный контур).",
+      "ci_check": "ci/checks/db/hire-read-grant.db.test.ts: registerHire kind='agent' → нет role_assignment на role-reader у нанятого агента."
+    },
+    {
+      "id": "FF-619-3",
+      "rule": "role-reader НЕ обходит field-visibility: актор с role-reader видит запись (record present), но скрытое field-visibility-поле редактируется (ключ физически отсутствует). Гейт композитный.",
+      "ci_check": "ci/checks/db/hire-read-grant.db.test.ts: запись со скрытым полем + field-visibility policy/grant → post-gate GET: record в списке, скрытый JSONB-ключ absent (applyFieldVisibilityRedaction поверх)."
+    },
+    {
+      "id": "FF-619-4",
+      "rule": "Миграция 123: существующий рядовой человек-сотрудник ПОСЛЕ миграции читает запись (GET 200, не 404); до миграции 0 грантов; повторный прогон no-op (WHERE NOT EXISTS); агент НЕ получает role-reader.",
+      "ci_check": "ci/checks/db/migration-123-read-grant-staff.db.test.ts (live PG): seed pre-fix тенант (owner→role-reader+грант; рядовой человек БЕЗ назначения; агент) → до 123 у рядового 0 covering-грантов → применить 123 → 1 грант, GET 200; 2-й/3-й прогон дублей не создаёт; агенту role-reader не назначен."
+    },
+    {
+      "id": "FF-619-5",
+      "rule": "Tenant-изоляция граната не ослаблена: рядовой сотрудник тенанта A c role-reader не читает записи тенанта B (RLS первичен).",
+      "ci_check": "ci/checks/db/migration-123-read-grant-staff.db.test.ts: актор A (backfilled role-reader) → GET записи тенанта B: невидима в LIST, 404 в DETAIL через choros_app (NOBYPASSRLS) роль."
+    },
+    {
+      "id": "FF-619-6",
+      "rule": "Анти-кейс (D-064): в diff src/ нет кейс-слагов персон (e-larina/e-orlov/e-configurator/role-approver/soglasovanie/tel-/Согласование); охват generic по kind='human'.",
+      "ci_check": "bash ci/checks/read-pdp-anti-case.sh (git-diff scoped по src/) — зелёный на этом diff (fitness-набор)."
+    },
+    {
+      "id": "FF-619-7",
+      "rule": "Миграция 123 итерирует FROM choros.tenant / FROM choros.employee, без literal tenant-UUID (кроме RESOURCE_ROOT сентинела).",
+      "ci_check": "статический assert внутри ci/checks/db/migration-123-read-grant-staff.db.test.ts: regex — нет tenant-shaped UUID в коде (комментарии сняты), есть FROM choros.tenant."
+    }
+  ],
+  "traceability": [
+    {"ac": "Нанятый человек получает role-reader и читает свою запись", "covered_by": "ADR §2.1 hire-флоу вариант (а) + FF-619-1"},
+    {"ac": "Агент не получает role-reader массово", "covered_by": "ADR §2.2 + FF-619-2"},
+    {"ac": "role-reader не обходит field-visibility (композитный гейт)", "covered_by": "ADR §2.3 + FF-619-3"},
+    {"ac": "Существующий рядовой сотрудник читает записи после миграции", "covered_by": "ADR §2.4 миграция 123 + FF-619-4"},
+    {"ac": "Tenant-изоляция не ослаблена", "covered_by": "ADR §2.4/§3 RLS первичен + FF-619-5"},
+    {"ac": "Анти-кейс: generic-механизм без имён персон", "covered_by": "ADR §2.4 + FF-619-6"},
+    {"ac": "Идемпотентность + анти-хардкод миграции", "covered_by": "ADR §2.4 + FF-619-4/FF-619-7"}
+  ],
+  "runtime_target": "runtime:node — TS/HTTP-слой (src/http/rights-intents.ts) + backfill Postgres-миграция (migrations/123_read_grant_all_staff_backfill.sql, применяется штатным migrations/run.mjs при деплое). Fitness: live-PG vitest (npm run fitness:db на реальном PG :55432, соло) + shell-линтер read-pdp-anti-case.sh (npm run fitness). Внешний ресурс не требуется.",
+  "adr_artifact_path": "docs/adr/ADR-T0619-read-grant-staff.md",
+  "escalation": ""
+}
