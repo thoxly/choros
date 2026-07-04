@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0586",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8 (LIVE_PROOF, D-064)", "covered": false},
+    {"ac": "AC-9 (LIVE_PROOF fallback, D-064)", "covered": false},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Independently ran: npx vitest run (full suite) -> 273 files passed | 2 skipped (275), 5336 tests passed | 10 skipped, 0 failed. Matches pr-handoff.json's claimed numbers exactly.",
+    "Independently ran: npx vitest run src/runtime/agent-dispatch/__tests__/ src/server/__tests__/agent-dispatch-loop-live-flag.test.ts -> 7 files, 97 tests, all green (includes both frozen weld tests unmodified-in-substance).",
+    "Independently re-ran run-agent-step.test.ts SOLO (not in the full-suite batch) -> 35/35 green, no flake.",
+    "Independently ran: bash ci/checks/agent-live-flip-flag.sh --self-test -> 4/4 self-test assertions PASS (planted violation detected, degraded-path isolation correct, fixed fixture recognised compliant, planted SQL-resolve violation detected). Then bash ci/checks/agent-live-flip-flag.sh (production check against the real file) -> PASS, all 5 checks green. Gate is non-tautological.",
+    "Independently ran: npm run fitness (full ~240-check chain) -> exit 0. The 15 lines matching '^FAIL' in the log are self-test fixtures of OTHER gates (T-0210 docpage-writeful-tools, FF-RP-7/8, FF-T0572-3/4/5/6/BADGE/FROZEN, document-render-isolation, check-template-deps) operating on /tmp scratch files or pre-existing baseline diffs unrelated to this task's files -- confirmed by inspecting each FAIL line's context.",
+    "Independently ran: npx tsc --noEmit -> exit 0. npm run build -> exit 0.",
+    "git diff <merge-base>...HEAD on agent-step-weld.dormant.test.ts and agent-step-weld.live-stub.test.ts is EMPTY -- frozen weld tests genuinely untouched, not just claimed.",
+    "grep -n 'llm_secret_handle' on run-agent-step.ts + agent-dispatch-loop.ts -> zero hits (ADR SS4.4 respected). grep -nE 'llm_connection|secret_handle' on agent-dispatch-loop.ts -> only one hit, inside a doc-comment (line 449, '*'-prefixed), not a code line -- the flip-flag gate's own comment-stripping logic correctly excludes it, and manual inspection confirms it is prose ('...chain (ADR-T0586 SS3 / RL-3) --'), not a SQL reference.",
+    "Confirmed LlmUnavailableError / canonicalizeLlmError are PRE-EXISTING (T-0573), not newly introduced -- the ADR's claim that these are reused pure primitives (not invented for this task) checks out via git diff on src/core/llm-port.ts (no changes) and git show <merge-base>:src/core/llm-port.ts (both symbols already present).",
+    "Confirmed the live-gate order in run-agent-step.ts matches ADR SS4.1 verbatim: liveConfigured = deps.liveEnabled && llmConfigured(ctx.llm); port = liveConfigured ? (deps.llmPortFactory ? deps.llmPortFactory(cfg) : deps.llm) : dormantLlmPort. The LlmUnavailableError catch branch is positioned BEFORE the timeout/egress string-matching branches (confirmed by reading the catch block top-to-bottom) -- test 'LlmUnavailableError is classified BEFORE the generic/timeout/egress fallback' proves this with a message containing the substring 'timeout' that still classifies via the type-based branch.",
+    "Confirmed docker-compose.yml / .env.prod.example diffs are purely additive (AGENT_LIVE_ENABLED with :-false default placed next to AGENT_TOPICS), and package.json's fitness chain diff only APPENDS the new gate (comm -23 on old-vs-new check lists is empty -- no existing check was removed).",
+    "Confirmed the T-0587 seam is respected: git diff --name-only <merge-base>...HEAD contains no hits for assistant-analyst.ts, registry-digest-dao.ts, or any web/ path.",
+    "Confirmed no migrations touched: git diff --name-only under migrations/ is empty; NF6 holds.",
+    "AC-8/AC-9 are explicitly LIVE_PROOF (manual, on the dev stand, post-merge+deploy per the ADR SS8 plan) -- correctly out of this review's static/test scope; marked not-yet-covered here, to be closed by the tester phase on the deployed stand, not a review blocker.",
+    "Branch is NOT stale relative to dev in any way that matters: dev advanced via T-0628 (c57e1d6, employee login/email split, migration 127) which touches user-mgmt/employee zones entirely disjoint from this task's files (run-agent-step.ts, agent-dispatch-loop.ts, ci/checks/agent-live-flip-flag.sh, docker-compose.yml, .env.prod.example, package.json fitness chain, plus new test files) -- git diff --name-only confirms zero file overlap. No rebase needed; a merge would be a clean fast-forward-style union with no conflicts expected."
+  ]
+}
