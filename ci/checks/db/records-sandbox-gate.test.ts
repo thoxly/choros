@@ -121,16 +121,23 @@ function makeRequest(
   method: string,
   path: string,
   extraHeaders: Record<string, string> = {},
+  jsonBody?: unknown,
 ): Promise<{ statusCode: number; body: string }> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(baseUrl + path);
+    const payload = jsonBody !== undefined ? Buffer.from(JSON.stringify(jsonBody)) : undefined;
+    const headers = { ...extraHeaders };
+    if (payload !== undefined) {
+      headers["content-type"] = "application/json";
+      headers["content-length"] = String(payload.length);
+    }
     const req = http.request(
       {
         hostname: parsed.hostname,
         port: Number(parsed.port),
         path: parsed.pathname + parsed.search,
         method,
-        headers: extraHeaders,
+        headers,
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -139,6 +146,7 @@ function makeRequest(
       },
     );
     req.on("error", reject);
+    if (payload !== undefined) req.write(payload);
     req.end();
   });
 }
@@ -165,6 +173,9 @@ let injectedPriv: ActorPrivilege = { isOwnerOrAdmin: false, hasAuthoringDraftGra
 async function stubResolveActorTenant(slug: string): Promise<string> {
   if (slug === "actor-a") return TENANT_A;
   if (slug === "actor-b") return TENANT_B;
+  // T-0623: actor-other is tenant A's second author (see draftRecOwnByOther /
+  // the forged-authorship-spoof test) — never privileged, always same tenant as actor-a.
+  if (slug === "actor-other") return TENANT_A;
   throw new Error(`unknown test actor: ${slug}`);
 }
 
@@ -335,6 +346,54 @@ describe("T-0623 creator-own floor over the sandbox gate (столп-4)", () => 
     injectedPriv = { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false };
     const del = await makeRequest(baseUrl, "DELETE", `/api/records/${uuid()}`, { "x-dev-user": "actor-a" });
     expect(del.statusCode).toBe(404);
+  }));
+
+  it("creator-floor slug comes from the AUTHENTICATED actor, not a request-body/field spoof: " +
+    "actor-a POSTing a record with a forged created_by/actor field in the payload does NOT let " +
+    "actor-other read or delete it (the real author is actor-a, resolved server-side)", requireDb(async () => {
+    injectedPriv = { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false };
+    // actor-a creates a record in the DRAFT app while forging authorship fields
+    // (created_by / actor) as TOP-LEVEL body keys — outside the schema-validated
+    // `data` object (which has additionalProperties:false, so stuffing them inside
+    // `data` would just 400). The POST route (src/http/records.ts registerRecordRoutes
+    // "POST" handler) only ever reads body.application_id / body.registry_def_id /
+    // body.data — it never looks at body.created_by or body.actor — so these forged
+    // keys are silently ignored and `created_by` is populated exclusively from the
+    // extractActor()-resolved, auth-derived `actor` server variable.
+    const create = await makeRequest(
+      baseUrl,
+      "POST",
+      "/api/records",
+      { "x-dev-user": "actor-a" },
+      {
+        application_id: draftAppId,
+        registry_def_id: draftRegId,
+        data: { name: "forged-authorship-attempt" },
+        created_by: "actor-other",
+        actor: "actor-other",
+      },
+    );
+    expect(create.statusCode).toBe(201);
+    const forgedId = (JSON.parse(create.body) as { id: string }).id;
+
+    // The TRUE author (actor-a, from the auth-resolved identity) sees + can delete it —
+    // the T-0623 creator floor is keyed on the real identity, matching the live-server behavior.
+    const getAsA = await makeRequest(baseUrl, "GET", `/api/records/${forgedId}`, { "x-dev-user": "actor-a" });
+    expect(getAsA.statusCode).toBe(200);
+
+    // The spoof target (actor-other) — the slug forged INSIDE the request body — gets
+    // NEITHER read NOR delete access: the sandbox creator-escape is bound to the
+    // server-resolved actor identity ($N bind param from extractActor), never to any
+    // value found in the request body. If the forged field had leaked into created_by,
+    // actor-other would incorrectly see/delete this row — it must not.
+    const getAsOther = await makeRequest(baseUrl, "GET", `/api/records/${forgedId}`, { "x-dev-user": "actor-other" });
+    expect(getAsOther.statusCode).toBe(404);
+    const delAsOther = await makeRequest(baseUrl, "DELETE", `/api/records/${forgedId}`, { "x-dev-user": "actor-other" });
+    expect(delAsOther.statusCode).toBe(403);
+
+    // Cleanup via the true author.
+    const delAsA = await makeRequest(baseUrl, "DELETE", `/api/records/${forgedId}`, { "x-dev-user": "actor-a" });
+    expect(delAsA.statusCode).toBe(204);
   }));
 });
 
