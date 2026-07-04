@@ -92,15 +92,21 @@ async function seedRegDef(c: pg.Client, tenantId: string, appId: string, slug: s
   return id;
 }
 
-async function seedRecord(c: pg.Client, tenantId: string, regId: string, data: object): Promise<string> {
+async function seedRecord(
+  c: pg.Client,
+  tenantId: string,
+  regId: string,
+  data: object,
+  createdBy = "seed",
+): Promise<string> {
   const id = uuid();
   await c.query("BEGIN");
   await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
   await c.query(
     `INSERT INTO choros.record
        (tenant_id, id, registry_id, data, created_at, updated_at, created_by)
-     VALUES ($1, $2, $3, $4::jsonb, 0, 0, 'seed')`,
-    [tenantId, id, regId, JSON.stringify(data)],
+     VALUES ($1, $2, $3, $4::jsonb, 0, 0, $5)`,
+    [tenantId, id, regId, JSON.stringify(data), createdBy],
   );
   await c.query("COMMIT");
   return id;
@@ -148,6 +154,10 @@ let appPool: pg.Pool;
 let pubAppId = "", pubRegId = "", pubRecId = "";
 let draftAppId = "", draftRegId = "", draftRecId = "";
 let bPubRecId = "", bDraftRecId = "";
+// T-0623 (столп-4): draft-app records DISTINGUISHED by author.
+//   - draftRecOwnByA: created_by='actor-a' — actor-a must see + delete their own even in a draft app.
+//   - draftRecOwnByOther: created_by='someone-else' — actor-a must NOT see it (draft, not theirs).
+let draftRecOwnByA = "", draftRecOwnByOther = "";
 
 // Privilege the injected resolver returns — mutated per test.
 let injectedPriv: ActorPrivilege = { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false };
@@ -174,6 +184,10 @@ beforeAll(requireDb(async () => {
     draftAppId = await seedApp(c, TENANT_A, `draft-${uuid().slice(0, 8)}`, "draft");
     draftRegId = await seedRegDef(c, TENANT_A, draftAppId, "reg-draft");
     draftRecId = await seedRecord(c, TENANT_A, draftRegId, { name: "draft-rec" });
+
+    // T-0623: two more draft-app records in the SAME draft app, differing only by author.
+    draftRecOwnByA = await seedRecord(c, TENANT_A, draftRegId, { name: "draft-mine" }, "actor-a");
+    draftRecOwnByOther = await seedRecord(c, TENANT_A, draftRegId, { name: "draft-theirs" }, "actor-other");
 
     // Tenant B: one published + one draft record (must never appear for actor-a).
     const bPubApp = await seedApp(c, TENANT_B, `bpub-${uuid().slice(0, 8)}`, "published");
@@ -266,6 +280,61 @@ describe("T-0558 records sandbox gate (live RLS + tier)", () => {
     // GET of a tenant-B record by actor-a → 404 (RLS-filtered, never the sandbox path).
     const getB = await makeRequest(baseUrl, "GET", `/api/records/${bPubRecId}`, { "x-dev-user": "actor-a" });
     expect(getB.statusCode).toBe(404);
+  }));
+});
+
+describe("T-0623 creator-own floor over the sandbox gate (столп-4)", () => {
+  it("unprivileged author SEES their OWN draft-app record (GET 200), NOT another's (404)", requireDb(async () => {
+    injectedPriv = { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false };
+    // Own draft record → visible even though the app is draft and actor is unprivileged.
+    const mine = await makeRequest(baseUrl, "GET", `/api/records/${draftRecOwnByA}`, { "x-dev-user": "actor-a" });
+    expect(mine.statusCode).toBe(200);
+    // Another author's draft record → still hidden (sandbox gate holds for non-own rows).
+    const theirs = await makeRequest(baseUrl, "GET", `/api/records/${draftRecOwnByOther}`, { "x-dev-user": "actor-a" });
+    expect(theirs.statusCode).toBe(404);
+    // The seed-authored draft record (created_by='seed') is likewise NOT theirs → hidden.
+    const seedRec = await makeRequest(baseUrl, "GET", `/api/records/${draftRecId}`, { "x-dev-user": "actor-a" });
+    expect(seedRec.statusCode).toBe(404);
+  }));
+
+  it("unprivileged author's LIST includes their OWN draft record, excludes others' draft records", requireDb(async () => {
+    injectedPriv = { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false };
+    const r = await makeRequest(baseUrl, "GET", "/api/records", { "x-dev-user": "actor-a" });
+    expect(r.statusCode).toBe(200);
+    const ids = (JSON.parse(r.body).records as Array<{ id: string }>).map((x) => x.id);
+    expect(ids).toContain(pubRecId);          // published — everyone
+    expect(ids).toContain(draftRecOwnByA);    // own draft — T-0623 floor
+    expect(ids).not.toContain(draftRecOwnByOther); // others' draft — still hidden
+    expect(ids).not.toContain(draftRecId);         // seed-authored draft — still hidden
+  }));
+
+  it("TENANT ISOLATION preserved: the creator floor never crosses tenants", requireDb(async () => {
+    // actor-a authored nothing in tenant B; even if a B row shared the slug string,
+    // the withTenantTx + RLS scope + explicit r.tenant_id guard keep B rows invisible.
+    injectedPriv = { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false };
+    const list = await makeRequest(baseUrl, "GET", "/api/records", { "x-dev-user": "actor-a" });
+    const ids = (JSON.parse(list.body).records as Array<{ id: string }>).map((x) => x.id);
+    expect(ids).not.toContain(bPubRecId);
+    expect(ids).not.toContain(bDraftRecId);
+  }));
+
+  it("unprivileged author may DELETE their OWN draft-app record (204); NOT another's (403)", requireDb(async () => {
+    injectedPriv = { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false };
+    // Cannot delete a draft record they did not author → 403 (столп-4 does not widen).
+    const delTheirs = await makeRequest(baseUrl, "DELETE", `/api/records/${draftRecOwnByOther}`, { "x-dev-user": "actor-a" });
+    expect(delTheirs.statusCode).toBe(403);
+    // CAN delete their own → 204. (Runs last: it removes the row.)
+    const delMine = await makeRequest(baseUrl, "DELETE", `/api/records/${draftRecOwnByA}`, { "x-dev-user": "actor-a" });
+    expect(delMine.statusCode).toBe(204);
+    // Gone now (404).
+    const getGone = await makeRequest(baseUrl, "GET", `/api/records/${draftRecOwnByA}`, { "x-dev-user": "actor-a" });
+    expect(getGone.statusCode).toBe(404);
+  }));
+
+  it("non-existent id → 404 (never a 403 that would leak existence)", requireDb(async () => {
+    injectedPriv = { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false };
+    const del = await makeRequest(baseUrl, "DELETE", `/api/records/${uuid()}`, { "x-dev-user": "actor-a" });
+    expect(del.statusCode).toBe(404);
   }));
 });
 

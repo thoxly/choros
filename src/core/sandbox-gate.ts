@@ -131,10 +131,42 @@ export function decideDraftVisibility(
  *                              authoring_draft holder) — the boolean OR of the two
  *                              flags resolved by the DAO. When true the predicate
  *                              imposes NO restriction.
+ * @property creatorEscape      T-0623 (столп-4, «create must not create an object
+ *                              invisible to yourself»): OPTIONAL creator-own floor.
+ *                              A non-privileged actor is STILL allowed to see a row
+ *                              of a DRAFT (sandbox) application when that row was
+ *                              CREATED BY the actor themselves — otherwise a
+ *                              rank-and-file employee who writes a record into a
+ *                              draft-tier app (create is not sandbox-gated) can
+ *                              never read it back (GET 404 / list empty) or delete
+ *                              it (403). This is a per-ROW ownership escape ONLY: it
+ *                              never widens visibility to any OTHER user's rows, and
+ *                              never relaxes the tenant scope (RLS + the caller's
+ *                              own `tenant_id` guard are untouched). When present,
+ *                              the sandbox restriction becomes
+ *                                  (<tierColumn> = 'published' OR <ownerColumn> = <ownerParam>)
+ *                              for a non-privileged actor.
+ *                                - `ownerColumn`: a TRUSTED, code-level column
+ *                                  identifier (e.g. `"r.created_by"`) — like
+ *                                  `tierColumn`, MUST NOT be sourced from a request.
+ *                                - `ownerParam`: the `$N` placeholder STRING the
+ *                                  caller has ALREADY allocated for the actor slug
+ *                                  bind value (e.g. `"$4"`). Keeping the value as a
+ *                                  bind param (never a literal) is what makes this
+ *                                  safe against the ONE piece of caller-derived data
+ *                                  in the fragment (the actor slug). The caller is
+ *                                  responsible for pushing the actor slug onto its
+ *                                  params array at the matching index.
+ *                              Omitted (undefined) ⇒ byte-identical to the
+ *                              pre-T-0623 fragment (no creator floor).
  */
 export interface SandboxReadPredicateOptions {
   tierColumn: string;
   actorIsPrivileged: boolean;
+  creatorEscape?: {
+    ownerColumn: string;
+    ownerParam: string;
+  };
 }
 
 /**
@@ -188,5 +220,17 @@ export function sandboxReadPredicate(
   // Restrict to the published tier. 'published' is the Tier enum constant, not
   // user input → safe as a SQL string literal; keeps the fragment $-free so the
   // caller's parameter indices stay intact.
-  return { sql: `${opts.tierColumn} = 'published'`, params: [] };
+  const publishedOnly = `${opts.tierColumn} = 'published'`;
+  // T-0623 (столп-4): a non-privileged actor additionally keeps sight of the
+  // rows they CREATED themselves — a draft-tier row of their own is not hidden
+  // from them (create is not sandbox-gated, so hiding it on read would leave an
+  // object invisible to its own author). This is strictly ADDITIVE (an OR with
+  // the actor's own slug bound as a param) — it never reveals any OTHER actor's
+  // draft row and never touches the tenant scope. Absent creatorEscape ⇒ the
+  // exact pre-T-0623 published-only fragment.
+  if (opts.creatorEscape !== undefined) {
+    const { ownerColumn, ownerParam } = opts.creatorEscape;
+    return { sql: `(${publishedOnly} OR ${ownerColumn} = ${ownerParam})`, params: [] };
+  }
+  return { sql: publishedOnly, params: [] };
 }
