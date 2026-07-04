@@ -166,6 +166,66 @@ Dev-значения ниже — **DEV ONLY**; prod-значения инжек
 | `NODE_ENV` | `development` | Режим Node (`development` / `production`); prod overlay устанавливает `production` |
 | `PORT` | `3000` | Внутренний порт приложения (EXPOSE 3000 в Dockerfile) |
 | `APP_PORT` | `3000` | Хост-порт маппинга (`${APP_PORT:-3000}:3000`); не конфликтует с 55432/8180/9000/8082 |
+| `FILE_STORE_ROOT` | `/app/uploads` | **T-0624** Каталог внутри контейнера, куда `FsObjectStore` (`src/adapters/s3-object-store.ts`) пишет физические байты файлов (`src/server.ts`). Смонтирован на именованный docker-volume (см. ниже) — НЕ голый путь контейнера. |
+
+### T-0624 — persistent volume для файлового контента (FsObjectStore)
+
+**Проблема (LIVE_PROOF T-0579):** `FsObjectStore` хранит байты вложений на файловой
+системе контейнера. Без volume-mount `FILE_STORE_ROOT` — это часть writable-слоя
+образа: `docker compose up` с пересборкой образа (или пересоздание контейнера)
+стирает каталог. Метаданные (`file_version.size` и т.д.) в Postgres переживают,
+байты — нет → скачивание старого файла отдаёт HTTP 500 / `len=0`. Свежие загрузки
+в ТЕКУЩЕМ контейнере работали (маскировало проблему до передеплоя).
+
+**Фикс:** `FILE_STORE_ROOT=/app/uploads` смонтирован на именованный docker-volume:
+
+| Стек | Volume | Объявлен в |
+|---|---|---|
+| dev | `choros_uploads` | `docker-compose.yml` (base) |
+| prod | `choros_uploads_prod` | `docker-compose.prod.yml` (override, физически изолирован от dev — AC-4 паттерн, как `choros_pgdata_prod`) |
+
+Именованный volume переживает `docker compose up`/`down`/пересборку образа —
+Docker управляет его данными вне writable-слоя контейнера; стирает его только
+`down -v` или явный `docker volume rm`. В Dockerfile нет `USER` (рантайм — root),
+поэтому контейнер пишет в volume без проблем с правами независимо от того, кто
+создал volume.
+
+**Prod-долговечность (за рамками этой задачи, GT-4):** именованный volume решает
+проблему «файл теряется при передеплое на ТОМ ЖЕ хосте», но не «хост потерян/
+диск умер». Настоящая prod-долговечность — S3-совместимый провайдер за портом
+`ObjectStore` (T-0579 ADR §deploy, T-0119 §8) — деплой-тайм выбор фаундера, вне
+объёма T-0624.
+
+**Как проверить живьём, что volume переживает передеплой:**
+
+```bash
+# 1. Залить файл на дев-стенде (через UI или напрямую curl, дав валидный auth):
+curl -sf -X POST "http://<host>:3000/api/records/<recordId>/files" \
+  -H "X-File-Name: probe.txt" -H "Content-Type: text/plain" \
+  --data-binary "T-0624 persistence probe $(date -u +%FT%TZ)" \
+  -H "x-dev-user: <actor>"
+# Запомнить fileVersionId из ответа (201 {fileId, versionId, versionNo}).
+
+# 2. Убедиться, что байты реально лежат в volume (не только в живом контейнере):
+docker compose exec choros sh -c 'ls -la /app/uploads'
+docker volume inspect <project>_choros_uploads   # Mountpoint существует на хосте
+
+# 3. Передеплой С пересборкой образа (это ключевой момент — именно пересборка
+#    стирала writable-слой контейнера ДО фикса):
+docker compose build choros
+docker compose up -d --force-recreate choros
+# (дождаться healthy: docker compose ps)
+
+# 4. Скачать файл, залитый ДО передеплоя — байты должны быть на месте:
+curl -sf "http://<host>:3000/api/files/<versionId>/download" \
+  -H "x-dev-user: <actor>" -o /tmp/probe-after-redeploy.txt
+diff <(echo -n "T-0624 persistence probe ...") /tmp/probe-after-redeploy.txt
+# ИЛИ проще: сравнить Content-Length ответа с исходным size — не 0, не 500.
+```
+
+Критерий успеха: HTTP 200 (не 500), тело непустое, байты совпадают с загруженными
+до передеплоя. Провал (500/len=0) после `--force-recreate` без volume — это ровно
+дефект, зафиксированный LIVE_PROOF T-0579; после фикса он не должен повторяться.
 
 ### Запуск prod-стека
 

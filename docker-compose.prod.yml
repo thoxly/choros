@@ -54,6 +54,16 @@ services:
       # vendor-CRM, ₽ catalogs, contractor directory). A new human lands in a
       # clean, empty tenant. Override to "1" only to deliberately demo on prod.
       CHOROS_SEED_DEMO: ${CHOROS_SEED_DEMO:-0}
+      # T-0624: same named-volume fix as dev (base file), just the _prod-suffixed
+      # volume declared below (AC-4 physical isolation pattern). NOTE: this is a
+      # stopgap durability floor for prod, NOT the durable answer — a real prod
+      # deploy should swap FsObjectStore for an S3-compatible ObjectStore adapter
+      # (GT-4 founder-gated choice, T-0579 ADR §deploy) so file bytes survive
+      # host loss, not just container/image churn.
+      FILE_STORE_ROOT: ${FILE_STORE_ROOT:-/app/uploads}
+    volumes:
+      - "choros_uploads_prod:/app/uploads"
 
 volumes:
   choros_pgdata_prod: {}   # physically isolated from choros_pgdata (dev)
+  choros_uploads_prod: {}  # physically isolated from choros_uploads (dev) — T-0624

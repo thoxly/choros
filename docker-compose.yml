@@ -212,6 +212,15 @@ services:
       DEEPSEEK_API_KEY:  ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       DEEPSEEK_MODEL:    ${DEEPSEEK_MODEL:-deepseek-chat}
+      # T-0624 [LIVE_PROOF T-0579 follow-up]: FsObjectStore (src/adapters/s3-object-store.ts)
+      # writes file bytes under this path. It MUST match the volume mount below
+      # (choros_uploads:/app/uploads) — otherwise a redeploy (docker compose up
+      # with an image rebuild) wipes the container filesystem and every
+      # previously-uploaded file 500s on download (metadata row survives, bytes
+      # gone). Named volume survives `up`/`down`/rebuild; only `down -v` or an
+      # explicit `docker volume rm` removes it. Prod S3-backed durability is a
+      # separate deploy-time ObjectStore-port swap (GT-4, see T-0579 ADR §deploy).
+      FILE_STORE_ROOT: ${FILE_STORE_ROOT:-/app/uploads}
     ports:
       - "${APP_PORT:-3000}:3000"
     # Pin public resolvers: Docker's embedded DNS forwarder was returning EAI_AGAIN
@@ -228,6 +237,11 @@ services:
     # founder_request:choros-host-docker-dns. Empty default = no pin (relies on DNS).
     extra_hosts:
       - "api.deepseek.com:${DEEPSEEK_HOST_IP:-3.173.21.63}"
+    # T-0624: persistent file-content volume — see FILE_STORE_ROOT comment above.
+    # No USER directive in the Dockerfile runtime stage (root) so the container
+    # can write here regardless of the named volume's initial ownership.
+    volumes:
+      - "choros_uploads:/app/uploads"
     depends_on:
       postgres:
         condition: service_healthy
@@ -246,3 +260,7 @@ services:
 
 volumes:
   choros_pgdata: {}
+  # T-0624: file-content plane (FsObjectStore, FILE_STORE_ROOT=/app/uploads).
+  # Named volume — survives `docker compose up` (incl. image rebuild), `stop`/
+  # `start`, and daemon restarts; only `down -v` / explicit `volume rm` erases it.
+  choros_uploads: {}
