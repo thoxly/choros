@@ -280,6 +280,17 @@ const tenantForActor = new Map<string, string>();
 let recordA = '';
 let recordB = '';
 
+// T-0620 gap-closer: the FF-620-PARITY owner fixture deliberately seeds an
+// employee with ZERO record grants (the strictest possible proof — upload
+// works even with nothing). But the REAL production tenant owner is NOT
+// grant-less: migration 117 block B assigns role-reader (record/read,
+// RESOURCE_ROOT scope) to the tenant-owner employee at registration time, and
+// migration 124 documents that assignment as already covering the owner. So
+// in prod "owner uploads AND downloads their own file" must also hold with a
+// read grant present — this second owner fixture closes that realistic-state
+// gap (distinct from the deliberately-grant-less OWNER_A/B used above).
+const OWNER_WITH_READ_A = 'fwauthz-owner-reader-a';
+
 beforeAll(
   requireDb(async () => {
     await withClient(migratorUrl(), async (c) => {
@@ -304,6 +315,17 @@ beforeAll(
         await seedRootReadGrant(c, t, readerRole);
         tenantForActor.set(ownerSlug, t);
         tenantForActor.set(readerSlug, t);
+
+        if (t === TENANT_A) {
+          // Realistic-owner fixture: an employee assigned role-reader (mirrors
+          // migration 117 block B assigning the tenant-owner to role-reader in
+          // prod) — proves upload+download-own-file also holds in the ACTUAL
+          // prod grant shape for the owner, not just the deliberately grant-less
+          // stress fixture above.
+          const ownerReaderEmp = await seedEmployee(c, t, OWNER_WITH_READ_A);
+          await seedRoleAssignment(c, t, ownerReaderEmp, readerRole);
+          tenantForActor.set(OWNER_WITH_READ_A, t);
+        }
       }
     });
 
@@ -375,6 +397,29 @@ describe('T-0620 file-write authz parity (live HTTP + PG)', () => {
       // WRITE succeeded and rows exist; download-by-reader is covered below).
       const versionId = body['versionId'] as string;
       expect(typeof versionId).toBe('string');
+    }),
+  );
+
+  it(
+    'FF-620-PARITY (realistic owner): owner WITH the actual prod grant (role-reader, ' +
+      'mirroring migration 117) uploads → 201 and downloads their own file → 200 with bytes',
+    requireDb(async () => {
+      // Closes the gap between the deliberately grant-less OWNER_A stress fixture
+      // above and the REAL prod owner, who does hold role-reader (migration 117
+      // block B assigns it at registration time). Proves the parity fix holds in
+      // the actual shipped grant shape, not only in the stricter synthetic case.
+      const content = Buffer.from('realistic owner upload bytes');
+      const up = await httpPost(
+        `${baseUrl}/api/records/${recordA}/files`,
+        { 'x-dev-user': OWNER_WITH_READ_A, 'Content-Type': 'text/plain', 'X-File-Name': 'owner-real.txt' },
+        content,
+      );
+      expect(up.status).toBe(201);
+      const versionId = (up.json as Record<string, unknown>)['versionId'] as string;
+
+      const dl = await httpGet(`${baseUrl}/api/files/${versionId}/download`, { 'x-dev-user': OWNER_WITH_READ_A });
+      expect(dl.status).toBe(200);
+      expect(dl.body).toContain('realistic owner upload bytes');
     }),
   );
 
@@ -465,17 +510,30 @@ describe('T-0620 file-write authz parity (live HTTP + PG)', () => {
   );
 
   it(
-    'FF-620-TENANT (write): tenant-B reader cannot upload to a tenant-A record (deny, no 201)',
+    'FF-620-TENANT (write): tenant-B reader cannot upload to a tenant-A record (403, no 201)',
     requireDb(async () => {
-      // READER_B resolves to TENANT_B; the composite FK (tenant_id, record_id) on
-      // choros.file cannot bind (TENANT_B, recordA) — recordA lives in TENANT_A — so
-      // the write is refused (no 201). Tenant isolation of the file↔record link holds.
+      // READER_B resolves to TENANT_B; loadRecordRegistryId(pool, TENANT_B, recordA)
+      // looks up recordA scoped to TENANT_B — recordA lives in TENANT_A, so the
+      // lookup returns zero rows (reg === null) → the pre-check denies BEFORE
+      // insertFile is ever called (honest 403 not_found, no existence leak in the
+      // body). Tenant isolation of the file↔record write link holds — this is a
+      // TIGHTER assertion than merely "not 201": it pins the exact status AND
+      // proves the deny fires pre-insert (zero-orphan by construction, not by luck).
+      const before = await countFiles(TENANT_A, recordA);
       const up = await httpPost(
         `${baseUrl}/api/records/${recordA}/files`,
-        { 'x-dev-user': READER_B, 'Content-Type': 'text/plain' },
+        { 'x-dev-user': READER_B, 'Content-Type': 'text/plain', 'X-File-Name': 'cross-tenant-write.txt' },
         Buffer.from('cross tenant write'),
       );
-      expect(up.status).not.toBe(201);
+      expect(up.status).toBe(403);
+      const body = up.json as Record<string, unknown> | null;
+      expect(body).not.toBeNull();
+      // No fileId/versionId minted — nothing to leak, nothing orphaned.
+      expect((body as Record<string, unknown>)['fileId']).toBeUndefined();
+      // The real (natural, non-synthetic) cross-tenant deny path also commits ZERO
+      // choros.file rows — the pre-check fires before insertFile on THIS exact path
+      // (not just the synthetic denyResolver harness in FF-620-ORPHAN above).
+      expect(await countFiles(TENANT_A, recordA)).toBe(before);
     }),
   );
 
