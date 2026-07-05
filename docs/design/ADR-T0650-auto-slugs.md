@@ -3,11 +3,12 @@
 **Phase:** DESIGN → BUILD · **Status:** implemented · **Date:** 2026-07-05
 **Task:** T-0650 [W4-UX] (родитель T-0647 E-UX-HUMAN)
 **Source:** `docs/design/ux-study-2026-07-05.md` §7
-**Foundation (не противоречит, унифицирует):** `src/core/slugify-process-key.ts` (T-0377,
-генератор ключей процессов — прототип), `src/core/register.ts::slugifyOrgName` (T-0140,
-self-reg, retry-on-conflict с random-suффиксом), `web/src/forms/relation-cascade.js::slugFromName`
-(фронтовый дубль транслита), `src/http/applications.ts` / `registry-defs.ts` / `seed-write.ts`
-(`SLUG_RE`, `UNIQUE(tenant_id[, scope], slug)` + catch 23505 → 409 — уже канонический паттерн).
+**Foundation:** `src/core/slugify-process-key.ts` (T-0377, генератор ключей процессов —
+прототип, УНИФИЦИРОВАН на новый общий модуль), `src/core/register.ts::slugifyOrgName` (T-0140,
+self-reg — НЕ тронут, держит свою копию карты), `web/src/forms/relation-cascade.js::slugFromName`
+(фронтовый дубль транслита — НЕ тронут, держит свою копию), `src/http/applications.ts` /
+`registry-defs.ts` / `seed-write.ts` (`SLUG_RE`, `UNIQUE(tenant_id[, scope], slug)` + catch
+23505 → 409 — уже канонический паттерн, переиспользован для авто-генерации).
 
 ---
 
@@ -20,6 +21,17 @@ self-reg, retry-on-conflict с random-suффиксом), `web/src/forms/relation
 продублирована в 6+ файлах. Генератор транслита фактически СУЩЕСТВУЕТ и уже применяется
 (ключ процесса в модельере авто-генерится — источник `novyy-protsess-N`, когда автор не
 назвал процесс); проблема — он не применён к остальным 10 местам создания.
+
+**Область унификации в T-0650 (честно, F2 из ревью):** новый канонический модуль
+`src/core/slug-generator.ts` вводится как единственный источник транслит-карты + грамматики,
+и на него мигрирован ТОЛЬКО backend-путь ключей процессов (`slugify-process-key.ts` стал
+тонкой обёрткой). Две другие копии карты — `register.ts::slugifyOrgName` (self-reg тенанта)
+и `web/src/forms/relation-cascade.js::slugFromName` (клиентский каскад) — **НЕ мигрированы**
+осознанно: их выход не должен меняться этой задачей (self-reg использует свой fallback
+«org» и SLUG_MAX=80; клиентский каскад — свой fallback «app»), а без-регрессионная миграция
+их обоих — отдельная работа вне скоупа T-0650. Т.е. дубликат карты остаётся в 2 из 3 мест;
+T-0650 не претендует их устранить, только унифицировать process-key путь и дать всем НОВЫМ
+create-эндпоинтам единый серверный генератор.
 
 ## 2. Решение: канонический генератор + опциональность на существующих unique-констрейнтах
 
@@ -36,12 +48,17 @@ export async function generateUniqueSlug(
 export const SLUG_GENERATOR_RE: RegExp                        // = каноническая грамматика (единственный источник)
 ```
 
-Пере-экспортирует и заменяет транслит-карту `slugify-process-key.ts` — **`slugify-process-key.ts`
-теперь тонкая обёртка** (`slugifyProcessName` = `generateSlugFromName`, `generateUniqueProcessKey`
-= `generateUniqueSlug` с иной сигнатурой fallback-суффикса, сохранённой байт-в-байт для
-обратной совместимости существующих тестов `process-defs.test.ts`). Ни один существующий
-импорт не сломан — `slugify-process-key.ts` остаётся валидным модулем, просто без
-дублирующейся Cyrillic-карты внутри.
+Заменяет транслит-карту ВНУТРИ `slugify-process-key.ts` (и только его — см. §1 про
+`register.ts`/`relation-cascade.js`, которые НЕ тронуты) — **`slugify-process-key.ts`
+теперь тонкая обёртка** над `generateSlugFromName`/`generateUniqueSlug`. Ни один существующий
+импорт не сломан, и вывод **байт-в-байт неизменен**, ВКЛЮЧАЯ fallback-слово: обёртка
+коэрсит generic-fallback генератора (`"item"`, экспорт `GENERIC_SLUG_FALLBACK`) обратно
+в исторический `"process"` на своей границе — для ЛЮБОГО имени, дающего пустой слаг (пустое,
+из пробелов, ИЛИ символ-онли типа `"!!!###"`/`"ъъъ"`/`"---"`, которое фильтруется в пустоту).
+Это точечно исправлено в F1 (изначальный рефактор регрессировал `"process"→"item"` на
+символ-онли входах; закреплено pin-тестом `process-defs.test.ts`, мутационно проверено).
+`generateUniqueProcessKey` использует `generateUniqueSlug` с сохранённой формой
+fallback-суффикса — байт-в-байт совместимо с существующими тестами `process-defs.test.ts`.
 
 ### 2.2 Атомарность коллизии — ДВА слоя, не read-then-write race
 

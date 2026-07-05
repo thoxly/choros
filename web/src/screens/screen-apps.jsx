@@ -32,6 +32,7 @@ import { devHeaders } from '../app-shell/dev-auth.js';
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { validateAppForm, mapCreateError } from './apps-validate.js';
 import { SlugField } from '../components/slug-field.jsx';
+import { previewSlugFromName } from '../components/slug-field-logic.js';
 import { renameApplication, deleteApplication as deleteApplicationApi } from './apps-manage-api.js';
 import { ConsequenceSummary } from '../util/confirm-helpers.jsx';
 import { PublishSolutionDialog } from './apps-publish-dialog.jsx';
@@ -115,6 +116,11 @@ function CreateAppModal({ open, onClose, onCreated }) {
       try { parsed = await res.json(); } catch { /* ignore parse error */ }
       const mapped = mapCreateError(res.status, parsed);
       if (mapped.field === 'slug') {
+        // T-0650 UX F-1: a slug error (409 conflict / 400) on an UNTOUCHED slug would
+        // otherwise sit under the read-only preview with no input to fix it (dead-end).
+        // Force the field editable (touched) and seed its value with the current preview
+        // so SlugField renders <Field> with the error in its hint — the user can correct it.
+        if (!slugTouched) { setSlugTouched(true); if (!slug) setSlug(previewSlugFromName(displayName)); }
         setFieldErrors((prev) => ({ ...prev, slug: mapped.message }));
       } else {
         setSubmitErr(mapped.message);

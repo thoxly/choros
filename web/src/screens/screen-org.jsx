@@ -19,6 +19,7 @@ import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../app-shell/active-tenant.js';
 import { SlugField } from '../components/slug-field.jsx';
+import { previewSlugFromName } from '../components/slug-field-logic.js';
 import {
   validateDepartment, validatePosition, validateEmployee, validateRole, validateAssignment,
   buildDepartmentPayload, buildPositionPayload, buildEmployeePayload, buildRolePayload, buildAssignmentPayload,
@@ -178,6 +179,15 @@ function OrgCrudModal({ open, config, onClose, onCreated }) {
       try { parsed = await res.json(); } catch { /* ignore */ }
       const mapped = mapOrgError(res.status, parsed, config.entity);
       if (mapped.field && (config.fields || []).some((f) => f.key === mapped.field)) {
+        // T-0650 UX F-1: if the erroring field is the (untouched) auto-slug, make it
+        // editable so the user isn't stuck with an error under the read-only preview.
+        const slugField = (config.fields || []).find((f) => f.key === mapped.field && f.kind === 'slug');
+        if (slugField && !slugTouched) {
+          setSlugTouched(true);
+          if (!values[slugField.key]) {
+            setField(slugField.key, previewSlugFromName(values[slugField.nameKey] ?? ''));
+          }
+        }
         setFieldErrors((prev) => ({ ...prev, [mapped.field]: mapped.message }));
       } else {
         setSubmitErr(mapped.message);
@@ -187,7 +197,7 @@ function OrgCrudModal({ open, config, onClose, onCreated }) {
     } finally {
       setSubmitting(false);
     }
-  }, [config, values, onCreated]);
+  }, [config, values, onCreated, slugTouched, setField]);
 
   if (!open || !config) return null;
 

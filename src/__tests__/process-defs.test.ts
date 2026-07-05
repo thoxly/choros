@@ -732,6 +732,36 @@ describe("slugifyProcessName (T-0377)", () => {
     expect(slugifyProcessName("   ")).toBe("process");
   });
 
+  // T-0650 F1 (contract-regression pin): a NON-empty, non-whitespace name that
+  // transliterates/filters to nothing (all-symbol / non-latin-non-cyrillic) must
+  // STILL fall back to the process-specific word "process" — NOT the canonical
+  // generator's generic "item". The T-0650 refactor (wrapper over slug-generator.ts)
+  // regressed this to "item"; this test pins the contract so a re-regression
+  // (removing the 'item'→'process' coercion in slugifyProcessName) fails loudly.
+  // Mutation check: revert the F1 fix (return generateSlugFromName(name) verbatim)
+  // and every case below flips to "item…" → these expectations turn RED.
+  it("F1 pin: all-symbol / non-transliterable name still falls back to 'process' (not 'item')", () => {
+    expect(slugifyProcessName("!!!###")).toBe("process");
+    expect(slugifyProcessName("ъъъ")).toBe("process");
+    expect(slugifyProcessName("---")).toBe("process");
+    expect(slugifyProcessName("№№№")).toBe("process");
+    expect(slugifyProcessName("日本語")).toBe("process");
+    // Explicit anti-regression: never leaks the generic generator fallback word.
+    expect(slugifyProcessName("!!!###")).not.toBe("item");
+  });
+
+  it("F1 pin: generateUniqueProcessKey base for a filters-to-empty name is 'process', then 'process-2'", async () => {
+    const key0 = await generateUniqueProcessKey("!!!###", async () => false);
+    expect(key0).toBe("process");
+    let calls = 0;
+    const key1 = await generateUniqueProcessKey("---", async () => {
+      calls++;
+      return calls === 1; // 'process' taken → 'process-2'
+    });
+    expect(key1).toBe("process-2");
+    expect(key1).not.toMatch(/^item/);
+  });
+
   it("truncates to 60 chars max", () => {
     const long = "A".repeat(100);
     expect(slugifyProcessName(long).length).toBeLessThanOrEqual(60);

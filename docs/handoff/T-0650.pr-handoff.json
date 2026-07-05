@@ -22,6 +22,7 @@
     "src/core/__tests__/slug-generator.test.ts",
     "src/__tests__/seed-write.auto-slug.test.ts",
     "src/__tests__/assistant-configurator.test.ts",
+    "src/__tests__/process-defs.test.ts",
     "ci/checks/db/applications_crud.test.ts",
     "ci/checks/db/registry_defs_crud.test.ts",
     "web/src/components/slug-field.jsx",
@@ -40,14 +41,39 @@
   "deviations_from_adr": [
     "Скоуп сужен по прямой инструкции фаундера («лучше ядро+половина мест ПОЛНОСТЬЮ зелёное»): полностью покрыты ядро + 6 create-эндпоинтов (applications/registry-defs/departments/positions/employees/roles) + SlugField в 3 экранах (screen-apps.jsx, screen-app-schema.jsx, screen-org.jsx через org-crud.js data-driven конфиг) + ассистент create_application. Отложены с обоснованием в T-0650.spec.md: ключ каждого поля схемы (#3, плотная grid-строка FieldRow — отдельный визуальный проход), найм агента (#8, Keycloak-clientId создаётся ДО DB-транзакции — retry должен ретраить и KC-вызов, не только INSERT — отдельная аккуратная задача), SoD/intents-форма (#9, внутренний debug-инструмент /api/rights/intents/hire, не основной путь), модельер 3 подместа (#10, требует мультиселект по схеме — уже отмечено в исследовании как волна B), пикеры 'Название (slug)' вместо голого слага (низкий риск косметика, FINDINGS).",
     "«Набор полей» НЕ спрятан полностью (авто-main при первом «Настроить поля») — это навигационное изменение экрана AppSchemaScreen (список→сразу редактор), больше чем point-fix; SlugField снимает боль ручного слага в create-форме registry_def, но сам концепт registry_def остаётся видимым в UI. Задокументировано в T-0650.spec.md как отложенное.",
-    "generateUniqueSlug (existsFn form) сохранён для обратной совместимости slugify-process-key.ts, но create-эндпоинты T-0650 используют ОТДЕЛЬНЫЙ примитив insertWithUniqueSlugRetry (retry-on-INSERT-conflict) — более строгий атомарный паттерн, чем существовавший ранее в process-defs.ts (который делает SELECT-проверку внутри той же транзакции — тоже безопасно, но по другому механизму). ADR явно документирует оба паттерна и почему они разные."
+    "generateUniqueSlug (existsFn form) сохранён для обратной совместимости slugify-process-key.ts, но create-эндпоинты T-0650 используют ОТДЕЛЬНЫЙ примитив insertWithUniqueSlugRetry (retry-on-INSERT-conflict) — более строгий атомарный паттерн, чем существовавший ранее в process-defs.ts (который делает SELECT-проверку внутри той же транзакции — тоже безопасно, но по другому механизму). ADR явно документирует оба паттерна и почему они разные.",
+    "F2 (доработано в fix-forward после ревью): T-0650 унифицирует на новый общий генератор ТОЛЬКО backend-путь ключей процессов (slugify-process-key.ts). register.ts::slugifyOrgName и web/src/forms/relation-cascade.js НЕ мигрированы (git diff пуст) — держат свои копии транслит-карты осознанно (их выход не должен меняться этой задачей). ADR §1/§2.1 + заголовок slug-generator.ts исправлены на честную формулировку (не «унифицировано 3 карты», а «унифицирован process-key путь; те две — независимые мирроры»)."
   ],
   "friction_events": [
     "src/core/slugify-process-key.ts рефакторинг в тонкую обёртку потребовал точного совпадения существующего теста 'falls back to uuid suffix when 1-10 are all taken' (11 existsFn-вызовов до фоллбэка) — проверено вручную арифметикой (1 база + 9 занумерованных = 10 вызовов) перед запуском, совпало с первого раза.",
     "web/vitest.config.js работает в plain node environment (без jsdom/react-dom) — SlugField спроектирован hook-free (T-0649 дисциплина), но первая версия теста слишком агрессивно descend-ила в дерево через <Field> (который использует useId()) → 'Cannot read properties of null (reading useId)'. Исправлено ограничением tree-walk helper'а (не спускаться в Field/MonoId/Button — проверять их props, не их внутренний рендер), мирроря паттерн actor-chip.test.jsx (RecordRef exclusion).",
     "Edit-тул дважды отказался матчить старый multi-line старый-текст в slugify-process-key.ts и seed-write.ts (вероятно из-за незначительных whitespace/юникод расхождений) — решено полным Write вместо частичного Edit для этих файлов.",
-    "Полный npm run fitness (200+ гейтов) занял ~100 секунд; полный npm run ci (tsc+eslint+fitness+vitest) — включает fitness внутри — общий прогон занял отдельного внимания на то, что множественные 'FAIL' строки в выводе являются ОЖИДАЕМЫМИ self-test плантами (сразу за ними идёт 'SELF-TEST PASS') — не путать с реальным провалом; проверено grep-ом на 'FAIL' вне self-test контекста — пусто, реальный exit code = 0."
+    "Полный npm run fitness (200+ гейтов) занял ~100 секунд; полный npm run ci (tsc+eslint+fitness+vitest) — включает fitness внутри — общий прогон занял отдельного внимания на то, что множественные 'FAIL' строки в выводе являются ОЖИДАЕМЫМИ self-test плантами (сразу за ними идёт 'SELF-TEST PASS') — не путать с реальным провалом; проверено grep-ом на 'FAIL' вне self-test контекста — пусто, реальный exit code = 0.",
+    "Fix-forward после code-review CHANGES_REQUESTED (docs/review/T-0650.review.json + T-0650.ux-review.json): устранены F1 (P2 контракт-регресс fallback-word), F2 (док-точность unification-claim), UX F-1 (тупик 409 без инпута), F3 (uuid8-fallback guard). Детали в review_response ниже."
   ],
+  "review_response": {
+    "review_files": ["docs/review/T-0650.review.json", "docs/review/T-0650.ux-review.json"],
+    "F1": {
+      "severity": "P2 (блокер)",
+      "kind": "regression / contract-break",
+      "fix": "slugifyProcessName коэрсит generic-fallback генератора ('item', экспорт GENERIC_SLUG_FALLBACK) обратно в исторический 'process' для ЛЮБОГО имени, дающего пустой слаг — не только empty/whitespace, но и символ-онли ('!!!###','ъъъ','---','№№№','日本語'). Generic генератор НЕ тронут (для др. сущностей 'item' корректен). Проверено: дефолт генератора не протёк — все другие вызовы generateSlugFromName ожидают именно generic-'item' (create-эндпоинты) или SLUG_RE-совместимый слаг (никто не завязан на конкретное fallback-слово кроме process-key пути).",
+      "pin_test": "src/__tests__/process-defs.test.ts — 2 новых теста ('F1 pin: all-symbol name → process не item' + 'generateUniqueProcessKey base для filters-to-empty → process, process-2'). Мутационно проверено: revert F1-фикса (return generateSlugFromName(name) verbatim) → pin-тесты + существующий empty/whitespace тест краснеют (3 failed, 'expected item to be process'); restore → 36/36 green.",
+      "docstrings_fixed": "slugify-process-key.ts header + slugifyProcessName docstring + ADR §2.1 — все обновлены с ложного 'behavior UNCHANGED (same word process)' на честное 'process для любого имени, дающего пустой слаг; коэрсия item→process на границе обёртки'."
+    },
+    "F2": {
+      "severity": "P2 (док-точность)",
+      "fix": "ADR §1 (+ Foundation-заголовок), ADR §2.1, slug-generator.ts module header — исправлены с завышенного 'унифицирует 3 дублированные карты' на честное: унифицирован ТОЛЬКО slugify-process-key путь; register.ts::slugifyOrgName и relation-cascade.js НЕ мигрированы (осознанно, чтобы не менять их выход — свои fallback 'org'/SLUG_MAX=80 и 'app'), держат свои копии карты. pr-handoff deviations_from_adr дополнен той же честной формулировкой. Миграция тех двух — НЕ сделана (вне скоупа, чтобы не рисковать регрессом их выхода)."
+    },
+    "UX_F1": {
+      "severity": "minor (тупик обратной связи)",
+      "kind": "dead-end на 409",
+      "fix": "Во всех 3 handleSubmit (screen-apps.jsx, screen-app-schema.jsx, screen-org.jsx OrgCrudModal): при серверной ошибке на поле слага (mapError.field==='slug' — 409 CONFLICT или 400) принудительно поднимается slugTouched=true (и value сидится текущим превью, если было пусто), так что SlugField сразу рендерит редактируемый <Field> с той же ошибкой в hint — пользователь может поправить конфликт. Раньше ошибка садилась на preview-режим без инпута = тупик."
+    },
+    "F3": {
+      "severity": "informational (робастность)",
+      "fix": "insertWithUniqueSlugRetry: финальный uuid8-fallback обёрнут в bounded re-roll (UUID_FALLBACK_ATTEMPTS=3, свежий suffix каждый раз) — ~1-в-4e9 коллизия на одном uuid8 больше не пропагирует raw 23505 → 500; терминация сохранена (после бюджета re-throw). Верхняя граница retry не изменилась по смыслу: base + 9 numbered + до 3 uuid = ограничено, не unbounded."
+    }
+  },
   "live_proof": {
     "verdict": "GREEN",
     "date": "2026-07-05",

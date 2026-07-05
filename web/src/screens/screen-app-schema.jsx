@@ -37,6 +37,7 @@ import { devHeaders } from '../app-shell/dev-auth.js';
 import { validateAppForm } from './apps-validate.js';
 import { resolveRelationTarget, slugFromName } from '../forms/relation-cascade.js';
 import { SlugField } from '../components/slug-field.jsx';
+import { previewSlugFromName } from '../components/slug-field-logic.js';
 import {
   FIELD_TYPES,
   COLLECTION_SUB_FIELD_TYPES,
@@ -1078,6 +1079,9 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
       const parsed = await res.json().catch(() => null);
       const mapped = mapSchemaError(res.status, parsed);
       if (mapped.field === 'slug' && !isEdit) {
+        // T-0650 UX F-1: make the slug field editable on a server slug error so the
+        // user isn't stuck with an error under the read-only preview (dead-end).
+        if (!slugTouched) { setSlugTouched(true); if (!slug) setSlug(previewSlugFromName(displayName)); }
         setMetaErrs((prev) => ({ ...prev, slug: mapped.message }));
       } else {
         setSubmitErr(mapped.message);

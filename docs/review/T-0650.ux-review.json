@@ -1,0 +1,98 @@
+{
+  "task_id": "T-0650",
+  "review_type": "ux",
+  "gate": "OBLIK G1-G7",
+  "verdict": "approved",
+  "reviewer_note": "UX-ревью (не code-ревью). Смотрел ТОЛЬКО UX-контракт SlugField и его применение в 4 экранах. Файлы под ревью не трогал; вердикт пишу только в этот файл (параллельно работает code-ревьюер).",
+  "summary": "SlugField решает боль ux-study §7 («слаг-ад»: ~15-30 рукописных машинных имён на кейс) чисто и по-OBLIK'овски: человек вводит только «Название», слаг рождается сам живым превью «будет создан как X · изменить», прогрессивно раскрывается в обычное mono-поле по клику. Реюз кит-примитивов (Field/MonoId/Button), ноль хардкод-цвета (только --chs-* токены), корректный порядок «имя → слаг» во всех 4 конфигах, dirty-флаг живёт в родителе (hook-free дисциплина T-0649). touched/locked режимы наследуют a11y от <Field>/<MonoId>. Автоматический WCAG-AA чек (form-field) — 0 issues. Находки — все non-blocking полишинг: одна дыра обратной связи при 409 на untouched-слаге, две edge-case-неожиданности превью (пустой результат из emoji/не-латиницы; хвостовой дефис на 60-символьной обрезке), a11y-нюанс подписи в preview-режиме, мёртвый locked-код + неточный комментарий. Ничего не блокирует мерж.",
+  "principles_assessment": {
+    "1_progressive_disclosure": {
+      "rating": "strong",
+      "note": "Дефолт = НЕ инпут, а живая подпись-превью + ghost-кнопка «изменить» (slug-field.jsx:78-97). Слаг скрыт, но в один клик доступен — эталон прогрессивного раскрытия. Понятность термина: фраза «будет создан как <mono>` объясняет ЧТО такое слаг через демонстрацию (человек видит машинное имя, не читает определение); при пустом названии — «слаг сгенерируется автоматически из названия». В touched-режиме hint 'строчные латинские, цифры, дефис · 1–64' объясняет правила. Машинным жаргоном не пугает: слово «слаг» осталось в UPPERCASE-подписи (chs-label), но пользователю НЕ нужно понимать его, чтобы завести сущность — вот суть изменения. Порядок полей исправлен во всех конфигах: имя-подобное поле идёт ПЕРЕД слагом (screen-org.jsx makeCrudConfig — display_name/title перед kind:'slug'; screen-apps/app-schema — Название перед SlugField), человек сначала отвечает на понятный вопрос."
+    },
+    "2_feedback": {
+      "rating": "good_with_one_gap",
+      "note": "Сгенерированный слаг ВИДЕН до сохранения (превью-текст) и обновляется ВЖИВУЮ по мере набора названия — previewSlugFromName зеркалит name на каждый ре-рендер (компонент полностью controlled, name приходит из родителя). Коллизия -2: разрешается на сервере атомарно и БЕСШУМНО — при untouched-слаге это правильно (пользователь получит foo-2, увидит после создания), клиент честно не претендует резолвить коллизию (slug-field-logic.js docblock). НО обратная-связь-дыра F-1: при 409 CONFLICT ошибка садится на поле (setFieldErrors slug), а slugTouched остаётся false → SlugField рендерит preview-режим и показывает красный текст ошибки БЕЗ инпута для правки. Пользователь видит «Слаг уже занят», а единственный аффорданс — кнопка «изменить» (её текст не сигналит 'исправьте конфликт'). Низкая частота (untouched-слаг сервер авто-резолвит -2, 409 сюда прилетит редко), но состояние 'ошибка-без-инпута' — реальный тупик."
+    },
+    "3_accessibility": {
+      "rating": "good",
+      "note": "touched-режим = кит <Field>: label↔input через htmlFor (Field использует useId), hint/ошибка через aria-describedby, aria-invalid — полностью корректно (components.jsx:343-359). locked-режим = <MonoId> (наследует его семантику). Автоматический WCAG-AA чек по form-field паттерну — 0 issues (passed 1.1.1/1.3.1/1.4.3/2.1.1/2.4.4/2.4.7/4.1.1/4.1.2). Клавиатура/фокус: ghost-кнопка «изменить» — обычный <button>, focus-visible через .chs-btn:focus-visible (--chs-color-focus-ring). Нюансы F-4 (nit): (a) в preview/locked режимах подпись — голый <span className='chs-label'>, НЕ связан с последующим контролом (в preview контрола-инпута нет, связывать нечего; но кнопка «изменить» не имеет программной связи с подписью «Слаг»); (b) живой превью-текст не в aria-live — при наборе названия скринридер не проговаривает меняющийся слаг (допустимо: это превью, не ошибка/статус); (c) кнопка «изменить» без контекста в списке кнопок SR может звучать неоднозначно — aria-label вида «изменить слаг» усилил бы. Ни один пункт не роняет WCAG-AA."
+    },
+    "4_consistency": {
+      "rating": "strong",
+      "note": "Одинаковое поведение во всех 4 экранах: screen-apps.jsx:166, screen-app-schema.jsx:1115, screen-org.jsx:107 (×4 сущности через единый OrgFormField kind:'slug'). Один компонент, один контракт props — расхождений нет. Совпадение с паттернами формы: touched-режим ПЕРЕИСПОЛЬЗУЕТ <Field mono> (тот же контрол, что был у ручного слага), locked — <MonoId> (тот же примитив, что рендерит машинные id по всей системе), кнопка — <Button variant='ghost' size='sm'>. Ноль самодельной input/label-разметки. Ноль хардкод-цвета — components.css:318-338 только --chs-* токены (G6). CSS-препвью-строка выравнивается по высоте контрола (min-height: var(--chs-control-h)), совпадает с высотой соседнего <Field> в горизонтальном layout app-schema."
+    },
+    "5_edge_cases_ui": {
+      "rating": "good_with_nits",
+      "note": "Пустое название → превью-строка честно показывает «слаг сгенерируется автоматически из названия» (не фабрикует слово — покрыто тестом slug-field.test.jsx:125). Длинное название → обрезка до 60 символов видима в превью (F-3 nit: обрезка .slice(0,60) идёт ПОСЛЕ trim-хвостового-дефиса → превью может показать 'ochen-' с хвостовым дефисом; формально проходит SLUG_FIELD_RE т.к. regex допускает хвостовой '-', но выглядит слегка неопрятно; чисто косметика превью, сервер — источник истины). Юникод/emoji: латиница/кириллица → предсказуемо ('🚀 Ракета'→'raketa', 'Отдел продаж'→'otdel-prodazh'). F-2 (major-of-nits): название ЦЕЛИКОМ из emoji/не-транслитерируемого юникода/пунктуации ('日本語のみ', '!!!', '---') → превью пустое → падает на generic-хинт «сгенерируется автоматически», хотя название ВВЕДЕНО. Пользователь получит непрозрачный серверный fallback-слаг, которого не видел — это сюрприз (принцип 'no surprises'). Не блокер (кириллица/латиница — 99% кейсов), но стоит показать что-то вроде «из этого названия слаг не выводится — сервер подберёт имя» вместо молчаливого дефолт-хинта."
+    }
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "minor",
+      "axis": 2,
+      "location": "web/src/components/slug-field.jsx:76-97 (untouched preview-режим) + web/src/screens/screen-apps.jsx:116-118 (409 → setFieldErrors slug, slugTouched не поднимается); тот же паттерн в screen-app-schema.jsx и screen-org.jsx (OrgCrudModal handleSubmit)",
+      "issue": "Тупик 'ошибка-без-инпута': при 409 CONFLICT (mapCreateError → {field:'slug'}) ошибка садится на fieldErrors.slug, но slugTouched остаётся false. SlugField рендерит preview-режим (нет <input>) и показывает красный текст ошибки под превью-строкой (slug-field.jsx:95). Пользователь видит «Слаг уже занят в этом тенанте», но ЕДИНСТВЕННЫЙ аффорданс для правки — ghost-кнопка «изменить», текст которой не сообщает 'разреши конфликт'. Реальная частота низкая (untouched-слаг сервер авто-резолвит суффиксом -2, поэтому 409 на untouched прилетит только на нерезолвимой коллизии display_name или гонке), но состояние логически тупиковое.",
+      "suggestion": "При маппинге серверной ошибки на поле слага принудительно поднимать slugTouched=true (и сидить value текущим превью) — тогда SlugField сразу откроет редактируемый <Field> с той же ошибкой в hint, и пользователь сможет поправить. 3-строчная правка в каждом из 3 handleSubmit (или обернуть в хелпер). Не блокирует мерж."
+    },
+    {
+      "id": "F-2",
+      "severity": "minor",
+      "axis": 5,
+      "location": "web/src/components/slug-field.jsx:82-89 + web/src/components/slug-field-logic.js:41-48 (previewSlugFromName)",
+      "issue": "Название целиком из emoji / не-транслитерируемого юникода (напр. '日本語のみ') / только-пунктуации ('!!!', '---') даёт ПУСТОЙ превью → компонент падает на generic-подсказку «слаг сгенерируется автоматически из названия», идентичную состоянию 'название ещё не введено'. Пользователь ввёл осмысленное (для него) название, но не получает сигнала, что база-слаг пуста и сервер сфабрикует непрозрачное машинное имя, которого он не увидит до создания. Нарушение принципа 'no surprises' (человек создаст сущность со слагом, который никогда не видел и не выбирал).",
+      "suggestion": "Различать 'название пустое' и 'название введено, но не даёт латинского слага': во втором случае показать явную фразу вроде «из этого названия слаг не выводится — сервер подберёт имя автоматически» (или предложить нажать «изменить» и вписать вручную). Низкий приоритет — кириллица/латиница покрывают ~99% реальных названий. Не блокирует."
+    },
+    {
+      "id": "F-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/components/slug-field-logic.js:43-47 (порядок операций: trim хвостовых '-' ДО .slice(0, SLUG_MAX_LEN))",
+      "issue": "На названии длиннее ~60 символов .slice(0,60) применяется ПОСЛЕ шага replace(/^-+|-+$/g,''), поэтому обрезка может оставить хвостовой дефис в превью (пример: длинное 'Очень Очень ...' → 'ochen-...-ochen-'). Формально строка всё ещё проходит SLUG_FIELD_RE (regex [a-z0-9-]{0,63} допускает хвостовой '-'), тест 'every non-empty preview satisfies grammar' зелёный, и docblock честно предупреждает 'сервер — источник истины'. Но живой превью показывает пользователю слегка неопрятный '...ochen-', расходящийся с тем, что реально запишет сервер (который дотрежет).",
+      "suggestion": "Повторно сделать .replace(/-+$/,'') ПОСЛЕ .slice(0, SLUG_MAX_LEN) — одна строка, косметика превью. Не блокирует."
+    },
+    {
+      "id": "F-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/components/slug-field.jsx:53-58 (locked) и :79-97 (preview): <span className='chs-label'>{label}</span> — не <label htmlFor>; кнопка «изменить» (:91) без aria-label",
+      "issue": "В preview/locked режимах подпись рендерится голым <span className='chs-label'>, а не <label htmlFor>. В preview-режиме нет <input> (связывать не с чем), но кнопка «изменить» не имеет программной связи с подписью «Слаг» — при навигации по кнопкам скринридер услышит одинокое «изменить» без контекста, к чему оно относится. Живой превью-текст также не в aria-live (меняющийся при наборе слаг SR не проговаривает — допустимо для превью). WCAG-AA автоматический чек — 0 issues, так что это ниже порога нарушения.",
+      "suggestion": "Дать кнопке aria-label={`изменить ${label.toLowerCase()}`} (напр. 'изменить слаг'), чтобы SR-навигация по кнопкам была однозначной. Опционально — обернуть подпись+превью в role='group' с aria-label, чтобы озвучить связку. Косметика a11y, не блокирует."
+    },
+    {
+      "id": "F-5",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/components/slug-field.jsx:51-60 (locked-ветка) + web/src/screens/screen-app-schema.jsx:864-868 (комментарий 'Existing defs are always touched ... SlugField renders it locked, see below')",
+      "issue": "Проп locked НИГДЕ не передаётся ни одним из 4 применений (grep: 0 использований locked= в screens). Все 4 формы — create-only; в screen-app-schema edit-режиме SlugField вообще внутри {!isEdit && ...}, т.е. не рендерится. Locked-ветка + её unit-тест (slug-field.test.jsx:181-187) — мёртвый/forward-looking код в этом диффе, а комментарий на строке 868 ('SlugField renders it locked, see below') утверждает поведение, которого нет — вводит будущего читателя в заблуждение.",
+      "suggestion": "Либо убрать locked-ветку и её тест до появления реального edit-места (YAGNI), либо оставить, но поправить комментарий screen-app-schema.jsx:868 на честное 'edit-режим не рендерит SlugField (слаг иммутабелен, редактируется только имя)'. Безвредно, не блокирует."
+    }
+  ],
+  "acceptance_coverage": [
+    {"principle": "progressive-disclosure-slug-hidden-but-reachable", "covered": true, "note": "Дефолт = превью-подпись + ghost «изменить», не инпут; клик раскрывает <Field mono>. slug-field.jsx:76-97. Тест untouched→no <Field>, touched→<Field> (slug-field.test.jsx:116-149) зелёный."},
+    {"principle": "user-understands-what-slug-is", "covered": true, "note": "Обучение через демонстрацию: 'будет создан как <mono>'; при пустом имени — 'сгенерируется автоматически'; в touched — hint с правилами грамматики. Термин 'слаг' остался, но знание его не требуется для завершения задачи."},
+    {"principle": "live-preview-updates-on-name-typing", "covered": true, "note": "Полностью controlled компонент, previewSlugFromName(name) пересчитывается на каждый ре-рендер; name прокинут из родителя (screen-org передаёт allValues[nameKey], apps/app-schema — displayName)."},
+    {"principle": "collision-suffix-2-handled", "covered": true, "note": "Разрешается сервером атомарно и бесшумно для untouched-слага (правильно). Клиент честно не претендует резолвить (slug-field-logic.js docblock). НО 409-обратная-связь на untouched — тупик без инпута (F-1, minor, non-blocking)."},
+    {"principle": "a11y-label-input-association", "covered": true, "note": "touched-режим наследует <Field> (htmlFor+useId, aria-describedby, aria-invalid). WCAG-AA form-field чек — 0 issues. Preview/locked подпись — <span> (в preview нет инпута; нюанс F-4 nit)."},
+    {"principle": "consistent-across-4-screens", "covered": true, "note": "Один компонент, один props-контракт: screen-apps:166, screen-app-schema:1115, screen-org:107 (×4 org-сущности через единый OrgFormField kind:'slug'). Реюз Field/MonoId/Button, ноль хардкод-цвета (components.css:318-338)."},
+    {"principle": "edge-empty-name", "covered": true, "note": "Пустое → generic-хинт, не фабрикованное слово (slug-field.test.jsx:125). Правильно."},
+    {"principle": "edge-long-name-truncation-visible", "covered": true, "note": "Обрезка до 60 видна в превью; nit F-3 — возможен хвостовой дефис (косметика, грамматике не противоречит)."},
+    {"principle": "edge-unicode-emoji-name", "covered": "partial", "note": "Кириллица/латиница → предсказуемый транслит. Название ЦЕЛИКОМ из emoji/CJK/пунктуации → пустой превью, неотличимый от 'имя не введено' → тихий серверный fallback = сюрприз (F-2, minor, non-blocking)."},
+    {"principle": "no-hardcoded-color-G6", "covered": true, "note": "components.css:318-338 (.chs-slugfield-preview*) — только --chs-* токены. Подтверждено чтением."},
+    {"principle": "hook-free-discipline-T0649", "covered": true, "note": "SlugField полностью stateless/controlled — dirty-флаг (slugTouched) живёт в родителе рядом со slug, не в local useState. Соответствует node-окружению vitest без jsdom (docblock slug-field.jsx:15-19). Тесты — plain-function invocation."}
+  ],
+  "blocking_for_merge": [],
+  "non_blocking_followups": [
+    "F-1 (minor): при серверной ошибке слага поднимать slugTouched=true, чтобы поле стало редактируемым (иначе тупик 'ошибка без инпута' на 409).",
+    "F-2 (minor): различать 'имя пустое' и 'имя не даёт латинского слага' — явный сигнал вместо тихого серверного fallback (принцип no-surprises).",
+    "F-3 (nit): дотримить хвостовой '-' ПОСЛЕ обрезки в 60 символов (косметика превью).",
+    "F-4 (nit): aria-label 'изменить слаг' на ghost-кнопке для SR-навигации.",
+    "F-5 (nit): убрать неиспользуемую locked-ветку (YAGNI) ИЛИ поправить вводящий в заблуждение комментарий screen-app-schema.jsx:868."
+  ],
+  "verified_live": {
+    "wcag_aa_form_field_check": "mcp ux-patterns check_accessibility (patternType=form-field, wcagLevel=AA) по SlugField+Field — 0 issues, passed: 1.1.1/1.3.1/1.4.3(AA)/2.1.1/2.4.4/2.4.7(AA)/4.1.1/4.1.2",
+    "preview_edge_cases": "Прогнал previewSlugFromName живьём (node) на 11 входах: '' и '   '→''; 'Отдел продаж'→'otdel-prodazh'; '🚀 Ракета'→'raketa'; '日本語のみ'→'' (F-2); '!!!'/'---'→'' (F-2); длинное→хвостовой '-' (F-3); 'Café Ünïcode'→'caf-n-code'; '123 старт'→'123-start'",
+    "locked_prop_usage": "grep по web/src/screens: 0 передач locked= — locked-ветка не используется (F-5)"
+  }
+}

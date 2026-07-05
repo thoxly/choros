@@ -9,11 +9,20 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  GENERIC_SLUG_FALLBACK,
   SLUG_GENERATOR_RE,
   generateSlugFromName,
   generateUniqueSlug,
+  insertWithUniqueSlugRetry,
   transliterate,
 } from "../slug-generator.js";
+
+// A synthetic pg 23505 unique_violation error (anti-case: no real case content).
+function conflictError() {
+  const e = new Error("duplicate key value violates unique constraint") as Error & { code: string };
+  e.code = "23505";
+  return e;
+}
 
 describe("SLUG_GENERATOR_RE", () => {
   it("matches the documented canonical grammar", () => {
@@ -60,13 +69,14 @@ describe("generateSlugFromName", () => {
     expect(generateSlugFromName("  --Test  Name--  ")).toBe("test-name");
   });
 
-  it("falls back to a generic 'item' for empty/whitespace-only input", () => {
-    expect(generateSlugFromName("")).toBe("item");
-    expect(generateSlugFromName("   ")).toBe("item");
+  it("falls back to the exported GENERIC_SLUG_FALLBACK for empty/whitespace-only input", () => {
+    expect(GENERIC_SLUG_FALLBACK).toBe("item");
+    expect(generateSlugFromName("")).toBe(GENERIC_SLUG_FALLBACK);
+    expect(generateSlugFromName("   ")).toBe(GENERIC_SLUG_FALLBACK);
   });
 
-  it("falls back to a generic 'item' when the name is only symbols", () => {
-    expect(generateSlugFromName("!!!###")).toBe("item");
+  it("falls back to GENERIC_SLUG_FALLBACK when the name is only symbols (F1 boundary: process-key path coerces this back to 'process')", () => {
+    expect(generateSlugFromName("!!!###")).toBe(GENERIC_SLUG_FALLBACK);
   });
 
   it("truncates to at most 60 characters", () => {
@@ -129,5 +139,60 @@ describe("generateUniqueSlug", () => {
     // base (1 call) + base-2 (1 call) = 2 calls before uuid fallback
     expect(calls).toBe(2);
     expect(key).toMatch(/^otdel-prodazh-[0-9a-f]{8}$/);
+  });
+});
+
+describe("insertWithUniqueSlugRetry (atomic retry-on-INSERT-conflict)", () => {
+  it("returns the row from the FIRST insertFn call when the base slug is free", async () => {
+    const got = await insertWithUniqueSlugRetry("Отдел продаж", async (slug) => ({ slug }));
+    expect(got).toEqual({ slug: "otdel-prodazh" });
+  });
+
+  it("retries with -2 when the base INSERT throws a 23505", async () => {
+    let n = 0;
+    const got = await insertWithUniqueSlugRetry("Отдел продаж", async (slug) => {
+      n++;
+      if (n === 1) throw conflictError(); // base collides
+      return { slug };
+    });
+    expect(got).toEqual({ slug: "otdel-prodazh-2" });
+  });
+
+  it("propagates a NON-conflict error immediately (no retry, no swallow)", async () => {
+    const boom = new Error("some other db error");
+    await expect(
+      insertWithUniqueSlugRetry("Отдел продаж", async () => { throw boom; }),
+    ).rejects.toBe(boom);
+  });
+
+  it("terminates with a bounded number of insertFn calls under always-conflict (F3 upper bound)", async () => {
+    // base + base-2..base-10 (9 numbered) + up to 3 uuid re-rolls = at most 13 calls,
+    // then throws — never an unbounded loop.
+    let calls = 0;
+    await expect(
+      insertWithUniqueSlugRetry("Отдел продаж", async () => {
+        calls++;
+        throw conflictError();
+      }),
+    ).rejects.toBeDefined();
+    // 1 base + 9 numbered + 3 uuid = 13
+    expect(calls).toBe(13);
+  });
+
+  it("F3: a uuid-fallback collision is RE-ROLLED, not propagated (succeeds on a later uuid attempt)", async () => {
+    // Make every numbered candidate AND the first uuid attempt collide, then succeed.
+    let calls = 0;
+    const got = await insertWithUniqueSlugRetry(
+      "Отдел продаж",
+      async (slug) => {
+        calls++;
+        // 1 base + 9 numbered = 10 collisions, then the 11th (first uuid) collides too,
+        // the 12th (second uuid re-roll) succeeds.
+        if (calls <= 11) throw conflictError();
+        return { slug };
+      },
+    );
+    expect(calls).toBe(12);
+    expect(got.slug).toMatch(/^otdel-prodazh-[0-9a-f]{8}$/);
   });
 });
