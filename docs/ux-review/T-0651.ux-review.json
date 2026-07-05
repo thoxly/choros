@@ -1,0 +1,55 @@
+{
+  "task_id": "T-0651",
+  "verdict": "approved",
+  "gate_seen": {
+    "green": true,
+    "red_rules": []
+  },
+  "themes_checked": ["light", "dark"],
+  "pattern_sources": [
+    {
+      "element": "CollapsibleZoneHeader (chs-nav__grouplabel--collapsible)",
+      "pattern": "collapsible-section-disclosure (button + aria-expanded + aria-controls)",
+      "applied": true
+    },
+    {
+      "element": "SidebarAppRow / SidebarSectionGroup drag-and-drop",
+      "pattern": "drag-and-drop-list-reorder-with-keyboard-alternative",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "T-0651-N1",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/app-shell/shell.jsx — SidebarSectionGroup drop target (chs-nav__subgroup onDragOver/onDrop)",
+      "issue": "Drop-подсветка есть на две вещи (app-row --dragover через box-shadow снизу, subgroup --dragover через inset outline), но нет отдельного визуального различия между «вставить между строками» и «добавить в конец раздела» — обе ветки computeAppMove дают одинаковый box-shadow на app-row или общий outline на группе. Не блокирует: позиция всё равно фиксируется PATCH-ом и видна после refreshSidebarData, но во время самого перетаскивания пользователь не видит, ПЕРЕД какой строкой окажется приложение при drop на пустое место группы (только «эта группа примет»).",
+      "suggestion": "Опционально (не для этой волны): добавить индикатор вставки (тонкая линия между строками) при dragover на app-row, а не только dragover-заливку самой строки."
+    },
+    {
+      "id": "T-0651-N2",
+      "severity": "nit",
+      "root": "A",
+      "location": "web/src/app-shell/shell.jsx — SidebarSectionGroup / инлайн Field переименования (строки ~433-444)",
+      "issue": "Инлайн-редактирование раздела рендерит kit `Field` без видимого label (label=null) внутри `chs-nav__subgrouplabel--section` — это соответствует паттерну screen-sections.jsx, но нет aria-label на инпуте, так что скринридер объявит просто «edit text», не «Название раздела «X»»",
+      "suggestion": "Добавить `aria-label={`Название раздела «${section.section}»`}` на Field при editing=true — дёшево, не меняет layout."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    { "ac": "Группы понятны и доступны (button aria-expanded, клавиатурно, РАБОТА постоянна)", "covered": true },
+    { "ac": "DnD + клавиатурная альтернатива сохранена (▲/▼ не убраны)", "covered": true },
+    { "ac": "Нет мёртвых кнопок (+Раздел/контекст-меню/инлайн-переименование все реально работают)", "covered": true },
+    { "ac": "Тема/жаргон — новые классы только через --chs-* токены, подписи человеческие, счётчик честный", "covered": true },
+    { "ac": "Мёртвые состояния обработаны (пустой раздел, 0 разделов, prefs-загрузка без мигания)", "covered": true }
+  ],
+  "_notes": {
+    "diff_stat": "20 files changed, 2136 insertions(+), 37 deletions(-) — dev...HEAD (spec, ADR, migration 129, src/http/user-prefs.ts + applications.ts sort_order, web/src/app-shell/{shell.jsx,sidebar-dnd.js,sidebar-app-menu.js,user-prefs-api.js,nav-sections.js,app.css} + tests)",
+    "1_groups": "CollapsibleZoneHeader — реальная <button type=\"button\" aria-expanded={!collapsed} aria-controls={panelId}>, шеврон-иконка индикатор. Enter/Space нативно работают на <button> (не div-onClick) — подтверждено юнит-тестом shell.sidebar.test.jsx ('zone header is a keyboard-operable button with aria-expanded'). Дефолт DEFAULT_COLLAPSED=['constructor','observability','admin'] задаётся СИНХРОННО при инициализации state (до async getAllUserPrefs) — при бэкенд-сбое остаётся тот же дефолт, значит НЕТ 'всё открыто -> схлопнулось' мигания на обычной загрузке; на возврате пользователя с ранее развёрнутой группой возможен один тик 'свёрнуто -> развёрнуто' при разрешении user_pref, что честно и минимально (тот же паттерн, что navApps/navSections best-effort). РАБОТА зона не оборачивается CollapsibleZoneHeader вообще (collapsible = zone.id !== 'work') — постоянно видна, включая счётчик «Мои задачи» (liveCount привязан к тому же GET /api/inbox counts.mine, что читает сам экран инбокса — не статичный seed, комментарий T-0307 честно закрыт).",
+    "2_dnd_keyboard": "КРИТИЧНО подтверждено: SidebarAppRow рендерит ОБА ▲/▼ Button (aria-label «Переместить «X» вверх/вниз», disabled на границах массива) РЯДОМ с draggable-оберткой — DnD добавлен, не заменил кнопки (проверено юнит-тестом shell.sidebar.test.jsx 'sidebar DnD keeps ▲/▼'). Та же гарантия для разделов (SidebarSectionGroup — ▲/▼ + drag handle на заголовке, 'Без раздела'/fallback сознательно НЕ draggable и без ▲/▼, т.к. это не сущность). Drop-цели: onDragOver/onDrop навешаны и на отдельный app-row (вставка перед конкретным приложением), и на весь subgroup-контейнер (добавление в конец/в пустой раздел/в 'Без раздела') — computeAppMove/computeSectionDrop в sidebar-dnd.js чистые, 14 юнит-тестов без DOM зелёные. Визуальный фидбек драга: --dragover (box-shadow inset снизу на app-row / inset outline на subgroup) + --dragging (opacity 0.5 на источнике) — оба через токены (--chs-color-accent), нет хардкода. Единственный нит (N1): нет отдельного индикатора 'между этими двумя строками' vs 'в конец группы' — не блокирует, PATCH и рефетч всё равно корректно фиксируют позицию.",
+    "3_dead_controls": "«+ Раздел» — реальный POST /api/sections (201 -> onCreated -> refreshSidebarData), 409-конфликт и прочие ошибки показывают человеческий текст, не тихо проглатываются. Контекст-меню (⋯, Popover isMenu) — Переименовать/В раздел открывают ре-юзнутые RenameAppModal/SetSectionModal (те же компоненты, что /apps уже использует, экспортированы а не задублированы — подтверждено grep + тестом 'reuses the existing app-management modals'), 'Настроить поля' — реальная навигация на /app-schema/:appId. Инлайн-переименование раздела — PATCH /api/sections/:id{name}, Enter коммитит/Escape отменяет, blur коммитит, пустая строка no-op (не даёт сохранить пустое имя). Все ▲/▼ дизейблены на границах массива (isFirst/isLast), а не притворяются активными — честный disabled, не мёртвая кнопка без реакции.",
+    "4_theme_jargon": "bash ci/checks/ux/ux-g2-theme-pairing.sh -> PASS (light default + [data-theme=dark] reachable в обоих token-источниках). Все новые классы (chs-nav__app-row*, chs-nav__subgroup*, chs-nav__add-section*, chs-nav__grouplabel--collapsible) используют исключительно var(--chs-color-*/--chs-space-*/--chs-radius-*) — 0 хардкод-цветов (ux-g6-no-new-hardcode PASS, 0 findings в новых строках). ux-g5-jargon-denylist (informational) — 51 находок, ВСЕ в *.test.jsx/*.test.js файлах (T-id/telLinear ссылки в describe()), ноль в видимом продуктовом UI. Подписи — «Мои задачи», «Раздел», «Переименовать», «В раздел →», «Настроить поля», «Без раздела» — обычный русский, не движковый жаргон. Счётчик читаем: <span className=\"chs-navitem__count\">{liveCount}</span>, tabular-nums, тот же контракт что и demo/soon бейджи.",
+    "5_dead_states": "Пустой раздел (0 приложений) -> явный <div className=\"chs-nav__subgroup-empty\">Пусто — перетащите сюда приложение</div>, ВНУТРИ контейнера с активными onDragOver/onDrop (drop-зона реально работает, не только текст-заглушка). 0 разделов в тенанте -> navGroupsForDnd содержит только fallback-группу 'Без раздела' (или пустой массив при 0 приложений тоже) — «+ Раздел» всё равно рендерится безусловно (не зависит от наличия групп), так что путь создания первого раздела не заперт. Загрузка prefs: DEFAULT_COLLAPSED — синхронный локальный дефолт ДО эффекта, что явно прокомментировано в коде и подтверждается тем, что это тот же React state (не отдельный loading-флаг) — нет отдельного skeleton/spinner, но и нет 'моргания' между двумя визуальными состояниями групп на большинстве логинов (только один честный переход при отличном от дефолта персональном состоянии, что ожидаемо и корректно, не баг)."
+  }
+}
