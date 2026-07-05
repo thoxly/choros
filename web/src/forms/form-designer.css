@@ -1,0 +1,60 @@
+/* ============================================================================
+   CHOROS — form-designer.css  (T-0656 · E-FORMS drag-and-drop canvas polish)
+
+   Styling for the interface-builder canvas DnD feedback: the drop indicator
+   (a full-width placeholder bar that shows WHERE a block will land, not a 6px
+   sliver), the receiving-container highlight, and the fullscreen canvas.
+
+   Theme-honest (OBLIK gate G2/G6): every colour is a --chs-* token; there is no
+   hardcoded hex. Light is the readable default (:root in tokens.css); dark is
+   reachable via [data-theme="dark"] on those same tokens, so this file inherits
+   the pairing without redeclaring it.
+   ============================================================================ */
+
+/* --- drop indicator: a real placeholder bar, full container width --- */
+.chs-drop-indicator {
+  height: 4px;
+  margin: 2px 0;
+  border-radius: var(--chs-radius-full);
+  background: transparent;
+  transition: height 90ms ease, background 90ms ease, box-shadow 90ms ease;
+}
+
+.chs-drop-indicator--active {
+  height: 10px;
+  background: var(--chs-color-accent);
+  box-shadow: 0 0 0 2px var(--chs-color-accent-soft);
+}
+
+/* --- receiving container highlight (the "куда встанет" answer) --- */
+.chs-canvas-node--drop-target {
+  /* border/background are set inline from the same tokens; this class gives the
+     screen-reader-independent visual affordance a stable hook + a soft pulse. */
+  outline: 2px dashed var(--chs-color-accent);
+  outline-offset: -2px;
+}
+
+/* --- fullscreen canvas: fills the viewport, keeps palette/inspector reachable
+   via the in-canvas toggle rendered by FormDesigner (not removed from the DOM). */
+.chs-designer-canvas--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: var(--chs-z-overlay);
+  margin: 0;
+  max-height: 100vh;
+  overflow: auto;
+  background: var(--chs-color-bg);
+  padding: var(--chs-space-6);
+}
+
+/* the fullscreen toggle button row inside the canvas */
+.chs-designer-canvas__bar {
+  display: flex;
+  gap: var(--chs-space-2);
+  align-items: center;
+  margin-bottom: var(--chs-space-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chs-drop-indicator { transition: none; }
+}
