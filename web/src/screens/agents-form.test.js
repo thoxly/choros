@@ -20,6 +20,7 @@ import {
   mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
   connectionOptions, buildLlmConnectionPayload, mapLlmConnectionError,
   outcomeMeta, formatActivityTime, activityContext, mapActivityError,
+  mapAgentInstructionError, mapAgentInstructionPromoteError,
 } from './agents-form.js';
 
 describe('validateHire', () => {
@@ -331,5 +332,52 @@ describe('mapActivityError — honest surfacing of the GET contract', () => {
   });
   it('falls back with the HTTP status for unknown codes', () => {
     expect(mapActivityError(500, {})).toMatch(/500/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0637 — agent competence instruction (draft/publish)
+// ---------------------------------------------------------------------------
+
+describe('mapAgentInstructionError — honest surfacing of the GET/PUT contract', () => {
+  it('maps 409 PUBLISHED_LOCKED to the re-draft-then-publish guidance', () => {
+    const m = mapAgentInstructionError(409, { error: { code: 'PUBLISHED_LOCKED' } });
+    expect(m).toMatch(/черновик/i);
+    expect(m).toMatch(/опублик/i);
+  });
+  it('maps 401 to a human re-login message (not a raw code)', () => {
+    const m = mapAgentInstructionError(401, {});
+    expect(m).toMatch(/авторизован/i);
+    expect(m).not.toContain('401');
+  });
+  it('maps 403 to an authority message', () => {
+    expect(mapAgentInstructionError(403, {})).toMatch(/прав/i);
+  });
+  it('maps 404 to agent-not-found', () => {
+    expect(mapAgentInstructionError(404, {})).toMatch(/не найден/i);
+  });
+  it('falls back with the HTTP status for unknown codes', () => {
+    expect(mapAgentInstructionError(500, {})).toMatch(/500/);
+  });
+});
+
+describe('mapAgentInstructionPromoteError — honest surfacing of the promote contract', () => {
+  it('maps 409 NOT_IN_DRAFT to "already published"', () => {
+    expect(mapAgentInstructionPromoteError(409, { error: { code: 'NOT_IN_DRAFT' } })).toMatch(/опубликован/i);
+  });
+  it('maps 403 NO_PROMOTE_GRANT to a promote-grant message', () => {
+    expect(mapAgentInstructionPromoteError(403, { error: { code: 'NO_PROMOTE_GRANT' } })).toMatch(/грант/i);
+  });
+  it('maps 403 FORBIDDEN_AGENT_SELF_PROMOTE to a human-required message', () => {
+    expect(mapAgentInstructionPromoteError(403, { error: { code: 'FORBIDDEN_AGENT_SELF_PROMOTE' } })).toMatch(/человек/i);
+  });
+  it('maps 401 to a human re-login message', () => {
+    expect(mapAgentInstructionPromoteError(401, {})).toMatch(/авторизован/i);
+  });
+  it('maps 404 to a "save the draft again" message', () => {
+    expect(mapAgentInstructionPromoteError(404, {})).toMatch(/черновик/i);
+  });
+  it('falls back with the HTTP status for unknown codes', () => {
+    expect(mapAgentInstructionPromoteError(500, {})).toMatch(/500/);
   });
 });

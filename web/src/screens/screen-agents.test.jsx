@@ -85,3 +85,43 @@ describe('screen-agents — activity panel wiring (T-0499)', () => {
     expect(src).not.toContain('agent.proceeded');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0637 — agent COMPETENCE INSTRUCTION editor (draft/publish)
+// ---------------------------------------------------------------------------
+
+describe('screen-agents — instruction editor wiring (T-0637)', () => {
+  it('reads/writes the instruction via GET/PUT /api/agents/:id/instruction', () => {
+    expect(src).toContain('/api/agents/${agentId}/instruction');
+    expect(src).toMatch(/method:\s*'PUT'/);
+  });
+  it('has an "Инструкция агента" toggle (no dead button)', () => {
+    expect(src).toContain('Инструкция агента');
+    expect(src).toContain('setInstructionOpen');
+  });
+  it('publishes via the EXISTING shared promote route, not a new mechanism', () => {
+    expect(src).toContain('/api/artifacts/${state.instruction_id}/promote');
+    expect(src).toContain("artifact_table: 'agent_instruction'");
+    expect(src).toMatch(/method:\s*'POST'/);
+  });
+  it('renders honest states (loading / error) and human tier labels', () => {
+    expect(src).toContain('Загрузка инструкции');
+    expect(src).toContain('instructionTierLabel');
+    expect(src).toContain('mapAgentInstructionError');
+    expect(src).toContain('mapAgentInstructionPromoteError');
+  });
+  it('the publish button is disabled with a reason when not in draft / no id yet (not a dead affordance)', () => {
+    expect(src).toContain('canPublish');
+    expect(src).toContain('publishDisabledReason');
+  });
+  it('the published-lock 409 is surfaced human, not a raw code', () => {
+    expect(src).not.toMatch(/>\s*409\s*</);
+  });
+  it('uses only --chs-* tokens for the new section (no hardcoded color)', () => {
+    // Scoped check: the tier badge / textarea / banner styles introduced for T-0637.
+    const idx = src.indexOf('T-0637 — Instruction editor tokens');
+    expect(idx).toBeGreaterThan(-1);
+    const section = src.slice(idx, src.indexOf('function AgentInstructionEditor'));
+    expect(section).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+  });
+});
