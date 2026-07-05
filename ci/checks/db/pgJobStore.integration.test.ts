@@ -337,6 +337,90 @@ describe("AC-1: fetchAndLock returns correct fields", () => {
 });
 
 // ---------------------------------------------------------------------------
+// T-0677: fetchAndLock threads process_def_id/instance_id (migration 111,
+// T-0534) onto the returned Job — upstream fix for the T-0638 live-proof gap
+// (agent-step-context.ts's readJobVars() received instanceId="" for every
+// live agentTask because fetchAndLock's RETURNING list omitted these columns,
+// even though enqueue() wrote them to the DB correctly).
+// ---------------------------------------------------------------------------
+describe("T-0677: fetchAndLock threads process_def_id/instance_id onto Job", () => {
+  it("enqueue with processDefId+instanceId → fetchAndLock returns a Job with instanceId/processDefId populated (not empty)", async () => {
+    const clock = makeFixedClock(1000);
+    await runAsTenant(TENANT_A, clock, async (store) => {
+      await store.enqueue(
+        "agent-step",
+        { agentEmployeeId: "agent-1" },
+        3,
+        "idem-t0677-1",
+        "telLinear",
+        "99573238",
+      );
+      const result = await store.fetchAndLock("w1", ["agent-step"], 1, 30000);
+      expect(result).toHaveLength(1);
+      const job = result[0];
+      // RED before the fix: job.instanceId/processDefId did not exist on the
+      // Job interface at all, and fetchAndLock's RETURNING list did not select
+      // the columns — this would have been `undefined` (or a TS compile error
+      // referencing a non-existent field) pre-fix.
+      expect(job.instanceId).toBe("99573238");
+      expect(job.processDefId).toBe("telLinear");
+    });
+  });
+
+  it("getById also threads instanceId/processDefId (SELECT list parity with fetchAndLock)", async () => {
+    const clock = makeFixedClock(1000);
+    await runAsTenant(TENANT_A, clock, async (store) => {
+      const enqueued = await store.enqueue(
+        "agent-step",
+        { agentEmployeeId: "agent-1" },
+        3,
+        "idem-t0677-2",
+        "purchaseApproval",
+        "inst-abc-123",
+      );
+      const fetched = await store.getById(enqueued.id);
+      expect(fetched).toBeDefined();
+      expect(fetched!.instanceId).toBe("inst-abc-123");
+      expect(fetched!.processDefId).toBe("purchaseApproval");
+    });
+  });
+
+  it("backward compatibility: job enqueued WITHOUT processDefId/instanceId → fields are null, no crash", async () => {
+    const clock = makeFixedClock(1000);
+    await runAsTenant(TENANT_A, clock, async (store) => {
+      // Legacy call shape: no 5th/6th args at all (pre-T-0534 callers).
+      await store.enqueue("legacy-topic", { foo: "bar" }, 3);
+      const result = await store.fetchAndLock("w1", ["legacy-topic"], 1, 30000);
+      expect(result).toHaveLength(1);
+      const job = result[0];
+      expect(job.instanceId).toBeNull();
+      expect(job.processDefId).toBeNull();
+      // The rest of the Job contract is unaffected.
+      expect(job.state).toBe(JobState.LOCKED);
+      expect(job.lockOwner).toBe("w1");
+    });
+  });
+
+  it("directly-seeded legacy row (process_def_id/instance_id columns NULL at the DB level) → fetchAndLock does not crash, fields null", async () => {
+    const clock = makeFixedClock(1000);
+    const jobId = await seedJob({
+      tenantId: TENANT_A,
+      topic: "legacy-seeded",
+      state: "CREATED",
+      available_at: 500,
+      created_at: 500,
+    });
+    await runAsTenant(TENANT_A, clock, async (store) => {
+      const result = await store.fetchAndLock("w1", ["legacy-seeded"], 1, 30000);
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe(jobId);
+      expect(result[0].instanceId).toBeNull();
+      expect(result[0].processDefId).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AC-2: fetchAndLock FIFO, maxJobs cap
 // ---------------------------------------------------------------------------
 describe("AC-2: fetchAndLock FIFO + maxJobs cap", () => {

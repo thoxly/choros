@@ -57,6 +57,16 @@ interface JobRow {
   created_at: string;         // bigint comes back as string from pg
   available_at: string;       // bigint comes back as string from pg
   // tenant_id is present but not part of the TS Job interface
+  /**
+   * T-0677: process_def_id/instance_id (migration 111, T-0534). Present on
+   * JobRow ONLY when the caller's SELECT/RETURNING list includes them — every
+   * query in this file now does (fetchAndLock, enqueue, getById, listBy*).
+   * Optional here (not just nullable) so call sites that construct a JobRow
+   * literal without these columns (none currently do, but future defensiveness)
+   * still type-check; rowToJob() treats a missing key the same as SQL NULL.
+   */
+  process_def_id?: string | null;
+  instance_id?: string | null;
 }
 
 function rowToJob(row: JobRow): Job {
@@ -70,6 +80,12 @@ function rowToJob(row: JobRow): Job {
     lockExpiry: row.lock_expiry != null ? Number(row.lock_expiry) : undefined,
     createdAt: Number(row.created_at),
     available_at: Number(row.available_at),
+    // T-0677: thread process_def_id/instance_id (migration 111) into the Job
+    // object. `?? null` normalises `undefined` (column absent from a SELECT
+    // list — should not happen now, but defensive) to `null`, matching the
+    // documented "absent/legacy row" contract on Job.processDefId/instanceId.
+    processDefId: row.process_def_id ?? null,
+    instanceId: row.instance_id ?? null,
   };
 }
 
@@ -148,7 +164,8 @@ export class PostgresJobStore {
             NULL, NULL, $5, $5, NULL,
             $6, $7)
          RETURNING id, topic, variables, state, retries,
-                   lock_owner, lock_expiry, created_at, available_at`,
+                   lock_owner, lock_expiry, created_at, available_at,
+                   process_def_id, instance_id`,
         [id, topic, JSON.stringify(variables), retries, now, pdi, iid]
       );
       return rowToJob(rows[0]);
@@ -168,7 +185,8 @@ export class PostgresJobStore {
        ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL
        DO NOTHING
        RETURNING id, topic, variables, state, retries,
-                 lock_owner, lock_expiry, created_at, available_at`,
+                 lock_owner, lock_expiry, created_at, available_at,
+                 process_def_id, instance_id`,
       [id, topic, JSON.stringify(variables), retries, now, idempotencyKey, pdi, iid]
     );
     if (ins.rows.length > 0) {
@@ -178,7 +196,8 @@ export class PostgresJobStore {
     // Conflict → the row already exists for this (tenant, key). Return it as-is.
     const sel = await q.query<JobRow>(
       `SELECT id, topic, variables, state, retries,
-              lock_owner, lock_expiry, created_at, available_at
+              lock_owner, lock_expiry, created_at, available_at,
+              process_def_id, instance_id
        FROM choros.job
        WHERE tenant_id = current_setting('choros.tenant_id', false)::uuid
          AND idempotency_key = $1`,
@@ -204,7 +223,8 @@ export class PostgresJobStore {
   async getById(id: string): Promise<Job | undefined> {
     const { rows } = await this.pool.query<JobRow>(
       `SELECT id, topic, variables, state, retries,
-              lock_owner, lock_expiry, created_at, available_at
+              lock_owner, lock_expiry, created_at, available_at,
+              process_def_id, instance_id
        FROM choros.job
        WHERE id = $1`,
       [id]
@@ -218,7 +238,8 @@ export class PostgresJobStore {
   async listByTopic(topic: string): Promise<Job[]> {
     const { rows } = await this.pool.query<JobRow>(
       `SELECT id, topic, variables, state, retries,
-              lock_owner, lock_expiry, created_at, available_at
+              lock_owner, lock_expiry, created_at, available_at,
+              process_def_id, instance_id
        FROM choros.job
        WHERE topic = $1
        ORDER BY created_at ASC`,
@@ -233,7 +254,8 @@ export class PostgresJobStore {
   async listByState(state: JobState): Promise<Job[]> {
     const { rows } = await this.pool.query<JobRow>(
       `SELECT id, topic, variables, state, retries,
-              lock_owner, lock_expiry, created_at, available_at
+              lock_owner, lock_expiry, created_at, available_at,
+              process_def_id, instance_id
        FROM choros.job
        WHERE state = $1
        ORDER BY created_at ASC`,
@@ -248,7 +270,8 @@ export class PostgresJobStore {
   async listByTopicAndState(topic: string, state: JobState): Promise<Job[]> {
     const { rows } = await this.pool.query<JobRow>(
       `SELECT id, topic, variables, state, retries,
-              lock_owner, lock_expiry, created_at, available_at
+              lock_owner, lock_expiry, created_at, available_at,
+              process_def_id, instance_id
        FROM choros.job
        WHERE topic = $1 AND state = $2
        ORDER BY created_at ASC`,
@@ -294,7 +317,8 @@ export class PostgresJobStore {
        FROM candidates
        WHERE j.id = candidates.id
        RETURNING j.id, j.topic, j.variables, j.state, j.retries,
-                 j.lock_owner, j.lock_expiry, j.created_at, j.available_at`,
+                 j.lock_owner, j.lock_expiry, j.created_at, j.available_at,
+                 j.process_def_id, j.instance_id`,
       [topics, now, maxJobs, workerId, lockDurationMs]
     );
     // Sort the returned rows by created_at ASC (UPDATE FROM doesn't guarantee order)

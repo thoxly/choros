@@ -44,6 +44,9 @@ async function seedAgentJob(params: {
   available_at?: number;
   created_at?: number;
   lockExpiry?: number | null;
+  /** T-0677: migration 111 (T-0534) columns — omit to leave them NULL (legacy row). */
+  processDefId?: string | null;
+  instanceId?: string | null;
 }): Promise<string> {
   const id = uuid();
   const now = Date.now();
@@ -51,8 +54,9 @@ async function seedAgentJob(params: {
     await c.query(
       `INSERT INTO choros.job
          (tenant_id, id, topic, variables, state, retries,
-          lock_owner, lock_expiry, created_at, available_at)
-       VALUES ($1,$2,$3,$4,$5,0,NULL,$6,$7,$8)`,
+          lock_owner, lock_expiry, created_at, available_at,
+          process_def_id, instance_id)
+       VALUES ($1,$2,$3,$4,$5,0,NULL,$6,$7,$8,$9,$10)`,
       [
         params.tenantId,
         id,
@@ -62,6 +66,8 @@ async function seedAgentJob(params: {
         params.lockExpiry ?? null,
         params.created_at ?? now,
         params.available_at ?? now,
+        params.processDefId ?? null,
+        params.instanceId ?? null,
       ],
     );
   });
@@ -254,5 +260,110 @@ describe("T-0392 cross-tenant: PostgresAgentJobFetcher under BYPASSRLS migrator 
     expect(batchA!.jobs.map((j) => j.id)).toEqual([jobA]);
     // B's expired job is reclaimed under B's own batch, stamped B.
     expect(batchB!.jobs.some((j) => j.id === jobBExpired && j.variables["__tenantId"] === TENANT_B)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0677 [P0 движок]: PostgresAgentJobFetcher must thread process_def_id /
+// instance_id (migration 111, T-0534) onto the returned Job — this IS the
+// production path behind the live agent dispatch loop (main.ts wires
+// PostgresAgentJobFetcher, NOT PostgresJobStore.fetchAndLock, for real jobs).
+//
+// This is the exact defect T-0638 live-proof diagnosed: a real agentTask job's
+// RETURNING list here omitted process_def_id/instance_id, so every job handed
+// to assembleAgentStepContext → readJobVars() carried job.instanceId===undefined
+// (pre-fix: the field did not exist on Job at all), degrading to instanceId=""
+// downstream and making the defer-completion action 404 DEFER_NOT_ROUTABLE
+// (repro on stand: instance 99573238).
+// ---------------------------------------------------------------------------
+describe("T-0677: PostgresAgentJobFetcher threads process_def_id/instance_id onto Job", () => {
+  it("a job seeded with process_def_id/instance_id is returned with both fields populated (mutation-red pre-fix: was undefined/empty)", async () => {
+    const now = Date.now();
+    const jobId = await seedAgentJob({
+      tenantId: TENANT_A,
+      created_at: now - 100,
+      available_at: now - 100,
+      processDefId: "telLinear",
+      instanceId: "99573238",
+    });
+
+    const batches = await fetcher.fetchAndLockAgentJobs({
+      workerId: WORKER,
+      topics: [AGENT_TOPIC],
+      maxJobs: 10,
+      lockMs: 30_000,
+      nowMs: now,
+    });
+
+    const batchA = batches.find((b) => b.tenantId === TENANT_A);
+    expect(batchA).toBeDefined();
+    const job = batchA!.jobs.find((j) => j.id === jobId);
+    expect(job, "seeded job must appear in tenant A's batch").toBeDefined();
+
+    // The precise assertion this PR fixes: these fields must carry the REAL
+    // Flowable process-instance id / process-definition key captured at
+    // enqueue time, not be absent/undefined/empty.
+    expect(job!.instanceId).toBe("99573238");
+    expect(job!.processDefId).toBe("telLinear");
+  });
+
+  it("backward compatibility: a legacy row with NULL process_def_id/instance_id → fields are null, fetch does not crash", async () => {
+    const now = Date.now();
+    const jobId = await seedAgentJob({
+      tenantId: TENANT_A,
+      created_at: now - 100,
+      available_at: now - 100,
+      // processDefId/instanceId omitted → NULL at the DB level (pre-migration-111
+      // row, or an enqueue call that never captured process scope).
+    });
+
+    const batches = await fetcher.fetchAndLockAgentJobs({
+      workerId: WORKER,
+      topics: [AGENT_TOPIC],
+      maxJobs: 10,
+      lockMs: 30_000,
+      nowMs: now,
+    });
+
+    const batchA = batches.find((b) => b.tenantId === TENANT_A);
+    const job = batchA!.jobs.find((j) => j.id === jobId);
+    expect(job).toBeDefined();
+    expect(job!.instanceId).toBeNull();
+    expect(job!.processDefId).toBeNull();
+  });
+
+  it("each tenant's process_def_id/instance_id are scoped to their own job (no cross-tenant field bleed)", async () => {
+    const now = Date.now();
+    const jobA = await seedAgentJob({
+      tenantId: TENANT_A,
+      created_at: now - 100,
+      available_at: now - 100,
+      processDefId: "procA",
+      instanceId: "inst-A-1",
+    });
+    const jobB = await seedAgentJob({
+      tenantId: TENANT_B,
+      created_at: now - 100,
+      available_at: now - 100,
+      processDefId: "procB",
+      instanceId: "inst-B-1",
+    });
+
+    const batches = await fetcher.fetchAndLockAgentJobs({
+      workerId: WORKER,
+      topics: [AGENT_TOPIC],
+      maxJobs: 10,
+      lockMs: 30_000,
+      nowMs: now,
+    });
+
+    const batchA = batches.find((b) => b.tenantId === TENANT_A);
+    const batchB = batches.find((b) => b.tenantId === TENANT_B);
+    const foundA = batchA!.jobs.find((j) => j.id === jobA);
+    const foundB = batchB!.jobs.find((j) => j.id === jobB);
+    expect(foundA!.instanceId).toBe("inst-A-1");
+    expect(foundA!.processDefId).toBe("procA");
+    expect(foundB!.instanceId).toBe("inst-B-1");
+    expect(foundB!.processDefId).toBe("procB");
   });
 });

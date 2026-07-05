@@ -199,6 +199,127 @@ describe("assembleAgentStepContext", () => {
 });
 
 // ---------------------------------------------------------------------------
+// T-0677 — readJobVars() sources instanceId/procKey from job.instanceId /
+// job.processDefId (migration 111, T-0534), NOT solely from job.variables.
+//
+// RED before the fix: readJobVars() read ONLY from `variables`, and the live
+// agent-dispatch fetchers (pgJobStore.fetchAndLock / agent-dispatch-loop.ts's
+// PostgresAgentJobFetcher) never populated `variables.instanceId` — that key
+// comes from Flowable engine metadata (ExternalTask.processInstanceId), not a
+// BPMN business variable. A job shaped like the ACTUAL live-proof T-0638
+// repro (instanceId/processDefId on the Job object, NOT in variables) produced
+// ctx.instanceId === "" pre-fix. This is the exact defect the PR fixes.
+// ---------------------------------------------------------------------------
+describe("assembleAgentStepContext — T-0677 job.instanceId/processDefId threading", () => {
+  /** A job shaped like a REAL fetchAndLock/rowToJob result: no instanceId/procKey
+   * inside `variables` at all (only what the bridge/business step actually sets),
+   * but WITH the top-level instanceId/processDefId columns (migration 111). */
+  function makeLiveShapedJob(over: Partial<Job> = {}): Job {
+    return {
+      id: "job-live-1",
+      topic: DEFAULT_AGENT_TOPIC,
+      variables: {
+        __tenantId: TENANT,
+        // NOTE: deliberately NO instanceId/procKey key here — mirrors the real
+        // enqueue path (externalTaskBridge.ts passes Flowable engine metadata
+        // as enqueue()'s positional processDefId/instanceId args, not as a
+        // variables entry).
+        agentEmployeeId: AGENT,
+        roleId: ROLE,
+        externalTaskId: "ext-live-1",
+        fields: { amount: 100 },
+      },
+      state: JobState.LOCKED,
+      retries: 0,
+      lockOwner: "agent-dispatcher",
+      lockExpiry: NOW + 30_000,
+      createdAt: NOW,
+      available_at: NOW,
+      ...over,
+    };
+  }
+
+  it("uses job.instanceId/job.processDefId when variables carries no instanceId (mutation-red pre-fix)", async () => {
+    const client = fakeContextClient();
+    const job = makeLiveShapedJob({
+      instanceId: "99573238",
+      processDefId: "telLinear",
+    });
+    const ctx = await assembleAgentStepContext(client, job, assembleDeps(), NOW);
+
+    // Pre-fix, this was "" (readJobVars only looked at job.variables, which has
+    // no instanceId key on this fixture) — the exact defect diagnosed by T-0638
+    // live-proof (repro instance 99573238).
+    expect(ctx.instanceId).toBe("99573238");
+    expect(ctx.procKey).toBe("telLinear");
+  });
+
+  it("falls back to job.variables when job.instanceId/processDefId are absent (legacy job, backward-compat)", async () => {
+    const client = fakeContextClient();
+    // No top-level instanceId/processDefId (pre-migration-111 job, or a job whose
+    // enqueue path never captured process scope) — variables carries the legacy
+    // convention keys instead. Must not crash; must resolve from variables.
+    const job = makeLiveShapedJob({
+      variables: {
+        __tenantId: TENANT,
+        instanceId: "legacy-inst-1",
+        procKey: "legacyProc",
+        agentEmployeeId: AGENT,
+        roleId: ROLE,
+        externalTaskId: "ext-legacy-1",
+        fields: {},
+      },
+      instanceId: undefined,
+      processDefId: undefined,
+    });
+    const ctx = await assembleAgentStepContext(client, job, assembleDeps(), NOW);
+
+    expect(ctx.instanceId).toBe("legacy-inst-1");
+    expect(ctx.procKey).toBe("legacyProc");
+  });
+
+  it("job.instanceId=null (explicit DB NULL, migration 111 nullable column) does not crash — falls back cleanly", async () => {
+    const client = fakeContextClient();
+    const job = makeLiveShapedJob({
+      variables: {
+        __tenantId: TENANT,
+        agentEmployeeId: AGENT,
+        roleId: ROLE,
+        externalTaskId: "ext-null-1",
+        fields: {},
+      },
+      instanceId: null,
+      processDefId: null,
+    });
+    const ctx = await assembleAgentStepContext(client, job, assembleDeps(), NOW);
+
+    // No instanceId anywhere (neither column nor variables) → "" is the honest,
+    // safe-degrade value (steers the motor toward defer, per readJobVars' doc).
+    expect(ctx.instanceId).toBe("");
+    expect(ctx.procKey).toBe("");
+  });
+
+  it("job.instanceId (real column) wins over a conflicting legacy variables.instanceId", async () => {
+    const client = fakeContextClient();
+    const job = makeLiveShapedJob({
+      variables: {
+        __tenantId: TENANT,
+        instanceId: "stale-legacy-value",
+        agentEmployeeId: AGENT,
+        roleId: ROLE,
+        externalTaskId: "ext-2",
+        fields: {},
+      },
+      instanceId: "authoritative-999",
+      processDefId: "telLinear",
+    });
+    const ctx = await assembleAgentStepContext(client, job, assembleDeps(), NOW);
+
+    expect(ctx.instanceId).toBe("authoritative-999");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // runAgentDispatchOnce — the keystone happy-path (dormant → defer → step closes)
 // ---------------------------------------------------------------------------
 

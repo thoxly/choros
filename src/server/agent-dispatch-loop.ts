@@ -339,6 +339,13 @@ export class PostgresAgentJobFetcher implements AgentJobFetcher {
           lock_expiry: string | null;
           created_at: string;
           available_at: string;
+          // T-0677: process_def_id/instance_id (migration 111, T-0534). Previously
+          // omitted from this hand-rolled RETURNING list — the production cause of
+          // agent-step-context.ts's readJobVars() always seeing instanceId="" (this
+          // fetcher, NOT PostgresJobStore.fetchAndLock, is what backs the live
+          // agent dispatch loop wired in main.ts).
+          process_def_id: string | null;
+          instance_id: string | null;
         }>(
           `WITH candidates AS (
              SELECT id FROM choros.job
@@ -361,7 +368,8 @@ export class PostgresAgentJobFetcher implements AgentJobFetcher {
            WHERE j.id = candidates.id
              AND j.tenant_id = $6
            RETURNING j.tenant_id, j.id, j.topic, j.variables, j.state, j.retries,
-                     j.lock_owner, j.lock_expiry, j.created_at, j.available_at`,
+                     j.lock_owner, j.lock_expiry, j.created_at, j.available_at,
+                     j.process_def_id, j.instance_id`,
           [
             args.topics,
             args.nowMs,
@@ -389,6 +397,10 @@ export class PostgresAgentJobFetcher implements AgentJobFetcher {
           lockExpiry: r.lock_expiry !== null ? Number(r.lock_expiry) : undefined,
           createdAt: Number(r.created_at),
           available_at: Number(r.available_at),
+          // T-0677: thread process_def_id/instance_id from the row (migration 111)
+          // onto the Job object so readJobVars() can read the authoritative DB value.
+          processDefId: r.process_def_id ?? null,
+          instanceId: r.instance_id ?? null,
         }));
       } catch {
         await client.query("ROLLBACK").catch(() => {/* swallow */});
