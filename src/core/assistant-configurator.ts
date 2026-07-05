@@ -54,6 +54,7 @@ import {
   type RegistryDefCandidate,
   type RelationCascadeDecision,
 } from "./relation-cascade.js";
+import { generateSlugFromName } from "./slug-generator.js";
 import type { ChatLlmRequest, ChatLlmResult, ChatToolCall } from "./llm-port.js";
 // T-0600: canonical, jargon-free error text for a caught LLM failure — never
 // echo the raw err.message (may embed a provider's raw JSON body).
@@ -678,25 +679,9 @@ function processToolCall(
     // an honest blocked message rather than a 500 at the DB layer.
     // -----------------------------------------------------------------------
     case "create_application": {
-      const appSlug = typeof args["appSlug"] === "string" ? args["appSlug"] : "";
       const appDisplayName =
         typeof args["appDisplayName"] === "string" ? args["appDisplayName"].trim() : "";
 
-      if (!CONFIGURATOR_SLUG_RE.test(appSlug)) {
-        const blocked: BlockedOp = {
-          kind: "pending_human_confirm",
-          description:
-            `create_application: некорректный slug приложения «${appSlug}» ` +
-            `(нужны строчные латиница/цифры/дефис, 1–64 символа).`,
-          toolName: call.name,
-          requiredAction: "Уточните корректный slug приложения и повторите.",
-        };
-        return {
-          blocked,
-          changelogLine: `⚠ [ЗАБЛОКИРОВАНО] create_application: некорректный slug «${appSlug}»`,
-          toolResultContent: `error: invalid appSlug '${appSlug}'`,
-        };
-      }
       if (appDisplayName.length === 0) {
         const blocked: BlockedOp = {
           kind: "pending_human_confirm",
@@ -710,6 +695,17 @@ function processToolCall(
           toolResultContent: `error: empty appDisplayName`,
         };
       }
+
+      // T-0650 [столп 5 / UX-study §7]: the assistant does not have to invent a
+      // machine-shaped slug — it uses the SAME generator the human-facing
+      // SlugField mirrors (src/core/slug-generator.ts). A missing/invalid
+      // appSlug arg auto-derives from appDisplayName instead of blocking the
+      // operation with "please provide a valid slug". An EXPLICIT valid slug
+      // (the LLM tool-called with one) is still honored as before.
+      const rawAppSlug = typeof args["appSlug"] === "string" ? args["appSlug"] : "";
+      const appSlug = CONFIGURATOR_SLUG_RE.test(rawAppSlug)
+        ? rawAppSlug
+        : generateSlugFromName(appDisplayName);
 
       // Section defaults to the application's own slug/name when not specified.
       const sectionSlug =
