@@ -1,0 +1,43 @@
+{
+  "task_id": "T-0616",
+  "status": "pr_open",
+  "branch": "task/T-0616-proc-key-fallback",
+  "pr_url": "local:task/T-0616-proc-key-fallback",
+  "summary": "Два nit-фикса из независимого ревью T-0614 (docs/review/T-0614.review.json, findings F-1/F-2 — не блокировали мерж, зафиксированы как follow-up долг). F-2 [анти-кейс]: при отсутствии proc_key в payload (legacy/битая строка) procKey дефолтился к КОНКРЕТНОМУ ключу 'telLinear' (export const DEFAULT_PROC_KEY = 'telLinear', src/http/process-projection.ts) → definitionName резолвился в КОНКРЕТНОЕ имя 'Канонический линейный ТЭЛ' через fallbackDefinitionName (src/core/process-catalog-view.ts), которая спецкейсила именно эту строку — 'не знаю ключ → значит ТЭЛ', микро-кейс-хардкод. Исправлено на двух концах: (1) fallbackDefinitionName больше не спецкейсит НИ ОДИН ключ — всегда честно эхоит входной processKey (для telLinear в т.ч. — поведение теперь одинаково для ВСЕХ ключей без modeler-строки); (2) DEFAULT_PROC_KEY меняет ЗНАЧЕНИЕ с кейс-литерала 'telLinear' на нейтральный синтетический ключ 'process:unknown' (не денылист-литерал, не имя никакого реального процесса). F-1 [coverage-gap]: resolveDefinitionNames (src/http/process-projection.ts) защищён ДВАЖДЫ рантайм (withTenant SET LOCAL + FORCE RLS на choros.process_definition, миграция 074, И явный WHERE tenant_id=$1), но НИ ОДИН тест не пинил tenant-scope — мутационная проба ревьюера (снять WHERE) оставляла зелёными и unit-тесты (fake-пул матчит по тексту запроса, игнорирует WHERE), и живой db-тест (T-0282 RLS-тесты не сеют choros.process_definition → resolveDefinitionNames всегда бьёт в fallback-ветку, modeler-резолв не упражняется). Добавлен двух-тенантный db-тест в ci/checks/db/process-projection.test.ts: ОДИН process_key, РАЗНЫЕ definition.name в тенантах A/B, инстанс стартован ТОЛЬКО в A → listInstanceProjections(A).definitionName === имя A, никогда имя B. Мутационно проверено вживую: снятие WHERE tenant_id=$1 из resolveDefinitionNames роняет именно этот новый тест (проверено, мутация откачена).",
+  "mechanism": {
+    "f2_fallback_name": "src/core/process-catalog-view.ts:fallbackDefinitionName — удалён `if (processKey === \"telLinear\") return \"Канонический линейный ТЭЛ\"`, функция теперь `return processKey` безусловно для любого входа.",
+    "f2_default_proc_key": "src/http/process-projection.ts:345 — export const DEFAULT_PROC_KEY меняет значение с \"telLinear\" на \"process:unknown\" (только значение константы; сама константа и все 7 call-site strField(...,'proc_key', DEFAULT_PROC_KEY) не тронуты — near-unreachable ветка, write-half безусловно пишет proc_key: args.procKey на каждом emit-сайте).",
+    "f2_test_updates": "src/__tests__/process-catalog-view.test.ts (fallbackDefinitionName describe-блок + buildCatalogDefinitions engine-only-key тест) и src/__tests__/processes-live-instances.test.ts (AC-2) обновлены под новое честное поведение — telLinear без modeler-строки теперь эхоит 'telLinear' как имя, не 'Канонический линейный ТЭЛ'.",
+    "f1_db_test": "ci/checks/db/process-projection.test.ts — новый describe(\"T-0616 [F-1] — resolveDefinitionNames is tenant-scoped (regression pin)\") + новый локальный хелпер seedProcessDefDirect (tenant-scoped INSERT под choros_app пулом, зеркалит ci/checks/db/process-catalog.test.ts'ов одноимённый хелпер — не задублирован импортом, т.к. этот файл не импортировал тот модуль ранее). Тест сеет один process_key в двух свежих (freshTenant()) тенантах с разными definition.name, стартует РЕАЛЬНЫЙ инстанс только в тенанте A через appendProcessStarted (канонический writer), утверждает definitionName === имя A / !== имя B.",
+    "anti_case_erosion": "bash ci/checks/anti-case-lock.sh Phase 2: repo-wide code-only 'telLinear' count упал 3→1 (единственный оставшийся — web/src/forms/FormBuilder.jsx:509's placeholder=\"telLinear\" UI-хинт, вне периметра этой задачи); aggregate 18→16. ci/checks/data/anti-case-baseline.json обновлён (записан новый факт-baseline, в духе документированного этим файлом принципа 'erodes, does not grow' — каждая задача, снижающая count, ОБЯЗАНА так же снизить recorded baseline)."
+  },
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true,
+    "build_result": "npx tsc --noEmit — 0 ошибок.",
+    "lint_result": "npx eslint src — 0 errors, 44 pre-existing warnings (no-console, файлы вне дифа этой задачи, не тронуты).",
+    "types_result": "Покрыто npx tsc --noEmit (полный проект, отдельный от lint прогон) — 0 ошибок.",
+    "tests_result": "npx vitest run (root, весь юнит-набор) — 283 файла passed | 2 skipped (285), 5494 passed | 10 skipped (5504), 0 failed. src/__tests__/process-catalog-view.test.ts (7/7, включая обновлённый fallbackDefinitionName-тест) и src/__tests__/processes-live-instances.test.ts (18/18, включая обновлённый AC-2) зелёные.",
+    "fitness_result": "DATABASE_URL=:55432 npm run fitness:db (полный прогон, --no-file-parallelism) — первый прогон поймал 1 таймаут-флейк в ci/checks/db/seed-pack.test.ts (файл НЕ в диффе этой задачи), второй полный прогон поймал 7 таймаут-флейков в ci/checks/db/doc-reconcile.db.test.ts / doc-regen.db.test.ts / doc-summary.db.test.ts (тоже вне диффа — doc_page/doc_log пайплайн, ничего общего с process_definition/audit_event) — воспроизведено под параллельной нагрузкой других worktree на общем PG :55432 (задокументированный паттерн, память choros-run-poehali-w1/w3-2026-07). ci/checks/db/process-projection.test.ts (файл этой задачи) и ci/checks/db/process-catalog.test.ts перепрогнаны СОЛО зелёными: 7/7 и 9/9 соответственно, оба прогона. Мутационная проверка F-1: убрано WHERE tenant_id=$1 AND из resolveDefinitionNames SQL → новый тест T-0616 [F-1] упал (expected 'shared-proc-...' to be 'Имя тенанта A' / получил сырой process_key, оба тенанта дали 0 строк под RLS без явного WHERE) — мутация немедленно откачена (git diff чист после отката, файл побайтово восстановлен из бэкапа). bash ci/checks/anti-case-lock.sh — PASS (Phase 1 + Phase 2, telLinear 3→1, aggregate 18→16, все прочие литералы within baseline) + --self-test PASS (все детекторы функциональны). bash ci/checks/detel-literal-baseline.sh — PASS (aggregate 4<7, ни один литерал не регрессировал; этот гейт не отслеживает telLinear — не затронут напрямую). bash ci/checks/detel-base-task-from-engine.sh — PASS (оба call-site по-прежнему threading+live-engine-read, не тронуты этой задачей)."
+  },
+  "files_changed": [
+    "T-0616.spec.md",
+    "docs/design/ADR-T0616-proc-key-fallback.md",
+    "src/core/process-catalog-view.ts",
+    "src/http/process-projection.ts",
+    "src/__tests__/process-catalog-view.test.ts",
+    "src/__tests__/processes-live-instances.test.ts",
+    "ci/checks/db/process-projection.test.ts",
+    "ci/checks/data/anti-case-baseline.json",
+    "docs/handoff/T-0616.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [
+    "Worktree provisioned без node_modules — npm ci --maxsockets=3 (нет флейка на этом прогоне, установилось с первой попытки).",
+    "fitness:db под параллельной нагрузкой других worktree-сессий на общем PG (:55432) флейкует таймаутами в НЕ связанных с этой задачей файлах (seed-pack.test.ts / doc-reconcile / doc-regen / doc-summary) — подтверждённый пред-существующий паттерн (память choros-run-poehali-w1/w3-2026-07: 'фитнес:db под параллельным агентом флейкает — упавшее перепроверять соло'); файлы этой задачи (process-projection.test.ts / process-catalog.test.ts) перепрогнаны соло зелёными оба раза, регрессии от этой задачи не подтверждены.",
+    "Мутационная проба F-1 (снять WHERE tenant_id=$1) дала неожиданный конкретный результат — оба тенанта увидели 0 строк definitionName (не утечку имени B в A, как можно было бы наивно ожидать от простого снятия WHERE), потому что RLS USING-предикат всё ещё активен на choros_app-соединении даже без явного WHERE в SQL-тексте; тест всё равно ловит регресс (definitionName падает до сырого process_key вместо ожидаемого 'Имя тенанта A'), так что регресс-пин подтверждён рабочим, просто механизм провала — не прямая утечка, а полная деградация резолва до fallback-ветки под RLS-масштабированием без сопутствующего WHERE."
+  ]
+}
