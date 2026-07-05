@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0649",
+  "verdict": "approved",
+  "gate_seen": {
+    "green": true,
+    "red_rules": []
+  },
+  "themes_checked": ["light", "dark"],
+  "pattern_sources": [
+    {
+      "element": "DateInput (date/datetime presentation, field-renderer.jsx)",
+      "pattern": "patterns/forms/date-input",
+      "mcp_ref": "uxpatterns-MCP get_implementation_checklist(patterns/forms/date-input)",
+      "applied": true
+    },
+    {
+      "element": "PersonPicker search+select (field-renderer.jsx)",
+      "pattern": "patterns/forms/autocomplete",
+      "mcp_ref": "uxpatterns-MCP search_patterns(combobox autocomplete search select)",
+      "applied": false
+    }
+  ],
+  "findings": [
+    {
+      "id": "T-0649-N1",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/forms/field-renderer.jsx — PersonPicker/RelationPickerField search+select pair",
+      "issue": "Поиск сотрудника/связи реализован как отдельный текстовый input + нативный <select> (не ARIA-combobox с role=\"combobox\"/listbox/стрелками — паттерн uxpatterns-MCP 'autocomplete' рекомендует именно listbox+arrow-nav). Это ДОСЛОВНО существующая конвенция кодовой базы (RelationPickerField был таким же ДО T-0649) — не регресс этой задачи.",
+      "suggestion": "Не блокирует T-0649. Если решится единая замена на настоящий combobox — заводить отдельной задачей на ОБА компонента разом (PersonPicker+RelationPickerField), не точечно."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    { "ac": "MoneyInput: ₽ внутри поля, разряды-разделители при вводе, копейки не теряются (150000.5 → \"150 000,5\" в поле; formatCellValue → \"150 000,50 ₽\")", "covered": true },
+    { "ac": "Целый рубль без копеек не захламляется (\"150 000 ₽\", не \"150 000,00 ₽\")", "covered": true },
+    { "ac": "DateInput: дд.мм.гггг вместо сырого ISO — в форме (overlay), в списке/канбане/деталке (formatCellValue → formatShortDate, один источник форматирования на все три места)", "covered": true },
+    { "ac": "datetime-тип: новый скаляр x-datetime, рендерит datetime-local + дд.мм.гггг чч:мм", "covered": true },
+    { "ac": "x-date в collection-строках переживает round-trip схемы (x-collection-date-fields), рендерится как DateInput, не деградирует в string", "covered": true },
+    { "ac": "PersonPicker: честная ошибка + работающая кнопка «Повторить» (retryTick перезапускает fetchEmployees, не мёртвая кнопка)", "covered": true },
+    { "ac": "Корневой фикс 401: fetchEmployees → fetchWithAuthRetry (auth headers on every call + transient-401 self-heal), не голый fetch", "covered": true },
+    { "ac": "PersonPicker: поиск по имени ИЛИ должности", "covered": true },
+    { "ac": "Дубль-колонка «Создано» убрана (рендерится один раз через columns, hardcoded fallback только если view её скрыл)", "covered": true },
+    { "ac": "Тема/токены: контролы только на --chs-* + .chs-input/.chs-label, без хардкод-цветов (G2/G6 gates green)", "covered": true },
+    { "ac": "Клавиатурный доступ DateInput сохранён (нативный input type=date/datetime-local, calendar-picker-indicator не тронут color-стилем)", "covered": true },
+    { "ac": "Мёртвые состояния: пустое money/date поле, PersonPicker loading/error/empty, DateInput пустое значение — все честные, без крашей", "covered": true }
+  ]
+}
