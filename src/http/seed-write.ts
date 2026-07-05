@@ -261,6 +261,16 @@ import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 // Exported (T-0583, additive): src/http/user-mgmt.ts reuses this SAME
 // owner-or-covering-delegable-grant gate for account create/deactivate — the
 // identical check POST /api/employees already runs (N5, no second gate impl).
+//
+// T-0630 (additive): `operation` widened to also accept "read" so the SAME
+// helper gates GET /api/users/accounts (owner or a covering, delegable
+// mgmt_object:employee grant) — no new authority path, no new employee-lookup
+// SQL (D-064/T-0658 discipline: loadAdminContext already carries the T-0658
+// `deactivated_at IS NULL` fail-closed predicate; this file must not grow a
+// 6th parallel authority resolver). `Operation` (grant-lattice.ts) already
+// includes "read" — the lattice/validateAdminDelegation are untouched; only
+// this thin wrapper's parameter type widens. All 8 pre-existing call sites
+// (create/update/delete) are unaffected.
 export function assertOrgObjectAuthority(
   admin: AdminContext,
   mgmtKind:
@@ -268,7 +278,7 @@ export function assertOrgObjectAuthority(
     | "mgmt_object:position"
     | "mgmt_object:employee"
     | "mgmt_object:role",
-  operation: "create" | "update" | "delete",
+  operation: "create" | "update" | "delete" | "read",
   tenantId: string,
   actorId: string,
   nowMs: number,

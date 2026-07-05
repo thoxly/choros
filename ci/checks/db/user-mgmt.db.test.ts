@@ -587,6 +587,125 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
   });
 
   // ---------------------------------------------------------------------
+  // T-0630 [SECURITY]: GET /api/users/accounts previously carried NO
+  // authority gate (only auth) — any authenticated tenant member, owner or
+  // not, got 200 with the full account list (login/name/position/department/
+  // active for every human in the tenant). Adversarial finding on T-0628.
+  // MUTATION-PROVEN RED: before the fix, `plainRes.status` below was 200 —
+  // this test fails on pre-fix code and passes after (owner or a covering,
+  // delegable mgmt_object:employee grant now required, same gate PATCH uses).
+  // ---------------------------------------------------------------------
+  it('T-0630 [SECURITY]: a plain (non-owner, non-granted) tenant member gets 403 NOT_OWNER on GET /api/users/accounts — no list leak', async () => {
+    const t = await registerOne('read-gate-plain');
+    kc.reset();
+
+    // Owner creates at least one account so there IS something to leak if the
+    // gate were absent.
+    const ownerCreate = await postUsers(
+      { tenant_id: t.tenantId, login: `readgate-target-${Date.now()}`, email: `readgate-target-${Date.now()}@example.com`, password: 'password12345', display_name: 'Read Gate Target' },
+      t.ownerSlug,
+    );
+    expect(ownerCreate.status, JSON.stringify(ownerCreate.json)).toBe(201);
+
+    // Seed a plain human employee with NO mgmt_object:employee grant/role,
+    // no role_assignment at all — the exact adversarial shape from T-0628.
+    const plainSlug = `plain-read-${Date.now()}`;
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      await c.query(
+        `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), NULL, 'human', $2, 'Plain Reader Attempt', $3, $3)`,
+        [t.tenantId, plainSlug, Date.now()],
+      );
+      await c.query('COMMIT');
+    });
+
+    const plainRes = await getAccounts(plainSlug);
+    expect(plainRes.status, JSON.stringify(plainRes.json)).toBe(403);
+    expect(plainRes.json?.error?.code ?? plainRes.json?.code).toBe('NOT_OWNER');
+    // The list body must never leak alongside a 403 — no `accounts` key present.
+    expect(plainRes.json?.accounts).toBeUndefined();
+
+    // Sanity: the SAME tenant's owner still sees the list (no over-correction).
+    const ownerRes = await getAccounts(t.ownerSlug);
+    expect(ownerRes.status, JSON.stringify(ownerRes.json)).toBe(200);
+    expect(Array.isArray(ownerRes.json.accounts)).toBe(true);
+    expect(ownerRes.json.accounts.length).toBeGreaterThanOrEqual(2); // owner + the created target
+  });
+
+  it('T-0630 [SECURITY]: a non-owner holder of a delegable mgmt_object:employee grant gets 200 on GET /api/users/accounts (read-parity with write)', async () => {
+    const t = await registerOne('read-gate-granted');
+    kc.reset();
+
+    const ownerCreate = await postUsers(
+      { tenant_id: t.tenantId, login: `readgate-grantee-target-${Date.now()}`, email: `readgate-grantee-target-${Date.now()}@example.com`, password: 'password12345', display_name: 'Grantee Target' },
+      t.ownerSlug,
+    );
+    expect(ownerCreate.status, JSON.stringify(ownerCreate.json)).toBe(201);
+
+    // Seed a human employee, then grant them a role carrying a confirmed,
+    // in-window, delegable mgmt_object:employee grant — the SAME shape
+    // assertOrgObjectAuthority's covering-grant branch requires (mirrors the
+    // role-constructor-admin seeding pattern documented in seed-write.ts).
+    const granteeSlug = `grantee-${Date.now()}`;
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+
+      const { rows: employeeRows } = await c.query<{ id: string }>(
+        `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), NULL, 'human', $2, 'Employee Grantee', $3, $3)
+         RETURNING id`,
+        [t.tenantId, granteeSlug, Date.now()],
+      );
+      const granteeId = employeeRows[0]!.id;
+
+      const { rows: ownerRoleRows } = await c.query<{ org_scope: unknown }>(
+        `SELECT ra.org_scope
+           FROM choros.role_assignment ra
+           JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+          WHERE ra.tenant_id = $1 AND r.slug = 'tenant-owner' LIMIT 1`,
+        [t.tenantId],
+      );
+      const scope = ownerRoleRows[0]!.org_scope;
+
+      const { rows: roleRows } = await c.query<{ id: string }>(
+        `INSERT INTO choros.role (tenant_id, id, slug, display_name, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, 'Employee Reader Role', $3, $3)
+         RETURNING id`,
+        [t.tenantId, `employee-reader-${Date.now()}`, Date.now()],
+      );
+      const roleId = roleRows[0]!.id;
+
+      await c.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, operation, scope, delegable,
+            granted_by, created_at)
+         VALUES ($1, gen_random_uuid(), $2, 'mgmt_object:employee', 'read', $3::jsonb, true, $4, $5)`,
+        [t.tenantId, roleId, JSON.stringify(scope), t.ownerSlug, Date.now()],
+      );
+
+      await c.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, $3, $4::jsonb,
+                 NULL, NULL, 'seed', 'seed', NULL, 'seed', NULL, 0, 0)`,
+        [t.tenantId, granteeId, roleId, JSON.stringify(scope)],
+      );
+      await c.query('COMMIT');
+    });
+
+    const res = await getAccounts(granteeSlug);
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(Array.isArray(res.json.accounts)).toBe(true);
+    expect(res.json.accounts.some((a: any) => a.employee_id === ownerCreate.json.employee_id)).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------
   // AC-11/AC-12 (tester-added, T-0583 TEST phase): the plaintext password
   // must never surface in ANY HTTP response body — success AND error paths
   // (create-409, create-503, create-201, list, patch) — and never in the
@@ -988,5 +1107,38 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     expect(msg).not.toContain('email');
     // KC was reached (guard passed for a non-seed login) then reported the clash.
     expect(kc.createCallCount).toBe(1);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0630 (minor): EMAIL_TAKEN's 409 text softened. admin-port.ts's own
+  // comment admits EMAIL_TAKEN is the DEFAULT mapping "when the body is
+  // absent/unparseable/ambiguous" — a login clash can surface under this
+  // same code, so the message must not claim specifically "email already
+  // exists" (misdirects the owner into fixing the wrong field).
+  // ---------------------------------------------------------------------
+  it('T-0630 (minor): EMAIL_TAKEN → 409 with a softened "login or email" text, not a misleading "email already exists" claim', async () => {
+    const t = await registerOne('email-taken-text');
+    kc.reset();
+    kc.failOnCreate = true; // next createHumanUser throws EMAIL_TAKEN
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `email-taken-text-${Date.now()}`,
+        email: `email-taken-text-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Email Taken Text',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('EMAIL_TAKEN');
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+    // Must mention BOTH possible fields (honest about the ambiguity), not
+    // assert specifically that email is the one that collided.
+    expect(msg).toContain('логин');
+    expect(msg).toContain('email');
+    expect(msg).not.toBe('an account with that email already exists');
   });
 });

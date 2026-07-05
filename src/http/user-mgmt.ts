@@ -13,6 +13,14 @@
  *   GET    /api/users/accounts      — list human accounts of the actor's tenant
  *   PATCH  /api/users/:employee_id  — deactivate/reactivate an account
  *
+ * T-0630 [security] fix: GET /api/users/accounts previously carried NO
+ * authority check (only auth — any authenticated tenant member, owner or
+ * not, got 200 with the full account list). It now runs the SAME
+ * loadAdminContext + assertOrgObjectAuthority(mgmt_object:employee, "read")
+ * seam POST/PATCH already use — owner or a covering, delegable
+ * mgmt_object:employee grant, no new authority path (D-064/T-0658
+ * discipline: this file must not grow a 6th parallel authority resolver).
+ *
  * KC-first + compensation (N4, mirrors src/core/register.ts): the KC user is
  * created BEFORE any DB write; if the DB transaction then fails, the KC user
  * is best-effort deleted (no KC-sibling orphan). EMAIL_TAKEN → 409; KC
@@ -320,7 +328,13 @@ export function registerUserMgmtRoutes(
         throw new HttpError(409, "LOGIN_TAKEN", "this login is already taken — choose a different login");
       }
       if (code === "EMAIL_TAKEN") {
-        throw new HttpError(409, "EMAIL_TAKEN", "an account with that email already exists");
+        // T-0630: softened from "an account with that email already exists".
+        // admin-port.ts's own comment admits EMAIL_TAKEN is the DEFAULT
+        // mapping "when the body is absent/unparseable/ambiguous" — a login
+        // clash can surface as this same code when Keycloak's 409 body does
+        // not disambiguate. Naming only "email" here misdirects the owner
+        // into fixing the wrong field when the real collision is the login.
+        throw new HttpError(409, "EMAIL_TAKEN", "логин или email уже заняты — выберите другие значения");
       }
       // Defense-in-depth: validateCreateBody already rejects a non-email
       // `email` before this call, so a real KC realm should never 400 here in
@@ -409,10 +423,28 @@ export function registerUserMgmtRoutes(
   // -------------------------------------------------------------------------
   // GET /api/users/accounts — tenant-scoped list of human accounts.
   // 200: { accounts: [{ employee_id, login, display_name, position, department, active }] }
+  //
+  // T-0630 [security] fix — this route was missing the authority gate that
+  // POST/PATCH below already carry: an authenticated-but-unauthorized tenant
+  // member (no mgmt_object:employee grant, not owner) could list every
+  // account in the tenant (login/name/position/department/active) with a
+  // plain fetch (adversarial finding on T-0628). Gate: owner OR a covering,
+  // delegable mgmt_object:employee grant — the SAME loadAdminContext +
+  // assertOrgObjectAuthority seam PATCH uses just below (no new authority
+  // path; loadAdminContext carries the T-0658 deactivated_at IS NULL
+  // fail-closed predicate already).
   // -------------------------------------------------------------------------
   router.register("GET", "/api/users/accounts", withAuth(async (req, res) => {
     const actorId = await extractActor(req, pool);
     const tenantId = await resolveActorTenant(actorId);
+
+    const admin = await loadAdminContext(pool, tenantId, actorId, nowMs());
+    const oracle = await loadTenantOrgAncestry(pool, tenantId);
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:employee", "read", tenantId, actorId, nowMs(),
+      "owner or mgmt_object:employee grant required to read user accounts",
+      oracle,
+    );
 
     const client = await pool.connect();
     let rows: Array<{
