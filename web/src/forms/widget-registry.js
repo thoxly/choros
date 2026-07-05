@@ -64,6 +64,30 @@ export const WIDGET_COMPAT_TABLE = Object.freeze({
   relation: ['record-picker'],
   collection: ['table'],
   computed: ['readout'],
+  // T-0678 (P0, capstone T-0629): the 7 live-schema field types parseRecordSchema
+  // (apps-schema.js) ALSO emits but that were MISSING here — so their `field`
+  // node had NO compatible widget (defaultWidgetForType → 'text' fallback →
+  // isWidgetCompatible(type,'text') === false → validateDocument V-WIDGET failed
+  // → FormDesigner «Сохранить» hard-disabled + the Inspector widget-picker
+  // rendered EMPTY (WIDGET_COMPAT[type] || [])). A form with a `money` field
+  // (the base CRM «Сделка».сумма) could not be saved at all.
+  //
+  // The FIRST widget of each list is defaultWidgetForType (nodeForField stamps
+  // it). Every widget listed here is one the renderer HONORS: FormDocumentRenderer
+  // .widgetToPresentation maps money→number, datetime→(undefined, so the schema
+  // TYPE drives the control) etc., and FieldControl (field-renderer.jsx) then
+  // resolves the ACTUAL control from the field's schema TYPE — money→MoneyInput,
+  // datetime→DateInput(withTime), email→<input type=email>, url→<input type=url>,
+  // person→PersonPicker, multi-select→checkbox group, file→FileField (all shipped
+  // in T-0509/T-0512/T-0516/T-0579/T-0649). No widget below leads to a control the
+  // renderer can't draw (verified: schema type wins in resolveFieldContract).
+  money: ['money', 'number'],
+  datetime: ['datetime', 'date'],
+  email: ['email', 'text'],
+  url: ['url', 'text'],
+  person: ['person'],
+  'multi-select': ['multi-select'],
+  file: ['file'],
 });
 
 /**
@@ -140,9 +164,14 @@ const DESCRIPTOR_META = [
   },
   {
     id: 'field', class: 'data-bound', floor: 1, dataSource: 'current-record',
-    contractKinds: ['scalar', 'enum'],
+    // T-0678: a `field` node hosts EVERY live-schema field type that
+    // nodeTypeForFieldType routes to a `field` node — the flat scalar/enum
+    // contracts PLUS the flat structural scalars money/multi-select/person/file
+    // (relation/collection/computed route to relation/table/readout nodes, NOT
+    // here). This metadata mirrors validateDocument's V-CONTRACT field-node gate.
+    contractKinds: ['scalar', 'enum', 'money', 'multi-select', 'person', 'file'],
     paletteGroup: 'Данные', icon: '🔤', label: 'Поле',
-    summary: 'Скалярное поле (текст, число, дата, список).', data: true, contract: 'scalar',
+    summary: 'Поле записи (текст, число, дата, сумма, список, сотрудник, файл…).', data: true, contract: 'scalar',
   },
   {
     id: 'table', class: 'data-bound', floor: 1, dataSource: 'current-record',

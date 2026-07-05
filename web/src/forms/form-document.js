@@ -491,9 +491,21 @@ export function validateDocument(doc, fields) {
     // V-CONTRACT: the palette node's contract must match the field's contract.
     const paletteEntry = PALETTE[type];
     const fieldContract = resolveFieldContract({ type: schemaField.type, options: schemaField.options }).contractKind;
-    // field nodes accept scalar OR enum (both flat scalar contracts).
+    // A `field` node hosts every live-schema field type that nodeTypeForFieldType
+    // routes to a `field` node — i.e. the flat scalar/enum contracts PLUS the flat
+    // structural scalars (money/multi-select/person/file). The three types that
+    // route AWAY from a field node (relation→relation, collection→table,
+    // computed→readout) each keep their own node-type contract gate below.
+    //
+    // T-0678 (P0, capstone T-0629): this used to be a hardcoded `scalar || enum`
+    // whitelist, which REJECTED a `money`/`multi-select`/`person`/`file` field on a
+    // `field` node even though nodeForField/nodeTypeForFieldType had ALREADY placed
+    // it there — the "Узел «Поле» нельзя привязать к полю (тип «money»)" the
+    // capstone hit live. Gating on nodeTypeForFieldType keeps the "where does this
+    // field go" and "what may this node host" answers from EVER drifting apart
+    // (ONE source of truth, not two parallel literals).
     const contractOk = type === 'field'
-      ? (fieldContract === 'scalar' || fieldContract === 'enum')
+      ? nodeTypeForFieldType(schemaField.type) === 'field'
       : fieldContract === paletteEntry.contract;
     if (!contractOk) {
       errors.push({
