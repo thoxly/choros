@@ -134,6 +134,24 @@ type InboxItem = {
   step: string;
   inst: string;
   /**
+   * T-0683 (D-064, wave-5 human-layer): the HUMAN-READABLE process-definition
+   * name for this task's instance (from InstanceInboxTask.processName, resolved
+   * batched from choros.process_definition.name — reused resolveDefinitionNames).
+   * The inbox «ПРОЦЕСС» column renders THIS as the primary identifier instead of
+   * the raw instance-UUID (`inst`). Additive optional — absent on seed fixtures
+   * (whose `inst` is a human "INS-7731" label, already non-UUID) and on defer/
+   * agent rows that have no process definition; the client's ProcessRef falls
+   * back to the task step/name for those, never to a bare machine key.
+   */
+  processName?: string;
+  /**
+   * T-0683: originating business record id (present when the process was started
+   * by an on_create trigger). The client's RecordRef lazily resolves this to the
+   * record's TITLE — the human disambiguator between two instances of the same
+   * process. Additive optional — absent for manually-started / seed / defer rows.
+   */
+  recordId?: string;
+  /**
    * Role/position the task is ADDRESSED TO. Invariant: a task targets a role, not a
    * specific human. "Из пула" claim eligibility is computed from this, not from execName.
    */
@@ -895,6 +913,12 @@ async function findInboxItems(
         name: row.name,
         step: row.step,
         inst: row.inst,
+        // T-0683 (D-064, wave-5): carry the HUMAN process name + originating record
+        // id so the inbox «ПРОЦЕСС» column shows a human identifier, not the raw
+        // instance-UUID. processName is always present on an instance task (the
+        // projection guarantees a fallback name); recordId only when on_create-started.
+        processName: row.processName,
+        ...(row.recordId !== undefined ? { recordId: row.recordId } : {}),
         role: row.role,
         execType: "human",
         pool: true,
@@ -1319,6 +1343,11 @@ export function registerInboxRoutes(
             name: instanceTaskForDetail.name,
             step: instanceTaskForDetail.step,
             inst: instanceTaskForDetail.inst,
+            // T-0683: human process name + record id for the detail drawer's ProcessRef.
+            processName: instanceTaskForDetail.processName,
+            ...(instanceTaskForDetail.recordId !== undefined
+              ? { recordId: instanceTaskForDetail.recordId }
+              : {}),
             role: instanceTaskForDetail.role,
             pool: true,
             sla: { min: 60, left: 60 }, // default SLA for instance tasks (no per-task SLA yet)

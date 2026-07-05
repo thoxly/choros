@@ -357,3 +357,34 @@ describe('screen-inbox — T-0665-e2e P0 fix: fields=[] no longer masks a valid 
     expect(hasLayoutIdx).toBeLessThan(guardIdx);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0683 (D-064, wave-5 human-layer; capstone T-0647 finding): the inbox
+// «ПРОЦЕСС» column must render a HUMAN process reference (ProcessRef), NOT the
+// raw instance-UUID as a bare MonoId. These source-level pins fail on a revert
+// to the pre-fix `<td><MonoId>{t.inst}</MonoId></td>`.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0683: «ПРОЦЕСС» column uses ProcessRef, not raw UUID', () => {
+  it('imports ProcessRef from the component kit', () => {
+    expect(src).toMatch(/import\s*\{[^}]*\bProcessRef\b[^}]*\}\s*from\s*'\.\.\/components\/components\.jsx'/s);
+  });
+
+  it('the list table row renders <ProcessRef .../> with processName + inst + recordId', () => {
+    // Scope to the table body row-map so we assert the LIST column specifically.
+    const rowsIdx = src.indexOf('{rows.map((t) => {');
+    expect(rowsIdx).toBeGreaterThan(-1);
+    const rowsBody = src.slice(rowsIdx, src.indexOf('</table>', rowsIdx));
+    expect(rowsBody).toMatch(/<ProcessRef\b/);
+    expect(rowsBody).toMatch(/processName=\{t\.processName\}/);
+    expect(rowsBody).toMatch(/inst=\{t\.inst\}/);
+    expect(rowsBody).toMatch(/recordId=\{t\.recordId\}/);
+  });
+
+  it('MUTATION pin: the raw `<MonoId>{t.inst}</MonoId>` primary is GONE from the list row', () => {
+    // The exact pre-fix construct the capstone flagged. A revert brings it back
+    // and this test goes red.
+    const rowsIdx = src.indexOf('{rows.map((t) => {');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('</table>', rowsIdx));
+    expect(rowsBody).not.toMatch(/<MonoId>\{t\.inst\}<\/MonoId>/);
+  });
+});

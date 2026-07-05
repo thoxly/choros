@@ -206,6 +206,26 @@ export interface InstanceInboxTask {
   readonly inst: string;
   /** Process-definition key. */
   readonly procKey: string;
+  /**
+   * T-0683 (D-064, wave-5 human-layer): the HUMAN-READABLE name of this task's
+   * process DEFINITION — resolved from choros.process_definition.name (latest
+   * version for procKey, tenant-scoped) via the SAME resolveDefinitionNames batch
+   * already proven for listInstanceProjections (REUSED, not re-hardcoded), or
+   * fallbackDefinitionName(procKey) when no modeler row exists (engine-only defs).
+   * Surfaced so the inbox «ПРОЦЕСС» column can show a human process name as the
+   * PRIMARY identifier instead of the raw instance-UUID (the capstone T-0647
+   * defect: the operator's main screen showed `5ec293d1-77d7-…` as the primary
+   * process key). NEVER empty — the fallback guarantees an honest human string.
+   */
+  readonly processName: string;
+  /**
+   * T-0683: originating business record id (present when the instance was started
+   * by an on_create trigger; read from the process.started/next_task payload's
+   * `record_id`). Absent for processes started outside the record-create path.
+   * The client's RecordRef lazily resolves this to the record's TITLE — the
+   * primary disambiguator between two instances of the same process definition.
+   */
+  readonly recordId?: string;
   /** Epoch-ms the task became available. */
   readonly occurredAt: number;
   /**
@@ -1140,6 +1160,31 @@ export async function listInstanceInboxTasks(
     if (inst) instancesWithNextTask.add(inst);
   }
 
+  // T-0683 (D-064, wave-5 human-layer): resolve the HUMAN process-definition name
+  // for every distinct procKey across the surfaced tasks in ONE batched SELECT
+  // (resolveDefinitionNames — the SAME helper listInstanceProjections already uses,
+  // REUSED here, not re-hardcoded). This lets the inbox «ПРОЦЕСС» column show a
+  // human process name as the PRIMARY identifier instead of the raw instance-UUID.
+  // record_id is read per-row from the payload below (already persisted by
+  // appendProcessStarted / appendNextTaskEvent) — no extra query.
+  const procKeysForRows: string[] = [];
+  for (const row of started) {
+    const p = (row.payload ?? {}) as Record<string, unknown>;
+    procKeysForRows.push(strField(p, "proc_key", DEFAULT_PROC_KEY));
+  }
+  for (const row of nextTaskRows) {
+    const p = (row.payload ?? {}) as Record<string, unknown>;
+    procKeysForRows.push(strField(p, "proc_key", DEFAULT_PROC_KEY));
+  }
+  const definitionNames = await resolveDefinitionNames(pool, tenantId, procKeysForRows);
+  const nameForKey = (procKey: string): string =>
+    definitionNames.get(procKey) ?? fallbackDefinitionName(procKey);
+  // T-0683: read record_id from a payload (present when started via on_create).
+  const recordIdOf = (payload: Record<string, unknown>): string | undefined => {
+    const raw = payload["record_id"];
+    return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+  };
+
   const tasks: InstanceInboxTask[] = [];
 
   // 1. Base process.started rows (hide once approved, OR instance ended, OR
@@ -1157,6 +1202,9 @@ export async function listInstanceInboxTasks(
       step: strField(payload, "task_step", APPROVE_STEP),
       inst,
       procKey: strField(payload, "proc_key", DEFAULT_PROC_KEY),
+      // T-0683: human process name (batched) + originating record id (from payload).
+      processName: nameForKey(strField(payload, "proc_key", DEFAULT_PROC_KEY)),
+      ...(recordIdOf(payload) !== undefined ? { recordId: recordIdOf(payload) } : {}),
       occurredAt: row.occurred_at,
       // T-0571 (BUG-014 fix): base process.started rows no longer assert a literal
       // BPMN defKey — the projection does not know (and a GENERIC process's author
@@ -1193,6 +1241,9 @@ export async function listInstanceInboxTasks(
       step: strField(payload, "task_step", APPROVE_STEP),
       inst,
       procKey: strField(payload, "proc_key", DEFAULT_PROC_KEY),
+      // T-0683: human process name (batched) + originating record id (from payload).
+      processName: nameForKey(strField(payload, "proc_key", DEFAULT_PROC_KEY)),
+      ...(recordIdOf(payload) !== undefined ? { recordId: recordIdOf(payload) } : {}),
       occurredAt: row.occurred_at,
       // T-0443 Fix A: process.next_task payload carries task_def_key set by the engine-drive
       // handler (appendNextTaskEvent writes it). Use it so the approve handler can complete

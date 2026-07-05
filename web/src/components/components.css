@@ -71,6 +71,28 @@
   text-decoration: underline;
 }
 
+/* ---------------- ProcessRef (T-0683) ---------------- */
+.chs-processref {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+.chs-processref__name {
+  font-size: var(--chs-text-sm);
+  color: var(--chs-color-text);
+  font-weight: var(--chs-weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.chs-processref__record {
+  font-size: var(--chs-text-xs);
+  color: var(--chs-color-text-muted);
+}
+
 /* ---------------- Mono value (числа/таймстамп/бюджет) ---------------- */
 .chs-mono {
   font-family: var(--chs-font-mono);

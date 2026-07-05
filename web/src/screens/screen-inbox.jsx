@@ -15,9 +15,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Button, MonoId, Mono, ExecutorBadge, ActorChip, StatusChip,
+  Button, MonoId, Mono, ExecutorBadge, ActorChip, ProcessRef, StatusChip,
   Drawer, EmptyState, LoadingState, ErrorState, KitIcon,
 } from '../components/components.jsx';
+// T-0683: auth headers for the nested RecordRef fetch inside ProcessRef (resolves
+// the source record's TITLE). Same helper the rest of this screen already uses.
+import { authHeaders } from '../app-shell/dev-auth.js';
 import { Icon } from '../app-shell/icon.jsx';
 // T-0608 (пункт е): every fetch on this screen now goes through
 // fetchWithAuthRetry (built on top of authHeaders internally) — direct
@@ -661,8 +664,16 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
               <span style={S.key}>Шаг</span>
               <Mono>{detail.item.step}</Mono>
 
-              <span style={S.key}>Инстанс</span>
-              <MonoId>{detail.item.inst}</MonoId>
+              {/* T-0683: process shown as a HUMAN name (+ source record) — the raw
+                  instance-UUID is demoted inside ProcessRef, not the primary key. */}
+              <span style={S.key}>Процесс</span>
+              <ProcessRef
+                processName={detail.item.processName}
+                inst={detail.item.inst}
+                recordId={detail.item.recordId}
+                stepFallback={detail.item.name || detail.item.step}
+                headers={authHeaders()}
+              />
 
               <span style={S.key}>Исполнитель</span>
               <ExecutorBadge type={detail.item.execType || 'human'} name={detail.item.execName} />
@@ -714,6 +725,12 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
             <section style={S.section}>
               <h3 style={S.title}>Процесс</h3>
               <div style={S.grid}>
+                {/* T-0683: lead with the HUMAN process-definition name (deТЭЛ
+                    T-0614) — the raw instance-UUID follows as a demoted mono
+                    detail, not the first thing the operator reads. */}
+                <span style={S.key}>Процесс</span>
+                <span style={S.val}>{detail.projection.definitionName || detail.projection.procKey}</span>
+
                 <span style={S.key}>Инстанс</span>
                 <MonoId>{detail.projection.inst}</MonoId>
 
@@ -1047,7 +1064,19 @@ function InboxScreen() {
                         </span>
                       </div>
                     </td>
-                    <td><MonoId>{t.inst}</MonoId></td>
+                    {/* T-0683 (D-064, wave-5): «ПРОЦЕСС» column shows a HUMAN
+                        process name (+ source record title) as primary — the raw
+                        instance-UUID is demoted, never the primary key on the
+                        operator's main screen (capstone T-0647 defect). */}
+                    <td>
+                      <ProcessRef
+                        processName={t.processName}
+                        inst={t.inst}
+                        recordId={t.recordId}
+                        stepFallback={t.name || t.step}
+                        headers={authHeaders()}
+                      />
+                    </td>
                     <td>
                       {inPool ? (
                         <span className="chs-pool"><span className="chs-pool__glyph" /> в пуле</span>
