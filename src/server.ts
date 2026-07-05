@@ -35,6 +35,7 @@ import { registerApplicationRoutes } from "./http/applications.js";
 import { registerRightsResourcesRoute } from "./http/rights-resources.js";
 import { registerSolutionPublishRoutes } from "./http/solution-publish.js";
 import { registerSectionRoutes } from "./http/sections.js";
+import { registerUserPrefRoutes } from "./http/user-prefs.js";
 import { registerRecordRoutes } from "./http/records.js";
 import { registerListViewRoutes } from "./http/list-views.js";
 import { registerRecordLinksRoutes } from "./http/record-links.js";
@@ -800,6 +801,19 @@ function buildRouter(
   // slug / KC sub, never from headers. Same deps as applications.
   if (grantsPool) {
     registerSectionRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register user-prefs (личные настройки) CRUD API (T-0651 E-NAV-IA/sidebar-
+  // workspace — generic per-actor key/value store, migration 129). Tenant- AND
+  // actor-scoped via withTenantTx + RLS (policy user_pref_tenant_isolation) +
+  // an actor filter baked into every query; no extra privilege gate (a
+  // preference costs nothing to write and touches only the writer's own row).
+  if (grantsPool) {
+    registerUserPrefRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
