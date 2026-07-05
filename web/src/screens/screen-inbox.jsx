@@ -55,6 +55,43 @@ import FormDocumentRenderer from '../forms/FormDocumentRenderer.jsx';
 // ---------------------------------------------------------------------------
 
 /**
+ * hasBoundLayout — T-0665-e2e P0 fix: the ONE place that decides whether a
+ * `binding` carries a structurally valid form-document layout (has a
+ * `.root`). Pure, exported so both the render branch (`hasLayout` below) and
+ * the no-content guard (`resolveInboxFormHasContent`) agree — no risk of the
+ * two checks drifting apart the way the single inline expression and the
+ * separate `fields.length === 0` guard drifted before this fix.
+ */
+export function hasBoundLayout(binding) {
+  return !!(binding && binding.layout && typeof binding.layout === 'object' && binding.layout.root);
+}
+
+/**
+ * resolveInboxFormHasContent — T-0665-e2e P0 fix (guard-order defect, LIVE_PROOF
+ * finding #F5): pure decision "is there anything to render for this binding?".
+ *
+ * BEFORE this fix, InboxTaskForm returned null as soon as `fields.length === 0`
+ * — BEFORE it ever looked at `binding.layout`. Every form assembled through the
+ * FormDesigner drag-n-drop constructor saves `{layout}` WITHOUT `fields`
+ * (persistLayout in web/src/forms/FormDesigner.jsx never sends a `fields` key),
+ * and src/http/binding.ts's POST handler stores `fields = []` for that
+ * layout-only save path (the column is NOT NULL). So EVERY DnD-built form
+ * hit the empty-fields guard and rendered as "no form" for the assignee,
+ * even though a perfectly valid, non-empty `layout.root` existed on the same
+ * row — the `hasLayout` branch a few lines down was provably unreachable.
+ *
+ * The fix: there is content to render iff there is a non-empty `fields[]`
+ * OR a structurally valid layout — never neither.
+ *
+ * @param {unknown[]} fields   binding.fields (may be [] for a layout-only save)
+ * @param {boolean} hasLayout  hasBoundLayout(binding)
+ * @returns {boolean} true when InboxTaskForm should render something.
+ */
+export function resolveInboxFormHasContent(fields, hasLayout) {
+  return (Array.isArray(fields) && fields.length > 0) || !!hasLayout;
+}
+
+/**
  * InboxTaskForm — fetches and renders the form bound to a process step.
  * If no binding exists (404), renders nothing (transparent).
  * On submit: collects values and calls onSubmit(values).
@@ -185,9 +222,30 @@ export function InboxTaskForm({ processKey, stepKey, recordId, onSubmit, submitt
   // No binding for this step — render nothing (task card works without a form)
   if (binding === false) return null;
 
-  // Empty fields list — binding exists but nothing to fill in
   const fields = binding.fields || [];
-  if (fields.length === 0) return null;
+
+  // T-0665 (F5): a binding may carry a `layout` (the form-document a human
+  // assembled in FormDesigner OR an agent edited via document-ops, T-0656) —
+  // when present and structurally valid (has a root), render it through the
+  // SAME FormDocumentRenderer FormDesigner already uses as its live preview,
+  // so the assignee sees the arrangement exactly as it was built. A binding
+  // saved BEFORE layout existed (legacy, fields-only) has no `layout` key at
+  // all (src/http/binding.ts omits it rather than sending null) — that path
+  // renders EXACTLY as before, byte-for-byte (NF3 backward compatibility).
+  const hasLayout = hasBoundLayout(binding);
+
+  // Empty fields list AND no layout — binding exists but there is truly
+  // nothing to render. LIVE_PROOF T-0665-e2e P0: this guard used to run
+  // BEFORE hasLayout was computed (`fields.length === 0` short-circuited to
+  // null), so EVERY layout FormDesigner ever persisted (persistLayout never
+  // sends `fields` — src/http/binding.ts stores `fields=[]` for the
+  // layout-only save path) rendered as "no form" to the assignee, even
+  // though a valid, non-empty layout.root existed on the SAME binding. The
+  // guard now fires only when there is NEITHER a fields list NOR a
+  // structurally valid layout — matching resolveInboxFormHasContent's single
+  // source of truth (below) so this branch and the render branch never
+  // disagree about what counts as "something to show".
+  if (!resolveInboxFormHasContent(fields, hasLayout)) return null;
 
   // T-0579 (review M1): thread the CURRENT record's id onto file-contract
   // fields ONLY — same reasoning as screen-app-records.jsx's
@@ -198,16 +256,6 @@ export function InboxTaskForm({ processKey, stepKey, recordId, onSubmit, submitt
     const { contractKind } = resolveFieldContract(f);
     return contractKind === 'file' ? { ...f, recordId } : f;
   });
-
-  // T-0665 (F5): a binding may carry a `layout` (the form-document a human
-  // assembled in FormDesigner OR an agent edited via document-ops, T-0656) —
-  // when present and structurally valid (has a root), render it through the
-  // SAME FormDocumentRenderer FormDesigner already uses as its live preview,
-  // so the assignee sees the arrangement exactly as it was built. A binding
-  // saved BEFORE layout existed (legacy, fields-only) has no `layout` key at
-  // all (src/http/binding.ts omits it rather than sending null) — that path
-  // renders EXACTLY as before, byte-for-byte (NF3 backward compatibility).
-  const hasLayout = binding.layout && typeof binding.layout === 'object' && binding.layout.root;
 
   return (
     <section style={{ marginBottom: 'var(--chs-space-8)' }}>

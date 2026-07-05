@@ -48,7 +48,8 @@ import {
   type LiveSchemaView,
   type FormDocument,
 } from "../core/floor-boundary.js";
-import { resolveLiveSchemaFieldKeys } from "../db/live-form-schema.js";
+import { resolveLiveSchemaFieldKeys, resolveLiveRecordSchema } from "../db/live-form-schema.js";
+import { deriveFieldDefsFromSchema } from "../core/form-schema-derive.js";
 
 // ---------------------------------------------------------------------------
 // Injected deps for actor-scoped routes (T-0376)
@@ -336,6 +337,121 @@ export async function classifyLayoutSave(
 }
 
 // ---------------------------------------------------------------------------
+// T-0665-e2e (P0 fix, #2 fields-from-layout): a FormDesigner save carries
+// `layout` but never `fields` (persistLayout in web/src/forms/FormDesigner.jsx
+// only ever sends {process_key, form_key, layout}) — so the POST handler used
+// to fall back to `fields = []` for every layout-only save (see the comment
+// on that branch below). That left form_binding in an inconsistent state:
+// `layout` (the authored arrangement) and `fields` (the flat field list a
+// handful of OTHER consumers read — e.g. the legacy FieldControl fallback
+// path in InboxTaskForm, and any future filters/views keyed off
+// form_binding.fields) disagreed about what fields the form actually has.
+// `fields=[]` also fed directly into the LIVE_PROOF T-0665-e2e P0 (screen-
+// inbox.jsx's guard treated an empty fields[] as "nothing to render", even
+// though `layout` had content).
+//
+// Fix: derive `fields` FROM the saved layout — walk the tree collecting
+// every `fieldKey` referenced (same channel-1 binding key FormDesigner's
+// addFieldBlock uses), then look up each key's TYPE from the live
+// registry_def.record_schema (the SAME authoritative source
+// classifyLayoutSave already resolves for the Floor-1/2 gate — deriveField-
+// DefsFromSchema is the existing single-source schema→FieldDef derivation,
+// T-0337). One document, one field list — no second, drifting source of
+// truth for "what fields does this form have".
+// ---------------------------------------------------------------------------
+
+/** Pure: collect every `fieldKey` referenced by a form-document tree, in
+ * depth-first document order (root first, then children, then tabs' children
+ * — mirrors floor-boundary.ts's scanDocument traversal so both walks see the
+ * same tree the same way). Duplicate keys collapse (a document should not
+ * reference the same field twice, but if it does, dedup keeps the derived
+ * fields[] well-formed for validateBindingFields' uniqueness rule).
+ */
+export function collectLayoutFieldKeys(doc: unknown): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+
+  function visit(node: unknown): void {
+    if (node == null || typeof node !== "object" || Array.isArray(node)) return;
+    const n = node as {
+      fieldKey?: unknown;
+      children?: unknown;
+      tabs?: ReadonlyArray<{ children?: unknown }>;
+    };
+    if (typeof n.fieldKey === "string" && n.fieldKey.length > 0 && !seen.has(n.fieldKey)) {
+      seen.add(n.fieldKey);
+      ordered.push(n.fieldKey);
+    }
+    if (Array.isArray(n.children)) {
+      for (const child of n.children) visit(child);
+    }
+    if (Array.isArray(n.tabs)) {
+      for (const tab of n.tabs) {
+        if (tab && Array.isArray(tab.children)) {
+          for (const child of tab.children) visit(child);
+        }
+      }
+    }
+  }
+
+  if (doc && typeof doc === "object" && !Array.isArray(doc)) {
+    const root = (doc as { root?: unknown }).root;
+    // form-document shape is {schemaVersion, source, root: {type, children}} —
+    // the tree hangs off `.root` (form-document-format.spec.md §3). Fall back
+    // to treating `doc` itself as the root for a caller that already passed
+    // the unwrapped tree (defensive — mirrors classifyLayoutSave's own
+    // root-unwrap a few lines up in this file).
+    visit(root !== undefined && root !== null ? root : doc);
+  }
+
+  return ordered;
+}
+
+/**
+ * Derive BindingField[] from a saved layout, sourcing TYPE/required/options
+ * from the live record_schema. Returns [] when the live schema is
+ * unresolvable (no process_app_binding/registry_def) or the layout
+ * references no fields — never throws (this runs on the already-gated
+ * layout-save path; classifyLayoutSave has already fail-closed on an
+ * unresolvable schema BEFORE this is called, so unresolvable-here in
+ * practice only happens for a layout with zero fieldKey references, e.g. a
+ * pure static-content form).
+ */
+export async function deriveFieldsFromLayout(
+  client: pg.PoolClient,
+  tenantId: string,
+  processKey: string,
+  layout: Record<string, unknown>,
+): Promise<BindingField[]> {
+  const referencedKeys = collectLayoutFieldKeys(layout);
+  if (referencedKeys.length === 0) return [];
+
+  const recordSchema = await resolveLiveRecordSchema(client, tenantId, processKey);
+  if (recordSchema === null) return [];
+
+  const allFieldDefs = deriveFieldDefsFromSchema(recordSchema);
+  const byKey = new Map(allFieldDefs.map((f) => [f.key, f] as const));
+
+  const derived: BindingField[] = [];
+  for (const key of referencedKeys) {
+    const def = byKey.get(key);
+    if (!def) continue;
+    // BindingField.required is a non-optional boolean (binding-compat.ts
+    // contract); FieldDef.required is optional (absent means "not
+    // required"). BindingField.options is a mutable string[]; FieldDef.options
+    // is a readonly string[]. Map field-by-field rather than widen either
+    // frozen type.
+    derived.push({
+      key: def.key,
+      type: def.type,
+      required: def.required ?? false,
+      ...(def.options !== undefined ? { options: [...def.options] } : {}),
+    });
+  }
+  return derived;
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -559,7 +675,15 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
       }
 
       // fields is optional when layout is provided; required otherwise (FormBuilder path).
-      let fields: BindingField[];
+      // T-0665-e2e (P0 fix): when layout is present but `fields` is not sent
+      // (the FormDesigner path — persistLayout never sends `fields`), fields
+      // is no longer hardcoded to `[]`; it is DERIVED from the layout inside
+      // the tx below (deriveFieldsFromLayout needs a live DB client + the
+      // resolved tenantId, so the actual derivation happens after
+      // resolveActorTenant/withTenantTx are available — see fieldsFromBody /
+      // finalFields there). This `fieldsFromBody` var only captures the
+      // explicit-fields case (FormBuilder path, unchanged).
+      let fieldsFromBody: BindingField[] | null = null;
       if (body["fields"] !== undefined) {
         const validation = validateBindingFields(body["fields"]);
         if (!validation.ok) {
@@ -567,11 +691,8 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
             `invalid fields: ${validation.errors.map((e) => `[${e.index}] ${e.reason}`).join("; ")}`
           );
         }
-        fields = validation.fields;
-      } else if (layout !== null) {
-        // FormDesigner sends layout but not fields; store an empty array (column is NOT NULL).
-        fields = [];
-      } else {
+        fieldsFromBody = validation.fields;
+      } else if (layout === null) {
         throw new HttpError(400, "VALIDATION", "fields is required when layout is not provided");
       }
 
@@ -593,6 +714,20 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
         if (layout !== null) {
           await classifyLayoutSave(client, tenantId, processKey, layout);
         }
+
+        // T-0665-e2e (P0 fix, fields-from-layout): resolve the field list to
+        // persist. Explicit `fields` in the body (FormBuilder path) always
+        // wins unchanged. Otherwise, when a layout was sent (FormDesigner
+        // path) WITHOUT `fields`, derive them from the layout tree against
+        // the live record_schema — see deriveFieldsFromLayout's doc comment
+        // above for why (form_binding.fields must stay a real projection of
+        // what the layout actually shows, not a hardcoded empty array that
+        // starves downstream consumers — including InboxTaskForm's own
+        // fields-length guard, LIVE_PROOF T-0665-e2e P0).
+        const fields: BindingField[] =
+          fieldsFromBody !== null
+            ? fieldsFromBody
+            : await deriveFieldsFromLayout(client, tenantId, processKey, layout as Record<string, unknown>);
 
         const existing = await getBinding(client, tenantId, processKey, stepKey);
         if (!existing) {

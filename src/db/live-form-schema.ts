@@ -68,6 +68,48 @@ export async function resolveLiveSchemaFieldKeys(
   tenantId: string,
   processKey: string,
 ): Promise<Set<string> | null> {
+  const recordSchema = await resolveLiveRecordSchema(client, tenantId, processKey);
+  if (recordSchema === null) {
+    return null;
+  }
+
+  const properties =
+    typeof recordSchema === "object" &&
+    (recordSchema as { properties?: unknown }).properties &&
+    typeof (recordSchema as { properties?: unknown }).properties === "object"
+      ? (recordSchema as { properties: Record<string, unknown> }).properties
+      : null;
+  if (!properties) {
+    // The registry exists but has no properties object → treat as authoritative
+    // EMPTY key-set (any non-empty KEY_SET in the doc is therefore a dangling
+    // binding → Floor-2). This is intentionally NOT null: the registry resolved.
+    return new Set<string>();
+  }
+
+  return new Set<string>(Object.keys(properties));
+}
+
+/**
+ * T-0665-e2e (F5/fields-from-layout fix): resolve the FULL live
+ * `registry_def.record_schema` object (not merely its key set) for a
+ * process's bound form. Extracted from resolveLiveSchemaFieldKeys's body
+ * (same resolution path, same fail-closed semantics — see module doc) so a
+ * second caller (persistLayoutDerivedFields in src/http/binding.ts) can
+ * derive TYPED BindingField entries (key/type/required/options/...) via
+ * form-schema-derive.ts's deriveFieldDefsFromSchema, without duplicating the
+ * process_app_binding → registry_def SQL walk. resolveLiveSchemaFieldKeys
+ * itself is UNCHANGED in signature/behavior — this is an additive sibling.
+ *
+ * @returns the parsed record_schema object, OR null when unresolvable (no
+ *          process_app_binding / no registry_def) — same fail-closed
+ *          contract as resolveLiveSchemaFieldKeys.
+ * @throws  re-throws DB errors (fail-closed), same as resolveLiveSchemaFieldKeys.
+ */
+export async function resolveLiveRecordSchema(
+  client: pg.PoolClient,
+  tenantId: string,
+  processKey: string,
+): Promise<unknown | null> {
   if (!isUuid(tenantId)) {
     // Cannot scope a query without a valid tenant → unvalidatable → fail-closed.
     return null;
@@ -114,18 +156,5 @@ export async function resolveLiveSchemaFieldKeys(
     return null;
   }
 
-  const recordSchema = schemaRow.record_schema as { properties?: Record<string, unknown> } | null;
-  const properties =
-    recordSchema && typeof recordSchema === "object" && recordSchema.properties &&
-    typeof recordSchema.properties === "object"
-      ? recordSchema.properties
-      : null;
-  if (!properties) {
-    // The registry exists but has no properties object → treat as authoritative
-    // EMPTY key-set (any non-empty KEY_SET in the doc is therefore a dangling
-    // binding → Floor-2). This is intentionally NOT null: the registry resolved.
-    return new Set<string>();
-  }
-
-  return new Set<string>(Object.keys(properties));
+  return schemaRow.record_schema ?? null;
 }

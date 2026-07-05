@@ -15,6 +15,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
+// T-0665-e2e (P0 fix): pure, hook-free helpers extracted from InboxTaskForm's
+// body so the guard-order regression (LIVE_PROOF finding F5) can be pinned
+// with real behavioral (mutational) assertions, not only source-presence —
+// see the describe block near the bottom of this file. Same import pattern
+// already used by screen-apps.test.jsx / screen-rights.test.jsx for pure
+// named exports out of a screen .jsx file.
+import { hasBoundLayout, resolveInboxFormHasContent } from './screen-inbox.jsx';
 
 const fs = await import('fs');
 const path = await import('path');
@@ -279,7 +286,74 @@ describe('screen-inbox — InboxTaskForm applies the bound layout when present (
   it('recordId is threaded onto file-contract fields for BOTH the layout and legacy paths (fieldsWithRecordId shared)', () => {
     const idx = src.indexOf('const fieldsWithRecordId');
     expect(idx).toBeGreaterThan(-1);
-    const block = src.slice(idx, src.indexOf('const hasLayout'));
+    // T-0665-e2e (P0 fix): hasLayout is now computed BEFORE fieldsWithRecordId
+    // (the no-content guard needs hasLayout ahead of any field derivation) —
+    // slice to the next stable boundary after fieldsWithRecordId's own
+    // definition (the JSX return) rather than 'const hasLayout', which no
+    // longer follows it.
+    const block = src.slice(idx, src.indexOf('return (', idx));
     expect(block).toContain("contractKind === 'file' ? { ...f, recordId } : f");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0665-e2e (P0 fix) — guard-order defect (LIVE_PROOF T-0665-e2e finding F5).
+//
+// BEHAVIORAL (mutational) tests, not source-presence: hasBoundLayout and
+// resolveInboxFormHasContent are pure, exported, hook-free functions (unlike
+// InboxTaskForm itself, which cannot be invoked directly — see the comment on
+// the describe block above), so they can be called directly with real
+// arguments and their REAL return value asserted. Reverting the P0 fix (i.e.
+// restoring `if (fields.length === 0) return null;` BEFORE `hasLayout` is
+// computed) does not change these functions' behavior in isolation — what it
+// changes is the ORDER InboxTaskForm calls them in. The regression these
+// tests are built to catch is therefore pinned by the last test below, which
+// asserts the guard's own source position relative to hasLayout — the ONE
+// assertion that must be source-level, because "order of two statements" is
+// not observable through either function's return value alone.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0665-e2e P0 fix: fields=[] no longer masks a valid layout', () => {
+  it('hasBoundLayout: false for a binding with no layout key at all (legacy row)', () => {
+    expect(hasBoundLayout({ fields: [] })).toBe(false);
+  });
+
+  it('hasBoundLayout: false when layout has no root (structurally invalid)', () => {
+    expect(hasBoundLayout({ fields: [], layout: {} })).toBe(false);
+    expect(hasBoundLayout({ fields: [], layout: null })).toBe(false);
+  });
+
+  it('hasBoundLayout: true for a structurally valid layout (has .root)', () => {
+    expect(hasBoundLayout({ fields: [], layout: { root: { type: 'section', children: [] } } })).toBe(true);
+  });
+
+  it('resolveInboxFormHasContent: false when fields=[] AND no layout (truly nothing to show)', () => {
+    expect(resolveInboxFormHasContent([], false)).toBe(false);
+  });
+
+  it('resolveInboxFormHasContent: true when fields is non-empty, regardless of layout (legacy path)', () => {
+    expect(resolveInboxFormHasContent([{ key: 'title', type: 'string' }], false)).toBe(true);
+  });
+
+  it('resolveInboxFormHasContent: TRUE when fields=[] BUT hasLayout is true — the exact P0 case', () => {
+    // This is the LIVE_PROOF T-0665-e2e P0 case byte-for-byte: a FormDesigner
+    // save persists {fields: [], layout: {root: {...}}}. Before the fix,
+    // InboxTaskForm's `if (fields.length === 0) return null` fired here and
+    // the assignee never saw the arrangement. The single source of truth for
+    // "is there something to render" must say yes.
+    expect(resolveInboxFormHasContent([], true)).toBe(true);
+  });
+
+  it('InboxTaskForm computes hasLayout via hasBoundLayout BEFORE the no-content guard runs (guard-order pin)', () => {
+    // Source-level pin for the one thing the two pure-function tests above
+    // cannot observe: STATEMENT ORDER. Reverting to the pre-fix order (an
+    // early `if (fields.length === 0) return null` ahead of the hasLayout
+    // computation) would make this test fail even though hasBoundLayout/
+    // resolveInboxFormHasContent still individually behave correctly —
+    // exactly the regression this whole fix targets.
+    const hasLayoutIdx = src.indexOf('const hasLayout = hasBoundLayout(binding)');
+    const guardIdx = src.indexOf('if (!resolveInboxFormHasContent(fields, hasLayout)) return null;');
+    expect(hasLayoutIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(hasLayoutIdx).toBeLessThan(guardIdx);
   });
 });
