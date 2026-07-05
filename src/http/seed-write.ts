@@ -47,6 +47,7 @@ import type { AdminContext } from "../core/scoped-admin.js";
 import type { Grant } from "../core/grant-lattice.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { insertWithUniqueSlugRetry } from "../core/slug-generator.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -454,9 +455,15 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       oracle,
     );
 
-    const slug = b["slug"];
-    if (typeof slug !== "string" || slug.length === 0) {
-      throw new HttpError(400, "VALIDATION", "slug is required");
+    // T-0650 [UX-study §7]: slug is now OPTIONAL. If omitted/blank, the server derives
+    // one from display_name (auto-slugs). Explicit-slug validation is UNCHANGED.
+    const rawSlug = b["slug"];
+    let explicitSlug: string | null = null;
+    if (rawSlug !== undefined && rawSlug !== null && rawSlug !== "") {
+      if (typeof rawSlug !== "string") {
+        throw new HttpError(400, "VALIDATION", "slug must be a string");
+      }
+      explicitSlug = rawSlug;
     }
     const display_name = b["display_name"];
     if (typeof display_name !== "string" || display_name.length === 0) {
@@ -467,27 +474,37 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       assertUuidShape(parent_id as string, "parent_id");
     }
 
-    const id = randomUUID();
     const ts = nowMs();
 
-    try {
+    const insertOne = async (candidateSlug: string): Promise<{ id: string; slug: string }> => {
+      const id = randomUUID();
       await withTenantTx(pool, tenant_id, async (client) => {
         await client.query(
           `INSERT INTO choros.department (tenant_id, id, parent_id, slug, display_name, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $6)`,
-          [tenant_id, id, parent_id, slug, display_name, ts],
+          [tenant_id, id, parent_id, candidateSlug, display_name, ts],
         );
       });
-    } catch (err) {
-      if (isConflict(err)) {
-        throw new HttpError(409, "CONFLICT", `department with slug '${slug}' already exists in tenant`);
+      return { id, slug: candidateSlug };
+    };
+
+    let created: { id: string; slug: string };
+    if (explicitSlug !== null) {
+      try {
+        created = await insertOne(explicitSlug);
+      } catch (err) {
+        if (isConflict(err)) {
+          throw new HttpError(409, "CONFLICT", `department with slug '${explicitSlug}' already exists in tenant`);
+        }
+        throw err;
       }
-      throw err;
+    } else {
+      created = await insertWithUniqueSlugRetry(display_name, insertOne, { isConflict });
     }
 
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ id, slug }));
+    res.end(JSON.stringify(created));
   }));
 
   // -------------------------------------------------------------------------
@@ -524,36 +541,52 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     }
     assertUuidShape(department_id, "department_id");
 
-    const slug = b["slug"];
-    if (typeof slug !== "string" || slug.length === 0) {
-      throw new HttpError(400, "VALIDATION", "slug is required");
+    // T-0650 [UX-study §7]: slug is now OPTIONAL. If omitted/blank, the server derives
+    // one from title (auto-slugs). Explicit-slug validation is UNCHANGED.
+    const rawSlug = b["slug"];
+    let explicitSlug: string | null = null;
+    if (rawSlug !== undefined && rawSlug !== null && rawSlug !== "") {
+      if (typeof rawSlug !== "string") {
+        throw new HttpError(400, "VALIDATION", "slug must be a string");
+      }
+      explicitSlug = rawSlug;
     }
     const title = b["title"];
     if (typeof title !== "string" || title.length === 0) {
       throw new HttpError(400, "VALIDATION", "title is required");
     }
 
-    const id = randomUUID();
     const ts = nowMs();
 
-    try {
+    const insertOne = async (candidateSlug: string): Promise<{ id: string; slug: string }> => {
+      const id = randomUUID();
       await withTenantTx(pool, tenant_id, async (client) => {
         await client.query(
           `INSERT INTO choros.position (tenant_id, id, department_id, slug, title, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $6)`,
-          [tenant_id, id, department_id, slug, title, ts],
+          [tenant_id, id, department_id, candidateSlug, title, ts],
         );
       });
-    } catch (err) {
-      if (isConflict(err)) {
-        throw new HttpError(409, "CONFLICT", `position with slug '${slug}' already exists in department`);
+      return { id, slug: candidateSlug };
+    };
+
+    let created: { id: string; slug: string };
+    if (explicitSlug !== null) {
+      try {
+        created = await insertOne(explicitSlug);
+      } catch (err) {
+        if (isConflict(err)) {
+          throw new HttpError(409, "CONFLICT", `position with slug '${explicitSlug}' already exists in department`);
+        }
+        throw err;
       }
-      throw err;
+    } else {
+      created = await insertWithUniqueSlugRetry(title, insertOne, { isConflict });
     }
 
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ id, slug }));
+    res.end(JSON.stringify(created));
   }));
 
   // -------------------------------------------------------------------------
@@ -591,9 +624,17 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     if (kind !== "human" && kind !== "agent") {
       throw new HttpError(400, "VALIDATION", "kind must be 'human' or 'agent'");
     }
-    const slug = b["slug"];
-    if (typeof slug !== "string" || slug.length === 0) {
-      throw new HttpError(400, "VALIDATION", "slug is required");
+    // T-0650 [UX-study §7]: slug is now OPTIONAL. If omitted/blank, the server derives
+    // one from display_name (auto-slugs). Explicit-slug validation is UNCHANGED. Note:
+    // this is the human/agent's identity slug — login resolution (T-0372/T-0633) still
+    // keys on it, but auto-generation is equally safe (uniqueness enforced the same way).
+    const rawSlug = b["slug"];
+    let explicitSlug: string | null = null;
+    if (rawSlug !== undefined && rawSlug !== null && rawSlug !== "") {
+      if (typeof rawSlug !== "string") {
+        throw new HttpError(400, "VALIDATION", "slug must be a string");
+      }
+      explicitSlug = rawSlug;
     }
     const display_name = b["display_name"];
     if (typeof display_name !== "string" || display_name.length === 0) {
@@ -604,27 +645,37 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       assertUuidShape(position_id as string, "position_id");
     }
 
-    const id = randomUUID();
     const ts = nowMs();
 
-    try {
+    const insertOne = async (candidateSlug: string): Promise<{ id: string; slug: string }> => {
+      const id = randomUUID();
       await withTenantTx(pool, tenant_id, async (client) => {
         await client.query(
           `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
-          [tenant_id, id, position_id, kind, slug, display_name, ts],
+          [tenant_id, id, position_id, kind, candidateSlug, display_name, ts],
         );
       });
-    } catch (err) {
-      if (isConflict(err)) {
-        throw new HttpError(409, "CONFLICT", `employee with slug '${slug}' already exists in tenant`);
+      return { id, slug: candidateSlug };
+    };
+
+    let created: { id: string; slug: string };
+    if (explicitSlug !== null) {
+      try {
+        created = await insertOne(explicitSlug);
+      } catch (err) {
+        if (isConflict(err)) {
+          throw new HttpError(409, "CONFLICT", `employee with slug '${explicitSlug}' already exists in tenant`);
+        }
+        throw err;
       }
-      throw err;
+    } else {
+      created = await insertWithUniqueSlugRetry(display_name, insertOne, { isConflict });
     }
 
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ id, slug }));
+    res.end(JSON.stringify(created));
   }));
 
   // -------------------------------------------------------------------------
@@ -678,20 +729,29 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(403, "NOT_OWNER", "insufficient delegation to create roles");
     }
 
-    const slug = b["slug"];
-    if (typeof slug !== "string" || slug.length === 0) {
-      throw new HttpError(400, "VALIDATION", "slug is required");
-    }
-    // T-0642 fix-forward: charset gate (defense-in-depth alongside the
-    // escapeXml fix at the candidateGroups injection site in
-    // user-task-role-mapper.ts) — role.slug must be a safe, URL/XML-attribute-
-    // shaped identifier, not arbitrary text.
-    if (!SLUG_RE.test(slug)) {
-      throw new HttpError(
-        400,
-        "VALIDATION",
-        "slug must be a lowercase alphanumeric/dash string (1-64 chars)",
-      );
+    // T-0650 [UX-study §7]: slug is now OPTIONAL. If omitted/blank, the server derives
+    // one from display_name (auto-slugs) — generateSlugFromName's output always
+    // satisfies SLUG_RE, so the T-0642 charset defense-in-depth (candidateGroups
+    // XML-attribute injection guard) holds for auto-generated slugs too. Explicit-slug
+    // validation is UNCHANGED.
+    const rawSlug = b["slug"];
+    let explicitSlug: string | null = null;
+    if (rawSlug !== undefined && rawSlug !== null && rawSlug !== "") {
+      if (typeof rawSlug !== "string") {
+        throw new HttpError(400, "VALIDATION", "slug must be a string");
+      }
+      // T-0642 fix-forward: charset gate (defense-in-depth alongside the
+      // escapeXml fix at the candidateGroups injection site in
+      // user-task-role-mapper.ts) — role.slug must be a safe, URL/XML-attribute-
+      // shaped identifier, not arbitrary text.
+      if (!SLUG_RE.test(rawSlug)) {
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          "slug must be a lowercase alphanumeric/dash string (1-64 chars)",
+        );
+      }
+      explicitSlug = rawSlug;
     }
     const display_name = b["display_name"];
     if (typeof display_name !== "string" || display_name.length === 0) {
@@ -699,27 +759,37 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     }
     const description = b["description"] ?? null;
 
-    const id = randomUUID();
     const ts = nowMs();
 
-    try {
+    const insertOne = async (candidateSlug: string): Promise<{ id: string; slug: string }> => {
+      const id = randomUUID();
       await withTenantTx(pool, tenant_id, async (client) => {
         await client.query(
           `INSERT INTO choros.role (tenant_id, id, slug, display_name, description, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $6)`,
-          [tenant_id, id, slug, display_name, description, ts],
+          [tenant_id, id, candidateSlug, display_name, description, ts],
         );
       });
-    } catch (err) {
-      if (isConflict(err)) {
-        throw new HttpError(409, "CONFLICT", `role with slug '${slug}' already exists in tenant`);
+      return { id, slug: candidateSlug };
+    };
+
+    let created: { id: string; slug: string };
+    if (explicitSlug !== null) {
+      try {
+        created = await insertOne(explicitSlug);
+      } catch (err) {
+        if (isConflict(err)) {
+          throw new HttpError(409, "CONFLICT", `role with slug '${explicitSlug}' already exists in tenant`);
+        }
+        throw err;
       }
-      throw err;
+    } else {
+      created = await insertWithUniqueSlugRetry(display_name, insertOne, { isConflict });
     }
 
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ id, slug }));
+    res.end(JSON.stringify(created));
   }));
 
   // -------------------------------------------------------------------------

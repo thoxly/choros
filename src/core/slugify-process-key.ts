@@ -14,45 +14,26 @@
  *     then slug-<uuid-suffix> as a guaranteed-unique fallback.
  *     existsFn(key) → Promise<boolean> (checks DB for collision)
  *
- * Design:
- *   - Reuses the same Cyrillic→latin transliteration map as slugifyOrgName
- *     (src/core/register.ts) — NOT re-imported (to avoid circular deps and
- *     keep this util zero-dep stdlib-only). The map is duplicated intentionally.
- *   - Max slug length: 60 chars (leaves room for numeric/uuid suffix within 80).
- *   - No IO — all IO is behind the injected existsFn.
+ * T-0650: this module is now a thin wrapper over the canonical generator
+ * src/core/slug-generator.ts (unifies the Cyrillic map + grammar that used to be
+ * duplicated across slugify-process-key.ts / register.ts / relation-cascade.js —
+ * see ADR-T0650-auto-slugs.md §2.1). Public API/behavior is UNCHANGED (same
+ * fallback word "process", same 60-char cap, same base-2..base-10 then uuid8
+ * suffix shape) — no breaking change for existing callers (process-defs.ts,
+ * assistant.ts, process-defs.test.ts).
  */
 
-import { randomUUID } from "node:crypto";
-
-// ---------------------------------------------------------------------------
-// Cyrillic transliteration (mirrors register.ts — no import to avoid cycles)
-// ---------------------------------------------------------------------------
-
-const CYRILLIC_MAP: Record<string, string> = {
-  а: "a",  б: "b",  в: "v",  г: "g",  д: "d",
-  е: "e",  ё: "e",  ж: "zh", з: "z",  и: "i",
-  й: "y",  к: "k",  л: "l",  м: "m",  н: "n",
-  о: "o",  п: "p",  р: "r",  с: "s",  т: "t",
-  у: "u",  ф: "f",  х: "h",  ц: "ts", ч: "ch",
-  ш: "sh", щ: "sch", ъ: "",  ы: "y",  ь: "",
-  э: "e",  ю: "yu", я: "ya",
-};
-
-const SLUG_BASE_MAX = 60;
+import { generateSlugFromName, generateUniqueSlug } from "./slug-generator.js";
 
 /**
  * Pure: derive a URL-safe, human-readable slug from a process name.
  * Supports Cyrillic, Latin, digits. All other chars become dashes.
+ * Empty/whitespace-only name → "process" (process-specific fallback word, preserved
+ * for backward compat; generateSlugFromName's generic fallback is "item").
  */
 export function slugifyProcessName(name: string): string {
   if (!name || !name.trim()) return "process";
-  const slug = name
-    .toLowerCase()
-    .replace(/[а-яё]/g, (ch) => CYRILLIC_MAP[ch] ?? ch)
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return (slug || "process").slice(0, SLUG_BASE_MAX);
+  return generateSlugFromName(name);
 }
 
 /**
@@ -60,7 +41,7 @@ export function slugifyProcessName(name: string): string {
  *
  * Strategy:
  *   1. Try base = slugifyProcessName(name)
- *   2. If taken, try base-2, base-3 … base-10
+ *   2. If taken, try base-2 through base-10
  *   3. If all taken, use base-<first-8-chars-of-uuid> (practically unique)
  *
  * @param name      Human-readable process name (may be Cyrillic).
@@ -71,17 +52,9 @@ export async function generateUniqueProcessKey(
   existsFn: (key: string) => Promise<boolean>,
 ): Promise<string> {
   const base = slugifyProcessName(name);
-
-  // Try base first
-  if (!(await existsFn(base))) return base;
-
-  // Try base-2 through base-10
-  for (let n = 2; n <= 10; n++) {
-    const candidate = `${base}-${n}`;
-    if (!(await existsFn(candidate))) return candidate;
-  }
-
-  // Guaranteed-unique fallback: base + uuid short suffix
-  const suffix = randomUUID().replace(/-/g, "").slice(0, 8);
-  return `${base.slice(0, 48)}-${suffix}`;
+  // Delegate to the canonical generator, seeded with the process-specific base
+  // (so the "process" fallback word is preserved) rather than re-deriving from name.
+  // maxNumberedAttempts:9 → tries base-2..base-10 (9 numbered attempts), matching the
+  // original loop bound exactly.
+  return generateUniqueSlug(base, existsFn, { maxNumberedAttempts: 9 });
 }

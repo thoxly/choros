@@ -67,6 +67,7 @@ import {
   upsertCrossAppRefForField,
   deleteCrossAppRefForField,
 } from "../db/cross-app-ref-dao.js";
+import { generateSlugFromName, insertWithUniqueSlugRetry } from "../core/slug-generator.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -754,20 +755,25 @@ function serializeRegistryDef(row: RegistryDefCrudRow): Record<string, unknown> 
   };
 }
 
+// T-0650: slug is now optional — null means "auto-generate from displayName" (see
+// applications.ts createApplication for the identical pattern). Explicit-slug behavior
+// is UNCHANGED (single INSERT, 23505 → 409); auto-generation retries on conflict with
+// a numbered suffix (ADR-T0650-auto-slugs.md §2.2).
 async function createRegistryDef(args: {
   pool: pg.Pool;
   tenantId: string;
   applicationId: string;
-  slug: string;
+  slug: string | null;
   displayName: string;
   description: string | null;
   recordSchema: unknown;
   nowMs: number;
 }): Promise<RegistryDefCrudRow> {
   const { pool, tenantId, applicationId, slug, displayName, description, recordSchema, nowMs } = args;
-  const id = randomUUID();
-  return withTenantTx(pool, tenantId, async (client) => {
-    try {
+
+  const insertOne = (candidateSlug: string): Promise<RegistryDefCrudRow> =>
+    withTenantTx(pool, tenantId, async (client) => {
+      const id = randomUUID();
       // record_schema_version is left to the column DEFAULT 1 (migration 070) —
       // a freshly created registry_def starts at version 1; subsequent record_schema
       // UPDATEs bump it via the increment trigger.
@@ -781,7 +787,7 @@ async function createRegistryDef(args: {
           tenantId,
           id,
           applicationId,
-          slug,
+          candidateSlug,
           displayName,
           description,
           JSON.stringify(recordSchema),
@@ -795,27 +801,45 @@ async function createRegistryDef(args: {
       await reconcileCrossAppRefs(client, tenantId, id, null, recordSchema);
 
       return row;
-    } catch (err) {
-      const code = (err as { code?: string } | null)?.code;
-      // 23505 = unique_violation → (tenant_id, application_id, slug) taken (migration 004).
-      if (code === "23505") {
-        throw new HttpError(
-          409,
-          "CONFLICT",
-          `registry_def slug '${slug}' already exists for this application`,
-        );
-      }
-      // 23503 = foreign_key_violation → application_id not in this tenant (FK to application).
-      if (code === "23503") {
-        throw new HttpError(
-          404,
-          "NOT_FOUND",
-          `application '${applicationId}' not found in this tenant`,
-        );
-      }
-      throw err;
+    });
+
+  const mapError = (err: unknown, attemptedSlug: string): never => {
+    const code = (err as { code?: string } | null)?.code;
+    // 23505 = unique_violation → (tenant_id, application_id, slug) taken (migration 004).
+    if (code === "23505") {
+      throw new HttpError(
+        409,
+        "CONFLICT",
+        `registry_def slug '${attemptedSlug}' already exists for this application`,
+      );
     }
-  });
+    // 23503 = foreign_key_violation → application_id not in this tenant (FK to application).
+    if (code === "23503") {
+      throw new HttpError(
+        404,
+        "NOT_FOUND",
+        `application '${applicationId}' not found in this tenant`,
+      );
+    }
+    throw err;
+  };
+
+  if (slug !== null) {
+    try {
+      return await insertOne(slug);
+    } catch (err) {
+      return mapError(err, slug);
+    }
+  }
+
+  // Auto-generate: retry-on-conflict across successive candidates (base, base-2, …).
+  // A 23503 (bad application_id) is NOT a slug conflict — it must propagate immediately,
+  // not be treated as "try the next candidate" (isConflict narrows to 23505 only).
+  try {
+    return await insertWithUniqueSlugRetry(displayName, insertOne);
+  } catch (err) {
+    return mapError(err, generateSlugFromName(displayName));
+  }
 }
 
 // T-0609: exported so src/http/rights-resources.ts can reuse the SAME tenant-scoped
@@ -889,21 +913,28 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
       throw new HttpError(400, "VALIDATION", "application_id must be a valid UUID");
     }
 
-    const slug = body["slug"];
-    if (typeof slug !== "string" || !SLUG_RE.test(slug)) {
-      throw new HttpError(
-        400,
-        "VALIDATION",
-        "slug must be a lowercase alphanumeric/dash string (1-64 chars)",
-      );
-    }
-
     const displayName = body["display_name"];
     if (typeof displayName !== "string" || displayName.trim().length === 0) {
       throw new HttpError(400, "VALIDATION", "display_name must be a non-empty string");
     }
     if (displayName.length > 256) {
       throw new HttpError(400, "VALIDATION", "display_name must be at most 256 chars");
+    }
+
+    // T-0650 [UX-study §7]: slug is now OPTIONAL. If omitted/blank, the server derives
+    // one from display_name (auto-slugs — see ADR-T0650-auto-slugs.md). If provided
+    // explicitly, the SAME validation as before applies (backward compatible).
+    const rawSlug = body["slug"];
+    let explicitSlug: string | null = null;
+    if (rawSlug !== undefined && rawSlug !== null && rawSlug !== "") {
+      if (typeof rawSlug !== "string" || !SLUG_RE.test(rawSlug)) {
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          "slug must be a lowercase alphanumeric/dash string (1-64 chars)",
+        );
+      }
+      explicitSlug = rawSlug;
     }
 
     let description: string | null = null;
@@ -946,7 +977,7 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
       pool,
       tenantId,
       applicationId,
-      slug,
+      slug: explicitSlug,
       displayName,
       description,
       recordSchema,

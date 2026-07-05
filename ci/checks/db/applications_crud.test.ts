@@ -297,6 +297,74 @@ describe('applications API — create/list/get (T-0262)', () => {
     expect(gotB.statusCode).toBe(200);
   }));
 
+  // -------------------------------------------------------------------------
+  // T-0650 [UX-study §7]: slug is now OPTIONAL — auto-generated from display_name
+  // when omitted, with atomic collision-suffix (-2/-3/…) on the real UNIQUE index.
+  // -------------------------------------------------------------------------
+
+  it('T-0650: omitted slug → 201 with an auto-generated slug derived from display_name', requireDb(async () => {
+    const uniqueName = `Автослаг тест ${uuid().slice(0, 8)}`;
+    const r = await makeRequest(
+      baseUrl,
+      'POST',
+      '/api/applications',
+      { display_name: uniqueName },
+      { 'x-dev-user': 'actor-a' },
+    );
+    expect(r.statusCode).toBe(201);
+    const body = JSON.parse(r.body) as Record<string, unknown>;
+    cleanupIds.push({ tenantId: TENANT_A, id: body['id'] as string });
+    expect(typeof body['slug']).toBe('string');
+    expect(body['slug']).toMatch(/^[a-z0-9][a-z0-9-]{0,63}$/);
+    // Derived from the transliterated name — starts with "avtoslag-test".
+    expect(body['slug']).toMatch(/^avtoslag-test/);
+  }));
+
+  it('T-0650: blank-string slug is treated the same as omitted (auto-generates)', requireDb(async () => {
+    const uniqueName = `Пустой слаг ${uuid().slice(0, 8)}`;
+    const r = await makeRequest(
+      baseUrl,
+      'POST',
+      '/api/applications',
+      { display_name: uniqueName, slug: '' },
+      { 'x-dev-user': 'actor-a' },
+    );
+    expect(r.statusCode).toBe(201);
+    const body = JSON.parse(r.body) as Record<string, unknown>;
+    cleanupIds.push({ tenantId: TENANT_A, id: body['id'] as string });
+    expect(body['slug']).toMatch(/^pustoy-slag/);
+  }));
+
+  it('T-0650: two creates with the SAME display_name → second gets a -2 suffix atomically (not 409)', requireDb(async () => {
+    const sameName = `Дубликат имени ${uuid().slice(0, 8)}`;
+
+    const first = await makeRequest(
+      baseUrl, 'POST', '/api/applications', { display_name: sameName }, { 'x-dev-user': 'actor-a' },
+    );
+    expect(first.statusCode).toBe(201);
+    const firstBody = JSON.parse(first.body) as Record<string, unknown>;
+    cleanupIds.push({ tenantId: TENANT_A, id: firstBody['id'] as string });
+
+    const second = await makeRequest(
+      baseUrl, 'POST', '/api/applications', { display_name: sameName }, { 'x-dev-user': 'actor-a' },
+    );
+    expect(second.statusCode).toBe(201); // NOT 409 — auto-slug resolves the collision.
+    const secondBody = JSON.parse(second.body) as Record<string, unknown>;
+    cleanupIds.push({ tenantId: TENANT_A, id: secondBody['id'] as string });
+
+    expect(secondBody['slug']).toBe(`${firstBody['slug']}-2`);
+    expect(secondBody['id']).not.toBe(firstBody['id']);
+  }));
+
+  it('T-0650: explicit slug still validates/behaves exactly as before (backward compat)', requireDb(async () => {
+    const badSlugRes = await makeRequest(
+      baseUrl, 'POST', '/api/applications',
+      { display_name: 'X', slug: 'Not A Slug!' },
+      { 'x-dev-user': 'actor-a' },
+    );
+    expect(badSlugRes.statusCode).toBe(400);
+  }));
+
   it('TENANT ISOLATION: actor A list never contains tenant B\'s rows', requireDb(async () => {
     // Seed a uniquely-slugged app into TENANT_B.
     const bSlug = `iso-list-b-${uuid().slice(0, 8)}`;

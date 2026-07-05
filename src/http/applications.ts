@@ -47,6 +47,7 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { resolveActorPrivilege } from "../db/sandbox-gate-dao.js";
+import { insertWithUniqueSlugRetry, isUniqueViolationError } from "../core/slug-generator.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -195,36 +196,49 @@ async function selectAppByIdTx(
 // Services
 // ---------------------------------------------------------------------------
 
+// T-0650: slug is now optional — null means "auto-generate from displayName". When an
+// explicit slug is given, behavior is UNCHANGED from before (single INSERT, 23505 → 409).
+// When null, insertWithUniqueSlugRetry drives the retry-on-INSERT-conflict loop so
+// collisions resolve atomically to a numbered suffix instead of a 409 (ADR-T0650 §2.2).
 async function createApplication(args: {
   pool: pg.Pool;
   tenantId: string;
-  slug: string;
+  slug: string | null;
   displayName: string;
   description: string | null;
   section: string | null;  // T-0540
   nowMs: number;
 }): Promise<ApplicationRow> {
   const { pool, tenantId, slug, displayName, description, section, nowMs } = args;
-  const id = randomUUID();
-  return withTenantTx(pool, tenantId, async (client) => {
-    try {
+
+  const insertOne = (candidateSlug: string): Promise<ApplicationRow> =>
+    withTenantTx(pool, tenantId, async (client) => {
+      const id = randomUUID();
       await client.query(
         `INSERT INTO choros.application
            (tenant_id, id, slug, display_name, description, section, tier, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $7)`,
-        [tenantId, id, slug, displayName, description, section, nowMs],
+        [tenantId, id, candidateSlug, displayName, description, section, nowMs],
       );
       // Re-select with the section JOIN so section_name is populated (T-0551).
       const row = await selectAppByIdTx(client, tenantId, id);
       return row!;
+    });
+
+  if (slug !== null) {
+    try {
+      return await insertOne(slug);
     } catch (err) {
       // 23505 = unique_violation → slug already taken within this tenant (AC-8).
-      if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23505") {
+      if (isUniqueViolationError(err)) {
         throw new HttpError(409, "CONFLICT", `application slug '${slug}' already exists in this tenant`);
       }
       throw err;
     }
-  });
+  }
+
+  // Auto-generate: retry-on-conflict across successive candidates (base, base-2, …).
+  return insertWithUniqueSlugRetry(displayName, insertOne);
 }
 
 // Sentinel thrown when a PATCH references a section_id not in the caller's tenant.
@@ -565,21 +579,29 @@ export function registerApplicationRoutes(
     }
     const body = rawBody as Record<string, unknown>;
 
-    const slug = body["slug"];
-    if (typeof slug !== "string" || !SLUG_RE.test(slug)) {
-      throw new HttpError(
-        400,
-        "VALIDATION",
-        "slug must be a lowercase alphanumeric/dash string (1-64 chars)",
-      );
-    }
-
     const displayName = body["display_name"];
     if (typeof displayName !== "string" || displayName.trim().length === 0) {
       throw new HttpError(400, "VALIDATION", "display_name must be a non-empty string");
     }
     if (displayName.length > 256) {
       throw new HttpError(400, "VALIDATION", "display_name must be at most 256 chars");
+    }
+
+    // T-0650 [UX-study §7]: slug is now OPTIONAL. If omitted/blank, the server derives
+    // one from display_name (auto-slugs — see ADR-T0650-auto-slugs.md). If provided
+    // explicitly, the SAME validation as before applies (backward compatible — no
+    // behavior change for existing callers that always send a slug).
+    const rawSlug = body["slug"];
+    let explicitSlug: string | null = null;
+    if (rawSlug !== undefined && rawSlug !== null && rawSlug !== "") {
+      if (typeof rawSlug !== "string" || !SLUG_RE.test(rawSlug)) {
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          "slug must be a lowercase alphanumeric/dash string (1-64 chars)",
+        );
+      }
+      explicitSlug = rawSlug;
     }
 
     let description: string | null = null;
@@ -609,7 +631,7 @@ export function registerApplicationRoutes(
     const row = await createApplication({
       pool,
       tenantId,
-      slug,
+      slug: explicitSlug,
       displayName,
       description,
       section,

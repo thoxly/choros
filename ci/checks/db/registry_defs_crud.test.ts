@@ -395,6 +395,61 @@ describe('registry_def API — create/list/get (T-0263)', () => {
     expect(second.statusCode).toBe(409);
   }));
 
+  // -------------------------------------------------------------------------
+  // T-0650 [UX-study §7]: slug is now OPTIONAL — auto-generated from
+  // display_name when omitted, with atomic collision-suffix (-2/…) on the real
+  // UNIQUE(tenant_id, application_id, slug) index.
+  // -------------------------------------------------------------------------
+
+  it('T-0650: omitted slug → 201 with an auto-generated slug derived from display_name', requireDb(async () => {
+    const uniqueName = `Автонабор ${uuid().slice(0, 8)}`;
+    const r = await makeRequest(
+      baseUrl,
+      'POST',
+      '/api/registry-defs',
+      { application_id: appAId, display_name: uniqueName, record_schema: VALID_SCHEMA },
+      { 'x-dev-user': 'actor-a' },
+    );
+    expect(r.statusCode).toBe(201);
+    const body = JSON.parse(r.body) as Record<string, unknown>;
+    regDefCleanup.push({ tenantId: TENANT_A, id: body['id'] as string });
+    expect(body['slug']).toMatch(/^[a-z0-9][a-z0-9-]{0,63}$/);
+    expect(body['slug']).toMatch(/^avtonabor/);
+  }));
+
+  it('T-0650: two creates with the SAME display_name under the same app → second gets -2 (not 409)', requireDb(async () => {
+    const sameName = `Дубликат набора ${uuid().slice(0, 8)}`;
+
+    const first = await makeRequest(
+      baseUrl, 'POST', '/api/registry-defs',
+      { application_id: appAId, display_name: sameName, record_schema: VALID_SCHEMA },
+      { 'x-dev-user': 'actor-a' },
+    );
+    expect(first.statusCode).toBe(201);
+    const firstBody = JSON.parse(first.body) as Record<string, unknown>;
+    regDefCleanup.push({ tenantId: TENANT_A, id: firstBody['id'] as string });
+
+    const second = await makeRequest(
+      baseUrl, 'POST', '/api/registry-defs',
+      { application_id: appAId, display_name: sameName, record_schema: VALID_SCHEMA },
+      { 'x-dev-user': 'actor-a' },
+    );
+    expect(second.statusCode).toBe(201); // NOT 409 — auto-slug resolves the collision.
+    const secondBody = JSON.parse(second.body) as Record<string, unknown>;
+    regDefCleanup.push({ tenantId: TENANT_A, id: secondBody['id'] as string });
+
+    expect(secondBody['slug']).toBe(`${firstBody['slug']}-2`);
+  }));
+
+  it('T-0650: explicit slug still validates as before (backward compat)', requireDb(async () => {
+    const r = await makeRequest(
+      baseUrl, 'POST', '/api/registry-defs',
+      { application_id: appAId, display_name: 'X', slug: 'Not A Slug!', record_schema: VALID_SCHEMA },
+      { 'x-dev-user': 'actor-a' },
+    );
+    expect(r.statusCode).toBe(400);
+  }));
+
   it('404 when application_id does not exist in the tenant (FK)', requireDb(async () => {
     const r = await makeRequest(
       baseUrl,
