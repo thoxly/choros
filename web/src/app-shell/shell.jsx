@@ -395,7 +395,7 @@ function SidebarAppRow({
  */
 function SidebarSectionGroup({
   section, isFirst, isLast, onRename, onMoveArrow,
-  onDragOverSection, onDropSection, isDragOverSection, isDraggingThisSection,
+  onGroupDragOver, onGroupDrop, isDragOverSection, isDraggingThisSection,
   onDragStartSection, onDragEndSection,
   children,
 }) {
@@ -412,11 +412,17 @@ function SidebarSectionGroup({
     setEditing(false);
   }, [draft, section.section, section.section_id, onRename]);
 
+  // Drop on the group container. The PARENT decides what it means (app move into
+  // this section vs. section reorder) from the active drag kind — so dropping an
+  // app onto an EMPTY section, or onto the group padding below the last app,
+  // still moves the app here (not only when landing exactly on another app row).
+  // The «Без раздела» fallback accepts APP drops (moving an app out of a section
+  // → section_id=null) but is not itself a draggable/reorderable section.
   return (
     <div
       className={`chs-nav__subgroup${isDragOverSection ? ' chs-nav__subgroup--dragover' : ''}${isDraggingThisSection ? ' chs-nav__subgroup--dragging' : ''}`}
-      onDragOver={isFallback ? undefined : (e) => { e.preventDefault(); onDragOverSection(section.section_id); }}
-      onDrop={isFallback ? undefined : (e) => { e.preventDefault(); onDropSection(section.section_id); }}
+      onDragOver={(e) => { e.preventDefault(); onGroupDragOver(section.section_id); }}
+      onDrop={(e) => { e.preventDefault(); onGroupDrop(section.section_id); }}
     >
       <div
         className="chs-nav__subgrouplabel chs-nav__subgrouplabel--section"
@@ -1338,7 +1344,8 @@ function AppShell() {
   // this just refreshes the sidebar's own section/app cache.
   const handleSectionCreated = useCallback(() => { refreshSidebarData(); }, [refreshSidebarData]);
 
-  // DnD — app dropped onto a section group (reorder within, or move across).
+  // DnD — app dropped onto a specific app row (reorder within / move across,
+  // inserting BEFORE the target row). Called from SidebarAppRow's onDrop.
   const handleAppDrop = useCallback((targetSectionId, beforeAppId) => {
     const draggedId = draggingAppId;
     setDraggingAppId(null); setDragOverAppId(null);
@@ -1346,14 +1353,34 @@ function AppShell() {
     patchApplications(computeAppMove(navGroupsForDnd, draggedId, targetSectionId, beforeAppId));
   }, [draggingAppId, navGroupsForDnd, patchApplications]);
 
-  // DnD — section header dropped onto another section header (reorder sections).
-  const handleSectionDrop = useCallback((targetSectionId) => {
-    const draggedId = draggingSectionId;
-    setDraggingSectionId(null); setDragOverSectionId(null);
-    if (!draggedId) return;
-    const ordered = navGroupsForDnd.filter((g) => !g.fallback).map((g) => ({ id: g.section_id, sort_order: navSections.find((s) => s.id === g.section_id)?.sort_order ?? 0 }));
-    patchSections(computeSectionDrop(ordered, draggedId, targetSectionId));
-  }, [draggingSectionId, navGroupsForDnd, navSections, patchSections]);
+  const sectionOrderList = useCallback(() =>
+    navGroupsForDnd.filter((g) => !g.fallback).map((g) => ({
+      id: g.section_id,
+      sort_order: navSections.find((s) => s.id === g.section_id)?.sort_order ?? 0,
+    })), [navGroupsForDnd, navSections]);
+
+  // DnD — drop on the GROUP container (not a specific app row). Routes by the
+  // active drag kind: an app being dragged → append it to this section (empty
+  // section, «Без раздела», or the padding below the last row); a section being
+  // dragged → reorder sections (skipped when the target is the fallback group).
+  const handleGroupDrop = useCallback((targetSectionId) => {
+    if (draggingAppId) {
+      const draggedId = draggingAppId;
+      setDraggingAppId(null); setDragOverAppId(null);
+      patchApplications(computeAppMove(navGroupsForDnd, draggedId, targetSectionId, undefined));
+      return;
+    }
+    if (draggingSectionId && targetSectionId) {
+      const draggedId = draggingSectionId;
+      setDraggingSectionId(null); setDragOverSectionId(null);
+      patchSections(computeSectionDrop(sectionOrderList(), draggedId, targetSectionId));
+    }
+  }, [draggingAppId, draggingSectionId, navGroupsForDnd, patchApplications, patchSections, sectionOrderList]);
+
+  const handleGroupDragOver = useCallback((sectionId) => {
+    if (draggingSectionId) setDragOverSectionId(sectionId);
+    // (app dragover highlight is tracked per-row by dragOverAppId)
+  }, [draggingSectionId]);
 
   const keycloak = isKeycloakMode(authConfig);
 
@@ -1497,9 +1524,9 @@ function AppShell() {
                       onMoveArrow={handleSectionArrowMove}
                       onDragStartSection={setDraggingSectionId}
                       onDragEndSection={() => { setDraggingSectionId(null); setDragOverSectionId(null); }}
-                      onDragOverSection={setDragOverSectionId}
-                      onDropSection={handleSectionDrop}
-                      isDragOverSection={dragOverSectionId === sec.section_id && draggingSectionId !== sec.section_id}
+                      onGroupDragOver={handleGroupDragOver}
+                      onGroupDrop={handleGroupDrop}
+                      isDragOverSection={dragOverSectionId === sec.section_id && draggingSectionId !== sec.section_id && !!draggingSectionId}
                       isDraggingThisSection={draggingSectionId === sec.section_id}
                     >
                       {sec.apps.length === 0 && (
