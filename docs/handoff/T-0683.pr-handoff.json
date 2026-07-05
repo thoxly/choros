@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0683",
+  "status": "pr_open",
+  "branch": "task/T-0683",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/http/process-projection.ts",
+    "src/http/inbox.ts",
+    "web/src/components/components.jsx",
+    "web/src/components/components.css",
+    "web/src/screens/screen-inbox.jsx",
+    "web/src/components/actor-chip.test.jsx",
+    "web/src/screens/screen-inbox.test.jsx",
+    "src/__tests__/inbox-process-ref.test.ts"
+  ],
+  "summary": "Inbox «ПРОЦЕСС» column no longer renders the raw instance-UUID (or a bare `agent:` key) as the primary identifier on the operator's main screen (capstone T-0647 P0). New ProcessRef primitive (sibling of ActorChip/RecordRef, T-0648) shows the HUMAN process-definition name as primary + the source record title (via RecordRef) as disambiguator; the UUID is demoted. Server: listInstanceInboxTasks now surfaces processName (batched via the REUSED resolveDefinitionNames — not N+1) and recordId (from the started/next_task payload, tenant-scoped RLS via withTenant), threaded onto InboxItem.",
+  "deviations_from_adr": [
+    "No ADR authored (P0 UI+enrichment task). Followed the T-0648 established pattern verbatim: batch resolver + kit primitive + honest fallback.",
+    "Record TITLE is resolved client-side by the existing RecordRef (lazy GET /api/records/:id, PDP/tenant enforced by that endpoint) rather than server-batched, matching how RecordRef is already used elsewhere (T-0648). Server surfaces only recordId; no new records endpoint needed."
+  ],
+  "friction_events": [
+    "Worktree had no node_modules — ran `npm ci` at root and web/ before any gate could run.",
+    "anti-case-lock (rights-ui-anti-case + read-pdp-anti-case) flagged case-literals I put in NEW test lines ('Согласование счёта', 'e-orlov') — the D-064 denylist scans added lines under src/ and web/src/ including tests. Replaced with neutral non-case values ('Обработка заявки', 'e-worker'); gate green.",
+    "Root `eslint web/src --ext .jsx` mis-parses .jsx (react plugin/parser not applied from that path) and reports pre-existing false errors on unchanged lines — this is exactly why the project's web lint script is `|| true`. The blocking server lint (`eslint src`) is 0 errors. My ProcessRef additions introduce no new lint findings.",
+    "Agent/defer inbox rows carry `inst = agent:<uuid>` and `execName = raw actor` (deferred-inbox-store.ts:182/202) — ProcessRef humanizes the `agent:` PROCESS key to the task's own step/name; the unclaimed-defer execName resolution is a broader separate concern (out of scope here, noted for follow-up)."
+  ],
+  "gate_numbers": {
+    "tsc": "0 errors",
+    "web_vitest": "2409 passed (91 files)",
+    "server_vitest": "5661 passed, 10 skipped (296 files)",
+    "web_build": "built in 4.58s, 544 modules",
+    "fitness_db": "1322 passed (138 files), solo on real PG :55432",
+    "anti_case_lock": "PASS (both phases, denylist within baseline)",
+    "anti_uuid_actor_render": "PASS (0 bare raw-identifier renders)",
+    "server_lint": "0 errors, 44 warnings (pre-existing)"
+  },
+  "mutation_pins": [
+    "web (deriveProcessRefPrimary): reverting the machine-key branch to return the raw `inst` → 2 tests RED in actor-chip.test.jsx (primary must never be a UUID).",
+    "web (screen-inbox list column): reverting <ProcessRef.../> back to <MonoId>{t.inst}</MonoId> → 2 source-pins RED in screen-inbox.test.jsx.",
+    "server (listInstanceInboxTasks): dropping processName/recordId enrichment → 2 tests RED in inbox-process-ref.test.ts."
+  ]
+}

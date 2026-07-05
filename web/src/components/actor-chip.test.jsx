@@ -34,8 +34,11 @@ import {
   ActorChip,
   ExecutorBadge,
   AuditEvent,
+  ProcessRef,
   asRenderableText,
   deriveRecordRefLabel,
+  deriveProcessRefPrimary,
+  isMachineInst,
 } from './components.jsx';
 
 // ---------------------------------------------------------------------------
@@ -355,5 +358,90 @@ describe('ActorChip — T-0648 FIX-3: deactivated marker', () => {
   it('deactivated=false (default) → NO deactivation marker in the accessible name', () => {
     const acc = accNameOf(ActorChip({ type: 'human', name: 'Активный', id: 'e-active' }));
     expect(acc).not.toContain('деактивирован');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. T-0683 — ProcessRef: the inbox «ПРОЦЕСС» column must NEVER show a raw
+//    instance-UUID (or a bare `agent:` key) as the PRIMARY identifier. Sibling
+//    of ActorChip/RecordRef (T-0648). Mutational: revert the server enrichment
+//    (processName absent) → the raw UUID must STILL not become the primary text.
+// ---------------------------------------------------------------------------
+
+const A_UUID = '5ec293d1-77d7-11f1-abdf-0242ac120002';
+
+describe('T-0683 — isMachineInst (raw machine keys never primary)', () => {
+  it('a raw instance-UUID IS a machine key', () => {
+    expect(isMachineInst(A_UUID)).toBe(true);
+  });
+  it('an `agent:<id>` synthetic key IS a machine key', () => {
+    expect(isMachineInst('agent:' + A_UUID)).toBe(true);
+    expect(isMachineInst('instance:abc')).toBe(true);
+  });
+  it('a human fixture label like "INS-7731" is NOT a machine key', () => {
+    expect(isMachineInst('INS-7731')).toBe(false);
+  });
+  it('empty / missing inst is treated as a machine key (no human value)', () => {
+    expect(isMachineInst('')).toBe(true);
+    expect(isMachineInst(undefined)).toBe(true);
+  });
+});
+
+describe('T-0683 — deriveProcessRefPrimary (primary is always human)', () => {
+  it('processName (human) always wins as the primary label', () => {
+    const { label } = deriveProcessRefPrimary({ processName: 'Обработка заявки', inst: A_UUID });
+    expect(label).toBe('Обработка заявки');
+    expect(label).not.toBe(A_UUID);
+  });
+  it('MUTATION: no processName + UUID inst → primary is NEVER the raw UUID', () => {
+    // This is the exact capstone T-0647 defect: reverting the server enrichment
+    // (processName undefined) must still not surface the raw UUID as primary.
+    const { label, showInst } = deriveProcessRefPrimary({ processName: undefined, inst: A_UUID });
+    expect(label).not.toBe(A_UUID);
+    expect(label).toBe('Процесс'); // honest generic — the task name fallback is empty here
+    expect(showInst).toBe(false);  // UUID never surfaced as a bare secondary either
+  });
+  it('agent row: no processName + `agent:` key → uses the human task label, not the key', () => {
+    const { label, showInst } = deriveProcessRefPrimary({
+      processName: undefined,
+      inst: 'agent:' + A_UUID,
+      stepFallback: 'Классифицировать обращение',
+    });
+    expect(label).toBe('Классифицировать обращение');
+    expect(label).not.toMatch(/^agent:/);
+    expect(showInst).toBe(false);
+  });
+  it('human fixture inst (no processName) → uses the fixture label as primary', () => {
+    const { label } = deriveProcessRefPrimary({ processName: undefined, inst: 'INS-7731' });
+    expect(label).toBe('INS-7731');
+  });
+});
+
+describe('T-0683 — ProcessRef component tree (no recordId → hook-free)', () => {
+  // ProcessRef only renders the nested RecordRef (which uses hooks) when
+  // recordId is present. Without recordId it is a pure function-component tree —
+  // safe to call directly and tree-walk (same discipline as ActorChip above).
+  it('with processName: the human name is in the rendered text, the UUID is NOT bare text', () => {
+    const tree = ProcessRef({ processName: 'Возврат средств', inst: A_UUID });
+    const text = flattenText(tree).join(' ');
+    expect(text).toContain('Возврат средств');
+    // The raw UUID must not appear as a bare text leaf (it lives only in title).
+    expect(text).not.toContain(A_UUID);
+  });
+  it('MUTATION: no processName + UUID inst → the UUID is NOT the primary text', () => {
+    const tree = ProcessRef({ processName: undefined, inst: A_UUID, stepFallback: '' });
+    const text = flattenText(tree).join(' ');
+    expect(text).toContain('Процесс');
+    expect(text).not.toContain(A_UUID);
+  });
+  it('agent row: `agent:` key is never rendered as bare text', () => {
+    const tree = ProcessRef({
+      processName: undefined,
+      inst: 'agent:' + A_UUID,
+      stepFallback: 'Триаж обращения',
+    });
+    const text = flattenText(tree).join(' ');
+    expect(text).toContain('Триаж обращения');
+    expect(text).not.toMatch(/agent:/);
   });
 });

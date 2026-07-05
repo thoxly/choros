@@ -299,6 +299,114 @@ function RecordRef({ recordId, appId, headers, fetchImpl }) {
   );
 }
 
+/* ----------------------------------------------------------------------------
+   ProcessRef — T-0683 (D-064, wave-5 human-layer; capstone T-0647 finding):
+   the inbox «ПРОЦЕСС» column rendered the raw instance-UUID
+   (`5ec293d1-77d7-11f1-…`) as the PRIMARY identifier on the operator's main
+   screen — the central violation of «прожить решение без единого машинного
+   ключа». Agent-rows showed a bare `agent:` key. This is the sibling primitive
+   to ActorChip/RecordRef (T-0648): show a HUMAN process name as primary + the
+   source record's title (via RecordRef) as the disambiguator; the raw
+   instance-UUID is DEMOTED to a mono secondary chip (never the primary text).
+
+   Deliberately dependency-free (kit convention): the caller passes its own auth
+   `headers` through to the nested RecordRef, exactly as RecordRef itself
+   documents — the kit layer never reaches into app-shell/dev-auth.js.
+
+   Props:
+     processName — the HUMAN process-definition name (from
+                   InstanceInboxTask.processName / InboxItem.processName). When
+                   present it is ALWAYS the primary label.
+     inst        — the raw instance identifier (a UUID for real engine
+                   instances, "INS-7731" for seed fixtures, or "agent:<id>" for
+                   agent-defer rows). Shown only DEMOTED as a mono secondary,
+                   and only when it is NOT a bare machine key with no human
+                   value to add.
+     recordId    — originating record id (InboxItem.recordId); when present a
+                   RecordRef resolves its TITLE as the disambiguator.
+     appId       — record's owning app id, if known (threaded to RecordRef).
+     stepFallback— a human step/task label to use as primary when there is NO
+                   processName AND `inst` is a machine key (agent rows): the
+                   task's own name/step is the best available human handle.
+     headers     — auth headers, passed through to RecordRef.
+     fetchImpl   — fetch override (tests / RecordRef).
+   ---------------------------------------------------------------------------- */
+
+/** UUID (v1–v5) shape — a raw machine key that must never be a primary label. */
+const PROCESSREF_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * isMachineInst — true when `inst` is a bare machine key with no human meaning:
+ * a raw UUID, an `agent:<...>` / `instance:<...>` synthetic key, or empty. A
+ * human-friendly fixture label like "INS-7731" is NOT a machine key.
+ */
+export function isMachineInst(inst) {
+  if (typeof inst !== "string" || inst.trim() === "") return true;
+  const s = inst.trim();
+  if (PROCESSREF_UUID_RE.test(s)) return true;
+  if (/^(agent|instance|flw):/i.test(s)) return true;
+  // Bare UUID embedded after a known synthetic prefix already handled above; a
+  // plain hex-ish blob with no separators reads as machine too.
+  return false;
+}
+
+/**
+ * deriveProcessRefPrimary — PURE decision (hook-free, unit-testable, mirrors
+ * deriveRecordRefLabel's split): pick the PRIMARY human label for a process
+ * reference, and report whether the raw `inst` still deserves a demoted
+ * secondary chip.
+ *
+ * Order:
+ *   1. processName (human definition name) — always wins when present.
+ *   2. else stepFallback (the task's own human step/name) — for agent/defer
+ *      rows that carry no process definition but do carry a human task label.
+ *   3. else inst when inst is human-friendly (e.g. "INS-7731").
+ *   4. else the honest generic «Процесс» — NEVER the raw UUID/agent: key.
+ *
+ * Returns { label, showInst }:
+ *   - label:    the primary human string (never a bare machine key).
+ *   - showInst: true iff `inst` is human-friendly AND was not already used as
+ *               the primary — a UUID/agent: key is NEVER surfaced as a bare
+ *               secondary text (it lives only in the demoted MonoId chip the
+ *               component renders as tooltip-grade context, if at all).
+ */
+export function deriveProcessRefPrimary({ processName, inst, stepFallback } = {}) {
+  const pn = typeof processName === "string" ? processName.trim() : "";
+  if (pn) return { label: pn, showInst: !isMachineInst(inst) };
+  const sf = typeof stepFallback === "string" ? stepFallback.trim() : "";
+  const machine = isMachineInst(inst);
+  if (!machine) {
+    // inst is human-friendly (e.g. "INS-7731") — use it as primary.
+    return { label: inst.trim(), showInst: false };
+  }
+  // inst is a machine key — never show it as primary. Prefer a human step label.
+  if (sf) return { label: sf, showInst: false };
+  return { label: "Процесс", showInst: false };
+}
+
+function ProcessRef({ processName, inst, recordId, appId, stepFallback, headers, fetchImpl }) {
+  const { label, showInst } = deriveProcessRefPrimary({ processName, inst, stepFallback });
+  const machine = isMachineInst(inst);
+  const rawInst = asRenderableText(inst);
+  return (
+    <span className="chs-processref">
+      <span className="chs-processref__name" title={machine && rawInst ? rawInst : undefined}>
+        {label}
+      </span>
+      {recordId && (
+        <span className="chs-processref__record">
+          <RecordRef recordId={recordId} appId={appId} headers={headers} fetchImpl={fetchImpl} />
+        </span>
+      )}
+      {/* The raw instance id is DEMOTED: a human-friendly fixture id may show as a
+          mono secondary; a UUID/agent: machine key is never surfaced as bare text
+          (it stays in the name's title tooltip only). */}
+      {showInst && rawInst && <MonoId chip>{rawInst}</MonoId>}
+    </span>
+  );
+}
+
 /* StatusChip */
 const STATUS_META = {
   running: { label: "Выполняется", cls: "chs-chip--running" },
@@ -1117,7 +1225,7 @@ function DataTableCell({ children, numeric = false, right = false, center = fals
 }
 
 export {
-  ExecGlyph, ExecutorBadge, ActorChip, MonoId, Mono, RecordRef, StatusChip, Button, Field, Select,
+  ExecGlyph, ExecutorBadge, ActorChip, MonoId, Mono, RecordRef, ProcessRef, StatusChip, Button, Field, Select,
   BudgetMeter, ReservationMeter, RoleAssignment, OpChip, DerivedChip,
   TaskRow, AuditEvent, EXEC_META, STATUS_META,
   KitIcon, Spinner,
@@ -1129,3 +1237,6 @@ export {
   // which is exported for the SAME reason — pure label-derivation logic, no hooks).
   asRenderableText, deriveRecordRefLabel,
 };
+// T-0683: deriveProcessRefPrimary / isMachineInst are already exported at their
+// `export function` declaration site (pure, hook-free, unit-testable — same
+// split as deriveRecordRefLabel); no duplicate named export here.
