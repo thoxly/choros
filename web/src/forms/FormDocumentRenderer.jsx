@@ -49,7 +49,26 @@ import { getWidget, registerRender } from './widget-registry.js';
  * Build the "renderable field" descriptor FieldControl expects from a document
  * node + the LIVE schema field. The TYPE and OPTIONS come from the schema (never
  * the node) — this is the anti-drift contract. The node contributes only the
- * presentation: label, widget→presentation, mode.
+ * presentation: label, widget→presentation, mode (subject to the per-step
+ * override below).
+ *
+ * T-0665 (F6): `mode` prioritizes `schemaField.mode` — the SERVER-SIDE
+ * per-step mode (T-0404, carried in form_binding.fields[].mode and already
+ * enforced by the legacy FieldControl-per-row path's resolveFieldMode/
+ * editableKeys submit-gate) — over the layout node's own authoring-time
+ * `node.mode` (set by FormDesigner's Inspector "Режим" control). Without
+ * this, a field the process author marked read-only/required/hidden AT THIS
+ * STEP would render editable/optional/visible whenever the layout path was
+ * used, even though the exact same binding renders it correctly via the
+ * legacy per-row path — a real behavioral regression between the two render
+ * paths for the SAME data, not merely a cosmetic gap. `node.mode` remains the
+ * fallback for a field the schema does not otherwise constrain.
+ *
+ * T-0665 (F5 completeness): `recordId` passes through from schemaField (the
+ * caller threads it onto file-contract entries in the `fields` array it
+ * hands to FormDocumentRenderer, mirroring what the legacy per-row path
+ * already does) — without it, FileField would silently lose its "which
+ * record does this belong to" context under the layout render path only.
  */
 function renderableField(node, schemaField) {
   // widget on the node maps to a presentation override; absent → schema default.
@@ -62,8 +81,9 @@ function renderableField(node, schemaField) {
     type: schemaField ? schemaField.type : 'string',
     options: schemaField && Array.isArray(schemaField.options) ? schemaField.options : undefined,
     presentation,
-    // per-step mode → FieldControl's resolveFieldMode vocabulary.
-    mode: nodeModeToFieldMode(node.mode),
+    // Per-step mode: schema (server-side, T-0404) wins; layout node is the fallback.
+    mode: (schemaField && schemaField.mode) || nodeModeToFieldMode(node.mode),
+    ...(schemaField && schemaField.recordId !== undefined ? { recordId: schemaField.recordId } : {}),
   };
 }
 

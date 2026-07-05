@@ -157,6 +157,45 @@ describe('anti-drift: a dangling binding is surfaced, not silent', () => {
   });
 });
 
+describe('T-0665 (F6): per-step schema mode wins over the layout node\'s authoring-time mode', () => {
+  it('schemaField.mode="hidden" hides the field even when the layout node has no mode set', () => {
+    const node = { type: 'field', fieldKey: 'amount', widget: 'money' }; // no node.mode
+    const schemaWithMode = SCHEMA.map((f) => (f.key === 'amount' ? { ...f, mode: 'hidden' } : f));
+    const tree = FormNode({ node, ctx: ctxFor(schemaWithMode) });
+    // FieldControl itself returns null when hidden — executing it here should
+    // yield no rendered control at all.
+    const controls = byComponent(tree, FieldControl);
+    // FieldNode always renders a FieldControl element (FieldControl decides
+    // internally to return null for hidden) — assert the FIELD passed carries
+    // mode:'hidden' so FieldControl's own resolveFieldMode hides it.
+    expect(controls.length).toBe(1);
+    expect(controls[0].props.field.mode).toBe('hidden');
+  });
+
+  it('schemaField.mode="read-only" wins over a layout node authored as mode:"required" (server per-step policy is authoritative)', () => {
+    const node = { type: 'field', fieldKey: 'amount', widget: 'money', mode: 'required' };
+    const schemaWithMode = SCHEMA.map((f) => (f.key === 'amount' ? { ...f, mode: 'read-only' } : f));
+    const tree = FormNode({ node, ctx: ctxFor(schemaWithMode) });
+    const controls = byComponent(tree, FieldControl);
+    expect(controls[0].props.field.mode).toBe('read-only');
+  });
+
+  it('falls back to the layout node\'s own mode when the schema field carries none (authoring-time default preserved)', () => {
+    const node = { type: 'field', fieldKey: 'amount', widget: 'money', mode: 'readonly' };
+    const tree = FormNode({ node, ctx: ctxFor(SCHEMA) }); // SCHEMA's amount has no .mode
+    const controls = byComponent(tree, FieldControl);
+    expect(controls[0].props.field.mode).toBe('read-only'); // nodeModeToFieldMode('readonly')
+  });
+
+  it('recordId passes through from the schema field onto the renderable field (file-contract needs it under the layout path too)', () => {
+    const node = { type: 'field', fieldKey: 'doc', widget: 'text' };
+    const schemaWithFile = [{ key: 'doc', type: 'file', title: 'Договор', recordId: 'rec-123' }];
+    const tree = FormNode({ node, ctx: ctxFor(schemaWithFile) });
+    const controls = byComponent(tree, FieldControl);
+    expect(controls[0].props.field.recordId).toBe('rec-123');
+  });
+});
+
 describe('«Согласование» document renders end-to-end', () => {
   it('renders the positions table + readout + relation + readonly amount', () => {
     const doc = {
