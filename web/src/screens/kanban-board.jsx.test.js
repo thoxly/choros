@@ -128,6 +128,27 @@ describe('NF-6: kit-only + no drag-and-drop LIBRARY (native HTML5 DnD only)', ()
   });
 });
 
+describe('T-0626: empty card_fields falls back to deriveRecordLabel, not a raw UUID', () => {
+  it('imports deriveRecordLabel from records-form.js and resolveCardLabel from kanban-board.js (reuses the platform convention, no second implementation)', () => {
+    expect(boardSrc).toMatch(/import \{ formatCellValue, computeComputedFieldValue, deriveRecordLabel \} from '\.\/records-form\.js';/);
+    expect(boardSrc).toMatch(/resolveCardLabel/);
+    expect(boardSrc).toMatch(/from '\.\/kanban-board\.js';/);
+  });
+  it('cardLabel is computed via resolveCardLabel, threading deriveRecordLabel through as the empty-card_fields fallback', () => {
+    expect(boardSrc).toMatch(/const cardLabel = resolveCardLabel\(\s*\n\s*record, fields, fieldMetaByKey, formatCellValue, computeComputedFieldValue, deriveRecordLabel,\s*\n\s*\);/);
+  });
+});
+
+describe("T-0626 FF-K: resolveCardLabel's fallback contract (source-level; behaviour proven in kanban-card-label.test.js)", () => {
+  const boardJsSrc = readSibling('kanban-board.js');
+  it('resolveCardLabel: empty card_fields returns deriveRecordLabelFn(record), never a raw id slice', () => {
+    expect(boardJsSrc).toMatch(/if \(fields\.length === 0\) \{\s*\n\s*return deriveRecordLabelFn\(record\);/);
+  });
+  it('resolveCardLabel is exported (unit-testable pure function, no React/hooks)', () => {
+    expect(boardJsSrc).toMatch(/export function resolveCardLabel\(/);
+  });
+});
+
 describe("D-064 anti-case: kanban-board.jsx/.js carry no business-domain vocabulary", () => {
   const FORBIDDEN = [/сделк/i, /стади/i, /воронк/i, /\bdeal\b/i, /\bstage\b/i, /\bpipeline\b/i, /\bCRM\b/];
   it('kanban-board.jsx is generic', () => {

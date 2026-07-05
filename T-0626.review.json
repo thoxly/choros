@@ -1,0 +1,39 @@
+{
+  "task_id": "T-0626",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": false }
+  ],
+  "role_gap_evidence": [],
+  "ux_review": {
+    "d062_axes": {
+      "contrast": "n/a — no new visual/styling tokens introduced; this is a text-content fix only (aria-label / card display string), no raw hex/rgba added, kanban-ux-gate G1-G7 confirmed clean",
+      "jargon": "pass — cardLabel now surfaces the record's own field content (e.g. record's name/title), which is more honest to the end-user than the previous raw UUID; no new jargon introduced",
+      "honesty": "improved — the prior screen lied by presenting an internal identifier (truncated UUID prefixed with 'Запись') as if it were meaningful content; the fix makes the card say something a human can actually use to distinguish records. The last-resort fallback (record with zero textual/numeric fields) is a short id ref ('cf1e4523…'), not a bare full UUID and not the old template — an honest 'this record has no nameable field' signal rather than a fabricated label"
+    },
+    "consistency": "confirmed by reading records-form.js:1079-1089: deriveRecordLabel is the exact same convention already used by RelationCell/RelationPicker and the record list/detail screens (T-0447) — kanban now matches the rest of the product rather than having its own bespoke (broken) fallback",
+    "regression_check": "configured card_fields path (fields.length > 0) is byte-identical in behavior: resolveCardLabel's fields.length===0 branch is a pure addition, the fields.length>0 branch is the unmodified original logic (fields[0] via fieldMetaByKey + formatCellValue/computeComputedFieldValue, same point fallback). Verified via kanban-card-label.test.js AC-3 cases and by re-reading the diff — no changes to buildKanbanColumns/buildMovePayload/drag-and-drop code paths",
+    "delegation_check": "resolveCardLabel (kanban-board.js) does not reimplement 'first non-empty field' logic — confirmed by reading the source: on the empty-cardFields branch it calls deriveRecordLabelFn(record) (the injected records-form.js function) directly and returns its result, with zero duplicated string/number-scanning logic in kanban-board.js itself. This satisfies spec NF-1 (one resolver, not a second copy)"
+  },
+  "notes": [
+    "Verified independently (not just trusting pr-handoff): git diff dev...HEAD read in full; deriveRecordLabel read at records-form.js:1079-1089 and confirmed it matches the claimed contract (first non-empty string/number field in record.data, else `${id.slice(0,8)}…`, never a bare UUID).",
+    "cardLabel confirmed wired to the actual rendered aria-label in kanban-board.jsx:77 (aria-label={cardLabel}) — not a dead computation.",
+    "Ran directly: `cd web && npx vitest run src/screens/kanban-card-label.test.js src/screens/kanban-board.jsx.test.js` -> 2 files, 37 tests, all pass.",
+    "Ran directly: `bash ci/checks/ux/kanban-ux-gate.sh`, `bash ci/checks/kanban-registry-no-fork.sh`, `bash ci/checks/anti-case-lock.sh` -> all PASS/exit 0.",
+    "Ran directly: `cd web && npm run build` -> succeeds isolated inside web/, only the pre-existing >500kB chunk-size advisory warning (unrelated to this diff), no new web->src runtime import found by grep.",
+    "AC-9 (LIVE_PROOF screenshot on the dev stand) is NOT independently verifiable by this reviewer (no stand access in this pass) — marked not-covered rather than assumed; this is a manual/stand-level acceptance criterion, not a blocking code-review concern given all automatable ACs (1-8) are proven green and the underlying logic is directly traced to the spec's claimed behavior. Recommend the LIVE_PROOF screenshot still be captured before promotion, per D-064 discipline, but it does not block this small, well-contained UX-defect fix from an authorship/correctness standpoint.",
+    "No UX axis flags contrast/jargon/honesty issues (D-062): the change is a strict honesty improvement (meaningful label vs. a bare internal id), reuses existing platform convention rather than inventing new copy, and the fallback-of-last-resort is itself an existing, already-reviewed format (deriveRecordLabel's short id ref, T-0447)."
+  ],
+  "review_path": "T-0626.review.json",
+  "commit": null
+}

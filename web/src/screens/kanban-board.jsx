@@ -36,8 +36,8 @@ import React, { useCallback, useMemo, useState } from 'react';
 import {
   Card, Badge, EmptyState, LoadingState, ErrorState,
 } from '../components/components.jsx';
-import { formatCellValue, computeComputedFieldValue } from './records-form.js';
-import { buildKanbanColumns, buildMovePayload, isFieldRequired } from './kanban-board.js';
+import { formatCellValue, computeComputedFieldValue, deriveRecordLabel } from './records-form.js';
+import { buildKanbanColumns, buildMovePayload, isFieldRequired, resolveCardLabel } from './kanban-board.js';
 
 // ---------------------------------------------------------------------------
 // KanbanCard — one record rendered as a kit <Card>, with the keyboard-operable
@@ -57,14 +57,12 @@ function KanbanCard({
     onMove(record, nextValue);
   }, [record, currentValue, onMove]);
 
-  const cardLabel = fields.length > 0
-    ? (() => {
-      const first = fieldMetaByKey.get(fields[0]);
-      const v = first && first.type === 'computed' ? computeComputedFieldValue(first, data) : data[fields[0]];
-      const rendered = formatCellValue(v, first ? first.type : 'string');
-      return typeof rendered === 'string' ? rendered : `Запись ${record.id.slice(0, 8)}`;
-    })()
-    : `Запись ${record.id.slice(0, 8)}`;
+  // T-0626: label derivation lives in the pure resolveCardLabel (kanban-board.js)
+  // so the fallback contract (empty card_fields -> deriveRecordLabel, never a
+  // raw UUID) is unit-testable without React/hooks — see kanban-card-label.test.js.
+  const cardLabel = resolveCardLabel(
+    record, fields, fieldMetaByKey, formatCellValue, computeComputedFieldValue, deriveRecordLabel,
+  );
 
   return (
     <li

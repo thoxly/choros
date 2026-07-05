@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0626",
+  "status": "pr_open",
+  "branch": "task/T-0626-kanban-card-label",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "web/src/screens/kanban-board.js",
+    "web/src/screens/kanban-board.jsx",
+    "web/src/screens/kanban-board.jsx.test.js",
+    "web/src/screens/kanban-card-label.test.js",
+    "T-0626.spec.md",
+    "T-0626.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "Spec/ADR combined into T-0626.spec.md only (no separate .adr.md) — per task instruction and the T-0635 precedent, this is a small, well-scoped UX defect fix, not an architectural decision warranting a separate ADR.",
+    "Extracted the label-derivation logic into a new pure function resolveCardLabel (web/src/screens/kanban-board.js) instead of inlining deriveRecordLabel directly inside the KanbanCard JSX component. Reason: KanbanCard calls useCallback (a React hook), and this repo's web vitest tier is hook-free/jsdom-free (no react-test-renderer/react-dom available — confirmed by grepping the existing test suite and by a failed spike: calling KanbanCard as a plain function throws 'Cannot read properties of null (reading useCallback)'). Extracting the label VALUE computation into a pure, dependency-injected function makes the T-0626 fallback contract genuinely unit-testable (kanban-card-label.test.js) without adding a new test-rendering dependency to the project — mirrors the project's own established convention (buildKanbanColumns/buildMovePayload already live in kanban-board.js for the same reason, per that file's own header comment)."
+  ],
+  "open_questions": [],
+  "defect_and_fix": {
+    "defect": "web/src/screens/kanban-board.jsx, function KanbanCard, variable cardLabel: when a kanban view's card_fields was not configured (fields.length === 0), the card's aria-label / keyboard-select label fell back to a raw (truncated) UUID: `Запись ${record.id.slice(0, 8)}`. Live-proven user-facing defect, first surfaced by capstone T-0584 (LIVE_PROOF /poehali wave 2): an owner who never opens the kanban config panel sees cards labelled by opaque ids, not by any recognizable field of the record.",
+    "fix": "The platform already has a canonical convention for exactly this situation — deriveRecordLabel (web/src/screens/records-form.js:1079-1089, T-0447): first non-empty string/number value found in record.data (schema-key order), or a short 8-char id ref (never a bare full UUID) if the record has no textual field at all. It is already reused by RelationCell/RelationPicker (forms/field-renderer.jsx) and by the record list and record detail screens (screen-app-records.jsx, screen-record-detail.jsx) — three independent consumers, zero duplication. kanban-board.jsx now imports and threads deriveRecordLabel into a new pure resolveCardLabel (kanban-board.js), which is called from KanbanCard for the empty-card_fields branch. The configured card_fields path (fields.length > 0) is completely untouched — same fields[0]-driven rendering and same pre-existing point fallback as before.",
+    "files": ["web/src/screens/kanban-board.jsx", "web/src/screens/kanban-board.js"]
+  },
+  "default_label_logic": "When card_fields is empty: resolveCardLabel(record, [], ...) -> deriveRecordLabel(record) -> first non-empty string/number value in record.data (schema-key iteration order), else a short id ref (`${id.slice(0,8)}…`) — never the raw full UUID and never the old 'Запись <uuid>' template. When card_fields is configured: unchanged v1 behaviour — fields[0]'s rendered value via formatCellValue/computeComputedFieldValue, with its own pre-existing point fallback (`Запись ${id.slice(0,8)}`) only if that SPECIFIC configured field renders to a non-string for that record (out of scope for this fix, per spec FR-2).",
+  "tests_added": [
+    {
+      "file": "web/src/screens/kanban-card-label.test.js",
+      "covers": "Behavioural coverage of resolveCardLabel (pure function, no React/hooks needed): AC-2 empty card_fields + a non-empty string field -> that field's value, not a UUID/'Запись <id>' (2 cases, different field keys/ids); defensive case for cardFields=undefined treated like []; AC-3 configured card_fields path unchanged (fields[0] wins over deriveRecordLabel, including its own pre-existing point-fallback '—' when the configured field renders to a non-string); AC-4 record with zero textual/numeric fields -> deriveRecordLabel's own short-id-ref format ('cf1e4523…'), never the bare full UUID and never 'Запись <uuid>' — including a whitespace-only-string edge case."
+    },
+    {
+      "file": "web/src/screens/kanban-board.jsx.test.js",
+      "covers": "Source-text/wiring proof (project convention for this hook-bearing JSX file, mirrors the rest of this test file): kanban-board.jsx imports deriveRecordLabel from records-form.js and resolveCardLabel from kanban-board.js; cardLabel is computed via resolveCardLabel with the correct argument order/threading; kanban-board.js's resolveCardLabel source itself returns deriveRecordLabelFn(record) on the empty-fields branch and is exported."
+    }
+  ],
+  "gates": {
+    "web_vitest": "pass — full web suite: 78 test files, 2120 tests, 0 failed (cd web && npx vitest run)",
+    "web_build": "pass — cd web && npm run build succeeds (isolated, Docker-honest: web/ builds standalone; only a pre-existing >500kB chunk-size warning, unrelated to this diff)",
+    "kanban_ux_gate": "pass — bash ci/checks/ux/kanban-ux-gate.sh (G1-G7 static checks clean, unmodified gate)",
+    "kanban_registry_no_fork": "pass — bash ci/checks/kanban-registry-no-fork.sh (FF-K-1a/b/c, FF-K-4: zero new migrations/routers/direct SELECTs, list-views.ts untouched)",
+    "kanban_write_via_record_put": "pass — bash ci/checks/kanban-write-via-record-put.sh (FF-K-3: move still only via PUT /api/records/:id)",
+    "anti_case": "pass — bash ci/checks/anti-case-lock.sh (both phases: delegate gates clean, full D-064 denylist aggregate 19 vs baseline 24 — strictly within baseline, no regression)",
+    "npm_run_fitness": "pass (269 PASS / 0 FAIL on this diff's own gates) with TWO transient environment-load flakes observed and independently re-verified clean standalone on a shared machine running ~6+ concurrent worktree fitness/vitest runs (T-0618/T-0637/T-0643 and others observed live via `ps aux` during this task): run 1 failed at ci/checks/dual-control-isolation.sh (FF-DC11, a static grep of src/http/grants.ts unrelated to kanban/web) — passed cleanly standalone both before and after this diff was stashed; run 2 failed at ci/checks/worker-auth-config-failfast.sh (FF-6, reads live KC_ISSUER/KEYCLOAK_URL env vars) — passed cleanly standalone with no KC env vars set in this shell. Neither check touches web/, kanban-board.*, or records-form.js; both are pre-existing, load-sensitive gates unrelated to this task's diff.",
+    "migration": "none required — pure frontend/web fix, zero backend/migration/routing changes (confirmed by kanban-registry-no-fork.sh and by files_changed above being exclusively under web/)"
+  },
+  "live_proof_plan": [
+    "1. On the dev stand, open an app with a kanban-type view whose card_fields is empty/unconfigured (either a fresh kanban view just created via the type picker, or an existing one where the owner never opened 'Настроить список' -> card fields).",
+    "2. Expected BEFORE this fix: every card on the board is labelled with a raw id fragment, e.g. 'Запись cf1e4523' (aria-label, and the 'Переместить «...» в колонку' select label) — no relation to any actual field of the record.",
+    "3. Expected AFTER this fix: every card's label (aria-label on the Card, and the keyboard-select's aria-label) shows the record's own first non-empty text/number field (e.g. a name/title-like field) — a human reads the board and can tell which record is which without opening it. A record with genuinely no textual field anywhere falls back to a short id reference (8 chars + ellipsis), still readable/copyable, never a bare 36-char UUID and never the old template text.",
+    "4. Regression check: a kanban view WITH card_fields configured (e.g. via 'Настроить список') is visually identical to before this change — same field(s) shown, same order, no new fallback text introduced.",
+    "5. Screenshot/snapshot both states (empty card_fields -> readable label; configured card_fields -> unchanged) as the LIVE_PROOF artifact for UX_REVIEW."
+  ]
+}
