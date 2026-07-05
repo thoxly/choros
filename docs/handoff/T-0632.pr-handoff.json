@@ -3,6 +3,16 @@
   "status": "pr_open",
   "branch": "task/T-0632-report-agg-readpdp",
   "pr_url": "local:task/T-0632-report-agg-readpdp",
+  "live_proof": {
+    "verdict": "GREEN",
+    "stand": "http://100.121.76.86:3000 dev@e8c735d",
+    "method": "Playwright chromium, real Keycloak Authorization Code + PKCE via KC login form; two real KC actors (lp-t0632-narrow, lp-t0632-wide) with different real choros.grant rows (application-read + record-read scoped to 1-of-2 vs 2-of-2 records); direct fetch('/api/report-pages/:id/render' and '/data') from each actor's own authenticated browser session using their own Bearer accessToken — same requests the SPA itself issues.",
+    "render_result": "narrow actor SUM=100 (only the visible record, never 100+900=1000); wide actor SUM=1000 (full).",
+    "data_result": "narrow actor records=[record1 only], total_count=1 (not 2 — hidden record's existence not even revealed via count); wide actor records=[both], total_count=2.",
+    "report": "docs/live-proof/T-0632.live-proof.md",
+    "evidence_dir": "docs/live-proof/T-0632-evidence/",
+    "setup_note": "No pre-existing report_page rows on the stand (0 rows in Dev Silo) — minimal test fixture seeded (application/registry/2 records/2 report-pages, mirroring ci/checks/db/report-page-render-read-pdp.db.test.ts's seed shape) plus 2 real KC actors with real grant rows. Fixtures left on stand as a reusable regression case (prefixed e0000001-0000-0000-0000-00000000* / lp-t0632-*), not deleted."
+  },
   "summary": "Security fix (столп 4): the report-page endpoints computed/dumped record data over the WHOLE registry gated ONLY by an application-level READ grant (checkReadGrant), never a record-level READ-PDP check — so a narrow record-scope actor received data/aggregates over rows they cannot read individually. TWO sibling surfaces of the same wall: (1) /render + /export (Floor-1 aggregate, buildAggSql) computed SUM/AVG/COUNT/MIN/MAX/LIST over EVERY record — the defect adversary-skeptic T-0587 found and ADR-T0587 §1.1 explicitly declined to fix. (2) /data (dataFloor2, LEAK A found by adversary opus on review of the first T-0632 iteration) dumped the FULL data of EVERY record + an exact full-registry COUNT(*) — the raw-row twin of the aggregate leak. T-0632 closes BOTH at the source: variant (б) — a per-row isRecordReadable filter over a bounded raw-row fetch. For aggregates the visible subset is folded in application code (new pure module src/core/visible-record-agg.ts, full Floor-1 vocab); for /data the raw dump is filtered to visible records and total_count is the VISIBLE count (not SELECT COUNT(*)). Same discipline the analyst chat (T-0587) and GET /api/records (T-0570) already use. The application-level checkReadGrant remains the first, mandatory gate; the record-level filter is an additional, second gate on top. Also audited /process-analytics (4th route): reads the S3 transition journal, not choros.record — not a record-scope READ-PDP surface, no change needed.",
   "fix_variant": {
     "chosen": "б — per-row isRecordReadable filter over a bounded raw-row fetch; aggregate computed in application code over the visible subset only",
