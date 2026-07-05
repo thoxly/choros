@@ -254,24 +254,32 @@ async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string
 // ---------------------------------------------------------------------------
 
 /**
- * GrantTrailRowWithDisplay — GrantTrailRow (unchanged, wire-frozen) plus TWO
- * additive optional fields carrying the T-0648 batch-resolved actor/subject
- * display shape ({id, name, type, deactivated}). ADDITIVE ONLY: `actor` and
- * `subject` on the row keep their original raw-string shape (existing readers/
- * tests are untouched) — the frontend prefers `actorResolved`/`subjectResolved`
- * when present and falls back to the raw string otherwise.
+ * GrantTrailRowWithDisplay — GrantTrailRow (unchanged, wire-frozen) plus THREE
+ * additive optional fields carrying the T-0648 batch-resolved actor/subject/
+ * confirmer display shape ({id, name, type, deactivated}). ADDITIVE ONLY:
+ * `actor`/`subject`/`confirmed_by` on the row keep their original raw-string
+ * shape (existing readers/tests are untouched) — the frontend prefers
+ * `actorResolved`/`subjectResolved`/`confirmedResolved` when present and falls
+ * back to the raw string otherwise.
+ *
+ * T-0685: `confirmedResolved` added — the «КТО-ПОДТВЕРДИЛ» (confirmed_by) actor
+ * is the THIRD identifier column on /rights/trail (alongside «КТО-ВЫДАЛ» actor
+ * and «КОМУ» subject); the capstone T-0647 live-proof showed a raw
+ * employee-UUID leaking there too when confirmed_by holds a UUID/slug the seed
+ * fixtures never showed (they carry human display names).
  */
 type GrantTrailRowWithDisplay = GrantTrailRow & {
   actorResolved?: ResolvedActor;
   subjectResolved?: ResolvedActor;
+  confirmedResolved?: ResolvedActor;
 };
 
 /**
- * T-0648: batch-resolve every DISTINCT actor/subject in a page of grant-trail
- * rows in ONE query (batchResolveActors) — not one lookup per row. `subject`
- * on an assignment/grant event is sometimes a role slug (not an employee), so
- * an unresolved subject simply keeps no `subjectResolved` field (the frontend
- * falls back to the raw string, exactly as it does today).
+ * T-0648/T-0685: batch-resolve every DISTINCT actor/subject/confirmer in a page
+ * of grant-trail rows in ONE query (batchResolveActors) — not one lookup per
+ * row. `subject` on an assignment/grant event is sometimes a role slug (not an
+ * employee), so an unresolved subject simply keeps no `subjectResolved` field
+ * (the frontend falls back to the raw string, exactly as it does today).
  */
 async function attachResolvedActors(
   pool: pg.Pool,
@@ -282,6 +290,7 @@ async function attachResolvedActors(
   for (const r of rows) {
     if (r.actor) ids.add(r.actor);
     if (r.subject) ids.add(r.subject);
+    if (r.confirmed_by) ids.add(r.confirmed_by);
   }
   if (ids.size === 0) return rows;
 
@@ -297,6 +306,7 @@ async function attachResolvedActors(
     ...r,
     ...(r.actor && resolved.has(r.actor) ? { actorResolved: resolved.get(r.actor) } : {}),
     ...(r.subject && resolved.has(r.subject) ? { subjectResolved: resolved.get(r.subject) } : {}),
+    ...(r.confirmed_by && resolved.has(r.confirmed_by) ? { confirmedResolved: resolved.get(r.confirmed_by) } : {}),
   }));
 }
 

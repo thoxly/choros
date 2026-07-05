@@ -85,6 +85,38 @@ function collectObjectChildren(node, bad = []) {
   return bad;
 }
 
+/**
+ * flattenVisibleText — T-0685: collect the VISIBLE primary text leaves of a
+ * rendered tree (recursing into function components by calling them), SKIPPING
+ * aria-hidden decorations and chs-sr-only screen-reader-only spans. This is the
+ * text a sighted operator actually reads in the «КОМУ»/«КТО-ВЫДАЛ» columns —
+ * exactly where the capstone T-0647 saw the raw employee-UUID leak. We exclude
+ * sr-only/title so the assertion is specifically about the PRIMARY label, not
+ * the (legitimately id-bearing) tooltip/accessible-name.
+ */
+function flattenVisibleText(node, acc = []) {
+  if (node === null || node === undefined || node === false) return acc;
+  if (typeof node === 'string' || typeof node === 'number') {
+    acc.push(String(node));
+    return acc;
+  }
+  if (Array.isArray(node)) {
+    for (const c of node) flattenVisibleText(c, acc);
+    return acc;
+  }
+  if (typeof node === 'object' && node.type) {
+    if (node.props && node.props['aria-hidden']) return acc; // decorative glyph
+    const cls = (node.props && node.props.className) || '';
+    if (typeof cls === 'string' && cls.includes('chs-sr-only')) return acc; // AT-only
+    if (typeof node.type === 'function') {
+      flattenVisibleText(node.type(node.props || {}), acc);
+      return acc;
+    }
+    flattenVisibleText(node.props && node.props.children, acc);
+  }
+  return acc;
+}
+
 function baseRow(overrides = {}) {
   return {
     id: 'grt-1',
@@ -303,6 +335,134 @@ describe('T-0648 LIVE_PROOF · API-shape rows (the resolver output) also render 
     });
     const tree = GrantTrailRow({ r: apiRowToDisplay(row) });
     expect(collectObjectChildren(tree)).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// T-0685 LIVE_PROOF — /rights/trail «КОМУ» (subject) and «КТО-ВЫДАЛ» (granter)
+// must NEVER surface a raw employee-UUID as the PRIMARY text.
+//
+// THE CAPSTONE T-0647 DEFECT: the batch actor resolver (src/db/actor-resolver.ts)
+// resolves an actor/subject id → a human name when the id maps to an employee
+// row. But when it does NOT (a stale/cross-tenant employee UUID, or a subject
+// that is a grant/assignment TARGET uuid, not an employee), the server attaches
+// no *Resolved field and apiRowToDisplay's honest fallback carries the raw id AS
+// the name (name === id === a UUID). Pre-fix ActorChip rendered that UUID as the
+// PRIMARY label — a bare machine key in the operator's face. Post-fix (T-0685)
+// ActorChip demotes any UUID/machine-key primary to the tooltip + mono chip and
+// shows the honest generic type label instead — exactly like ProcessRef/RecordRef.
+//
+// MUTATION: revert the ActorChip demotion and these RED (the UUID returns as the
+// primary visible text). A neutral UUID + generic names keep the anti-case gate
+// happy (no role-slug / person-name literals are introduced here).
+// ===========================================================================
+
+describe('T-0685 · unresolved actor UUID is NEVER the primary «КОМУ»/«КТО-ВЫДАЛ» text', () => {
+  const RAW_ID_A = 'a1b2c3d4-0000-4000-8000-000000000001';
+  const RAW_ID_B = 'a1b2c3d4-0000-4000-8000-000000000002';
+
+  it('granter (actor) unresolved UUID → primary column text is NOT the raw UUID', () => {
+    // No actorResolved from the server (resolver miss) → apiRowToDisplay falls
+    // back to { name: <uuid>, id: <uuid> }. The rendered PRIMARY text must not be
+    // the UUID — it must be an honest generic label.
+    const row = baseRow({ actor: RAW_ID_A, actorResolved: undefined, subject: 'role-x' });
+    const tree = GrantTrailRow({ r: apiRowToDisplay(row) });
+    const visible = flattenVisibleText(tree).join(' ');
+    expect(visible).not.toContain(RAW_ID_A); // the leak the capstone saw
+  });
+
+  it('subject (КОМУ) unresolved UUID → primary column text is NOT the raw UUID', () => {
+    const row = baseRow({ subject: RAW_ID_B, subjectResolved: undefined });
+    const tree = GrantTrailRow({ r: apiRowToDisplay(row) });
+    const visible = flattenVisibleText(tree).join(' ');
+    expect(visible).not.toContain(RAW_ID_B);
+  });
+
+  it('BOTH granter and subject unresolved UUIDs → neither UUID is primary text', () => {
+    const row = baseRow({
+      actor: RAW_ID_A, actorResolved: undefined,
+      subject: RAW_ID_B, subjectResolved: undefined,
+    });
+    const tree = GrantTrailRow({ r: apiRowToDisplay(row) });
+    const visible = flattenVisibleText(tree).join(' ');
+    expect(visible).not.toContain(RAW_ID_A);
+    expect(visible).not.toContain(RAW_ID_B);
+    // The honest generic type label stands in for the missing human name — an
+    // unresolved actor coerces to the "service" kind (never a fabricated human),
+    // so its label is the generic kind word, not the raw UUID.
+    expect(visible).toContain('Сервис');
+  });
+
+  it('the raw UUID stays REACHABLE — it is demoted to the tooltip, not dropped', () => {
+    // Столп-honesty: we hide the UUID from the PRIMARY, we do not erase it.
+    const row = baseRow({ actor: RAW_ID_A, actorResolved: undefined });
+    const tree = GrantTrailRow({ r: apiRowToDisplay(row) });
+    // Find the granter ActorChip (first ActorChip element) and assert its
+    // wrapper title carries the raw id for auditability.
+    const chips = [];
+    (function walk(n) {
+      if (!n || typeof n !== 'object') return;
+      if (Array.isArray(n)) { n.forEach(walk); return; }
+      if (isReactElement(n)) {
+        const t = typeof n.props?.title === 'string' ? n.props.title : '';
+        if (t.includes(RAW_ID_A)) chips.push(n);
+        walk(n.props && n.props.children);
+        if (typeof n.type === 'function') walk(n.type(n.props || {}));
+      }
+    })(tree);
+    expect(chips.length).toBeGreaterThan(0); // UUID present in a tooltip somewhere
+  });
+
+  it('a RESOLVED actor still shows its human name (no false-positive demotion)', () => {
+    // Guard: the demotion must fire ONLY on machine-key names — a real resolved
+    // human name must still render as the primary text.
+    const row = baseRow({
+      actor: 'e-fixture-x',
+      actorResolved: { id: 'e-fixture-x', name: 'Фикстур Один', type: 'human', deactivated: false, resolved: true },
+    });
+    const tree = GrantTrailRow({ r: apiRowToDisplay(row) });
+    const visible = flattenVisibleText(tree).join(' ');
+    expect(visible).toContain('Фикстур Один');
+  });
+
+  it('confirmer (КТО-ПОДТВЕРДИЛ) unresolved UUID → NOT rendered raw in the provenance column', () => {
+    // The THIRD identifier column the capstone T-0647 live-proof caught leaking a
+    // raw employee-UUID: confirmed_by. Unresolved machine-key → honest generic.
+    const row = baseRow({ confirmed_by: RAW_ID_A, confirmedResolved: undefined });
+    const tree = GrantTrailRow({ r: apiRowToDisplay(row) });
+    const visible = flattenVisibleText(tree).join(' ');
+    expect(visible).not.toContain(RAW_ID_A);
+  });
+
+  it('confirmer WITH confirmedResolved (server T-0685 resolve) shows the human name', () => {
+    const row = baseRow({
+      confirmed_by: 'e-fixture-y',
+      confirmedResolved: { id: 'e-fixture-y', name: 'Фикстур Два', type: 'human', deactivated: false, resolved: true },
+    });
+    const display = apiRowToDisplay(row);
+    expect(display.confirmed).toEqual(['Фикстур Два']);
+  });
+
+  it('LIVE_PROOF (exact capstone UUID shapes) — owner+orlov raw employee-UUIDs never primary', () => {
+    // The precise scenario the capstone T-0647 acceptance surfaced: an assignment
+    // event whose actor (granter), subject (КОМУ) and confirmed_by (КТО-ПОДТВЕРДИЛ)
+    // all carry raw employee-UUIDs the batch resolver MISSED. NONE may appear as
+    // visible primary text. (Neutral UUID literals — no case-lock content.)
+    const OWNER = '3462410f-c98a-4a11-9b2e-000000000001';
+    const ORLOV = 'e0000000-0000-4000-8000-000000000007';
+    const row = {
+      id: 'grt-live', type: 'assignment.create',
+      actor: OWNER, actorResolved: undefined,
+      subject: ORLOV, subjectResolved: undefined,
+      confirmed_by: OWNER, confirmedResolved: undefined,
+      scope: { kind: 'node', hierarchy: 'org', nodeId: 'fin', nodeLevel: 'department' },
+      proposed_by: 'human',
+      payload: { roleId: 'role-x' }, occurred_at: 1749383066318,
+    };
+    const tree = GrantTrailRow({ r: apiRowToDisplay(row) });
+    const visible = flattenVisibleText(tree).join(' ');
+    expect(visible).not.toContain(OWNER);
+    expect(visible).not.toContain(ORLOV);
   });
 });
 

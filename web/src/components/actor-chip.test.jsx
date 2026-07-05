@@ -210,6 +210,57 @@ describe('ActorChip — T-0648 honest fallback when name is absent', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 3b. T-0685 — an UNRESOLVED actor whose name is itself a raw UUID must never
+//     be surfaced as the PRIMARY text (capstone T-0647 /rights/trail defect):
+//     the batch resolver missed, so the honest fallback carries name === id === a
+//     UUID. ActorChip must demote it (tooltip only) and show the honest type
+//     label instead — exactly like ProcessRef/RecordRef. A human-legible SLUG
+//     fallback is NOT a machine key and stays primary (unchanged).
+// ---------------------------------------------------------------------------
+
+describe('ActorChip — T-0685: a raw-UUID name is demoted, never rendered primary', () => {
+  const RAW_UUID = 'a1b2c3d4-0000-4000-8000-00000000abcd';
+
+  it('name === id === UUID (resolver miss) → the UUID is NOT in the visible text', () => {
+    const tree = ActorChip({ type: 'human', name: RAW_UUID, id: RAW_UUID });
+    expect(textOf(tree)).not.toContain(RAW_UUID);
+    // The honest generic type label stands in for the missing human name.
+    expect(textOf(tree)).toContain('Человек');
+  });
+
+  it('the demoted UUID stays reachable in the tooltip (hidden, not erased)', () => {
+    const tree = ActorChip({ type: 'human', name: RAW_UUID, id: RAW_UUID });
+    expect(tree.props.title).toContain(RAW_UUID);
+  });
+
+  it('showId=true → the demoted UUID surfaces in a mono chip (auditability preserved)', () => {
+    const tree = ActorChip({ type: 'human', name: RAW_UUID, id: RAW_UUID, showId: true });
+    const monoids = findByType(tree, 'span').filter((el) =>
+      (el.props.className || '').includes('chs-monoid'),
+    );
+    expect(monoids.length).toBeGreaterThan(0);
+  });
+
+  it('an `agent:`-shaped synthetic key is ALSO demoted (never primary)', () => {
+    const key = 'agent:' + RAW_UUID;
+    const tree = ActorChip({ type: 'agent', name: key, id: key });
+    expect(textOf(tree)).not.toContain(key);
+    expect(textOf(tree)).toContain('Агент');
+  });
+
+  it('a human-legible SLUG fallback (NOT a machine key) is STILL primary (no over-demotion)', () => {
+    const tree = ActorChip({ type: 'service', id: 'policy-sync' });
+    expect(textOf(tree)).toContain('policy-sync');
+  });
+
+  it('a resolved human name still renders primary (demotion fires only on machine keys)', () => {
+    const tree = ActorChip({ type: 'human', name: 'Активный Пользователь', id: RAW_UUID });
+    expect(textOf(tree)).toContain('Активный Пользователь');
+    expect(textOf(tree)).not.toContain(RAW_UUID); // id still tooltip-only
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 4. React error #31 regression guard — object passed where a string belongs
 // ---------------------------------------------------------------------------
 
