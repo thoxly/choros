@@ -54,6 +54,12 @@ import {
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js';
 import { downloadFile } from '../lib/authed-file.js';
+// T-0627: draft-sandbox banner — the app's tier is already loaded via loadApp()
+// below; canPublishDraft is a PRESENTATION-ONLY mirror of the server's
+// resolveActorPrivilege (never a gate — see nav-config.js doc comment).
+import { getNavCapabilities } from '../app-shell/active-tenant.js';
+import { canPublishDraft } from '../app-shell/nav-config.js';
+import { PublishSolutionDialog } from './apps-publish-dialog.jsx';
 import {
   schemaToFormFields,
   schemaToColumns,
@@ -963,6 +969,56 @@ export function CreateRecordDrawer({ open, onClose, onCreated, applicationId, re
   );
 }
 
+// ---------------------------------------------------------------------------
+// T-0627: DraftSandboxBanner — makes the "publish to leave the sandbox" step
+// NOTICEABLE from the screen where its absence is actually experienced (this
+// records screen), instead of being buried in screen-apps.jsx's "…" row menu.
+//
+// Renders ONLY while the owning application is tier==='draft' (disappears the
+// instant a fresh loadApp() sees tier==='published' — no separate dismiss
+// state, so it can never go stale-hidden after a publish elsewhere). Copy
+// differs by viewer capability (canPublish, a PRESENTATION-ONLY mirror of the
+// server's own privilege check — see nav-config.js's canPublishDraft doc):
+// an owner/admin/authoring_draft holder gets an actionable frame + the
+// «Опубликовать» button (opens the SAME PublishSolutionDialog screen-apps.jsx
+// uses); a rank-and-file viewer — who cannot act on it — gets the honest
+// explanation WITHOUT a dead button (G3: no affordance for an action the
+// viewer structurally cannot take).
+//
+// Generic, case-free copy (anti-case-lock, D-064 §5); token-only styling
+// mirroring screen-forms.jsx's existing warning banner (role="status").
+// ---------------------------------------------------------------------------
+
+export function DraftSandboxBanner({ app, canPublish, onOpenPublish }) {
+  if (!app || app.tier !== 'draft') return null;
+  return (
+    <div
+      className="chs-app-records__draft-banner"
+      role="status"
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--chs-space-4)',
+        flexWrap: 'wrap',
+        background: 'var(--chs-color-warning-soft)',
+        borderBottom: '1px solid var(--chs-color-warning)',
+        padding: 'var(--chs-space-3) var(--chs-space-6)',
+        fontSize: 'var(--chs-text-sm)',
+        color: 'var(--chs-color-text)',
+      }}
+    >
+      <span>
+        {canPublish
+          ? 'Приложение в черновике: пока видны только ваши записи. Опубликуйте, чтобы команда работала на общей доске.'
+          : 'Приложение в черновике: пока видны только ваши записи. Когда владелец опубликует приложение, команда увидит общую доску.'}
+      </span>
+      {canPublish && (
+        <Button variant="primary" size="sm" onClick={onOpenPublish}>
+          Опубликовать
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function AppRecordsScreen() {
   const { appId } = useParams();
   const navigate = useNavigate();
@@ -988,6 +1044,11 @@ function AppRecordsScreen() {
   // ADR §3.3 — byte-identical to pre-T-0581 behaviour, NF-2/AC-9) + panel open state.
   const [activeViewId, setActiveViewId] = useState(null);
   const [viewPanelOpen, setViewPanelOpen] = useState(false);
+
+  // T-0627: draft-sandbox banner state — reuses the SAME PublishSolutionDialog
+  // screen-apps.jsx opens from its "…" menu, just triggered from here too.
+  const [publishOpen, setPublishOpen] = useState(false);
+  const canPublish = useMemo(() => canPublishDraft(getNavCapabilities()), []);
 
   // ---- load registry_defs for the application -----------------------------
   const loadDefs = useCallback(async () => {
@@ -1106,6 +1167,13 @@ function AppRecordsScreen() {
     if (created && created.id) setHighlightId(created.id);
     loadRecords();
   }, [loadRecords]);
+
+  // T-0627: after a successful publish from the draft-sandbox banner, reload
+  // `app` — the SAME loadApp() the header already uses — so the banner
+  // disappears the instant tier flips to 'published', without a page reload.
+  const handlePublishedFromBanner = useCallback((summary) => {
+    if (summary && summary.allOk) loadApp();
+  }, [loadApp]);
 
   // T-0568: confirm-gated record delete. DELETE /api/records/:id (T-0566 frozen
   // contract → 204 deleted / 404 already-gone — both settle to "drop the row").
@@ -1245,6 +1313,15 @@ function AppRecordsScreen() {
         onConfirm={confirmDelete}
         onClose={() => setToDelete(null)}
       />
+      {/* T-0627: draft-sandbox banner's publish action — the SAME dialog
+          screen-apps.jsx's "…" menu opens, just reachable from here too. */}
+      <PublishSolutionDialog
+        open={publishOpen}
+        app={app}
+        pushToast={push}
+        onClose={() => setPublishOpen(false)}
+        onDone={handlePublishedFromBanner}
+      />
       <div className="chs-inbox">
         <div style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--chs-space-5)',
@@ -1300,6 +1377,15 @@ function AppRecordsScreen() {
             </Button>
           </div>
         </div>
+
+        {/* T-0627: draft-sandbox banner — visible from the screen where the
+            "only my records" experience actually happens, not just buried in
+            screen-apps.jsx's "…" menu. Renders only while app.tier==='draft'. */}
+        <DraftSandboxBanner
+          app={app}
+          canPublish={canPublish}
+          onOpenPublish={() => setPublishOpen(true)}
+        />
 
         <div className="chs-inbox__scroll">
           {/* registry_def load states first — records depend on a chosen def. */}

@@ -249,3 +249,53 @@ describe('screen-record-detail — delete (T-0568)', () => {
     expect(src).toContain("push({ tone: 'success', message: 'Запись удалена' })");
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0627: honest EmptyState instead of a bare 404 — when the OWNING
+// application resolves as still draft, explain WHY a colleague's record
+// might not be visible yet, WITHOUT ever asserting the record exists (the
+// server's 404 stays byte-identical for "hidden" vs "never existed",
+// T-0558 — this is a client-side copy addition only, ADR-T0627 §3.2).
+// ---------------------------------------------------------------------------
+
+describe('screen-record-detail — honest 404 for a draft-tier app (T-0627)', () => {
+  it('on a 404, best-effort fetches GET /api/applications/:appId (the EXISTING tenant-scoped read, no new endpoint)', () => {
+    const idx = src.indexOf("if (res.status === 404) {");
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 1300);
+    expect(block).toContain('/api/applications/${encodeURIComponent(appId)}');
+    expect(block).toContain(".then(async (appRes) => {");
+    expect(block).toContain(".catch(() => {");
+  });
+
+  it('sets notFoundAppIsDraft ONLY when the fetched application tier is "draft" (never asserts the record itself exists)', () => {
+    const idx = src.indexOf("if (res.status === 404) {");
+    const block = src.slice(idx, idx + 1300);
+    expect(block).toMatch(/appData\.tier === 'draft'/);
+    expect(block).toContain('setNotFoundAppIsDraft(true)');
+  });
+
+  it('resets notFoundAppIsDraft to false at the start of every loadRecord (no stale draft-flag from a PREVIOUS record)', () => {
+    const idx = src.indexOf('const loadRecord = useCallback(async () => {');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 400);
+    expect(block).toContain('setNotFoundAppIsDraft(false)');
+  });
+
+  it('renders the DRAFT-framed honest copy when notFoundAppIsDraft is true — worded as "if this is a colleague\'s record" (non-committal on existence)', () => {
+    expect(src).toMatch(/если это запись коллеги, она станет видна после публикации приложения владельцем/);
+  });
+
+  it('falls back to the EXACT prior generic copy when notFoundAppIsDraft is false (byte-identical degrade, zero regression)', () => {
+    expect(src).toContain('Запись не найдена или у вас нет к ней доступа.');
+  });
+
+  it('the EmptyState description is a ternary keyed on notFoundAppIsDraft (both branches reachable, no dead code)', () => {
+    const idx = src.indexOf('description={');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 400);
+    expect(block).toContain('notFoundAppIsDraft');
+    expect(block).toContain('?');
+    expect(block).toContain(':');
+  });
+});

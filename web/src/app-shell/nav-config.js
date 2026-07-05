@@ -257,6 +257,27 @@ export function visibleZones(navSet) {
   return ['work'];
 }
 
+/**
+ * canPublishDraft — T-0627: PRESENTATION-ONLY mirror of
+ * src/db/sandbox-gate-dao.ts's resolveActorPrivilege (isOwnerOrAdmin ||
+ * hasAuthoringDraftGrant), used SOLELY to decide which draft-sandbox banner
+ * copy to show and whether to render the «Опубликовать» button — NEVER to
+ * gate any read/write. The actual sandbox-gate decision stays entirely
+ * server-side (src/core/sandbox-gate.ts), untouched by this helper.
+ *
+ * Fail-closed: no NavCapabilitySet (not yet resolved / degraded) → false
+ * (no button shown) — never worse than omitting the affordance.
+ *
+ * @param {object|null|undefined} navSet  NavCapabilitySet | null
+ * @returns {boolean}
+ */
+export function canPublishDraft(navSet) {
+  if (!navSet || navSet.degraded) return false;
+  if (navSet.isGenesisOwner) return true;
+  const caps = Array.isArray(navSet.capabilities) ? navSet.capabilities : [];
+  return caps.some((c) => c === 'authoring_draft' || c.startsWith('mgmt_object:'));
+}
+
 // ============================================================================
 // T-0539: SCREEN_REGISTRY — реестр экранов (id → ScreenRegistryEntry)
 // FF-SCREEN-DECL: каждый <Route> в shell.jsx обязан иметь запись с zone+capability.

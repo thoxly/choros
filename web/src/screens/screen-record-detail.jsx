@@ -620,6 +620,13 @@ function RecordDetailScreen() {
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // T-0627: on a 404, best-effort-check whether the OWNING application is
+  // still draft — if so, the honest EmptyState copy explains that a
+  // colleague's record may not be visible yet, instead of a bare "not found".
+  // null = not (yet) checked / inapplicable; true = app resolved as draft.
+  // NEVER asserts the record exists — see ADR-T0627 §3.2 (deliberately
+  // true under EITHER "hidden" or "never existed").
+  const [notFoundAppIsDraft, setNotFoundAppIsDraft] = useState(false);
   // T-0608 (пункт г): slug → display-name map for record.created_by (an
   // employee SLUG, which for a Keycloak-registered human equals the KC user
   // UUID — rendering it raw is exactly the «АВТОР: 4c653940-…» bug). Loaded
@@ -643,12 +650,30 @@ function RecordDetailScreen() {
     if (!id) { setError('Не указан идентификатор записи'); return; }
     setError(null);
     setRecord(null);
+    setNotFoundAppIsDraft(false);
     try {
       const res = await fetch(`/api/records/${encodeURIComponent(id)}`, {
         headers: devHeaders(),
       });
       if (res.status === 404) {
         setError({ notFound: true });
+        // T-0627: best-effort, non-blocking — check whether the OWNING
+        // application (from the :appId route param) is still draft. This
+        // reuses GET /api/applications/:id VERBATIM (already tenant-scoped,
+        // unfiltered by tier — any tenant member can already read an app's
+        // own tier via the /apps list). On ANY failure (network error, app
+        // already published, appId missing) this silently leaves the flag
+        // false — the EmptyState falls back to the exact prior generic copy
+        // (byte-identical degrade, ADR-T0627 §3.2).
+        if (appId) {
+          fetch(`/api/applications/${encodeURIComponent(appId)}`, { headers: devHeaders() })
+            .then(async (appRes) => {
+              if (!appRes.ok) return;
+              const appData = await appRes.json();
+              if (appData && appData.tier === 'draft') setNotFoundAppIsDraft(true);
+            })
+            .catch(() => { /* best-effort — keep the generic 404 copy */ });
+        }
         return;
       }
       if (!res.ok) {
@@ -662,7 +687,7 @@ function RecordDetailScreen() {
     } catch (e) {
       setError(String(e?.message || e));
     }
-  }, [id]);
+  }, [id, appId]);
 
   useEffect(() => { loadRecord(); }, [loadRecord]);
 
@@ -765,12 +790,20 @@ function RecordDetailScreen() {
           <LoadingState label="Загрузка записи…" />
         )}
 
-        {/* Not found */}
+        {/* Not found. T-0627: when the owning application resolves as still
+            draft (best-effort check in loadRecord, never asserting the
+            record exists — ADR-T0627 §3.2), swap the bare generic copy for
+            an honest explanation of WHY a colleague's record might not be
+            visible yet. Falls back to the exact prior copy otherwise. */}
         {error && typeof error === 'object' && error.notFound && (
           <EmptyState
             icon={<KitIcon name="inbox" size={28} />}
             title="Запись не найдена"
-            description="Запись не найдена или у вас нет к ней доступа."
+            description={
+              notFoundAppIsDraft
+                ? 'Запись не найдена. Приложение ещё в черновике — если это запись коллеги, она станет видна после публикации приложения владельцем.'
+                : 'Запись не найдена или у вас нет к ней доступа.'
+            }
             action={
               <Button variant="primary" onClick={() => navigate(backPath)}>
                 Вернуться к списку
