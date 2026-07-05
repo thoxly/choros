@@ -66,5 +66,18 @@
   "findings": [
     "A list-level 'N records hidden pending publication' indicator was explicitly considered and rejected (documented in the ADR and spec's out_of_scope) — it would require a privileged COUNT the server intentionally does not expose to a non-privileged caller, and the count itself would leak existence/volume information across the sandbox-gate boundary. Flagging this here only so a future task does not casually add it without re-reading this reasoning.",
     "ci/checks/anti-case-lock.sh's delegate rights-ui-anti-case.sh (git-diff-scoped raw substring grep over ADDED lines) has no way to distinguish a test asserting a literal's ABSENCE from the literal's actual presence — any future test that writes out the D-064 denylist tokens as a literal array (even inside a `.not.toMatch()`/`.not.toContain()` negative assertion) will trip it. Worth a documentation note in the gate's own header comment for the next author who hits this; not fixed here since the gate's ownership belongs to T-0570/T-0572/T-0575/T-0576, not this task."
-  ]
+  ],
+  "live_proof": {
+    "verdict": "GREEN",
+    "date": "2026-07-05",
+    "stand": "http://100.121.76.86:3000 (dev @ af7a8fc)",
+    "report": "docs/live-proof/T-0627.live-proof.md",
+    "evidence_dir": "docs/live-proof/T-0627-evidence/",
+    "checks": {
+      "banner_visible_with_publish_button": "GREEN — created a fresh draft app via UI, DraftSandboxBanner (role=status) shows immediately with exact copy \"Приложение в черновике: пока видны только ваши записи. Опубликуйте, чтобы команда работала на общей доске.\" and a working «Опубликовать» button",
+      "banner_disappears_live_no_reload": "GREEN — clicked Опубликовать -> PublishSolutionDialog confirm -> POST /api/applications/:id/publish-solution 200 all_ok:true -> closed result dialog -> in the SAME page (no page.reload() anywhere in the flow) the banner text and button are gone (document.body.innerText no longer contains \"Приложение в черновике\", Опубликовать button count 0); before/after screenshots of the identical page confirm visually"
+    },
+    "bypasses_found": "none — entire flow (create app, view banner, click publish, confirm dialog, close result) driven via real UI clicks; network interception used read-only to confirm the already-clicked publish request succeeded",
+    "blockers": "none"
+  }
 }
