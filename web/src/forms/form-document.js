@@ -529,14 +529,31 @@ export function validateDocument(doc, fields) {
     }
 
     // V-SUBKEY (table): every column subKey must exist in the collection's sub-schema.
+    //
+    // T-0680: a table column's subKey is a SUB-KEY of the parent collection — it
+    // lives in the collection's nested sub-schema, NOT the flat top-level schema.
+    // When the parent collection field IS present in the live schema (already
+    // asserted above: schemaField exists + V-CONTRACT matched `collection`) but the
+    // schema view arrived WITHOUT the collection's `subFields` (the round-trip that
+    // rebuilds `fields` can drop them — the exact LIVE-defect T-0678, where a form
+    // with a «Позиции» table hit a false dangling-binding), the columns are COVERED
+    // by the parent collection binding and must NOT be flagged. A sub-schema is only
+    // enforced when it is KNOWN (subByKey has an entry for this collection). This
+    // does NOT weaken the real dangling check: a genuinely bad column (subKey not in
+    // a KNOWN sub-schema) still errors; a top-level dangling fieldKey is caught by
+    // V-KEY above.
     if (type === 'table') {
-      const subMap = subByKey.get(fieldKey) || new Map();
+      const subMap = subByKey.get(fieldKey);
+      const subSchemaKnown = subMap instanceof Map && subMap.size > 0;
       const cols = Array.isArray(node.columns) ? node.columns : [];
       for (const col of cols) {
         if (!col || typeof col.subKey !== 'string') {
           errors.push({ code: 'V-SUBKEY', path, message: `Колонка таблицы «${fieldKey}» без subKey.` });
           continue;
         }
+        // Sub-schema unknown (collection present but its sub-fields didn't survive
+        // the schema round-trip) → the column is covered by the parent binding.
+        if (!subSchemaKnown) continue;
         const subField = subMap.get(col.subKey);
         if (!subField) {
           errors.push({ code: 'V-SUBKEY', path, message: `Колонка «${col.subKey}» отсутствует в схеме таблицы «${fieldKey}».` });

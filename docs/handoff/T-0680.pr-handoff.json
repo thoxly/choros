@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0680",
+  "status": "pr_open",
+  "branch": "task/T-0680",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/floor-boundary.ts",
+    "src/db/live-form-schema.ts",
+    "src/http/binding.ts",
+    "src/__tests__/floor-boundary.test.ts",
+    "src/__tests__/binding-fields-from-layout.test.ts",
+    "web/src/forms/form-document.js",
+    "web/src/forms/form-document.test.js",
+    "docs/handoff/T-0680.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "The task pointed at web/src/forms/form-document.js -> validateDocument as the site of R-4. Investigation (never trust the description) found the R-4 'висящий биндинг / dangling' rule that ACTUALLY produced the live 409 lives SERVER-SIDE: src/core/floor-boundary.ts classifyFloorBoundary + src/db/live-form-schema.ts resolveLiveSchemaFieldKeys. The client validateDocument (V-SUBKEY/V-KEY) had ALREADY PASSED in the live-proof (saveBtnDisabled:false) — the block was purely the server 409 WRONG_FLOOR. So the load-bearing fix is server-side; the client V-SUBKEY was hardened too (defense-in-depth + the disabled-button symptom when the round-tripped schema drops subFields). Fixing only the client would NOT have removed the 409.",
+    "Extended LiveSchemaView with an OPTIONAL subKeysByCollection map rather than folding subKeys into the flat fieldKeys namespace. This is additive: legacy callers (no map) fall back to 'subKey covered by its live parent collection' — never dangling — which is the correct default and does not weaken channel-1 (a dangling table fieldKey is still caught)."
+  ],
+  "friction_events": [
+    "Fresh worktree had no node_modules (root + web both missing) — ran npm ci --maxsockets=3 in both before any tsc/vitest/build could run. Also `npx tsc` resolved to the WRONG (unrelated) tsc package — used node_modules/.bin/tsc instead.",
+    "fitness:db could NOT be run to completion in this environment: PG is up on :55432 but the migrator role credentials / DATABASE_URL template setup the fitness:db globalSetup needs are not provisioned here (password authentication failed for user choros_migrator). My change touches NO schema/migrations (pure validator logic) and the server binding save path is fully exercised by the stub-pool integration test (binding-fields-from-layout.test.ts, incl. the new T-0680 collection-save cases) which passed in the full `vitest run`. fitness (anti-case-lock + named-binding-isolation + forms-schema-binding + eslint + build) all green.",
+    "Pre-existing web eslint error on base (DATA_NODE_TYPES unused import in form-document.test.js — confirmed present on 53843f1d by stashing). Removed it as a clean drive-by since I was editing that file; my changes add zero new lint findings and `eslint web/src` (the changed files) is now clean.",
+    "The live-proof doc named a symbol `resolveLiveSchemaFieldKeys` — that IS the real function (src/db/live-form-schema.ts), returning `new Set(Object.keys(properties))` (top-level only). Its docstring even claimed to cover 'три канала' incl. subKey, but the resolver never emitted sub-schema keys — the classifier had no nested key set to check subKeys against, so it checked them against the top-level namespace and every collection column read as dangling."
+  ],
+  "notes": {
+    "root_cause": "A form-document table (collection) node carries columns[].subKey — R-4 channel 2. A subKey is a SUB-key of the parent collection: it lives in record_schema.properties[collection].items.properties (a NESTED level), NOT among the top-level Object.keys(properties). BOTH the server classifier (floor-boundary.ts scanDocument) and the client V-SUBKEY handled this wrong in the live path: the server flattened subKeys into the same KEY_SET as top-level fieldKeys and checked them against resolveLiveSchemaFieldKeys() (top-level only) — so EVERY column of any collection («Позиции».qty/product) read as a dangling binding -> Floor-2 -> 409 WRONG_FLOOR. Live-proof T-0678 had to DELETE the «Позиции» table to get a clean POST 201.",
+    "fix_server": "floor-boundary.ts: split channel-2 out of the flat keySet into scan.collectionSubKeys ([{collectionKey, subKey}]). R-4 now (a) checks primary fieldKey/displayField vs top-level fieldKeys (unchanged); (b) for each column subKey: dangling iff parent collectionKey NOT in live keys (real dangling table — also caught by channel 1), OR a KNOWN sub-schema is supplied for that collection and the subKey is absent from it (real bad column). If no sub-schema is supplied for a LIVE parent collection, the subKey is COVERED by the parent binding (not dangling). Wired a new resolver resolveLiveCollectionSubKeys (live-form-schema.ts) that reads record_schema.properties[k].items.properties for array-of-object collections (multi-select items:string is correctly NOT treated as a collection), threaded into LiveSchemaView.subKeysByCollection in binding.ts classifyLayoutSave.",
+    "fix_client": "form-document.js V-SUBKEY: when the collection field IS present in the schema (V-KEY + V-CONTRACT already passed) but its subFields did NOT survive the round-trip (subByKey has no/empty entry for that key), the columns are covered by the parent collection binding and are NOT flagged. A KNOWN non-empty sub-schema is still fully enforced (a real bad column errors; a top-level dangling fieldKey is caught by V-KEY).",
+    "not_weakened": "Real dangling is UNCHANGED: (server) a table bound to a non-existent collection -> Floor-2 (channel 1); a column subKey absent from a KNOWN collection sub-schema -> Floor-2. (client) same via V-KEY + V-SUBKEY-on-known-sub-schema. Negative tests pin all four cases.",
+    "pin_tests": {
+      "server_floor_boundary": "src/__tests__/floor-boundary.test.ts — describe 'T-0680 PIN' (4 tests): table+valid-collection+valid-columns -> Floor-1; subKeys covered EVEN with no sub-schema map (legacy) -> Floor-1; NEGATIVE bad column (not in sub-schema) -> Floor-2; NEGATIVE table bound to non-existent collection -> Floor-2. Also: the shared SCHEMA was corrected — product/quantity moved OUT of the flat fieldKeys (the old workaround that masked the bug) INTO subKeysByCollection.",
+      "server_http": "src/__tests__/binding-fields-from-layout.test.ts — describe 'POST /api/forms/binding — a COLLECTION table layout SAVES (T-0680)' (2 tests): a «Позиции» table layout -> 201 (not 409) + GET round-trips the layout; NEGATIVE bad column subKey -> 409.",
+      "client": "web/src/forms/form-document.test.js — describe 'T-0680 PIN' (4 tests): table+full sub-schema -> ok+serializes; table+collection present but subFields DROPPED -> still ok (covered by parent); NEGATIVE bad column (known sub-schema) -> V-SUBKEY error; NEGATIVE table on absent field -> V-KEY error."
+    },
+    "mutation_red_proven": {
+      "server": "Reverted floor-boundary channel-2 (subKey back into the flat keySet) -> 5 RED: both new T-0680 covered-by-parent pins + the HTTP collection-save pin + the two existing all-valid FB cases (FB-1/FB-4-d) which now correctly depend on the honest sub-schema. Restored -> green.",
+      "client": "Reverted the `if (!subSchemaKnown) continue;` guard (treat unknown sub-schema as empty Map) -> 1 RED: the 'subFields DROPPED' pin fails (2 false V-SUBKEY errors); both NEGATIVE tests stay green (fix does not weaken real dangling). Restored -> green."
+    },
+    "gate_numbers": {
+      "tsc_noEmit": "exit 0",
+      "server_vitest": "5659 passed / 10 skipped / 295 files (baseline 5653 -> +6 new T-0680 pins)",
+      "web_vitest": "2395 passed / 91 files (baseline 2391 -> +4 new T-0680 pins)",
+      "web_build": "vite build exit 0 (built in ~2.6s)",
+      "eslint_changed_files": "0 errors (7 changed src/web files)",
+      "anti_case_lock": "PASS (Phase 1 delegates clean; Phase 2 full D-064 denylist within baseline, aggregate 16/16)",
+      "named_binding_isolation": "PASS (NB-1..NB-6)",
+      "forms_schema_binding": "PASS (FF-FORMS1)",
+      "fitness_db": "NOT RUN (env: choros_migrator credentials / DATABASE_URL template not provisioned in this worktree; no schema/migration touched — pure validator logic; server binding path covered by stub-pool integration test)"
+    }
+  }
+}

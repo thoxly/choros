@@ -90,6 +90,73 @@ export async function resolveLiveSchemaFieldKeys(
 }
 
 /**
+ * T-0680: resolve the SUB-schema key sets of every collection field in the live
+ * record_schema — a map { <collectionFieldKey>: [subKey, …] }.
+ *
+ * WHY THIS EXISTS: R-4 channel 2 (table.columns[].subKey) does NOT live among the
+ * top-level `properties` keys — a collection is `{type:"array", items:{type:"object",
+ * properties:{<subKey>:…}}}`, so its column subKeys are a NESTED level. The floor
+ * classifier used to fold subKeys into the same flat top-level keySet and check
+ * them against `resolveLiveSchemaFieldKeys` (top-level only) → EVERY collection
+ * column looked like a dangling binding, so ANY form carrying a table failed
+ * classifyFloorBoundary with 409 WRONG_FLOOR (LIVE-defect T-0678: the «Позиции»
+ * table of a CRM «Сделка» had to be deleted for the save to pass). Feeding this
+ * map into LiveSchemaView.subKeysByCollection lets R-4 verify a column subKey
+ * against its OWNING collection's sub-schema — covered when present, genuinely
+ * dangling when absent — instead of against the top-level namespace.
+ *
+ * Same resolution path + fail-closed contract as resolveLiveSchemaFieldKeys (it
+ * reuses resolveLiveRecordSchema). Returns null when the live schema is
+ * unresolvable (caller fails closed); an empty map when the schema has zero
+ * collection fields (authoritative — no sub-schemas to check).
+ *
+ * @returns { [collectionKey]: string[] } | null (unresolvable → caller fails closed).
+ * @throws  re-throws DB errors (fail-closed), same as resolveLiveSchemaFieldKeys.
+ */
+export async function resolveLiveCollectionSubKeys(
+  client: pg.PoolClient,
+  tenantId: string,
+  processKey: string,
+): Promise<Record<string, string[]> | null> {
+  const recordSchema = await resolveLiveRecordSchema(client, tenantId, processKey);
+  if (recordSchema === null) {
+    return null;
+  }
+
+  const properties =
+    typeof recordSchema === "object" &&
+    (recordSchema as { properties?: unknown }).properties &&
+    typeof (recordSchema as { properties?: unknown }).properties === "object"
+      ? (recordSchema as { properties: Record<string, unknown> }).properties
+      : null;
+  if (!properties) {
+    // Registry resolved but no properties → no collections → authoritative empty map.
+    return {};
+  }
+
+  const out: Record<string, string[]> = {};
+  for (const [key, rawDef] of Object.entries(properties)) {
+    if (rawDef == null || typeof rawDef !== "object" || Array.isArray(rawDef)) continue;
+    const def = rawDef as { type?: unknown; items?: unknown };
+    if (def.type !== "array") continue;
+    const items = def.items;
+    if (items == null || typeof items !== "object" || Array.isArray(items)) continue;
+    const itemsObj = items as { type?: unknown; properties?: unknown };
+    // A collection field is items:{type:"object", properties:{…}} — a multi-select
+    // (items:{type:"string"|enum}) has NO sub-properties and is NOT a collection.
+    if (itemsObj.type !== "object") continue;
+    const itemProps =
+      itemsObj.properties && typeof itemsObj.properties === "object" && !Array.isArray(itemsObj.properties)
+        ? (itemsObj.properties as Record<string, unknown>)
+        : null;
+    // Record the collection even with zero sub-properties (empty array) so R-4 sees
+    // an AUTHORITATIVE (present-but-empty) sub-schema, not an "unknown" one.
+    out[key] = itemProps ? Object.keys(itemProps) : [];
+  }
+  return out;
+}
+
+/**
  * T-0665-e2e (F5/fields-from-layout fix): resolve the FULL live
  * `registry_def.record_schema` object (not merely its key set) for a
  * process's bound form. Extracted from resolveLiveSchemaFieldKeys's body
