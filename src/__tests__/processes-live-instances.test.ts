@@ -321,8 +321,11 @@ describe("T-0614 [деТЭЛ] · /api/processes name/progress/execs are honestly
       );
       expect(status).toBe(200);
       const data = json as Record<string, unknown>;
-      // LIVE_PROC's honest engine-only fallback (fallbackDefinitionName), not empty/undefined.
-      expect(data.name).toBe("Канонический линейный ТЭЛ");
+      // T-0616 [F-2, D-064 анти-кейс fix]: fallbackDefinitionName no longer special-
+      // cases the "telLinear" key to the display literal "Канонический линейный ТЭЛ" —
+      // it now echoes ANY unnamed engine-only key back honestly (LIVE_PROC itself),
+      // same as every other unrecognized process_key. Not empty/undefined either way.
+      expect(data.name).toBe(LIVE_PROC);
     });
   });
 

@@ -323,16 +323,26 @@ export const APPROVE_STEP = "Согласование";
 /** Display name of the U4 approval inbox task. */
 export const APPROVE_TASK_NAME = "Согласовать заявку";
 /**
- * T-0614 [деТЭЛ]: the ONE named fallback for `proc_key` when a payload omits it
- * (legacy/malformed row) — the seeded engine-only ТЭЛ key, matching the process
- * this module's other ТЭЛ-compatibility defaults (APPROVER_ROLE/APPROVE_STEP)
- * already assume. Consolidated to a SINGLE named constant (was five separate
- * inline `"telLinear"` string-literal fallbacks scattered across this file) so
- * the anti-case denylist count for this literal does not grow with each new
- * call site — every `strField(..., "proc_key", ...)` fallback in this module
- * reads this constant instead of repeating the literal.
+ * T-0616 [F-2, D-064 анти-кейс fix]: the ONE named fallback for `proc_key` when
+ * a payload omits it entirely (legacy/malformed row — the write half always
+ * writes `proc_key: args.procKey` unconditionally, see emitProcessStarted /
+ * every appendNextTaskEvent call site, so this branch is near-unreachable in
+ * practice).
+ *
+ * T-0614 originally defaulted this to the literal ENGINE key `"telLinear"` —
+ * which meant an unknown/malformed row was displayed as the CONCRETE named
+ * process "Канонический линейный ТЭЛ" (via fallbackDefinitionName), i.e. "I
+ * don't know this process's key → assume it's ТЭЛ". That is itself a
+ * micro-case-hardcode (review T-0614 F-2): a real, specific, existing
+ * process's identity leaking onto rows that are not that process at all.
+ *
+ * Fixed here: the fallback is a NEUTRAL, honestly-synthetic key (not any real
+ * process's key) — `fallbackDefinitionName` (src/core/process-catalog-view.ts,
+ * REUSED) then echoes it back verbatim as the display name, same as it does
+ * for every other unrecognized key. A malformed row now honestly renders as
+ * "an unnamed process", never as a borrowed name from a real seeded process.
  */
-export const DEFAULT_PROC_KEY = "telLinear";
+export const DEFAULT_PROC_KEY = "process:unknown";
 
 // ---------------------------------------------------------------------------
 // WRITE half — emission seam (called from process-start.ts on start, and from

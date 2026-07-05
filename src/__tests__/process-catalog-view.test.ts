@@ -66,7 +66,9 @@ describe("buildCatalogDefinitions — honesty core", () => {
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({
       process_key: "telLinear",
-      name: "Канонический линейный ТЭЛ",
+      // T-0616 [F-2]: no modeler row → the honest fallback is the key itself,
+      // not the special-cased case-literal display name.
+      name: "telLinear",
       source: "engine",
       status: "deployed",
       version: null,
@@ -114,8 +116,13 @@ describe("serializeInstance", () => {
 });
 
 describe("fallbackDefinitionName", () => {
-  it("names the canonical ТЭЛ honestly, else echoes the key", () => {
-    expect(fallbackDefinitionName("telLinear")).toBe("Канонический линейный ТЭЛ");
+  // T-0616 [F-2, D-064 анти-кейс fix]: this used to special-case "telLinear" to
+  // the display literal "Канонический линейный ТЭЛ" (a micro-case-hardcode —
+  // review T-0614 F-2). Removed: EVERY key, including "telLinear", now echoes
+  // back honestly — no key gets a borrowed display name it did not earn from a
+  // real choros.process_definition row.
+  it("echoes the key back verbatim for ANY unnamed process, no key special-cased", () => {
+    expect(fallbackDefinitionName("telLinear")).toBe("telLinear");
     expect(fallbackDefinitionName("some-other")).toBe("some-other");
   });
 });

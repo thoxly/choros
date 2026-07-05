@@ -23,7 +23,7 @@
 
 import { describe, it, expect } from "vitest";
 import pg from "pg";
-import { appUrl } from "./_helpers.js";
+import { appUrl, uuid } from "./_helpers.js";
 import { makePgAuditWriter, type PgClientLike } from "../../../src/db/audit-writer.js";
 import {
   appendProcessStarted,
@@ -62,6 +62,38 @@ async function withTenantTx<T>(
     const result = await fn(c as unknown as PgClientLike);
     await c.query("COMMIT");
     return result;
+  } catch (err) {
+    await c.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    await c.end();
+  }
+}
+
+/**
+ * T-0616 [F-1, tenant-scope regression pin]: seed a choros.process_definition row
+ * directly (mirrors ci/checks/db/process-catalog.test.ts's seedProcessDefDirect) —
+ * tenant-scoped INSERT under the app pool (SET LOCAL choros.tenant_id), so RLS is
+ * the exact production isolation path, not a migrator-bypass insert.
+ */
+async function seedProcessDefDirect(
+  tenantId: string,
+  processKey: string,
+  name: string,
+): Promise<void> {
+  const c = new Client({ connectionString: appUrl() });
+  await c.connect();
+  try {
+    await c.query("BEGIN");
+    await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await c.query(
+      `INSERT INTO choros.process_definition
+         (tenant_id, id, process_key, name, bpmn_xml, version, status, deployment_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, '<definitions/>', 1, 'published', NULL, 0, 0)
+       ON CONFLICT DO NOTHING`,
+      [tenantId, uuid(), processKey, name],
+    );
+    await c.query("COMMIT");
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
     throw err;
@@ -211,6 +243,64 @@ describe("T-0282 — projection is tenant-RLS isolated (AC-9 substrate)", () => 
       const projB = await listInstanceProjections(pool, tenantB);
       expect(projB.find((p) => p.inst === instB)).toBeDefined();
       expect(projB.find((p) => p.inst === instA)).toBeUndefined();
+    } finally {
+      await pool.end();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0616 [F-1, review T-0614 coverage-gap]: resolveDefinitionNames tenant-scope
+// regression pin. The review's mutation probe (remove `WHERE tenant_id = $1`
+// from resolveDefinitionNames's SELECT) left EVERY existing test green — the
+// unit fake-pool matches by query TEXT and ignores WHERE, and this file's own
+// AC-1/AC-3 tests never seed a choros.process_definition row (so
+// resolveDefinitionNames always hits its fallback branch, never exercising the
+// modeler-name resolve at all). Runtime is safe today (withTenant's SET LOCAL +
+// FORCE RLS on choros.process_definition, migration 074, masks the row even
+// without the WHERE — defense-in-depth), but NO test pinned it, so a future
+// regression dropping the WHERE would slip through the whole suite silently.
+//
+// This test seeds the SAME process_key in TWO tenants with DIFFERENT
+// definition names (A/B), starts an instance of that key in tenant A, and
+// asserts tenant A's projection sees ONLY name A — never name B. It is the
+// one test that goes RED if `WHERE tenant_id = $1 AND` is removed from
+// resolveDefinitionNames (verified below by reverting the fix and re-running).
+// ---------------------------------------------------------------------------
+
+describe("T-0616 [F-1] — resolveDefinitionNames is tenant-scoped (regression pin)", () => {
+  it("same process_key, different definition names per tenant → tenant A's projection sees ONLY its own name, never tenant B's", async () => {
+    const tenantA = freshTenant();
+    const tenantB = freshTenant();
+    const sharedProcKey = `shared-proc-${crypto.randomUUID().slice(0, 8)}`;
+    const instA = `flw-${crypto.randomUUID().slice(0, 8)}`;
+
+    // Same process_key in both tenants, but DIFFERENT names — a cross-tenant
+    // leak would surface tenant B's name on tenant A's read.
+    await seedProcessDefDirect(tenantA, sharedProcKey, "Имя тенанта A");
+    await seedProcessDefDirect(tenantB, sharedProcKey, "Имя тенанта B");
+
+    // Only tenant A actually starts an instance of this process_key.
+    await withTenantTx(tenantA, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId: instA,
+        procKey: sharedProcKey,
+        actor: "e-orlov",
+        nowMs: Date.now(),
+      }),
+    );
+
+    const pool = new pg.Pool({ connectionString: appUrl(), max: 2 });
+    try {
+      const projA = await listInstanceProjections(pool, tenantA);
+      const proj = projA.find((p) => p.inst === instA);
+      expect(proj).toBeDefined();
+      // The load-bearing assertion: tenant A's definitionName is its OWN name,
+      // never tenant B's — this is what goes red without `WHERE tenant_id=$1`
+      // in resolveDefinitionNames (DISTINCT ON (process_key) would otherwise be
+      // free to pick either tenant's row for the same process_key).
+      expect(proj!.definitionName).toBe("Имя тенанта A");
+      expect(proj!.definitionName).not.toBe("Имя тенанта B");
     } finally {
       await pool.end();
     }
