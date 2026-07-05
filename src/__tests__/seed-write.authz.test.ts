@@ -206,6 +206,59 @@ describe("T-0388 (a) — a tenant's own owner CAN write into their tenant", () =
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // T-0642 fix-forward (defense-in-depth): a slug outside the charset gate is
+  // rejected with 400 before it can ever reach choros.role.slug — the value
+  // that later gets written into flowable:candidateGroups="<slug>" during
+  // publish (user-task-role-mapper.ts). The escapeXml fix at that injection
+  // site is the primary control; this test proves the second layer (reject at
+  // creation) also holds, so a malformed slug never reaches persistence.
+  // ---------------------------------------------------------------------------
+  it("POST /api/roles with an XML-breaking slug → 400 VALIDATION (defense-in-depth, T-0642)", async () => {
+    const { port, close } = await startTestServer(makeStubPool(TENANT_A, [TENANT_A]));
+    try {
+      const resp = await post(port, "/api/roles", {
+        tenant_id: TENANT_A,
+        slug: 'x" flowable:assignee="attacker',
+        display_name: "Attack Role",
+      });
+      expect(resp.status).toBe(400);
+      expect(errCode(resp.body)).toBe("VALIDATION");
+    } finally {
+      await close();
+    }
+  });
+
+  it("POST /api/roles with an uppercase/space slug → 400 VALIDATION (charset gate, T-0642)", async () => {
+    const { port, close } = await startTestServer(makeStubPool(TENANT_A, [TENANT_A]));
+    try {
+      const resp = await post(port, "/api/roles", {
+        tenant_id: TENANT_A,
+        slug: "Not A Slug!",
+        display_name: "Bad Slug Role",
+      });
+      expect(resp.status).toBe(400);
+      expect(errCode(resp.body)).toBe("VALIDATION");
+    } finally {
+      await close();
+    }
+  });
+
+  it("POST /api/roles with a dash-containing slug → 201 (regression, charset gate allows dashes)", async () => {
+    const { port, close } = await startTestServer(makeStubPool(TENANT_A, [TENANT_A]));
+    try {
+      const resp = await post(port, "/api/roles", {
+        tenant_id: TENANT_A,
+        slug: "budget-approver",
+        display_name: "Budget Approver",
+      });
+      expect(resp.status).toBe(201);
+      expect((resp.body as { slug: string }).slug).toBe("budget-approver");
+    } finally {
+      await close();
+    }
+  });
+
   it("POST /api/positions into own tenant → 201", async () => {
     const { port, close } = await startTestServer(makeStubPool(TENANT_A, [TENANT_A]));
     try {

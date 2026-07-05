@@ -80,7 +80,7 @@
  */
 
 import { tokenize, type Attr } from "./bpmn-xml-parser.js";
-import { ensureFlowableNamespace } from "./agent-task-external-mapper.js";
+import { ensureFlowableNamespace, escapeXml } from "./agent-task-external-mapper.js";
 
 // ---------------------------------------------------------------------------
 // Extraction — which userTasks need resolution.
@@ -202,6 +202,16 @@ export async function mapUserTaskRoleToCandidateGroups(
  * tag whose id attribute equals `userTaskId`. Operates on the raw string so the
  * document (DI, namespaces, formatting) is otherwise byte-preserved. Mirrors
  * lane-role-mapper.ts::injectCandidateGroups exactly.
+ *
+ * SECURITY (T-0642 fix-forward, adversarial finding): `roleSlug` originates
+ * from the DB (choros.role.slug via the injected resolveRoleSlug port) and is
+ * NOT a fixed, author-controlled string — a tenant owner can set an arbitrary
+ * slug via POST /api/roles (seed-write.ts). Writing it into the XML attribute
+ * unescaped lets a slug like `x" flowable:assignee="attacker` break out of the
+ * candidateGroups attribute and inject arbitrary flowable:* attributes onto the
+ * userTask (e.g. a hard assignee), bypassing normal role-based routing. Must be
+ * escapeXml'd exactly like agent-task-external-mapper.ts (T-0635) escapes its
+ * injected flowable:field values — reused here, not duplicated.
  */
 function injectCandidateGroups(
   xml: string,
@@ -216,7 +226,7 @@ function injectCandidateGroups(
     // Defensive: if candidateGroups somehow already present in this exact tag
     // body (should not happen — extractUserTaskRoleRefs already filtered), skip.
     if (/\bcandidateGroups=/.test(body)) return full;
-    return `${body} flowable:candidateGroups="${roleSlug}"${close}`;
+    return `${body} flowable:candidateGroups="${escapeXml(roleSlug)}"${close}`;
   });
 }
 

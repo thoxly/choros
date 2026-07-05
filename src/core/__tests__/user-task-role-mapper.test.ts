@@ -211,4 +211,68 @@ describe("mapUserTaskRoleToCandidateGroups", () => {
     const nsMatches = out.match(/xmlns:flowable=/g) ?? [];
     expect(nsMatches).toHaveLength(1);
   });
+
+  // -------------------------------------------------------------------------
+  // T-0642 fix-forward — blocking adversarial finding: role.slug (resolved via
+  // the injected port, ultimately sourced from choros.role.slug — attacker-
+  // controlled via POST /api/roles) was written into the candidateGroups
+  // attribute WITHOUT XML-escaping, letting a crafted slug break out of the
+  // attribute and inject arbitrary flowable:* attributes (e.g. a hard
+  // flowable:assignee) onto the userTask. Proves the fix (escapeXml at the
+  // injection site) closes the hole, and that a normal slug is unaffected.
+  // -------------------------------------------------------------------------
+  describe("security: XML injection via resolved role slug (T-0642)", () => {
+    const ROLE_ID_ATTACK = "e0000000-0000-0000-0000-00000000dead";
+
+    it("escapes a slug carrying a double-quote + injected attribute (probe payload)", async () => {
+      const maliciousSlug = 'x" flowable:assignee="attacker';
+      const xml = modelerProc(
+        `<userTask id="Activity_hack" choros:assignedRoleId="${ROLE_ID_ATTACK}"/>`,
+      );
+      const resolver = stubResolver({ [ROLE_ID_ATTACK]: maliciousSlug });
+      const out = await mapUserTaskRoleToCandidateGroups(xml, resolver);
+
+      // The rogue attribute must NOT appear as a real, separately-parsed attribute.
+      expect(out).not.toContain('flowable:assignee="attacker"');
+      // The payload must be escaped inside the candidateGroups value.
+      expect(out).toContain(
+        'flowable:candidateGroups="x&quot; flowable:assignee=&quot;attacker"',
+      );
+      // The output must still be well-formed enough for the tokenizer/linter
+      // to see ONE attribute (candidateGroups), not two.
+      const reparsed = extractUserTaskRoleRefs(out);
+      expect(reparsed).toEqual([]); // no unresolved refs left — nothing new to inject
+    });
+
+    it("escapes &, <, > and \" in a resolved slug", async () => {
+      const trickySlug = `a&b<c>d"e`;
+      const xml = modelerProc(
+        `<userTask id="Activity_tricky" choros:assignedRoleId="${ROLE_ID_ATTACK}"/>`,
+      );
+      const resolver = stubResolver({ [ROLE_ID_ATTACK]: trickySlug });
+      const out = await mapUserTaskRoleToCandidateGroups(xml, resolver);
+
+      expect(out).toContain(
+        'flowable:candidateGroups="a&amp;b&lt;c&gt;d&quot;e"',
+      );
+      expect(out).not.toContain(`candidateGroups="${trickySlug}"`);
+    });
+
+    it("leaves a normal, charset-clean slug byte-for-byte unescaped (regression)", async () => {
+      const resolver = stubResolver({ [ROLE_ID_BUH]: ROLE_SLUG_BUH });
+      const out = await mapUserTaskRoleToCandidateGroups(ONE_ROLE_XML, resolver);
+      expect(out).toContain(`flowable:candidateGroups="${ROLE_SLUG_BUH}"`);
+    });
+
+    it("escaped output still passes lintBpmn (well-formed XML)", async () => {
+      const maliciousSlug = 'x" flowable:assignee="attacker';
+      const xml = modelerProc(
+        `<userTask id="Activity_hack" choros:assignedRoleId="${ROLE_ID_ATTACK}"/>`,
+      );
+      const resolver = stubResolver({ [ROLE_ID_ATTACK]: maliciousSlug });
+      const out = await mapUserTaskRoleToCandidateGroups(xml, resolver);
+      const lintResult = lintBpmn(out);
+      expect(lintResult.ok).toBe(true);
+    });
+  });
 });

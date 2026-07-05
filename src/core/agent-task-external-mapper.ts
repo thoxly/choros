@@ -339,8 +339,13 @@ function buildExtensionFieldBlock(cfg: AgentTaskConfig): string {
   return `<extensionElements>${fieldXml}</extensionElements>`;
 }
 
-/** Minimal XML-text/attr escaper for injected values. */
-function escapeXml(s: string): string {
+/**
+ * Minimal XML-text/attr escaper for injected values.
+ * Exported (T-0642) so other publish-transform mappers that inject
+ * attribute/text values into raw BPMN XML (user-task-role-mapper.ts)
+ * reuse this single escaper rather than duplicating it.
+ */
+export function escapeXml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
