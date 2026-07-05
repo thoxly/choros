@@ -550,7 +550,11 @@ describe("runLegalPrecheck orchestrator", () => {
     expect(outcome.kind).toBe("defer-to-human");
     const deferOutcome = outcome as { kind: "defer-to-human"; doubtReason: string; inboxTaskRef: string; signal: string };
     expect(deferOutcome.signal).toBe("dormant");
-    expect(deferOutcome.doubtReason).toContain("instruction");
+    // T-0638 (defect #3): planDeferTask now humanizes the known "no published
+    // instruction for agent" literal to Russian for the human reviewer — the
+    // raw English no longer appears in the outcome/audit payload.
+    expect(deferOutcome.doubtReason).not.toContain("instruction for agent");
+    expect(deferOutcome.doubtReason).toMatch(/[а-яА-Я]/);
 
     const rows = auditWriter.rows(TENANT_A);
     expect(rows).toHaveLength(1);
