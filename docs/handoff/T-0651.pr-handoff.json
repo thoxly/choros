@@ -55,5 +55,23 @@
     "npm run fitness:db полным прогоном (631s, 135 файлов, --no-file-parallelism) дал 5 red-файлов (doc-summary/doc-reconcile/doc-regen/records_crud + 1) — все ФЛЕЙК под нагрузкой параллельных template-clone (doc-* тратят ~14s/файл и таймаутят; records_crud уперся в 5000ms). Все 5 ЗЕЛЁНЫЕ в изоляции (60/60 re-run). Ни один не трогает user_pref/section/application. Документированный в памяти феномен «параллельные vitest+db флейкуют → соло-числа». Затронутые этой задачей db-файлы (user_prefs_crud/sections_crud/applications_crud/schema) зелёные И в полном прогоне, И в изоляции.",
     "1 server-vitest флейк: forms-from-schema.test.ts SP-1 таймаут 10s под полной нагрузкой (235s suite); в изоляции 5.6s, зелёный. Не связан с файлами задачи.",
     "Web-тир не имеет строгого eslint-гейта (root eslint.config.js скопит только src/**/*.ts; web lint = best-effort || to true). Web-корректность гейтится vite build (падает на синтаксис/импорт). Это существующее устройство репо, не отклонение задачи."
-  ]
+  ],
+  "live_proof": {
+    "verdict": "GREEN",
+    "date": "2026-07-05",
+    "stand": "http://100.121.76.86:3000 (dev @ af7a8fc)",
+    "report": "docs/live-proof/T-0651.live-proof.md",
+    "evidence_dir": "docs/live-proof/T-0651-evidence/",
+    "checks": {
+      "collapsible_groups_default_collapsed": "GREEN — 3 groups (constructor/observability/admin) aria-expanded=false by default, confirmed via GET /api/user-prefs baseline",
+      "expand_collapse_click_and_keyboard": "GREEN — mouse click AND keyboard Enter AND Space all toggle aria-expanded, each fires PUT /api/user-prefs/sidebar.collapsed_groups -> 200",
+      "persist_across_reload": "GREEN — expanded state survives full page.reload() (networkidle), confirmed twice with explicit waitForResponse on the PUT before reload",
+      "add_section_button": "GREEN — POST /api/sections -> 201, confirmed via GET /api/sections; note: empty section (0 apps) is intentionally hidden from sidebar per FF-SECTIONS-EMPTY-HIDDEN until first app is moved in (documented as FINDING, not a bug)",
+      "dnd_app_into_section": "GREEN — real native HTML5 DragEvent dispatch (dragstart/dragenter/dragover/drop/dragend with ~50ms pacing) moved an app between sections; PATCH /api/applications/:id -> 200 with new section_id + recalculated sort_order; survives reload",
+      "arrow_buttons_reorder": "GREEN — up/down arrow buttons on app row work independently of DnD, same PATCH contract, aria-label confirms accessible name",
+      "counter_mine_matches_screen": "GREEN — sidebar counter (0) matches GET /api/inbox counts.mine (0) matches the actual Мои задачи screen Мне tab (0) — same feed, no drift"
+    },
+    "bypasses_found": "none — all 4 checks performed via real UI interaction (click/keyboard/native drag events); network interception used read-only for verification of already-performed UI actions, never to substitute for the UI action itself",
+    "blockers": "none"
+  }
 }
