@@ -29,6 +29,9 @@ config/activation/*.key
 *-priv.pem
 *_private_key*
 *.ed25519.priv
+# LIVE_PROOF Playwright storageState reuse — contains a live session access token,
+# never commit (session-scoped, not a repo artifact).
+.reverify-storage-state.json
 # The signed activation-key fixture under src/__tests__/fixtures/activation/ is a
 # committed test artifact (a PUBLIC-verifiable wire string, not a secret) — keep it.
 !src/__tests__/fixtures/activation/*.key
