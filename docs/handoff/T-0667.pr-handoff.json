@@ -1,0 +1,52 @@
+{
+  "task_id": "T-0667",
+  "status": "pr_open",
+  "branch": "task/T-0667-candidategroups-linter-scope",
+  "pr_url": "local:task/T-0667-candidategroups-linter-scope",
+  "summary": "ci/checks/candidategroups-role-slug-linter.sh (T-0336) был КРАСНЫЙ на dev: FAIL на docs/live-proof/T-0612-evidence/T-0612-liveproof-defect.bpmn20.xml (candidateGroups role-manager/role-owner, намеренно незасеянные — доказательная фикстура live-proof T-0612 «Уровень 1: дефектная модель», НЕ production-BPMN). Линтер классифицирует ЛЮБОЙ *.bpmn/*.bpmn20.xml вне seed/ как production (FAIL при незасеянном слаге) — docs/live-proof/** никогда не был учтён в этой бинарной классификации. ФРОЗЕН-ПРОВЕРКА: линтер владеет T-0336 (заголовок строки 2), текущая задача T-0667 ≠ владелец; ci/checks/frozen-checks-immutable.sh (FF-FCI1) FAIL'ит любую правку чужого ci/checks/*.sh без санкции; grep ci/checks/data/frozen-sanctions.jsonl на 'T-0667'/'candidategroups' — 0 строк, санкции нет. РЕШЕНИЕ (менее рискованный путь, без правки линтера): переименовать оба evidence-файла в *.bpmn20.xml.txt — glob линтера (-name \"*.bpmn\" -o -name \"*.bpmn20.xml\") их больше не матчит. Это НЕ изобретение: та же конвенция уже применена в кодовой базе самим T-0612 для docs/design/T-0612-purchaseApproval-fixed.bpmn20.xml.txt (референс в ci/checks/flowable/purchase-approval-convergence-smoke.sh). Verdict-логика линтера НЕ тронута ни байтом — scope-correction (evidence исключён из скана), не weakening (production BPMN по-прежнему строго проверяется). МУТАЦИОННАЯ ПРОВЕРКА: временный config/flowable/processes/_mutation-test-tmp/T-0667-mutation-probe.bpmn20.xml (production-путь) с candidateGroups=\"role-definitely-not-seeded-xyz\" → линтер FAIL, exit 1 — детектор жив после фикса; временный файл удалён, не входит в diff.",
+  "mechanism": {
+    "root_cause": "candidategroups-role-slug-linter.sh:167-174 is_prod=true для любого пути вне seed/*; docs/live-proof/** (появился позже T-0336, в эпоху D-064 LIVE_PROOF) никогда не был добавлен в исключения — ложный FAIL на исторических доказательных фикстурах T-0612.",
+    "frozen_check_verified": "Заголовок ci/checks/candidategroups-role-slug-linter.sh:2 = '# T-0336 …'. TASK_ID текущей ветки (из имени task/T-0667-…) = T-0667. frozen-checks-immutable.sh читает T-ID владельца из BASE_REF-версии файла (tamper-proof anchor) — T-0336 ≠ T-0667 → любой diff CDMRT этого файла FAIL'ит FF-FCI1 без записи в frozen-sanctions.jsonl (founder или auto_additive класс). Проверено прогоном bash ci/checks/frozen-checks-immutable.sh ДО правки (PASS, т.к. ничего не менялось) и ПОСЛЕ (PASS, т.к. линтер по-прежнему не тронут — изменены только docs/-файлы).",
+    "fix_chosen": "git mv двух evidence-файлов: T-0612-liveproof-defect.bpmn20.xml → …xml.txt, T-0612-liveproof-fixed.bpmn20.xml → …xml.txt. Verdict-логика линтера (is_prod, WARN/FAIL ветки, seed-исключение) — байт-в-байт нетронута.",
+    "not_weakening": "Мутационная проверка (§ мутация ниже) доказывает: реальный production .bpmn (путь вне seed/) с незасеянным candidateGroups по-прежнему ловится линтером (FAIL, exit 1) после фикса — детектор жив, просто больше не видит несуществующий 'production'-файл там, где production никогда не было.",
+    "side_effects_checked": "ci/checks/doc-coherence.sh матчит только *.bpmn (endsWith), не *.bpmn20.xml — переименованные файлы никогда не подпадали под него. grep -rn по repo (.sh/.ts/.mjs/.json) на старые имена файлов — 0 совпадений в коде (только повествовательные упоминания в docs/live-proof/T-0612.live-proof.md; 4 .mjs-скрипта внутри самой evidence-папки ссылаются на СТАРЫЙ абсолютный путь /Users/shoxy/Code/choros-wt/T-0612/… — уже нерабочие вне исходного воркдира, не выполняются CI)."
+  },
+  "mutation_check": {
+    "probe_path": "config/flowable/processes/_mutation-test-tmp/T-0667-mutation-probe.bpmn20.xml (temporary, removed after check)",
+    "probe_content": "userTask flowable:candidateGroups=\"role-definitely-not-seeded-xyz\"",
+    "result": "FAIL 'role-definitely-not-seeded-xyz' — NOT found in any migration SQL (production BPMN requires a seeded role); exit code 1",
+    "conclusion": "Linter still catches unseeded candidateGroups on a real production-path BPMN after the fix — scope-correction confirmed, not a weakening"
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npm run build (root, tsc x2) — 0 ошибок. Worktree был провижен без node_modules (root) — npm ci --maxsockets=3 выполнен первым (pre-existing infra friction, не связано с задачей). Никакой .ts не тронут — только rename docs/-файлов + новые .md.",
+    "lint": true,
+    "lint_result": "Изменения — только .sh-не-тронуты, .md новые, .bpmn20.xml→.bpmn20.xml.txt rename. eslint не применим (не .ts/.js).",
+    "types": true,
+    "types_result": "tsc --noEmit включён в npm run build выше — 0 ошибок.",
+    "tests": true,
+    "tests_result": "vitest не запускался отдельно — задача не тронула ни одного .ts/.test.ts файла (только ci/checks-скрипты запущены напрямую + rename docs/). npm run build (tsc, косвенно проверяет типы всего проекта) прошёл чисто.",
+    "fitness": true,
+    "fitness_result": "Точечные гейты (не полный npm run fitness — 300+ чеков, избыточно для чисто-docs изменения): bash ci/checks/candidategroups-role-slug-linter.sh → PASS with warnings (exit 0, production BPMN без ошибок, evidence больше не сканируется). bash ci/checks/candidategroups-role-slug-linter.sh --self-test → PASS (детекторы линтера сами не менялись). bash ci/checks/frozen-checks-immutable.sh → PASS (0 диффов ci/checks/*.sh — линтер не тронут). bash ci/checks/anti-case-lock.sh → PASS (aggregate literal count не вырос, 16=16 baseline)."
+  },
+  "frozen_check_status": {
+    "is_frozen": true,
+    "owner_task": "T-0336",
+    "sanction_found": false,
+    "workaround": "renamed evidence files to *.bpmn20.xml.txt (same convention already used by T-0612 for docs/design/T-0612-purchaseApproval-fixed.bpmn20.xml.txt) instead of editing the frozen linter's verdict logic",
+    "verdict_logic_touched": false
+  },
+  "files_changed": [
+    "T-0667.spec.md",
+    "docs/design/ADR-T0667-linter-scope.md",
+    "docs/live-proof/T-0612-evidence/T-0612-liveproof-defect.bpmn20.xml.txt",
+    "docs/live-proof/T-0612-evidence/T-0612-liveproof-fixed.bpmn20.xml.txt",
+    "docs/handoff/T-0667.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [
+    "Worktree provisioned без node_modules (root) — npm ci --maxsockets=3 перед npm run build (паттерн из предыдущих прогонов T-0599/T-0601/T-0605/T-0609).",
+    "Линтер оказался frozen под чужим T-ID (T-0336) — прямая правка glob/find внутри скрипта была бы простейшим фиксом, но запрещена без founder-санкции (frozen-sanctions.jsonl пуст для T-0667/этого файла); выбран менее рискованный путь (rename evidence), явно разрешённый постановкой задачи.",
+    "git commit сплит: первый git restore --staged на .txt-untracked-файлах не разъединил git-обнаруженную rename-пару в индексе полностью — итоговый первый коммит (spec+design) неожиданно унёс с собой D-часть рефакторинга (deletion двух старых .bpmn20.xml), а re-add (.txt) ушёл вторым (fix) коммитом; чистый net-эффект (rename) идентичен, но split 'spec+design / fix' не идеально чист по D/A на уровне одного коммита — оба коммита самосогласованы (git status чист, ни один файл не потерян)."
+  ]
+}
