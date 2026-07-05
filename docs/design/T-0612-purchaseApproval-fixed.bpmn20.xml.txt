@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  T-0612-purchaseApproval-fixed.bpmn20.xml.txt — corrected purchaseApproval model.
+
+  PROVENANCE (T-0612, see docs/design/ADR-T0612-purchase-escalation-convergence.md
+  §1): the purchaseApproval process ("Закупки") is TENANT-AUTHORED case content —
+  it was hand-authored as raw BPMN XML and POSTed directly to POST
+  /api/process-defs → /publish during the 2026-07-01/07-02 live acceptance
+  session (dev tenant ООО Аксон), NOT built via the canvas modeler ("НЕ мышью по
+  канвасу" — session memory choros-acceptance-2026-07-01-zakupki.md). It is NOT
+  committed anywhere in the choros repository (confirmed: no seed pack, no
+  fixture, no template references it — grep across the whole tree finds only
+  descriptive code comments citing it as an example of an already-observed live
+  instance, e.g. src/http/processes.ts, src/http/records.ts,
+  migrations/121_process_app_binding_submit_task_key.sql).
+
+  THIS FILE is the fix artifact for исход (б): a corrected replacement model,
+  ready to be POSTed to the SAME publish endpoint (POST /api/process-defs →
+  /publish) against the live dev tenant during the LIVE_PROOF phase, reproducing
+  the exact process key/shape the case already uses but with the defect closed.
+
+  THE DEFECT (found live, T-0612): the boundary timer guarding "Согласование
+  финдиректора" (task-fin) was authored non-interrupting
+  (cancelActivity="false" — an explicit choice, since BPMN's own default when
+  the attribute is absent is interrupting=true) with an escalation branch
+  ("Эскалация: финдир молчит", task-esc) that dead-ended at ITS OWN endEvent
+  instead of reconnecting to the main flow. When the finance director approved
+  BEFORE the PT2M deadline fired (the observed happy-path acceptance run), the
+  main token reached endEvent "Заказ размещён" — but the still-armed,
+  never-fired, never-cancelled boundary timer left the process instance
+  unable to complete: act_hi_procinst.end_time stayed NULL forever, even
+  though the product-visible outcome ("Заказ размещён") had already appeared.
+
+  THE FIX (ADR-T0612 §2, decision D1): keep cancelActivity="false" — per the
+  business semantics the founder's task framing settled on, the escalation IS
+  a non-critical reminder to the owner/manager pool, NOT a cancellation of the
+  finance director's authority to approve. Add a converging exclusiveGateway
+  (gw-fin-converge) that both the finance director's normal completion AND the
+  escalation task's completion flow into, before the single, shared endEvent
+  "Заказ размещён". This closes the convergence gap with ZERO change to the
+  non-interrupting semantics the business wants: whichever branch finishes
+  LAST is the one that actually drives the gateway's single outgoing flow to
+  the end (Flowable's exclusiveGateway does not require every incoming flow to
+  arrive — it fires on the FIRST arrival and discards the token from whichever
+  branch arrives later, which for a fired-then-caught-up escalation task means
+  the process completes as soon as either resolves).
+
+  This shape now PASSES src/core/bpmn-linter.ts's checkTimerEscalationConvergence
+  (T-0612, additive) — the guarded task's own outgoing flow and the escalation
+  branch both resolve to the same reachable node (gw-fin-converge) before any
+  endEvent, so the linter no longer flags a disconnected escalation branch.
+
+  NOTE ON SCOPE: this file reproduces only the finance-director-approval +
+  escalation SLICE of the full purchaseApproval case (start → ... → task-fin →
+  end). The full case also branches on ${amount>500000} upstream of this slice
+  (per session memory) — that upstream branching is untouched/unaffected by
+  this fix and is not reproduced here since its exact node ids were never
+  captured in any repo artifact (tenant-only state, see ADR §1). Whoever
+  publishes this during LIVE_PROOF should splice this task-fin..end slice into
+  the existing upstream structure on the live tenant (or, if reproducing the
+  whole case from scratch is preferred, wire "cheks the finance-approval branch
+  reached when ${amount > 500000}" upstream of startEvent "start-fin-branch"
+  below) rather than treating this file as the complete case top-to-bottom.
+-->
+<definitions
+  xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:flowable="http://flowable.org/bpmn"
+  xmlns:choros="http://choros.io/bpmn"
+  targetNamespace="http://choros.io/purchase-approval"
+  xsi:schemaLocation="http://www.omg.org/spec/BPMN/20100524/MODEL
+    http://www.omg.org/spec/BPMN/2.0/20100501/BPMN20.xsd">
+
+  <process id="purchaseApproval" name="Закупки: согласование заявки" isExecutable="true">
+
+    <!-- Entry point of this slice (splice point — see NOTE ON SCOPE above). -->
+    <startEvent id="start-fin-branch" name="Начало (ветка &gt;500000)"/>
+
+    <!-- UserTask: Согласование финдиректора -->
+    <userTask id="task-fin"
+              name="Согласование финдиректора"
+              flowable:candidateGroups="role-manager">
+      <documentation>
+        Финансовый директор рассматривает заявку на закупку (сумма &gt; 500000)
+        и согласовывает или отклоняет. Согласование продвигает заявку к
+        размещению заказа.
+      </documentation>
+    </userTask>
+
+    <!--
+      Boundary timer: PT2M deadline guarding task-fin, NON-INTERRUPTING
+      (cancelActivity="false" — an explicit, deliberate choice: the escalation
+      is a REMINDER to the owner pool, not a takeover of the finance director's
+      approval authority; see ADR-T0612 §2 D1 for the business-semantics
+      rationale). Escalates to task-esc on fire.
+    -->
+    <boundaryEvent id="bnd-fin-timeout"
+                   name="Таймаут согласования (2 мин)"
+                   attachedToRef="task-fin"
+                   cancelActivity="false"
+                   choros:timerDeadlineKind="duration"
+                   choros:timerDeadline="PT2M"
+                   choros:escalateTo="owner">
+      <timerEventDefinition>
+        <timeDuration>PT2M</timeDuration>
+      </timerEventDefinition>
+    </boundaryEvent>
+
+    <!-- UserTask: Эскалация — финдир молчит (fired ONLY if the timer fires). -->
+    <userTask id="task-esc"
+              name="Эскалация: финдир молчит"
+              flowable:candidateGroups="role-owner">
+      <documentation>
+        Напоминание владельцу: финансовый директор не согласовал заявку в
+        течение 2 минут. Это НЕ отменяет и не блокирует согласование финдира —
+        обе ветки сходятся перед размещением заказа (первая из завершившихся
+        продвигает процесс).
+      </documentation>
+    </userTask>
+
+    <!--
+      THE FIX: a converging exclusiveGateway both branches flow into, so the
+      process instance can always reach the shared endEvent — closing the
+      T-0612 zombie-instance gap. Whichever branch completes FIRST drives this
+      gateway's single outgoing flow forward.
+    -->
+    <exclusiveGateway id="gw-fin-converge" name="Согласовано / эскалировано"/>
+
+    <!-- Shared end for this slice. -->
+    <endEvent id="end-order-placed" name="Заказ размещён"/>
+
+    <!-- Sequence flows -->
+    <sequenceFlow id="sf-start-fin"     sourceRef="start-fin-branch" targetRef="task-fin"/>
+    <sequenceFlow id="sf-fin-converge"  sourceRef="task-fin"         targetRef="gw-fin-converge"/>
+    <sequenceFlow id="sf-timer-esc"     sourceRef="bnd-fin-timeout"  targetRef="task-esc"/>
+    <sequenceFlow id="sf-esc-converge"  sourceRef="task-esc"         targetRef="gw-fin-converge"/>
+    <sequenceFlow id="sf-converge-end"  sourceRef="gw-fin-converge"  targetRef="end-order-placed"/>
+
+  </process>
+
+</definitions>
