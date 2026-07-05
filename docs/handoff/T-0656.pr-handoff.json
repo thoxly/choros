@@ -13,10 +13,13 @@
     "T-0656.spec.md",
     "docs/design/ADR-T0656-forms-dnd-canvas.md",
     "web/src/forms/FormDesigner.jsx",
+    "web/src/forms/FormDesigner.test.jsx",
     "web/src/forms/canvas-autoscroll.js",
     "web/src/forms/canvas-autoscroll.test.js",
     "web/src/forms/canvas-a11y.js",
     "web/src/forms/canvas-a11y.test.js",
+    "web/src/forms/canvas-path.js",
+    "web/src/forms/canvas-path.test.js",
     "web/src/forms/form-designer.css",
     "web/src/forms/form-document-ops-parity.test.js",
     "src/core/form-document-ops.ts",
@@ -26,8 +29,16 @@
     "src/http/binding.ts",
     "src/server.ts",
     "src/__tests__/form-document-ops-parity.test.ts",
-    "src/__tests__/forms-document-ops-wire.test.ts"
+    "src/__tests__/forms-document-ops-wire.test.ts",
+    "src/__tests__/binding-layout-shape.test.ts"
   ],
+  "ux_review_fixes": {
+    "UX-1_container_highlight_prefix_collision": "FIXED. Was: containerHighlighted = hoverKey.startsWith(containerKey(...)) — string prefix on concatenated path keys with no segment boundary, so 'container 1' lit up while dragging inside 'container 10' ('10:0'.startsWith('1')===true), and nested [0,1] vs [0,10]. Now: hover state carries the STRUCTURED path (segment array + tab); the highlight decision is canvas-path.js containerIsDropTarget(myPath, hover.path) — a SEGMENT-wise prefix compare. Proven by canvas-path.test.js, which runs the OLD string predicate (returns true = bug) next to the new one (returns false = fix) in the same test.",
+    "UX-2_fullscreen_hid_palette_and_inspector": "FIXED via approach (b) — expand the WHOLE workspace, not the canvas alone. Was: position:fixed;inset:0 on .chs-designer-canvas only, orphaning its grid siblings (palette/inspector) → in fullscreen you could neither drag in a field nor edit properties, and the on-screen hint ('по краям экрана') was false. Now: the --fullscreen modifier is on the OUTER .chs-form-designer grid wrapper that CONTAINS palette+canvas+inspector; each column scrolls independently (form-designer.css). All three panels stay present and functional; the hint is now true ('Палитра слева, свойства справа. Esc — выйти'). The canvas-only class chs-designer-canvas--fullscreen is deleted. Chosen over the ADR's original (unbuilt) toggle-tabs sketch because it is simpler and keeps every tool live. ADR §6 updated.",
+    "component_test_added": "FormDesigner.test.jsx (there was NO component test before — how UX-1 slipped in). Renders via react-dom/server (no jsdom in this tier): smoke (palette+canvas+inspector all present) + the fullscreen INVARIANT (canvas-only fullscreen class absent; the three panels coexist under one wrapper). UX-1's 10+-container regression is covered directly in canvas-path.test.js.",
+    "reduced_motion_autoscroll": "canvas-autoscroll.js prefersReducedMotion() added; the FormDesigner autoscroll effect does a single discrete nudge per dragover (no continuous rAF loop) under prefers-reduced-motion, so off-screen drop targets stay reachable without continuous animation. +4 tests. The CSS already suppressed the drop-indicator transition under the same media query.",
+    "F1_root_shape_human_path_regression": "binding-layout-shape.test.ts — posts a real {root:{...}} FormDesigner document to the HUMAN POST /api/forms/binding and asserts Floor-1 acceptance (was a false 409 before the classifyLayoutSave normalization); a {root:…} doc with a custom node or a dangling fieldKey still gets 409 (gate not weakened)."
+  },
   "deviations_from_adr": [
     "ADR §4.2 planned only proof-by-shared-op-vectors between the JS and TS modules; the implementation also had to NORMALIZE the form-document shape inside classifyLayoutSave — FormDesigner sends {schemaVersion, source, root:{...}} but classifyFloorBoundary treats the passed object AS the root node and only descends .children/.tabs (never .root), so a real FormDesigner document classified as false-Floor-2. classifyLayoutSave now wraps the real root under the classifier's own {type:'root', children:[root]} contract. This is a correctness fix to the SHARED gate (helps the human /api/forms/binding path too), not a weakening — additive and covered by the wire test's Floor-1 200 case.",
     "ADR §4.4 deferred the MCP/tool-descriptor wrapper for the assistant to a FINDING (below) — the HTTP seam + parity test are delivered; the assistant tool registration is not."
@@ -36,7 +47,9 @@
   "friction_events": [
     "Session dropped by an API error mid-BUILD after ~55 tool calls; resumed from the exact interruption point (spec+design committed, FormDesigner.jsx + canvas-autoscroll partial in working tree) without redoing finished work.",
     "tsc rootDir:src forbids importing web/src JS from a src test (probed: TS7016 implicit-any) — so ops parity could NOT be proven by cross-importing both modules in one test. Resolved with a SHARED JSON op-vector fixture asserted independently by both tiers (src TS test + web JS test) — drift in either module reddens its own tier.",
-    "classifyFloorBoundary shape mismatch (see deviation 1) surfaced only when the wire test's valid-insert case returned 409 instead of 200 — required reading floor-boundary.ts's visitNode traversal to find it never descends .root."
+    "classifyFloorBoundary shape mismatch (see deviation 1) surfaced only when the wire test's valid-insert case returned 409 instead of 200 — required reading floor-boundary.ts's visitNode traversal to find it never descends .root.",
+    "UX_REVIEW round: the container-highlight prefix collision (UX-1) was invisible without a component/pure test — the fix required extracting the path-compare into a pure module (canvas-path.js) so it could be asserted directly against the old string logic. Confirms the reviewer's point that the missing FormDesigner test let it slip.",
+    "Fullscreen (UX-2): the web tier has no jsdom, so the fullscreen invariant is asserted structurally (the modifier class is on the wrapper, not the canvas) via react-dom/server markup rather than by toggling state and measuring layout — the strongest guarantee available without a browser-driver."
   ],
   "summary_phases": {
     "SPEC": "done — T-0656.spec.md (10 functional, 6 non-functional, 7 acceptance criteria incl. LIVE_PROOF).",
@@ -57,12 +70,12 @@
   "gate_results": {
     "tsc_noEmit": "0 errors",
     "eslint_src": "0 errors (44 pre-existing console warnings, none in new files)",
-    "vitest_server": "5511 passed, 10 skipped (287 files)",
-    "vitest_web": "2163 passed (81 files) — +37 new (canvas-autoscroll 8, canvas-a11y 7, ops-parity client 10; server parity 17 + wire 6 counted in server tier)",
+    "vitest_server": "5514 passed, 10 skipped (288 files) — +3 from binding-layout-shape (F1 regression)",
+    "vitest_web": "2184 passed (83 files) — +21 from UX_REVIEW fixes (canvas-path 13, FormDesigner component 4, reduced-motion 4) on top of the original +37 (canvas-autoscroll, canvas-a11y, ops-parity client)",
     "build_server": "tsc + seed tsc — ok",
     "build_web": "vite build — 537 modules, ok",
     "fitness_chain": "npm run fitness — exit 0 (all real gates green; the FAIL lines in the log are self-test scaffolding asserting checks go red on planted-broken fixtures)",
-    "ux_gates": "ux-g2-theme-pairing PASS; ux-g6-no-new-hardcode 0 new; ux-g4-state-primitives 0 new; ux-g5-jargon 0 new in touched files",
+    "ux_gates": "ux-g2-theme-pairing PASS; ux-g6-no-new-hardcode 0 new (fullscreen CSS is token-only, no hardcoded hex); ux-g4-state-primitives 0 new; ux-g5-jargon 0 new in touched files",
     "forms_schema_binding": "PASS",
     "isolation_gates": "http-route-auth-coverage PASS (new route withAuth-covered); anti-case-lock PASS (18=baseline, no growth); read-pdp-anti-case PASS; floor1-editor-isolation, named-binding-isolation, forms-sandbox-iframe PASS; no frozen file modified"
   },
@@ -75,7 +88,8 @@
   ],
   "findings": [
     "MCP/tool wrapper: register POST /api/forms/document-ops as an assistant ToolDeclaration (model on assistant-configurator.ts's TOOL_AUTHOR_BINDING) so the in-product assistant can drive form assembly conversationally. The HTTP shape + closed op vocabulary are the stable contract; this is additive.",
-    "LATENT BUG now fixed for the human path too: before this task, a real FormDesigner document ({root:{...}} shape) posted to POST /api/forms/binding would classify as false-Floor-2 by classifyFloorBoundary (which never descended .root). classifyLayoutSave now normalizes the shape. Worth a dedicated regression test on the /binding human path in a follow-up (the wire test here covers the document-ops path).",
-    "Consider a CI gate asserting src/core/form-document-ops.ts and web/src/forms/form-document-ops.js keep identical exported function names (belt-and-suspenders over the parity test) — mirrors forms-schema-binding.sh's drift guard."
+    "LATENT BUG now fixed AND tested on both paths: the {root:{...}} vs classifier shape mismatch (classifyFloorBoundary never descended .root) is fixed in classifyLayoutSave and now has a HUMAN-path regression (binding-layout-shape.test.ts) in addition to the document-ops wire test. No longer an open follow-up.",
+    "Consider a CI gate asserting src/core/form-document-ops.ts and web/src/forms/form-document-ops.js keep identical exported function names (belt-and-suspenders over the parity test) — mirrors forms-schema-binding.sh's drift guard.",
+    "No jsdom/@testing-library in the web test tier — the FormDesigner component test asserts on react-dom/server static markup + structural invariants (it cannot fire real drag events). A future e2e/Playwright pass (LIVE_PROOF) is the place to exercise actual pointer drag + the container highlight visually."
   ]
 }
