@@ -451,6 +451,11 @@ async function runProcessPublish(
     case "app_binding_unpublished":
       error = "APP_BINDING_UNPUBLISHED";
       break;
+    case "step_target_unresolved":
+      // T-0643 [анти-кейс/BUG-017]: a bound process's approve-step result target
+      // registry does not exist under the bound application.
+      error = "STEP_TARGET_UNRESOLVED";
+      break;
     case "engine_unavailable":
       error = result.code;
       break;

@@ -250,6 +250,12 @@ export function registerSolutionBundleRoutes(router: Router, deps: SolutionBundl
             // should not occur — §1 promotes the bound apps before this loop — so it
             // surfaces only if an app failed to promote; recorded as a partial failure.
             results.push({ kind: "process", ref: key, ok: false, detail: "APP_BINDING_UNPUBLISHED" });
+          } else if (pubResult.status === "step_target_unresolved") {
+            // T-0643 [анти-кейс/BUG-017]: a bound process's approve-step result
+            // target registry does not exist under the bound application — the
+            // first approve would 422. Recorded as a partial bundle-promote failure
+            // (same posture as app_binding_unpublished above).
+            results.push({ kind: "process", ref: key, ok: false, detail: "STEP_TARGET_UNRESOLVED" });
           } else if (pubResult.status === "engine_unavailable") {
             results.push({ kind: "process", ref: key, ok: false, detail: pubResult.code });
           } else {

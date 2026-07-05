@@ -62,6 +62,15 @@ import type { FormPersistPort } from "./forms.js";
 import type { ActorTenantResolver } from "./records.js";
 import { deriveFormDefFromSchema } from "../core/form-schema-derive.js";
 import { validateFormSubmissionAgainst } from "../core/form-validator.js";
+// T-0643 [анти-кейс/BUG-017 остаток]: this module used to carry its OWN SECOND
+// literal copy of the ТЭЛ default ("soglasovanie") even though the header
+// comment already claimed it read "the SAME config-primitive" as
+// step-applier.ts — it did not; it duplicated the string instead of calling
+// the shared function. Importing resolveDefaultStepResultSlug directly
+// collapses the anti-case-lock code-only count for "soglasovanie" from 2 to 1
+// (the one remaining occurrence is the config-primitive's OWN default value,
+// architecturally required for ТЭЛ backward-compat — see step-applier.ts).
+import { resolveDefaultStepResultSlug } from "../db/step-applier.js";
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -119,16 +128,18 @@ const FORM_TO_REGISTRY_SLUG: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
- * T-0575 config-primitive (BUG-017 §2.5 dedup): the fallback "Согласование"
- * registry slug used by the "approval" form. Configurable via env
- * `CHOROS_DEFAULT_STEP_RESULT_SLUG` — the SAME config-primitive step-applier.ts's
- * resolveDefaultStepResultSlug() reads, so the ТЭЛ value "soglasovanie" lives in
- * exactly ONE configuration point across both call sites (approve step-result AND
- * form-submit persistence), not two independently-hardcoded copies.
+ * T-0575 config-primitive (BUG-017 §2.5 dedup) / T-0643 (анти-кейс follow-up):
+ * the fallback "Согласование" registry slug used by the "approval" form.
+ * DELEGATES to step-applier.ts's resolveDefaultStepResultSlug() — the SAME
+ * config-primitive, called directly rather than re-implemented — so the ТЭЛ
+ * value "soglasovanie" lives in exactly ONE literal across the whole codebase
+ * (step-applier.ts's own default), not two independently-hardcoded copies.
+ * T-0643: this function used to carry its own bare `"soglasovanie"` fallback
+ * literal despite the claim in its own comment; that was the anti-case-lock's
+ * remaining "soglasovanie" occurrence #2 — now removed.
  */
 function resolveApprovalFormRegistrySlug(): string {
-  const v = process.env["CHOROS_DEFAULT_STEP_RESULT_SLUG"];
-  return v !== undefined && v.trim() !== "" ? v : "soglasovanie";
+  return resolveDefaultStepResultSlug();
 }
 
 /**

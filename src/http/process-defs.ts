@@ -43,6 +43,11 @@ import { lintBpmn, type LintViolation } from "../core/bpmn-linter.js";
 import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole, filterProvisionedAgentEmployeeIds } from "../db/grants-dao.js";
 import { loadPublishedRuleTables } from "../db/dmn-rule-table-store.js";
+// T-0643 [анти-кейс/BUG-017]: the SAME config-primitive default step-applier.ts's
+// applyStepResult falls back to when a binding carries no explicit
+// target_registry_slug override — reused here so the publish-time gate resolves
+// the identical slug the approve-time path would (no independent copy).
+import { resolveDefaultStepResultSlug } from "../db/step-applier.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -311,6 +316,99 @@ async function buildUnpublishedAppBindingViolations(
       `must not depend on a draft app. Publish/promote the application first ` +
       `(or promote both together in one solution bundle), then publish the process.`,
   }));
+}
+
+// ---------------------------------------------------------------------------
+// T-0643 [анти-кейс/BUG-017 remainder]: publish-coherence gate — a process bound
+// to an application whose approve step cannot resolve a step-RESULT target
+// registry must not publish silently.
+//
+// Prior state (T-0575): src/db/step-applier.ts resolves the target registry for
+// a completed step's result from process_app_binding.target_registry_slug (an
+// explicit per-binding override), falling back to the config-primitive default
+// (resolveDefaultStepResultSlug(), "soglasovanie" for ТЭЛ backward-compat) when
+// the binding carries no override. If NEITHER resolves to a real registry_def
+// row under the bound application, applyStepResult throws StepTargetUnresolvedError
+// (422) — but only at the FIRST APPROVE. A process authored fresh from the
+// constructor (a new application with no "soglasovanie"-slugged registry and no
+// explicit target_registry_slug set on its binding) publishes CLEAN today and only
+// fails when a real human approves their first task — late, and indistinguishable
+// from a transient fault at the point it actually breaks (BUG-017 in the D-064 §5
+// primitives map: "требует набор slug=soglasovanie, иначе 500 без лога").
+//
+// This gate re-runs the SAME resolution step-applier.ts uses (explicit override →
+// else default) at PUBLISH time, for every process_app_binding row this process
+// has, and rejects (422, step_target_unresolved) if the resolved slug does not
+// exist as a registry_def under the bound application — mirroring
+// buildUnpublishedAppBindingViolations's shape exactly (same DB-read-in-tenant-tx
+// pattern, same LintViolation envelope, same "list every offending binding"
+// posture) so the two publish-time DB gates read identically to a caller.
+//
+// NO app binding at all for this process → NOT a violation here (mirrors
+// step-applier.ts's OWN "no_app_binding → sanctioned no-op, approval commits, no
+// entity written" posture — a process the author never bound to an application
+// never expected to write a step-result entity, so there is nothing to validate
+// at publish time either).
+// ---------------------------------------------------------------------------
+
+async function buildUnresolvedTargetRegistryViolations(
+  pool: pg.Pool,
+  tenantId: string,
+  processKey: string,
+): Promise<LintViolation[]> {
+  const bindingRows = await withTenantTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{
+      application_id: string;
+      target_registry_slug: string | null;
+    }>(
+      `SELECT application_id, target_registry_slug
+         FROM choros.process_app_binding
+        WHERE tenant_id = $1
+          AND process_key = $2`,
+      [tenantId, processKey],
+    );
+    return rows;
+  });
+
+  if (bindingRows.length === 0) return [];
+
+  const violations: LintViolation[] = [];
+  for (const binding of bindingRows) {
+    const resolvedSlug =
+      binding.target_registry_slug && binding.target_registry_slug.trim() !== ""
+        ? binding.target_registry_slug
+        : resolveDefaultStepResultSlug();
+
+    const registryExists = await withTenantTx(pool, tenantId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `SELECT id
+           FROM choros.registry_def
+          WHERE tenant_id = $1
+            AND application_id = $2
+            AND slug = $3
+          LIMIT 1`,
+        [tenantId, binding.application_id, resolvedSlug],
+      );
+      return rows.length > 0;
+    });
+
+    if (!registryExists) {
+      violations.push({
+        type: "step_target_unresolved",
+        elementId: binding.application_id,
+        elementKind: "application",
+        message:
+          `This process's approve step writes its result into a registry named ` +
+          `"${resolvedSlug}" under the bound application — but no such registry ` +
+          `exists there yet. The FIRST approve would fail (STEP_TARGET_UNRESOLVED) ` +
+          `instead of the process publishing cleanly. Create a registry with slug ` +
+          `"${resolvedSlug}" under the bound application (or set an explicit ` +
+          `target_registry_slug on this process's binding to an existing registry), ` +
+          `then publish again.`,
+      });
+    }
+  }
+  return violations;
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +696,18 @@ export function registerProcessDefsRoutes(
       }));
       return;
     }
+    if (result.status === "step_target_unresolved") {
+      // T-0643 [анти-кейс/BUG-017]: 422 — a bound process's approve-step result
+      // target registry does not exist yet. Same envelope, distinct code — the
+      // SAME failure step-applier.ts throws at first-approve (STEP_TARGET_UNRESOLVED),
+      // surfaced here at publish time instead.
+      res.statusCode = 422;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        error: { code: "STEP_TARGET_UNRESOLVED", violations: result.violations },
+      }));
+      return;
+    }
     if (result.status === "engine_unavailable") {
       throw new HttpError(result.httpStatus, result.code, result.message);
     }
@@ -641,6 +751,11 @@ export type PublishProcessResult =
   // T-0559: a bound application is still tier='draft' (sandbox). A published process
   // must not depend on a draft app. Same 422 envelope as the other publish gates.
   | { status: "app_binding_unpublished"; violations: LintViolation[] }
+  // T-0643 [анти-кейс/BUG-017]: a bound process's approve-step result target
+  // registry (explicit binding override or the config-primitive default) does not
+  // exist under the bound application — the first approve would 422
+  // (STEP_TARGET_UNRESOLVED). Caught here, at publish, instead. Same 422 envelope.
+  | { status: "step_target_unresolved"; violations: LintViolation[] }
   | { status: "engine_unavailable"; httpStatus: number; code: string; message: string }
   | {
       status: "published";
@@ -721,6 +836,23 @@ export async function publishProcessByKey(
   const appBindingViolations = await buildUnpublishedAppBindingViolations(pool, tenantId, row.process_key);
   if (appBindingViolations.length > 0) {
     return { status: "app_binding_unpublished", violations: appBindingViolations };
+  }
+
+  // Step 2.65 [T-0643, анти-кейс/BUG-017]: publish-coherence gate — every
+  // process_app_binding this process has must resolve its step-RESULT target
+  // registry (explicit target_registry_slug override, else the config-primitive
+  // default) to a REAL registry_def under the bound application. Pre-T-0643 this
+  // was discoverable only at the first approve (StepTargetUnresolvedError, 422) —
+  // late. Runs AFTER the app-binding-draft gate and BEFORE deploy (never deploy a
+  // process whose first approve is guaranteed to fail). Mirrors the lint-failed /
+  // app_binding_unpublished 422 envelope.
+  const targetRegistryViolations = await buildUnresolvedTargetRegistryViolations(
+    pool,
+    tenantId,
+    row.process_key,
+  );
+  if (targetRegistryViolations.length > 0) {
+    return { status: "step_target_unresolved", violations: targetRegistryViolations };
   }
 
   // Step 2.7 [T-0505]: normalize for deploy. The modeler emits the process as

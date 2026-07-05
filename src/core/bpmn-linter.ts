@@ -57,7 +57,18 @@ export type LintViolationType =
   // application. Emitted by the publish-time DB-backed gate in process-defs.ts, NOT
   // by the pure linter (which has no DB). Reuses the LintViolation envelope so the
   // 422 response renders identically to the other publish-time violations.
-  | "app_binding_unpublished";
+  | "app_binding_unpublished"
+  // T-0643 [анти-кейс/BUG-017]: the step-result TARGET registry a bound process's
+  // approve step would write into (process_app_binding.target_registry_slug, or
+  // the config-primitive default when unset) does not resolve to any registry_def
+  // under the bound application. Pre-T-0643, this condition was ONLY discovered at
+  // the FIRST approve (StepTargetUnresolvedError, 422, src/db/step-applier.ts) —
+  // late (a freshly-authored process+application from the constructor would publish
+  // clean and only fail when a real human tried to approve their first task). This
+  // publish-time gate (buildUnresolvedTargetRegistryViolations, process-defs.ts)
+  // surfaces the SAME misconfiguration early, mirroring app_binding_unpublished's
+  // shape. Emitted by the DB-backed gate, not the pure linter.
+  | "step_target_unresolved";
 
 export interface LintViolation {
   type: LintViolationType;
