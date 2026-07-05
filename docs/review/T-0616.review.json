@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0616",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [],
+  "acceptance_coverage": [
+    {
+      "ac": "AC-1 (F-2, честный дефолт): fallbackDefinitionName(\"telLinear\") === \"telLinear\", не \"Канонический линейный ТЭЛ\"",
+      "covered": true
+    },
+    {
+      "ac": "AC-2 (F-2, нейтральный процкей): проекция строки без proc_key резолвит definitionName в честный нейтральный machine-key (DEFAULT_PROC_KEY echo), не в имя реального seed-процесса",
+      "covered": true
+    },
+    {
+      "ac": "AC-3 (F-2, анти-кейс не растёт): anti-case-lock.sh + detel-literal-baseline.sh PASS; telLinear repo-wide code-only count строго не растёт",
+      "covered": true
+    },
+    {
+      "ac": "AC-4 (F-1, regression pin): новый db-тест ci/checks/db/process-projection.test.ts (T-0616 [F-1]) зелёный на реальном Postgres против production RLS-пути",
+      "covered": true
+    },
+    {
+      "ac": "AC-5 (F-1, мутационное доказательство): снятие WHERE tenant_id=$1 AND из resolveDefinitionNames даёт красный новый тест",
+      "covered": true
+    }
+  ],
+  "role_gap_evidence": [
+    "F-2 прочитан построчно: src/core/process-catalog-view.ts fallbackDefinitionName() больше не содержит `if (processKey === \"telLinear\") return \"Канонический линейный ТЭЛ\"` — безусловный `return processKey`. src/http/process-projection.ts:345 DEFAULT_PROC_KEY изменил ЗНАЧЕНИЕ с \"telLinear\" на \"process:unknown\" — grep всех 7 call-site (:1024/1039/1159/1195/1360/2167/2243) подтверждает это обычные strField(...,'proc_key', DEFAULT_PROC_KEY)/`?? DEFAULT_PROC_KEY` fallback-паттерны без каких-либо специальных ветвлений на конкретное значение — новый кейс-хардкод не введён.",
+
+    "\"process:unknown\" проверен на нейтральность: не совпадает ни с одним реальным seed process_key (telLinear/purchaseApproval/prcocess:* не встречаются как реальные ключи в migrations/seeds), не входит в anti-case denylist (ci/checks/data/anti-case-baseline.json), формат `namespace:literal` совпадает по духу с существующим соседним синтетическим fallback `instance:${row.id}` в том же модуле — не изолированный ad-hoc выбор.",
+    "Легитимный путь смены DEFAULT_PROC_KEY проверен: write-half (emitProcessStarted + все appendNextTaskEvent call-sites) безусловно пишет `proc_key: args.procKey` на каждом emit-сайте — DEFAULT_PROC_KEY-ветка near-unreachable в проде (только legacy/malformed payload без proc_key). Смена значения константы не меняет ни одного пути, где telLinear был осмысленным дефолтом — такого пути нет, только чтение-фолбэк для отсутствующего поля.",
+    "F-1: живьём (не только прочитано) воспроизведена мутация ревьюера T-0614 — временно убрано `WHERE tenant_id = $1 AND` из resolveDefinitionNames SQL (src/http/process-projection.ts:911-915), файл сохранён как /tmp/process-projection.ts.bak. Прогон `DATABASE_URL=... npx vitest run --dir ci/checks/db --no-file-parallelism ci/checks/db/process-projection.test.ts -t F-1`: до мутации — 1 passed; после мутации — 1 failed (`expected 'shared-proc-3c9f99d0' to be 'Имя тенанта A'`, получен сырой process_key вместо имени). Файл побайтово восстановлен (git diff чист после отката), полный файл process-projection.test.ts перепрогнан — 7/7 passed. Подтверждает автора: регресс ловится, но механизм — деградация до fallback-ветки (0 строк под RLS без явного WHERE в связке с DISTINCT ON), не прямая утечка имени B в A — RLS USING-предикат остаётся барьером.",
+    "bash ci/checks/anti-case-lock.sh (полный) — PASS: Phase 2 показывает telLinear: 1 (baseline 1) OK, aggregate: 16 (baseline 16) OK — числа точно совпадают с обновлённым ci/checks/data/anti-case-baseline.json (диф: telLinear 3→1, aggregate 18→16), не подделаны — измеренные значения совпадают с записанным baseline, значит erosion реален (литералы физически убраны из src/, не просто вычеркнуты из baseline-файла). Также прогнаны --self-test (anti-case-lock.sh) и detel-literal-baseline.sh — оба PASS, ни один литерал не регрессировал.",
+    "grep telLinear по всему репо: единственное оставшееся вхождение вне __tests__/комментариев/legit test-fixtures — web/src/forms/FormBuilder.jsx:509 `placeholder=\"telLinear\"` (UI copy-хинт в форме модельера, не платформенный display-fallback) — верно отмечено вне периметра задачи, подтверждено чтением файла.",
+    "src/__tests__/process-catalog-view.test.ts и src/__tests__/processes-live-instances.test.ts прочитаны построчно и прогнаны (`npx vitest run`, оба файла): изменения честно отражают новое поведение (echo-key вместо case-литерала), не ослаблены — assertions по-прежнему проверяют конкретное непустое значение, не заменены на `toBeDefined()`/`toBeTruthy()`. 7/7 и 18/18 passed.",
+    "npx tsc --noEmit — 0 ошибок. T-0616.spec.md / docs/design/ADR-T0616-proc-key-fallback.md / docs/handoff/T-0616.pr-handoff.json прочитаны целиком — согласованы друг с другом и с исходным ревью T-0614 (docs/review/T-0614.review.json), findings F-1/F-2 текстуально совпадают с тем, что здесь фактически исправлено; ADR честно документирует нюанс RLS-деградации (не наивную прямую утечку), совпадает с тем, что независимо воспроизведено выше."
+  ]
+}
