@@ -35,6 +35,17 @@
  * new PDP path, no second scan: the pure accumulation logic lives in
  * src/core/visible-aggregate.ts (IO-free, independently unit-tested); this
  * DAO only wires it into the existing bounded scan.
+ *
+ * T-0613 (ADR-T0613, столп 6): the per-record SAMPLE value used to be the
+ * first scalar in data's key order, regardless of what that field IS — a
+ * code/number-shaped field earlier in the schema than the record's actual
+ * name field would win, showing the LLM (and through it, the user) a code as
+ * if it were the record's human-readable title. `pickTitleFieldKey`
+ * (src/core/registry-title-field.ts, IO-free, independently unit-tested)
+ * resolves ONE title-field key per registry from record_schema (explicit
+ * annotation, then a name/title-shaped key, then the first plain-textual
+ * field by deriveFieldType); `pickSampleValue` tries it first before falling
+ * back, UNCHANGED, to the original data-only scan.
  */
 
 import pg from "pg";
@@ -50,6 +61,7 @@ import {
   pickNumericFieldKeys,
   type NumericFieldAggregate,
 } from "../core/visible-aggregate.js";
+import { pickTitleFieldKey } from "../core/registry-title-field.js";
 
 // ---------------------------------------------------------------------------
 // Result shape
@@ -130,12 +142,32 @@ const DEFAULT_NUMERIC_FIELD_LIMIT = 5;
 
 /**
  * Pick a short, human-readable representative value from a record's `data`.
- * Generic: prefers the first non-empty string scalar (by key order), then any
- * scalar, else a compact JSON fallback. Truncated to keep the LLM context lean.
+ *
+ * T-0613 (столп 6 — ассистент в контуре): `titleFieldKey`, when given, is the
+ * registry's title-field key resolved ONCE per registry (schema-order pass,
+ * see `pickTitleFieldKey` / `registry-title-field.ts`) — e.g. `name`/`title`
+ * over a code/number-shaped field that happened to sit earlier in the schema.
+ * Tried FIRST, before the pre-existing data-scan-order fallback, so the LLM's
+ * example is the record's actual name, not an incidental first scalar (was:
+ * an ИНН-shaped code field could win purely by key order — LIVE_PROOF T-0607).
+ *
+ * When `titleFieldKey` is absent, or the record's OWN data has no usable
+ * value under that key (missing/blank for this particular row — schemas are
+ * not enforced per-row), falls back UNCHANGED to the original generic scan:
+ * first non-empty string scalar (by key order), then any scalar.
  */
-function pickSampleValue(data: unknown): string | null {
+function pickSampleValue(data: unknown, titleFieldKey: string | null): string | null {
   if (data === null || typeof data !== "object") return null;
   const obj = data as Record<string, unknown>;
+
+  if (titleFieldKey !== null) {
+    const v = obj[titleFieldKey];
+    if (typeof v === "string" && v.trim().length > 0) return truncate(v.trim());
+    if (typeof v === "number" || typeof v === "boolean") return truncate(String(v));
+    // Blank/missing under the title key for THIS row — fall through to the
+    // generic scan below rather than silently omitting the sample.
+  }
+
   // Prefer a non-empty string value.
   for (const key of Object.keys(obj)) {
     const v = obj[key];
@@ -249,6 +281,12 @@ export async function loadReadableRegistryDigest(
         const numericAccs = initNumericAccumulators(numericFields.map((f) => f.key));
         const numericLabels = new Map(numericFields.map((f) => [f.key, f.label]));
 
+        // T-0613: the title-field key is ALSO derived ONCE per registry, from
+        // the SAME record_schema pass — generic (D-064), see
+        // registry-title-field.ts for the ordered heuristic + why no existing
+        // signal was reusable.
+        const titleFieldKey = pickTitleFieldKey(reg.record_schema);
+
         let visibleCount = 0;
         const samples: string[] = [];
         for (const row of recRes.rows) {
@@ -264,7 +302,7 @@ export async function loadReadableRegistryDigest(
           // same visible subset.
           visibleCount++;
           if (samples.length < sampleLimit) {
-            const sample = pickSampleValue(row.data);
+            const sample = pickSampleValue(row.data, titleFieldKey);
             if (sample !== null) samples.push(sample);
           }
           if (numericFields.length > 0) {

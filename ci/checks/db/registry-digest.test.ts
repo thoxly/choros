@@ -351,4 +351,74 @@ describe.skipIf(!LIVE)('T-0607 (AC-3) — analyst registry digest in actor right
       await cleanup(tenantId);
     }
   }, 30_000);
+
+  // ---------------------------------------------------------------------------
+  // T-0613 (ADR-T0613, столп 6): title-field heuristic — LIVE_PROOF T-0607
+  // showed the digest sample could be a code/number-shaped field that happens
+  // to sit before the record's actual name in schema-property order. D-064
+  // anti-case: fixture uses GENERIC field keys (code/name), no business-domain
+  // literal.
+  // ---------------------------------------------------------------------------
+
+  async function seedRegistryWithCodeBeforeName(
+    tenantId: string,
+    createdBy: string,
+  ): Promise<{ regSlug: string }> {
+    const appId = uuid();
+    const regId = uuid();
+    const recId = uuid();
+    const regSlug = `reg-${Math.random().toString(36).slice(2, 8)}`;
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await c.query(
+        `INSERT INTO choros.application
+           (tenant_id, id, slug, display_name, description, tier, created_at, updated_at)
+         VALUES ($1, $2, $3, 'Раздел (тест заголовка)', NULL, 'published', 0, 0)`,
+        [tenantId, appId, `app-${regSlug}`],
+      );
+      // `code` (a code/number-shaped field) is FIRST in property order,
+      // `name` (the record's actual human-readable title) is SECOND — the
+      // exact schema-order shape that produced the live defect.
+      await c.query(
+        `INSERT INTO choros.registry_def
+           (tenant_id, id, application_id, slug, display_name, description, record_schema, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'Записи с кодом и именем (тест)', NULL, $5::jsonb, 0, 0)`,
+        [
+          tenantId, regId, appId, regSlug,
+          JSON.stringify({
+            type: 'object',
+            properties: {
+              code: { type: 'string' },
+              name: { type: 'string' },
+            },
+          }),
+        ],
+      );
+      await c.query(
+        `INSERT INTO choros.record (tenant_id, id, registry_id, data, created_at, updated_at, created_by)
+         VALUES ($1, $2, $3, $4::jsonb, 0, 0, $5)`,
+        [tenantId, recId, regId, JSON.stringify({ code: '7701234567', name: 'Тестовая запись' }), createdBy],
+      );
+      await c.query('COMMIT');
+    });
+    return { regSlug };
+  }
+
+  it('T-0613: code-before-name schema — digest sample is the name field, not the earlier code field', async () => {
+    const { tenantId, ownerSlug } = await registerOne('TitleField');
+    try {
+      const { regSlug } = await seedRegistryWithCodeBeforeName(tenantId, ownerSlug);
+
+      const digest = await loadReadableRegistryDigest(migPool, tenantId, ownerSlug, NOW());
+      expect(digest.degraded).toBe(false);
+      const entry = digest.registries.find((r) => r.slug === regSlug);
+      expect(entry).toBeDefined();
+      expect(entry!.samples.length).toBeGreaterThanOrEqual(1);
+      expect(entry!.samples.join(' ')).toContain('Тестовая запись');
+      expect(entry!.samples.join(' ')).not.toContain('7701234567');
+    } finally {
+      await cleanup(tenantId);
+    }
+  }, 30_000);
 });
