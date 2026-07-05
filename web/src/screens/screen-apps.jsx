@@ -31,6 +31,8 @@ import {
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { validateAppForm, mapCreateError } from './apps-validate.js';
+import { SlugField } from '../components/slug-field.jsx';
+import { previewSlugFromName } from '../components/slug-field-logic.js';
 import { renameApplication, deleteApplication as deleteApplicationApi } from './apps-manage-api.js';
 import { ConsequenceSummary } from '../util/confirm-helpers.jsx';
 import { PublishSolutionDialog } from './apps-publish-dialog.jsx';
@@ -58,6 +60,10 @@ const fieldErrStyle = {
 
 /**
  * CreateAppModal — форма создания приложения.
+ * T-0650 [UX-study §7]: слаг больше не придумывается руками — SlugField
+ * показывает живую подпись-превью из «Название», слаг отправляется на сервер
+ * ТОЛЬКО если пользователь явно кликнул «изменить» (иначе поле slug просто не
+ * шлётся, и сервер генерирует его сам из display_name — auto-slugs).
  * Контролируемые поля slug/display_name/description; клиентская валидация
  * (apps-validate.js, точное зеркало серверного SLUG_RE) — UX-подсказка, но
  * источник истины = сервер (повторно проверяет, отдаёт 400/409).
@@ -66,6 +72,7 @@ const fieldErrStyle = {
  */
 function CreateAppModal({ open, onClose, onCreated }) {
   const [slug, setSlug] = useState("");
+  const [slugTouched, setSlugTouched] = useState(false); // T-0650: SlugField dirty flag
   const [displayName, setDisplayName] = useState("");
   const [description, setDescription] = useState("");
   const [fieldErrors, setFieldErrors] = useState({}); // { slug?, display_name?, description? }
@@ -73,7 +80,7 @@ function CreateAppModal({ open, onClose, onCreated }) {
   const [submitting, setSubmitting] = useState(false);
 
   const reset = useCallback(() => {
-    setSlug(""); setDisplayName(""); setDescription("");
+    setSlug(""); setSlugTouched(false); setDisplayName(""); setDescription("");
     setFieldErrors({}); setSubmitErr(null); setSubmitting(false);
   }, []);
 
@@ -82,14 +89,17 @@ function CreateAppModal({ open, onClose, onCreated }) {
   const handleSubmit = useCallback(async (e) => {
     if (e && e.preventDefault) e.preventDefault();
     setSubmitErr(null);
-    const fields = { slug, display_name: displayName, description: description || undefined };
+    // T-0650: only validate slug grammar when the user actually touched it —
+    // untouched means "let the server auto-generate", never sent as "".
+    const fields = { slug: slugTouched ? slug : "", display_name: displayName, description: description || undefined };
     const { valid, errors } = validateAppForm(fields);
     setFieldErrors(errors);
     if (!valid) return;
 
     setSubmitting(true);
     try {
-      const body = { slug, display_name: displayName };
+      const body = { display_name: displayName };
+      if (slugTouched && slug.trim().length > 0) body.slug = slug;
       if (description.trim().length > 0) body.description = description;
       const res = await fetch('/api/applications', {
         method: 'POST',
@@ -106,6 +116,11 @@ function CreateAppModal({ open, onClose, onCreated }) {
       try { parsed = await res.json(); } catch { /* ignore parse error */ }
       const mapped = mapCreateError(res.status, parsed);
       if (mapped.field === 'slug') {
+        // T-0650 UX F-1: a slug error (409 conflict / 400) on an UNTOUCHED slug would
+        // otherwise sit under the read-only preview with no input to fix it (dead-end).
+        // Force the field editable (touched) and seed its value with the current preview
+        // so SlugField renders <Field> with the error in its hint — the user can correct it.
+        if (!slugTouched) { setSlugTouched(true); if (!slug) setSlug(previewSlugFromName(displayName)); }
         setFieldErrors((prev) => ({ ...prev, slug: mapped.message }));
       } else {
         setSubmitErr(mapped.message);
@@ -115,7 +130,7 @@ function CreateAppModal({ open, onClose, onCreated }) {
     } finally {
       setSubmitting(false);
     }
-  }, [slug, displayName, description, reset, onCreated]);
+  }, [slug, slugTouched, displayName, description, reset, onCreated]);
 
   return (
     <Modal
@@ -143,27 +158,25 @@ function CreateAppModal({ open, onClose, onCreated }) {
 
         <div style={{ marginBottom: 'var(--chs-space-6)' }}>
           <Field
-            label="Слаг"
-            mono
-            value={slug}
-            onChange={(e) => setSlug(e.target.value)}
-            placeholder="my-app"
-            autoFocus
-            invalid={Boolean(fieldErrors.slug)}
-            hint={fieldErrors.slug ? undefined : 'строчные латинские, цифры, дефис · 1–64'}
-          />
-          {fieldErrors.slug && <span style={fieldErrStyle}>{fieldErrors.slug}</span>}
-        </div>
-
-        <div style={{ marginBottom: 'var(--chs-space-6)' }}>
-          <Field
             label="Название"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
             placeholder="Моё приложение"
+            autoFocus
             invalid={Boolean(fieldErrors.display_name)}
           />
           {fieldErrors.display_name && <span style={fieldErrStyle}>{fieldErrors.display_name}</span>}
+        </div>
+
+        <div style={{ marginBottom: 'var(--chs-space-6)' }}>
+          <SlugField
+            name={displayName}
+            value={slug}
+            onChange={setSlug}
+            touched={slugTouched}
+            onTouch={(preview) => { setSlugTouched(true); setSlug(preview); }}
+            error={fieldErrors.slug}
+          />
         </div>
 
         <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>

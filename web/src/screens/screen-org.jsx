@@ -18,6 +18,8 @@ import { useToastContext } from '../app-shell/toast-context.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../app-shell/active-tenant.js';
+import { SlugField } from '../components/slug-field.jsx';
+import { previewSlugFromName } from '../components/slug-field-logic.js';
 import {
   validateDepartment, validatePosition, validateEmployee, validateRole, validateAssignment,
   buildDepartmentPayload, buildPositionPayload, buildEmployeePayload, buildRolePayload, buildAssignmentPayload,
@@ -70,12 +72,13 @@ const ENTITY_LABEL = {
 
 /**
  * OrgFormField — one controlled field. kind: "text" | "slug" | "select".
- * All three render via the kit: text/slug → <Field> (label↔input wired,
- * aria-invalid, hint/error via aria-describedby); select → <Select> (token
- * select with the same label/validation/density contract). No hand-rolled
- * input/label/select markup — consistent surface in both themes.
+ * text → <Field>; select → <Select> (token select, same label/validation/density
+ * contract). slug (T-0650) → <SlugField> — auto-generates from the companion
+ * `nameKey` field's current value; the human never has to invent a machine name
+ * (ux-study-2026-07-05.md §7). No hand-rolled input/label/select markup —
+ * consistent surface in both themes.
  */
-function OrgFormField({ field, value, onChange, error }) {
+function OrgFormField({ field, value, onChange, error, allValues, slugTouched, onSlugTouch }) {
   const invalid = Boolean(error);
   const labelNode = (
     <>{field.label}{field.optional ? <span className="chs-org__optional"> (опц.)</span> : null}</>
@@ -99,11 +102,25 @@ function OrgFormField({ field, value, onChange, error }) {
       </div>
     );
   }
+  if (field.kind === 'slug') {
+    return (
+      <div className="chs-org__modalfield">
+        <SlugField
+          label={field.label}
+          name={(allValues && field.nameKey) ? (allValues[field.nameKey] ?? '') : ''}
+          value={value}
+          onChange={onChange}
+          touched={Boolean(slugTouched)}
+          onTouch={(preview) => onSlugTouch && onSlugTouch(preview)}
+          error={error}
+        />
+      </div>
+    );
+  }
   return (
     <div className="chs-org__modalfield">
       <Field
         label={labelNode}
-        mono={field.kind === 'slug'}
         invalid={invalid}
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -127,10 +144,14 @@ function OrgCrudModal({ open, config, onClose, onCreated }) {
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitErr, setSubmitErr] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  // T-0650 [UX-study §7]: SlugField dirty flag — each config has at most one
+  // `kind: 'slug'` field, so a single boolean suffices. While false, that
+  // field's value stays "" (buildPayload omits blank slug → server auto-generates).
+  const [slugTouched, setSlugTouched] = useState(false);
 
   useEffect(() => {
     // Reset whenever a different modal config opens.
-    if (open) { setValues(initial()); setFieldErrors({}); setSubmitErr(null); setSubmitting(false); }
+    if (open) { setValues(initial()); setFieldErrors({}); setSubmitErr(null); setSubmitting(false); setSlugTouched(false); }
   }, [open, config]);
 
   const setField = useCallback((key, v) => setValues((s) => ({ ...s, [key]: v })), []);
@@ -158,6 +179,15 @@ function OrgCrudModal({ open, config, onClose, onCreated }) {
       try { parsed = await res.json(); } catch { /* ignore */ }
       const mapped = mapOrgError(res.status, parsed, config.entity);
       if (mapped.field && (config.fields || []).some((f) => f.key === mapped.field)) {
+        // T-0650 UX F-1: if the erroring field is the (untouched) auto-slug, make it
+        // editable so the user isn't stuck with an error under the read-only preview.
+        const slugField = (config.fields || []).find((f) => f.key === mapped.field && f.kind === 'slug');
+        if (slugField && !slugTouched) {
+          setSlugTouched(true);
+          if (!values[slugField.key]) {
+            setField(slugField.key, previewSlugFromName(values[slugField.nameKey] ?? ''));
+          }
+        }
         setFieldErrors((prev) => ({ ...prev, [mapped.field]: mapped.message }));
       } else {
         setSubmitErr(mapped.message);
@@ -167,7 +197,7 @@ function OrgCrudModal({ open, config, onClose, onCreated }) {
     } finally {
       setSubmitting(false);
     }
-  }, [config, values, onCreated]);
+  }, [config, values, onCreated, slugTouched, setField]);
 
   if (!open || !config) return null;
 
@@ -176,7 +206,16 @@ function OrgCrudModal({ open, config, onClose, onCreated }) {
       <form onSubmit={handleSubmit} className="chs-org__modalform">
         {config.subtitle && <p className="chs-org__modalsub">{config.subtitle}</p>}
         {(config.fields || []).map((f) => (
-          <OrgFormField key={f.key} field={{ ...f, label: f.label }} value={values[f.key] ?? ''} onChange={(v) => setField(f.key, v)} error={fieldErrors[f.key]} />
+          <OrgFormField
+            key={f.key}
+            field={{ ...f, label: f.label }}
+            value={values[f.key] ?? ''}
+            onChange={(v) => setField(f.key, v)}
+            error={fieldErrors[f.key]}
+            allValues={values}
+            slugTouched={slugTouched}
+            onSlugTouch={(preview) => { setSlugTouched(true); setField(f.key, preview); }}
+          />
         ))}
         {submitErr && (
           <div className="chs-org__formbanner chs-org__formbanner--err" role="alert">{submitErr}</div>
@@ -192,11 +231,14 @@ function OrgCrudModal({ open, config, onClose, onCreated }) {
   );
 }
 
-const SLUG_HINT = 'строчные латинские, цифры, дефис · 1–64';
-
 /**
  * makeCrudConfig — assemble the OrgCrudModal config for an entity kind, given the
  * current tenant-state UUID indices + actor id. Returns null for unknown kinds.
+ *
+ * T-0650 [UX-study §7]: every `kind: 'slug'` field carries `nameKey` — the sibling
+ * field SlugField mirrors its live preview from. Name-like fields are ordered
+ * BEFORE their slug (human fills in the name first; the slug question follows,
+ * already answered by the live preview).
  */
 function makeCrudConfig(kind, state, actorId) {
   const deptOptions = (state.departments || []).map((d) => ({ value: d.id, label: `${d.slug} · ${d.display_name || ''}`.trim() }));
@@ -209,8 +251,8 @@ function makeCrudConfig(kind, state, actorId) {
       title: 'Добавить подразделение', subtitle: 'Корневое подразделение тенанта.', entity: ENTITY_LABEL.department,
       endpoint: '/api/departments', validate: validateDepartment, buildPayload: (v) => buildDepartmentPayload(getActiveTenantId(), v),
       fields: [
-        { key: 'slug', label: 'Слаг', kind: 'slug', placeholder: 'sales', hint: SLUG_HINT },
         { key: 'display_name', label: 'Название', kind: 'text', placeholder: 'Продажи' },
+        { key: 'slug', label: 'Слаг', kind: 'slug', nameKey: 'display_name' },
       ],
     };
   }
@@ -220,8 +262,8 @@ function makeCrudConfig(kind, state, actorId) {
       endpoint: '/api/positions', validate: validatePosition, buildPayload: (v) => buildPositionPayload(getActiveTenantId(), v),
       fields: [
         { key: 'department_id', label: 'Подразделение', kind: 'select', options: deptOptions, placeholder: '— подразделение —' },
-        { key: 'slug', label: 'Слаг', kind: 'slug', placeholder: 'lead', hint: SLUG_HINT },
         { key: 'title', label: 'Название должности', kind: 'text', placeholder: 'Ведущий специалист' },
+        { key: 'slug', label: 'Слаг', kind: 'slug', nameKey: 'title' },
       ],
     };
   }
@@ -232,8 +274,8 @@ function makeCrudConfig(kind, state, actorId) {
       fields: [
         { key: 'kind', label: 'Тип', kind: 'select', default: 'human', placeholder: '— тип —',
           options: EMPLOYEE_KINDS.map((k) => ({ value: k, label: k === 'human' ? 'человек' : 'агент' })) },
-        { key: 'slug', label: 'Слаг', kind: 'slug', placeholder: 'j-doe', hint: SLUG_HINT },
         { key: 'display_name', label: 'Имя', kind: 'text', placeholder: 'Дж. Доу' },
+        { key: 'slug', label: 'Слаг', kind: 'slug', nameKey: 'display_name' },
         { key: 'position_id', label: 'Должность', kind: 'select', optional: true, options: posOptions, placeholder: '— без должности —' },
       ],
     };
@@ -243,8 +285,8 @@ function makeCrudConfig(kind, state, actorId) {
       title: 'Добавить роль', subtitle: 'Роль тенанта. Гранты роли настраиваются в «Права и доступ».', entity: ENTITY_LABEL.role,
       endpoint: '/api/roles', validate: validateRole, buildPayload: (v) => buildRolePayload(getActiveTenantId(), v),
       fields: [
-        { key: 'slug', label: 'Слаг', kind: 'slug', placeholder: 'approver', hint: SLUG_HINT },
         { key: 'display_name', label: 'Название роли', kind: 'text', placeholder: 'Согласующий' },
+        { key: 'slug', label: 'Слаг', kind: 'slug', nameKey: 'display_name' },
         { key: 'description', label: 'Описание', kind: 'text', optional: true, placeholder: 'Назначение роли' },
       ],
     };

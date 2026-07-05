@@ -20,6 +20,12 @@ export const DISPLAY_NAME_MAX = 256;
 /**
  * Validate the create-application form fields client-side.
  *
+ * T-0650 [UX-study §7]: slug is now OPTIONAL — an empty slug means "let the
+ * server auto-generate one from display_name" (see SlugField). Only a
+ * NON-EMPTY slug is grammar-checked; this mirrors the server's contract
+ * (src/http/applications.ts: blank/absent slug → auto-generate, explicit
+ * non-empty slug → validated as before).
+ *
  * @param {{ slug?: string, display_name?: string, description?: string }} fields
  * @returns {{ valid: boolean, errors: { slug?: string, display_name?: string, description?: string } }}
  */
@@ -29,9 +35,7 @@ export function validateAppForm(fields) {
   const displayName = typeof fields?.display_name === "string" ? fields.display_name : "";
   const description = fields?.description;
 
-  if (slug.length === 0) {
-    errors.slug = "Укажите слаг";
-  } else if (!SLUG_RE.test(slug)) {
+  if (slug.length > 0 && !SLUG_RE.test(slug)) {
     errors.slug = "Слаг: строчные латинские буквы, цифры и дефис (1–64 символа)";
   }
 

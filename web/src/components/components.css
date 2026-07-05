@@ -315,6 +315,28 @@
 .chs-hint { font-size: var(--chs-text-xs); color: var(--chs-color-text-faint); }
 .chs-hint--invalid { color: var(--chs-color-danger); }
 
+/* ---------------- SlugField (T-0650 — авто-слаги) ---------------- */
+/* Живая подпись-превью «будет создан как … · изменить» перед ручным
+   редактированием слага. Ноль хардкод-цвета — только --chs-* токены. */
+.chs-slugfield-preview__row {
+  display: flex;
+  align-items: center;
+  gap: var(--chs-space-4);
+  min-height: var(--chs-control-h);
+}
+.chs-slugfield-preview__text {
+  font-size: var(--chs-text-sm);
+  color: var(--chs-color-text-muted);
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.chs-slugfield-preview__mono {
+  font-family: var(--chs-font-mono);
+  letter-spacing: var(--chs-tracking-mono);
+  color: var(--chs-color-text);
+}
+
 /* ---------------- Overlay (общий для Modal/Drawer) ---------------- */
 .chs-overlay {
   position: fixed;

@@ -25,10 +25,12 @@ describe('validateAppForm', () => {
     expect(r.valid).toBe(true);
   });
 
-  it('requires a non-empty slug', () => {
+  // T-0650 [UX-study §7]: slug is now OPTIONAL client-side too — an empty slug
+  // means "let the server auto-generate one from display_name" (SlugField).
+  it('accepts an empty slug (auto-generated server-side, T-0650)', () => {
     const r = validateAppForm({ slug: '', display_name: 'A' });
-    expect(r.valid).toBe(false);
-    expect(r.errors.slug).toBeTruthy();
+    expect(r.valid).toBe(true);
+    expect(r.errors.slug).toBeUndefined();
   });
 
   it('rejects an uppercase / invalid slug (mirrors backend SLUG_RE)', () => {

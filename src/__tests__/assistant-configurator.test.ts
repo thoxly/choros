@@ -564,22 +564,56 @@ describe("AC-T462-2: create_application is declared in the configurator toolset"
 // AC-T462-3 (D8-G1): invalid slug → blocked (honest), NOT a crash/500
 // ---------------------------------------------------------------------------
 
-describe("AC-T462-3: create_application with invalid slug is blocked honestly", () => {
-  it("a bad appSlug → blockedOps (pending_human_confirm), approvedOps empty — no throw", async () => {
+// T-0650 [столп 5 / UX-study §7]: an invalid/missing appSlug no longer blocks
+// the operation — the assistant uses the SAME generator SlugField mirrors for
+// humans (src/core/slug-generator.ts) to derive a valid slug from
+// appDisplayName. Only a genuinely empty appDisplayName (nothing to
+// transliterate) still blocks — see the sibling describe below.
+describe("AC-T462-3: create_application with an invalid/missing appSlug auto-generates (T-0650)", () => {
+  it("a non-slug-shaped appSlug → auto-derived from appDisplayName, NOT blocked", async () => {
     const llm = new ToolCallLlmPort("create_application", {
-      appSlug: "Заявки!",            // not slug-shaped
+      appSlug: "Заявки!",            // not slug-shaped — no longer honored as-is
       appDisplayName: "Заявки",
-      humanReadableReason: "Тест некорректного slug",
+      humanReadableReason: "Тест авто-слага при некорректном appSlug",
     });
     const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
     const result = await runConfigurator("построй приложение Заявки!", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("create_application");
+    // Auto-generated from "Заявки" via the canonical transliterator.
+    expect(op.args["appSlug"]).toBe("zayavki");
+  });
+
+  it("a completely absent appSlug arg → auto-derived from appDisplayName", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appDisplayName: "Отдел продаж",
+      humanReadableReason: "Тест авто-слага без appSlug вовсе",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("построй приложение Отдел продаж", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    expect(result.approvedOps[0]!.args["appSlug"]).toBe("otdel-prodazh");
+  });
+
+  it("an empty appDisplayName still blocks (nothing to transliterate — unchanged from before)", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appDisplayName: "",
+      humanReadableReason: "Тест пустого названия",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("построй приложение", ctx);
 
     expect(result.approvedOps).toHaveLength(0);
     expect(result.blockedOps.length).toBeGreaterThan(0);
     const blocked = result.blockedOps[0]!;
     expect(blocked.kind).toBe("pending_human_confirm");
     expect(blocked.toolName).toBe("create_application");
-    expect(blocked.description).toMatch(/slug/i);
+    expect(blocked.description).toMatch(/appDisplayName/i);
   });
 });
 

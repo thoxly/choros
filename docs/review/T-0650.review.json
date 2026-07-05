@@ -1,0 +1,86 @@
+{
+  "task": "T-0650",
+  "title": "авто-слаги + SlugField (серверный слаг-генератор)",
+  "reviewer": "adversarial-opus (D-023 quality floor)",
+  "review_kind": "adversarial-correctness+security",
+  "branch": "task/T-0650-auto-slugs",
+  "base": "dev@ed75608",
+  "reviewed_at": "2026-07-05",
+  "verdict": "changes_requested",
+  "verdict_rationale": "Core design is sound and all gates are green (verified from a clean tree, real numbers below). Tenant-isolation of the auto-slug and retry-termination were proven LIVE against the NOBYPASSRLS app-role DB. One genuine P2 regression: the refactor of slugify-process-key.ts silently changed the empty-fallback WORD from 'process' to 'item' for a non-empty name that filters to empty, contradicting the ADR's explicit 'behavior UNCHANGED' claim, and no test covers it. Impact is low but it is a real contract break — hence changes_requested rather than approved. The two P2 findings are cheap to fix and do not block on the security/isolation axis.",
+  "gates": {
+    "tsc_noEmit": "PASS (exit 0)",
+    "server_vitest": "PASS 5646 passed, 10 skipped (295 files, 2 skipped)",
+    "web_vitest": "PASS 2382 passed (91 files)",
+    "fitness_db_solo": "PASS 1311 passed (138 files) — run SOLO with --no-file-parallelism, DATABASE_URL=choros_migrator@localhost:55432",
+    "anti_case_lock": "PASS (delegates clean + full D-064 §5 denylist within baseline; --self-test PASS)",
+    "targeted_new_tests": "PASS slug-generator.test.ts 17, seed-write.auto-slug.test.ts 13, assistant-configurator.test.ts 39, slug-field.test.jsx 13, org-crud.test.js 37, apps-validate.test.js 13"
+  },
+  "attack_zones": {
+    "1_tenant_isolation_uniqueness": {
+      "status": "CLEAN",
+      "evidence": "LIVE probe with choros_app (NOBYPASSRLS) pool: tenant A and tenant B each created an app from the SAME display_name and BOTH got the identical base slug 'kross-tenant-proba-xyz' (no -2, no cross-tenant collision, no leak). UNIQUE is composite everywhere (application: UNIQUE(tenant_id,slug); registry_def: UNIQUE(tenant_id,application_id,slug); department/employee/role: UNIQUE(tenant_id,slug); position: UNIQUE(tenant_id,department_id,slug)). Every INSERT attempt runs in its own withTenantTx (SET LOCAL choros.tenant_id + FORCE RLS default-DENY), so the retry loop's arbiter is the real per-tenant composite index at write time — it cannot see or collide with another tenant's rows."
+    },
+    "2_retry_termination": {
+      "status": "CLEAN",
+      "evidence": "Upper bound proven: insertWithUniqueSlugRetry under always-23505 makes EXACTLY 11 insertFn calls (base + base-2..base-10 = 10 numbered, then 1 uuid8 fallback), then throws — no unbounded loop, no DoS. LIVE parallel probe: 8 concurrent POSTs of the same name in one tenant → all 8 → 201 with unique slugs -2..-8, zero 409, no hang. Minor informational: the final uuid8 fallback attempt is UNGUARDED, so a (~1-in-4e9) collision on it would propagate a raw 23505 → 500 for the auto path; acceptable given odds, but not a caught 409."
+    },
+    "3_transliteration_regression": {
+      "status": "DEFECT (P2)",
+      "findings": [
+        "slugifyProcessName now returns 'item' (generateSlugFromName's generic fallback) instead of the original 'process' for a NON-empty name that transliterates/filters to empty (e.g. '!!!###', 'ъъъ', '---', '№№№'). Proven by verbatim old-vs-new comparison: 5/10 sampled inputs diverge. The module docstring (both old and new) and the ADR explicitly promise 'Empty/whitespace → process' and 'behavior is UNCHANGED (same fallback word process)' — this is false for the filters-to-empty case."
+      ],
+      "verified_identical": "For all REAL names the base slug output is byte-identical (map, grammar regex, dash-collapse, 60-char cap all unchanged): 'Согласование телефонного запроса'→'soglasovanie-telefonnogo-zaprosa', 'Отдел продаж'→'otdel-prodazh', 'Отдел №1'→'otdel-1', ''→'process', '   '→'process' all match old output exactly.",
+      "note": "ADR/handoff OVERSTATE the unification: it claims 3 duplicated maps were unified, but register.ts::slugifyOrgName and web/src/forms/relation-cascade.js were NOT changed (git diff empty) — they still hold their own copies. This is SAFE (no caller switched → no output regression there), but the doc claim is inaccurate (documentation P2)."
+    },
+    "4_explicit_slug_validation": {
+      "status": "CLEAN (backward-compatible)",
+      "evidence": "applications.ts, registry-defs.ts, roles all still gate an explicit non-empty slug through SLUG_RE (/^[a-z0-9][a-z0-9-]{0,63}$/) → 400 on bad. Auto path can never inject an invalid slug: generateSlugFromName is proven to always satisfy SLUG_GENERATOR_RE (unicode-filtered to [a-z0-9-], leading/trailing dashes stripped, capped 60, ''→'item'). Assistant create_application: explicit valid appSlug honored, else auto-derived — CONFIGURATOR_SLUG_RE == canonical grammar, sectionSlug falls back to appSlug (always valid). departments/positions/employees do NOT SLUG_RE-check an explicit slug, but that is the PRE-EXISTING behavior on dev (verified) — T-0650 preserved it verbatim, introduced no new hole. Roles keep the T-0642 candidateGroups-injection charset gate."
+    },
+    "5_redos_empty_length": {
+      "status": "CLEAN",
+      "evidence": "No ReDoS: all regexes are linear/bounded (no nested quantifiers). Length: LIVE probe — long cyrillic name → base capped at 60 chars, SLUG_RE-valid; uuid8 fallback key = 60 chars (well under 64 column limit), valid; empty/symbols/dashes → 'item'. Boundary tested."
+    },
+    "6_anti_case_in_src": {
+      "status": "CLEAN",
+      "evidence": "anti-case-lock gate PASS with all D-064 §5 denylist counts steady at baseline. Only two docstring-comment mentions in new/changed src: slugify-process-key.ts:9 'Согласование…' (pre-existing, verbatim on dev), slug-generator.ts:70 'Закупки оборудования' (generic industry slugify example in a comment, not the founder's concrete case) — neither trips the lock."
+    }
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P2",
+      "kind": "regression / contract-break",
+      "file": "src/core/slugify-process-key.ts",
+      "line": "38-46 (slugifyProcessName)",
+      "scenario": "input='!!!###' (or 'ъъъ' / '---' / '№№№' — non-empty, non-whitespace, filters to empty). OLD generateUniqueProcessKey base='process' (then process-2, process-3, …). NEW base='item' (then item-2, …). The 'process' fallback word is only preserved for name that is empty OR whitespace-only; a name that survives .trim() but yields no [a-z0-9] falls through to generateSlugFromName's generic 'item'. Contradicts the module docstring and ADR-T0650 §2.1 claim 'same fallback word process'.",
+      "fix_hint": "In slugifyProcessName, after delegating, coerce the generic 'item' fallback back to 'process' (e.g. `const s = generateSlugFromName(name); return s === 'item' ? 'process' : s;`) OR guard on the post-filter-empty case before delegating. Add a regression test pinning slugifyProcessName('!!!') === 'process'."
+    },
+    {
+      "id": "F2",
+      "severity": "P2",
+      "kind": "documentation-inaccuracy",
+      "file": "docs/design/ADR-T0650-auto-slugs.md + docs/handoff/T-0650.pr-handoff.json",
+      "line": "n/a",
+      "scenario": "ADR/handoff state the task 'unifies 3 duplicated transliteration maps'. In fact only slugify-process-key.ts was refactored to the wrapper; register.ts::slugifyOrgName and web/src/forms/relation-cascade.js STILL carry their own independent copies of CYRILLIC_MAP (git diff dev...HEAD empty for both). No correctness impact (no caller was switched), but the unification claim is overstated — the duplication the ADR says was eliminated still exists in 2 of 3 sites.",
+      "fix_hint": "Either wire register.ts + relation-cascade.js to the canonical generator too (client mirror can stay a documented mirror), or correct the ADR/handoff wording to 'unified the backend process-key path; register.ts and relation-cascade.js remain independent mirrors'."
+    },
+    {
+      "id": "F3",
+      "severity": "informational",
+      "kind": "robustness",
+      "file": "src/core/slug-generator.ts",
+      "line": "174-176 (insertWithUniqueSlugRetry uuid fallback)",
+      "scenario": "The final uuid8-suffixed fallback insertFn(fallback) is not wrapped in try/catch. If it collides (≈1-in-4e9 with an 8-hex suffix, effectively never), a raw 23505 propagates. For applications.ts/registry-defs.ts auto path this surfaces as a 500, not a caught 409/retry. Not a real-world defect; noted for completeness.",
+      "fix_hint": "Optional: widen the uuid suffix or wrap the final attempt with one more re-roll. Low priority."
+    }
+  ],
+  "what_is_solid": [
+    "Retry-on-INSERT-conflict is race-free: the real composite UNIQUE index at write time is the arbiter (no check-then-act window). Proven LIVE with 8-way parallel same-name creates.",
+    "Tenant isolation of auto-slugs verified LIVE via NOBYPASSRLS app pool — same base slug coexists across tenants; retry cannot see foreign-tenant rows.",
+    "Auto-generated slug is always SLUG_RE-compliant (unicode-safe, dash-collapsed, capped 60, non-empty via 'item' fallback) — auto path cannot inject an invalid identifier.",
+    "Explicit-slug validation and 409/404 mapping are byte-for-byte backward compatible on all 6 endpoints; roles keeps its T-0642 candidateGroups XML-injection charset gate.",
+    "Client SlugField is a clean hook-free controlled renderer; empty slug is OMITTED from the payload (not ''), correctly firing the server auto-generate branch.",
+    "For all REAL (non-symbol) names, slug OUTPUT is identical to the pre-refactor implementation (verified by direct old-vs-new comparison)."
+  ]
+}

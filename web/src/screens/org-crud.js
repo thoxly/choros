@@ -39,10 +39,12 @@ function str(v) {
   return typeof v === "string" ? v : "";
 }
 
+// T-0650 [UX-study §7]: slug is now OPTIONAL — an EMPTY slug means "let the
+// server auto-generate one from the entity's name" (SlugField). Only a
+// NON-EMPTY slug is grammar-checked; mirrors the server contract
+// (src/http/seed-write.ts: blank/absent slug → auto-generate).
 function requireSlug(errors, slug) {
-  if (slug.length === 0) {
-    errors.slug = "Укажите слаг";
-  } else if (!SLUG_RE.test(slug)) {
+  if (slug.length > 0 && !SLUG_RE.test(slug)) {
     errors.slug = "Слаг: строчные латинские буквы, цифры и дефис (1–64 символа)";
   }
 }
@@ -109,13 +111,21 @@ export function validateAssignment(f) {
 // fall through to their `?? null` defaults.
 // ---------------------------------------------------------------------------
 
+/**
+ * T-0650 [UX-study §7]: slug is OPTIONAL on every org create payload — an empty
+ * slug is OMITTED (not sent as ""), so the server's "blank/absent → auto-generate"
+ * branch fires (src/http/seed-write.ts). A non-empty slug is sent as-is
+ * (explicit path, validated server-side exactly as before).
+ */
+
 /** @returns body for POST /api/departments */
 export function buildDepartmentPayload(tenantId, f) {
   const body = {
     tenant_id: tenantId,
-    slug: str(f.slug),
     display_name: str(f.display_name).trim(),
   };
+  const slug = str(f.slug);
+  if (slug.length > 0) body.slug = slug;
   const parent = str(f.parent_id);
   if (parent.length > 0) body.parent_id = parent;
   return body;
@@ -123,12 +133,14 @@ export function buildDepartmentPayload(tenantId, f) {
 
 /** @returns body for POST /api/positions */
 export function buildPositionPayload(tenantId, f) {
-  return {
+  const body = {
     tenant_id: tenantId,
     department_id: str(f.department_id),
-    slug: str(f.slug),
     title: str(f.title).trim(),
   };
+  const slug = str(f.slug);
+  if (slug.length > 0) body.slug = slug;
+  return body;
 }
 
 /** @returns body for POST /api/employees */
@@ -136,9 +148,10 @@ export function buildEmployeePayload(tenantId, f) {
   const body = {
     tenant_id: tenantId,
     kind: str(f.kind),
-    slug: str(f.slug),
     display_name: str(f.display_name).trim(),
   };
+  const slug = str(f.slug);
+  if (slug.length > 0) body.slug = slug;
   const pos = str(f.position_id);
   if (pos.length > 0) body.position_id = pos;
   return body;
@@ -148,9 +161,10 @@ export function buildEmployeePayload(tenantId, f) {
 export function buildRolePayload(tenantId, f) {
   const body = {
     tenant_id: tenantId,
-    slug: str(f.slug),
     display_name: str(f.display_name).trim(),
   };
+  const slug = str(f.slug);
+  if (slug.length > 0) body.slug = slug;
   const desc = str(f.description).trim();
   if (desc.length > 0) body.description = desc;
   return body;
