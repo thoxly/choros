@@ -1,0 +1,25 @@
+{
+  "task_id": "T-0618",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/http/files.ts:642-645",
+      "issue": "wasSanitized forcing attachment regardless of isInlineSafeMime(contentType) result is currently unreachable dead-defense (contentType after sanitization is always \"application/octet-stream\" when wasSanitized is true, which is not on INLINE_SAFE_IMAGE_SUBTYPES/pdf anyway) — the comment at files.ts:637-641 already acknowledges this explicitly (\"it isn't on the allowlist anyway, but this makes the invariant explicit\"). Not a defect, just flagging it's belt-and-suspenders on an already-impossible path; fine to keep for future-proofing against an allowlist change that might include octet-stream by accident.",
+      "suggestion": "No action required — explicit invariant guards against future allowlist changes are reasonable defense-in-depth given this file's own stated discipline (T-0579 precedent)."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1: control-byte stored mime → 200 application/octet-stream + attachment, not 500", "covered": true},
+    {"ac": "AC-1b: CRLF header-injection-shaped mime → 200 octet-stream, no injected header reaches the client", "covered": true},
+    {"ac": "AC-2: valid mime (text/plain, image/png+inline) passthrough unchanged after sanitization added", "covered": true},
+    {"ac": "AC-3: XSS-regression — control-byte html-ish mime + ?disposition=inline STILL forced to attachment/octet-stream, never inline", "covered": true},
+    {"ac": "AC-4: over-length (>4096 char) mime → 200 octet-stream, not passed through as-is", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
