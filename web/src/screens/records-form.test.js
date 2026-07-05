@@ -99,6 +99,15 @@ describe('schemaToFormFields', () => {
     expect(fields[0]).toMatchObject({ key: 'due', type: 'string', inputKind: 'text' });
   });
 
+  it('T-0649: detects a datetime field via x-datetime → type "datetime", inputKind "datetime"', () => {
+    const fields = schemaToFormFields({
+      type: 'object',
+      additionalProperties: false,
+      properties: { at: { type: 'string', 'x-datetime': true, title: 'Момент' } },
+    });
+    expect(fields[0]).toMatchObject({ key: 'at', type: 'datetime', label: 'Момент', inputKind: 'datetime' });
+  });
+
   it('tolerates absent / malformed schemas', () => {
     expect(schemaToFormFields(null)).toEqual([]);
     expect(schemaToFormFields(undefined)).toEqual([]);
@@ -717,6 +726,66 @@ describe('T-0449: schemaToFormFields — collection field', () => {
     const nameField = fields.find((f) => f.key === 'order_name');
     expect(nameField).toMatchObject({ type: 'string', inputKind: 'text' });
     expect(nameField).not.toHaveProperty('subFields');
+  });
+
+  // T-0649: a date column inside a collection cannot carry a nested x-date
+  // (AJV strict rejects an x-* keyword inside items.properties[subKey], and
+  // the server's stripXExtensions only strips ROOT-level + top-level property
+  // x-*, never a property's own items). So a date sub-field is stored as a
+  // bare { type:"string" } and would degrade to a plain-text column on
+  // read-back — the "x-date never recurses into collection rows" gap (UX study
+  // §2). buildRecordSchema records the date sub-field keys as a ROOT-level
+  // x-collection-date-fields map; schemaToFormFields must read it back and
+  // restore sfType:"date" so the record-entry cell renders a DateInput.
+  it('T-0649: a date sub-field is restored via x-collection-date-fields (not degraded to string)', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        lines: {
+          type: 'array',
+          title: 'Позиции',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              product: { type: 'string', title: 'Товар' },
+              // A date column — stored as a bare string (no nested x-date).
+              ship_by: { type: 'string', title: 'Отгрузить до' },
+            },
+          },
+        },
+      },
+      // The root-level annotation buildRecordSchema emits for date columns.
+      'x-collection-date-fields': { lines: ['ship_by'] },
+    };
+    const parsed = schemaToFormFields(schema);
+    const lines = parsed.find((f) => f.key === 'lines');
+    const sf = Object.fromEntries(lines.subFields.map((s) => [s.key, s]));
+    // ship_by must be restored as a DATE column, not a plain string.
+    expect(sf.ship_by).toMatchObject({ type: 'date', inputKind: 'date' });
+    // product stays a plain string (not in the date-fields map).
+    expect(sf.product).toMatchObject({ type: 'string' });
+  });
+
+  it('T-0649: WITHOUT x-collection-date-fields, a bare string sub-field stays string (backward-compat)', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        lines: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { ship_by: { type: 'string' } },
+          },
+        },
+      },
+    };
+    const parsed = schemaToFormFields(schema);
+    const lines = parsed.find((f) => f.key === 'lines');
+    expect(lines.subFields[0]).toMatchObject({ key: 'ship_by', type: 'string' });
   });
 
   it('tolerates collection with no sub-fields (empty items.properties)', () => {
@@ -1853,6 +1922,56 @@ describe('T-0509: money field type', () => {
       expect(formatCellValue(uuid, 'relation')).toBe(RELATION_CELL_ASYNC);
       expect(formatCellValue([], 'collection')).toBe('—');
       expect(formatCellValue(42, 'computed')).toBe('42');
+    });
+
+    // ------------------------------------------------------------------------
+    // T-0649 P1 (data integrity): kopecks must NOT be silently rounded away on
+    // display. The live bug: entering 150000.5 (150 000 rubles 50 kopecks)
+    // rendered as "150 001 ₽" because formatCellValue passed
+    // maximumFractionDigits:0. This is the RED-until-fix guard.
+    // ------------------------------------------------------------------------
+    it('P1: fractional amount (kopecks) is NOT rounded away — 150000.5 shows kopecks, not "150 001"', () => {
+      const result = formatCellValue(150000.5, 'money');
+      // The kopecks (,50) must be present — NOT rounded to a whole 150 001.
+      expect(result).toMatch(/150.?000,50/);
+      // And it must NOT have become the rounded-up whole-ruble string.
+      expect(result).not.toMatch(/150.?001/);
+    });
+
+    it('P1: exact two-kopeck fraction is preserved (1234.99 → …1 234,99 ₽)', () => {
+      const result = formatCellValue(1234.99, 'money');
+      expect(result).toMatch(/1.?234,99/);
+    });
+
+    it('a whole-ruble amount shows NO kopecks (150000 → "150 000 ₽", not "150 000,00 ₽")', () => {
+      const result = formatCellValue(150000, 'money');
+      expect(result).toMatch(/150.?000/);
+      // No ",00" clutter for a round sum (minimumFractionDigits:0).
+      expect(result).not.toMatch(/150.?000,00/);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // T-0649: formatCellValue — date / datetime → дд.мм.гггг[ чч:мм] (not raw ISO)
+  // --------------------------------------------------------------------------
+  describe('formatCellValue — date/datetime (T-0649)', () => {
+    it('date ISO string → дд.мм.гггг (not the raw "2026-07-05")', () => {
+      expect(formatCellValue('2026-07-05', 'date')).toBe('05.07.2026');
+    });
+
+    it('empty/null date → "—"', () => {
+      expect(formatCellValue('', 'date')).toBe('—');
+      expect(formatCellValue(null, 'date')).toBe('—');
+    });
+
+    it('datetime ISO string → "дд.мм.гггг чч:мм"', () => {
+      const result = formatCellValue('2026-07-05T14:32:00', 'datetime');
+      expect(result).toMatch(/^05\.07\.2026 \d{2}:\d{2}$/);
+    });
+
+    it('empty/null datetime → "—"', () => {
+      expect(formatCellValue('', 'datetime')).toBe('—');
+      expect(formatCellValue(null, 'datetime')).toBe('—');
     });
   });
 });

@@ -118,6 +118,72 @@ export function formatDate(value, mode = 'datetime') {
 }
 
 // ---------------------------------------------------------------------------
+// formatShortDate / formatShortDateTime — T-0649: дд.мм.гггг числовой формат
+// ---------------------------------------------------------------------------
+//
+// formatDate (above) renders month NAMES ("29 июн 2026, 14:32") — good for
+// prose, but the "date"/"datetime" field CONTROLS (DateInput) and their list/
+// detail-view cells need the compact numeric дд.мм.гггг the founder's UX study
+// asked for (§2: "в списке дата рендерится сырым ISO 2026-07-05" — the fix is
+// NOT month-name prose, it's the numeric дд.мм.гггг every Russian business
+// document uses). Kept as separate functions (not a new `formatDate` mode) so
+// existing formatDate call sites/tests are untouched (NF-2 additive discipline).
+
+/**
+ * Formats an ISO date/datetime string (or Date/epoch-ms) as дд.мм.гггг.
+ * Parses the ISO date parts directly (no Date() timezone conversion) when the
+ * input already looks like YYYY-MM-DD[...] — this keeps a plain "date" field
+ * (no time-of-day, no timezone) stable regardless of the browser's local TZ
+ * (a Date() round-trip of a bare "2026-07-05" can shift a day near UTC
+ * midnight in a negative-offset TZ). Falls back to Date()-based formatting for
+ * epoch-ms/Date inputs (datetime values, which DO carry a real instant).
+ *
+ * @param {string|number|Date|null|undefined} value
+ * @returns {string} "05.07.2026" or '—' for null/undefined/invalid
+ */
+export function formatShortDate(value) {
+  if (value === null || value === undefined || value === '') return '—';
+
+  if (typeof value === 'string') {
+    const isoMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (isoMatch) {
+      const [, y, m, d] = isoMatch;
+      return `${d}.${m}.${y}`;
+    }
+  }
+
+  let d;
+  try {
+    d = value instanceof Date ? value : new Date(value);
+    if (isNaN(d.getTime())) return '—';
+  } catch {
+    return '—';
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
+
+/**
+ * Formats an ISO datetime string (or Date/epoch-ms) as "дд.мм.гггг чч:мм".
+ *
+ * @param {string|number|Date|null|undefined} value
+ * @returns {string} "05.07.2026 14:32" or '—' for null/undefined/invalid
+ */
+export function formatShortDateTime(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  let d;
+  try {
+    d = value instanceof Date ? value : new Date(value);
+    if (isNaN(d.getTime())) return '—';
+  } catch {
+    return '—';
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  const datePart = `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
+  return `${datePart} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// ---------------------------------------------------------------------------
 // formatEnum — enum → человеческая подпись
 // ---------------------------------------------------------------------------
 

@@ -57,6 +57,10 @@
 // (proven in apps-schema.js / apps-schema.test.js's identical pattern).
 import { parseFormula } from '../../../src/core/formula-parser.ts';
 import { evalFormula } from '../../../src/core/formula-eval.ts';
+// T-0649: shared дд.мм.гггг formatters — formatCellValue's date/datetime/money
+// branches use these so the list/detail cell and the DateInput/MoneyInput
+// controls (field-renderer.jsx) render identically (single source of truth).
+import { formatShortDate, formatShortDateTime } from '../lib/format.js';
 
 // The input control a given JSON-Schema primitive type maps to in the form.
 //   text       → <input type="text">      (string)
@@ -75,6 +79,8 @@ export const INPUT_KIND = {
   select: "select",
   "multi-select": "multi-select",
   date: "date",
+  // T-0649: datetime — <input type="datetime-local">, separate control from "date".
+  datetime: "datetime",
   url: "url",
   email: "email",
   money: "money",
@@ -328,6 +334,21 @@ export function schemaToFormFields(recordSchema) {
         ? new Set(def.items.required.filter((k) => typeof k === "string"))
         : new Set();
 
+      // T-0649: restore date-column typing lost on the JSON-Schema round-trip.
+      // A collection sub-field cannot carry its own x-date (AJV strict rejects an
+      // x-* keyword nested inside items.properties[subKey]/items — the server's
+      // stripXExtensions only strips ROOT-level and top-level properties[key]
+      // x-*). buildRecordSchema (apps-schema.js) records date sub-field keys as a
+      // ROOT-level x-collection-date-fields map instead (same mechanism as
+      // x-field-order); read it back here so the record-entry form renders a
+      // DateInput for the cell instead of a permanent plain-text fallback (the
+      // "x-date never recurses into collection rows" gap, UX study §2).
+      const xCollectionDateFields = recordSchema["x-collection-date-fields"];
+      const dateKeysForThisField = (
+        xCollectionDateFields && typeof xCollectionDateFields === "object" && !Array.isArray(xCollectionDateFields)
+          && Array.isArray(xCollectionDateFields[key])
+      ) ? new Set(xCollectionDateFields[key].filter((k) => typeof k === "string")) : null;
+
       const subFields = Object.keys(itemProps).map((sfKey) => {
         const sfDef = itemProps[sfKey];
         const sfTitle =
@@ -345,6 +366,16 @@ export function schemaToFormFields(recordSchema) {
             required: itemRequired.has(sfKey),
             inputKind: "select",
             options: sfOptions,
+          };
+        }
+        // T-0649: x-collection-date-fields says this column is a date.
+        if (dateKeysForThisField && dateKeysForThisField.has(sfKey)) {
+          return {
+            key: sfKey,
+            type: "date",
+            label: sfTitle || humanizeKey(sfKey),
+            required: itemRequired.has(sfKey),
+            inputKind: "date",
           };
         }
         const sfRawType = sfDef && typeof sfDef === "object" ? sfDef.type : undefined;
@@ -504,6 +535,21 @@ export function schemaToFormFields(recordSchema) {
         label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "date",
+      };
+    }
+
+    // T-0649: detect datetime fields by the presence of x-datetime annotation.
+    // Shape: { type: "string", "x-datetime": true }. Mirrors x-date exactly —
+    // must be detected before the generic string fallthrough.
+    const xDatetime = def && typeof def === "object" ? def["x-datetime"] : undefined;
+    if (xDatetime) {
+      return {
+        key,
+        type: "datetime",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "datetime",
       };
     }
 
@@ -824,6 +870,20 @@ export function validateRecordValues(formFields, values) {
       continue;
     }
 
+    // T-0649: datetime — required ⇒ non-empty; if present, must look like an
+    // ISO-8601 datetime (YYYY-MM-DDTHH:mm, the <input type="datetime-local"> value shape).
+    if (f.type === "datetime") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(str)) {
+        errors[f.key] = "Введите дату и время";
+      }
+      continue;
+    }
+
     // T-0516: url — required ⇒ non-empty; if present, must start with http:// or https://.
     if (f.type === "url") {
       const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
@@ -1009,9 +1069,9 @@ export function serializeRecordData(formFields, values) {
     }
 
     // T-0294: select and date are emitted as plain strings (just like string).
-    // T-0516: url and email are also plain strings.
+    // T-0516: url and email are also plain strings. T-0649: datetime too.
     // Blank optional ⇒ omit; blank required is caught by validateRecordValues.
-    if (f.type === "select" || f.type === "date" || f.type === "url" || f.type === "email") {
+    if (f.type === "select" || f.type === "date" || f.type === "datetime" || f.type === "url" || f.type === "email") {
       const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
       if (str.length === 0 && !f.required) {
         continue; // omit blank optional
@@ -1160,14 +1220,44 @@ export function formatCellValue(value, type) {
     return "—";
   }
 
-  // T-0509: money value is a plain number; display with Russian currency formatting.
-  // Thousands separators + ₽ symbol via Intl.NumberFormat (locale 'ru-RU', style 'currency').
-  // maximumFractionDigits:0 keeps kopeks hidden (round rubles only — matches the
-  // constructor's "Сумма (₽)" intent; fractional amounts are uncommonly entered here).
+  // T-0509/T-0649: money value is a plain number; display with Russian currency
+  // formatting. Thousands separators + ₽ symbol via Intl.NumberFormat (locale
+  // 'ru-RU', style 'currency').
+  //
+  // P1 FIX (T-0649, data-integrity bug caught live 2026-07-05): the previous
+  // maximumFractionDigits:0 SILENTLY ROUNDED AWAY kopecks on display — typing
+  // 150000.5 (150 000 rubles 50 kopecks) showed as "150 001 ₽", which reads as
+  // data loss even though storage (serializeRecordData above) never rounds.
+  //
+  // Kopecks are shown IN FULL (a standard 2-digit fraction) whenever the value
+  // actually has a fractional part ("150 000,50 ₽"), and a whole-ruble sum
+  // shows NO decimals ("150 000 ₽" — not cluttered with ",00" for the common
+  // case). Intl can't express "0 or 2 digits" in one call (min/max fraction
+  // are independent bounds), so we branch on whether the value has kopecks.
+  // Never rounds/truncates the fractional part — money has at most 2 decimal
+  // places, so 2 fraction digits is lossless.
   if (type === "money") {
     if (typeof value === "number" && Number.isFinite(value)) {
-      return value.toLocaleString("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 });
+      const hasKopecks = !Number.isInteger(value);
+      return value.toLocaleString("ru-RU", {
+        style: "currency",
+        currency: "RUB",
+        minimumFractionDigits: hasKopecks ? 2 : 0,
+        maximumFractionDigits: 2,
+      });
     }
+    return "—";
+  }
+
+  // T-0649: date/datetime — display дд.мм.гггг[ чч:мм] instead of the raw ISO
+  // string (UX study §2: "в списке дата рендерится сырым ISO 2026-07-05").
+  // Storage is unchanged (ISO string); this is a display-only reformat.
+  if (type === "date") {
+    if (typeof value === "string" && value.length > 0) return formatShortDate(value);
+    return "—";
+  }
+  if (type === "datetime") {
+    if (typeof value === "string" && value.length > 0) return formatShortDateTime(value);
     return "—";
   }
 
