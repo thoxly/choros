@@ -1,6 +1,6 @@
 {
   "task_id": "T-0656",
-  "status": "pr_open",
+  "status": "live_proof_red",
   "branch": "task/T-0656-forms-dnd-canvas",
   "ci_local": {
     "build": true,
@@ -91,5 +91,23 @@
     "LATENT BUG now fixed AND tested on both paths: the {root:{...}} vs classifier shape mismatch (classifyFloorBoundary never descended .root) is fixed in classifyLayoutSave and now has a HUMAN-path regression (binding-layout-shape.test.ts) in addition to the document-ops wire test. No longer an open follow-up.",
     "Consider a CI gate asserting src/core/form-document-ops.ts and web/src/forms/form-document-ops.js keep identical exported function names (belt-and-suspenders over the parity test) — mirrors forms-schema-binding.sh's drift guard.",
     "No jsdom/@testing-library in the web test tier — the FormDesigner component test asserts on react-dom/server static markup + structural invariants (it cannot fire real drag events). A future e2e/Playwright pass (LIVE_PROOF) is the place to exercise actual pointer drag + the container highlight visually."
-  ]
+  ],
+  "live_proof": {
+    "date": "2026-07-05",
+    "stand": "http://100.121.76.86:3000 (dev @ d591610)",
+    "tenant": "Dev Silo",
+    "method": "Playwright chromium headless, real Keycloak auth-code+PKCE login (e-owner), native HTML5 drag-and-drop simulated via manual DragEvent+DataTransfer dispatch (Playwright dragTo does not fire native draggable/onDragStart/onDragOver/onDrop).",
+    "verdict_human_canvas_mechanics": "GREEN — drop-preview bar (full-width, not a sliver), cross-container move with STRUCTURALLY correct highlight (only the true target container lights up, confirmed on a 2-section form with a field nested inside one section moved to the other — UX-1 regression fix confirmed live), fullscreen keeps palette+inspector visible AND functional (added a field and edited its properties while in fullscreen — UX-2 regression fix confirmed live, on-screen hint text now matches reality), keyboard-only path (select by click, ArrowDown reorders, Cmd+X cuts, Cmd+V pastes) all work with correct Russian aria-live announcements.",
+    "verdict_human_canvas_persistence": "RED (P0) — FormDesigner.jsx never sets doc.step (no UI field for processKey/stepKey exists), so persistLayout() always POSTs to the hardcoded fallback process_key='record', form_key='record-form', which has no process_app_binding/registry in ANY tenant on the stand -> save always fails 409 WRONG_FLOOR regardless of which application/field-set was picked in the designer. Additionally, FormDesigner never GETs an existing form_binding.layout on open (buildDefaultDocument always rebuilds a fresh flat document from the field-set schema) -> even if a layout were saved by some other means, reopening the designer discards it and shows a flat rebuild instead.",
+    "verdict_machine_seam": "GREEN mechanically, tested against a real tenant + a real form_binding row (process_key='telLinear', the only process on the stand with an explicit target_registry_slug so the Floor gate resolves): POST /api/forms/document-ops with a valid insert op -> 200, version 1->2, new field node persisted in layout.root.children (confirmed via direct DB read). Unknown op kind -> honest 400 VALIDATION (closed vocabulary error, not 500). Op referencing a dangling fieldKey not in the live schema -> honest 409 WRONG_FLOOR citing the same R-4 content-gate reason the human save path uses. All three are exactly the designed contract.",
+    "verdict_visible_in_ui_after_reopen": "RED (P0, structural, not a machine-seam bug) — checked BOTH UI surfaces that could show the change: (1) FormDesigner itself does not show it (see persistence finding above — it never reads back layout at all); (2) the PRODUCTION task-execution screen (InboxTaskForm in screen-inbox.jsx) fetches GET /api/forms/binding, but the server response for that route (src/http/binding.ts, actor-scoped GET handler) is hardcoded to {fields, version, processKey, stepKey} — layout is not even a key in the response. Confirmed live: GET on the exact row that had a machine-inserted field in its layout returned only the old flat `fields` array from a separate FormBuilder save, with no `layout` key present at all. Conclusion: layout (the shared human/agent contract this whole feature is built around) is not read by any reachable production UI surface — neither a human's DnD arrangement nor an agent's document-ops edit can currently reach the screen where an employee actually fills out a task.",
+    "pre_existing_blocker_not_t0656": "POST /api/forms/binding (and transitively the document-ops seam, which shares checkRole) requires role 'process_designer' in keycloak auth mode; this role is not seeded in ANY tenant on the stand (confirmed via direct DB query bypassing RLS), and checkRole has no tenant-owner short-circuit — so saving a form was unreachable for EVERYONE, including the genesis owner, until a temporary role+role_assignment was granted directly in the DB to unblock this LIVE_PROOF session (residue, documented in docs/live-proof/T-0656.live-proof.md, not removed pending a real fix).",
+    "workarounds_used": [
+      "Granted process_designer role + role_assignment directly in the DB to e-owner in Dev Silo (pre-existing gap, not fixable by re-running the human UI) — required to get past a 403 that blocks literally every actor on the stand.",
+      "Saved a real form_binding row via the FormBuilder 'запасное' (fallback) tab, not the DnD designer, because the DnD designer structurally cannot target a real processKey (finding above) — this IS a workaround around the human canvas, flagged as evidence for the P0, not a stand-in for it.",
+      "Manually UPDATEd form_binding.layout via a DB client to reconstruct 'what the DnD designer would have saved if it could reach a real processKey', in order to test the document-ops machine seam against a realistic row shape. The document-ops calls themselves were made via real HTTP + the real Bearer token of the logged-in owner session — that part was not a workaround, it is the feature under test."
+    ],
+    "report": "docs/live-proof/T-0656.live-proof.md",
+    "evidence_dir": "docs/live-proof/T-0656-evidence/"
+  }
 }
