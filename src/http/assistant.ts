@@ -185,20 +185,94 @@ function assertUuidShape(value: string, label: string): void {
 // Resolve rule: a valid UUID passes through unchanged; otherwise SELECT the id
 // by slug (RLS-scoped). Not found → null → the caller returns an HONEST op-error
 // string (surfaced in the changelog), never a 500.
+//
+// T-0611 (fixes T-0607 review F4, medium): `application` is UNIQUE(tenant_id,
+// slug) — a slug can never collide within one tenant, so `application`
+// resolution is (and remains) unambiguous. `registry_def` is UNIQUE(tenant_id,
+// application_id, slug) — the SAME slug MAY legitimately exist under two
+// different applications in one tenant. The former query did
+// `WHERE tenant_id = $1 AND slug = $2 LIMIT 1` with NO application_id filter
+// and NO ORDER BY — on a cross-app collision it silently resolved an
+// ARBITRARY row, so the configurator could edit the WRONG registry while
+// buildHonestOpsReport still reported a false ✓ (the op did succeed — on the
+// wrong target). No dialogue-scoped "current application" context exists to
+// disambiguate at the call sites (see ADR-T0611), so the fix is deterministic
+// REFUSAL: return a typed "ambiguous" result instead of guessing, listing the
+// candidate applications so a human/LLM can re-issue with the raw UUID
+// (registry_def.id is a tenant-wide, unambiguous PK component).
 // ---------------------------------------------------------------------------
+
+export type SlugResolveResult =
+  | { readonly kind: "id"; readonly id: string }
+  | { readonly kind: "not_found" }
+  | {
+      readonly kind: "ambiguous";
+      readonly slug: string;
+      readonly candidates: ReadonlyArray<{
+        readonly registryDefId: string;
+        readonly applicationSlug: string;
+        readonly applicationDisplayName: string;
+      }>;
+    };
 
 export async function resolveIdBySlug(
   client: pg.PoolClient,
   tenantId: string,
   table: "registry_def" | "application",
   idOrSlug: string,
-): Promise<string | null> {
-  if (UUID_RE.test(idOrSlug)) return idOrSlug;
-  const res = await client.query<{ id: string }>(
-    `SELECT id FROM choros.${table} WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+): Promise<SlugResolveResult> {
+  if (UUID_RE.test(idOrSlug)) return { kind: "id", id: idOrSlug };
+
+  if (table === "application") {
+    // UNIQUE(tenant_id, slug) — at most one row can ever match. ORDER BY is
+    // defensive documentation of intent, not a correctness requirement here.
+    const res = await client.query<{ id: string }>(
+      `SELECT id FROM choros.application WHERE tenant_id = $1 AND slug = $2 ORDER BY id`,
+      [tenantId, idOrSlug],
+    );
+    if (res.rows.length === 0) return { kind: "not_found" };
+    return { kind: "id", id: res.rows[0]!.id };
+  }
+
+  // table === "registry_def": UNIQUE(tenant_id, application_id, slug) — the
+  // slug alone does NOT determine a unique row. Fetch ALL matches (deterministic
+  // order) and detect the ambiguous case rather than LIMIT-1-guessing.
+  const res = await client.query<{
+    id: string;
+    application_slug: string;
+    application_display_name: string;
+  }>(
+    `SELECT rd.id AS id, a.slug AS application_slug, a.display_name AS application_display_name
+       FROM choros.registry_def rd
+       JOIN choros.application a
+         ON a.tenant_id = rd.tenant_id AND a.id = rd.application_id
+      WHERE rd.tenant_id = $1 AND rd.slug = $2
+      ORDER BY rd.id`,
     [tenantId, idOrSlug],
   );
-  return res.rows.length > 0 ? res.rows[0]!.id : null;
+  if (res.rows.length === 0) return { kind: "not_found" };
+  if (res.rows.length === 1) return { kind: "id", id: res.rows[0]!.id };
+  return {
+    kind: "ambiguous",
+    slug: idOrSlug,
+    candidates: res.rows.map((r) => ({
+      registryDefId: r.id,
+      applicationSlug: r.application_slug,
+      applicationDisplayName: r.application_display_name,
+    })),
+  };
+}
+
+/**
+ * T-0611: render the ambiguous-candidates list into the human message suffix
+ * used by every registry_def call site that surfaces resolveIdBySlug results.
+ */
+function formatAmbiguousCandidates(
+  candidates: ReadonlyArray<{ applicationSlug: string; applicationDisplayName: string }>,
+): string {
+  return candidates
+    .map((c) => `${c.applicationDisplayName} [${c.applicationSlug}]`)
+    .join(", ");
 }
 
 // ---------------------------------------------------------------------------
@@ -547,13 +621,19 @@ export async function executeApprovedOpAsDraft(
           await client.query("SET LOCAL search_path TO choros");
 
           // T-0607 (в1): accept slug OR uuid for the source registry_def.
-          const resolvedSourceId = await resolveIdBySlug(
+          // T-0611: refuse deterministically on cross-app slug collision.
+          const sourceResolved = await resolveIdBySlug(
             client, tenantId, "registry_def", sourceRegistryDefId,
           );
-          if (resolvedSourceId === null) {
+          if (sourceResolved.kind === "not_found") {
             await client.query("ROLLBACK");
             return `relate_application: исходный реестр «${sourceRegistryDefId}» не найден в этом пространстве`;
           }
+          if (sourceResolved.kind === "ambiguous") {
+            await client.query("ROLLBACK");
+            return `relate_application: слаг «${sourceResolved.slug}» неоднозначен — существует в нескольких приложениях этого пространства (${formatAmbiguousCandidates(sourceResolved.candidates)}). Уточните: укажите raw UUID нужного реестра (sourceRegistryDefId).`;
+          }
+          const resolvedSourceId = sourceResolved.id;
 
           // 1) Resolve the target registry_def id.
           //    LINK → use the existing id directly.
@@ -567,14 +647,19 @@ export async function executeApprovedOpAsDraft(
               return `relate_application(link): missing targetRegistryId`;
             }
             // T-0607 (в1): accept slug OR uuid for the link target too.
-            const resolvedTarget = await resolveIdBySlug(
+            // T-0611: refuse deterministically on cross-app slug collision.
+            const targetResolved = await resolveIdBySlug(
               client, tenantId, "registry_def", rawTarget,
             );
-            if (resolvedTarget === null) {
+            if (targetResolved.kind === "not_found") {
               await client.query("ROLLBACK");
               return `relate_application(link): целевой реестр «${rawTarget}» не найден в этом пространстве`;
             }
-            targetRegistryId = resolvedTarget;
+            if (targetResolved.kind === "ambiguous") {
+              await client.query("ROLLBACK");
+              return `relate_application(link): слаг «${targetResolved.slug}» неоднозначен — существует в нескольких приложениях этого пространства (${formatAmbiguousCandidates(targetResolved.candidates)}). Уточните: укажите raw UUID нужного реестра (targetRegistryId).`;
+            }
+            targetRegistryId = targetResolved.id;
           } else {
             const appSlug = typeof cascade["appSlug"] === "string" ? cascade["appSlug"] : null;
             const appDisplayName =
@@ -675,11 +760,18 @@ export async function executeApprovedOpAsDraft(
           await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
           await client.query("SET LOCAL search_path TO choros");
           // T-0607 (в1): accept slug OR uuid for the application id.
-          const resolvedAppId = await resolveIdBySlug(client, tenantId, "application", applicationId);
-          if (resolvedAppId === null) {
+          // T-0611: application is UNIQUE(tenant_id, slug) — "ambiguous" is not
+          // reachable here, but the discriminated result is handled exhaustively.
+          const appResolved = await resolveIdBySlug(client, tenantId, "application", applicationId);
+          if (appResolved.kind === "not_found") {
             await client.query("ROLLBACK");
             return `author_binding: приложение «${applicationId}» не найдено в этом пространстве`;
           }
+          if (appResolved.kind === "ambiguous") {
+            await client.query("ROLLBACK");
+            return `author_binding: слаг «${appResolved.slug}» неоднозначен в этом пространстве. Уточните: укажите raw UUID нужного приложения (applicationId).`;
+          }
+          const resolvedAppId = appResolved.id;
           await client.query(
             `INSERT INTO choros.process_app_binding
                (tenant_id, id, process_key, application_id, form_key,
@@ -739,13 +831,20 @@ export async function executeApprovedOpAsDraft(
           await client.query("SET LOCAL search_path TO choros");
 
           // T-0607 (в1): accept slug OR uuid — resolve to the real registry_def id.
-          const resolvedRegistryId = await resolveIdBySlug(
+          // T-0611: refuse deterministically on cross-app slug collision — never
+          // silently mutate an arbitrary registry sharing this slug.
+          const registryResolved = await resolveIdBySlug(
             client, tenantId, "registry_def", registryDefId,
           );
-          if (resolvedRegistryId === null) {
+          if (registryResolved.kind === "not_found") {
             await client.query("ROLLBACK");
             return `edit_jsonschema_non_destructive: реестр «${registryDefId}» не найден в этом пространстве`;
           }
+          if (registryResolved.kind === "ambiguous") {
+            await client.query("ROLLBACK");
+            return `edit_jsonschema_non_destructive: слаг «${registryResolved.slug}» неоднозначен — существует в нескольких приложениях этого пространства (${formatAmbiguousCandidates(registryResolved.candidates)}). Уточните: укажите raw UUID нужного реестра (registryDefId).`;
+          }
+          const resolvedRegistryId = registryResolved.id;
 
           // Merge the field into the existing record_schema using jsonb path operations.
           // For add_field: set properties[fieldKey] = fieldSchema (additive only).
@@ -924,6 +1023,9 @@ export async function executeApprovedOpAsDraft(
         // T-0607 (в1): accept slug OR uuid for applicationId. A non-resolvable
         // slug degrades to null grounding (the loop asks) rather than crashing the
         // WHERE application_id = <uuid> query with «invalid input syntax».
+        // T-0611: application is UNIQUE(tenant_id, slug) so "ambiguous" cannot
+        // occur here in practice; treated the same as not-found (degrade to
+        // null grounding) since this is a soft hint, never a write.
         let groundingAppId: string | null = null;
         if (applicationId) {
           const gc = await pool.connect();
@@ -931,7 +1033,8 @@ export async function executeApprovedOpAsDraft(
             await gc.query("BEGIN");
             await gc.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
             await gc.query("SET LOCAL search_path TO choros");
-            groundingAppId = await resolveIdBySlug(gc, tenantId, "application", applicationId);
+            const appResolved = await resolveIdBySlug(gc, tenantId, "application", applicationId);
+            groundingAppId = appResolved.kind === "id" ? appResolved.id : null;
             await gc.query("COMMIT");
           } catch {
             await gc.query("ROLLBACK").catch(() => {});
