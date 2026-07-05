@@ -1,0 +1,49 @@
+{
+  "task_id": "T-0627",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/handoff/T-0627.pr-handoff.json — live_proof_todo[] / T-0627.spec.md AC-9",
+      "issue": "AC-9 (LIVE_PROOF: owner creates draft app+records, non-owner employee reloads and sees the button-less banner variant, guessed-URL navigation to a colleague's draft-tier record shows the honest EmptyState copy, then re-navigation after publish shows the real record) is listed under `live_proof_todo` in the handoff — it was planned/spec'd but not actually executed against a running stand before this handoff. Everything else (unit coverage of DraftSandboxBanner's branches, canPublishDraft's fail-closed behavior, the frozen-file diff, all fitness/anti-case/ux gates, tsc, and the real GET /api/applications/:id + PublishSolutionDialog server-call chain) was verified directly in this review and is solid; only the end-to-end human-eyes pass across two roles on a live stand remains outstanding. Given D-064's LIVE_PROOF discipline (a task's real 'done' bar), this should be run before the task is marked done — not before merge of this diff, which is presentation-only and independently verified safe.",
+      "suggestion": "Run AC-9's 4-step LIVE_PROOF (owner + second employee, real browser or dev-no-db harness) before flipping T-0627 to done; record the pass in the handoff. Does not block approving this diff — no additional code risk was found that LIVE_PROOF would be needed to catch beyond what static/unit verification already covered."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": false}
+  ],
+  "ux_findings": {
+    "sandbox_gate_untouched": "CONFIRMED. `git diff 91bd3dc...HEAD --stat -- src/core/sandbox-gate.ts src/db/sandbox-gate-dao.ts src/http/records.ts src/http/applications.ts` is empty — zero lines touched in any of the four frozen files. No new endpoint, no new query, no migration anywhere in the diff (11 files: spec/ADR/handoff docs + 4 web .jsx screens/config + their 4 new test files). Record visibility (who sees which rows) is byte-identical to pre-T-0627.",
+    "canPublishDraft_is_presentation_only": "CONFIRMED. `web/src/app-shell/nav-config.js` canPublishDraft(navSet) (lines 261-279) is a pure function reading only the CACHED NavCapabilitySet (getNavCapabilities(), resolved once at boot, T-0539) — no fetch, no side effect, returns a boolean consumed ONLY as screen-app-records.jsx's `canPublish` prop, which gates (a) which banner sentence renders and (b) whether the «Опубликовать» button renders at all. It is never sent to the server, never read by any authz check. Verified server-side: PublishSolutionDialog's actual publish action (apps-publish-dialog.jsx -> apps-publish-api.js -> POST /api/applications/:id/publish-solution) has its own independent, unchanged server-side authz — the dialog itself does no client-side role gating (an unauthorized caller reaching it would simply get a non-2xx POST response surfaced as an error toast, not a client-side block). Fail-closed: null/degraded NavCapabilitySet -> canPublishDraft returns false (no button shown), never worse than omitting the affordance.",
+    "no_dead_buttons": "CONFIRMED (G3). DraftSandboxBanner (screen-app-records.jsx lines 992-1020): when canPublish is false, the JSX renders `{canPublish && (<Button>...)}` -> `false`, i.e. the button branch is entirely absent from output, not a disabled button. Directly asserted in screen-app-records.test.jsx ('a rank-and-file viewer (canPublish=false) sees the explanatory copy WITHOUT a button'). Owner/admin/authoring_draft-holder gets a real, wired button (`onClick={onOpenPublish}` -> opens the actual, already-existing PublishSolutionDialog, same component screen-apps.jsx's row menu already opens — imported, not duplicated).",
+    "honest_404": "CONFIRMED. screen-record-detail.jsx's notFoundAppIsDraft best-effort check (lines 623-677) fetches GET /api/applications/:appId ONLY after a 404 from GET /api/records/:id, swallows any failure (network error / app already published / missing appId) and leaves the flag false, in which case the EmptyState renders the EXACT prior generic copy 'Запись не найдена или у вас нет к ней доступа.' byte-identical to pre-task. The draft-branch copy ('если это запись коллеги, она станет видна после публикации приложения владельцем') is deliberately non-committal — true under both 'record exists but hidden' and 'record never existed', matching the server's own intentional non-disclosure (T-0558). The underlying GET /api/records/:id 404 contract is untouched; this is copy layered on the client after the fact, not a new server signal. Verified server-side that GET /api/applications/:id (src/http/applications.ts ~lines 629-648) applies no privilege/tier filter beyond tenant-scoping (RLS) — any tenant member already gets 200+tier for any app id in their tenant via this route today (same as the /apps list), so reusing it here opens no new surface.",
+    "theme_a11y_anticase": "bash ci/checks/anti-case-lock.sh -> PASS (Phase 1 delegates clean, Phase 2 full D-064 denylist aggregate 16, at baseline). bash ci/checks/ux/ux-g2-theme-pairing.sh -> PASS. bash ci/checks/ux/ux-g5-jargon-denylist.sh -> PASS (informational gate, exit 0 by design; no new findings attributable to T-0627's touched files). DraftSandboxBanner uses role=\"status\" and exclusively --chs-* tokens (--chs-color-warning-soft/-warning/-text, --chs-space-*, --chs-text-sm), mirroring screen-forms.jsx's existing warning banner pattern — zero hardcoded hex/px. Copy is plain Russian, no raw English jargon (sandbox/tier/draft) leaked into visible text — 'черновик'/'песочница' only.",
+    "test_coverage": "100 tests across the 4 touched/new test files pass (screen-app-records.test.jsx, screen-record-detail.test.jsx, screen-apps.test.jsx, nav-visibility.test.js). Directly verified via source read: DraftSandboxBanner tests cover null-app (no flash), tier==='published' (absent), tier==='draft' (role=status + correct branch copy for canPublish true/false), button presence/absence + onClick wiring, and an anti-case-safe (runtime-assembled-token) assertion that the copy contains no D-064 denylist literal. canPublishDraft is unit-tested for null/degraded/genesis-owner/authoring_draft/mgmt_object:*/no-capability. This directly covers AC-1/AC-2/AC-3/AC-4/AC-5."
+  },
+  "verification_performed": [
+    "cd /Users/shoxy/Code/choros-wt/T-0627 && git log --oneline dev..HEAD (3 commits) + git diff dev...HEAD --stat (11 files, 674 insertions/3 deletions, all in web/src screens + nav-config + docs)",
+    "git diff 91bd3dc...HEAD --stat -- src/core/sandbox-gate.ts src/db/sandbox-gate-dao.ts src/http/records.ts src/http/applications.ts -> empty output confirmed directly",
+    "Read nav-config.js canPublishDraft (lines 261-279) + its doc comment; confirmed presentation-only, fail-closed, mirrors resolveActorPrivilege in comment only",
+    "Read screen-app-records.jsx DraftSandboxBanner (992-1020) + its wiring in AppRecordsScreen (1048-1051, 1316-1324, 1381-1388)",
+    "Read screen-record-detail.jsx notFoundAppIsDraft best-effort fetch + EmptyState branch (623-677, 793-813)",
+    "git diff for screen-apps.jsx CreateAppModal onboarding sentence — confirmed pure copy addition, no new field/validation",
+    "Sub-agent verified src/http/applications.ts GET /:id route (lines ~629-648): resolveActorTenant + tenant-scoped RLS query, NO privilege/capability check, tier always in response — confirmed identical posture to GET /api/applications list",
+    "Sub-agent verified apps-publish-dialog.jsx: real fetchPublishPreview on open (read-only GET), real publishSolution POST only on explicit confirm-button click, no client-side role gating, errors surfaced as toast",
+    "bash ci/checks/anti-case-lock.sh -> PASS; bash ci/checks/ux/ux-g2-theme-pairing.sh -> PASS; bash ci/checks/ux/ux-g5-jargon-denylist.sh -> PASS (informational)",
+    "cd web && npx tsc --noEmit -> 0 errors",
+    "cd web && npx vitest run src/app-shell/nav-visibility.test.js src/screens/screen-app-records.test.jsx src/screens/screen-record-detail.test.jsx src/screens/screen-apps.test.jsx -> 4 files, 100 tests, all passed"
+  ]
+}

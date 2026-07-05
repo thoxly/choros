@@ -13,6 +13,7 @@ import {
   projectZones,
   visibleZones,
   visibleItems,
+  canPublishDraft,
   ZONES,
   SCREEN_REGISTRY,
 } from './nav-config.js';
@@ -228,5 +229,43 @@ describe('SCREEN_REGISTRY invariants (FF-SCREEN-DECL precondition)', () => {
         expect(SCREEN_REGISTRY[item.id], `Missing ${item.id} in SCREEN_REGISTRY`).toBeDefined();
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0627: canPublishDraft — PRESENTATION-ONLY mirror of the server's
+// resolveActorPrivilege (src/db/sandbox-gate-dao.ts). Used ONLY to decide the
+// draft-sandbox banner's copy/whether to show «Опубликовать» — never a gate.
+// ---------------------------------------------------------------------------
+
+describe('canPublishDraft(navSet) — T-0627 draft-publish banner capability mirror', () => {
+  it('fail-closed: null/undefined navSet → false (no button shown)', () => {
+    expect(canPublishDraft(null)).toBe(false);
+    expect(canPublishDraft(undefined)).toBe(false);
+  });
+
+  it('fail-closed: degraded navSet → false, even if isGenesisOwner was true', () => {
+    expect(canPublishDraft({ isGenesisOwner: true, capabilities: ['authoring_draft'], degraded: true })).toBe(false);
+  });
+
+  it('isGenesisOwner:true → true regardless of capabilities', () => {
+    expect(canPublishDraft({ isGenesisOwner: true, capabilities: [] })).toBe(true);
+  });
+
+  it('authoring_draft capability → true (mirrors hasAuthoringDraftGrant)', () => {
+    expect(canPublishDraft({ isGenesisOwner: false, capabilities: ['authoring_draft'] })).toBe(true);
+  });
+
+  it('any mgmt_object:* capability → true (mirrors isOwnerOrAdmin admin-grant branch)', () => {
+    expect(canPublishDraft({ isGenesisOwner: false, capabilities: ['mgmt_object:grant'] })).toBe(true);
+  });
+
+  it('a rank-and-file actor (no owner, no relevant capability) → false', () => {
+    expect(canPublishDraft({ isGenesisOwner: false, capabilities: ['observability:read'] })).toBe(false);
+    expect(canPublishDraft({ isGenesisOwner: false, capabilities: [] })).toBe(false);
+  });
+
+  it('missing/non-array capabilities on an otherwise-valid navSet → false (defensive)', () => {
+    expect(canPublishDraft({ isGenesisOwner: false })).toBe(false);
   });
 });

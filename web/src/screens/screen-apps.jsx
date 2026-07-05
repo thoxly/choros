@@ -134,6 +134,11 @@ function CreateAppModal({ open, onClose, onCreated }) {
       <form id="create-app-form" onSubmit={handleSubmit}>
         <p style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           Новое приложение конструктора. Создаётся в статусе «черновик».
+          {/* T-0627: onboarding — the sandbox scope (author-only visibility)
+              and the way out of it (publish) must be visible at creation
+              time, not discovered later as a surprise 404 (T-0584 capstone). */}
+          {' '}Черновик — личная песочница: записи видны только их автору, пока
+          вы не опубликуете приложение для команды.
         </p>
 
         <div style={{ marginBottom: 'var(--chs-space-6)' }}>

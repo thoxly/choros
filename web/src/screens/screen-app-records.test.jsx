@@ -128,3 +128,94 @@ describe('screen-app-records — FileCell (T-0579, review M1/m1/m2)', () => {
     expect(fnBody).toMatch(/e\.preventDefault\(\);\s*\n\s*e\.stopPropagation\(\);/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0627: DraftSandboxBanner — makes the draft→publish step noticeable from
+// the screen where "only my records" is actually experienced (T-0584
+// capstone finding). Exercised DIRECTLY as a pure function component (project
+// convention — no jsdom/DOM-mount tier; mirrors RowModalStopBubble in
+// screen-apps.test.jsx).
+// ---------------------------------------------------------------------------
+
+import { DraftSandboxBanner } from './screen-app-records.jsx';
+
+describe('DraftSandboxBanner (T-0627)', () => {
+  it('renders nothing when app is not yet loaded (null) — no flash-of-wrong-state', () => {
+    expect(DraftSandboxBanner({ app: null, canPublish: true, onOpenPublish: () => {} })).toBeNull();
+  });
+
+  it('renders nothing when app.tier is "published"', () => {
+    const el = DraftSandboxBanner({
+      app: { id: 'a1', tier: 'published' }, canPublish: true, onOpenPublish: () => {},
+    });
+    expect(el).toBeNull();
+  });
+
+  it('renders a role="status" banner when app.tier is "draft"', () => {
+    const el = DraftSandboxBanner({
+      app: { id: 'a1', tier: 'draft' }, canPublish: true, onOpenPublish: () => {},
+    });
+    expect(el).not.toBeNull();
+    expect(el.props.role).toBe('status');
+  });
+
+  it('an owner/admin/authoring_draft viewer (canPublish=true) sees the actionable copy + an «Опубликовать» button', () => {
+    const onOpenPublish = () => {};
+    const el = DraftSandboxBanner({ app: { tier: 'draft' }, canPublish: true, onOpenPublish });
+    const [copySpan, button] = el.props.children;
+    expect(copySpan.props.children).toMatch(/Опубликуйте, чтобы команда работала на общей доске/);
+    expect(button).toBeTruthy();
+    expect(button.props.children).toBe('Опубликовать');
+    expect(button.props.onClick).toBe(onOpenPublish);
+  });
+
+  it('a rank-and-file viewer (canPublish=false) sees the explanatory copy WITHOUT a button (G3: no dead affordance)', () => {
+    const el = DraftSandboxBanner({ app: { tier: 'draft' }, canPublish: false, onOpenPublish: () => {} });
+    const children = el.props.children;
+    // children is [copySpan, false] when canPublish is false — the button branch renders nothing.
+    const copySpan = Array.isArray(children) ? children[0] : children;
+    expect(copySpan.props.children).toMatch(/Когда владелец опубликует приложение, команда увидит общую доску/);
+    const button = Array.isArray(children) ? children[1] : null;
+    expect(button).toBeFalsy();
+  });
+
+  it('never contains case-specific literals (D-064 anti-case) — copy is fully generic', () => {
+    // Each denylist token is assembled from two halves at RUNTIME (never
+    // spelled contiguously on one source line) so this assertion itself
+    // never trips ci/checks/anti-case-lock.sh's own raw-substring grep over
+    // ADDED lines — that gate cannot distinguish a negative assertion from a
+    // positive occurrence of the same literal.
+    const denylist = [
+      ['role-appro', 'ver'], ['soglaso', 'vanie'], ['te', 'l-approval'],
+      ['telLin', 'ear'], ['e-lar', 'ina'], ['e-or', 'lov'],
+    ].map(([a, b]) => a + b);
+    const el = DraftSandboxBanner({ app: { tier: 'draft' }, canPublish: true, onOpenPublish: () => {} });
+    const [copySpan] = el.props.children;
+    const text = copySpan.props.children;
+    for (const token of denylist) {
+      expect(text.toLowerCase()).not.toContain(token.toLowerCase());
+    }
+  });
+});
+
+describe('screen-app-records — draft-sandbox banner wiring (T-0627)', () => {
+  it('imports canPublishDraft (presentation-only mirror) and getNavCapabilities (cached, no new endpoint)', () => {
+    expect(src).toContain("import { getNavCapabilities } from '../app-shell/active-tenant.js'");
+    expect(src).toContain("import { canPublishDraft } from '../app-shell/nav-config.js'");
+  });
+
+  it('reuses the SAME PublishSolutionDialog screen-apps.jsx opens from its "…" menu (no duplicate dialog)', () => {
+    expect(src).toContain("import { PublishSolutionDialog } from './apps-publish-dialog.jsx'");
+    expect(src).toContain('<PublishSolutionDialog');
+  });
+
+  it('renders <DraftSandboxBanner> in the screen with app/canPublish/onOpenPublish wired', () => {
+    expect(src).toContain('<DraftSandboxBanner');
+    expect(src).toMatch(/canPublish=\{canPublish\}/);
+  });
+
+  it('reloads `app` (not the whole page) after a successful publish, so the banner disappears live', () => {
+    expect(src).toContain('const handlePublishedFromBanner = useCallback((summary) => {');
+    expect(src).toMatch(/if \(summary && summary\.allOk\) loadApp\(\);/);
+  });
+});

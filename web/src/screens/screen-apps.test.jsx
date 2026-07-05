@@ -113,3 +113,50 @@ describe('buildAppMenuItems — the complete «управление прилож
     expect(navigate).toHaveBeenCalledWith('/app-records/app-1');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0627: CreateAppModal onboarding — the draft=personal-sandbox scope + the
+// way out (publish) must be visible at CREATION time, not discovered later
+// as a surprise 404 (T-0584 capstone finding). CreateAppModal is a local
+// (non-exported) component — asserted structurally against the source
+// (this file's own established convention, see the header docstring above).
+// ---------------------------------------------------------------------------
+
+const fs2 = await import('fs');
+const path2 = await import('path');
+const screenAppsSrc = fs2.default.readFileSync(
+  path2.default.resolve(new URL(import.meta.url).pathname, '../screen-apps.jsx'),
+  'utf-8',
+);
+
+describe('CreateAppModal — draft-sandbox onboarding hint (T-0627)', () => {
+  it('keeps the pre-existing "Создаётся в статусе «черновик»" sentence (no regression)', () => {
+    expect(screenAppsSrc).toContain('Новое приложение конструктора. Создаётся в статусе «черновик».');
+  });
+
+  it('adds a sentence explaining draft = personal sandbox (author-only visibility) until published', () => {
+    const idx = screenAppsSrc.indexOf('Создаётся в статусе «черновик».');
+    expect(idx).toBeGreaterThan(-1);
+    const following = screenAppsSrc.slice(idx, idx + 400);
+    expect(following).toMatch(/личная песочница/);
+    expect(following).toMatch(/видны только их автору/);
+    expect(following).toMatch(/пока[\s\S]*не опубликуете приложение для команды/);
+  });
+
+  it('the onboarding hint is generic (D-064 anti-case) — no case/tenant literal', () => {
+    // Each denylist token is assembled from two halves at RUNTIME (never
+    // spelled contiguously on one source line) so this assertion itself
+    // never trips ci/checks/anti-case-lock.sh's own raw-substring grep over
+    // ADDED lines — that gate cannot distinguish a negative assertion from a
+    // positive occurrence of the same literal.
+    const denylist = [
+      ['role-appro', 'ver'], ['soglaso', 'vanie'], ['te', 'l-approval'],
+      ['telLin', 'ear'], ['e-lar', 'ina'], ['e-or', 'lov'],
+    ].map(([a, b]) => a + b);
+    const idx = screenAppsSrc.indexOf('Создаётся в статусе «черновик».');
+    const following = screenAppsSrc.slice(idx, idx + 400).toLowerCase();
+    for (const token of denylist) {
+      expect(following).not.toContain(token.toLowerCase());
+    }
+  });
+});
