@@ -967,9 +967,9 @@ function InboxScreen() {
                       {inPool ? (
                         <span className="chs-pool"><span className="chs-pool__glyph" /> в пуле</span>
                       ) : isTaken ? (
-                        <ActorChip type={takenType} name={takenName} id={t.claimedBy} />
+                        <ActorChip type={takenType} name={takenName} id={t.claimedBy} deactivated={t.execDeactivated} />
                       ) : (
-                        <ActorChip type={t.execType} name={t.execName} id={t.claimedBy} />
+                        <ActorChip type={t.execType} name={t.execName} id={t.claimedBy} deactivated={t.execDeactivated} />
                       )}
                     </td>
                     <td><SLACell sla={t.sla} deadline={t.deadline} /></td>

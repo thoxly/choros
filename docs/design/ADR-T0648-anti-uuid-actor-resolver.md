@@ -54,6 +54,21 @@ batchResolveActors(pool, tenantId, ids: string[]): Promise<Map<string, ResolvedA
   which shape they hold. Mirrors the "distinct-set → one query → build a Map"
   shape already established by `resolveExecutorFallbackBatch` (src/http/
   inbox.ts, T-0380).
+- **Map indexing — dual slug+id (deviation from the initial design, review
+  F-2).** The returned Map indexes each resolved row under BOTH its `slug` AND
+  its raw `id::text` unconditionally — so a caller that holds either shape can
+  `map.get(x)` and hit the same `ResolvedActor`. The initial design indexed
+  only by the caller-supplied key (a "one entry per input id" contract); it was
+  changed to unconditional dual indexing to keep the resolver a single generic
+  entry point for pages that mix both shapes (one column keyed by slug, another
+  by employee_id) without a second query. CONSEQUENCE: `Map.size` is up to
+  `2 × (distinct resolved rows)`, NOT the number of input ids — callers that
+  need "did EACH of my ids resolve?" must iterate THEIR OWN id list calling
+  `map.get(id)`, never read `Map.size`. This is documented at the call site
+  (batchResolveActors body comment) and pinned by the unit test
+  (actor-resolver.test.ts katch g: 25 ids → Map.size 50, still ONE query) and
+  the live-DB test (actor-resolver.db.test.ts AC-n1: 10 ids → size 20, ONE
+  round-trip). Unit test case (g) asserts 25 ids → Map.size 50.
 - **Type taxonomy**: `choros.employee.kind` is a closed 2-value CHECK
   (`human`|`agent` — migration 016; "service workers (s-ledger, s-ocr) map to
   kind='agent'" by the migration's own comment — there is no 3rd DB value).
@@ -90,11 +105,33 @@ batchResolveActors(pool, tenantId, ids: string[]): Promise<Map<string, ResolvedA
   whole `{type,name}` shape instead of `.name`) into a safe string
   (`.name` if present, else `JSON.stringify`, never throws). Every place a
   bare `{name}`-shaped JSX slot exists now runs through this guard.
-- **`ActorChip({type, name, id, showId, bare})`** — the single primitive for
-  rendering ANY actor (human/agent/service): glyph by type (reuses
-  `ExecutorBadge`/`ExecGlyph` — not duplicated) + human-readable name in the
-  MAIN text + the raw id ONLY as a `title` tooltip (and, with `showId=true`,
-  a separate `<MonoId>` chip) — never the bare id in the flowing text.
+- **`ActorChip({type, name, id, showId, bare, deactivated})`** — the single
+  primitive for rendering ANY actor (human/agent/service): glyph by type
+  (reuses `ExecutorBadge`/`ExecGlyph` — not duplicated) + human-readable name
+  in the MAIN text + the raw id ONLY as a `title` tooltip (and, with
+  `showId=true`, a separate `<MonoId>` chip) — never the bare id in the
+  flowing text.
+- **A11y — the actor TYPE is in the ACCESSIBLE NAME in EVERY mode (review
+  UX_REVIEW блокер FIX-1).** The glyph is `aria-hidden` (decorative — colour/
+  shape duplicate the type) and `title=` is a hover tooltip that AT does not
+  reliably announce. So столп 4 ("agents are visible AS employees") would be
+  invisible to a screen-reader user, who'd hear only the name. FIX:
+  `ExecutorBadge` (which `ActorChip` wraps) now always emits a `chs-sr-only`
+  (visually-hidden) text node carrying the human-readable type — accessible
+  name becomes e.g. "Счёт-агент (агент)" — in showLabel AND bare/showLabel=false
+  modes alike. Pinned by actor-chip.test.jsx (accessible-name walk that skips
+  aria-hidden, includes sr-only; asserts the type reaches the name in all
+  modes; mutation-verified — removing the sr-only span fails 7 tests).
+- **Deactivation marker (review nit FIX-3).** `ResolvedActor.deactivated` was
+  resolved+carried by the backend but no screen surfaced it. `ActorChip` now
+  takes `deactivated` and renders a muted + struck-through visual (`.chs-exec--
+  deactivated`, token-only) PLUS «(деактивирован)» in the accessible name and
+  the tooltip — a deactivated actor is now distinguishable in audit/trail/inbox
+  from an active one, for sighted AND AT users. Wired through all 5 readers:
+  audit `actorDisplay.deactivated`, process-instance `actorDisplay.deactivated`
+  (HistoryRow) + `completedByDeactivated` (HistoryStepRow, new wire field),
+  grant-trail `actorResolved/subjectResolved.deactivated`, analytics
+  `actorResolved.deactivated`, inbox `execDeactivated` (new wire field).
 - **`RecordRef({recordId, appId, headers, fetchImpl})`** — lazily resolves a
   record's title via `GET /api/records/:id` and renders it as a link to the
   record (`/apps/:appId/records/:id`); on load failure or missing label,
@@ -109,7 +146,7 @@ batchResolveActors(pool, tenantId, ids: string[]): Promise<Map<string, ResolvedA
 | audit log `actor` | `src/http/audit.ts` `handleGetAuditLog` | batch-resolves the page's distinct actors, attaches `actorDisplay` additively (raw `actor` untouched for back-compat) |
 | grant-trail `actor`/`subject` | `src/http/grant-trail.ts` `attachResolvedActors` | batch-resolves both columns' distinct values, attaches `actorResolved`/`subjectResolved` additively |
 | analytics `top_actors` | `src/http/operational-analytics.ts` `handleGet` | batch-resolves distinct `top_actors[].actor`, attaches `actorResolved` additively |
-| process-instance history `completedBy` | `src/http/processes.ts` `fetchInstanceHistoryDetail` via injected `ActorsDisplayResolver` (ports-and-adapters: `processes.ts` stays pg/db-import-free, FF-DISPLAY-4-style isolation — the resolver is injected through `StartInstanceDeps.resolveActorsDisplay`, wired in `src/server.ts` to `batchResolveActors`) | attaches `completedByName` per history step, one query per request regardless of step count |
+| process-instance history `completedBy` | `src/http/processes.ts` `fetchInstanceHistoryDetail` via injected `ActorsDisplayResolver` (ports-and-adapters: `processes.ts` stays pg/db-import-free, FF-DISPLAY-4-style isolation — the resolver is injected through `StartInstanceDeps.resolveActorsDisplay`, wired in `src/server.ts` to `batchResolveActors`) | attaches `completedByName` + `completedByType` (FIX-2 — a userTask can be completed by an AGENT; the frontend HistoryStepRow no longer hardcodes `type="human"`) + `completedByDeactivated` (FIX-3) per history step, one query per request regardless of step count |
 
 Frontend consumers: `screen-audit.jsx` (`AuditEventRow`), `screen-process-
 instance.jsx` (`HistoryRow`, `HistoryStepRow`, record-source →

@@ -23,6 +23,11 @@
 .chs-exec--service { color: var(--chs-exec-service); background: var(--chs-exec-service-soft); border-color: var(--chs-exec-service-border); }
 .chs-exec--bare { background: transparent; border-color: transparent; padding-left: 0; }
 .chs-exec--dot { gap: var(--chs-space-3); }
+/* T-0648 FIX-3: deactivated actor — muted + struck-through name. The
+   «(деактивирован)» marker in the accessible name (ExecutorBadge chs-sr-only)
+   carries the meaning for AT; this is the visual echo (never colour-only). */
+.chs-exec--deactivated { opacity: 0.55; }
+.chs-exec--deactivated > span:not(.chs-sr-only) { text-decoration: line-through; }
 
 /* ---------------- MonoId ---------------- */
 .chs-monoid {

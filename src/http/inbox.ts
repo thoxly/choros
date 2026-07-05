@@ -148,6 +148,13 @@ type InboxItem = {
    * name with no separate raw id (seed fixtures, e.g.).
    */
   execSlug?: string;
+  /**
+   * T-0648 FIX-3: the claimer's soft-deactivation marker (ResolvedActor.
+   * deactivated). Additive optional field — lets the client's ActorChip show
+   * the «(деактивирован)» marker for a claim held by an actor who was
+   * subsequently deactivated (a lost signal today). Absent ⇒ active/unknown.
+   */
+  execDeactivated?: boolean;
   pool?: boolean;
   sla: { min: number; left: number };
   due: string;
@@ -735,6 +742,7 @@ async function findInboxItems(
         execType: claimerInfo.type,
         execName: claimerInfo.name,
         execSlug: claim.claimedBy,
+        execDeactivated: claimerInfo.deactivated,
         claimedBy: claim.claimedBy,
         claimedAt: claim.claimedAt,
         mine,
@@ -801,6 +809,7 @@ async function findInboxItems(
           execType: claimerInfo.type,
           execName: claimerInfo.name,
           execSlug: claim.claimedBy,
+          execDeactivated: claimerInfo.deactivated,
           claimedBy: claim.claimedBy,
           claimedAt: claim.claimedAt,
           mine,
@@ -892,6 +901,7 @@ async function findInboxItems(
           execType: claimerInfo.type,
           execName: claimerInfo.name,
           execSlug: claim.claimedBy,
+          execDeactivated: claimerInfo.deactivated,
           claimedBy: claim.claimedBy,
           claimedAt: claim.claimedAt,
           mine,

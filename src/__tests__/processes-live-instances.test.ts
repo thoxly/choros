@@ -697,11 +697,14 @@ describe("T-0648 · GET /api/processes/:id resolves completedBy to a display nam
         lastIdsArg = ids;
         const m = new Map();
         if (ids.includes("e-fixture-assignee")) {
+          // T-0648 FIX-2/FIX-3: the completer is an AGENT (not human) and
+          // soft-deactivated — proves the backend carries the resolved TYPE
+          // and deactivation, not a hardcoded "human"/active default.
           m.set("e-fixture-assignee", {
             id: "e-fixture-assignee",
-            name: "К. Орлов",
-            type: "human",
-            deactivated: false,
+            name: "Проверочный-агент",
+            type: "agent",
+            deactivated: true,
             resolved: true,
           });
         }
@@ -720,7 +723,7 @@ describe("T-0648 · GET /api/processes/:id resolves completedBy to a display nam
     else process.env["DATABASE_URL"] = prevDbUrl;
   });
 
-  it("attaches completedByName for a resolved completedBy slug", async () => {
+  it("attaches completedByName + resolved TYPE + deactivation for a resolved completedBy slug (FIX-2/FIX-3)", async () => {
     const { status, json } = await httpReq(
       "GET",
       `${harness.baseUrl()}/api/processes/${LIVE_INST}`,
@@ -730,7 +733,12 @@ describe("T-0648 · GET /api/processes/:id resolves completedBy to a display nam
     const data = json as { history: Array<Record<string, unknown>> };
     const taskA = data.history.find((h) => h.step === "Проверка А");
     expect(taskA?.completedBy).toBe("e-fixture-assignee");
-    expect(taskA?.completedByName).toBe("К. Орлов");
+    expect(taskA?.completedByName).toBe("Проверочный-агент");
+    // FIX-2: the completer's REAL type is carried (not hardcoded "human") — an
+    // agent-completed userTask must render with the agent glyph.
+    expect(taskA?.completedByType).toBe("agent");
+    // FIX-3: the deactivation marker is carried too.
+    expect(taskA?.completedByDeactivated).toBe(true);
   });
 
   it("NO N+1: resolves the SAME distinct completedBy slug across multiple steps in exactly ONE call PER REQUEST", async () => {

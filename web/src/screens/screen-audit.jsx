@@ -36,7 +36,7 @@ function AuditEventRow({ ev }) {
       </div>
       <div className="chs-ev__body">
         <div className="chs-ev__line">
-          <ActorChip type={display?.type || type} name={display?.name || ev.actor} id={display?.id || ev.actor} />
+          <ActorChip type={display?.type || type} name={display?.name || ev.actor} id={display?.id || ev.actor} deactivated={display?.deactivated} />
           <span>{ev.summary || ev.action}</span>
           {ev.target && <MonoId chip>{ev.target}</MonoId>}
           <MonoId>{ev.action}</MonoId>

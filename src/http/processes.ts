@@ -276,6 +276,15 @@ export interface InstanceHistoryDetail {
      * falls back to `completedBy` itself (never worse than today).
      */
     completedByName?: string;
+    /**
+     * T-0648 FIX-2 (столп 4): the resolved actor TYPE (human/agent/service) of
+     * the step's completer. A userTask can be completed by an AGENT — the
+     * frontend must NOT hardcode a human glyph. Present iff `completedByName`
+     * is; absent ⇒ frontend falls back to "human" (the pre-resolve default).
+     */
+    completedByType?: "human" | "agent" | "service";
+    /** T-0648 FIX-3: the completer's soft-deactivation marker, if resolved. */
+    completedByDeactivated?: boolean;
   }[];
   /** false when the engine could not be reached for the activity history. */
   historyAvailable: boolean;
@@ -322,7 +331,17 @@ async function fetchInstanceHistoryDetail(
         historyWithNames = history.map((h) => {
           if (!h.completedBy) return h;
           const hit = resolved.get(h.completedBy);
-          return hit ? { ...h, completedByName: hit.name } : h;
+          // T-0648 FIX-2/FIX-3: carry the resolved TYPE + deactivation so the
+          // frontend renders the right glyph (agent-completed step ≠ human) and
+          // the deactivation marker, instead of hardcoding "human".
+          return hit
+            ? {
+                ...h,
+                completedByName: hit.name,
+                completedByType: hit.type,
+                completedByDeactivated: hit.deactivated,
+              }
+            : h;
         });
       } catch {
         // Degrade gracefully: keep the raw slug (read-projection, never throws).

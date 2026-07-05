@@ -195,8 +195,8 @@ function GrantTrailScreen() {
                     <span className={`chs-actchip chs-actchip--${am.cls}`}><span className="chs-actchip__dot" />{am.label}</span>
                     {r.crit && <span className="chs-trailcrit" title="критичный грант">крит.</span>}
                   </DataTableCell>
-                  <DataTableCell className="chs-trailcell"><ActorChip type={r.actor.type} name={r.actor.name} id={r.actor.id} /></DataTableCell>
-                  <DataTableCell className="chs-trailcell"><ActorChip type={r.subject.type} name={r.subject.name} id={r.subject.id} /></DataTableCell>
+                  <DataTableCell className="chs-trailcell"><ActorChip type={r.actor.type} name={r.actor.name} id={r.actor.id} deactivated={r.actor.deactivated} /></DataTableCell>
+                  <DataTableCell className="chs-trailcell"><ActorChip type={r.subject.type} name={r.subject.name} id={r.subject.id} deactivated={r.subject.deactivated} /></DataTableCell>
                   <DataTableCell className="chs-trailcell chs-trailcell--grant">
                     <span className="chs-trailrole">{r.role}</span>
                     <span className="chs-trailgrant"><OpChip op={r.op} /><Mono className="chs-trailres">{r.res.replace(/^mcp:\/\//, "")}</Mono></span>

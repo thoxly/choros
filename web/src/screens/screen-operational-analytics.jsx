@@ -304,6 +304,7 @@ function TopActorsTable({ rows }) {
                     type={r.actorResolved?.type || 'human'}
                     name={r.actorResolved?.name || r.actor}
                     id={r.actorResolved?.id || r.actor}
+                    deactivated={r.actorResolved?.deactivated}
                   />
                 </td>
                 <td style={tdStyle}>

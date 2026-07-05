@@ -147,7 +147,7 @@ export type ActorPrivilegeResolver = (
 export type ActorsDisplayResolver = (
   tenantId: string,
   ids: readonly string[],
-) => Promise<Map<string, { id: string; name: string; type: string; deactivated: boolean; resolved: boolean }>>;
+) => Promise<Map<string, { id: string; name: string; type: "human" | "agent" | "service"; deactivated: boolean; resolved: boolean }>>;
 
 export interface StartInstanceDeps {
   pool: pg.Pool;

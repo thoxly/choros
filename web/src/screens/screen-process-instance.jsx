@@ -127,7 +127,7 @@ function HistoryRow({ ev }) {
         {fmtTs(ev.ts)}
       </Mono>
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', flexWrap: 'wrap' }}>
-        <ActorChip type={display?.type || type} name={display?.name || ev.actor} id={display?.id || ev.actor} />
+        <ActorChip type={display?.type || type} name={display?.name || ev.actor} id={display?.id || ev.actor} deactivated={display?.deactivated} />
         <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           {ev.summary || ev.action}
         </span>
@@ -148,6 +148,12 @@ function HistoryRow({ ev }) {
  * raw `completedBy` slug is shown through ActorChip, preferring the backend's
  * resolved `completedByName` (T-0648 batch resolver) and falling back to the
  * raw slug honestly when unresolved (never worse than before this change).
+ *
+ * T-0648 FIX-2/FIX-3: a userTask can be completed by an AGENT — take the
+ * backend-resolved `completedByType` (never hardcode "human", which would draw
+ * an agent-completed step with a human glyph and undermine столп 4) and the
+ * `completedByDeactivated` marker; both degrade to the pre-resolve default
+ * ("human" / not-deactivated) when the backend could not resolve the slug.
  */
 function HistoryStepRow({ step }) {
   return (
@@ -170,7 +176,12 @@ function HistoryStepRow({ step }) {
       )}
       {step.completedBy && (
         <span style={{ display: 'inline-flex', alignItems: 'center' }}>
-          · <ActorChip type="human" name={step.completedByName} id={step.completedBy} />
+          · <ActorChip
+              type={step.completedByType || 'human'}
+              name={step.completedByName}
+              id={step.completedBy}
+              deactivated={step.completedByDeactivated}
+            />
         </span>
       )}
     </div>

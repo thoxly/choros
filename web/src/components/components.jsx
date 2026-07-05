@@ -111,18 +111,33 @@ function asRenderableText(value) {
   return String(value);
 }
 
-/* ExecutorBadge — единый цвето-иконочный код типа исполнителя */
-function ExecutorBadge({ type = "human", label, name, bare = false, showLabel = true }) {
+/* ExecutorBadge — единый цвето-иконочный код типа исполнителя.
+ *
+ * T-0648 FIX-1 (a11y, столп 4): the actor TYPE (human/agent/service) must be
+ * in the ACCESSIBLE NAME in EVERY mode — not only visually via the glyph+colour
+ * and not only in `title=` (a hover tooltip is not reliably announced by AT).
+ * Otherwise a screen-reader user hears just the name, cannot tell an agent from
+ * a human, and столп 4 ("agents are visible AS employees") is invisible to them.
+ * We surface the type (and the T-0648 FIX-3 deactivation marker) as a
+ * `chs-sr-only` (visually-hidden) span that reads right after the name, so the
+ * accessible name becomes e.g. "Счёт-агент (агент)" / "И. Петров (человек, деактивирован)".
+ * The glyph stays aria-hidden (decorative — colour/shape duplicate the type).
+ */
+function ExecutorBadge({ type = "human", label, name, bare = false, showLabel = true, deactivated = false }) {
   const meta = EXEC_META[type] || EXEC_META.human;
   const displayName = asRenderableText(name) || asRenderableText(label) || meta.label;
+  // Screen-reader suffix: the type is always spoken; deactivation adds a marker.
+  const srSuffix = deactivated ? `(${meta.label}, деактивирован)` : `(${meta.label})`;
   return (
     <span
-      className={`chs-exec ${meta.cls} ${bare ? "chs-exec--bare" : ""}`}
-      aria-label={showLabel ? undefined : meta.label}
+      className={`chs-exec ${meta.cls} ${bare ? "chs-exec--bare" : ""} ${deactivated ? "chs-exec--deactivated" : ""}`}
       title={meta.label}
     >
       <ExecGlyph type={type} />
       {showLabel && <span>{displayName}</span>}
+      {/* Type (and deactivation) in the accessible name — announced in ALL modes,
+          including bare/showLabel=false where there is no visible label. */}
+      <span className="chs-sr-only">{showLabel ? ` ${srSuffix}` : `${displayName} ${srSuffix}`}</span>
     </span>
   );
 }
@@ -145,15 +160,21 @@ function ExecutorBadge({ type = "human", label, name, bare = false, showLabel = 
               плотных списках; экраны с явной колонкой «id» могут showId=true).
      bare   — без текстовой подписи вовсе (только глиф) — проксируется в
               ExecutorBadge, id остаётся в title.
+     deactivated — T-0648 FIX-3: сотрудник soft-деактивирован (employee.
+              deactivated_at, приходит с резолвом ResolvedActor.deactivated).
+              Приглушённый визуальный стиль + «(деактивирован)» в accessible-
+              name/тултипе — потерянный сигнал теперь виден в аудите/трейле.
    ---------------------------------------------------------------------------- */
-function ActorChip({ type = "human", name, id, showId = false, bare = false }) {
+function ActorChip({ type = "human", name, id, showId = false, bare = false, deactivated = false }) {
   const meta = EXEC_META[type] || EXEC_META.human;
   const safeId = asRenderableText(id);
   const displayName = asRenderableText(name) || safeId || meta.label;
-  const tooltip = safeId && safeId !== displayName ? `${meta.label} · ${safeId}` : meta.label;
+  // T-0648 FIX-3: deactivation surfaces in the visible tooltip too (not only AT).
+  const typeLabel = deactivated ? `${meta.label} · деактивирован` : meta.label;
+  const tooltip = safeId && safeId !== displayName ? `${typeLabel} · ${safeId}` : typeLabel;
   return (
     <span className="chs-actorchip" title={tooltip}>
-      <ExecutorBadge type={type} name={displayName} bare={bare} />
+      <ExecutorBadge type={type} name={displayName} bare={bare} deactivated={deactivated} />
       {showId && safeId && <MonoId chip>{safeId}</MonoId>}
     </span>
   );

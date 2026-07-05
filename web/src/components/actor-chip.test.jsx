@@ -94,6 +94,44 @@ function flattenText(node, acc = []) {
   return acc;
 }
 
+/**
+ * Accessible-name approximation: collect text leaves like flattenText, but
+ * SKIP any subtree marked aria-hidden (the decorative glyph) and INCLUDE
+ * visually-hidden (chs-sr-only) text — this mirrors how AT computes the
+ * accessible name from a node's text content (aria-hidden excluded, sr-only
+ * included). Used to assert the actor TYPE reaches the accessible name in
+ * every mode (T-0648 FIX-1).
+ */
+function accessibleNameOf(node, acc = []) {
+  if (node === null || node === undefined || node === false) return acc;
+  if (typeof node === 'string' || typeof node === 'number') {
+    acc.push(String(node));
+    return acc;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) accessibleNameOf(child, acc);
+    return acc;
+  }
+  if (typeof node === 'object' && node.type) {
+    if (node.props && node.props['aria-hidden']) return acc; // decorative — skip
+    if (typeof node.type === 'function') {
+      accessibleNameOf(node.type(node.props || {}), acc);
+      return acc;
+    }
+    // An explicit aria-label overrides descendant text for the accessible name.
+    if (node.props && typeof node.props['aria-label'] === 'string') {
+      acc.push(node.props['aria-label']);
+      return acc;
+    }
+    accessibleNameOf(node.props && node.props.children, acc);
+  }
+  return acc;
+}
+
+function accNameOf(tree) {
+  return accessibleNameOf(tree).join(' ').replace(/\s+/g, ' ').trim();
+}
+
 function textOf(tree) {
   return flattenText(tree).join(' ');
 }
@@ -244,5 +282,78 @@ describe('T-0648 deriveRecordRefLabel — RecordRef title derivation (mirrors de
   it('null/undefined record → null (RecordRef treats this as "denied/honest-empty", never throws)', () => {
     expect(deriveRecordRefLabel(null)).toBeNull();
     expect(deriveRecordRefLabel(undefined)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. FIX-1 (a11y, столп 4): the actor TYPE is in the ACCESSIBLE NAME in every
+//    mode — a screen-reader user must be able to tell an agent from a human,
+//    not only sighted users via the glyph/colour.
+// ---------------------------------------------------------------------------
+
+describe('ActorChip/ExecutorBadge — T-0648 FIX-1: actor type is in the accessible name (all modes)', () => {
+  it('ActorChip human: accessible name contains the human-readable type "Человек"', () => {
+    const acc = accNameOf(ActorChip({ type: 'human', name: 'И. Петров', id: 'e-petrov' }));
+    expect(acc).toContain('И. Петров');
+    expect(acc).toContain('Человек');
+  });
+
+  it('ActorChip agent: accessible name contains "Агент" (столп 4 — agent distinguishable by AT, not only by glyph)', () => {
+    const acc = accNameOf(ActorChip({ type: 'agent', name: 'Счёт-агент', id: 'a-invoice' }));
+    expect(acc).toContain('Счёт-агент');
+    expect(acc).toContain('Агент');
+  });
+
+  it('ActorChip service: accessible name contains "Сервис"', () => {
+    const acc = accNameOf(ActorChip({ type: 'service', name: 'ledger-sync', id: 's-ledger' }));
+    expect(acc).toContain('ledger-sync');
+    expect(acc).toContain('Сервис');
+  });
+
+  it('the type reaches the accessible name via SR-ONLY text, NOT only via title= (title is not reliably announced)', () => {
+    // The type must be a real text node in the tree, not merely a title attribute
+    // on the wrapper — assert it survives accessible-name computation (which does
+    // not read title=).
+    const tree = ActorChip({ type: 'agent', name: 'Счёт-агент', id: 'a-invoice' });
+    expect(accNameOf(tree)).toContain('Агент');
+  });
+
+  it('bare/showLabel=false mode: the type is STILL in the accessible name (no visible label, but AT still hears the type)', () => {
+    // ExecutorBadge showLabel=false is used e.g. in ra-grant-trail glyph-only spots.
+    const acc = accNameOf(ExecutorBadge({ type: 'agent', name: 'Счёт-агент', showLabel: false }));
+    expect(acc).toContain('Счёт-агент');
+    expect(acc).toContain('Агент');
+  });
+
+  it('bare glyph-only ActorChip: accessible name carries name + type', () => {
+    const acc = accNameOf(ActorChip({ type: 'service', name: 'ocr-gateway', id: 's-ocr', bare: true }));
+    expect(acc).toContain('ocr-gateway');
+    expect(acc).toContain('Сервис');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. FIX-3: deactivated actor — marker in the accessible name + muted style.
+// ---------------------------------------------------------------------------
+
+describe('ActorChip — T-0648 FIX-3: deactivated marker', () => {
+  it('deactivated=true → accessible name includes «деактивирован» (lost signal now audible)', () => {
+    const acc = accNameOf(ActorChip({ type: 'human', name: 'Уволенный', id: 'e-gone', deactivated: true }));
+    expect(acc).toContain('Уволенный');
+    expect(acc).toContain('деактивирован');
+  });
+
+  it('deactivated=true → the wrapper carries the chs-exec--deactivated visual class', () => {
+    const tree = ActorChip({ type: 'human', name: 'Уволенный', id: 'e-gone', deactivated: true });
+    // ExecutorBadge is the inner component that owns the class — render it and check.
+    const badge = findByType(tree, 'span').find((el) =>
+      (el.props.className || '').includes('chs-exec--deactivated'),
+    );
+    expect(badge).toBeDefined();
+  });
+
+  it('deactivated=false (default) → NO deactivation marker in the accessible name', () => {
+    const acc = accNameOf(ActorChip({ type: 'human', name: 'Активный', id: 'e-active' }));
+    expect(acc).not.toContain('деактивирован');
   });
 });
