@@ -1,0 +1,75 @@
+{
+  "task_id": "T-0650",
+  "status": "pr_open",
+  "branch": "task/T-0650-auto-slugs",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "T-0650.spec.md",
+    "docs/design/ADR-T0650-auto-slugs.md",
+    "docs/live-proof/T-0650.live-proof.md",
+    "src/core/slug-generator.ts",
+    "src/core/slugify-process-key.ts",
+    "src/core/assistant-configurator.ts",
+    "src/http/applications.ts",
+    "src/http/registry-defs.ts",
+    "src/http/seed-write.ts",
+    "src/core/__tests__/slug-generator.test.ts",
+    "src/__tests__/seed-write.auto-slug.test.ts",
+    "src/__tests__/assistant-configurator.test.ts",
+    "ci/checks/db/applications_crud.test.ts",
+    "ci/checks/db/registry_defs_crud.test.ts",
+    "web/src/components/slug-field.jsx",
+    "web/src/components/slug-field-logic.js",
+    "web/src/components/slug-field.test.jsx",
+    "web/src/components/components.css",
+    "web/src/screens/apps-validate.js",
+    "web/src/screens/apps-validate.test.js",
+    "web/src/screens/org-crud.js",
+    "web/src/screens/org-crud.test.js",
+    "web/src/screens/screen-apps.jsx",
+    "web/src/screens/screen-app-schema.jsx",
+    "web/src/screens/screen-org.jsx",
+    "docs/handoff/T-0650.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "Скоуп сужен по прямой инструкции фаундера («лучше ядро+половина мест ПОЛНОСТЬЮ зелёное»): полностью покрыты ядро + 6 create-эндпоинтов (applications/registry-defs/departments/positions/employees/roles) + SlugField в 3 экранах (screen-apps.jsx, screen-app-schema.jsx, screen-org.jsx через org-crud.js data-driven конфиг) + ассистент create_application. Отложены с обоснованием в T-0650.spec.md: ключ каждого поля схемы (#3, плотная grid-строка FieldRow — отдельный визуальный проход), найм агента (#8, Keycloak-clientId создаётся ДО DB-транзакции — retry должен ретраить и KC-вызов, не только INSERT — отдельная аккуратная задача), SoD/intents-форма (#9, внутренний debug-инструмент /api/rights/intents/hire, не основной путь), модельер 3 подместа (#10, требует мультиселект по схеме — уже отмечено в исследовании как волна B), пикеры 'Название (slug)' вместо голого слага (низкий риск косметика, FINDINGS).",
+    "«Набор полей» НЕ спрятан полностью (авто-main при первом «Настроить поля») — это навигационное изменение экрана AppSchemaScreen (список→сразу редактор), больше чем point-fix; SlugField снимает боль ручного слага в create-форме registry_def, но сам концепт registry_def остаётся видимым в UI. Задокументировано в T-0650.spec.md как отложенное.",
+    "generateUniqueSlug (existsFn form) сохранён для обратной совместимости slugify-process-key.ts, но create-эндпоинты T-0650 используют ОТДЕЛЬНЫЙ примитив insertWithUniqueSlugRetry (retry-on-INSERT-conflict) — более строгий атомарный паттерн, чем существовавший ранее в process-defs.ts (который делает SELECT-проверку внутри той же транзакции — тоже безопасно, но по другому механизму). ADR явно документирует оба паттерна и почему они разные."
+  ],
+  "friction_events": [
+    "src/core/slugify-process-key.ts рефакторинг в тонкую обёртку потребовал точного совпадения существующего теста 'falls back to uuid suffix when 1-10 are all taken' (11 existsFn-вызовов до фоллбэка) — проверено вручную арифметикой (1 база + 9 занумерованных = 10 вызовов) перед запуском, совпало с первого раза.",
+    "web/vitest.config.js работает в plain node environment (без jsdom/react-dom) — SlugField спроектирован hook-free (T-0649 дисциплина), но первая версия теста слишком агрессивно descend-ила в дерево через <Field> (который использует useId()) → 'Cannot read properties of null (reading useId)'. Исправлено ограничением tree-walk helper'а (не спускаться в Field/MonoId/Button — проверять их props, не их внутренний рендер), мирроря паттерн actor-chip.test.jsx (RecordRef exclusion).",
+    "Edit-тул дважды отказался матчить старый multi-line старый-текст в slugify-process-key.ts и seed-write.ts (вероятно из-за незначительных whitespace/юникод расхождений) — решено полным Write вместо частичного Edit для этих файлов.",
+    "Полный npm run fitness (200+ гейтов) занял ~100 секунд; полный npm run ci (tsc+eslint+fitness+vitest) — включает fitness внутри — общий прогон занял отдельного внимания на то, что множественные 'FAIL' строки в выводе являются ОЖИДАЕМЫМИ self-test плантами (сразу за ними идёт 'SELF-TEST PASS') — не путать с реальным провалом; проверено grep-ом на 'FAIL' вне self-test контекста — пусто, реальный exit code = 0."
+  ],
+  "live_proof": {
+    "verdict": "GREEN",
+    "date": "2026-07-05",
+    "stand": "изолированный worktree — HTTP-роут (registerApplicationRoutes/registerSeedWriteRoutes) поверх РЕАЛЬНОГО Postgres :55432 (choros-postgres-1), без деплоя на dev (задача не имеет прав на dev/main)",
+    "report": "docs/live-proof/T-0650.live-proof.md",
+    "checks": {
+      "auto_slug_from_name_only": "GREEN — POST /api/applications { display_name: 'Закупки оборудования LiveProof' } (НИ ОДНОГО поля slug в теле) → 201 { slug: 'zakupki-oborudovaniya-liveproof' }; реальный HTTP-роут, реальный Postgres, ноль моков",
+      "atomic_collision_suffix": "GREEN — второй POST с ТЕМ ЖЕ display_name (снова без slug) → 201 { slug: 'zakupki-oborudovaniya-liveproof-2' }, НЕ 409 — коллизия разрешена атомарно через реальный UNIQUE(tenant_id, slug) индекс (retry-on-insert-conflict), не через отдельную SELECT-проверку",
+      "explicit_slug_backward_compat": "GREEN — POST { display_name, slug: 'explicit-liveproof-app' } → 201 { slug: 'explicit-liveproof-app' } байт-в-байт, старое поведение не изменилось",
+      "registry_def_auto_slug": "GREEN — 3 новых теста в ci/checks/db/registry_defs_crud.test.ts (реальный PG): omitted→авто-слаг из display_name, коллизия→-2 не 409, explicit invalid→400 как раньше; 15/15 файл зелёный",
+      "org_entities_auto_slug": "GREEN — 13 тестов в src/__tests__/seed-write.auto-slug.test.ts через РЕАЛЬНЫЙ registerSeedWriteRoutes HTTP-роутер (department/position/employee/role), включая симулированную атомарную коллизию (pg 23505 → -2)",
+      "slug_field_ui_states": "GREEN — 13 unit-тестов web/src/components/slug-field.test.jsx (hook-free plain-function invocation): untouched-превью, touched-инпут, locked-MonoId — все 3 состояния корректны"
+    },
+    "findings_beyond_scope": [
+      "Ключ каждого поля схемы (место #3 из 11) остаётся ручным — плотная grid-строка FieldRow в screen-app-schema.jsx требует отдельного визуального прохода (авто из «Название поля» + анти-коллизия внутри клиентского массива полей). Follow-up рекомендован.",
+      "Найм агента (#8) — slug определяет Keycloak clientId (deriveKcClientId), а KC-клиент создаётся ДО DB-транзакции (src/http/agents.ts Step 4) — атомарный retry-on-conflict должен ретраить И создание KC-клиента, не только INSERT. Отдельная аккуратная задача (не тривиальный copy-paste паттерна).",
+      "SoD/intents-форма (#9, ra-intents.jsx) — внутренний debug/RBAC-тестовый инструмент (/api/rights/intents/hire), не основной путь сборки кейса — низкий приоритет.",
+      "Модельер: 3 подместа (#10, bpmn-properties-panel.jsx) — ключ процесса уже авто (T-0377, не трогали); «форма/набор полей (ключ)» и «перечислите ключи видимых полей текстом» требуют мультиселект по схеме привязанного приложения — уже отмечено исследованием как волна B (§7.4).",
+      "Пикеры существующих сущностей (org-crud.js:202-205, label: p.slug) всё ещё показывают голый слаг вместо «Название (slug)» — низкий риск, чистая косметика, не сделано в рамках узкого ядро+половина-мест скоупа.",
+      "«Набор полей» как концепция НЕ спрятана из UI (авто-main при первом «Настроить поля») — SlugField снимает боль поля, но сам registry_def-выбор остаётся видимым экраном."
+    ],
+    "bypasses_found": "none — все проверки через реальный HTTP-роут и реальный Postgres unique-констрейнт как арбитр",
+    "blockers": "none"
+  }
+}
