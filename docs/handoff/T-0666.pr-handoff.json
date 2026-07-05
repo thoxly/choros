@@ -71,6 +71,18 @@
     "Confirm a rank-and-file (non-owner, no process_designer role) employee still gets 403 attempting the same save — the bypass must not have spilled access.",
     "Confirm the process_designer role now appears in the tenant's role list (e.g. via /api/org or the rights-assignment UI) as an assignable, unassigned role — proving the owner can now delegate form-building to a real employee without a manual DB grant."
   ],
+  "live_proof": {
+    "date": "2026-07-05",
+    "stand": "http://100.121.76.86:3000 (dev@69cb01f)",
+    "browser": "Playwright chromium headless, real Keycloak Authorization Code + PKCE (not dev-shortcut), actor e-owner",
+    "verdict": "GREEN — owner bypass confirmed live",
+    "report": "docs/live-proof/T-0665-e2e.live-proof.md (joint T-0665+T-0666 live-proof pass)",
+    "evidence_dir": "docs/live-proof/T-0665-e2e-evidence/",
+    "result": "POST /api/forms/binding as e-owner (real KC session, no process_designer role_assignment granted in this session) returned 201 (not 403) on the first attempt in a fresh browser context, and again on a second independent save (different stepKey). Directly reverses the T-0656 pre_existing_blocker: form-binding save from the UI no longer requires a manual DB-granted role for the tenant owner.",
+    "rank_and_file_403_live_check": "NOT independently re-verified live in this pass (no rank-and-file credentials with/without process_designer available in this session) — relies on T-0666's own mutation-verified unit tests (binding-owner-bypass.test.ts AC-4: non-owner without the role still gets 403) plus the fact the owner's session never carried an elevated grant and still needed the bypass to succeed (a plain checkRole 403 was the pre-T-0666 default for e-owner too, per the T-0583 memory note e-owner had no product-level grants beyond genesis-owner identity).",
+    "process_designer_role_visible_in_rights_ui": "NOT verified — /api/rights returned a demo stub ({\"roles\":[],\"demo\":true}) in this session, not real role-assignment data; did not chase further (out of this pass's critical path, the owner-bypass result itself is the load-bearing claim for T-0666).",
+    "downstream_finding": "The owner-bypass success is real, but the form saved this way is NOT reliably renderable to the assignee afterward — see T-0665's live_proof.p0_found (docs/handoff/T-0665.pr-handoff.json): the same POST path stores form_binding.fields=[] whenever a layout is supplied without an explicit fields array (which FormDesigner's persistLayout always does), and InboxTaskForm's fields.length===0 guard returns null before ever checking hasLayout. This is a T-0665-side defect, not a T-0666 regression — T-0666's own scope (the save succeeding for the owner) is proven live and correct."
+  },
   "findings": [
     "T-0656's own pr-handoff.json (docs/handoff/T-0656.pr-handoff.json, live_proof.pre_existing_blocker_not_t0656) already documented this exact defect and its DB-grant workaround before this task existed — this PR is the promised fix for that residue.",
     "checkRole is reused verbatim by THREE HTTP surfaces (binding.ts's two POST routes, floor1-editor.ts's authorizeEditor, dmn-rule-table.ts's authorizeDesigner) plus one internal seam (forms-document-ops.ts, the T-0656 agent op-apply path) — fixing the shared function fixed all four/five call sites in one change, consistent with the codebase's existing 'single source of truth for the process_designer authz convention' discipline documented in checkRole's own comment.",
