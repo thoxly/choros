@@ -35,8 +35,10 @@ import {
   resetRenderPoolForTesting,
   MAX_DATA_LIMIT,
   type ReportPageRenderAuthzDeps,
+  type ReportAggReadVisibilityResolver,
 } from "../http/report-page-render.js";
 import { Router } from "../http/router.js";
+import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 
 // ---------------------------------------------------------------------------
 // Fake pool infrastructure (mirrors report-pages.test.ts)
@@ -1159,5 +1161,181 @@ describe("FF-FLOOR2-RLS structural: no DB credentials exported", () => {
       k.toLowerCase().includes("connectionstring")
     );
     expect(credentialKeys).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0632 (security, столп 4) — record-level READ-PDP filtering of Floor-1
+// aggregates when resolveReadVisibility is wired (unit-level, FakePool).
+//
+// The adversary finding (T-0587, ADR-T0587 §1.1): buildAggSql computed
+// SUM/COUNT/... over EVERY record in a registry, gated only by the
+// application-level checkReadGrant — never isRecordReadable. These tests
+// exercise the NEW default path (resolveReadVisibility present) against a
+// FakePool that returns raw {id,data} rows (not a pre-computed agg_result),
+// proving the aggregate is computed over the JS-filtered visible subset.
+//
+// AC-T0632-1: narrow record-scope grant → aggregate over ONLY the covered
+//   record(s), NOT the full registry (mutational proof: the excluded row's
+//   huge value never reaches the sum).
+// AC-T0632-2: zero covering record grants → count:0 (honest empty aggregate,
+//   not 403/500).
+// AC-T0632-3: resolveReadVisibility ABSENT → legacy full-registry aggregate
+//   unchanged (honest-degrade regression guard).
+// ---------------------------------------------------------------------------
+
+describe("T-0632 — record-level READ-PDP filtering of Floor-1 aggregates", () => {
+  const RECORD_VISIBLE = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee1";
+  const RECORD_HIDDEN = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee2";
+
+  // Flat equality oracle (mirrors assistant-*.test.ts convention): a grant's
+  // scope covers a resource node iff the node id equals the grant's own
+  // nodeId — no synthetic hierarchy needed for a record-scope grant test.
+  const flatOracle: AncestryOracle = {
+    isDescendantOrSelf(_hierarchy, descendantId, ancestorId) {
+      return descendantId === ancestorId;
+    },
+  };
+
+  function recordScopeGrant(recordId: string): Grant {
+    return {
+      tenantId: "t",
+      id: "g1",
+      roleId: "r1",
+      resourceType: "record",
+      operation: "read",
+      scope: { kind: "node", hierarchy: "resource", nodeId: recordId, nodeLevel: "record" },
+      delegable: true,
+      grantedBy: "seed",
+      createdAt: 0,
+    };
+  }
+
+  function makeNarrowResolver(): ReportAggReadVisibilityResolver {
+    return async () => ({ grants: [recordScopeGrant(RECORD_VISIBLE)], ancestry: flatOracle });
+  }
+
+  function makeZeroGrantResolver(): ReportAggReadVisibilityResolver {
+    return async () => ({ grants: [], ancestry: flatOracle });
+  }
+
+  // Row sequence for the T-0632 default path (resolveReadVisibility present):
+  // BEGIN, SET LOCAL x2, SELECT report_page, SELECT registry_def, SELECT raw
+  // record rows (id,data), COMMIT.
+  function makeRawRowRenderRowSets(recordRows: Array<{ id: string; data: unknown }>): unknown[][] {
+    return [
+      [],
+      [],
+      [],
+      [fakeFloor1Page],
+      [fakeRegistryDefRow],
+      recordRows,
+      [],
+    ];
+  }
+
+  it("AC-T0632-1: narrow record-scope grant → SUM over the visible record ONLY, never the hidden one's huge value", async () => {
+    resetRenderPoolForTesting();
+    const rowSets = makeRawRowRenderRowSets([
+      { id: RECORD_VISIBLE, data: { amount: 42 } },
+      { id: RECORD_HIDDEN, data: { amount: 999999 } }, // must NEVER contribute
+    ]);
+    const router = new Router();
+    registerReportPageRenderRoutes(
+      router,
+      makeFakePool(rowSets),
+      allowDeps,
+      undefined,
+      makeNarrowResolver(),
+    );
+    const server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const addr = server.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl + `/api/report-pages/${VALID_PAGE_ID}/render`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(200);
+      const body = json as Record<string, unknown>;
+      const metrics = body["metrics"] as Array<Record<string, unknown>>;
+      expect(metrics[0]!["result"]).toBe(42);
+      expect(metrics[0]!["result"]).not.toBe(42 + 999999);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("AC-T0632-2: zero covering record grants → count:0 aggregate (honest empty, not 403/500)", async () => {
+    resetRenderPoolForTesting();
+    const countPage = {
+      ...fakeFloor1Page,
+      page_def: [{ source_registry_def_id: VALID_REG_DEF_ID, field_key: "amount", agg: "count" }],
+    };
+    const rowSets: unknown[][] = [
+      [],
+      [],
+      [],
+      [countPage],
+      [fakeRegistryDefRow],
+      [
+        { id: RECORD_VISIBLE, data: { amount: 42 } },
+        { id: RECORD_HIDDEN, data: { amount: 7 } },
+      ],
+      [],
+    ];
+    const router = new Router();
+    registerReportPageRenderRoutes(
+      router,
+      makeFakePool(rowSets),
+      allowDeps,
+      undefined,
+      makeZeroGrantResolver(),
+    );
+    const server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const addr = server.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl + `/api/report-pages/${VALID_PAGE_ID}/render`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(200);
+      const body = json as Record<string, unknown>;
+      const metrics = body["metrics"] as Array<Record<string, unknown>>;
+      expect(metrics[0]!["result"]).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("AC-T0632-3: resolveReadVisibility ABSENT → legacy full-registry SQL aggregate unchanged (honest-degrade regression guard)", async () => {
+    resetRenderPoolForTesting();
+    // Legacy row-shape: {agg_result} — proves the OLD path still runs
+    // byte-for-byte when no resolver is injected (test-only degradation).
+    const rowSets = makeFloor1RenderRowSets("12345.00");
+    const router = new Router();
+    registerReportPageRenderRoutes(router, makeFakePool(rowSets), allowDeps);
+    const server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const addr = server.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl + `/api/report-pages/${VALID_PAGE_ID}/render`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(200);
+      const body = json as Record<string, unknown>;
+      const metrics = body["metrics"] as Array<Record<string, unknown>>;
+      expect(metrics[0]!["result"]).toBe("12345.00");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
