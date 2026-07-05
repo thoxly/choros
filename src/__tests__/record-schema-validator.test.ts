@@ -379,4 +379,145 @@ describe('record-schema-validator', () => {
     expect(typeResult.valid).toBe(false);
     expect(typeResult.errors.length).toBeGreaterThan(0);
   });
+
+  // -------------------------------------------------------------------------
+  // T-0663: format:"email" (and date/date-time/uri) — AJV strict compile-time
+  // "unknown format" bug. Seeded registries (migrations 073/083 — «Контрагенты»
+  // contact_email, «Производственный календарь» date) carry raw JSON-Schema
+  // `format` keywords the bare AJV instance did not recognise: ajv.compile()
+  // THREW before validate() ever ran, so EVERY write into such a registry 400ed
+  // — including a record where the email field was entirely absent. These tests
+  // are RED against the pre-fix validator (bare `new Ajv()`, no ajv-formats) and
+  // GREEN after registering formats in makeAjv().
+  // -------------------------------------------------------------------------
+
+  describe('T-0663: format:"email" record-schema (compile-time regression + empty-optional semantics)', () => {
+    // Mirrors migrations/083_core_system_registries_seed.sql «Контрагенты» —
+    // contact_email is OPTIONAL (only `name` is required).
+    const kontragentySchema = {
+      type: 'object',
+      additionalProperties: true,
+      properties: {
+        name: { type: 'string', title: 'Наименование' },
+        contact_email: { type: 'string', format: 'email', title: 'Email контакта' },
+      },
+      required: ['name'],
+    };
+
+    it('AC-a: a record with a VALID email in an optional email field saves (valid:true)', () => {
+      const schemaHistory: SchemaHistoryMap = new Map([[1, kontragentySchema]]);
+      const record = {
+        data: { name: 'ООО Ромашка', contact_email: 'contact@romashka.example' },
+        schema_version: 1,
+      };
+      const result = validateRecordAgainstSchema(record, schemaHistory);
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('AC-b: a record with an EMPTY optional email field saves (was the reported bug — 400 regardless of value)', () => {
+      const schemaHistory: SchemaHistoryMap = new Map([[1, kontragentySchema]]);
+
+      // Variant 1: the key is present but blank (a client that sends "" rather
+      // than omitting the key — the defensive case; the shipped web form omits
+      // the key, but the server must not depend on that).
+      const withEmptyString = { data: { name: 'ООО Ромашка', contact_email: '' }, schema_version: 1 };
+      const r1 = validateRecordAgainstSchema(withEmptyString, schemaHistory);
+      expect(r1.valid).toBe(true);
+      expect(r1.errors).toHaveLength(0);
+
+      // Variant 2: the key is omitted entirely (what serializeRecordData actually
+      // sends for a blank optional field, per web/src/screens/records-form.js).
+      const withOmittedKey = { data: { name: 'ООО Ромашка' }, schema_version: 1 };
+      const r2 = validateRecordAgainstSchema(withOmittedKey, schemaHistory);
+      expect(r2.valid).toBe(true);
+      expect(r2.errors).toHaveLength(0);
+    });
+
+    it('AC-c: a record with an INVALID (non-empty, malformed) email in a REQUIRED email field is honestly rejected', () => {
+      // required email field — distinct schema from kontragentySchema (whose
+      // contact_email is optional) so this test proves format validation is
+      // NOT silently disabled by the T-0663 fix — a genuinely malformed,
+      // non-empty email value must still 400.
+      const requiredEmailSchema = {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string' },
+          contact_email: { type: 'string', format: 'email' },
+        },
+        required: ['name', 'contact_email'],
+      };
+      const schemaHistory: SchemaHistoryMap = new Map([[1, requiredEmailSchema]]);
+
+      const badEmail = { data: { name: 'ООО Ромашка', contact_email: 'not-an-email' }, schema_version: 1 };
+      const badResult = validateRecordAgainstSchema(badEmail, schemaHistory);
+      expect(badResult.valid).toBe(false);
+      expect(badResult.errors.length).toBeGreaterThan(0);
+      expect(badResult.errors.some((e) => e.includes('email'))).toBe(true);
+
+      // A required-but-absent email field must still be rejected (required
+      // governs presence; the T-0663 empty-string carve-out is not a backdoor
+      // around `required`).
+      const missingEmail = { data: { name: 'ООО Ромашка' }, schema_version: 1 };
+      const missingResult = validateRecordAgainstSchema(missingEmail, schemaHistory);
+      expect(missingResult.valid).toBe(false);
+      expect(missingResult.errors.length).toBeGreaterThan(0);
+
+      // A valid, non-empty email in the required field passes.
+      const goodEmail = { data: { name: 'ООО Ромашка', contact_email: 'sales@romashka.example' }, schema_version: 1 };
+      const goodResult = validateRecordAgainstSchema(goodEmail, schemaHistory);
+      expect(goodResult.valid).toBe(true);
+      expect(goodResult.errors).toHaveLength(0);
+    });
+
+    it('validateRecordSchemaDefinition: a record_schema authoring format:"email" is accepted (no compile throw)', () => {
+      // The T-0263 authoring guard shares the same makeAjv() factory — a schema
+      // author declaring format:"email" directly (not just via the x-email
+      // round-trip convention) must not 400 at registry_def create/update time.
+      const result = validateRecordSchemaDefinition(kontragentySchema);
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('format:"date" / format:"date-time" (migrations 073/083: not_after, prod-kalendar.date) compile and validate', () => {
+      // Mirrors migrations/083 «Производственный календарь» (date, required) and
+      // migrations/073 vendor-crm (not_after: format "date", activation_key_issued_at:
+      // format "date-time") — the same compile-time "unknown format" bug applied to
+      // every non-email format keyword these seeds use.
+      const calendarSchema = {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          date: { type: 'string', format: 'date', title: 'Дата' },
+          is_working_day: { type: 'boolean' },
+          activation_key_issued_at: { type: 'string', format: 'date-time' },
+        },
+        required: ['date', 'is_working_day'],
+      };
+      const schemaHistory: SchemaHistoryMap = new Map([[1, calendarSchema]]);
+
+      const valid = validateRecordAgainstSchema(
+        { data: { date: '2026-07-05', is_working_day: true, activation_key_issued_at: '2026-07-05T10:00:00Z' }, schema_version: 1 },
+        schemaHistory,
+      );
+      expect(valid.valid).toBe(true);
+      expect(valid.errors).toHaveLength(0);
+
+      // Optional date-time field left blank (empty string) still saves.
+      const blankOptional = validateRecordAgainstSchema(
+        { data: { date: '2026-07-05', is_working_day: false, activation_key_issued_at: '' }, schema_version: 1 },
+        schemaHistory,
+      );
+      expect(blankOptional.valid).toBe(true);
+
+      // A malformed, non-empty date is still honestly rejected.
+      const badDate = validateRecordAgainstSchema(
+        { data: { date: 'not-a-date', is_working_day: true }, schema_version: 1 },
+        schemaHistory,
+      );
+      expect(badDate.valid).toBe(false);
+      expect(badDate.errors.length).toBeGreaterThan(0);
+    });
+  });
 });

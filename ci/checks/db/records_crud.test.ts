@@ -679,4 +679,100 @@ describe('records API — enriched detail GET /api/records/:id (T-0295)', () => 
     });
     expect(got.statusCode).toBe(404);
   }));
+
+  // ---------------------------------------------------------------------------
+  // T-0663: format:"email" record_schema — live Postgres proof.
+  //
+  // migrations/083_core_system_registries_seed.sql «Контрагенты» (kontragenty)
+  // seeds contact_email as { type:"string", format:"email" } (optional — only
+  // `name` is required). Before the fix, the bare AJV instance in
+  // record-schema-validator.ts THREW "unknown format \"email\" ignored in
+  // schema" at ajv.compile() time — a COMPILE-time failure that happens before
+  // validate() ever looks at the payload, so EVERY POST /api/records into this
+  // registry 400ed, including one where contact_email was entirely absent.
+  // This is the real seeded schema shape (not a synthetic approximation),
+  // exercised through the actual HTTP route (registerRecordRoutes → assertDataValid
+  // → validateRecordAgainstSchema), on real Postgres.
+  // ---------------------------------------------------------------------------
+  describe('T-0663: format:"email" registry_def — real Postgres round-trip', () => {
+    // Mirrors migrations/083 kontragenty exactly: contact_email OPTIONAL (format:
+    // "email"), name REQUIRED. additionalProperties:true (tenant-extensible, as seeded).
+    const KONTRAGENTY_LIKE_SCHEMA = {
+      type: 'object',
+      additionalProperties: true,
+      properties: {
+        name: { type: 'string', title: 'Наименование' },
+        contact_email: { type: 'string', format: 'email', title: 'Email контакта' },
+      },
+      required: ['name'],
+    };
+
+    let emailAppId = '';
+    let emailRegId = '';
+
+    beforeAll(async () => {
+      if (!hasDb) return;
+      await withClient(migratorUrl(), async (c) => {
+        emailAppId = await seedApplicationDirect(c, TENANT_A, `rec-app-email-${uuid().slice(0, 8)}`);
+        emailRegId = await seedRegistryDefDirect(
+          c, TENANT_A, emailAppId, `rec-reg-email-${uuid().slice(0, 8)}`, KONTRAGENTY_LIKE_SCHEMA,
+        );
+      });
+      regDefCleanup.push({ tenantId: TENANT_A, id: emailRegId });
+      appCleanup.push({ tenantId: TENANT_A, id: emailAppId });
+    });
+
+    it('AC-a: POST with a VALID email in the optional email field → 201, data persisted as sent', requireDb(async () => {
+      const r = await makeRequest(
+        baseUrl,
+        'POST',
+        '/api/records',
+        { application_id: emailAppId, registry_def_id: emailRegId, data: { name: 'ООО Ромашка', contact_email: 'sales@romashka.example' } },
+        { 'x-dev-user': 'actor-a' },
+      );
+      expect(r.statusCode).toBe(201);
+      const body = JSON.parse(r.body) as { id: string; data: Record<string, unknown> };
+      recordCleanup.push({ tenantId: TENANT_A, id: body.id });
+      expect(body.data).toEqual({ name: 'ООО Ромашка', contact_email: 'sales@romashka.example' });
+    }));
+
+    it('AC-b: POST with the EMPTY-optional email field omitted → 201 (this was the reported bug: 400 even when email was blank)', requireDb(async () => {
+      const r = await makeRequest(
+        baseUrl,
+        'POST',
+        '/api/records',
+        { application_id: emailAppId, registry_def_id: emailRegId, data: { name: 'АО Василёк' } },
+        { 'x-dev-user': 'actor-a' },
+      );
+      expect(r.statusCode).toBe(201);
+      const body = JSON.parse(r.body) as { id: string; data: Record<string, unknown> };
+      recordCleanup.push({ tenantId: TENANT_A, id: body.id });
+      expect(body.data).toEqual({ name: 'АО Василёк' });
+    }));
+
+    it('AC-b2: POST with the email field explicitly sent as an empty string → 201 (defensive: server does not rely on the client omitting the key)', requireDb(async () => {
+      const r = await makeRequest(
+        baseUrl,
+        'POST',
+        '/api/records',
+        { application_id: emailAppId, registry_def_id: emailRegId, data: { name: 'ИП Иванов', contact_email: '' } },
+        { 'x-dev-user': 'actor-a' },
+      );
+      expect(r.statusCode).toBe(201);
+      const body = JSON.parse(r.body) as { id: string };
+      recordCleanup.push({ tenantId: TENANT_A, id: body.id });
+    }));
+
+    it('AC-c: POST with a non-empty MALFORMED email → 400 VALIDATION (format checking is not silently disabled)', requireDb(async () => {
+      const r = await makeRequest(
+        baseUrl,
+        'POST',
+        '/api/records',
+        { application_id: emailAppId, registry_def_id: emailRegId, data: { name: 'ООО Ромашка', contact_email: 'not-an-email' } },
+        { 'x-dev-user': 'actor-a' },
+      );
+      expect(r.statusCode).toBe(400);
+      expect(JSON.stringify(JSON.parse(r.body))).toMatch(/schema/i);
+    }));
+  });
 });
