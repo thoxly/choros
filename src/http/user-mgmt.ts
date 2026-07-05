@@ -524,6 +524,64 @@ export function registerUserMgmtRoutes(
     }
     const kcUserId = found.slug;
 
+    // T-0658 (round 3) — LAST-OWNER GUARD. The T-0658 deactivation gate in
+    // org.ts (isGenesisOwnerForTenant / loadAdminContext) makes a deactivated
+    // owner resolve to isGenesisOwner=false. That correctly closes the security
+    // hole, but introduces a SELF-LOCKOUT: reactivation goes through THIS route,
+    // whose own authority gate is loadAdminContext (assertOrgObjectAuthority
+    // above). If the LAST active tenant-owner is deactivated, no one is left who
+    // can reactivate them (the owner themself is now isGenesisOwner=false, and
+    // there is no other owner) — the tenant is bricked. Fail-CLOSED against the
+    // IRREVERSIBLE action: refuse to deactivate the last active tenant-owner.
+    // Only checked on deactivation (active === false); reactivation is always
+    // allowed. Counts OTHER active owners (confirmed, in-window role_assignment
+    // to role.slug='tenant-owner', employee.deactivated_at IS NULL) EXCLUDING
+    // the target — if zero, the target is the last owner → 409.
+    if (active === false) {
+      const isLastOwner = await withTenantTx(pool, tenantId, async (client) => {
+        // Is the TARGET currently an active tenant-owner?
+        const { rows: targetOwnerRows } = await client.query<{ one: number }>(
+          `SELECT 1 AS one
+             FROM choros.role_assignment ra
+             JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+            WHERE ra.tenant_id = $1
+              AND ra.employee_id = $2
+              AND r.slug = 'tenant-owner'
+              AND ra.confirmed_by IS NOT NULL
+              AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+              AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+            LIMIT 1`,
+          [tenantId, employeeId, nowMs()],
+        );
+        if (targetOwnerRows.length === 0) return false; // target is not an owner — no guard needed
+
+        // Are there any OTHER active (non-deactivated) tenant-owners?
+        const { rows: otherOwnerRows } = await client.query<{ one: number }>(
+          `SELECT 1 AS one
+             FROM choros.role_assignment ra
+             JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+             JOIN choros.employee e ON e.tenant_id = ra.tenant_id AND e.id = ra.employee_id
+            WHERE ra.tenant_id = $1
+              AND ra.employee_id <> $2
+              AND r.slug = 'tenant-owner'
+              AND ra.confirmed_by IS NOT NULL
+              AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+              AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+              AND e.deactivated_at IS NULL
+            LIMIT 1`,
+          [tenantId, employeeId, nowMs()],
+        );
+        return otherOwnerRows.length === 0; // target IS an owner AND no other active owner → last owner
+      });
+      if (isLastOwner) {
+        throw new HttpError(
+          409,
+          "LAST_OWNER",
+          "нельзя деактивировать единственного владельца тенанта — сначала назначьте другого владельца",
+        );
+      }
+    }
+
     // KC-first (N4): flip the KC login BEFORE touching the local marker. If KC
     // is unreachable, the local row stays untouched and the caller sees 503.
     try {

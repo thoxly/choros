@@ -216,15 +216,81 @@ human). Простой единый `AND` — минимальная, наибо
   follow-up на фиделити (сейчас explain деактивированного может показать
   гранты, которые real-PDP уже не чтит — расхождение диагностики, НЕ дыра).
 - `src/http/assistant.ts:1290` (avoid self-notify), `:1783` (agent budget —
-  агент, не деактивируется), `src/http/grants.ts:1468` / `rights-intents.ts`
-  (резолв по `id`/write-target existence), `org.ts:156/257/317` (display-списки),
-  `org.ts:534` `humanEmployeeSlugExists` (identity-mapping для sub→slug
-  auth-резолюции, не грант) — все не-authority.
+  агент, не деактивируется), `src/http/grants.ts:1468` (резолв по `id` —
+  write-target existence, НЕ actor-authority), `org.ts:156/257/317`
+  (display-списки), `org.ts:534` `humanEmployeeSlugExists` (identity-mapping
+  для sub→slug auth-резолюции, не грант) — все не-authority.
 
-**Вывод: БЕЗОПАСНО.** Оба (три) live authority-резолвера — грант-путь (А),
-owner/admin-путь (B) и report-page delegated-reader (C) — закрыты одним и тем
-же fail-closed предикатом. Фикс — чистое СУЖЕНИЕ (может только запретить то, что
-было ошибочно разрешено; никогда не разрешает то, что было запрещено).
+> **ПОПРАВКА ТРИАЖА (round 3).** Первая редакция §3.4 ошибочно свалила
+> `rights-intents.ts` в кучу «резолв по id / write-target existence». Это
+> НЕВЕРНО для одного из его хендлеров: `POST /api/rights/intents/self-absence`
+> резолвит АКТОРА (не write-target) собственным инлайн `slug→employee`
+> подзапросом и на Tier-2 ветке МЯТИТ грант — это authority-путь. Он вынесен в
+> §3.5 (резолвер D) как ЗАКРЫТАЯ дыра. Остальные 4 хендлера файла
+> (hire/fire/substitute/urgent-revoke) идут через `loadAdminContext` (закрыт
+> §3.2) — они действительно не-authority-по-своему-резолву.
+
+### 3.5. Резолвер D — self-absence actor-резолв + Tier-2 mint (`rights-intents.ts`)
+
+`POST /api/rights/intents/self-absence` (`rights-intents.ts:1155-1380`) —
+ЕДИНСТВЕННЫЙ authority-ПИШУЩИЙ хендлер в файле, который НЕ идёт через
+`loadAdminContext`. Сравнение: hire (:357), fire (:578), substitute (:756),
+urgent-revoke (:979) — ВСЕ гейтят через `loadAdminContext` (закрыты §3.2). А
+self-absence резолвит актора прямым `SELECT id FROM choros.employee ... slug=$2`
+(строка ~1199) БЕЗ `deactivated_at` и гейтит role-holding прямым
+`role_assignment`-запросом (~1264) без предиката.
+
+Эксплойт: деактивированный актор (токен жив, `role_assignment` НЕ отозван)
+объявляет self-absence → Tier-2 ветка (~1295) делает INSERT в `choros."grant"`
+делегированного гранта СООБЩНИКУ (`substitute_employee_id`). Сообщник —
+ЖИВОЙ субъект, поэтому `getGrantsForSubject` (резолвер A) отдаёт ему этот грант:
+резолвер A НЕ ловит, т.к. эксплуатируемый субъект (сообщник) НЕ деактивирован —
+деактивирован ПИШУЩИЙ. Тот же класс, что T-0588 латал локально в inbox.
+
+ФИКС: `AND deactivated_at IS NULL` в actor-резолв подзапросе (строка 1199).
+Fail-closed: деактивированный актор резолвится в ноль строк → 404, mint не
+достигается. Проверено: остальные 4 хендлера файла закрыты через
+`loadAdminContext`; строка 445 (`SELECT kind ... id=$2` в hire) — резолв
+KIND write-ТАРГЕТА (нанимаемого), не актора, и hire уже гейтован
+`loadAdminContext` — не authority-по-своему-резолву. Мутационно доказано:
+без предиката тот же запрос доходит до mint (`tier:"tier2"`, `ttl_grant_id`
+выдан) — 404 превращается в 200 с реальным грантом сообщнику.
+
+### 3.6. Побочный OVER_BLOCK, вводимый §3.2 — self-lockout последнего владельца
+
+Фикс §3.2 (деактивированный владелец → `isGenesisOwner=false`) вводит НОВЫЙ
+дефект: реактивация идёт через `PATCH /api/users` (`user-mgmt.ts`), чей
+собственный authz-гейт — `loadAdminContext` (теперь с `deactivated_at`). Если
+деактивирован ПОСЛЕДНИЙ активный tenant-owner, реактивировать некому (сам он уже
+`isGenesisOwner=false`, другого владельца нет) → тенант кирпич.
+
+ФИКС (round 3): в `PATCH /api/users` (путь `active:false`) — pre-check «нельзя
+деактивировать ПОСЛЕДНЕГО активного tenant-owner»: считаем ДРУГИХ активных
+владельцев (confirmed, in-window `role_assignment` на `role.slug='tenant-owner'`,
+`employee.deactivated_at IS NULL`, EXCLUDING цель); если целевой — владелец И
+других активных владельцев ноль → 409 `LAST_OWNER` («нельзя деактивировать
+единственного владельца тенанта»). Fail-CLOSED против НЕОБРАТИМОГО действия
+(проверка ДО любой KC/DB-мутации). Реактивация (`active:true`) не затронута.
+Мутационно доказано: без гейта деактивация единственного владельца → 200
+(кирпич).
+
+### 3.7. Систематизация — вынесено в T-0662
+
+Пять authority-резолверов (A грант-путь, B owner/admin, C report-page, D
+self-absence) закрыты ТОЧЕЧНО одним и тем же предикатом. То, что их пять —
+симптом отсутствия ЕДИНОГО identity/деактивации-слоя: каждый новый
+authority-путь обязан помнить про `deactivated_at`. Проектирование
+анти-рецидивного механизма (identity-слой-гейт ИЛИ фитнес-гейт, статически
+ловящий любой новый `slug→employee` authority-резолв без предиката) вынесено в
+ОТДЕЛЬНУЮ задачу **T-0662** (архитектор). Этот таск (T-0658) — ТОЧЕЧНОЕ
+закрытие пяти конкретных дыр + честный триаж, НЕ общий рефактор.
+
+**Вывод: БЕЗОПАСНО.** Пять live authority-путей — грант-путь (A), owner/admin (B),
+report-page delegated-reader (C), self-absence actor+mint (D) — закрыты одним и
+тем же fail-closed предикатом; §3.6 закрывает побочный self-lockout. Фикс —
+чистое СУЖЕНИЕ (может только запретить то, что было ошибочно разрешено; никогда
+не разрешает то, что было запрещено), плюс last-owner guard (§3.6), не дающий
+СУЖЕНИЮ сделать тенант необратимо-заблокированным.
 
 ## 4. Существующие тесты — влияние
 
@@ -244,7 +310,8 @@ subject в непустой набор (баг-как-фича отсутств�
 ## 5. Object model / contracts
 
 Без миграции — колонка `deactivated_at` уже существует (migration 125),
-меняются только READ-предикаты трёх authority-резолверов.
+меняются только READ-предикаты authority-резолверов + добавляется last-owner
+guard (тоже без миграции — читает существующие строки).
 
 - `src/db/grants-dao.ts` — резолвер А: `getGrantsForSubject` шаг 1: добавлен
   `AND deactivated_at IS NULL` + расширенный комментарий (см. §2.1/§2.2).
@@ -256,17 +323,32 @@ subject в непустой набор (баг-как-фича отсутств�
 - `src/http/report-page-render.ts` — резолвер C: `AND deactivated_at IS NULL`
   в инлайн slug→employee подзапросе не-owner ветки `defaultCheckReadGrant`
   (owner-ветка step 1 закрыта через `loadAdminContext`; см. §3.3).
+- `src/http/rights-intents.ts` — резолвер D (round 3): `AND deactivated_at IS
+  NULL` в actor-резолв подзапросе `POST /api/rights/intents/self-absence`
+  (строка ~1199) + расширенный комментарий (см. §3.5).
+- `src/http/user-mgmt.ts` — LAST-OWNER GUARD (round 3): в `PATCH /api/users`
+  путь `active:false` — pre-check перед любой KC/DB-мутацией, считающий других
+  активных tenant-owner; если цель — последний → 409 `LAST_OWNER` (см. §3.6).
 - Новый db-тест: `ci/checks/db/grants-dao-subject-deactivation.db.test.ts`
-  (резолвер А) — живой Postgres, AC-2/AC-3/AC-4 (см. спеку §5).
+  (резолвер А) — живой Postgres, AC-2/AC-3/AC-4.
 - Новый db-тест: `ci/checks/db/org-admin-deactivation.db.test.ts` (резолвер B)
-  — живой Postgres, доказывает: деактивированный владелец →
-  `isGenesisOwnerForTenant`=false и `loadAdminContext.isGenesisOwner`=false;
-  деактивированный админ → `adminGrants=[]`; активные владелец/админ →
-  сохраняют власть. Мутационно проверено (без предиката 3 гейт-теста краснеют).
-- Оба новых db-теста мирроят стиль `grants-dao-deactivated.db.test.ts`
-  (T-0588): свежий per-suite tenant, `uuid()`-суффиксные фикстуры, без
-  кейс-литералов (кроме структурного slug `'tenant-owner'` — имя корня
-  решётки, migration 026, не бизнес-литерал).
+  — деактивированный владелец → `isGenesisOwnerForTenant`=false и
+  `loadAdminContext.isGenesisOwner`=false; деактивированный админ →
+  `adminGrants=[]`; активные владелец/админ → сохраняют власть. Мутационно
+  проверено.
+- Расширены (round 3, additive — новые describe-блоки, существующие тесты не
+  тронуты):
+  - `ci/checks/db/rights-intents.db.test.ts` (резолвер D) — позитив-контроль:
+    активный актор → self-absence Tier-2 грант СОЗДАЁТСЯ (200); деактивированный
+    → 404 и грант НЕ создаётся. Мутационно: без предиката тот же запрос доходит
+    до mint (`tier:"tier2"`, `ttl_grant_id` выдан) — 404→200 с реальным грантом.
+  - `ci/checks/db/user-mgmt.db.test.ts` (last-owner guard) — деактивация
+    единственного владельца → 409 `LAST_OWNER` (KC не тронут, владелец активен);
+    с вторым владельцем — деактивация одного разрешена, оставшийся последний
+    защищён. Мутационно: без гейта деактивация единственного владельца → 200.
+- Все новые/расширенные db-тесты — `uuid()`-суффиксные фикстуры, без
+  кейс-литералов (кроме структурного slug `'tenant-owner'` — имя корня решётки,
+  migration 026, не бизнес-литерал).
 
 ## 6. Fitness functions
 
@@ -278,7 +360,9 @@ subject в непустой набор (баг-как-фича отсутств�
 | FF-658-OWNER-GATE (резолвер B) | деактивированный tenant-owner → `isGenesisOwnerForTenant`=false И `loadAdminContext.isGenesisOwner`=false (теряет owner-short-circuit во всех ×11 seed-write / LLM-config / system-agent / report-page путях). Живой PG, мутационно проверен. | `npm run fitness:db` (`org-admin-deactivation.db.test.ts`) |
 | FF-658-ADMIN-GATE (резолвер B) | деактивированный админ (делегируемый `mgmt_object:*` грант, не владелец) → `loadAdminContext.adminGrants=[]`. Живой PG. | `npm run fitness:db` (тот же db-тест) |
 | FF-658-OWNER-ADMIN-REGRESSION (резолвер B) | активный владелец → `isGenesisOwner=true`; активный админ → сохраняет делегируемый `mgmt_object` грант (happy-path не сломан). Живой PG. | `npm run fitness:db` (тот же db-тест) |
-| FF-658-REGRESSION | существующие unit/db-тесты (`src/__tests__/grants-dao.test.ts`, `ci/checks/db/invoke-grant-resolver.db.test.ts`, `ci/checks/db/grants-dao-deactivated.db.test.ts` и весь остальной набор) проходят без перекраски. | `npx vitest run` + `npm run fitness:db` |
+| FF-658-SELFABS-GATE (резолвер D, round 3) | деактивированный актор → self-absence 404 и Tier-2 грант НЕ создаётся; активный актор → грант СОЗДАЁТСЯ (позитив-контроль). Живой PG, мутационно проверен (без предиката mint фактически происходит). | `npm run fitness:db` (`rights-intents.db.test.ts`) |
+| FF-658-LAST-OWNER-GUARD (round 3) | деактивация ЕДИНСТВЕННОГО активного tenant-owner → 409 `LAST_OWNER` (KC не тронут, владелец остаётся активен); при наличии второго активного владельца деактивация одного разрешена. Живой PG, мутационно проверен (без гейта → 200, тенант-кирпич). | `npm run fitness:db` (`user-mgmt.db.test.ts`) |
+| FF-658-REGRESSION | существующие unit/db-тесты (`src/__tests__/grants-dao.test.ts`, `ci/checks/db/invoke-grant-resolver.db.test.ts`, `ci/checks/db/grants-dao-deactivated.db.test.ts` и весь остальной набор, включая нетронутые тесты в расширенных файлах) проходят без перекраски. | `npx vitest run` + `npm run fitness:db` |
 | grant-resolver-isolation (inherited, unchanged) | `src/core/grant-resolver.ts` не тронут этим таском вовсе. | `ci/checks/grant-resolver-isolation.sh` |
 | dual-control-isolation (inherited, unchanged) | шаг 3 (`criticalGrantPredicate`, `confirmed2_by`) не тронут — additive `AND` в шаге 1 ортогонален дуал-контрольному домену. | `ci/checks/dual-control-isolation.sh` |
 | single-resolver (inherited, unchanged) | `src/core/object-handle.ts` не тронут — фикс живёт целиком в `grants-dao.ts`. | `ci/checks/single-resolver.sh` |
@@ -300,11 +384,13 @@ subject в непустой набор (баг-как-фича отсутств�
 | AC-2 (деактивированный + валидный грант → []) | новый db-тест `grants-dao-subject-deactivation.db.test.ts`, describe "AC-2" |
 | AC-3 (активный + тот же грант → грант есть) | тот же файл, describe "AC-3" (позитив-контроль) |
 | AC-4 (агент не задет) | тот же файл, describe "AC-4" |
-| AC-5 (риппл документирован, оба резолвера) | §3.1 (грант-путь) + §3.2 (owner/admin-путь) + §3.3 (report-page) + §3.4 (не-authority сайты) |
+| AC-5 (риппл документирован, все резолверы) | §3.1 (грант) + §3.2 (owner/admin) + §3.3 (report-page) + §3.4 (не-authority триаж) + §3.5 (self-absence) + §3.6 (last-owner guard) + §3.7 (T-0662) |
 | AC-owner/AC-admin (owner/admin-путь закрыт, мутационно проверен) | §3.2 + `org-admin-deactivation.db.test.ts` |
+| AC-selfabs (self-absence закрыт, мутационно проверен) | §3.5 + `rights-intents.db.test.ts` (round 3) |
+| AC-last-owner (self-lockout предотвращён, мутационно проверен) | §3.6 + `user-mgmt.db.test.ts` (round 3) |
 | AC-6 (существующие тесты без перекраски) | §4 этого ADR + прогон `npx vitest run` |
 | AC-7 (tsc/eslint/vitest зелёные) | стандартный гейт |
-| AC-8 (fitness:db зелёный вкл. новый тест) | §5/§6 |
+| AC-8 (fitness:db зелёный вкл. новые тесты) | §5/§6 |
 | AC-9 (изоляционные гейты зелёные) | §6 inherited rows |
 
 ## 9. Risks / compatibility
@@ -320,6 +406,16 @@ subject в непустой набор (баг-как-фича отсутств�
   (любой PDP-путь через `getGrantsForSubject`) теперь корректно отдаёт `[]`.
   Отзыв самого KC-токена (session revocation API) — отдельная, более крупная
   задача вне рамок T-0658 (спека §7).
+- **Пять точечных фиксов, не общий механизм (round 3)** — закрыты пять
+  конкретных authority-путей (A/B/C/D + last-owner guard). Тот факт, что их
+  оказалось пять, — симптом отсутствия единого identity/деактивации-слоя;
+  проектирование анти-рецидивного механизма (identity-слой-гейт ИЛИ статический
+  фитнес-гейт, ловящий любой новый `slug→employee` authority-резолв без
+  предиката) вынесено в **T-0662**. Этот таск НЕ строит общий механизм.
+- **last-owner guard — узкий, не общий invariant** — гейт срабатывает ТОЛЬКО
+  на деактивацию (`active:false`) последнего активного tenant-owner; реактивация
+  и деактивация не-владельцев/не-последних владельцев не затронуты. Это защита
+  от НЕОБРАТИМОСТИ, введённой §3.2, а не общая политика владения.
 - **`inbox.ts` локальные гейты (T-0588) остаются** — избыточны, но не
   конфликтуют (оба фейлят в одну сторону). Не удаляются в этом таске.
 - **`pdp-explain.ts` фиделити (follow-up, НЕ дыра)** — диагностический

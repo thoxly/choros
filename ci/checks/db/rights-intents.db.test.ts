@@ -24,6 +24,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { migratorUrl, withClient } from './_helpers.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import * as http from 'node:http';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -253,6 +254,155 @@ describe('FF-SUB-3: substitution mints a non-widening, non-delegable TTL grant (
         expect(parents.length, 'minted grant scope must match a substituted-role parent grant (⊑)').toBeGreaterThan(0);
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0658 (round 3) FIX-1 — self-absence must fail-closed for a DEACTIVATED
+// actor. self-absence is the ONLY authority-WRITING handler in rights-intents.ts
+// that does NOT route through loadAdminContext (hire/fire/substitute/urgent-
+// revoke all do, closed by the org.ts T-0658 fix). It resolved the actor by a
+// bespoke inline slug→employee lookup + gated role-holding by a direct
+// role_assignment read — neither checking deactivation. A deactivated actor
+// (token still live, role_assignment not revoked) could declare self-absence
+// and, on the Tier-2 branch, mint a delegated grant to an accomplice. FIX-1
+// adds `AND deactivated_at IS NULL` to the actor-resolve subquery → a
+// deactivated actor resolves to zero rows → 404, never reaching the mint.
+// ---------------------------------------------------------------------------
+describe('T-0658 FIX-1: a DEACTIVATED actor cannot declare self-absence (no Tier-2 grant minted)', () => {
+  // Seed a DEDICATED role carrying an explicitly delegable + inheritable grant,
+  // so the Tier-2 mint path WOULD fire (proven by the active-actor positive
+  // control) — making the "deactivated → no mint" assertion truly load-bearing.
+  const stamp = Date.now();
+  const roleId = randomUUID();
+  const roleSlug = `r-t0658-selfabs-${stamp}`;
+  let posId = '';
+
+  async function seedActor(slug: string, deactivatedAt: number | null): Promise<string> {
+    return withClient(migratorUrl(), async (c) => {
+      await c.query(`SET search_path TO choros`);
+      const empId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.employee
+           (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at, deactivated_at)
+         VALUES ($1, $2, $3, 'human', $4, $4, 0, 0, $5)`,
+        [DEV_TENANT, empId, posId, slug, deactivatedAt],
+      );
+      const raId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb,
+                 NULL, NULL, 'seed', 'seed', NULL, 'seed', NULL, 0, 0)`,
+        [DEV_TENANT, raId, empId, roleId, JSON.stringify(FIN_NODE)],
+      );
+      createdAssignments.push(raId);
+      createdEmployees.push(empId);
+      return empId;
+    });
+  }
+
+  beforeAll(async () => {
+    await withClient(migratorUrl(), async (c) => {
+      await c.query(`SET search_path TO choros`);
+      posId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.position (tenant_id, id, department_id, slug, title, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $4, 0, 0)`,
+        [DEV_TENANT, posId, DEPT_FIN, `p-t0658-selfabs-${stamp}`],
+      );
+      await c.query(
+        `INSERT INTO choros.role (tenant_id, id, slug, display_name, description, created_at, updated_at)
+         VALUES ($1, $2, $3, $3, NULL, 0, 0)`,
+        [DEV_TENANT, roleId, roleSlug],
+      );
+      // A DELEGABLE, INHERITABLE (no non_inheritable constraint), confirmed,
+      // in-window grant scoped to the Fin node — eligibleForTier2 keeps it and
+      // the mint loop copies it (delegable=true passes `if (!parent.delegable)`).
+      const grantId = randomUUID();
+      await c.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, resource_facet,
+            operation, scope, "constraint", delegable, granted_by,
+            valid_from, valid_until, created_at,
+            proposed_by, confirmed_by, confirmed2_by)
+         VALUES ($1, $2, $3, 'record', NULL,
+                 'read', $4::jsonb, NULL, true, 'seed',
+                 NULL, NULL, 0,
+                 NULL, 'seed', NULL)`,
+        [DEV_TENANT, grantId, roleId, JSON.stringify(FIN_NODE)],
+      );
+      createdGrants.push(grantId);
+    });
+  });
+
+  async function countMinted(): Promise<number> {
+    return withClient(migratorUrl(), async (c) => {
+      await c.query(`SET search_path TO choros`);
+      const { rows } = await c.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM choros."grant"
+          WHERE tenant_id=$1 AND role_id=$2 AND granted_by='intent:self-absence'`,
+        [DEV_TENANT, roleId],
+      );
+      return rows[0].n;
+    });
+  }
+
+  it('positive control: an ACTIVE actor holding the role CAN self-absence → Tier-2 grant IS minted', async () => {
+    const activeSlug = `e-t0658-active-${stamp}`;
+    const subSlug = `e-t0658-sub-active-${stamp}`;
+    const activeId = await seedActor(activeSlug, null);
+    const subId = await seedActor(subSlug, null);
+    const before = await countMinted();
+
+    const res = await api(
+      '/api/rights/intents/self-absence',
+      {
+        substitute_employee_id: subId,
+        role_id: roleId,
+        valid_until: Date.now() + 86_400_000,
+        org_scope: FIN_NODE,
+        force_tier2: true,
+      },
+      activeSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(res.json.tier).toBe('tier2');
+    if (res.json.rule_id) createdRules.push(res.json.rule_id);
+    if (res.json.ttl_grant_id) createdGrants.push(res.json.ttl_grant_id);
+    // Proof the seed's mint path is real: at least one self-absence grant appeared.
+    expect(await countMinted()).toBeGreaterThan(before);
+  });
+
+  it('deactivated actor holding the role → self-absence 404, and NO Tier-2 grant is minted (mutation-red without FIX-1)', async () => {
+    const deactSlug = `e-t0658-deact-${stamp}`;
+    const subSlug = `e-t0658-sub-deact-${stamp}`;
+    const deactId = await seedActor(deactSlug, 500_000); // DEACTIVATED
+    void deactId;
+    const subId = await seedActor(subSlug, null);
+    const before = await countMinted();
+
+    const res = await api(
+      '/api/rights/intents/self-absence',
+      {
+        substitute_employee_id: subId,
+        role_id: roleId,
+        valid_until: Date.now() + 86_400_000,
+        org_scope: FIN_NODE,
+        force_tier2: true,
+      },
+      deactSlug, // authenticate AS the deactivated actor
+    );
+
+    // Fail-closed: the deactivated actor resolves to no employee → 404. Without
+    // FIX-1 this same request reaches the mint (positive control proves the seed
+    // mints) — mutation-verified: reverting the gate makes this pass into the
+    // handler and mint, turning 404 into 201.
+    expect(res.status, JSON.stringify(res.json)).toBe(404);
+    // CRUCIALLY: no Tier-2 grant was minted to the accomplice.
+    expect(await countMinted(), 'deactivated actor must NOT mint a self-absence grant').toBe(before);
   });
 });
 

@@ -1171,6 +1171,23 @@ function registerSelfAbsence(
     // Resolve the actor's own employee UUID (absent_employee_id = actorId).
     // The actor is identified by their slug (dev mode) or KC sub→slug (KC mode).
     // We resolve their UUID via employee.slug lookup (same pattern as hire/fire).
+    //
+    // T-0658 [security/системный, столп 4] — `AND deactivated_at IS NULL`
+    // (fail-closed). self-absence is the ONLY authority-WRITING handler in this
+    // file that does NOT route through loadAdminContext (hire/fire/substitute/
+    // urgent-revoke all do, and are gated by the org.ts T-0658 fix). It resolves
+    // the actor by a bespoke inline slug→employee lookup and then gates
+    // role-holding by a direct role_assignment read — NEITHER checking
+    // deactivation. Deactivation (PATCH /api/users, T-0583) only sets
+    // employee.deactivated_at; it does NOT revoke role_assignment. So without
+    // this predicate a DEACTIVATED actor with a still-live KC token could
+    // declare self-absence and, on the Tier-2 branch below, MINT a delegated
+    // grant into choros."grant" for an accomplice — the accomplice is a live
+    // subject, so getGrantsForSubject (T-0658 resolver A) hands them that grant.
+    // Resolver A cannot catch this because the exploited subject (accomplice) is
+    // NOT deactivated; the deactivated party is the WRITER. Fail-closed here:
+    // a deactivated actor resolves to zero rows → 404, never reaching the mint.
+    // (Same privilege-escalation class T-0588 patched locally in inbox.ts.)
     let absentEmployeeId: string;
     {
       const client = await pool.connect();
@@ -1179,7 +1196,7 @@ function registerSelfAbsence(
         await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
         await client.query("SET LOCAL search_path TO choros");
         const { rows } = await client.query<{ id: string }>(
-          `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+          `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 AND deactivated_at IS NULL LIMIT 1`,
           [tenantId, actorId],
         );
         await client.query("COMMIT");
