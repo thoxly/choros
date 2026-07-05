@@ -29,8 +29,17 @@
  *      well-formed display object, not a bare "—" string mixed into the row.
  */
 
-import { describe, it, expect } from 'vitest';
-import { apiRowToDisplay, GrantTrailRow } from './ra-grant-trail.jsx';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// P0 (re-verify fix-forward №3): mock the shared auth helper so fetchGrantTrail's
+// header wiring is observable. authHeaders() is mode-aware in prod (keycloak→
+// Bearer, dev→X-Dev-User); here it returns a sentinel we assert reaches fetch.
+vi.mock('../../app-shell/dev-auth.js', () => ({
+  authHeaders: () => ({ Authorization: 'Bearer test-token-123' }),
+  devHeaders: () => ({ Authorization: 'Bearer test-token-123' }),
+}));
+
+import { apiRowToDisplay, GrantTrailRow, fetchGrantTrail } from './ra-grant-trail.jsx';
 import { TRAIL as TRAIL_SEED } from './ra-data.jsx';
 
 // ---------------------------------------------------------------------------
@@ -294,5 +303,56 @@ describe('T-0648 LIVE_PROOF · API-shape rows (the resolver output) also render 
     });
     const tree = GrantTrailRow({ r: apiRowToDisplay(row) });
     expect(collectObjectChildren(tree)).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// T-0648 re-verify fix-forward №3 (P0) — /rights/trail must send the AUTH HEADER.
+//
+// ROOT CAUSE: both fetch('/api/grant-trail') call sites sent NO auth header →
+// a live browser request 401'd ("missing Authorization header") → the screen
+// ALWAYS fell to the TRAIL_SEED fallback (fake seed data, not the tenant's live
+// grant-trail). /rights/trail was the only screen not using the shared helper.
+// fetchGrantTrail() now carries authHeaders() on BOTH the initial load and the
+// "load more" cursor request. These tests assert the header is present and that
+// the URL is built correctly for both forms. They RED on a fetch() without headers.
+// ===========================================================================
+
+describe('T-0648 re-verify №3 · fetchGrantTrail sends the auth header (P0: 401→seed fallback)', () => {
+  let lastCall;
+  let fetchMock;
+
+  beforeEach(() => {
+    lastCall = null;
+    fetchMock = vi.fn(async (url, init) => {
+      lastCall = { url, init };
+      return { ok: true, status: 200, json: async () => ({ rows: [], hasMore: false }) };
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('initial load: GET /api/grant-trail carries the Authorization header from authHeaders()', async () => {
+    await fetchGrantTrail(undefined, fetchMock);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastCall.url).toBe('/api/grant-trail');
+    // The exact header authHeaders() would produce (mocked above) must be passed.
+    expect(lastCall.init).toBeDefined();
+    expect(lastCall.init.headers).toEqual({ Authorization: 'Bearer test-token-123' });
+  });
+
+  it('load more: the before_seq cursor request ALSO carries the auth header', async () => {
+    await fetchGrantTrail('before_seq=42', fetchMock);
+    expect(lastCall.url).toBe('/api/grant-trail?before_seq=42');
+    expect(lastCall.init.headers).toEqual({ Authorization: 'Bearer test-token-123' });
+  });
+
+  it('the request is NEVER sent header-less (the P0 that forced the seed fallback)', async () => {
+    await fetchGrantTrail(undefined, fetchMock);
+    // Regression guard: a bare fetch(url) with no init / no headers is the bug.
+    expect(lastCall.init && lastCall.init.headers).toBeTruthy();
+    expect(Object.keys(lastCall.init.headers).length).toBeGreaterThan(0);
   });
 });
