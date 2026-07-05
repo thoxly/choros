@@ -144,3 +144,21 @@ UI has nothing to attach the constructor-employee to).
 - `process_designer` role now exists (seeded, unassigned) in every tenant —
   assignable to a real employee through the existing rights-assignment
   machinery, closing the "role doesn't exist to be granted" half of the bug.
+
+## 5. Frozen-check note
+
+Migration 128 is a genuinely new file numbered ≥38, which trips
+`ci/checks/substitution-isolation.sh`'s FF-SUB5 "only 036/037 permitted"
+migration-seam guard (that check is scoped to T-0035's substitution feature,
+unrelated to this task — the same false-positive class T-0625/T-0628 hit for
+migrations 126/127). Per the established `auto_additive` sanction channel
+(`ci/checks/auto-sanction-additive.sh`, T-0232), this task appended a
+purely-additive relief block to `substitution-isolation.sh` (mirrors the
+126/127 relief blocks verbatim in structure) plus a sanction entry in
+`ci/checks/data/frozen-sanctions.jsonl` — independently verified via
+`auto-sanction-additive.sh --verify` (A-1..A-4 additivity + GRANT-ESCALATION
+family attestation bound to this file in the T-0152 catalog + corpus_ref
+`efa4b97`, same corpus blob T-0625/T-0628 attested against, unchanged).
+`ci/checks/frozen-checks-immutable.sh` confirms the sanction and passes clean.
+No frozen check's real invariant (036/037 stay the only migrations native to
+T-0035; `substitution_rule` / the substitution port untouched) is weakened.

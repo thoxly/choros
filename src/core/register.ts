@@ -291,6 +291,15 @@ export async function registerTenant(
   const ownerRaReaderId = randomUUID();
   const agentRaReaderId = randomUUID();
   const readGrantId = randomUUID();
+  // T-0666 [substrate/P0]: id for the process_designer role — the
+  // conventional (non-PDP-grant) role checkRole (src/http/binding.ts) looks
+  // up by exact slug for form-binding / floor1-editor / dmn-rule-table save
+  // access. SEEDED but NOT auto-assigned (same posture as
+  // role-constructor-admin above): the owner already gets access via the
+  // isGenesisOwnerForTenant bypass in checkRole (ADR-T0666 §2.1) — this row
+  // only makes the role exist so the owner CAN delegate it to a staff
+  // form-builder through the existing rights-assignment machinery.
+  const processDesignerRoleId = randomUUID();
   const ts = deps.nowMs();
 
   let tenantSlug: string | undefined;
@@ -734,6 +743,37 @@ export async function registerTenant(
             nodeLevel: "application",
             nodeId: RESOURCE_ROOT_NODE_ID,
           }),
+          ts,
+        ],
+      );
+
+      // -----------------------------------------------------------------------
+      // T-0666 [substrate/P0]: seed the process_designer role — SEEDED but NOT
+      // auto-assigned (same posture as role-constructor-admin, 3k above). The
+      // owner already gets form-save access via checkRole's isGenesisOwnerForTenant
+      // bypass (ADR-T0666 §2.1); this row exists solely so the role IS an
+      // assignable principal (the owner can delegate it to a staff form-builder
+      // through the existing rights-assignment machinery — before this seed the
+      // role could not be assigned to anyone because it did not exist).
+      //
+      // Idempotency: ON CONFLICT DO NOTHING (fresh id per attempt → never
+      // conflicts on a genuinely new tenant).
+      // -----------------------------------------------------------------------
+
+      // 3q. role-process-designer (slug MUST be exactly 'process_designer' —
+      // checkRole in src/http/binding.ts matches this literal slug).
+      await client.query(
+        `INSERT INTO choros.role
+           (tenant_id, id, slug, display_name, description, created_at, updated_at)
+         VALUES ($1, $2, 'process_designer', 'Конструктор форм',
+                 $3, $4, $4)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          processDesignerRoleId,
+          "Platform role gating form-binding / floor1-editor / dmn-rule-table " +
+            "save access (checkRole, T-0072/T-0666) — seeded, not auto-assigned; " +
+            "the owner has access via the checkRole owner bypass regardless.",
           ts,
         ],
       );

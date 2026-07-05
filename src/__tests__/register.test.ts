@@ -1100,7 +1100,7 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
     await pool.end();
   });
 
-  it("FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 4 roles, 2 employees, 5 confirmed role_assignments (T-0570 updated)", async () => {
+  it("FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 5 roles, 2 employees, 5 confirmed role_assignments (T-0666 updated)", async () => {
     // T-0373 (PD-7): registerTenant also seeds role-configurator + assistant-agent.
     // T-0469 [auth]: registerTenant ALSO seeds role-constructor-admin (UNASSIGNED).
     //   roles 2→3; employees stay 2 (no new employee); role_assignments stay 3
@@ -1108,6 +1108,11 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
     // T-0570 (D3, READ-PDP): registerTenant ALSO seeds role-reader (default-open
     //   READ grant holder) + 2 CONFIRMED role_assignments (owner→reader,
     //   assistant-agent→reader): roles 3→4; role_assignments 3→5.
+    // T-0666 (substrate/P0): registerTenant ALSO seeds process_designer
+    //   (UNASSIGNED, same posture as role-constructor-admin — the owner already
+    //   gets form-save access via checkRole's isGenesisOwnerForTenant bypass,
+    //   this row only makes the role an assignable principal): roles 4→5;
+    //   role_assignments stay 5 (no new assignment).
     const kcLocal = new InMemoryKeycloakUserPort();
     const nowMs = () => Date.now();
     const req = {
@@ -1144,19 +1149,39 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
       );
       expect(tenants.rows).toHaveLength(1);
 
-      // Exactly 4 roles: tenant-owner + role-configurator (T-0373) +
+      // Exactly 5 roles: tenant-owner + role-configurator (T-0373) +
       // role-constructor-admin (T-0469, seeded-but-unassigned) + role-reader
-      // (T-0570, default-open READ grant holder).
+      // (T-0570, default-open READ grant holder) + process_designer (T-0666,
+      // seeded-but-unassigned — the owner reaches form-save via checkRole's
+      // owner bypass regardless, ADR-T0666 §2.1).
       const roles = await client.query(
         `SELECT slug FROM choros.role WHERE tenant_id = $1 ORDER BY slug`,
         [tenantId],
       );
-      expect(roles.rows).toHaveLength(4);
+      expect(roles.rows).toHaveLength(5);
       const roleSlugs = roles.rows.map((r: { slug: string }) => r.slug);
       expect(roleSlugs).toContain("tenant-owner");
       expect(roleSlugs).toContain("role-configurator");
       expect(roleSlugs).toContain("role-constructor-admin");
       expect(roleSlugs).toContain("role-reader");
+      expect(roleSlugs).toContain("process_designer");
+
+      // T-0666 boundary: process_designer is seeded but assigned to NOBODY on
+      // registration (mirrors the role-constructor-admin boundary above) — the
+      // owner delegates it to a staff form-builder later via the existing
+      // rights machinery; the owner's OWN form-save access never depends on
+      // this assignment (checkRole bypasses via isGenesisOwnerForTenant).
+      const pdRoleId = (
+        await client.query(
+          `SELECT id FROM choros.role WHERE tenant_id = $1 AND slug = 'process_designer'`,
+          [tenantId],
+        )
+      ).rows[0].id;
+      const pdAssignments = await client.query(
+        `SELECT id FROM choros.role_assignment WHERE tenant_id = $1 AND role_id = $2`,
+        [tenantId, pdRoleId],
+      );
+      expect(pdAssignments.rows).toHaveLength(0);
 
       // T-0469 boundary: role-constructor-admin is seeded but assigned to NOBODY
       // on registration (the owner grants it explicitly later). So the assignment

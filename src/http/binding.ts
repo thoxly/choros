@@ -37,7 +37,7 @@ import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthMode, getAuthContext, withAuth } from "./auth.js";
-import { resolveActorSlugFromAuth } from "../db/org.js";
+import { resolveActorSlugFromAuth, isGenesisOwnerForTenant } from "../db/org.js";
 import {
   validateBindingFields,
   type BindingField,
@@ -140,23 +140,48 @@ export async function extractActorSlug(
 }
 
 // ---------------------------------------------------------------------------
-// checkRole — conventional process_designer check (ADR §4)
+// checkRole — conventional process_designer check (ADR §4) + owner bypass
+// (T-0666, ADR-T0666 §2.1)
 //
 // In dev auth mode, role check is softened to «authenticated»
 // per ADR §4 footnote: process_designer not yet seeded in the dev DB.
-// In keycloak mode this would enforce a real role lookup — T-0072 wires only
-// the dev path; keycloak tightening is a later task.
+// In keycloak mode this enforces a real role lookup, with an OWNER SHORT-
+// CIRCUIT ahead of it: the tenant owner can always configure forms, the same
+// way it can always configure org structure / LLM connections / system
+// agents (capability-grants-dao.ts canConfigureLlmConnection /
+// canActorOperateSystemAgents both call isGenesisOwnerForTenant BEFORE
+// falling back to a grant/role check). Before T-0666, process_designer was
+// seeded in NO tenant, so this role_assignment lookup always returned 0 rows —
+// keycloak-mode form-binding save was 403 FORBIDDEN for EVERY actor, including
+// the owner (LIVE_PROOF T-0656 had to grant the role by hand in the DB).
+//
+// isGenesisOwnerForTenant is the SAME owner-authority resolver already used
+// by capability-grants-dao.ts — NOT a new employee-lookup. It is post-T-0658:
+// its inner slug→employee subquery carries `AND deactivated_at IS NULL`
+// (src/db/org.ts:721-748), so a DEACTIVATED owner with a still-live KC token
+// loses this bypass exactly like every other owner-gated mgmt path — no new
+// deactivation surface, no sixth authority path (ADR-T0666 §3 rejects an
+// ad-hoc inline employee-lookup for this reason).
 // ---------------------------------------------------------------------------
 
-// Exported for reuse by floor1-editor.ts (T-0073 review R-1) — single source of
-// truth for the process_designer authz convention; no second permission mechanism.
+// Exported for reuse by floor1-editor.ts (T-0073 review R-1) and
+// dmn-rule-table.ts — single source of truth for the process_designer authz
+// convention; no second permission mechanism. `pool` (T-0666) is required so
+// the owner short-circuit can run its own tenant-scoped transaction via
+// isGenesisOwnerForTenant (it does not reuse the caller's `client`/txn).
 export async function checkRole(
   client: pg.PoolClient,
+  pool: pg.Pool,
   tenantId: string,
   actorSlug: string,
 ): Promise<void> {
   const authMode = getAuthMode();
   if (authMode !== "dev") {
+    // Owner short-circuit (T-0666, ADR-T0666 §2.1) — resolved from the DB,
+    // never assumed (NF-3), same predicate every other mgmt path trusts.
+    if (await isGenesisOwnerForTenant(pool, tenantId, actorSlug, Date.now())) {
+      return;
+    }
     // keycloak mode: check role_assignment for process_designer.
     // role_assignment.employee_id is a UUID FK; actorSlug is the employee slug.
     // Join through employee to resolve slug → UUID so the check works correctly.
@@ -386,8 +411,8 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
     const nowMs = Date.now();
 
     const { statusCode, body: responseBody } = await withTenantTx(pool, tenantId, async (client) => {
-      // Role check (→ 403 if insufficient)
-      await checkRole(client, tenantId, actorId);
+      // Role check (→ 403 if insufficient) — owner bypass (T-0666, ADR §2.1)
+      await checkRole(client, pool, tenantId, actorId);
 
       // Upsert: INSERT ... ON CONFLICT (tenant_id, process_key, form_key) DO UPDATE
       const existing = await getBinding(client, tenantId, processKey, formKey);
@@ -537,7 +562,8 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
       const nowMs = Date.now();
 
       const { statusCode: sc, body: responseBody } = await withTenantTx(pool, tenantId, async (client) => {
-        await checkRole(client, tenantId, actor);
+        // Owner bypass (T-0666, ADR §2.1) — see checkRole doc comment.
+        await checkRole(client, pool, tenantId, actor);
 
         // T-0520 [D7-5]: classifyFloorBoundary gate — FormDesigner / agent layout-emit path.
         // When a layout (form-document) is provided, run the content gate BEFORE persisting.

@@ -101,7 +101,7 @@ async function authorizeDesigner(
     return; // dev mode: authenticated = sufficient
   }
   await withTenantTx(pool, tenantId, (client) =>
-    checkRole(client, tenantId, actorSlug),
+    checkRole(client, pool, tenantId, actorSlug),
   );
 }
 

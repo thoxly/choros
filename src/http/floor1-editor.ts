@@ -183,7 +183,7 @@ async function authorizeEditor(
     );
   }
   await withTenantTx(pool, tenantId, (client) =>
-    checkRole(client, tenantId, actorId),
+    checkRole(client, pool, tenantId, actorId),
   );
 }
 

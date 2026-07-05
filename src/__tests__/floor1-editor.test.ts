@@ -930,11 +930,29 @@ describe("HTTP AC-26 — Malformed fields body → 400 VALIDATION", () => {
  * T-0425: also stubs the agent resolver query (agent_card JOIN employee).
  * agentSlug: when non-null, indicates an agent card exists that maps to this slug;
  *            when null, the agent_card lookup returns empty (agent 401 path).
+ *
+ * T-0666: checkRole now calls isGenesisOwnerForTenant (owner bypass, ADR-T0666
+ * §2.1) BEFORE the process_designer role_assignment lookup. That query ALSO
+ * matches "role_assignment" (and re-opens its own client via pool.connect,
+ * hitting this SAME stub client) but is keyed on `r.slug = 'tenant-owner'`,
+ * distinct from checkRole's `r.slug = 'process_designer'` — branch on the
+ * literal so this stub keeps the two independent (isOwner defaults to FALSE
+ * unless a test explicitly opts in, isolating these AC-27/28/29 fixtures from
+ * the owner-bypass path, which has its own dedicated AC-30 coverage below).
  */
-function makeStubPool(roleCount: number, agentSlug: string | null = null): pg.Pool {
+function makeStubPool(
+  roleCount: number,
+  agentSlug: string | null = null,
+  isOwner: boolean = false,
+): pg.Pool {
   const client = {
     query: async (text: string, _params?: unknown[]) => {
       if (typeof text === "string" && text.includes("role_assignment")) {
+        if (text.includes("tenant-owner")) {
+          // isGenesisOwnerForTenant (T-0666 owner-bypass query, src/db/org.ts).
+          return { rows: isOwner ? [{ id: "owner-ra-1" }] : [] };
+        }
+        // checkRole's process_designer role_assignment lookup (binding.ts).
         return { rows: [{ cnt: roleCount }] };
       }
       // T-0425: resolveAgentSlugFromAuth query (agent_card JOIN employee, kind='agent').
@@ -1394,5 +1412,60 @@ describe("Integration — Floor-2 kind blocked at Floor-1 API boundary", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.errors.some((e) => e.code === "WRONG_FLOOR")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HTTP AC-31 — T-0666: checkRole owner bypass ripples into floor1-editor
+//
+// checkRole (src/http/binding.ts) is the SINGLE authz function floor1-editor's
+// authorizeEditor reuses verbatim (review R-1). T-0666 added an owner
+// short-circuit (isGenesisOwnerForTenant) ahead of the process_designer
+// role_assignment lookup — this proves the bypass reaches this route too,
+// without floor1-editor.ts carrying any owner-specific code of its own.
+// ---------------------------------------------------------------------------
+
+describe("HTTP AC-31 — T-0666: keycloak mode, tenant owner → 200 without process_designer role", () => {
+  it("owner (isGenesisOwnerForTenant=true), roleCount=0 → 200 (bypass, no manual role grant needed)", async () => {
+    await withKeycloakMode(async () => {
+      const { port, close } = await startTestServer(makeStubPool(0, null, true));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+          undefined,
+          bearerToken(),
+        );
+        expect(resp.status).toBe(200);
+        const body = resp.body as { fields: BindingField[] };
+        expect(body.fields.find((f) => f.key === "supplier")?.label).toBe("Поставщик");
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  it("non-owner (isGenesisOwnerForTenant=false), roleCount=0 → 403 (bypass does not spill to everyone)", async () => {
+    await withKeycloakMode(async () => {
+      const { port, close } = await startTestServer(makeStubPool(0, null, false));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+          undefined,
+          bearerToken(),
+        );
+        expect(resp.status).toBe(403);
+        expect((resp.body as { error: { code: string } }).error.code).toBe("FORBIDDEN");
+      } finally {
+        await close();
+      }
+    });
   });
 });
