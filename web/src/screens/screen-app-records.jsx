@@ -1360,7 +1360,16 @@ function AppRecordsScreen() {
               <thead>
                 <tr>
                   {columns.map((c) => <th key={c.key}>{c.label}</th>)}
-                  <th>Создано</th>
+                  {/* T-0649 P1 fix: the hardcoded "Создано" <th> below was a
+                      DUPLICATE — buildFieldCatalog (list-view-panel.js) already
+                      appends a `created_at` pseudo-column (label "Создано",
+                      visible by default) to the field catalog `columns` is
+                      derived from, so the active/default view's columns.map
+                      above already renders one "Создано" header. Only add a
+                      SECOND one when the active view does NOT include
+                      created_at (e.g. the user explicitly hid it) — never
+                      force a column the view configuration removed. */}
+                  {!columns.some((c) => c.type === 'created_at') && <th>Создано</th>}
                   {/* T-0295: detail view link column + T-0568: delete control */}
                   <th style={{ width: '140px' }} />
                 </tr>
@@ -1375,6 +1384,18 @@ function AppRecordsScreen() {
                       onClick={() => navigate(`/apps/${appId}/records/${rec.id}`)}
                     >
                       {columns.map((c) => {
+                        // T-0649: created_at is a native `record` table column, not a
+                        // record_schema property — it never lives in `data` (mirrors
+                        // src/core/view-config.ts's PSEUDO_COLUMN_CREATED_AT handling).
+                        if (c.type === 'created_at') {
+                          return (
+                            <td key={c.key}>
+                              <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                                {fmtTs(rec.created_at)}
+                              </Mono>
+                            </td>
+                          );
+                        }
                         // T-0507/T-0580: computed fields (rollup OR formula mode) are
                         // never stored in data, so compute on-read (client preview,
                         // NF-4 — server's derived-map is the source of truth).
@@ -1398,11 +1419,15 @@ function AppRecordsScreen() {
                         }
                         return <td key={c.key}>{rendered}</td>;
                       })}
-                      <td>
-                        <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-                          {fmtTs(rec.created_at)}
-                        </Mono>
-                      </td>
+                      {/* T-0649: fallback "Создано" cell — only rendered when the
+                          header fallback above also fired (view hid created_at). */}
+                      {!columns.some((c) => c.type === 'created_at') && (
+                        <td>
+                          <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                            {fmtTs(rec.created_at)}
+                          </Mono>
+                        </td>
+                      )}
                       {/* T-0295: open detail view + T-0568: delete this record.
                           Both stopPropagation so they never trigger the row's
                           navigate-on-click (open the detail view). */}
