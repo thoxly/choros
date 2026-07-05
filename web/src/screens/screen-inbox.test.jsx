@@ -226,3 +226,60 @@ describe('screen-inbox — InboxTaskForm threads recordId onto file fields (T-05
     expect(block).toContain('recordId={detail.projection.recordId}');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0665 (F5) — LIVE_PROOF T-0656 found that a DnD-assembled (or agent-edited,
+// T-0656 document-ops) layout could never reach the assignee: GET
+// /api/forms/binding never carried `layout`, and InboxTaskForm never looked
+// for one, always falling back to a flat FieldControl-per-row list. This
+// wires the SAME renderer FormDesigner already uses (FormDocumentRenderer,
+// T-0481) as a SECOND consumer, branching on `binding.layout` — a legacy
+// binding (no layout key at all, per src/http/binding.ts's omit-when-null
+// contract) renders EXACTLY as before (NF3).
+//
+// Source-presence tests (same convention as the rest of this file):
+// InboxTaskForm has useState/useEffect in its own body, so it cannot be
+// invoked as a plain function (unlike FieldControl, whose OWN body has no
+// hooks — see field-renderer-file.test.jsx) and renderToStaticMarkup never
+// fires effects, so `binding` can never leave its initial `null` state in a
+// static-markup render. Source-presence directly asserts the branch exists
+// and is wired correctly, matching how T-0608/T-0598/T-0579 above already
+// verify this file's behavior.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — InboxTaskForm applies the bound layout when present (T-0665 F5)', () => {
+  it('imports the ONE FormDocumentRenderer (not a second tree-walker)', () => {
+    expect(src).toContain("import FormDocumentRenderer from '../forms/FormDocumentRenderer.jsx'");
+  });
+
+  it('InboxTaskForm is now exported (additive — needed for direct testing)', () => {
+    expect(src).toContain('export function InboxTaskForm(');
+  });
+
+  it('branches on binding.layout having a structurally valid root, not merely truthy', () => {
+    expect(src).toContain('binding.layout && typeof binding.layout === \'object\' && binding.layout.root');
+  });
+
+  it('the layout branch renders FormDocumentRenderer with the LIVE fields (types/options), not the layout as the schema source', () => {
+    const idx = src.indexOf('hasLayout ? (');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 400);
+    expect(block).toContain('<FormDocumentRenderer');
+    expect(block).toContain('document={binding.layout}');
+    expect(block).toContain('fields={fieldsWithRecordId}');
+  });
+
+  it('the legacy (no-layout) branch still maps fields through FieldControl exactly as before', () => {
+    const idx = src.indexOf(') : (');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 500);
+    expect(block).toContain('<FieldControl');
+    expect(block).toContain('idPrefix="inbox-form-field"');
+  });
+
+  it('recordId is threaded onto file-contract fields for BOTH the layout and legacy paths (fieldsWithRecordId shared)', () => {
+    const idx = src.indexOf('const fieldsWithRecordId');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, src.indexOf('const hasLayout'));
+    expect(block).toContain("contractKind === 'file' ? { ...f, recordId } : f");
+  });
+});

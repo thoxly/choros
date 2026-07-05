@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0665",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "N-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "T-0665.spec.md:7,26; docs/design/ADR-T0665-forms-e2e-contour.md:96,176,182",
+      "issue": "Spec и ADR трижды называют механизм автоподсказки userTask 'DOMParser-разбор', но фактическая реализация (web/src/forms/bpmn-user-tasks.js) — это dependency-free regex-сканер, явно выбранный вместо DOMParser именно потому, что web/vitest.config.js 'node' env не имеет DOMParser/jsdom (см. собственный комментарий файла, строки 6-9). Решение по существу лучше (работает и в браузере, и в vitest node-тире), но текст спеки/ADR не обновлён под фактически выбранный примитив — доки описывают не то, что построено.",
+      "suggestion": "Точечная правка формулировки в spec/ADR (DOMParser → regex-сканер bpmn-user-tasks.js) в этой или следующей мелкой задаче; не блокирует, т.к. код и его обоснование самодокументированы верно."
+    },
+    {
+      "id": "N-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "web/src/forms/FormDocumentRenderer.jsx:254-294 (TableNode)",
+      "issue": "F6 приоритезирует schemaField.mode над node.mode ТОЛЬКО для top-level field/relation узлов (renderableField). TableNode считает readOnly исключительно из node.mode === 'readonly' (строка 261) и мёржит per-column mode как 'read-only'|undefined без обращения к schemaField.mode колонки/родителя. Если процесс когда-нибудь получит per-step mode='hidden'/'read-only' на collection-поле, таблица его не уважает под layout-путём. Не regression этой задачи (out of scope по ADR/spec — F6 заявлен только для renderableField) и не наблюдалось расхождения с legacy-путём для table в текущем продукте (легаси-путь тоже не рендерит collection-поля построчным FieldControl), поэтому не blocking.",
+      "suggestion": "Если per-step mode когда-нибудь появится на collection/table-полях — завести отдельную задачу на паритет TableNode с F6."
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "ac": "AC-a: POST с реальным (не 'record') processKey/stepKey сохраняет layout, 200/201 не 409",
+      "covered": true
+    },
+    {
+      "ac": "AC-b: GET возвращает layout байт-идентично сохранённому (оба роута: actor-scoped T-0376 и named T-0072)",
+      "covered": true
+    },
+    {
+      "ac": "AC-c: InboxTaskForm при binding.layout с валидным .root рендерит через FormDocumentRenderer, не построчный FieldControl",
+      "covered": true
+    },
+    {
+      "ac": "AC-d: легаси-биндинг без layout (GET без ключа layout) рендерится ТЕМ ЖЕ построчным FieldControl-путём, существующие screen-inbox тесты не тронуты по ожиданиям",
+      "covered": true
+    },
+    {
+      "ac": "AC-e (LIVE_PROOF, стенд): собрать форму drag-and-drop, привязать к реальному процессу+шагу, сохранить, переоткрыть, проверить рендер у исполнителя",
+      "covered": false
+    }
+  ],
+  "role_gap_evidence": [
+    "git log --oneline dev..HEAD: 5 коммитов (spec+design a8a67e9→a8e2b8a, GET+layout 2fdeed2, FormDesigner UI eb58380, GET-отдаёт-layout+рендерер 688e385, pr-handoff 339e819). git diff --stat: 13 файлов, +1249/-31, ядро изменений — src/http/binding.ts (+20/-2), web/src/forms/FormDesigner.jsx (+227/-16), web/src/screens/screen-inbox.jsx (+73/-31), web/src/forms/FormDocumentRenderer.jsx (+26/-1), новый bpmn-user-tasks.js (+75) — размер и распределение соответствуют заявленным 3 фиксам + компаньон F6.",
+    "Обратная совместимость (пункт 1) прочитана построчно и прогнана. src/http/binding.ts: оба GET-хендлера (named route ~строка 351, actor-scoped route ~строка 474) спредят `layout` в ответ ТОЛЬКО когда `row.layout !== null && row.layout !== undefined` — легаси-строка получает ответ без ключа `layout` вовсе (не null, не {}). web/src/screens/screen-inbox.jsx: `hasLayout = binding.layout && typeof binding.layout === 'object' && binding.layout.root` — легаси (layout отсутствует в объекте) → hasLayout=false → ветка `fields.map(...) → FieldControl` байт-в-байт идентична коду до диффа (сравнено визуально со старым телом функции в git diff). src/__tests__/binding-get-layout.test.ts прогнан напрямую (`npx vitest run`, 4/4 passed): доказывает стейтфул-стабом POST реального processKey/stepKey не 409 (AC-a), GET round-trips layout byte-identical на ОБОИХ роутах (AC-b), и явно — POST без layout в теле → GET возвращает объект БЕЗ ключа layout вообще (`expect('layout' in data).toBe(false)`), что прямое доказательство NF3 backward-compat на сервере. Клиентские тесты (web/src/screens/screen-inbox.test.jsx, 33/33 passed) содержат source-presence проверки того же условия и того, что легаси-ветка использует тот же idPrefix/FieldControl что раньше. Нет регресса для существующих легаси-форм на стенде: ни один существующий тест не переписан под новое поведение (git diff показывает только ДОБАВЛЕННЫЕ describe-блоки в конце файла, ни одна старая assertion не тронута).",
+    "F6 mode-приоритет (пункт 2) — самая рискованная часть ревью (потенциальная дыра видимости полей), проверена сквозь всю цепочку типов. web/src/forms/FormDocumentRenderer.jsx renderableField() строка 85: `mode: (schemaField && schemaField.mode) || nodeModeToFieldMode(node.mode)`. Проверено, что вокабуляр schemaField.mode (сервер, T-0404, из binding.fields[].mode) СОВПАДАЕТ с вокабуляром nodeModeToFieldMode: web/src/forms/field-contract.js resolveFieldMode() (строки 164-172) уже трактует field.mode как один из 'hidden'/'read-only'/'required-to-advance' — тот же самый набор строк, что nodeModeToFieldMode() в FormDocumentRenderer.jsx возвращает (readonly→'read-only', required→'required-to-advance', hidden→'hidden'). Значит приоритет не смешивает несовместимые форматы. Проверена цепочка сокрытия: результирующий `field.mode` из renderableField() передаётся в FieldControl (web/src/forms/field-renderer.jsx), который вызывает `resolveFieldMode(field)` и делает `if (hidden) return null` (строка ~1082) ДО рендера контрола — значит серверный hidden-mode реально прячет поле под НОВЫМ layout-путём, не только под legacy. web/src/forms/FormDocumentRenderer.test.jsx содержит 4 целевых теста (T-0665 F6 describe-блок, прогнаны напрямую 11/11 passed в файле): (a) schemaField.mode='hidden' даёт controls[0].props.field.mode==='hidden' при отсутствии node.mode; (b) schemaField.mode='read-only' ПОБЕЖДАЕТ node.mode='required' (сервер приоритетнее авторского); (c) при отсутствии schemaField.mode используется nodeModeToFieldMode(node.mode) как фолбэк; (d) recordId прокидывается с schemaField на renderable field (для FileField continuity). Все 4 сценария соответствуют комментарию в коде и ADR §3.4. Вывод: НЕ дыра — новый layout-путь уважает тот же server-side per-step mode, что и legacy-путь, приоритет корректен и симметричен по сокрытию.",
+    "Пикер процесса (пункт 3): web/src/forms/FormDesigner.jsx loadProcessCatalog() дергает `/api/process-catalog` (реальный тенантный эндпоинт, не константа), фильтрует `d.status === 'published'` — черновики не предлагаются (обоснованно в ADR §3.1: classifyLayoutSave всё равно требует реальный process_app_binding, предложение черновика создало бы ложную работоспособность). bpmn-user-tasks.js — чистый regex-сканер без сетевых/DOM зависимостей, extractUserTasks() читает `<userTask>`/`<bpmn:userTask>` id/name атрибуты в любом порядке, с XML-entity декодированием, дедупом id, никогда не бросает (все 8 тестов bpmn-user-tasks.test.js прогнаны напрямую, 8/8 passed). grep по всем изменённым src/-файлам на предмет кейс-контента (Закупки/purchaseApproval-как-литерал) — чисто (нет вхождений вне тестовых фикстур с обобщённым содержимым 'Подача заявки'/'Проверка заявки', что является generic test-данными, не production-хардкодом). bash ci/checks/anti-case-lock.sh прогнан напрямую — PASS, Phase 2 показывает aggregate: 16 (baseline 16), ни один литерал не вырос против baseline.",
+    "doc.step реальный (пункт 4): FormDesigner.jsx persistLayout(doc, step, ...) строка ~1333 берёт `step?.processKey || doc.step?.processKey || 'record'` и `step?.step || doc.step?.step || 'record-form'` — реальный выбор из пикера приоритетен, 'record'/'record-form' остаются крайним фолбэком (не удалены, что и требует NF1/анти-кейс: тот же смысл, что и раньше, просто не единственный путь). Save-кнопка гейтится: `disabled={!validation.ok || saveState.status === 'saving' || !(doc?.step || (selectedProcessKey && stepKey.trim()))}` — прогнан живой static-markup тест FormDesigner.test.jsx ('warns that a process+step must be chosen before the save button becomes usable'), подтверждающий и текст предупреждения, и disabled-атрибут кнопки реально рендерятся при отсутствии выбора (не просто source-presence, а через renderToStaticMarkup(<FormDesigner initialDocument={DOC} .../>) с DOC без step). Второй тест того же файла подтверждает обратное — при doc.step, заданном изначально (AI-emitted/embedded документ), предупреждение НЕ рендерится. 12/12 тестов FormDesigner.test.jsx прогнаны напрямую, все green.",
+    "Тесты честные (пункт 5): прогнаны напрямую (не полагаясь на pr-handoff числа) — `npx vitest run src/__tests__/binding-get-layout.test.ts` (4/4 passed), `npx vitest run` в web/ на все 4 изменённых тестовых файла разом (FormDocumentRenderer.test.jsx 11, FormDesigner.test.jsx 12, bpmn-user-tasks.test.js 8, screen-inbox.test.jsx 33 — итого 64/64 passed, invalid-hook-call warnings — ожидаемый шум tree-walk-без-jsdom подхода, задокументированный в комментариях файла, не ошибка). `npx tsc --noEmit -p .` — 0 ошибок. `bash ci/checks/anti-case-lock.sh` — PASS (Phase 1+2, aggregate 16=16, baseline не вырос — подтверждает заявленные автором 3 самозаражения были исправлены, финальное состояние чистое). `bash ci/checks/http-route-auth-coverage.sh` — PASS (FF-0328-1/2/3 все чисты, binding.ts остаётся withAuth-wrapped, изменение только тела ответа, не роута/auth). Проверено про candidategroups-role-slug-linter.sh (упомянутый в pr-handoff как единственный красный гейт): `git diff 73f86df HEAD -- docs/live-proof/T-0612-evidence/T-0612-liveproof-defect.bpmn20.xml` — пусто (файл не тронут этой веткой), `git log` показывает файл существовал с коммита af8f4eb (T-0612, задолго до базы этой ветки) — подтверждён как pre-existing baseline defect вне скоупа, per примечание задачи игнорируется как основание для changes_requested.",
+    "pr-handoff/spec/ADR прочитаны целиком (пункт 6). Все три файла согласованы между собой по функциональному разбиению F1-F6 и по acceptance criteria AC-a..AC-e. Единственное расхождение — spec/ADR называют механизм автоподсказки userTask 'DOMParser', а реализация — regex-сканер (см. finding N-1, nit, не блокирует: код и его обоснование самодокументированы верно в самом bpmn-user-tasks.js, расхождение чисто текстовое между планом и тем, что фактически построено и обоснованно лучше плана). pr-handoff честно документирует F6 как незапланированный, но необходимый компаньон-фикс (не скрывает scope creep), явно маркирует LIVE_PROOF AC-e как TODO на стенде (не выдаёт непройденное за пройденное), и явно документирует единственный красный гейт (candidategroups linter) с доказательством, что он pre-existing и вне скоупа — прозрачность handoff подтверждена, а не просто заявлена."
+  ]
+}

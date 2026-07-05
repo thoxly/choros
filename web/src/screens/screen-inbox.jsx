@@ -34,6 +34,15 @@ import { useToastContext } from '../app-shell/toast-context.jsx';
 // fields so recordId can be threaded onto them specifically (mirrors the
 // contractKind check screen-app-records.jsx already does for the same reason).
 import { FieldControl, resolveFieldMode, resolveFieldContract } from '../forms/field-renderer.jsx';
+// T-0665 (F5): the ONE form-document renderer (T-0481) — already used as the
+// live preview inside FormDesigner.jsx. LIVE_PROOF T-0656 found that GET
+// /api/forms/binding never carried `layout` and InboxTaskForm never looked
+// for one, so a DnD-assembled (or agent-edited) layout could never reach the
+// assignee's screen — it silently fell back to a flat FieldControl list
+// regardless of how the form was actually arranged. Reusing the SAME
+// renderer here (not a second tree-walker) means the assignee sees exactly
+// what was built in the designer.
+import FormDocumentRenderer from '../forms/FormDocumentRenderer.jsx';
 
 // ---------------------------------------------------------------------------
 // T-0376: InboxTaskForm — renders the bound form for a userTask in the inbox
@@ -64,7 +73,7 @@ import { FieldControl, resolveFieldMode, resolveFieldContract } from '../forms/f
  *   onSubmit    — callback(values: Record<string,unknown>) when the user submits
  *   submitting  — bool: disable submit button while parent is completing the step
  */
-function InboxTaskForm({ processKey, stepKey, recordId, onSubmit, submitting }) {
+export function InboxTaskForm({ processKey, stepKey, recordId, onSubmit, submitting }) {
   // null = loading; false = no binding (404); { fields } = loaded; 'error' = transient fetch error
   const [binding, setBinding] = useState(null);
   const [bindingError, setBindingError] = useState(null); // null | string
@@ -180,6 +189,26 @@ function InboxTaskForm({ processKey, stepKey, recordId, onSubmit, submitting }) 
   const fields = binding.fields || [];
   if (fields.length === 0) return null;
 
+  // T-0579 (review M1): thread the CURRENT record's id onto file-contract
+  // fields ONLY — same reasoning as screen-app-records.jsx's
+  // fieldWithRecordId. recordId is undefined when this task's process
+  // was not started on_create from a record; FileField surfaces that
+  // honestly (no dead upload affordance) rather than silently no-op'ing.
+  const fieldsWithRecordId = fields.map((f) => {
+    const { contractKind } = resolveFieldContract(f);
+    return contractKind === 'file' ? { ...f, recordId } : f;
+  });
+
+  // T-0665 (F5): a binding may carry a `layout` (the form-document a human
+  // assembled in FormDesigner OR an agent edited via document-ops, T-0656) —
+  // when present and structurally valid (has a root), render it through the
+  // SAME FormDocumentRenderer FormDesigner already uses as its live preview,
+  // so the assignee sees the arrangement exactly as it was built. A binding
+  // saved BEFORE layout existed (legacy, fields-only) has no `layout` key at
+  // all (src/http/binding.ts omits it rather than sending null) — that path
+  // renders EXACTLY as before, byte-for-byte (NF3 backward compatibility).
+  const hasLayout = binding.layout && typeof binding.layout === 'object' && binding.layout.root;
+
   return (
     <section style={{ marginBottom: 'var(--chs-space-8)' }}>
       <h3 style={{
@@ -193,25 +222,29 @@ function InboxTaskForm({ processKey, stepKey, recordId, onSubmit, submitting }) 
         Форма задачи
       </h3>
       <form onSubmit={handleSubmit} noValidate>
-        {fields.map((f) => {
-          // T-0579 (review M1): thread the CURRENT record's id onto file-contract
-          // fields ONLY — same reasoning as screen-app-records.jsx's
-          // fieldWithRecordId. recordId is undefined when this task's process
-          // was not started on_create from a record; FileField surfaces that
-          // honestly (no dead upload affordance) rather than silently no-op'ing.
-          const { contractKind } = resolveFieldContract(f);
-          const fieldWithRecordId = contractKind === 'file' ? { ...f, recordId } : f;
-          return (
-            <FieldControl
-              key={f.key}
-              field={fieldWithRecordId}
-              value={values[f.key]}
-              onChange={handleChange}
-              error={fieldErrors[f.key]}
-              idPrefix="inbox-form-field"
-            />
-          );
-        })}
+        {hasLayout ? (
+          <FormDocumentRenderer
+            document={binding.layout}
+            fields={fieldsWithRecordId}
+            values={values}
+            onChange={handleChange}
+            errors={fieldErrors}
+          />
+        ) : (
+          fields.map((f) => {
+            const fieldWithRecordId = fieldsWithRecordId.find((wf) => wf.key === f.key) || f;
+            return (
+              <FieldControl
+                key={f.key}
+                field={fieldWithRecordId}
+                value={values[f.key]}
+                onChange={handleChange}
+                error={fieldErrors[f.key]}
+                idPrefix="inbox-form-field"
+              />
+            );
+          })
+        )}
         {formError && (
           <div role="alert" style={{
             marginBottom: 'var(--chs-space-4)',

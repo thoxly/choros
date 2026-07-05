@@ -188,6 +188,13 @@ interface FormBindingRow {
   process_key: string;
   form_key: string;
   fields: unknown;
+  /**
+   * T-0665: the saved form-document layout (T-0506 column), NULL for legacy
+   * rows saved before layout existed (or saved without one via the plain
+   * FormBuilder path). Callers must treat null/undefined as "no layout" —
+   * never synthesize a document from `fields`.
+   */
+  layout: unknown;
   version: number;
   created_at: string;
   updated_at: string;
@@ -200,7 +207,7 @@ async function getBinding(
   formKey: string,
 ): Promise<FormBindingRow | null> {
   const { rows } = await client.query<FormBindingRow>(
-    `SELECT id, process_key, form_key, fields, version, created_at, updated_at
+    `SELECT id, process_key, form_key, fields, layout, version, created_at, updated_at
        FROM choros.form_binding
       WHERE tenant_id = $1
         AND process_key = $2
@@ -344,9 +351,14 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
+    // T-0665: layout is included ONLY when non-null — a legacy binding saved
+    // before T-0506/without a layout must NOT surface a synthesized/empty
+    // `layout` key, so callers can branch on `'layout' in data` to tell a
+    // legacy (fields-only) binding from a layout-carrying one.
     res.end(JSON.stringify({
       fields: row.fields,
       version: row.version,
+      ...(row.layout !== null && row.layout !== undefined ? { layout: row.layout } : {}),
     }));
   }));
 
@@ -462,11 +474,17 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
+      // T-0665: layout included only when non-null (see the named-route GET
+      // above for the legacy-compat rationale). This is the route the
+      // production inbox task card (InboxTaskForm) fetches — without this,
+      // a DnD-assembled or agent-edited layout could never reach the
+      // assignee's screen (LIVE_PROOF T-0656 finding).
       res.end(JSON.stringify({
         fields: row.fields,
         version: row.version,
         processKey,
         stepKey,
+        ...(row.layout !== null && row.layout !== undefined ? { layout: row.layout } : {}),
       }));
     }));
 
