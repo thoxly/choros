@@ -52,13 +52,18 @@ describe("validateDepartment", () => {
   it("accepts a valid department", () => {
     expect(validateDepartment({ slug: "sales", display_name: "Продажи" }).valid).toBe(true);
   });
-  it("flags missing slug and name", () => {
+  // T-0650 [UX-study §7]: slug is now OPTIONAL — an empty slug is valid (server
+  // auto-generates from display_name); only the required NAME is still enforced.
+  it("accepts an empty slug (auto-generated server-side) but still requires a name", () => {
     const { valid, errors } = validateDepartment({ slug: "", display_name: "" });
     expect(valid).toBe(false);
-    expect(errors.slug).toBeTruthy();
+    expect(errors.slug).toBeUndefined();
     expect(errors.display_name).toBeTruthy();
   });
-  it("flags malformed slug", () => {
+  it("accepts an empty slug together with a valid name (full auto-slug path)", () => {
+    expect(validateDepartment({ slug: "", display_name: "Продажи" }).valid).toBe(true);
+  });
+  it("flags malformed slug when one IS provided", () => {
     expect(validateDepartment({ slug: "Sales!", display_name: "X" }).errors.slug).toBeTruthy();
   });
 });
@@ -122,6 +127,14 @@ describe("payload assembly", () => {
     expect(withParent.parent_id).toBe(DEPT);
   });
 
+  // T-0650: an empty slug is OMITTED from the payload (not sent as ""), so the
+  // server's "blank/absent slug → auto-generate" branch fires.
+  it("department: omits slug when blank (auto-slug path, T-0650)", () => {
+    const body = buildDepartmentPayload(TENANT, { slug: "", display_name: "Продажи" });
+    expect("slug" in body).toBe(false);
+    expect(body).toEqual({ tenant_id: TENANT, display_name: "Продажи" });
+  });
+
   it("position: exact shape", () => {
     expect(buildPositionPayload(TENANT, { department_id: DEPT, slug: "lead", title: " Лид " })).toEqual({
       tenant_id: TENANT,
@@ -129,6 +142,11 @@ describe("payload assembly", () => {
       slug: "lead",
       title: "Лид",
     });
+  });
+
+  it("position: omits slug when blank (auto-slug path, T-0650)", () => {
+    const body = buildPositionPayload(TENANT, { department_id: DEPT, slug: "", title: "Лид" });
+    expect("slug" in body).toBe(false);
   });
 
   it("employee: omits position_id when blank, includes when set", () => {
@@ -139,11 +157,22 @@ describe("payload assembly", () => {
     expect(withPos.position_id).toBe(POS);
   });
 
+  it("employee: omits slug when blank (auto-slug path, T-0650)", () => {
+    const body = buildEmployeePayload(TENANT, { kind: "human", slug: "", display_name: "J. Doe" });
+    expect("slug" in body).toBe(false);
+    expect(body).toEqual({ tenant_id: TENANT, kind: "human", display_name: "J. Doe" });
+  });
+
   it("role: omits description when blank, includes when set", () => {
     const noDesc = buildRolePayload(TENANT, { slug: "r", display_name: "R" });
     expect("description" in noDesc).toBe(false);
     const withDesc = buildRolePayload(TENANT, { slug: "r", display_name: "R", description: " note " });
     expect(withDesc.description).toBe("note");
+  });
+
+  it("role: omits slug when blank (auto-slug path, T-0650)", () => {
+    const body = buildRolePayload(TENANT, { slug: "", display_name: "Согласующий" });
+    expect("slug" in body).toBe(false);
   });
 
   it("buildOrgScope: matches parseScopeElement node shape", () => {

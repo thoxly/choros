@@ -36,6 +36,7 @@ import {
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { validateAppForm } from './apps-validate.js';
 import { resolveRelationTarget, slugFromName } from '../forms/relation-cascade.js';
+import { SlugField } from '../components/slug-field.jsx';
 import {
   FIELD_TYPES,
   COLLECTION_SUB_FIELD_TYPES,
@@ -861,6 +862,11 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
 function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
   const isEdit = Boolean(editingDef);
   const [slug, setSlug] = useState(editingDef?.slug || '');
+  // T-0650 [UX-study §7]: SlugField dirty flag — true once the user clicked
+  // «изменить»; while false the slug is NOT sent (server auto-generates from
+  // displayName). Existing defs are always "touched" (their slug is immutable
+  // post-creation — SlugField renders it locked, see below).
+  const [slugTouched, setSlugTouched] = useState(isEdit);
   const [displayName, setDisplayName] = useState(editingDef?.display_name || '');
   const [fields, setFields] = useState(() =>
     isEdit ? parseRecordSchema(editingDef.record_schema) : [blankField()]
@@ -1025,9 +1031,11 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
     setFormErr(fv.formError);
 
     // For CREATE also validate slug/display_name (mirror of apps-validate).
+    // T-0650: slug is only sent (and only grammar-validated) when touched —
+    // untouched means "let the server auto-generate from displayName".
     let metaOk = true;
     if (!isEdit) {
-      const mv = validateAppForm({ slug, display_name: displayName });
+      const mv = validateAppForm({ slug: slugTouched ? slug : '', display_name: displayName });
       setMetaErrs(mv.errors);
       metaOk = mv.valid;
     }
@@ -1044,15 +1052,16 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
           body: JSON.stringify({ record_schema: recordSchema }),
         });
       } else {
+        const createBody = {
+          application_id: applicationId,
+          display_name: displayName,
+          record_schema: recordSchema,
+        };
+        if (slugTouched && slug.trim().length > 0) createBody.slug = slug;
         res = await fetch('/api/registry-defs', {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...devHeaders() },
-          body: JSON.stringify({
-            application_id: applicationId,
-            slug,
-            display_name: displayName,
-            record_schema: recordSchema,
-          }),
+          body: JSON.stringify(createBody),
         });
       }
 
@@ -1078,7 +1087,7 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
     } finally {
       setSubmitting(false);
     }
-  }, [fields, isEdit, slug, displayName, applicationId, editingDef, onSaved]);
+  }, [fields, isEdit, slug, slugTouched, displayName, applicationId, editingDef, onSaved]);
 
   return (
     <form onSubmit={handleSubmit} style={{
@@ -1094,17 +1103,6 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
         <div style={{ display: 'flex', gap: 'var(--chs-space-6)', marginBottom: 'var(--chs-space-6)' }}>
           <div style={{ flex: 1 }}>
             <Field
-              label="Слаг набора полей"
-              mono
-              value={slug}
-              onChange={(e) => setSlug(e.target.value)}
-              placeholder="my-registry"
-              invalid={Boolean(metaErrs.slug)}
-            />
-            {metaErrs.slug && <span style={errStyle}>{metaErrs.slug}</span>}
-          </div>
-          <div style={{ flex: 1 }}>
-            <Field
               label="Название набора полей"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
@@ -1112,6 +1110,17 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
               invalid={Boolean(metaErrs.display_name)}
             />
             {metaErrs.display_name && <span style={errStyle}>{metaErrs.display_name}</span>}
+          </div>
+          <div style={{ flex: 1 }}>
+            <SlugField
+              label="Слаг набора полей"
+              name={displayName}
+              value={slug}
+              onChange={setSlug}
+              touched={slugTouched}
+              onTouch={(preview) => { setSlugTouched(true); setSlug(preview); }}
+              error={metaErrs.slug}
+            />
           </div>
         </div>
       )}
