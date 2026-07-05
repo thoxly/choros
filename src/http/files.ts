@@ -142,6 +142,58 @@ function isInlineSafeMime(mime: string | null | undefined): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// T-0618: Content-Type read-time sanitization (setHeader-safety, NOT XSS gate)
+//
+// The stored mime (choros.file_version.mime_type) is read back here and
+// handed to res.setHeader('Content-Type', ...). Node's http.ServerResponse
+// throws ERR_INVALID_CHAR synchronously if the header value contains any
+// control byte (0x00-0x1F, 0x7F) — verified: setHeader('Content-Type',
+// 'text/plain\x00evil') throws "Invalid character in header content". The
+// upload route (POST /files) normalizes Content-Type from the HTTP header
+// before storing, so this isn't reachable through that writer today — but
+// core/file-attachment.ts::addVersion accepts attrs.mime as an arbitrary
+// string with no byte-level validation (only an optional mimeAllowlist,
+// unset for most callers), so ANY other writer (document-render.ts today;
+// a future seed/import/migration path tomorrow) can store a mime containing
+// control bytes. Today that would crash the download route with a 500
+// instead of serving the file — fail-closed for XSS (no XSS surface from a
+// header the browser never receives usably) but a needless availability
+// bug. sanitizeContentType applies the SAME read-time-boundary discipline
+// as isInlineSafeMime (T-0579): never trust only the writer, re-validate on
+// read, and fall back to a safe, well-known default rather than throw.
+// ---------------------------------------------------------------------------
+
+/** Maximum length for a Content-Type header value we'll pass through as-is. */
+const MAX_CONTENT_TYPE_LENGTH = 4096;
+
+/**
+ * Matches ANY control byte (0x00-0x1F, 0x7F) — the exact range Node's HTTP
+ * header validation rejects. A mime containing one of these cannot be set
+ * as a header value at all; passing it to setHeader throws ERR_INVALID_CHAR.
+ */
+const CONTROL_BYTE_RE = /[\x00-\x1f\x7f]/;
+
+/**
+ * Returns `mime` unchanged if it is safe to pass to
+ * `res.setHeader('Content-Type', ...)` as-is; otherwise returns the safe
+ * default `application/octet-stream`.
+ *
+ * This is NOT the XSS allowlist (that's isInlineSafeMime) — it exists purely
+ * so a malformed/control-byte stored mime degrades to a safe default
+ * download instead of crashing the response with ERR_INVALID_CHAR (500).
+ * Every mime that passes today's tests (text/plain, image/png,
+ * application/pdf, image/svg+xml, etc.) is untouched — this only catches
+ * bytes that were never valid HTTP header content in the first place.
+ */
+function sanitizeContentType(mime: string | null | undefined): string {
+  const fallback = "application/octet-stream";
+  if (typeof mime !== "string" || mime.length === 0) return fallback;
+  if (mime.length > MAX_CONTENT_TYPE_LENGTH) return fallback;
+  if (CONTROL_BYTE_RE.test(mime)) return fallback;
+  return mime;
+}
+
+// ---------------------------------------------------------------------------
 // Deps
 // ---------------------------------------------------------------------------
 
@@ -558,7 +610,19 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
           // via deps.meta — we must re-load from metaStore because we don't have it here).
           // We do a second getVersion read; the version was already authorized above.
           const version = await metaStore.getVersion(tenantId, fileVersionId);
-          const contentType = version?.mimeType ?? "application/octet-stream";
+          const rawMime = version?.mimeType ?? "application/octet-stream";
+
+          // T-0618: sanitize the stored mime BEFORE it ever reaches setHeader.
+          // A mime with a control byte would otherwise throw ERR_INVALID_CHAR
+          // inside setHeader below (uncaught → 500 instead of the file). This
+          // is a setHeader-safety guard, NOT the XSS allowlist — see
+          // sanitizeContentType's doc comment. wasSanitized tracks whether the
+          // stored value was rejected, so we can force `attachment` below
+          // regardless of ?disposition=inline (defense-in-depth: a mime that
+          // couldn't even survive being a valid header value never gets to
+          // ride the inline allowlist path).
+          const contentType = sanitizeContentType(rawMime);
+          const wasSanitized = contentType !== rawMime;
           const fileName = version ? `file-${fileVersionId}` : "download";
 
           // T-0579 (FR-8/FF-INLINE-SAFE): inline ONLY when the caller asked for
@@ -569,7 +633,16 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
           // `image/svg+xml;charset=...` variant, and text/html) — stays
           // `attachment`, exactly as before T-0579 (anti-XSS: an inline
           // SVG/HTML response would execute in the app's origin).
-          const disposition = wantsInline && isInlineSafeMime(contentType) ? "inline" : "attachment";
+          //
+          // T-0618: a sanitized (i.e. originally invalid/control-byte) mime
+          // is NEVER eligible for inline, no matter what isInlineSafeMime
+          // would say about the fallback "application/octet-stream" (it
+          // isn't on the allowlist anyway, but this makes the invariant
+          // explicit and independent of allowlist contents).
+          const disposition =
+            !wasSanitized && wantsInline && isInlineSafeMime(contentType)
+              ? "inline"
+              : "attachment";
 
           res.statusCode = 200;
           res.setHeader("Content-Type", contentType);
