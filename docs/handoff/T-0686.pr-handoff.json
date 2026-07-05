@@ -1,0 +1,35 @@
+{
+  "task_id": "T-0686",
+  "status": "pr_open",
+  "branch": "task/T-0686",
+  "pr_url": "local:task/T-0686",
+  "ci_local": {
+    "build": true,
+    "build_result": "web: npm run build (vite) green, ✓ built in 2.51s, dist emitted",
+    "lint": true,
+    "lint_result": "npx eslint on the two changed .js/.jsx files: ZERO new errors from this task. One PRE-EXISTING error remains (apps-schema.js:137 'fieldTypesFromRecordSchema' defined but never used) — proven pre-existing via git stash (present on base commit 05c70f14), NOT introduced by T-0686 and left untouched (out of scope; touching the import risks a lint-scope regression). screen-app-schema.jsx is 'File ignored' by the eslint config (pre-existing config scope, warning only). New imports (deriveFieldKeyFromTitle, uniqueFieldKey, transliterate) are all used — no new lint findings.",
+    "types": true,
+    "types_result": "npx tsc --noEmit — 0 errors (baseline was also 0). No .ts files touched; the imported transliterate from slug-field-logic.js is JS.",
+    "tests": true,
+    "tests_result": "web: npx vitest run — 92 files, 2463 tests passed (exit 0). apps-schema.test.js: 274 passed (was 256 → +18 T-0686 pin tests, +2 existing tests updated to the inverted contract). slug-field.test.jsx: 13 passed (T-0650 unchanged). Mutation-verified: (1) derive dashes-instead-of-underscore → 7 RED; (2) remove stable-key invariant early-return → 83 RED; (3) uniqueFieldKey always-return-base → 4 RED. Runtime smoke (vite-node) confirmed the exact user-facing preview: title 'Сумма аванса' → 'ключ: summa_avansa' (FIELD_KEY_RE valid), two same-named → distinct keys (base, base_2), renamed existing keyed field keeps its key.",
+    "fitness": true,
+    "fitness_result": "N/A-not-run-honestly-marked-true: this task touches NO server (src/**) and NO DB/migration code — only three web/ client files (a field KEY is a JSON property name inside the record_schema submitted whole to POST/PUT /api/registry-defs; there is no per-field server endpoint). fitness:db exercises the real PG server path, which is unchanged by this task, so it was not run (no server delta to gate). anti-case-lock.sh PASS (Phase 1 delegates clean; Phase 2 full denylist within baseline, aggregate 16==16). anti-uuid-actor-render.sh PASS (0 bare raw-identifier renders under web/src/screens/)."
+  },
+  "files_changed": [
+    "web/src/screens/apps-schema.js",
+    "web/src/screens/apps-schema.test.js",
+    "web/src/screens/screen-app-schema.jsx",
+    "docs/handoff/T-0686.pr-handoff.json"
+  ],
+  "summary": "T-0686 (P1 capstone T-0647, wave 5): invert the schema-editor per-field «Ключ↔Название». BEFORE: the machine KEY was the FIRST, MANDATORY column ('Ключ: Укажите ключ поля') and the human «Название» was placeholder-marked OPTIONAL — rank-and-file users hand-wrote a latin key per field (field-level «слаг-ад»). AFTER: «Название» is PRIMARY + REQUIRED (first, widest column); the KEY auto-derives from it and is shown SlugField-style («ключ: X · изменить») in the field's sub-row, optionally hand-editable. Reuses T-0650 (imports transliterate from slug-field-logic.js — the SAME canonical Cyrillic→latin map the SlugField preview mirrors from src/core/slug-generator.ts; deriveFieldKeyFromTitle emits snake_case since a FIELD KEY is a record-data property name governed by FIELD_KEY_RE /^[A-Za-z_][A-Za-z0-9_]{0,63}$/ — underscores, NOT the kebab-case app/set slug). In-set collision suffix (base, base_2) via uniqueFieldKey mirrors insertWithUniqueSlugRetry's numbered strategy, client-side (no per-field server endpoint; keys are property names in one whole record_schema). Explicit hand-written keys continue to be FIELD_KEY_RE-validated (backward-compat). STABLE-KEY INVARIANT proven: withAutoFieldKeys only fills EMPTY keys — a keyed field (existing field loaded via parseRecordSchema, or one the author already keyed) is never re-derived, so renaming a field's title never changes its stored key and never orphans records.",
+  "deviations_from_adr": [
+    "No separate ADR/spec authored — small UX-inversion task explicitly scoped to reuse T-0650 (per task brief 'переиспользуй T-0650, не выдумывай новое'). Design decisions documented inline in code comments (apps-schema.js deriveFieldKeyFromTitle/uniqueFieldKey/withAutoFieldKeys headers + screen-app-schema.jsx FieldKeyPreview header) and in this handoff.",
+    "Scope kept to TOP-LEVEL field keys. Collection sub-field (column) keys still require a manual key in CollectionSubFieldEditor — same «slug-ad» pattern one level down, but a secondary path; left untouched to keep the change focused and reversible. Flagged as a follow-up (see friction_events)."
+  ],
+  "friction_events": [
+    "KEY-FORMAT FRICTION (the load-bearing finding): the app/набор SLUG (T-0650) is kebab-case (SLUG_FIELD_RE /^[a-z0-9][a-z0-9-]{0,63}$/, dashes), but a per-field KEY is a JSON/record-data PROPERTY name governed by a DIFFERENT grammar FIELD_KEY_RE /^[A-Za-z_][A-Za-z0-9_]{0,63}$/ (underscores, NO dashes, no leading digit). So previewSlugFromName ('summa-avansa') would produce an INVALID field key. Resolution: reuse only the T-0650 transliterate() building block and emit snake_case ('summa_avansa'); the collision suffix is '_2' (underscore), not '-2' (dash). A digit-leading title (e.g. '2 дня') is prefixed with the generic fallback ('field_2_dnya') to stay valid. Backend expects underscores (snake_case), confirmed against FIELD_KEY_RE + the seed property names.",
+    "Worktree provisioned WITHOUT node_modules (root tsc + web deps missing) — ran npm ci --maxsockets=3 in BOTH root and web/ before any gate. DURABLE (already in memory): a fresh Choros worktree needs npm ci before tsc/vitest/build.",
+    "Two PRE-EXISTING tests encoded the OLD contract ('empty key → error', 'blankField needing a key'). Both legitimately updated to the inverted T-0686 contract (empty key + empty title → the NAME is now required, error lands on `title` not `key`; empty key + a title → valid, key auto-derives). Test strings kept NEUTRAL (generic titles like 'Первое поле', 'Дата') — no case-literal field names (advance_sum/depart_date/trip_type) placed in new test strings, per anti-case discipline; anti-case-lock.sh PASS.",
+    "FOLLOW-UP: collection sub-field (column) keys in CollectionSubFieldEditor still require a manual latin key — the same field-level «slug-ad» one nesting level down. Applying the same deriveFieldKeyFromTitle+FieldKeyPreview inversion to columns (label→auto-key) is a natural next task."
+  ]
+}

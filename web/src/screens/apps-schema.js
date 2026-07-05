@@ -135,6 +135,15 @@
 // resolve the sibling .ts source under this repo's toolchain.
 import { parseFormula } from '../../../src/core/formula-parser.ts';
 import { typeCheckFormula, fieldTypesFromRecordSchema } from '../../../src/core/formula-typecheck.ts';
+// T-0686: reuse the T-0650 canonical transliteration (Cyrillic→latin) — the SAME
+// map the SlugField preview uses (src/core/slug-generator.ts mirror). We derive
+// the per-field KEY from the human «Название» so the author never hand-writes a
+// latin key (the field-level «слаг-ад» the capstone T-0647 proved). NOTE the
+// grammar difference: a field KEY is a record-data PROPERTY name governed by
+// FIELD_KEY_RE (/^[A-Za-z_][A-Za-z0-9_]{0,63}$/) — underscores, NO dashes — unlike
+// the app/set SLUG (kebab-case, SLUG_FIELD_RE). So we reuse the transliteration
+// but emit snake_case, not the kebab previewSlugFromName produces.
+import { transliterate } from '../components/slug-field-logic.js';
 
 // Supported JSON-Schema primitive types the editor offers. value = the `type`
 // string emitted into record_schema; label = the human label in the dropdown.
@@ -191,6 +200,116 @@ export const FIELD_TITLE_MAX = 256;
 // T-0448: Scalar types permitted as collection sub-fields (depth cap 1: no collection/relation).
 // Declared before validateField (which references it) — `const` is not hoisted.
 export const COLLECTION_SUB_FIELD_TYPES = ["string", "number", "integer", "boolean", "select", "date"];
+
+// T-0686: generic fallback field key when a title transliterates to nothing
+// (empty / whitespace / all-symbol / non-transliterable). Deliberately generic
+// (anti-case, D-064) — never an entity-specific default.
+export const GENERIC_FIELD_KEY_FALLBACK = "field";
+
+/**
+ * T-0686: derive a FIELD KEY (record-data property name) from a human title.
+ *
+ * Reuses the T-0650 canonical Cyrillic→latin transliteration (imported from
+ * slug-field-logic.js — the SAME map the SlugField preview uses), but emits a
+ * FIELD_KEY_RE-valid identifier (snake_case, underscores) rather than the
+ * kebab-case SLUG that previewSlugFromName produces: a field key is a JSON
+ * property / record-data column name, governed by FIELD_KEY_RE
+ * (/^[A-Za-z_][A-Za-z0-9_]{0,63}$/ — letters/digits/underscore, no dashes).
+ *
+ *   "Сумма аванса"  → "summa_avansa"
+ *   "Trip Type"     → "trip_type"
+ *   "2 дня"         → "field_2_dnya"   (a key may not START with a digit)
+ *   ""/"   "/"!!!"  → "field"          (generic fallback — anti-case)
+ *
+ * PURE. Does NOT resolve collisions (that is uniqueFieldKey's job, applied
+ * against the whole set). The output ALWAYS satisfies FIELD_KEY_RE.
+ *
+ * @param {string} title
+ * @returns {string}
+ */
+export function deriveFieldKeyFromTitle(title) {
+  const raw = typeof title === "string" ? title : "";
+  if (!raw.trim()) return GENERIC_FIELD_KEY_FALLBACK;
+  let key = transliterate(raw.toLowerCase())
+    .replace(/[^a-z0-9_]+/g, "_") // non-[a-z0-9_] runs → single underscore
+    .replace(/_{2,}/g, "_")
+    .replace(/^_+|_+$/g, "");
+  // FIELD_KEY_RE forbids a leading digit — prefix the generic fallback so a
+  // digit-leading title still yields a valid, human-recognisable key.
+  if (/^[0-9]/.test(key)) key = `${GENERIC_FIELD_KEY_FALLBACK}_${key}`;
+  if (key.length === 0) return GENERIC_FIELD_KEY_FALLBACK;
+  return key.slice(0, 64);
+}
+
+/**
+ * T-0686: make a field key unique within a set of already-taken keys, using the
+ * same numbered-suffix strategy as the T-0650 server generator
+ * (insertWithUniqueSlugRetry: base, base_2, base_3, …) but snake-style and
+ * CLIENT-side. There is no per-field server endpoint — a set's field keys are
+ * property names inside ONE record_schema submitted whole (POST/PUT
+ * /api/registry-defs), so uniqueness within the set is resolved on the client
+ * before the schema is built (buildRecordSchema would otherwise collapse a
+ * duplicate key silently, and validateFields rejects duplicates outright).
+ *
+ * The suffix is appended with an UNDERSCORE (base_2) — not a dash — to stay
+ * FIELD_KEY_RE-valid (unlike the kebab slug's base-2).
+ *
+ * @param {string} base   a FIELD_KEY_RE-valid candidate (from deriveFieldKeyFromTitle)
+ * @param {Set<string>|Array<string>} taken  keys already used in the set
+ * @returns {string} a key not present in `taken`
+ */
+export function uniqueFieldKey(base, taken) {
+  const takenSet = taken instanceof Set ? taken : new Set(Array.isArray(taken) ? taken : []);
+  if (!takenSet.has(base)) return base;
+  // Trim room for the "_<n>" suffix so the result never exceeds 64 chars.
+  for (let n = 2; n < 1000; n++) {
+    const suffix = `_${n}`;
+    const candidate = `${base.slice(0, 64 - suffix.length)}${suffix}`;
+    if (!takenSet.has(candidate)) return candidate;
+  }
+  // Practically unreachable (1000 identically-named fields in one set) — return
+  // the base; validateFields' duplicate-key guard will surface the collision.
+  return base;
+}
+
+/**
+ * T-0686: fill in an auto-derived KEY for every field that has NO key yet
+ * (a NEW field the author named but did not key), leaving fields that already
+ * carry a key UNTOUCHED. This is the INVARIANT that protects field identity:
+ * a key, once set, is the field's stable identifier in the schema and in every
+ * stored record — regenerating it from a renamed title would orphan existing
+ * record data. Existing fields loaded via parseRecordSchema always carry their
+ * key, so they are never re-derived here.
+ *
+ * Collision resolution runs against the union of (a) keys already present on
+ * OTHER fields and (b) keys assigned earlier in THIS pass, so two same-named
+ * new fields get distinct keys (base, base_2).
+ *
+ * PURE — returns a new array; does not mutate the input fields. Applied at
+ * submit time (in the editor) and by validation, so an author who fills only
+ * «Название» sails through without hand-writing a single latin key.
+ *
+ * @param {Array<{key?:string, title?:string}>} fields
+ * @returns {Array<{key:string, title?:string}>}
+ */
+export function withAutoFieldKeys(fields) {
+  const list = Array.isArray(fields) ? fields : [];
+  // Seed the taken-set with every EXISTING (non-empty) key up front so an
+  // auto-derived key never collides with a hand-written one anywhere in the set.
+  const taken = new Set();
+  for (const f of list) {
+    const k = typeof f?.key === "string" ? f.key.trim() : "";
+    if (k.length > 0) taken.add(k);
+  }
+  return list.map((f) => {
+    const existing = typeof f?.key === "string" ? f.key.trim() : "";
+    if (existing.length > 0) return f; // stable-key invariant: never touch a keyed field
+    const base = deriveFieldKeyFromTitle(f?.title);
+    const key = uniqueFieldKey(base, taken);
+    taken.add(key);
+    return { ...f, key };
+  });
+}
 
 /**
  * T-0580: derive a fieldKey → operand-type map ("number"|"date"|"other") from
@@ -345,8 +464,20 @@ export function validateField(field, allFields) {
   const type = typeof field?.type === "string" ? field.type : "";
   const title = typeof field?.title === "string" ? field.title : "";
 
+  // T-0686 — INVERSION: the human «Название» is now PRIMARY and REQUIRED; the
+  // machine KEY is auto-derived from it (deriveFieldKeyFromTitle). So:
+  //   • empty key + non-empty title → OK (the key auto-generates; no error).
+  //     The auto-key is applied by withAutoFieldKeys before buildRecordSchema.
+  //   • empty key + empty title → require the NAME (the author must name the
+  //     field; without a name there is nothing to derive a key from). This is
+  //     the field-level equivalent of the SlugField inversion (T-0650).
+  //   • explicit key present → still grammar-validated against FIELD_KEY_RE
+  //     (backward-compat: a hand-written key must remain a valid identifier).
   if (key.length === 0) {
-    errors.key = "Укажите ключ поля";
+    if (title.trim().length === 0) {
+      errors.title = "Укажите название поля";
+    }
+    // else: key auto-derives from the title — no key error.
   } else if (!FIELD_KEY_RE.test(key)) {
     errors.key = "Ключ: латинская буква/подчёркивание, затем буквы/цифры/_ (1–64)";
   }
@@ -516,8 +647,18 @@ export function validateField(field, allFields) {
  */
 export function validateFields(fields) {
   const list = Array.isArray(fields) ? fields : [];
-  // T-0452: pass the full field list so computed fields can validate their rollupSource.
-  const fieldErrors = list.map((f) => validateField(f, list));
+  // T-0686: the AUTO-KEYED view (deriveFieldKeyFromTitle for empty-key fields) —
+  // the same list buildRecordSchema will emit. Used for (a) duplicate-key
+  // detection and (b) the computed-field rollupSource cross-reference context,
+  // so the keys validation reasons about match exactly what gets built (no
+  // "green validate → collapsed/renamed key on build" gap). Order is preserved
+  // (index-aligned with `list`); keyed fields are untouched (stable-key invariant).
+  const keyedList = withAutoFieldKeys(list);
+  // T-0452: pass the full (auto-keyed) field list so computed fields can resolve
+  // their rollupSource by key. Per-field key/title validation still runs on the
+  // RAW field (validateField sees the empty key → enforces the «Название» is
+  // required, the T-0686 inversion; a keyed field validates its key grammar).
+  const fieldErrors = list.map((f) => validateField(f, keyedList));
 
   let formError = null;
   if (list.length === 0) {
@@ -525,8 +666,12 @@ export function validateFields(fields) {
   }
 
   // Duplicate-key detection (case-sensitive — JSON keys are case-sensitive).
+  // T-0686: detect duplicates on the AUTO-KEYED view — two fields that resolve to
+  // the same key (e.g. a hand-written `summa` colliding with an auto-derived one)
+  // are caught here even before withAutoFieldKeys' own suffixing, and a duplicate
+  // among explicitly hand-written keys is reported on both offending rows.
   const seen = new Map();
-  list.forEach((f, i) => {
+  keyedList.forEach((f, i) => {
     const key = typeof f?.key === "string" ? f.key : "";
     if (key.length === 0) return;
     if (seen.has(key)) {
@@ -598,7 +743,13 @@ function emitScalarProp(f) {
  * @returns {object} record_schema (passes validateRecordSchemaDefinition)
  */
 export function buildRecordSchema(fields) {
-  const list = Array.isArray(fields) ? fields : [];
+  // T-0686: auto-derive a KEY for any field the author named but did not key
+  // (deriveFieldKeyFromTitle), so a field with only a «Название» is emitted with
+  // a real property name instead of being silently dropped by the empty-key skip
+  // below. Fields that already carry a key are untouched (stable-key invariant) —
+  // renaming an existing field's title never changes its stored key. Collisions
+  // within the set are resolved (base, base_2) before emit.
+  const list = withAutoFieldKeys(Array.isArray(fields) ? fields : []);
   const properties = {};
   const required = [];
   // T-0649: collectionDateFields — { [collectionFieldKey]: string[] of sub-field
@@ -1112,6 +1263,12 @@ export function mapSchemaError(status, body) {
 export function blankField() {
   return {
     key: "", type: "string", title: "", required: false,
+    // T-0686: keyTouched — UI-only flag (mirrors the SlugField `touched`
+    // pattern, T-0650). false = the KEY is auto-derived from «Название» and
+    // shown as a live preview; true = the author clicked «изменить» and now
+    // hand-edits the key (further title edits no longer re-derive it). Never
+    // persisted — buildRecordSchema ignores unknown field keys.
+    keyTouched: false,
     options: [], subFields: [],
     computedMode: "rollup",
     rollupSource: "", rollupOp: "sum", rollupValueField: "", rollupFactorField: "",

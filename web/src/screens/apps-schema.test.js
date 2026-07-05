@@ -38,6 +38,10 @@ import {
   mapSchemaError,
   blankField,
   blankSubField,
+  deriveFieldKeyFromTitle,
+  uniqueFieldKey,
+  withAutoFieldKeys,
+  FIELD_KEY_RE,
 } from './apps-schema.js';
 
 // T-0510: strip root-level x-* keys from a schema for direct AJV compile in tests.
@@ -302,15 +306,31 @@ describe('apps-schema · validateFields', () => {
   });
 
   it('flags bad/missing keys and bad types', () => {
+    // T-0686 inversion: an empty key is NO LONGER an error when a title is present
+    // (the key auto-derives). Here field[0] has empty key AND empty title → the
+    // NAME is now required, so the error lands on `title`, not `key`. field[1] has
+    // an explicit-but-invalid key → grammar error on `key` (backward-compat).
     const r = validateFields([
       { key: '', type: 'string' },
       { key: '1bad', type: 'string' },
       { key: 'ok', type: 'nope' },
     ]);
     expect(r.valid).toBe(false);
-    expect(r.fieldErrors[0].key).toBeTruthy();
-    expect(r.fieldErrors[1].key).toBeTruthy();
+    expect(r.fieldErrors[0].title).toBeTruthy(); // empty key + empty title → name required
+    expect(r.fieldErrors[0].key).toBeFalsy();
+    expect(r.fieldErrors[1].key).toBeTruthy();   // explicit invalid key still errors
     expect(r.fieldErrors[2].type).toBeTruthy();
+  });
+
+  it('T-0686: empty key + a title is VALID — the key auto-derives (no key error)', () => {
+    const r = validateFields([
+      { key: '', type: 'string', title: 'Первое поле' },
+      { key: '', type: 'number', title: 'Второе поле' },
+    ]);
+    expect(r.valid).toBe(true);
+    expect(r.fieldErrors[0].key).toBeFalsy();
+    expect(r.fieldErrors[0].title).toBeFalsy();
+    expect(r.formError).toBeNull();
   });
 
   it('flags duplicate keys on both occurrences', () => {
@@ -334,10 +354,15 @@ describe('apps-schema · validateFields', () => {
 });
 
 describe('apps-schema · validateField / blankField', () => {
-  it('blankField is a valid-typed empty row needing a key', () => {
+  it('blankField is a valid-typed empty row needing a NAME (T-0686 inversion)', () => {
+    // T-0686: a fresh blank row has empty key AND empty title. The key is no longer
+    // demanded up front (it auto-derives); instead the human «Название» is now the
+    // required primary field — so a blank row errors on `title`, not `key`.
     const b = blankField();
     expect(FIELD_TYPE_VALUES.includes(b.type)).toBe(true);
-    expect(validateField(b).key).toBeTruthy(); // empty key → error
+    expect(b.keyTouched).toBe(false);
+    expect(validateField(b).title).toBeTruthy(); // empty title → name required
+    expect(validateField(b).key).toBeFalsy();    // key auto-derives, not an error
   });
 });
 
@@ -2636,5 +2661,140 @@ describe('apps-schema T-0516 · email field type', () => {
   it('validateFields: accepts an email field', () => {
     const r = validateFields([{ key: 'contact_email', type: 'email', required: false }]);
     expect(r.valid).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0686 · per-field auto-key (invert «Название»↔«Ключ», reuse T-0650 translit)
+// ---------------------------------------------------------------------------
+describe('apps-schema T-0686 · deriveFieldKeyFromTitle', () => {
+  it('derives a snake_case FIELD_KEY_RE-valid key from a two-word Cyrillic name', () => {
+    const k = deriveFieldKeyFromTitle('Сумма аванса');
+    expect(k).toBe('summa_avansa'); // underscores, NOT the kebab slug produces
+    expect(FIELD_KEY_RE.test(k)).toBe(true);
+  });
+
+  it('derives from a latin name with spaces', () => {
+    const k = deriveFieldKeyFromTitle('Trip Type');
+    expect(k).toBe('trip_type');
+    expect(FIELD_KEY_RE.test(k)).toBe(true);
+  });
+
+  it('prefixes the generic fallback when a name would start with a digit', () => {
+    // FIELD_KEY_RE forbids a leading digit — must stay valid.
+    const k = deriveFieldKeyFromTitle('2 дня');
+    expect(k.startsWith('field_')).toBe(true);
+    expect(FIELD_KEY_RE.test(k)).toBe(true);
+  });
+
+  it('empty / whitespace / all-symbol title → generic fallback (anti-case), always valid', () => {
+    for (const bad of ['', '   ', '!!!###', '---']) {
+      const k = deriveFieldKeyFromTitle(bad);
+      expect(k).toBe('field');
+      expect(FIELD_KEY_RE.test(k)).toBe(true);
+    }
+  });
+
+  it('every derived key satisfies FIELD_KEY_RE (mutation-safe over varied names)', () => {
+    const names = ['Дата отъезда', 'X'.repeat(200), 'Поле №7', 'a-b-c', 'Ёлка щавель'];
+    for (const n of names) {
+      expect(FIELD_KEY_RE.test(deriveFieldKeyFromTitle(n))).toBe(true);
+    }
+  });
+});
+
+describe('apps-schema T-0686 · uniqueFieldKey (in-set collision suffix)', () => {
+  it('returns the base when it is free', () => {
+    expect(uniqueFieldKey('summa', new Set())).toBe('summa');
+  });
+
+  it('appends an UNDERSCORE-numbered suffix on collision (not a dash — FIELD_KEY_RE)', () => {
+    const out = uniqueFieldKey('summa', new Set(['summa']));
+    expect(out).toBe('summa_2');
+    expect(FIELD_KEY_RE.test(out)).toBe(true);
+  });
+
+  it('skips over multiple taken suffixes', () => {
+    const out = uniqueFieldKey('summa', new Set(['summa', 'summa_2', 'summa_3']));
+    expect(out).toBe('summa_4');
+  });
+});
+
+describe('apps-schema T-0686 · withAutoFieldKeys (stable-key invariant)', () => {
+  it('fills a key for a title-only field, leaving keyed fields untouched', () => {
+    const out = withAutoFieldKeys([
+      { key: '', type: 'string', title: 'Сумма аванса' },
+      { key: 'explicit_key', type: 'number', title: 'Прочее' },
+    ]);
+    expect(out[0].key).toBe('summa_avansa'); // auto-derived
+    expect(out[1].key).toBe('explicit_key'); // hand-written key NEVER touched
+  });
+
+  it('two title-only fields with the SAME name get distinct keys (base, base_2)', () => {
+    const out = withAutoFieldKeys([
+      { key: '', type: 'string', title: 'Дата' },
+      { key: '', type: 'string', title: 'Дата' },
+    ]);
+    expect(out[0].key).toBe('data');
+    expect(out[1].key).toBe('data_2');
+  });
+
+  it('an auto-derived key that would collide with an EXISTING explicit key is suffixed', () => {
+    const out = withAutoFieldKeys([
+      { key: 'summa', type: 'number', title: 'Явный ключ' }, // explicit `summa`
+      { key: '', type: 'string', title: 'Сумма' },           // derives to `summa` → suffixed
+    ]);
+    expect(out[0].key).toBe('summa');
+    expect(out[1].key).toBe('summa_2');
+  });
+
+  it('INVARIANT: renaming a keyed field\'s title does NOT change its key', () => {
+    // A field created earlier carries key `orig_key`. The author edits its title.
+    // The key must stay stable (stored records reference it) — not re-derive.
+    const before = { key: 'orig_key', type: 'string', title: 'Старое имя' };
+    const after = withAutoFieldKeys([{ ...before, title: 'Совершенно новое имя' }]);
+    expect(after[0].key).toBe('orig_key');
+  });
+
+  it('is PURE — does not mutate the input field objects', () => {
+    const input = [{ key: '', type: 'string', title: 'Поле' }];
+    const snapshot = JSON.parse(JSON.stringify(input));
+    withAutoFieldKeys(input);
+    expect(input).toEqual(snapshot); // input[0].key still ''
+  });
+});
+
+describe('apps-schema T-0686 · buildRecordSchema auto-keys title-only fields', () => {
+  it('a field with only a title is emitted with the derived key (not dropped)', () => {
+    const schema = buildRecordSchema([
+      { key: '', type: 'string', title: 'Сумма аванса', required: false },
+    ]);
+    expect(Object.keys(schema.properties)).toEqual(['summa_avansa']);
+    expect(schema.properties.summa_avansa.title).toBe('Сумма аванса');
+    expect(backendAccepts(schema)).toBe(true); // real AJV-strict accepts it
+  });
+
+  it('backend validator accepts a fully title-only set (round-trip stays valid)', () => {
+    const schema = buildRecordSchema([
+      { key: '', type: 'number', title: 'Первое', required: true },
+      { key: '', type: 'string', title: 'Второе', required: false },
+    ]);
+    expect(validateRecordSchemaDefinition(stripRootX(schema)).valid).toBe(true);
+  });
+
+  it('a required title-only field lands in the required[] under its derived key', () => {
+    const schema = buildRecordSchema([
+      { key: '', type: 'number', title: 'Обязательное поле', required: true },
+    ]);
+    const derived = deriveFieldKeyFromTitle('Обязательное поле');
+    expect(schema.required).toContain(derived);
+  });
+
+  it('INVARIANT: an existing keyed field keeps its key when its title changes on build', () => {
+    const schema = buildRecordSchema([
+      { key: 'stable_key', type: 'string', title: 'Переименовано', required: false },
+    ]);
+    expect(Object.keys(schema.properties)).toEqual(['stable_key']);
+    expect(schema.properties.stable_key.title).toBe('Переименовано');
   });
 });
