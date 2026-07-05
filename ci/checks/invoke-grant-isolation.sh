@@ -22,6 +22,14 @@
 #          appendAuditEvent / makePgAuditWriter (via the grants audit helper or
 #          db/audit-writer) and contains NO direct INSERT INTO audit_event / audit_head.
 #
+#  IG-7 — [T-0610, F-1 fix] Single grant-resolver: invoke.ts's caller-grant
+#          lookup (loadCallerInvokeGrants) calls the SAME getGrantsForSubject
+#          DAO every other PDP consumer uses (src/db/grants-dao.ts) — no bespoke
+#          inline `JOIN choros.role_assignment` / bare `FROM choros."grant"`
+#          query living in invoke.ts. This closes the security-review T-0605
+#          F-1 finding: the OLD inline query had neither the T-0605 canonical
+#          assignment-active predicate nor the T-0397 grant dual-control gate.
+#
 # Exit 0 on clean, non-zero on any violation.
 
 set -euo pipefail
@@ -218,6 +226,55 @@ else
   fi
 fi
 
+# ---- IG-7: single grant-resolver — no bespoke inline authority query (T-0610, F-1) ----
+echo ""
+echo "Check IG-7: invoke.ts's caller-grant lookup uses getGrantsForSubject (single resolver, no inline JOIN)"
+
+if [[ ! -f "${INVOKE_MODULE}" ]]; then
+  echo "FAIL [IG-7]: ${INVOKE_MODULE} does not exist"
+  ERRORS=$((ERRORS + 1))
+else
+  before_ig7=${ERRORS}
+
+  # Non-comment view (strip // and * prose lines) so header/doc prose mentioning
+  # the OLD query shape (explaining what was fixed) does not false-positive.
+  # Materialized into a variable (NOT piped straight into `grep -q`): under
+  # `set -o pipefail`, `grep -q` closing its read end early on a match can
+  # SIGPIPE the upstream `echo` on longer input, turning the pipeline's exit
+  # status into 141 instead of grep's real result — a false FAIL. Grepping a
+  # captured variable (here-string) sidesteps the pipe entirely.
+  NONCOMMENT_IG7="$(grep -vE "^[[:space:]]*(//|\*)" "${INVOKE_MODULE}" || true)"
+
+  # Must import getGrantsForSubject from the shared DAO (grants-dao.ts) — the
+  # ONE resolver every other PDP consumer uses.
+  if ! grep -qE "import[[:space:]]*\{[^}]*getGrantsForSubject[^}]*\}[[:space:]]*from[[:space:]]*[\"'].*grants-dao(\.js)?[\"']" <<< "${NONCOMMENT_IG7}"; then
+    echo "FAIL [IG-7]: invoke.ts does not import getGrantsForSubject from db/grants-dao.js"
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  # Must NOT contain a bespoke JOIN role_assignment (the old inline authority
+  # query's signature shape) in non-comment code.
+  join_matches=$(grep -nE "JOIN[[:space:]]+choros\.role_assignment" <<< "${NONCOMMENT_IG7}" || true)
+  if [[ -n "${join_matches}" ]]; then
+    echo "FAIL [IG-7]: invoke.ts contains a bespoke JOIN choros.role_assignment (should delegate to getGrantsForSubject):"
+    echo "${join_matches}"
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  # Must NOT contain a bare grant-table read (FROM choros."grant") in non-comment
+  # code — the only grant reads should flow through getGrantsForSubject.
+  grant_matches=$(grep -nE 'FROM[[:space:]]+choros\."grant"' <<< "${NONCOMMENT_IG7}" || true)
+  if [[ -n "${grant_matches}" ]]; then
+    echo "FAIL [IG-7]: invoke.ts contains a bare FROM choros.\"grant\" read (should delegate to getGrantsForSubject):"
+    echo "${grant_matches}"
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  if [[ ${ERRORS} -eq ${before_ig7} ]]; then
+    echo "PASS [IG-7]: invoke.ts resolves caller grants exclusively via getGrantsForSubject (single resolver)"
+  fi
+fi
+
 # ---- Result ------------------------------------------------------------------
 echo ""
 if [[ ${ERRORS} -gt 0 ]]; then
@@ -225,5 +282,5 @@ if [[ ${ERRORS} -gt 0 ]]; then
   exit 1
 fi
 
-echo "PASS: invoke-grant-isolation — all checks green (FF-IG-1..6)"
+echo "PASS: invoke-grant-isolation — all checks green (FF-IG-1..7)"
 exit 0

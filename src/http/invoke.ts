@@ -49,6 +49,7 @@ import { SEED_ORACLE } from "./seed-ancestry.js";
 // build the oracle from the tenant's REAL department tree (T-0515).
 export { SEED_ORACLE };
 import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
+import { getGrantsForSubject } from "../db/grants-dao.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -258,52 +259,36 @@ async function loadActiveRoleAssignment(
   return rows[0] ?? null;
 }
 
+// T-0610 [security-debt, столп4]: single-resolver fix (F-1, T-0605 review).
+//
+// Prior to this fix, this function ran its OWN inline SQL (JOIN role_assignment
+// + grant, filtered ONLY on operation='invoke') — a second, weaker authority
+// path parallel to getGrantsForSubject (grants-dao.ts), the ONE resolver every
+// other PDP consumer in the codebase uses (records.ts, org.ts, inbox.ts,
+// capability-grants-dao.ts, sandbox-gate-dao.ts, registry-digest-dao.ts,
+// role-grant-dao.ts). The inline query had NO assignment-active predicate
+// (no confirmed_by, no window, no T-0605 canonical confirmed2_by/proposed_by
+// gate) and NO grant-active predicate (no confirmed_by, no window, no T-0397
+// criticalGrantPredicate + confirmed2_by dual-control gate) — so an
+// unconfirmed/expired role assignment, or a semi-confirmed (one-approver)
+// invoke-grant (axis-b critical by construction: resource_type=
+// 'effect_resource' AND operation='invoke'), was silently treated as
+// PDP-active. Dual-control was bypassed entirely on the one surface whose
+// purpose is gating an external agent effect.
+//
+// FIX: delegate to getGrantsForSubject (the canonical resolver — already
+// applies the T-0605 assignment-active predicate + T-0397 grant dual-control
+// gate) and filter its result to operation='invoke' in TS — the exact pattern
+// capability-grants-dao.ts already uses (getGrantsForSubject → predicate
+// filter). No new SQL, no re-derived predicate, no migration (ADR-T0610 §2).
 async function loadCallerInvokeGrants(
-  client: pg.PoolClient,
+  pool: pg.Pool,
   tenantId: string,
   callerId: string,
+  nowMs: number,
 ): Promise<Grant[]> {
-  // Load invoke-grants for all roles the caller holds via their role_assignments
-  const { rows } = await client.query<{
-    id: string;
-    role_id: string;
-    resource_type: string;
-    resource_facet: unknown;
-    operation: string;
-    scope: unknown;
-    constraint: unknown;
-    delegable: boolean;
-    granted_by: string;
-    valid_from: string | null;
-    valid_until: string | null;
-    created_at: string;
-  }>(
-    `SELECT g.id, g.role_id, g.resource_type, g.resource_facet,
-            g.operation, g.scope, g."constraint", g.delegable,
-            g.granted_by, g.valid_from, g.valid_until, g.created_at
-       FROM choros."grant" g
-       JOIN choros.role_assignment ra
-         ON ra.tenant_id = g.tenant_id AND ra.role_id = g.role_id
-      WHERE g.tenant_id = $1
-        AND ra.employee_id = $2
-        AND g.operation = 'invoke'`,
-    [tenantId, callerId],
-  );
-  return rows.map((g) => ({
-    tenantId,
-    id: g.id,
-    roleId: g.role_id,
-    resourceType: g.resource_type as Grant["resourceType"],
-    resourceFacet: g.resource_facet ?? undefined,
-    operation: g.operation as Grant["operation"],
-    scope: g.scope as Grant["scope"],
-    constraint: g.constraint ?? undefined,
-    delegable: g.delegable,
-    grantedBy: g.granted_by,
-    validFrom: g.valid_from != null ? Number(g.valid_from) : undefined,
-    validUntil: g.valid_until != null ? Number(g.valid_until) : undefined,
-    createdAt: Number(g.created_at),
-  }));
+  const grants = await getGrantsForSubject(pool, tenantId, callerId, nowMs);
+  return grants.filter((g) => g.operation === "invoke");
 }
 
 // ---------------------------------------------------------------------------
@@ -375,8 +360,11 @@ export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
       const targetRoleId = roleAssignment.role_id;
       const targetOrgScope = roleAssignment.org_scope as ScopeElement;
 
-      // Load caller's invoke-grants (NF-4: fail-closed)
-      const grants = await loadCallerInvokeGrants(client, tenantId, callerId);
+      // Load caller's invoke-grants (NF-4: fail-closed). T-0610: resolved via
+      // the SAME getGrantsForSubject DAO the rest of the PDP uses (own
+      // read-scoped tx on `pool`, independent of this write tx's `client` —
+      // mirrors records.ts's resolveFieldVisibility/resolveReadVisibility).
+      const grants = await loadCallerInvokeGrants(pool, tenantId, callerId, nowMs);
 
       // T-0515: oracle from the tenant's REAL department tree (reuse this tx's client).
       const oracle = await loadTenantOrgAncestry(client, tenantId);
@@ -448,8 +436,9 @@ export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
       const targetRoleId = roleAssignment.role_id;
       const targetOrgScope = roleAssignment.org_scope as ScopeElement;
 
-      // Load caller's invoke-grants
-      const grants = await loadCallerInvokeGrants(client, tenantId, callerId);
+      // Load caller's invoke-grants. T-0610: same getGrantsForSubject DAO as
+      // the rest of the PDP (own read-scoped tx on `pool`).
+      const grants = await loadCallerInvokeGrants(pool, tenantId, callerId, nowMs);
 
       // T-0515: oracle from the tenant's REAL department tree (reuse this tx's client).
       const oracle = await loadTenantOrgAncestry(client, tenantId);

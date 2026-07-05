@@ -1,0 +1,39 @@
+{
+  "task_id": "T-0610",
+  "verdict": "approved",
+  "reviewed_sha": "e43b1eb",
+  "base_sha": "1e52cd7af1177ae24b6d7ce3c9694d01ed85adb9",
+  "ci_seen": {
+    "green": true,
+    "_note": "Независимая доверификация судьёй (не автором). (1) Прочитан src/db/grants-dao.ts::getGrantsForSubject целиком — подтверждено, что резолвер применяет ОБА свойства: T-0605 канонический assignment-active предикат (confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL) + in-window, шаг 2) И T-0397 grant dual-control гейт (confirmed_by + in-window + (NOT criticalGrantPredicate OR confirmed2_by IS NOT NULL), шаг 3, criticalGrantPredicate axis-b покрывает resource_type='effect_resource' AND operation='invoke' — ровно тип invoke-грантов). (2) git diff dev...HEAD -- src/http/invoke.ts прочитан целиком: loadCallerInvokeGrants теперь ЧИСТАЯ делегация (getGrantsForSubject(pool,tenantId,callerId,nowMs) + .filter(operation==='invoke')), оба колл-сайта (/api/invoke/request, /api/invoke/command) передают pool+nowMs (nowMs уже вычислен в обоих хендлерах строками выше — не re-derive). grep 'FROM choros.\"grant\"|JOIN choros.role_assignment' по invoke.ts — 0 совпадений (старый инлайн-SQL полностью удалён, coversInvoke не тронут — только источник грантов сменился). (3) bash ci/checks/invoke-grant-isolation.sh — PASS IG-1..IG-7 (IG-7 новый). (4) МУТАЦИОННАЯ проверка судьёй независимо от заявленного в pr-handoff: скопировал репо во временную директорию, git checkout dev -- src/http/invoke.ts (откат ТОЛЬКО прод-кода, тест НЕ трогал), прогнал invoke-caller-spoof.adversarial.test.ts на старом коде — 2 из 3 теста КРАСНЫЕ (expected [] to include 'e-tokenowner' — стаб-роутер по форме SQL не даёт старому инлайн-запросу попасть в шаг-1-хэндлер, grantLookupCallerIds остаётся пустым), контрольный тест (401 при несовпадении sub) зелёный на обоих версиях, как и ожидалось. На новом коде (e43b1eb) все 3 теста зелёные. Тест реально ловит регресс, а не фиктивно проходит на обеих версиях. (5) ci/checks/db/invoke-grant-resolver.db.test.ts прогнан ЖИВЬЁМ на реальном PG (:55432, DATABASE_URL=...:55432, --dir ci/checks/db --no-file-parallelism) — 4/4 PASS: AC-2 unconfirmed/expired assignment → 0 invoke-грантов, AC-3 semi-confirmed (confirmed2_by NULL) критичный invoke-грант → исключён, dual-confirmed → включён (регресс-пин легитимного пути). (6) npx tsc --noEmit -p . — 0 ошибок. (7) src/__tests__/invoke-grant.test.ts (23 теста, coversInvoke/audit/fail-closed) — git diff пуст (файл byte-unchanged), прогнан — 23/23 PASS, подтверждает coversInvoke и audit-seam нетронуты. (8) grant-resolver-isolation.sh, dual-control-isolation.sh — оба PASS (frozen-модули нетронуты). (9) anti-case-lock.sh — PASS, aggregate 18<=18 baseline, grep по ig-role-*/ig-emp-* и т.п. в src/ — 0 совпадений (кейс-контент только в db-тесте, не в src/). Все заявленные в pr-handoff.json гейты (npm_ci, tsc, eslint, build, полный vitest, invoke-grant-isolation, fitness:db) согласуются с точечной доверификацией судьи."
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "status": "informational, не блокирует",
+      "axis": 5,
+      "location": "src/db/grants-dao.ts::getGrantsForSubject (step 1, actorSlug param) vs src/http/invoke.ts::extractCallerId",
+      "issue": "getGrantsForSubject резолвит СЛАГ (SELECT id FROM employee WHERE slug=$2), а invoke.ts передаёт переменную с именем `callerId`. Имя вводит в заблуждение при беглом чтении (похоже на UUID), но это ПРЕДСУЩЕСТВУЮЩАЯ конвенция (extractCallerId's докстринг explicit: 'Mirrors binding.ts::extractActorSlug' и devUser/slug-путь возвращает slug, не UUID) — не introduced этим диффом, и семантически корректно (тот же slug, что resolveInvokeTenant уже использует как callerSlug парой строк выше). Не баг, чисто именование.",
+      "suggestion": "Опционально переименовать локальную переменную в callerSlug в отдельном follow-up для читаемости — не блокирует T-0610."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "loadCallerInvokeGrants делегирует в getGrantsForSubject (единый резолвер, не инлайн-SQL)", "covered": true, "evidence": "diff читан построчно; grep по invoke.ts на JOIN role_assignment / FROM choros.\"grant\" — 0 совпадений; IG-7 static gate PASS"},
+    {"ac": "Наследует T-0605 assignment-active предикат", "covered": true, "evidence": "getGrantsForSubject.ts шаг 2 читан целиком; db-тест AC-2 (unconfirmed/expired assignment → 0 грантов) 2/2 PASS живьём на PG"},
+    {"ac": "Наследует T-0397 confirmed2_by дуал-контроль для invoke-грантов (axis-b)", "covered": true, "evidence": "criticalGrantPredicate читан целиком (axis b = effect_resource+invoke); db-тест AC-3 (semi-confirmed excluded, dual-confirmed included) 2/2 PASS живьём"},
+    {"ac": "Оба колл-сайта (/api/invoke/request, /api/invoke/command) переведены на pool+nowMs, ни один не остался на старом client-пути", "covered": true, "evidence": "diff показывает обе замены; grep по loadCallerInvokeGrants( — только 2 колл-сайта, оба с pool,...,nowMs"},
+    {"ac": "coversInvoke не тронут — меняется только источник грантов", "covered": true, "evidence": "diff dev...HEAD не содержит изменений вне loadCallerInvokeGrants + импорта + 2 колл-сайтов; coversInvoke текстуально идентичен"},
+    {"ac": "Тесты честно краснеют на старом коде (не placebo)", "covered": true, "evidence": "судья независимо откатил invoke.ts к dev-версии в temp-копии, прогнал invoke-caller-spoof.adversarial.test.ts — 2/3 упали на старом коде (control-тест 401 корректно зелёный на обоих); на новом коде все 3 зелёные"},
+    {"ac": "IG-7 статически ловит регресс инлайн-SQL", "covered": true, "evidence": "bash ci/checks/invoke-grant-isolation.sh PASS IG-7; pr-handoff заявляет mutation-verified against old code — согласуется с независимым выводом судьи"},
+    {"ac": "pr-handoff.json не врёт", "covered": true, "evidence": "все проверяемые числовые/статусные claims (fitness:db 4/4, tsc 0 errors, invoke-grant-isolation IG-1..7, invoke-grant.test.ts unmodified) подтверждены независимым прогоном"},
+    {"ac": "Анти-кейс: нет кейс-контента в src/", "covered": true, "evidence": "anti-case-lock.sh PASS aggregate 18<=18; grep ig-role-/ig-emp-/e-tokenowner/e-attacker в src/http/invoke.ts — 0 совпадений (только в тестовых файлах, что допустимо)"}
+  ],
+  "role_gap_evidence": [
+    "Прочитан весь src/db/grants-dao.ts (792 строки) от первого лица, не с доверием к докстрингам автора — предикаты T-0605/T-0397 подтверждены построчно в SQL, а не пересказаны.",
+    "Мутационная доверификация теста проведена судьёй НЕЗАВИСИМО (не полагаясь на заявление pr-handoff 'mutation-verified'): temp-копия репо, откат invoke.ts к dev, прогон adversarial-теста — 2/3 корректно упали, что доказывает тест реально различает старый/новый код, а не проходит по совпадению.",
+    "db-тест (invoke-grant-resolver.db.test.ts) прогнан на РЕАЛЬНОМ Postgres (:55432, живой контейнер choros-postgres-1), не принят на слово из pr-handoff — 4/4 PASS воспроизведены.",
+    "Проверено отсутствие тихого расширения области: grant-resolver-isolation.sh + dual-control-isolation.sh (frozen-модули) оба PASS — фикс не тронул core PDP примитивы, только источник грантов в invoke.ts.",
+    "F-1 (именование callerId vs slug) — единственная находка, чисто косметическая, предсуществующая конвенция, явно не блокирует."
+  ]
+}
