@@ -155,20 +155,53 @@ function makeRecordingPool(): RecordingPool {
         return { rows: [{ employee_id: AGENT_ID }] };
       }
 
-      // loadActiveRoleAssignment (single-table SELECT role_id, org_scope)
+      // loadActiveRoleAssignment (TARGET-side, single-table SELECT role_id, org_scope
+      // — no `ra.` alias, no confirmed_by filter; distinct from grants-dao's step-2
+      // query below which DOES alias `ra.` and filters on confirmed_by).
       if (
         sql.includes("FROM choros.role_assignment") &&
+        !sql.includes("ra.role_id") &&
         !sql.includes('choros."grant"')
       ) {
         return { rows: [{ role_id: ROLE_ID, org_scope: TARGET_ORG_SCOPE }] };
       }
 
-      // loadCallerInvokeGrants (grant JOIN role_assignment, keyed on callerId param $2)
-      if (sql.includes('choros."grant"') && sql.includes("operation = 'invoke'")) {
-        const callerId = String(params?.[1] ?? "");
-        grantLookupCallerIds.push(callerId);
-        // Covering grant returned ONLY for the token actor.
-        return { rows: callerId === TOKEN_ACTOR ? [COVERING_GRANT_ROW] : [] };
+      // T-0610: loadCallerInvokeGrants now resolves via getGrantsForSubject
+      // (grants-dao.ts) — a THREE-step read (own tx on the pool), not the old
+      // single inline JOIN. Route each step by its distinctive SQL shape:
+
+      // getGrantsForSubject step 1 — resolve actor SLUG → employee id.
+      if (
+        sql.includes("FROM choros.employee") &&
+        sql.includes("slug = $2") &&
+        !sql.includes("EXISTS") &&
+        !sql.includes("JOIN")
+      ) {
+        const slug = String(params?.[1] ?? "");
+        grantLookupCallerIds.push(slug);
+        // Only the TOKEN actor resolves to an employee id; a mismatched caller
+        // (e.g. the spoofed header actor) finds no row → getGrantsForSubject
+        // short-circuits to [] (fail-closed empty, per its own header comment).
+        return { rows: slug === TOKEN_ACTOR ? [{ id: TOKEN_ACTOR }] : [] };
+      }
+
+      // getGrantsForSubject step 2 — CANONICAL assignment-active predicate
+      // (ra.role_id, confirmed_by/confirmed2_by/proposed_by gate, T-0605).
+      if (
+        sql.includes("FROM choros.role_assignment ra") &&
+        sql.includes("ra.role_id") &&
+        !sql.includes('choros."grant"')
+      ) {
+        // The employeeId bound here is the id resolved in step 1 (TOKEN_ACTOR
+        // sentinel above) — reaching this branch only happens for a resolved
+        // (i.e. token) actor, so the routine assignment to ROLE_ID is active.
+        return { rows: [{ role_id: ROLE_ID }] };
+      }
+
+      // getGrantsForSubject step 3 — grant read (confirmed_by + dual-control
+      // gate), scoped to role_id = ANY($2::uuid[]).
+      if (sql.includes('FROM choros."grant"') && sql.includes("operation")) {
+        return { rows: [COVERING_GRANT_ROW] };
       }
 
       // INSERT invoke_proposal — capture caller_id ($3).
