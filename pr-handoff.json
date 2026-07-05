@@ -54,5 +54,14 @@
   "friction": [
     "Heavy shared-Postgres (:55432) contention from concurrent sibling worktree sessions (T-0616, T-0658 both running their own fitness/vitest/tsc during this task's fitness:db window) produced the documented cross-worktree DB flake (13 failures in 4 unrelated files, one deadlock, one 5000ms-default-timeout trip) — resolved by isolating and re-running this task's OWN gate (registry-digest.test.ts) solo twice, both clean, rather than chasing the pre-existing unrelated flakes.",
     "The worktree's pr-handoff.json / T-0612.review.json / T-0626.* files were stale leftovers from prior tasks that had used this same worktree path before it was reset for T-0613 — pr-handoff.json existed with T-0612's content and had to be overwritten (Read-then-Write, per tool contract) rather than freshly created."
-  ]
+  ],
+  "live_proof": {
+    "date": "2026-07-05",
+    "stand": "http://100.121.76.86:3000, dev @ b43b942",
+    "verdict": "GREEN",
+    "summary": "Asked the assistant chat 'Покажи поставщиков' about a newly created, published registry ('T0613 LP Поставщики' / 'Поставщики', slug postavshiki) whose schema places a code-shaped field (inn/ИНН) BEFORE its name field (name/Наименование) — the exact anti-case shape from LIVE_PROOF T-0607. The assistant's verbatim answer named both records by their display name ('АО Василёк', 'ООО Ромашка'), never by their ИНН code (7798765432 / 7712345678), which was only offered as an optional follow-up detail. Cross-checked via SQL that the registry_def.record_schema JSON key order is genuinely inn-then-name and the record data matches.",
+    "artifact": "docs/live-proof/T-0613.live-proof.md",
+    "workarounds": "None in the proof itself (case creation + assistant question all via UI clicks/forms); SQL used only as a cross-check of schema key order, not as a substitute for the UI observation.",
+    "findings_out_of_scope": "P0 unrelated to T-0613/T-0616: creating a record in the pre-existing 'Контрагенты' registry (a8000000-0000-0000-0000-000000000002, schema has contact_email with format:email) fails via UI with 'unknown format \"email\" ignored in schema' even when the email field is left blank — blocks all record creation in that registry through the UI. Flagged for a separate task, not fixed here."
+  }
 }
