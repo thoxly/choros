@@ -310,13 +310,25 @@ async function fetchInstanceHistoryDetail(
 
   const variables = varsResult.ok ? varsResult.variables : [];
   const history = actsResult.ok
-    ? actsResult.activities.map((a) => ({
-        step: a.activityName || a.activityId,
-        kind: a.activityType,
-        startedAt: a.startTime,
-        endedAt: a.endTime,
-        completedBy: a.assignee,
-      }))
+    ? actsResult.activities
+        // T-0648 LIVE_PROOF fix (§2): Flowable's historic-activity-instances
+        // include `sequenceFlow` entries — the EDGES between nodes, not steps a
+        // person/agent ever performs. They (a) carry an EMPTY activityName, so
+        // `activityName || activityId` leaks the raw technical id ("sf-start-fin",
+        // "sf-timer-esc") into the UI as a "step name", and (b) never have an
+        // assignee, so they can never show a completedBy. Both are exactly the
+        // RED symptoms the live-proof caught. A sequenceFlow is a transition, not
+        // a step in the human history — drop it so only real BPMN NODES remain
+        // (startEvent/userTask/gateway/event/…), whose names are human and whose
+        // userTasks carry the completing assignee.
+        .filter((a) => a.activityType !== "sequenceFlow")
+        .map((a) => ({
+          step: a.activityName || a.activityId,
+          kind: a.activityType,
+          startedAt: a.startTime,
+          endedAt: a.endTime,
+          completedBy: a.assignee,
+        }))
     : [];
 
   // T-0648: batch-resolve every DISTINCT completedBy slug in ONE query (no
