@@ -834,6 +834,16 @@ async function runVisibilityFilteredMetric(
   }
 
   const { result, grouped } = aggregator.finalize();
+  // T-0632 LEAK B (adversary, LOW — ACCEPTED as-is): `truncated` is computed
+  // from the PRE-filter candidate count (rows.length === AGG_SCAN_LIMIT), which
+  // reveals only "the scan window was exhausted" — a coarse ≥AGG_SCAN_LIMIT
+  // signal, never an exact hidden-record count. This is BYTE-IDENTICAL to the
+  // already-accepted T-0587 precedent (registry-digest-dao.ts:
+  // `recRes.rows.length === scanLimit`). Computing it from the visible fold-count
+  // instead would be semantically WRONG — `truncated` must mean "candidate scan
+  // may be incomplete" (a pre-filter property of the window), not "visible set
+  // may be incomplete"; a registry of 5000 candidates with 3 visible rows still
+  // needs the truncation flag. Kept consistent with T-0587; see ADR-T0632 §7.
   const truncated = rows.length === AGG_SCAN_LIMIT;
 
   const metricResult: MetricResult = {
@@ -1089,7 +1099,14 @@ export function flattenRenderResultToTable(result: RenderResult): Tabular {
 //
 // Returns raw record rows for a given registry_def, subject to:
 //   - RLS: tenant isolation via GUC choros.tenant_id.
-//   - PDP: checkReadGrant (application read grant).
+//   - PDP (application-level): checkReadGrant (application read grant) — FIRST,
+//     mandatory gate.
+//   - PDP (record-level, T-0632): each row filtered through isRecordReadable;
+//     total_count is the VISIBLE count, not a full-registry COUNT(*). This is
+//     the raw-row twin of the /render aggregate fix — without it, a narrow
+//     record-scope actor read the FULL data of EVERY record here (bypassing the
+//     READ-PDP the /render fix added). Active whenever resolveReadVisibility is
+//     wired (production); absent → honest-degrade legacy full-registry dump.
 //   - No DB credentials in response.
 //   - limit capped at MAX_DATA_LIMIT (100).
 //   - offset must be >= 0.
@@ -1115,8 +1132,20 @@ async function dataFloor2(args: {
   actor: string;
   nowMs: number;
   authzDeps: ReportPageRenderAuthzDeps;
+  /**
+   * T-0632 (security, столп 4): OPTIONAL record-level READ-PDP resolver. When
+   * present (production, src/server.ts), the raw-record dump is filtered
+   * STRICTLY to records `isRecordReadable` allows for THIS actor and
+   * `total_count` reflects only the VISIBLE count — closing the sibling of
+   * the ADR-T0587 §1.1 finding (the /data endpoint is the raw-row twin of the
+   * /render aggregate; the application-level checkReadGrant alone let a narrow
+   * record-scope actor read the FULL data of EVERY record + an exact
+   * full-registry COUNT). When absent (honest-degrade, test-only), falls back
+   * to the pre-T-0632 full-registry dump.
+   */
+  resolveReadVisibility?: ReportAggReadVisibilityResolver;
 }): Promise<DataResult> {
-  const { pool, tenantId, pageId, registryDefId, limit, offset, actor, nowMs, authzDeps } = args;
+  const { pool, tenantId, pageId, registryDefId, limit, offset, actor, nowMs, authzDeps, resolveReadVisibility } = args;
 
   return withTenantTx(pool, tenantId, async (client) => {
     // 1. Load page to verify it exists and is floor=2 (and belongs to this tenant).
@@ -1141,7 +1170,8 @@ async function dataFloor2(args: {
     }
 
     // 2. PDP gate: application read grant scoped to this page's app_id (ADR §6 + T-0193 R-6).
-    // Checked after page existence/floor validated, before any data is returned.
+    // FR-3 (T-0632): this application-level gate remains FIRST and MANDATORY — the
+    // record-level READ-PDP filter below is an ADDITIONAL, second gate on top of it.
     const gateResult = await authzDeps.checkReadGrant(pool, tenantId, actor, page.app_id, nowMs);
     if (!gateResult.ok) {
       throw new HttpError(403, "NO_READ_GRANT", `read on application denied: ${gateResult.reason}`);
@@ -1160,35 +1190,111 @@ async function dataFloor2(args: {
       );
     }
 
-    // 4. Count total records (for pagination metadata)
-    const { rows: countRows } = await client.query<{ total: string }>(
-      `SELECT COUNT(*) AS total
-         FROM choros.record
-        WHERE tenant_id = $1 AND registry_id = $2`,
-      [tenantId, registryDefId],
-    );
-    const totalCount = parseInt(countRows[0]?.total ?? "0", 10);
+    // 3b. T-0632: resolve the actor's record-level READ-PDP visibility ONCE
+    // (NF-1 single-resolver — mirrors records.ts). Honest-degrade: absent
+    // resolver → the legacy full-registry dump path (step 4/5 below).
+    const visibility = resolveReadVisibility
+      ? await resolveReadVisibility(actor, tenantId, nowMs)
+      : undefined;
 
-    // 5. Fetch records with limit+offset (all parameterized — no interpolation)
-    const { rows: recordRows } = await client.query<{
+    if (visibility === undefined) {
+      // -----------------------------------------------------------------------
+      // LEGACY / honest-degrade path (no resolver wired — test-only; production
+      // src/server.ts ALWAYS wires the resolver). Byte-identical to pre-T-0632:
+      // full-registry COUNT + SQL LIMIT/OFFSET dump. NOT a sanctioned prod state.
+      // -----------------------------------------------------------------------
+      const { rows: countRows } = await client.query<{ total: string }>(
+        `SELECT COUNT(*) AS total
+           FROM choros.record
+          WHERE tenant_id = $1 AND registry_id = $2`,
+        [tenantId, registryDefId],
+      );
+      const totalCount = parseInt(countRows[0]?.total ?? "0", 10);
+
+      const { rows: recordRows } = await client.query<{
+        id: string;
+        data: unknown;
+        created_at: string;
+        updated_at: string;
+      }>(
+        `SELECT id, data, created_at, updated_at
+           FROM choros.record
+          WHERE tenant_id = $1 AND registry_id = $2
+          ORDER BY created_at ASC, id ASC
+          LIMIT $3 OFFSET $4`,
+        [tenantId, registryDefId, limit, offset],
+      );
+
+      return {
+        page_id: pageId,
+        floor: "2",
+        registry_def_id: registryDefId,
+        records: recordRows.map((r) => ({
+          id: r.id,
+          data: r.data,
+          created_at: r.created_at,
+          updated_at: r.updated_at,
+        })),
+        total_count: totalCount,
+        limit,
+        offset,
+      };
+    }
+
+    // -------------------------------------------------------------------------
+    // T-0632 DEFAULT (production) path: fetch a BOUNDED candidate window
+    // (AGG_SCAN_LIMIT, NF-3 — same bound the /render aggregate uses), filter
+    // EACH row through isRecordReadable (the SAME predicate GET /api/records
+    // and the analyst use — NF-1), then paginate the VISIBLE subset in-memory
+    // and derive total_count from the VISIBLE count (NOT a full-registry
+    // COUNT(*), which would itself leak the exact hidden-record count).
+    //
+    // The application_id per row is needed for the RowAncestry the predicate
+    // walks (record-scope self-match rule 1 / root-sentinel rule 2 both work
+    // via the record's own id / the root oracle; the join carries application_id
+    // for completeness / any future registry/app-scope narrowing, exactly as
+    // registry-digest-dao.ts joins it).
+    // -------------------------------------------------------------------------
+    const { rows: candidateRows } = await client.query<{
       id: string;
       data: unknown;
       created_at: string;
       updated_at: string;
+      application_id: string;
     }>(
-      `SELECT id, data, created_at, updated_at
-         FROM choros.record
-        WHERE tenant_id = $1 AND registry_id = $2
-        ORDER BY created_at ASC, id ASC
-        LIMIT $3 OFFSET $4`,
-      [tenantId, registryDefId, limit, offset],
+      `SELECT r.id, r.data, r.created_at, r.updated_at, rd.application_id
+         FROM choros.record r
+         JOIN choros.registry_def rd
+           ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
+        WHERE r.tenant_id = $1 AND r.registry_id = $2
+        ORDER BY r.created_at ASC, r.id ASC
+        LIMIT $3`,
+      [tenantId, registryDefId, AGG_SCAN_LIMIT],
     );
+
+    const visibleRows = candidateRows.filter((r) => {
+      const rowAncestry: RowAncestry = {
+        recordId: r.id,
+        registryId: registryDefId,
+        applicationId: r.application_id,
+      };
+      return isRecordReadable(rowAncestry, visibility.grants, visibility.ancestry, nowMs);
+    });
+
+    // total_count = count of VISIBLE records only (never the full-registry
+    // COUNT(*) — that would leak the number of records the actor cannot read).
+    const totalCount = visibleRows.length;
+
+    // Paginate the visible subset in-memory (offset/limit already validated +
+    // capped at the route). Slice is byte-identical to what SQL LIMIT/OFFSET
+    // would produce over the visible-only ordered set.
+    const pageRowsSlice = visibleRows.slice(offset, offset + limit);
 
     return {
       page_id: pageId,
       floor: "2",
       registry_def_id: registryDefId,
-      records: recordRows.map((r) => ({
+      records: pageRowsSlice.map((r) => ({
         id: r.id,
         data: r.data,
         created_at: r.created_at,
@@ -1217,11 +1323,14 @@ async function dataFloor2(args: {
  * @param resolveReadVisibility - T-0632 [SECURITY, столп 4]: optional record-level
  *   READ-PDP resolver (ReportAggReadVisibilityResolver). When wired (server.ts, the
  *   SAME getGrantsForSubject+loadTenantOrgAncestry→makeResourceAncestryOracle
- *   composition as records.ts's ReadVisibilityResolver), every Floor-1 aggregate is
- *   computed STRICTLY over records isRecordReadable allows for the actor — closing
- *   the ADR-T0587 §1.1 finding (a narrow record-scope grant used to receive a
- *   SUM/COUNT/... computed over the WHOLE registry). Omitted (test-only) → legacy
- *   full-registry SQL aggregate (pre-T-0632 behavior, honest-degrade).
+ *   composition as records.ts's ReadVisibilityResolver), it gates BOTH sibling
+ *   endpoints: (1) /render + /export — every Floor-1 aggregate is computed STRICTLY
+ *   over records isRecordReadable allows for the actor; (2) /data — the raw-record
+ *   dump is filtered to visible records only + total_count is the visible count.
+ *   Closes the ADR-T0587 §1.1 finding AND its /data raw-row sibling (a narrow
+ *   record-scope grant used to receive a SUM/COUNT over the WHOLE registry via
+ *   /render AND the FULL data of EVERY record via /data). Omitted (test-only) →
+ *   legacy full-registry behavior on both (pre-T-0632, honest-degrade).
  *
  * T-0489 G2: every handler is withAuth-wrapped at the registration site — keycloak
  * mode REQUIRES a valid Bearer (401 otherwise; x-dev-user no longer bypasses); dev
@@ -1406,6 +1515,7 @@ export function registerReportPageRenderRoutes(
         actor,
         nowMs: Date.now(),
         authzDeps: deps,
+        resolveReadVisibility,
       });
 
       res.statusCode = 200;

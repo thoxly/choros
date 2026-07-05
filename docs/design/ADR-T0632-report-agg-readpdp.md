@@ -36,6 +36,21 @@ SELECT SUM((data->>'field')::numeric) AS agg_result
 сам `report-page-render.ts` — тот остался открытой дырой. T-0632 закрывает
 именно её.
 
+### 1.1 Сиблинг-утечка: /data (LEAK A из адверс-ревью)
+
+Адверс-скептик (opus) на ревью первой итерации T-0632 нашёл, что закрыть
+только `/render`+`/export` **недостаточно** — READ-PDP дыра report-page НЕ
+замурована, пока течёт соседняя колонка той же стены: **`dataFloor2`
+(`GET /api/report-pages/:id/data`)**. Этот эндпоинт делает полный **raw-row
+дамп** (`SELECT id, data, created_at, updated_at ... WHERE tenant_id AND
+registry_id` над ВСЕМИ записями реестра) + `SELECT COUNT(*)` как
+`total_count`, гейтнутый **тем же** application-level `checkReadGrant` — БЕЗ
+построчного `isRecordReadable`. Тот самый узкий record-scope актор, которого
+защищает весь `/render`-фикс, через `/data` читает **полные данные КАЖДОЙ
+записи** реестра + точный полный `total_count`, обходя record-level READ-PDP,
+который `/render`-фикс только что добавил. `/data` — raw-row близнец
+агрегатного `/render`; чинить надо оба. T-0632 (эта итерация) закрывает и его.
+
 ## 2. Решение — вариант (б): построчный `isRecordReadable` фильтр НАД
    bounded-fetched raw rows, агрегат считается в приложении (не в SQL)
 
@@ -124,6 +139,22 @@ Application-level `checkReadGrant` остаётся **первым** гейто�
     security-фикс, не add-on feature; когда резолвер отсутствует, поведение
     деградирует к СТАРОМУ (полный SQL-агрегат) — задокументировано как
     временная/тестовая деградация, не разрешённое production-состояние.
+  - **`dataFloor2` (эндпоинт `/data`, LEAK A из адверс, §1.1)**: тот же
+    паттерн, что `renderFloor1`. При наличии резолвера: fetch bounded
+    candidate-окна (`AGG_SCAN_LIMIT`, тот же bound; join к `registry_def`
+    ради `application_id` для `RowAncestry`, как в `registry-digest-dao.ts`) →
+    per-row `isRecordReadable` фильтр → `total_count` = **число видимых**
+    (НЕ `SELECT COUNT(*)`, который сам бы утёк точное число скрытых записей)
+    → пагинация видимого подмножества in-memory (`slice(offset, offset+limit)`,
+    зеркалит фильтр-по-загруженной-странице records.ts). Без резолвера —
+    honest-degrade к старому пути (`SELECT COUNT(*)` + SQL LIMIT/OFFSET дамп),
+    байт-в-байт как до T-0632.
+  - `/process-analytics` (4-й роут файла) — **проверен, изменений не требует**:
+    читает S3-журнал переходов (`loadCycleTimeByActivity`/
+    `loadActorTypeBreakdown` над `audit_event`), не `choros.record`, не
+    отдаёт данные конкретных записей — процессная телеметрия, а не
+    record-scope READ-PDP поверхность (тот же класс, что T-0587 трактует
+    S3-журнал как внутреннюю телеметрию, не сущностные данные).
 - **`src/server.ts`**: `registerReportPageRenderRoutes` вызывается с новым
   резолвером, композиция байт-в-байт как `resolveReadVisibility` в
   `registerRecordRoutes` (:875-885) — `getGrantsForSubject` +
@@ -136,7 +167,9 @@ Application-level `checkReadGrant` остаётся **первым** гейто�
   живой Postgres, два actor'а одного тенанта — широкий грант видит полный
   SUM, узкий record-scope грант видит SUM строго по своему подмножеству;
   actor без покрывающих record-грантов видит `count:0`; genesis-owner
-  видит полный агрегат без изменений (регресс).
+  видит полный агрегат без изменений (регресс). **+ LEAK A `/data`-тест**:
+  узкий актор через `/data` видит ТОЛЬКО свою запись + `total_count`
+  видимых (не полный дамп/count); широкий — обе; 0-грант — пусто+0.
 
 ### 3.1 Сигнатура — аддитивная (NF-2/mirrors T-0570 records.ts pattern)
 
@@ -178,6 +211,7 @@ export function registerReportPageRenderRoutes(
 | FF-RAGG-3 | Existing charset/whitelist/parameterized-filter/withTenantTx invariants unchanged | `ci/checks/report-page-render-isolation.sh` |
 | FF-RAGG-4 | Анти-кейс: ни один добавленный литерал не кейс-специфичен | `ci/checks/read-pdp-anti-case.sh` + `ci/checks/anti-case-lock.sh` |
 | FF-RAGG-5 | genesis-owner видит полный агрегат (регресс) | `ci/checks/db/report-page-render-read-pdp.db.test.ts` (AC-owner-full) |
+| FF-RAGG-6 | `/data` (dataFloor2) raw-дамп фильтруется построчным `isRecordReadable`; `total_count` = число видимых (не `SELECT COUNT(*)`) | `ci/checks/db/report-page-render-read-pdp.db.test.ts` (LEAK A: узкий/широкий/0-грант) + `src/__tests__/report-page-render.test.ts` (AC-DATA-1/2/3) |
 
 ## 6. Traceability
 
@@ -191,3 +225,25 @@ export function registerReportPageRenderRoutes(
 | AC-6 | `ci/checks/read-pdp-anti-case.sh`, `grant-resolver-isolation.sh`, `http-route-auth-coverage.sh`, `anti-case-lock.sh` |
 | AC-7 | `npm run fitness:db` |
 | AC-8 | LIVE_PROOF section, docs/handoff/T-0632.pr-handoff.json |
+| LEAK A (/data sibling) | `ci/checks/db/report-page-render-read-pdp.db.test.ts` (LEAK A block) + `src/__tests__/report-page-render.test.ts` (T-0632 LEAK A block, AC-DATA-1/2/3), мутационно красный до фикса |
+
+## 7. LEAK B (адверс, LOW) — `truncated` как pre-fetch coarse-signal: ACCEPTED as-is
+
+Адверс отметил (LOW): `truncated:true` на `/render` при ≥`AGG_SCAN_LIMIT`
+записях раскрывает узкому актору «≥5000 записей матчат» — pre-fetch count,
+вычисленный ДО построчного фильтра. **Решение: оставить как есть,
+задокументировать.**
+
+Причины: (1) это **байт-в-байт** совпадает с уже принятым прецедентом
+T-0587/`registry-digest-dao.ts` (`recRes.rows.length === scanLimit`) — тот же
+coarse `≥scanLimit`-сигнал, никогда не точный count; менять здесь = ломать
+установленную симметрию одного механизма на двух поверхностях. (2)
+Семантически `truncated` ДОЛЖЕН означать «окно скана кандидатов могло быть
+неполным» (свойство pre-filter окна), а НЕ «видимое подмножество неполно» —
+реестр из 5000 кандидатов с 3 видимыми строками всё равно обязан нести флаг
+усечения, иначе агрегат молча недо-считает без сигнала. Вычислять `truncated`
+из visible fold-count было бы **некорректно**, а не только несимметрично. (3)
+Сигнал грубый (`≥5000`, не точное число) и никогда не раскрывает данные
+конкретной невидимой записи — только факт «реестр большой». Задокументировано
+в коде (комментарий у `const truncated = ...`) и здесь как accepted coarse
+signal, consistent with T-0587.

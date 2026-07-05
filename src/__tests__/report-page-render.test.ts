@@ -1339,3 +1339,165 @@ describe("T-0632 — record-level READ-PDP filtering of Floor-1 aggregates", () 
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0632 (security, столп 4) — LEAK A fix: record-level READ-PDP filtering of
+// the Floor-2 /data raw-record dump when resolveReadVisibility is wired.
+//
+// Adversary (opus) finding: dataFloor2 (GET /api/report-pages/:id/data) did a
+// full raw-row dump (SELECT id, data, created_at, updated_at over ALL records)
+// + SELECT COUNT(*) as total_count, gated ONLY by the application-level
+// checkReadGrant — the raw-row sibling of the /render aggregate leak. The same
+// narrow record-scope actor the /render fix protects could read the FULL data
+// of EVERY record + the exact full-registry count via /data. These tests
+// exercise the NEW default path against a FakePool that returns raw {id, data,
+// created_at, updated_at, application_id} candidate rows.
+//
+// AC-DATA-1 (mutational): narrow record-scope grant → /data returns ONLY the
+//   visible record, and total_count = visible count (not the full registry).
+// AC-DATA-2: zero covering record grants → empty records + total_count:0
+//   (honest empty, not 403/500 and not the full dump).
+// AC-DATA-3: resolveReadVisibility ABSENT → legacy full-registry dump +
+//   SELECT COUNT(*) path unchanged (honest-degrade regression guard).
+// ---------------------------------------------------------------------------
+
+describe("T-0632 LEAK A — record-level READ-PDP filtering of Floor-2 /data raw dump", () => {
+  const RECORD_VISIBLE = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee1";
+  const RECORD_HIDDEN = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee2";
+
+  const flatOracle: AncestryOracle = {
+    isDescendantOrSelf(_hierarchy, descendantId, ancestorId) {
+      return descendantId === ancestorId;
+    },
+  };
+
+  function recordScopeGrant(recordId: string): Grant {
+    return {
+      tenantId: "t",
+      id: "g1",
+      roleId: "r1",
+      resourceType: "record",
+      operation: "read",
+      scope: { kind: "node", hierarchy: "resource", nodeId: recordId, nodeLevel: "record" },
+      delegable: true,
+      grantedBy: "seed",
+      createdAt: 0,
+    };
+  }
+
+  function makeNarrowResolver(): ReportAggReadVisibilityResolver {
+    return async () => ({ grants: [recordScopeGrant(RECORD_VISIBLE)], ancestry: flatOracle });
+  }
+  function makeZeroGrantResolver(): ReportAggReadVisibilityResolver {
+    return async () => ({ grants: [], ancestry: flatOracle });
+  }
+
+  // Row sequence for the T-0632 /data default path (resolver present):
+  // BEGIN, SET LOCAL x2, SELECT report_page (floor=2), SELECT registry_def
+  // (existence), SELECT candidate join rows, COMMIT. NOTE: NO separate
+  // SELECT COUNT(*) — total_count is derived from the visible-filter count.
+  function makeDataVisibilityRowSets(
+    candidateRows: Array<{ id: string; data: unknown; created_at: string; updated_at: string; application_id: string }>,
+  ): unknown[][] {
+    return [
+      [],
+      [],
+      [],
+      [fakeFloor2Page],
+      [fakeRegDefForData],
+      candidateRows,
+      [],
+    ];
+  }
+
+  function candidate(id: string, amount: number) {
+    return { id, data: { amount }, created_at: "0", updated_at: "0", application_id: VALID_APP_ID };
+  }
+
+  async function runDataReq(
+    rowSets: unknown[][],
+    resolver: ReportAggReadVisibilityResolver,
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
+    const router = new Router();
+    registerReportPageRenderRoutes(router, makeFakePool(rowSets), allowDeps, undefined, resolver);
+    const server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const addr = server.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl + `/api/report-pages/${VALID_PAGE_ID}/data?registry_def_id=${VALID_REG_DEF_ID}`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      return { status, body: json as Record<string, unknown> };
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it("AC-DATA-1: narrow record-scope grant → /data returns ONLY the visible record; total_count = visible count (not full registry)", async () => {
+    resetRenderPoolForTesting();
+    const rowSets = makeDataVisibilityRowSets([
+      candidate(RECORD_VISIBLE, 42),
+      candidate(RECORD_HIDDEN, 999999), // must NEVER appear in records or count
+    ]);
+    const { status, body } = await runDataReq(rowSets, makeNarrowResolver());
+    expect(status).toBe(200);
+    const records = body["records"] as Array<Record<string, unknown>>;
+    expect(records.length).toBe(1);
+    expect(records[0]!["id"]).toBe(RECORD_VISIBLE);
+    // The hidden record's data must not leak, and total_count is visible-only.
+    expect(records.some((r) => r["id"] === RECORD_HIDDEN)).toBe(false);
+    expect(body["total_count"]).toBe(1);
+  });
+
+  it("AC-DATA-2: zero covering record grants → empty records + total_count:0 (honest empty, not 403/500, not full dump)", async () => {
+    resetRenderPoolForTesting();
+    const rowSets = makeDataVisibilityRowSets([
+      candidate(RECORD_VISIBLE, 42),
+      candidate(RECORD_HIDDEN, 7),
+    ]);
+    const { status, body } = await runDataReq(rowSets, makeZeroGrantResolver());
+    expect(status).toBe(200);
+    const records = body["records"] as Array<Record<string, unknown>>;
+    expect(records.length).toBe(0);
+    expect(body["total_count"]).toBe(0);
+  });
+
+  it("AC-DATA-3: resolveReadVisibility ABSENT → legacy full-registry dump + SELECT COUNT(*) path unchanged (honest-degrade)", async () => {
+    resetRenderPoolForTesting();
+    // Legacy sequence: page, regdef, SELECT COUNT(*), SELECT records, COMMIT —
+    // proves the OLD path (with its own COUNT query) still runs when no resolver.
+    const rowSets: unknown[][] = [
+      [],
+      [],
+      [],
+      [fakeFloor2Page],
+      [fakeRegDefForData],
+      [{ total: "2" }],       // SELECT COUNT(*) — legacy path only
+      [fakeRecordRow],        // SELECT records (LIMIT/OFFSET)
+      [],
+    ];
+    const router = new Router();
+    // No 5th resolver arg → honest-degrade legacy path.
+    registerReportPageRenderRoutes(router, makeFakePool(rowSets), allowDeps);
+    const server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const addr = server.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl + `/api/report-pages/${VALID_PAGE_ID}/data?registry_def_id=${VALID_REG_DEF_ID}`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(200);
+      const body = json as Record<string, unknown>;
+      expect((body["records"] as unknown[]).length).toBe(1);
+      expect(body["total_count"]).toBe(2); // full-registry COUNT(*), legacy behavior
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

@@ -139,6 +139,25 @@ async function seedFloor1CountPage(
   return id;
 }
 
+async function seedFloor2Page(
+  c: pg.Client,
+  tenantId: string,
+  appId: string,
+): Promise<string> {
+  const id = uuid();
+  const slug = `t0632-f2-${id.slice(0, 8)}`;
+  await c.query('BEGIN');
+  await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+  await c.query(
+    `INSERT INTO choros.report_page
+       (tenant_id, id, app_id, slug, title, floor, tier, page_code, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $4, '2', 'draft', 'export default function(){return null;}', 0, 0)`,
+    [tenantId, id, appId, slug],
+  );
+  await c.query('COMMIT');
+  return id;
+}
+
 async function seedEmployee(c: pg.Client, tenantId: string, slug: string): Promise<string> {
   const id = uuid();
   await c.query('BEGIN');
@@ -499,6 +518,126 @@ describe('AC-T0632-3: genesis-owner sees the full aggregate (no regression)', ()
       await withClient(migratorUrl(), async (c) => {
         await c.query('BEGIN');
         await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+        await c.query(`DELETE FROM choros.record WHERE tenant_id=$1 AND registry_id=$2`, [tenantId, regId]);
+        await c.query(`DELETE FROM choros.report_page WHERE tenant_id=$1 AND id=$2`, [tenantId, pageId]);
+        await c.query(`DELETE FROM choros.registry_def WHERE tenant_id=$1 AND id=$2`, [tenantId, regId]);
+        await c.query(`DELETE FROM choros.application WHERE tenant_id=$1 AND id=$2`, [tenantId, appId]);
+        await c.query('COMMIT');
+      });
+    });
+  }));
+});
+
+// ---------------------------------------------------------------------------
+// LEAK A (adversary opus, HIGH) — Floor-2 /data raw-record dump READ-PDP.
+//
+// GET /api/report-pages/:id/data (dataFloor2) is the raw-row sibling of the
+// /render aggregate: it used to dump the FULL data of EVERY record in a
+// registry + an exact full-registry COUNT(*), gated ONLY by the
+// application-level checkReadGrant. A narrow record-scope actor read the FULL
+// data of records they cannot see, bypassing the record-level READ-PDP the
+// /render fix added. This probe proves the fix against the REAL createServer()
+// composition root (same resolveReadVisibility wiring as GET /api/records):
+//
+//   AC-DATA-1 (mutational): a narrow-grant actor's /data returns ONLY the
+//     record(s) they can read + total_count = visible count (not the full
+//     registry). A wide/owner actor still sees every record.
+//   AC-DATA-2: an actor with the application-read grant but ZERO record-level
+//     grants gets an empty records[] + total_count:0 — not 403/500, not the
+//     full dump.
+// ---------------------------------------------------------------------------
+
+describe('LEAK A: Floor-2 /data raw-record dump is filtered by record-level READ-PDP', () => {
+  it('narrow record-scope actor sees ONLY the visible record + visible total_count; wide actor sees both; zero-grant sees none', requireDb(async () => {
+    const tenantId = DEV_TENANT_ID;
+    const appId = await withClient(migratorUrl(), (c) => seedApplication(c, tenantId));
+    const regId = await withClient(migratorUrl(), (c) => seedRegistryDef(c, tenantId, appId));
+
+    let record1Id = '';
+    let record2Id = '';
+    let pageId = '';
+    let narrowActor = '';
+    let wideActor = '';
+    let zeroActor = '';
+    let narrowEmpId = '';
+    let wideEmpId = '';
+    let zeroEmpId = '';
+    let narrowRoleId = '';
+    let wideRoleId = '';
+    let zeroRoleId = '';
+    let narrowRaId = '';
+    let wideRaId = '';
+    let zeroRaId = '';
+    const grantIds: string[] = [];
+
+    await withClient(migratorUrl(), async (c) => {
+      record1Id = await seedRecord(c, tenantId, regId, 100);
+      record2Id = await seedRecord(c, tenantId, regId, 900);
+      pageId = await seedFloor2Page(c, tenantId, appId);
+
+      narrowActor = `t0632-data-narrow-${uuid().slice(0, 8)}`;
+      narrowEmpId = await seedEmployee(c, tenantId, narrowActor);
+      narrowRoleId = await seedRole(c, tenantId);
+      narrowRaId = await seedRoleAssignment(c, tenantId, narrowEmpId, narrowRoleId);
+      grantIds.push(await seedApplicationReadGrant(c, tenantId, narrowRoleId, appId));
+      grantIds.push(await seedRecordReadGrant(c, tenantId, narrowRoleId, record1Id));
+
+      wideActor = `t0632-data-wide-${uuid().slice(0, 8)}`;
+      wideEmpId = await seedEmployee(c, tenantId, wideActor);
+      wideRoleId = await seedRole(c, tenantId);
+      wideRaId = await seedRoleAssignment(c, tenantId, wideEmpId, wideRoleId);
+      grantIds.push(await seedApplicationReadGrant(c, tenantId, wideRoleId, appId));
+      grantIds.push(await seedRecordReadGrant(c, tenantId, wideRoleId, record1Id));
+      grantIds.push(await seedRecordReadGrant(c, tenantId, wideRoleId, record2Id));
+
+      zeroActor = `t0632-data-zero-${uuid().slice(0, 8)}`;
+      zeroEmpId = await seedEmployee(c, tenantId, zeroActor);
+      zeroRoleId = await seedRole(c, tenantId);
+      zeroRaId = await seedRoleAssignment(c, tenantId, zeroEmpId, zeroRoleId);
+      grantIds.push(await seedApplicationReadGrant(c, tenantId, zeroRoleId, appId)); // app grant only, no record grant
+    });
+
+    const path = `/api/report-pages/${pageId}/data?registry_def_id=${regId}`;
+
+    // Narrow actor: only record1 (id + data), total_count = 1 (not 2).
+    const narrowResp = await makeRequest(baseUrl, path, narrowActor);
+    expect(narrowResp.statusCode).toBe(200);
+    const narrowBody = JSON.parse(narrowResp.body) as { records: Array<{ id: string }>; total_count: number };
+    expect(narrowBody.records.map((r) => r.id)).toEqual([record1Id]);
+    expect(narrowBody.records.some((r) => r.id === record2Id)).toBe(false);
+    expect(narrowBody.total_count).toBe(1);
+
+    // Wide actor: both records, total_count = 2.
+    const wideResp = await makeRequest(baseUrl, path, wideActor);
+    expect(wideResp.statusCode).toBe(200);
+    const wideBody = JSON.parse(wideResp.body) as { records: Array<{ id: string }>; total_count: number };
+    expect(wideBody.records.map((r) => r.id).sort()).toEqual([record1Id, record2Id].sort());
+    expect(wideBody.total_count).toBe(2);
+
+    // Zero-grant actor: application-read grant passes the page gate (200), but
+    // no record is visible → empty dump + total_count 0 (not 403, not full dump).
+    const zeroResp = await makeRequest(baseUrl, path, zeroActor);
+    expect(zeroResp.statusCode).toBe(200);
+    const zeroBody = JSON.parse(zeroResp.body) as { records: unknown[]; total_count: number };
+    expect(zeroBody.records.length).toBe(0);
+    expect(zeroBody.total_count).toBe(0);
+
+    addCleanup(async () => {
+      await withClient(migratorUrl(), async (c) => {
+        await c.query('BEGIN');
+        await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+        for (const gid of grantIds) {
+          await c.query(`DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`, [tenantId, gid]);
+        }
+        for (const raid of [narrowRaId, wideRaId, zeroRaId]) {
+          await c.query(`DELETE FROM choros.role_assignment WHERE tenant_id=$1 AND id=$2`, [tenantId, raid]);
+        }
+        for (const rid of [narrowRoleId, wideRoleId, zeroRoleId]) {
+          await c.query(`DELETE FROM choros.role WHERE tenant_id=$1 AND id=$2`, [tenantId, rid]);
+        }
+        for (const eid of [narrowEmpId, wideEmpId, zeroEmpId]) {
+          await c.query(`DELETE FROM choros.employee WHERE tenant_id=$1 AND id=$2`, [tenantId, eid]);
+        }
         await c.query(`DELETE FROM choros.record WHERE tenant_id=$1 AND registry_id=$2`, [tenantId, regId]);
         await c.query(`DELETE FROM choros.report_page WHERE tenant_id=$1 AND id=$2`, [tenantId, pageId]);
         await c.query(`DELETE FROM choros.registry_def WHERE tenant_id=$1 AND id=$2`, [tenantId, regId]);
