@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0648",
+  "verdict": "changes_requested",
+  "gate_seen": {
+    "green": true,
+    "red_rules": []
+  },
+  "themes_checked": ["light", "dark"],
+  "pattern_sources": [
+    {
+      "element": "ActorChip / ExecutorBadge (kit primitive, web/src/components/components.jsx)",
+      "pattern": "chip/badge с идентичностью актора",
+      "mcp_ref": "uxpatterns-MCP search_patterns query=\"chip badge actor identity avatar\" — нет точного паттерна в библиотеке (92 паттерна, ближайшие — activity-feed/comparison-table, не совпадают по сути); не блокер, решение оценено самостоятельно по WCAG/principles.md",
+      "applied": false
+    }
+  ],
+  "findings": [
+    {
+      "id": "T-0648-UX-1",
+      "severity": "blocking",
+      "root": "B",
+      "location": "web/src/components/components.jsx:115-128 (ExecutorBadge), :149-160 (ActorChip)",
+      "issue": "Тип актора (человек/агент/сервис) НЕ доходит до скринридера как часть доступного имени чипа. ExecutorBadge ставит aria-label ТОЛЬКО когда showLabel=false (bare-режим); в дефолтном режиме (showLabel=true — именно так вызывается ActorChip во всех применённых экранах: screen-audit, screen-inbox, screen-process-instance, screen-operational-analytics, ra-grant-trail) aria-label не задаётся вовсе, а глиф — aria-hidden=\"true\" (ExecGlyph). Слово-подпись типа (\"Человек\"/\"Агент\"/\"Сервис\") уходит только в атрибут title (тултип по hover/focus), который НЕ гарантированно озвучивается программами чтения с экрана без aria-describedby/aria-label. Итог: незрячий пользователь слышит просто ИМЯ (\"Иван Петров\"), без индикации что это агент — то есть столп 4 (агент виден как агент) НЕ выполнен для скринридер-пользователей, только визуально (глиф-форма+цвет+title на hover). Тесты actor-chip.test.jsx (248 строк) покрывают honest-fallback и React#31-hardening тщательно, но НЕ содержат ни одной проверки aria-label/accessible-name — ноль совпадений по aria-label|role= во всём файле.",
+      "suggestion": "Добавить программно доступное указание типа в сам ActorChip/ExecutorBadge, не полагаясь на title: либо (а) всегда рендерить aria-label={`${meta.label}: ${displayName}`} на корневом span (не зависеть от showLabel), либо (б) добавить сопроводительный <span className=\"chs-sr-only\">{meta.label}</span> перед именем (визуально скрыт, но озвучивается) — второй вариант безопаснее, т.к. не меняет доступное имя целиком для существующих snapshot-тестов. Покрыть тестом: рендер ActorChip type=\"agent\" → accessible name/текст содержит \"Агент\" в любой форме, доступной AT."
+    },
+    {
+      "id": "T-0648-UX-2",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-process-instance.jsx:173 (HistoryStepRow)",
+      "issue": "completedBy рендерится через <ActorChip type=\"human\" .../> — тип ЗАХАРДКОЖЕН на \"human\", хотя userTask в этом продукте может завершаться агентом (агенты — исполнители с правами, столп 4; T-0588/T-0634 и др. в памяти прогонов подтверждают агентские таски). Если шаг завершил агент, чип покажет глиф/цвет/подпись «Человек» — ложная атрибуция типа, ровно тот класс проблемы, который T-0648 призван искоренять для UUID, но здесь воспроизведён для type. Соседний HistoryRow (та же секция, строка ~130) уже делает правильно: type={display?.type || type}.",
+      "suggestion": "Пробросить реальный тип исполнителя шага с бэкенда (fetchInstanceHistoryDetail, src/http/processes.ts) в step.completedByType, аналогично completedByName, и использовать его вместо литерала \"human\"; при отсутствии — честный дефолт через execTypeOf(step.kind) или type=\"service\" (как resolveActorDisplay делает для неразрешённых), не \"human\" по умолчанию."
+    },
+    {
+      "id": "T-0648-UX-3",
+      "severity": "nit",
+      "root": "A",
+      "location": "src/db/actor-resolver.ts:74-77 (ResolvedActor.deactivated) — весь фронт-слой применения (screen-audit.jsx, screen-process-instance.jsx, screen-inbox.jsx, screen-operational-analytics.jsx, ra-grant-trail.jsx)",
+      "issue": "batchResolveActors честно резолвит и прокидывает deactivated:boolean на каждый ResolvedActor, бэкенд-хендлеры (audit.ts, grant-trail.ts, process-start.ts) прокидывают его в actorDisplay/actorResolved — но НИ ОДИН экран это поле не читает и не отображает. Уволенный/деактивированный сотрудник выглядит в аудите/трейле/инбоксе неотличимо от активного — не мёртвое состояние в смысле краша, но потерянный сигнал, за который уже заплачено (одна SQL-колонка, уже в payload).",
+      "suggestion": "Не блокирует T-0648 (анти-UUID достигнут), но дёшево дозакрыть: в ActorChip — если проп deactivated=true, добавить визуальную пометку (приглушённый тон + текст «(деактивирован)» в title/сопроводительном тексте), прокинув deactivated из display?.deactivated на местах вызова. Кандидат на отдельный тикет, не на переоткрытие этой задачи."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "агент отображается как агент (глиф+имя, отличим от человека/сервиса) — визуально", "covered": true},
+    {"ac": "агент отображается как агент — для скринридера (не только цвет/глиф)", "covered": false},
+    {"ac": "нет голого UUID в основном тексте (ActorChip/RecordRef, anti-uuid gate)", "covered": true},
+    {"ac": "тема/токены (G2) — глифы через --chs-exec-* с контрастом, обе темы", "covered": true},
+    {"ac": "жаргон (G5) — русские человеческие подписи, не англо-термины", "covered": true},
+    {"ac": "RecordRef — честный fallback при нерезолвленном title (никогда голый id в тексте)", "covered": true},
+    {"ac": "нерезолвленный актор — честный fallback (не белый экран/undefined)", "covered": true}
+  ]
+}
