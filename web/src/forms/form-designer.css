@@ -1,0 +1,73 @@
+/* ============================================================================
+   CHOROS — form-designer.css  (T-0656 · E-FORMS drag-and-drop canvas polish)
+
+   Styling for the interface-builder canvas DnD feedback: the drop indicator
+   (a full-width placeholder bar that shows WHERE a block will land, not a 6px
+   sliver), the receiving-container highlight, and the fullscreen canvas.
+
+   Theme-honest (OBLIK gate G2/G6): every colour is a --chs-* token; there is no
+   hardcoded hex. Light is the readable default (:root in tokens.css); dark is
+   reachable via [data-theme="dark"] on those same tokens, so this file inherits
+   the pairing without redeclaring it.
+   ============================================================================ */
+
+/* --- drop indicator: a real placeholder bar, full container width --- */
+.chs-drop-indicator {
+  height: 4px;
+  margin: 2px 0;
+  border-radius: var(--chs-radius-full);
+  background: transparent;
+  transition: height 90ms ease, background 90ms ease, box-shadow 90ms ease;
+}
+
+.chs-drop-indicator--active {
+  height: 10px;
+  background: var(--chs-color-accent);
+  box-shadow: 0 0 0 2px var(--chs-color-accent-soft);
+}
+
+/* --- receiving container highlight (the "куда встанет" answer) --- */
+.chs-canvas-node--drop-target {
+  /* border/background are set inline from the same tokens; this class gives the
+     screen-reader-independent visual affordance a stable hook + a soft pulse. */
+  outline: 2px dashed var(--chs-color-accent);
+  outline-offset: -2px;
+}
+
+/* --- fullscreen: expand the WHOLE workspace (palette + canvas + inspector),
+   not just the canvas. UX-2 fix — putting position:fixed on the canvas alone
+   orphaned its grid siblings (palette/inspector), so a field could not be
+   dragged in nor properties edited in fullscreen. The overlay is the whole grid,
+   so all three panels stay present and functional. */
+.chs-form-designer--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: var(--chs-z-overlay);
+  margin: 0;
+  height: 100vh;
+  max-height: 100vh;
+  background: var(--chs-color-bg);
+  padding: var(--chs-space-6);
+  /* grid stays 3-column; each column scrolls its own overflow. */
+}
+
+/* In fullscreen, the palette / canvas / inspector each scroll independently so a
+   long form or a long palette never pushes the others off-screen. */
+.chs-form-designer--fullscreen > .chs-designer-palette,
+.chs-form-designer--fullscreen > .chs-designer-canvas,
+.chs-form-designer--fullscreen > .chs-designer-inspector {
+  max-height: calc(100vh - 2 * var(--chs-space-6));
+  overflow: auto;
+}
+
+/* the fullscreen toggle button row inside the canvas */
+.chs-designer-canvas__bar {
+  display: flex;
+  gap: var(--chs-space-2);
+  align-items: center;
+  margin-bottom: var(--chs-space-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chs-drop-indicator { transition: none; }
+}

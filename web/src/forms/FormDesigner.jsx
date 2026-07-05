@@ -1,5 +1,5 @@
 /* ============================================================================
-   CHOROS — FormDesigner.jsx  (T-0481 · E-FORMS F2 / rebuilt T-0544)
+   CHOROS — FormDesigner.jsx  (T-0481 · E-FORMS F2 / rebuilt T-0544 / T-0656 DnD)
 
    THE INTERFACE BUILDER — "where layout is configured."
 
@@ -10,6 +10,16 @@
    inspector are DERIVED from the registry (descriptor.icon / .label /
    .paletteGroup / .editorProps) — no hardcoded GROUP_LABELS, no `if (node.type
    === 'text')` branches.
+
+   T-0656 (founder order — "make DnD actually pleasant, for humans AND agents"):
+   the visual feedback layer is rebuilt so a drag shows its RESULT, not a guess —
+   DropIndicator (was DropSlot) renders a full-width placeholder bar computed from
+   cursor position, the receiving container is highlighted, the canvas autoscrolls
+   near its edges, a keyboard cut/paste path sits next to the existing Alt+Up/Down,
+   a live-region announces every move, and the canvas can go fullscreen. NONE of
+   this touches form-document-ops.js — every move still resolves to the same
+   insertNode/removeNode/reorderNode/moveNode calls (the machine seam — T-0656
+   §4 ADR — shares this exact op vocabulary on the server).
 
    This is still the HUMAN driver of the form-document (deliverable 2): a thin
    visual shell over the tested pure layer — the registry, the pure ops
@@ -43,6 +53,10 @@ import {
 import {
   initHistory, pushHistory, undo as undoHistory, redo as redoHistory, canUndo, canRedo,
 } from './history-stack.js';
+import { computeAutoscrollDelta, prefersReducedMotion } from './canvas-autoscroll.js';
+import { announceMove, announceCut, announcePaste, cloneForClipboard } from './canvas-a11y.js';
+import { containerIsDropTarget } from './canvas-path.js';
+import './form-designer.css';
 
 // ---------------------------------------------------------------------------
 // Path / drag helpers
@@ -146,44 +160,69 @@ function FieldChip({ field, used, onAdd }) {
 }
 
 // ---------------------------------------------------------------------------
-// Drop slot — a path-aware insertion target between/around nodes
+// T-0656 — shared drag-hover state: WHICH container is the current drop target.
+// A single canvas-wide value (not per-slot local state) so the CONTAINER itself
+// (not just the thin slot) can be highlighted while a drag is over any of its
+// insertion points — the "куда же оно вставится" question gets a whole-container
+// answer, not a guess from a 6px sliver.
 // ---------------------------------------------------------------------------
 
-function DropSlot({ containerPath, tabIndex, insertAt, onDrop }) {
-  const [over, setOver] = useState(false);
+function containerKey(containerPath, tabIndex) {
+  const cp = containerPath.map((s) => (typeof s === 'number' ? s : `t${s.tab}.${s.index}`)).join('/');
+  return tabIndex === undefined || tabIndex === null ? cp : `${cp}#${tabIndex}`;
+}
+
+// ---------------------------------------------------------------------------
+// Drop indicator — a path-aware insertion target that renders the RESULT of a
+// drop (a full-width placeholder bar), not a guessable sliver. `active` (passed
+// by the parent, derived from shared drag-hover state) drives both the bar's
+// own emphasis and asks the CONTAINER to highlight via onContainerHover.
+// ---------------------------------------------------------------------------
+
+function DropIndicator({ containerPath, tabIndex, insertAt, onDrop, onHoverContainer, hover }) {
+  const myKey = `${containerKey(containerPath, tabIndex)}:${insertAt}`;
+  const active = hover?.key === myKey;
   return (
     <div
-      className={`chs-drop-slot${over ? ' chs-drop-slot--over' : ''}`}
+      className={`chs-drop-indicator${active ? ' chs-drop-indicator--active' : ''}`}
       role="presentation"
-      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setOver(true); }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setOver(false); onDrop({ containerPath, tabIndex, insertAt }, e); }}
-      style={{
-        height: over ? 10 : 6,
-        margin: '2px 0',
-        borderRadius: 'var(--chs-radius-sm)',
-        background: over ? 'var(--chs-color-accent)' : 'transparent',
-        border: over ? 'none' : '1px dashed transparent',
-        transition: 'height 80ms, background 80ms',
+      data-drop-indicator="true"
+      onDragOver={(e) => {
+        e.preventDefault(); e.stopPropagation();
+        onHoverContainer(myKey, containerPath, tabIndex);
+      }}
+      onDragLeave={(e) => { e.stopPropagation(); }}
+      onDrop={(e) => {
+        e.preventDefault(); e.stopPropagation();
+        onHoverContainer(null);
+        onDrop({ containerPath, tabIndex, insertAt }, e);
       }}
     />
   );
 }
 
-function EmptyDropZone({ containerPath, tabIndex, onDrop }) {
-  const [over, setOver] = useState(false);
+function EmptyDropZone({ containerPath, tabIndex, onDrop, onHoverContainer, hover }) {
+  const myKey = `${containerKey(containerPath, tabIndex)}:0`;
+  const active = hover?.key === myKey;
   return (
     <div
-      className={`chs-empty-drop${over ? ' chs-empty-drop--over' : ''}`}
-      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setOver(true); }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setOver(false); onDrop({ containerPath, tabIndex, insertAt: 0 }, e); }}
+      className={`chs-empty-drop${active ? ' chs-empty-drop--over' : ''}`}
+      onDragOver={(e) => {
+        e.preventDefault(); e.stopPropagation();
+        onHoverContainer(myKey, containerPath, tabIndex);
+      }}
+      onDragLeave={(e) => { e.stopPropagation(); }}
+      onDrop={(e) => {
+        e.preventDefault(); e.stopPropagation();
+        onHoverContainer(null);
+        onDrop({ containerPath, tabIndex, insertAt: 0 }, e);
+      }}
       style={{
         padding: 'var(--chs-space-3)', textAlign: 'center',
         color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)',
-        border: `1px dashed ${over ? 'var(--chs-color-accent)' : 'var(--chs-color-border)'}`,
+        border: `1px dashed ${active ? 'var(--chs-color-accent)' : 'var(--chs-color-border)'}`,
         borderRadius: 'var(--chs-radius-sm)',
-        background: over ? 'var(--chs-color-surface-muted, transparent)' : 'transparent',
+        background: active ? 'var(--chs-color-accent-soft)' : 'transparent',
       }}
     >
       Перетащите сюда
@@ -198,7 +237,7 @@ function EmptyDropZone({ containerPath, tabIndex, onDrop }) {
 function CanvasNode({
   node, containerPath, index, tabIndex,
   selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, brokenKeys,
-  siblingCount, onMoveUp, onMoveDown,
+  siblingCount, onMoveUp, onMoveDown, onHoverContainer, hover,
 }) {
   const descriptor = getWidget(node.type);
   const key = pathKey(containerPath, index, tabIndex);
@@ -208,13 +247,24 @@ function CanvasNode({
   const isContainer = descriptor && (descriptor.isContainer === true);
 
   const myPath = childContainerPath(containerPath, index, tabIndex);
+  // STRUCTURAL container highlight (UX-1 fix): this container lights up iff the
+  // drag hover is INSIDE it — its own children-path is a SEGMENT prefix of the
+  // hover container path (canvas-path.js). The previous string.startsWith on
+  // concatenated keys false-matched container 1 while dragging inside container
+  // 10 (and nested [0,1] vs [0,10]); segment compare has real boundaries.
+  const containerHighlighted = isContainer && containerIsDropTarget(myPath, hover?.path ?? null);
 
-  // T-0529: keyboard handler for Alt+Up/Down reorder fallback
+  // T-0529/T-0656: keyboard handler — Alt+Up/Down (legacy) and plain Up/Down
+  // (T-0656 — the natural arrow-key expectation once a block is selected)
+  // both reorder; Cmd/Ctrl+X cuts, Cmd/Ctrl+V pastes (wired by the parent via
+  // window-level listeners so multi-node clipboard state stays in one place).
   const handleKeyDown = (e) => {
-    if (e.altKey && e.key === 'ArrowUp') {
+    const isArrowUp = e.key === 'ArrowUp';
+    const isArrowDown = e.key === 'ArrowDown';
+    if ((e.altKey || (!e.metaKey && !e.ctrlKey)) && isArrowUp) {
       e.preventDefault(); e.stopPropagation();
       if (onMoveUp && index > 0) onMoveUp(containerPath, index, tabIndex);
-    } else if (e.altKey && e.key === 'ArrowDown') {
+    } else if ((e.altKey || (!e.metaKey && !e.ctrlKey)) && isArrowDown) {
       e.preventDefault(); e.stopPropagation();
       if (onMoveDown && index < siblingCount - 1) onMoveDown(containerPath, index, tabIndex);
     } else if (e.key === 'Enter' || e.key === ' ') {
@@ -225,16 +275,19 @@ function CanvasNode({
 
   return (
     <div
-      className={`chs-canvas-node${selected ? ' chs-canvas-node--selected' : ''}`}
+      className={`chs-canvas-node${selected ? ' chs-canvas-node--selected' : ''}${containerHighlighted ? ' chs-canvas-node--drop-target' : ''}`}
       role="treeitem"
       aria-selected={selected}
       aria-label={`${descriptor ? descriptor.label : node.type}: ${userLabel || node.fieldKey || 'без метки'}`}
       tabIndex={0}
+      data-node-key={key}
       style={{
         border: broken ? '2px solid var(--chs-color-danger)'
-          : selected ? '2px solid var(--chs-color-accent)' : '1px solid var(--chs-color-border)',
+          : selected ? '2px solid var(--chs-color-accent)'
+          : containerHighlighted ? '2px dashed var(--chs-color-accent)' : '1px solid var(--chs-color-border)',
         borderRadius: 'var(--chs-radius-md)', padding: 'var(--chs-space-3)',
-        background: 'var(--chs-color-surface)', cursor: 'grab',
+        background: containerHighlighted ? 'var(--chs-color-accent-soft)' : 'var(--chs-color-surface)',
+        cursor: 'grab',
       }}
       draggable
       onDragStart={(e) => { e.stopPropagation(); setDrag(e, { kind: 'reorder', fromContainer: containerPath, fromIndex: index, fromTab: tabIndex ?? null }); }}
@@ -254,14 +307,14 @@ function CanvasNode({
             <button type="button" className="chs-btn chs-btn--ghost chs-btn--sm"
               onClick={(e) => { e.stopPropagation(); onMoveUp(containerPath, index, tabIndex); }}
               disabled={index === 0}
-              aria-label="Переместить блок выше (Alt+↑)"
+              aria-label="Переместить блок выше (стрелка вверх)"
               title="Переместить выше">▲</button>
           )}
           {onMoveDown && (
             <button type="button" className="chs-btn chs-btn--ghost chs-btn--sm"
               onClick={(e) => { e.stopPropagation(); onMoveDown(containerPath, index, tabIndex); }}
               disabled={siblingCount !== undefined && index >= siblingCount - 1}
-              aria-label="Переместить блок ниже (Alt+↓)"
+              aria-label="Переместить блок ниже (стрелка вниз)"
               title="Переместить ниже">▼</button>
           )}
           <button type="button" className="chs-btn chs-btn--ghost chs-btn--sm" onClick={(e) => { e.stopPropagation(); onDuplicate(containerPath, index, tabIndex); }} aria-label="Дублировать блок" title="Дублировать">⧉</button>
@@ -280,28 +333,30 @@ function CanvasNode({
         <TabsCanvas node={node} containerPath={myPath} selectedKeys={selectedKeys}
           onSelectNode={onSelectNode} onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
           onMoveUp={onMoveUp} onMoveDown={onMoveDown}
+          onHoverContainer={onHoverContainer} hover={hover}
           brokenKeys={brokenKeys} />
       )}
       {isContainer && !descriptor.isTabs && (
         <ChildrenCanvas node={node} containerPath={myPath} selectedKeys={selectedKeys}
           onSelectNode={onSelectNode} onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
           onMoveUp={onMoveUp} onMoveDown={onMoveDown}
+          onHoverContainer={onHoverContainer} hover={hover}
           brokenKeys={brokenKeys} />
       )}
     </div>
   );
 }
 
-/** Render a container's children with interleaved DropSlots (section/columns). */
-function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, brokenKeys }) {
+/** Render a container's children with interleaved DropIndicators (section/columns). */
+function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, onHoverContainer, hover, brokenKeys }) {
   const kids = Array.isArray(node.children) ? node.children : [];
   return (
     <div className="chs-canvas-children" role="group" style={{ marginTop: 'var(--chs-space-2)', marginLeft: 'var(--chs-space-3)', paddingLeft: 'var(--chs-space-2)', borderLeft: '2px solid var(--chs-color-border)' }}>
       {kids.length === 0 ? (
-        <EmptyDropZone containerPath={containerPath} onDrop={onDrop} />
+        <EmptyDropZone containerPath={containerPath} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
       ) : (
         <>
-          <DropSlot containerPath={containerPath} insertAt={0} onDrop={onDrop} />
+          <DropIndicator containerPath={containerPath} insertAt={0} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
           {kids.map((child, i) => (
             <React.Fragment key={child.id || `${child.type}-${i}`}>
               <CanvasNode
@@ -310,9 +365,10 @@ function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRem
                 selectedKeys={selectedKeys} onSelectNode={onSelectNode}
                 onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
                 onMoveUp={onMoveUp} onMoveDown={onMoveDown}
+                onHoverContainer={onHoverContainer} hover={hover}
                 brokenKeys={brokenKeys}
               />
-              <DropSlot containerPath={containerPath} insertAt={i + 1} onDrop={onDrop} />
+              <DropIndicator containerPath={containerPath} insertAt={i + 1} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
             </React.Fragment>
           ))}
         </>
@@ -322,7 +378,7 @@ function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRem
 }
 
 /** Render a tabs node's children: a tab switcher + the active tab's children. */
-function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, brokenKeys }) {
+function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, onHoverContainer, hover, brokenKeys }) {
   const tabs = Array.isArray(node.tabs) ? node.tabs : [];
   const [active, setActive] = useState(0);
   const tabIdx = Math.min(active, Math.max(0, tabs.length - 1));
@@ -363,10 +419,10 @@ function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove,
         style={{ paddingLeft: 'var(--chs-space-2)', borderLeft: '2px solid var(--chs-color-border)' }}
       >
         {kids.length === 0 ? (
-          <EmptyDropZone containerPath={containerPath} tabIndex={tabIdx} onDrop={onDrop} />
+          <EmptyDropZone containerPath={containerPath} tabIndex={tabIdx} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
         ) : (
           <>
-            <DropSlot containerPath={containerPath} tabIndex={tabIdx} insertAt={0} onDrop={onDrop} />
+            <DropIndicator containerPath={containerPath} tabIndex={tabIdx} insertAt={0} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
             {kids.map((child, i) => (
               <React.Fragment key={child.id || `${child.type}-${i}`}>
                 <CanvasNode
@@ -375,9 +431,10 @@ function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove,
                   selectedKeys={selectedKeys} onSelectNode={onSelectNode}
                   onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
                   onMoveUp={onMoveUp} onMoveDown={onMoveDown}
+                  onHoverContainer={onHoverContainer} hover={hover}
                   brokenKeys={brokenKeys}
                 />
-                <DropSlot containerPath={containerPath} tabIndex={tabIdx} insertAt={i + 1} onDrop={onDrop} />
+                <DropIndicator containerPath={containerPath} tabIndex={tabIdx} insertAt={i + 1} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
               </React.Fragment>
             ))}
           </>
@@ -496,11 +553,33 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   const [saveState, setSaveState] = useState({ status: 'idle' });
   const [loadError, setLoadError] = useState(null);
   const [saveGen, setSaveGen] = useState(0);
+  // T-0656: canvas-wide drag-hover state — which insertion point (and thus which
+  // container) is the current drop target, so the WHOLE container highlights.
+  // `key` (exact string) drives the hovered INDICATOR's own bar; `path` (segment
+  // array + tab) drives the CONTAINER highlight via STRUCTURAL prefix compare
+  // (canvas-path.js) — NOT string.startsWith, which false-matches "10" under "1".
+  const [hover, setHover] = useState(null); // null | { key, path, tabIndex }
+  // T-0656: fullscreen canvas toggle (local state, no routing).
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  // T-0656: live-region announcement text for screen readers.
+  const [announcement, setAnnouncement] = useState('');
+  // T-0656: keyboard cut/paste clipboard (a single detached node).
+  const clipboardRef = useRef(null);
+  // T-0656: canvas DOM ref for autoscroll.
+  const canvasRef = useRef(null);
 
   const doc = history ? history.present : null;
 
   // T-0533: last-saved snapshot for isDirty.
   const savedDocRef = useRef(initialDocument ?? null);
+
+  // T-0656: shared hover handler passed to every DropIndicator/EmptyDropZone.
+  // Stores the exact key (for the indicator) AND the structured path (for the
+  // structural container-highlight compare). Called with null to clear.
+  const onHoverContainer = useCallback((key, containerPath, tabIndex) => {
+    if (key === null || key === undefined) { setHover(null); return; }
+    setHover({ key, path: containerPath, tabIndex });
+  }, []);
 
   // commit a doc transform through history (single source of truth for edits).
   const commit = useCallback((fn) => {
@@ -630,9 +709,36 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
     commit((d) => updateNode(d, target.containerPath, target.index, patch, target.tabIndex));
   }, [commit, selectedKeys, doc]);
 
+  // T-0656: children array at a container path (tab-aware) — for announcements.
+  const childrenAt = useCallback((d, containerPath, tabIndex) => {
+    const container = nodeAtPath(d, containerPath);
+    if (!container) return [];
+    return container.type === 'tabs'
+      ? (container.tabs?.[tabIndex]?.children || [])
+      : (container.children || []);
+  }, []);
+
+  // T-0656: announce a reorder in the live region (human sentence, not a path).
+  const announceReorder = useCallback((d, containerPath, newIndex, tabIndex) => {
+    const container = nodeAtPath(d, containerPath);
+    const kids = childrenAt(d, containerPath, tabIndex);
+    const moved = kids[newIndex];
+    if (!moved) return;
+    const containerLabel = containerPath.length === 0
+      ? '' // root → announceMove falls back to "в форме"
+      : (container?.label || container?.title || (getWidget(container?.type)?.label ?? ''));
+    setAnnouncement(announceMove({
+      label: moved.label || moved.title || moved.fieldKey || (getWidget(moved.type)?.label ?? moved.type),
+      containerLabel,
+      position: newIndex + 1,
+      total: kids.length,
+    }));
+  }, [childrenAt]);
+
   // --- drop dispatch (nested, path-aware) ---
   const handleDrop = useCallback((dropTarget, e) => {
     const data = readDrag(e);
+    setHover(null);
     if (!data) return;
     const { containerPath, tabIndex, insertAt } = dropTarget;
     if (data.kind === 'reorder') {
@@ -640,11 +746,19 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
       const fromTab = data.fromTab === null ? undefined : data.fromTab;
       const sameContainer = JSON.stringify(fromContainer) === JSON.stringify(containerPath) && (fromTab ?? null) === (tabIndex ?? null);
       if (sameContainer) {
-        commit((d) => reorderNode(d, containerPath, data.fromIndex, insertAt ?? data.fromIndex, tabIndex));
+        commit((d) => {
+          const next = reorderNode(d, containerPath, data.fromIndex, insertAt ?? data.fromIndex, tabIndex);
+          announceReorder(next, containerPath, Math.min(insertAt ?? data.fromIndex, Math.max(0, childrenAt(next, containerPath, tabIndex).length - 1)), tabIndex);
+          return next;
+        });
       } else {
         const fromPath = fromTab === undefined ? [...fromContainer, data.fromIndex] : [...fromContainer, { tab: fromTab, index: data.fromIndex }];
         const toPath = tabIndex === undefined ? [...containerPath, insertAt ?? 0] : [...containerPath, { tab: tabIndex, index: insertAt ?? 0 }];
-        commit((d) => moveNode(d, fromPath, toPath, fromTab, tabIndex));
+        commit((d) => {
+          const next = moveNode(d, fromPath, toPath, fromTab, tabIndex);
+          announceReorder(next, containerPath, Math.min(insertAt ?? 0, Math.max(0, childrenAt(next, containerPath, tabIndex).length - 1)), tabIndex);
+          return next;
+        });
       }
     } else if (data.kind === 'field') {
       const field = fields.find((f) => f.key === data.fieldKey);
@@ -656,22 +770,62 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
       }
     }
     setSelectedKeys(new Set());
-  }, [commit, fields]);
+  }, [commit, fields, announceReorder]);
 
   // root-level drop (drop onto canvas background → append at root).
   const handleRootDrop = useCallback((e) => {
     handleDrop({ containerPath: [], insertAt: rootChildren.length }, e);
   }, [handleDrop, rootChildren.length]);
 
-  // T-0529: keyboard-drag fallback — reorder via Alt+Up/Down button clicks.
+  // T-0529/T-0656: keyboard-drag fallback — reorder via arrow keys / ▲▼ buttons.
   const moveNodeUp = useCallback((containerPath, index, tabIndex) => {
     if (index <= 0) return;
-    commit((d) => reorderNode(d, containerPath, index, index - 1, tabIndex));
-  }, [commit]);
+    commit((d) => {
+      const next = reorderNode(d, containerPath, index, index - 1, tabIndex);
+      announceReorder(next, containerPath, index - 1, tabIndex);
+      return next;
+    });
+  }, [commit, announceReorder]);
 
   const moveNodeDown = useCallback((containerPath, index, tabIndex) => {
-    commit((d) => reorderNode(d, containerPath, index, index + 1, tabIndex));
-  }, [commit]);
+    commit((d) => {
+      const next = reorderNode(d, containerPath, index, index + 1, tabIndex);
+      // reorderNode clamps toIndex; recompute the actual landing index.
+      const landed = Math.min(index + 1, Math.max(0, childrenAt(next, containerPath, tabIndex).length - 1));
+      announceReorder(next, containerPath, landed, tabIndex);
+      return next;
+    });
+  }, [commit, announceReorder, childrenAt]);
+
+  // T-0656: keyboard cut/paste over the SAME ops (removeNode / insertNode).
+  // Cut = detach the single-selected node into clipboardRef; Paste = insert the
+  // clipboard node after the current selection (or at root end if nothing selected).
+  const cutSelected = useCallback(() => {
+    if (selectedKeys.size !== 1) return;
+    const key = Array.from(selectedKeys)[0];
+    const target = resolveKey(doc, key);
+    if (!target) return;
+    clipboardRef.current = cloneForClipboard(target.node);
+    setAnnouncement(announceCut(target.node.label || target.node.title || target.node.fieldKey || getWidget(target.node.type)?.label));
+    commit((d) => removeNode(d, target.containerPath, target.index, target.tabIndex));
+    setSelectedKeys(new Set());
+  }, [selectedKeys, doc, commit]);
+
+  const pasteClipboard = useCallback(() => {
+    const node = clipboardRef.current;
+    if (!node) return;
+    const copy = cloneForClipboard(node); // fresh copy so repeated paste works
+    if (selectedKeys.size === 1) {
+      const target = resolveKey(doc, Array.from(selectedKeys)[0]);
+      if (target) {
+        commit((d) => insertNode(d, target.containerPath, copy, target.index + 1, target.tabIndex));
+        setAnnouncement(announcePaste(copy.label || copy.title || copy.fieldKey || getWidget(copy.type)?.label));
+        return;
+      }
+    }
+    commit((d) => insertNode(d, [], copy));
+    setAnnouncement(announcePaste(copy.label || copy.title || copy.fieldKey || getWidget(copy.type)?.label));
+  }, [selectedKeys, doc, commit]);
 
   // --- undo/redo ---
   const doUndo = useCallback(() => setHistory((h) => undoHistory(h) || h), []);
@@ -679,15 +833,65 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
 
   useEffect(() => {
     const onKey = (e) => {
-      const z = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z';
-      const y = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y';
+      const mod = e.metaKey || e.ctrlKey;
+      const z = mod && e.key.toLowerCase() === 'z';
+      const y = mod && e.key.toLowerCase() === 'y';
+      const x = mod && e.key.toLowerCase() === 'x';
+      const v = mod && e.key.toLowerCase() === 'v';
+      // Don't hijack cut/paste while the user is editing an input/textarea.
+      const inField = e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '');
       if (z && e.shiftKey) { e.preventDefault(); doRedo(); }
       else if (z) { e.preventDefault(); doUndo(); }
       else if (y) { e.preventDefault(); doRedo(); }
+      else if (x && !inField && selectedKeys.size === 1) { e.preventDefault(); cutSelected(); }
+      else if (v && !inField && clipboardRef.current) { e.preventDefault(); pasteClipboard(); }
+      else if (e.key === 'Escape' && isFullscreen) { setIsFullscreen(false); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [doUndo, doRedo]);
+  }, [doUndo, doRedo, cutSelected, pasteClipboard, selectedKeys.size, isFullscreen]);
+
+  // T-0656: autoscroll the canvas when a drag hovers near its top/bottom edge.
+  // Reduced-motion (accessibility): skip the continuous rAF loop (that IS the
+  // "motion") and do a single discrete nudge per dragover — the off-screen drop
+  // target stays reachable without a continuously animated scroll.
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return undefined;
+    const reduced = prefersReducedMotion();
+    let raf = null;
+    let delta = 0;
+    const step = () => {
+      if (delta !== 0) {
+        el.scrollTop += delta;
+        raf = requestAnimationFrame(step);
+      } else {
+        raf = null;
+      }
+    };
+    const onDragOver = (e) => {
+      delta = computeAutoscrollDelta(el.getBoundingClientRect(), e.clientY);
+      if (delta === 0) return;
+      if (reduced) {
+        // discrete single nudge, no continuous loop
+        el.scrollTop += delta;
+        return;
+      }
+      if (raf === null) raf = requestAnimationFrame(step);
+    };
+    const stop = () => { delta = 0; if (raf !== null) { cancelAnimationFrame(raf); raf = null; } };
+    el.addEventListener('dragover', onDragOver);
+    el.addEventListener('dragleave', stop);
+    el.addEventListener('drop', stop);
+    el.addEventListener('dragend', stop);
+    return () => {
+      el.removeEventListener('dragover', onDragOver);
+      el.removeEventListener('dragleave', stop);
+      el.removeEventListener('drop', stop);
+      el.removeEventListener('dragend', stop);
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, [doc]);
 
   // --- render ---
   if (loadError) return <ErrorState message={loadError} />;
@@ -700,7 +904,10 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   const selectedSchemaField = selectedNode && selectedNode.fieldKey ? fields.find((f) => f.key === selectedNode.fieldKey) : null;
 
   return (
-    <div className="chs-form-designer" style={{ display: 'grid', gridTemplateColumns: '240px 1fr 380px', gap: 'var(--chs-space-4)' }}>
+    <div
+      className={`chs-form-designer${isFullscreen ? ' chs-form-designer--fullscreen' : ''}`}
+      style={{ display: 'grid', gridTemplateColumns: '240px 1fr 380px', gap: 'var(--chs-space-4)' }}
+    >
       {/* ---- Palette + source picker ---- */}
       <aside className="chs-designer-palette">
         {!initialFields && (
@@ -751,20 +958,46 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
 
       {/* ---- Canvas (nested tree) ---- */}
       <main
+        ref={canvasRef}
         className="chs-designer-canvas"
         role="tree"
         aria-label="Дерево конструктора"
         onDragOver={(e) => e.preventDefault()}
         onDrop={handleRootDrop}
+        onDragLeave={(e) => { if (e.currentTarget === e.target) setHover(null); }}
         style={{ minHeight: 200, padding: 'var(--chs-space-3)', border: '1px dashed var(--chs-color-border)', borderRadius: 'var(--chs-radius-md)' }}
       >
+        {/* T-0656: canvas action bar — fullscreen toggle (works; not a stub).
+            UX-2 fix: fullscreen expands the WHOLE workspace (palette + canvas +
+            inspector), not just the canvas — so a field can still be dragged in
+            and properties still edited. The on-screen hint is now TRUE. */}
+        <div className="chs-designer-canvas__bar">
+          <Button
+            variant="ghost"
+            onClick={() => setIsFullscreen((v) => !v)}
+            title={isFullscreen ? 'Выйти из полноэкранного режима (Esc)' : 'Развернуть конструктор на весь экран'}
+            aria-pressed={isFullscreen}
+            aria-label={isFullscreen ? 'Свернуть конструктор' : 'Развернуть конструктор на весь экран'}
+          >
+            {isFullscreen ? '🗗 Свернуть' : '⛶ На весь экран'}
+          </Button>
+          {isFullscreen && (
+            <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+              Палитра слева, свойства справа. Esc — выйти.
+            </span>
+          )}
+        </div>
+
+        {/* T-0656: live-region for move/cut/paste announcements (screen readers). */}
+        <div aria-live="polite" className="chs-sr-only" data-testid="canvas-live-region">{announcement}</div>
+
         {!doc ? (
           <EmptyState title="Выберите набор полей" description="Слева выберите приложение и набор полей — форма соберётся из них." />
         ) : rootChildren.length === 0 ? (
-          <EmptyDropZone containerPath={[]} onDrop={handleDrop} />
+          <EmptyDropZone containerPath={[]} onDrop={handleDrop} onHoverContainer={onHoverContainer} hover={hover} />
         ) : (
           <>
-            <DropSlot containerPath={[]} insertAt={0} onDrop={handleDrop} />
+            <DropIndicator containerPath={[]} insertAt={0} onDrop={handleDrop} onHoverContainer={onHoverContainer} hover={hover} />
             {rootChildren.map((node, i) => (
               <React.Fragment key={node.id || `${node.type}-${i}`}>
                 <CanvasNode
@@ -773,9 +1006,10 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                   selectedKeys={selectedKeys} onSelectNode={selectNode}
                   onRemove={removeAt} onDuplicate={duplicateAt} onDrop={handleDrop}
                   onMoveUp={moveNodeUp} onMoveDown={moveNodeDown}
+                  onHoverContainer={onHoverContainer} hover={hover}
                   brokenKeys={validation.brokenKeys}
                 />
-                <DropSlot containerPath={[]} insertAt={i + 1} onDrop={handleDrop} />
+                <DropIndicator containerPath={[]} insertAt={i + 1} onDrop={handleDrop} onHoverContainer={onHoverContainer} hover={hover} />
               </React.Fragment>
             ))}
           </>
