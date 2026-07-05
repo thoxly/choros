@@ -26,6 +26,7 @@ import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
 import { registerAgentListRoutes } from "./http/agents-list.js";
 import { registerBindingRoutes } from "./http/binding.js";
+import { registerFormDocumentOpsRoute } from "./http/forms-document-ops.js";
 import { registerProcessCatalogRoutes } from "./http/process-catalog.js";
 import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
@@ -719,12 +720,16 @@ function buildRouter(
 
   // Register named-binding endpoints (T-0072 E11.1 — additive).
   // T-0376: actor-scoped /api/forms/binding routes require resolveActorTenant deps.
+  // T-0656: the agent machine seam (POST /api/forms/document-ops) shares the same
+  // deps + reuses binding.ts's auth/role/Floor gate (one contract, two drivers).
   if (grantsPool) {
-    registerBindingRoutes(router, grantsPool, {
+    const bindingDeps = {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
-    });
+    };
+    registerBindingRoutes(router, grantsPool, bindingDeps);
+    registerFormDocumentOpsRoute(router, grantsPool, bindingDeps);
   }
 
   // Register the REAL process catalog + process↔application binding (T-0270 E13).

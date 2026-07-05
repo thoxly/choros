@@ -1,0 +1,77 @@
+{
+  "_comment": "T-0656 SHARED PARITY FIXTURE. The SAME op vectors + expected results are asserted by BOTH the server TS ops (src/__tests__/form-document-ops-parity.test.ts) AND the client JS ops (web/src/forms/form-document-ops-parity.test.js). If either implementation drifts, its tier's test goes red against this fixture — mechanical proof that the human canvas and the agent machine seam share ONE op semantics. Edit ops in BOTH modules → the outputs here must still match.",
+  "baseDoc": {
+    "schemaVersion": 1,
+    "source": {},
+    "root": {
+      "type": "section",
+      "children": [
+        { "type": "field", "fieldKey": "a", "widget": "text" },
+        { "type": "columns", "count": 2, "children": [
+          { "type": "field", "fieldKey": "b", "widget": "text" },
+          { "type": "field", "fieldKey": "c", "widget": "text" }
+        ] },
+        { "type": "tabs", "tabs": [
+          { "title": "T1", "children": [ { "type": "field", "fieldKey": "d", "widget": "text" } ] },
+          { "title": "T2", "children": [] }
+        ] }
+      ]
+    }
+  },
+  "vectors": [
+    {
+      "name": "insert divider at root end (default index)",
+      "op": { "kind": "insert", "containerPath": [], "node": { "type": "divider" } },
+      "expectedRootChildTypes": ["field", "columns", "tabs", "divider"]
+    },
+    {
+      "name": "insert divider at root index 1",
+      "op": { "kind": "insert", "containerPath": [], "node": { "type": "divider" }, "index": 1 },
+      "expectedRootChildTypes": ["field", "divider", "columns", "tabs"]
+    },
+    {
+      "name": "insert field into columns container",
+      "op": { "kind": "insert", "containerPath": [1], "node": { "type": "field", "fieldKey": "x", "widget": "text" } },
+      "expectedColumnsFieldKeys": ["b", "c", "x"]
+    },
+    {
+      "name": "insert into tab 1 of tabs node",
+      "op": { "kind": "insert", "containerPath": [2], "node": { "type": "field", "fieldKey": "y", "widget": "text" }, "tabIndex": 1 },
+      "expectedTab0FieldKeys": ["d"],
+      "expectedTab1FieldKeys": ["y"]
+    },
+    {
+      "name": "remove first root child",
+      "op": { "kind": "remove", "containerPath": [], "index": 0 },
+      "expectedRootChildTypes": ["columns", "tabs"]
+    },
+    {
+      "name": "reorder root children (move index 0 to 2)",
+      "op": { "kind": "reorder", "containerPath": [], "fromIndex": 0, "toIndex": 2 },
+      "expectedRootChildTypes": ["columns", "tabs", "field"]
+    },
+    {
+      "name": "reorder inside columns (swap b and c)",
+      "op": { "kind": "reorder", "containerPath": [1], "fromIndex": 0, "toIndex": 1 },
+      "expectedColumnsFieldKeys": ["c", "b"]
+    },
+    {
+      "name": "update a field label at root",
+      "op": { "kind": "update", "containerPath": [], "index": 0, "patch": { "label": "Переименовано" } },
+      "expectedRootChild0Label": "Переименовано"
+    },
+    {
+      "name": "move field b out of columns to root end",
+      "op": { "kind": "move", "fromPath": [1, 0], "toPath": [3] },
+      "expectedRootChildTypes": ["field", "columns", "tabs", "field"],
+      "expectedColumnsFieldKeys": ["c"],
+      "expectedMovedFieldKeyAtRootEnd": "b"
+    },
+    {
+      "name": "move field a into columns at index 0 (columns shifts to root[0] after removal)",
+      "op": { "kind": "move", "fromPath": [0], "toPath": [1, 0] },
+      "columnsPath": [0],
+      "expectedColumnsFieldKeys": ["a", "b", "c"]
+    }
+  ]
+}
