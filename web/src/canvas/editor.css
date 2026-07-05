@@ -16,6 +16,21 @@
 }
 .chs-edtoolbar__id { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 0 1 auto; overflow: hidden; }
 .chs-edtoolbar__name { font-size: var(--chs-text-md); font-weight: var(--chs-weight-semibold); letter-spacing: var(--chs-tracking-tight); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* T-0684 [capstone T-0647 P1]: editable process-name input in the toolbar. Reads as
+   plain title text until focused; an unfilled/placeholder name lights the field red so
+   the author cannot miss the "name it" requirement enforced by save/publish. */
+.chs-edtoolbar__name-input {
+  font-size: var(--chs-text-md); font-weight: var(--chs-weight-semibold);
+  letter-spacing: var(--chs-tracking-tight); color: var(--chs-color-text);
+  background: transparent; border: 1px solid transparent; border-radius: var(--chs-radius-2);
+  padding: var(--chs-space-1) var(--chs-space-2); min-width: 0; width: 100%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chs-edtoolbar__name-input:hover { border-color: var(--chs-color-border); }
+.chs-edtoolbar__name-input:focus { outline: none; border-color: var(--chs-color-focus-ring, var(--chs-color-accent)); background: var(--chs-color-bg); }
+.chs-edtoolbar__name-input::placeholder { color: var(--chs-color-text-muted); font-weight: var(--chs-weight-regular); }
+.chs-edtoolbar__name-input--invalid { border-color: var(--chs-color-danger); }
+.chs-edtoolbar__name-input--invalid:focus { border-color: var(--chs-color-danger); }
 .chs-edtoolbar__meta { display: flex; align-items: center; gap: var(--chs-space-4); flex: none; }
 .chs-edtoolbar__sep { width: 1px; height: 20px; background: var(--chs-color-border); flex: none; }
 .chs-edtoolbar__group { display: flex; align-items: center; gap: var(--chs-space-2); }

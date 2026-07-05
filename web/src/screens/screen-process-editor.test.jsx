@@ -104,3 +104,49 @@ describe('ValidationBanner — never shows failure as green (T-0484)', () => {
     expect(ValidationBanner({ result: null, onDismiss: noop })).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0684 [capstone T-0647 P1]: the editor now REQUIRES a human process name.
+// The editor's full mount pulls in bpmn-js (not available in the node test tier),
+// so we lock the wiring structurally on the source (project idiom: screen source
+// presence — see screen-process-instance.test.jsx). The behavioural guarantees of
+// the guard itself are pin-tested in process-name-policy.test.js.
+// ---------------------------------------------------------------------------
+describe('screen-process-editor — human process-name enforcement (T-0684)', async () => {
+  const fs = await import('fs');
+  const path = await import('path');
+  const src = fs.default.readFileSync(
+    path.default.resolve(new URL(import.meta.url).pathname, '../screen-process-editor.jsx'),
+    'utf-8',
+  );
+
+  it('imports the shared name policy (predicate + message + placeholder)', () => {
+    expect(src).toContain("from './process-name-policy.js'");
+    expect(src).toContain('isRejectedProcessName');
+    expect(src).toContain('PROCESS_NAME_REQUIRED_MESSAGE');
+    expect(src).toContain('UNNAMED_PROCESS_PLACEHOLDER');
+  });
+
+  it('renders an editable name INPUT (not derived static text) in the toolbar', () => {
+    expect(src).toContain('chs-edtoolbar__name-input');
+    expect(src).toContain('onNameChange');
+    expect(src).toContain('Название процесса');
+  });
+
+  it('guards BOTH save and publish with the name policy before the network call', () => {
+    // The guard must appear at least twice (handleSave + handlePublish).
+    const guardHits = src.match(/if \(isRejectedProcessName\(name\)\)/g) || [];
+    expect(guardHits.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('no longer silently defaults a save to the placeholder name', async () => {
+    // Regression lock: the pre-fix code shipped the placeholder to the backend via
+    // `const name = processName || <placeholder>`. That literal default must be gone.
+    // The placeholder literal is pulled from the policy module (not hardcoded here).
+    const { UNNAMED_PROCESS_PLACEHOLDER } = await import('./process-name-policy.js');
+    const badDefault = new RegExp(
+      `processName \\|\\| ['"]${UNNAMED_PROCESS_PLACEHOLDER}['"]`,
+    );
+    expect(src).not.toMatch(badDefault);
+  });
+});

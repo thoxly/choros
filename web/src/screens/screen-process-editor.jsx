@@ -40,6 +40,13 @@ import {
   saveProcessDef,
   publishProcessDef,
 } from '../canvas/process-editor-api.js';
+// T-0684 [capstone T-0647 P1]: pre-flight name guard — block save/publish before the
+// network call when the author never gave the process a real human name.
+import {
+  isRejectedProcessName,
+  PROCESS_NAME_REQUIRED_MESSAGE,
+  UNNAMED_PROCESS_PLACEHOLDER,
+} from './process-name-policy.js';
 import '../canvas/editor.css';
 
 /* --------------------------------------------------------------------------
@@ -206,6 +213,11 @@ function EditorToolbar({
   onLoad,
   onValidate,
   onPublish,
+  // T-0684 [capstone T-0647 P1]: editable process-name field.
+  nameDraft,
+  onNameChange,
+  namePlaceholder,
+  nameInvalid,
   // T-0437: optional entry point to the branch-rules editor. Only supplied when
   // a real processKey exists (not for unsaved new processes).
   onBranchRules,
@@ -216,9 +228,19 @@ function EditorToolbar({
   return (
     <div className="chs-edtoolbar">
       <div className="chs-edtoolbar__id">
-        <span className="chs-edtoolbar__name">
-          {processName || 'Процесс'}
-        </span>
+        {/* T-0684: the name is an EDITABLE input, not derived text — the author must
+            give the process a real human name (empty/placeholder is rejected on
+            save/publish). aria-invalid + a hint below surface the requirement. */}
+        <input
+          type="text"
+          className={`chs-edtoolbar__name-input${nameInvalid ? ' chs-edtoolbar__name-input--invalid' : ''}`}
+          value={nameDraft}
+          placeholder={namePlaceholder}
+          onChange={(e) => onNameChange(e.target.value)}
+          aria-label="Название процесса"
+          aria-invalid={nameInvalid || undefined}
+          title="Название процесса, которое увидят сотрудники"
+        />
       </div>
       <div className="chs-edtoolbar__meta">
         <MonoId>{processId || 'PRC-UNKNOWN'}</MonoId>
@@ -392,11 +414,24 @@ export default function ProcessEditorScreen() {
   // falls back to route :id for existing, null for brand-new unsaved processes.
   const processKey = assignedKey ?? (isNew ? null : id);
 
-  // T-0324: derived process name from backendMeta or route param
-  const processName = backendMeta?.name
-    || (processKey ? processKey.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) : 'Новый процесс');
+  // T-0684 [capstone T-0647 P1]: the process name is now an EDITABLE field the author
+  // must fill — the modeler used to derive it silently (placeholder «Новый процесс»
+  // for a new process), so a save/publish went through nameless and 11 definitions on
+  // the operator's real screens were all named the placeholder. `nameDraft` seeds from
+  // the backend name on load (existing process) or stays empty (brand-new → author must
+  // type). Empty draft renders the placeholder as an <input placeholder> hint, never as
+  // the saved value.
+  const [nameDraft, setNameDraft] = useState('');
+  // The name used for save/publish + the toolbar/title display: the author's draft when
+  // non-empty, else the loaded backend name, else empty (guarded before any write).
+  const processName = nameDraft.trim() || backendMeta?.name || '';
   const processId = processKey ? processKey.toUpperCase() : 'PRC-NEW';
   const processStatus = backendMeta?.status || 'draft';
+  // T-0684: the name field is "invalid" (visual nudge) once the author has touched it
+  // and left it empty/placeholder — but only after a touch, so a freshly-opened new
+  // process does not show a red field before the author has done anything.
+  const [nameTouched, setNameTouched] = useState(false);
+  const nameInvalid = nameTouched && isRejectedProcessName(nameDraft);
 
   /* ------------------------------------------------------------------
      T-0324: Load definition from backend on mount.
@@ -422,6 +457,11 @@ export default function ProcessEditorScreen() {
       } else {
         setInitialXml(def.bpmnXml);
         setBackendMeta({ name: def.name, version: def.version, status: def.status });
+        // T-0684: seed the editable name field from the loaded definition's name so
+        // the author sees/edits the real name (not a placeholder). A pre-fix
+        // placeholder-named row loads its placeholder here so the author is nudged to
+        // rename it before the next save/publish (the create/publish gates reject it).
+        if (typeof def.name === 'string') setNameDraft(def.name);
       }
       setLoadPhase('ready');
     } catch (err) {
@@ -530,12 +570,21 @@ export default function ProcessEditorScreen() {
     const modeler = liveModeler;
     if (!modeler || isBusy) return;
 
+    // T-0684 [capstone T-0647 P1]: pre-flight name guard — do not even attempt a save
+    // with a missing/placeholder name (the server would 400 anyway). Surface the
+    // requirement inline + light up the field instead of a wasted round-trip.
+    const name = processName.trim();
+    if (isRejectedProcessName(name)) {
+      setNameTouched(true);
+      setStatusMsg({ text: PROCESS_NAME_REQUIRED_MESSAGE, isError: true });
+      return;
+    }
+
     setIsBusy(true);
     setStatusMsg({ text: 'Сохраняю…', isError: false });
     try {
       const { xml } = await saveDiagram(modeler);
       // Pass null processKey for new processes — backend assigns the key.
-      const name = processName || 'Новый процесс';
       const result = await saveProcessDef(processKey || null, name, xml);
       const finalKey = result.assignedKey ?? result.processKey;
 
@@ -638,12 +687,21 @@ export default function ProcessEditorScreen() {
     const modeler = liveModeler;
     if (!modeler || isBusy) return;
 
+    // T-0684 [capstone T-0647 P1]: pre-flight name guard — a process may not go LIVE
+    // nameless. Block before the save+publish round-trip; the server publish path also
+    // rejects a placeholder-named draft as a defense-in-depth backstop.
+    const name = processName.trim();
+    if (isRejectedProcessName(name)) {
+      setNameTouched(true);
+      setStatusMsg({ text: PROCESS_NAME_REQUIRED_MESSAGE, isError: true });
+      return;
+    }
+
     setIsBusy(true);
     setStatusMsg({ text: 'Публикую…', isError: false });
     try {
       // Step 1: Save current XML — auto-assigns key for new processes.
       const { xml } = await saveDiagram(modeler);
-      const name = processName || 'Новый процесс';
       const saved = await saveProcessDef(processKey || null, name, xml);
       const finalKey = saved.assignedKey ?? saved.processKey;
 
@@ -728,6 +786,11 @@ export default function ProcessEditorScreen() {
         onLoad={handleLoad}
         onValidate={handleValidate}
         onPublish={() => setPublishConfirmOpen(true)}
+        // T-0684: editable name field.
+        nameDraft={nameDraft}
+        onNameChange={(v) => { setNameTouched(true); setNameDraft(v); }}
+        namePlaceholder={UNNAMED_PROCESS_PLACEHOLDER}
+        nameInvalid={nameInvalid}
         // T-0437: navigate to branch-rules editor. Only provided when a real
         // processKey is known (not for unsaved new processes — G3: no dead affordance).
         onBranchRules={processKey ? () => navigate(`/processes/${encodeURIComponent(processKey)}/branch-rules`) : undefined}

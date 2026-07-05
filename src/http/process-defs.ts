@@ -35,6 +35,15 @@ import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
+// T-0684 [D-064 wave-5, capstone T-0647 P1]: the ONE predicate both the create route
+// and the publish path use to reject a nameless/placeholder-named process — so a NEW
+// definition can never be born as the modeler's «Новый процесс» placeholder (the live
+// capstone finding: 11 definitions all named the placeholder on the operator's screens).
+import {
+  isAcceptedProcessName,
+  isRejectedProcessName,
+  PROCESS_NAME_REQUIRED_MESSAGE,
+} from "../core/process-name-policy.js";
 import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
 import { mapTimerEscalation } from "../core/timer-escalation-mapper.js";
 import { mapAgentTaskToExternal, extractAgentTaskConfigs } from "../core/agent-task-external-mapper.js";
@@ -490,8 +499,11 @@ export function registerProcessDefsRoutes(
     const name = body["name"];
     const rawBpmnXml = body["bpmnXml"];
 
-    if (typeof name !== "string" || !name.trim()) {
-      throw new HttpError(400, "VALIDATION", "name must be a non-empty string");
+    // T-0684: enforce a real HUMAN process name at the source. Empty/whitespace OR
+    // the modeler's «Новый процесс» placeholder (case/space-insensitive) is rejected —
+    // a NEW definition may not be saved nameless. Existing valid names pass unchanged.
+    if (!isAcceptedProcessName(name)) {
+      throw new HttpError(400, "VALIDATION", PROCESS_NAME_REQUIRED_MESSAGE);
     }
     if (typeof rawBpmnXml !== "string" || !rawBpmnXml.trim()) {
       throw new HttpError(400, "VALIDATION", "bpmnXml must be a non-empty string");
@@ -779,6 +791,26 @@ export async function publishProcessByKey(
   });
   if (!row) {
     return { status: "not_found" };
+  }
+
+  // T-0684 [D-064 wave-5, capstone T-0647 P1]: a process may not go LIVE nameless.
+  // Defense-in-depth behind the create-route gate — a draft persisted before this
+  // enforcement (or via any other write path) that still carries the modeler
+  // placeholder / an empty name is rejected at publish, not deployed into a swamp of
+  // «Новый процесс» on the operator's live screens. Same 422 lint envelope shape as
+  // the other publish gates so the client renders the violation identically.
+  if (isRejectedProcessName(row.name)) {
+    return {
+      status: "lint_failed",
+      violations: [
+        {
+          type: "process_definition",
+          elementId: processKey,
+          elementKind: "process",
+          message: PROCESS_NAME_REQUIRED_MESSAGE,
+        },
+      ],
+    };
   }
 
   // T-0635 [P0-4]: agentTask → live agent-step external task, applied HERE

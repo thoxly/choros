@@ -21,6 +21,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { registerProcessDefsRoutes } from "../http/process-defs.js";
 import type { FlowableClient } from "../core/flowable-client.js";
+// T-0684: import the placeholder + message from the ONE policy module so these pin
+// tests never hardcode the process-name literal (anti-case-lock: neutral values only).
+import {
+  UNNAMED_PROCESS_PLACEHOLDER,
+  PROCESS_NAME_REQUIRED_MESSAGE,
+} from "../core/process-name-policy.js";
 
 // ---------------------------------------------------------------------------
 // Minimal router stub — captures registered handlers so tests can invoke them.
@@ -316,6 +322,69 @@ describe("process-defs routes (unit, no DB)", () => {
       expect(body.version).toBe(1);
       expect(body.status).toBe("draft");
     });
+
+    // -----------------------------------------------------------------------
+    // T-0684 [capstone T-0647 P1]: a NEW process may not be saved nameless.
+    // The modeler's placeholder default (imported from the ONE policy module so
+    // the test never hardcodes the literal) and an empty name are both rejected
+    // with 400 «Укажите название процесса»; a real human name saves fine.
+    // -----------------------------------------------------------------------
+    it("T-0684: rejects the placeholder default name with 400 (no swamp of unnamed defs)", async () => {
+      const inserted: string[] = [];
+      const pool = makePool(async (sql) => {
+        if (/BEGIN|COMMIT|ROLLBACK|SET LOCAL/.test(sql)) return { rows: [] };
+        if (/INSERT/.test(sql)) { inserted.push(sql); return { rows: [] }; }
+        return { rows: [] };
+      });
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
+      const route = router.find("POST", "/api/process-defs");
+
+      const req = makeReq({
+        body: JSON.stringify({ name: UNNAMED_PROCESS_PLACEHOLDER, bpmnXml: "<x/>" }),
+      });
+      const res = makeRes();
+
+      await expect(
+        route!.handler(req as any, res as any, {}),
+      ).rejects.toMatchObject({ statusCode: 400, message: PROCESS_NAME_REQUIRED_MESSAGE });
+      // Nothing was persisted — the gate fired before any INSERT.
+      expect(inserted).toHaveLength(0);
+    });
+
+    it("T-0684: rejects a whitespace-only / placeholder-with-extra-spaces name (400)", async () => {
+      const pool = makePool(async () => ({ rows: [] }));
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
+      const route = router.find("POST", "/api/process-defs");
+
+      // Extra spaces + different case must not smuggle the placeholder past the gate.
+      const sneaky = `  ${UNNAMED_PROCESS_PLACEHOLDER.toUpperCase()}   `;
+      const req = makeReq({ body: JSON.stringify({ name: sneaky, bpmnXml: "<x/>" }) });
+      const res = makeRes();
+
+      await expect(
+        route!.handler(req as any, res as any, {}),
+      ).rejects.toMatchObject({ statusCode: 400, message: PROCESS_NAME_REQUIRED_MESSAGE });
+    });
+
+    it("T-0684: a REAL human name still saves (201) — enforcement does not block valid names", async () => {
+      const pool = makePool(async (sql) => {
+        if (/BEGIN|COMMIT|ROLLBACK|SET LOCAL/.test(sql)) return { rows: [] };
+        if (/ORDER BY version DESC/.test(sql)) return { rows: [] };
+        if (/INSERT/.test(sql)) return { rows: [] };
+        return { rows: [] };
+      });
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
+      const route = router.find("POST", "/api/process-defs");
+
+      const req = makeReq({
+        body: JSON.stringify({ processKey: "my-proc", name: "Widget Intake Review", bpmnXml: "<xml/>" }),
+      });
+      const res = makeRes();
+
+      await route!.handler(req as any, res as any, {});
+      expect(res.statusCode).toBe(201);
+      expect(res.json.processKey).toBe("my-proc");
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -392,6 +461,48 @@ describe("process-defs routes (unit, no DB)", () => {
       expect(deployedXml).not.toContain('isExecutable="false"');
       expect(deployedXml).toContain('<process id="pub-proc"');
       expect(deployedXml).not.toContain('id="Process_1"');
+    });
+
+    // -----------------------------------------------------------------------
+    // T-0684 [capstone T-0647 P1]: defense-in-depth — a draft that still carries
+    // the placeholder / empty name (persisted before the create gate, or via any
+    // other write path) is REJECTED at publish, never deployed into the engine.
+    // Returns the lint 422 envelope; deployBpmn is never called.
+    // -----------------------------------------------------------------------
+    it("T-0684: rejects publishing a placeholder-named draft (422) — deployBpmn not called", async () => {
+      const placeholderNamedRow = {
+        id: "00000000-0000-0000-0000-0000000000aa",
+        process_key: "pub-proc",
+        name: UNNAMED_PROCESS_PLACEHOLDER, // never a real human name
+        bpmn_xml: `<?xml version="1.0"?><definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" targetNamespace="http://test"><process id="Process_1" isExecutable="false"><startEvent id="Start_1"/><endEvent id="End_1"/></process></definitions>`,
+        version: 1,
+        status: "draft",
+        deployment_id: null,
+        created_at: "1000",
+        updated_at: "2000",
+      };
+      const pool = makePool(async (sql) => {
+        if (/BEGIN|COMMIT|ROLLBACK|SET LOCAL/.test(sql)) return { rows: [] };
+        if (/process_app_binding/.test(sql)) return { rows: [] };
+        if (/SELECT/.test(sql)) return { rows: [placeholderNamedRow] };
+        return { rows: [] };
+      });
+      const flowableSuccess = makeFlowable({
+        deployBpmn: vi.fn().mockResolvedValue({ ok: true, deploymentId: "deploy-xyz" }),
+      });
+      registerProcessDefsRoutes(router as any, pool as any, flowableSuccess, TEST_RESOLVER);
+      const route = router.find("POST", "/api/process-defs/pub-proc/publish");
+
+      const req = makeReq();
+      const res = makeRes();
+      await route!.handler(req as any, res as any, { key: "pub-proc" });
+
+      expect(res.statusCode).toBe(422);
+      const body = res.json;
+      expect(body.error.code).toBe("BPMN_LINT_FAILED");
+      expect(JSON.stringify(body.error.violations)).toContain(PROCESS_NAME_REQUIRED_MESSAGE);
+      // Critical: the engine was never touched — a nameless process cannot go live.
+      expect(flowableSuccess.deployBpmn).not.toHaveBeenCalled();
     });
   });
 });

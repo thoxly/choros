@@ -18,6 +18,10 @@ import {
   hasVariables,
   hasDetailedHistory,
   formatHistoryTimestamp,
+  deriveInstanceTitle,
+  formatVariableValue,
+  renderableVariables,
+  hasRenderableVariables,
 } from './process-instance.logic.js';
 
 describe('instanceDetailPath — navigation target for the instance detail view', () => {
@@ -162,5 +166,80 @@ describe('formatHistoryTimestamp — engine ISO-8601 → human-readable (T-0609)
     expect(formatHistoryTimestamp(undefined)).toBe('—');
     expect(formatHistoryTimestamp('')).toBe('—');
     expect(formatHistoryTimestamp('not-a-date')).toBe('—');
+  });
+});
+
+// T-0684 [capstone T-0647 P1]: instance title is the HUMAN name, machine key demoted.
+// Live capstone finding: the detail title rendered the machine key (a camelCase
+// engine key) where the definition's human name belongs.
+describe('deriveInstanceTitle — human name primary, machine key never the title', () => {
+  it('promotes a real human name and demotes the raw key', () => {
+    const out = deriveInstanceTitle({ name: 'Обработка виджета', procId: 'telLinear' });
+    expect(out.title).toBe('Обработка виджета');
+    expect(out.title).not.toBe('telLinear');
+    expect(out.keyDemoted).toBe('telLinear');
+  });
+
+  it('never shows the raw key as the title when name === key (engine-only fallback)', () => {
+    // The server echoes the key as `name` when no modeler row exists → name === procId.
+    const out = deriveInstanceTitle({ name: 'telLinear', procId: 'telLinear' });
+    expect(out.title).not.toBe('telLinear');       // NOT the machine key
+    expect(out.title).toBe('Процесс');              // honest generic
+    expect(out.keyDemoted).toBe('telLinear');       // key still shown, but demoted
+  });
+
+  it('is defensive against missing name / procId', () => {
+    expect(deriveInstanceTitle({ procId: 'k' }).title).toBe('Процесс');
+    expect(deriveInstanceTitle(null).title).toBe('Процесс');
+    expect(deriveInstanceTitle({ name: 'Real Name' }).keyDemoted).toBeNull();
+  });
+});
+
+// T-0684 [capstone T-0647 P1]: process-variables never render the literal "undefined".
+// Live capstone finding: the variables section printed the literal `undefined` x3.
+describe('formatVariableValue — no literal "undefined"/"null" ever', () => {
+  it('renders undefined / null / empty as the honest em-dash, NEVER "undefined"', () => {
+    expect(formatVariableValue(undefined)).toBe('—');
+    expect(formatVariableValue(null)).toBe('—');
+    expect(formatVariableValue('')).toBe('—');
+    expect(formatVariableValue(undefined)).not.toBe('undefined');
+    expect(formatVariableValue(null)).not.toBe('null');
+  });
+
+  it('renders real values honestly (string / number / boolean / object)', () => {
+    expect(formatVariableValue('hello')).toBe('hello');
+    expect(formatVariableValue(0)).toBe('0');       // falsy but real
+    expect(formatVariableValue(false)).toBe('false');
+    expect(formatVariableValue({ a: 1 })).toBe('{"a":1}');
+  });
+});
+
+describe('renderableVariables / hasRenderableVariables — no phantom rows', () => {
+  it('drops phantom rows (no name AND no value) that would render as "undefined"', () => {
+    const instance = {
+      variables: [
+        { name: undefined, value: undefined },   // phantom → dropped
+        { name: '', value: null },               // phantom → dropped
+        { name: 'amount', value: 500 },          // real → kept
+      ],
+    };
+    const rows = renderableVariables(instance);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].name).toBe('amount');
+    expect(rows[0].value).toBe(500);
+  });
+
+  it('keeps a NAMED variable with a null value (honest "exists, no value") — renders "—"', () => {
+    const instance = { variables: [{ name: 'note', value: null }] };
+    const rows = renderableVariables(instance);
+    expect(rows).toHaveLength(1);
+    expect(formatVariableValue(rows[0].value)).toBe('—');
+  });
+
+  it('hasRenderableVariables is false for a payload of ONLY phantom rows', () => {
+    expect(hasRenderableVariables({ variables: [{ name: undefined, value: undefined }] })).toBe(false);
+    expect(hasRenderableVariables({ variables: [] })).toBe(false);
+    expect(hasRenderableVariables(null)).toBe(false);
+    expect(hasRenderableVariables({ variables: [{ name: 'x', value: 1 }] })).toBe(true);
   });
 });

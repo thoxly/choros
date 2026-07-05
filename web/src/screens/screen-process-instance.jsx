@@ -36,9 +36,12 @@ import {
   progressFraction,
   filterInstanceHistory,
   hasSourceRecord,
-  hasVariables,
   hasDetailedHistory,
   formatHistoryTimestamp,
+  deriveInstanceTitle,
+  hasRenderableVariables,
+  renderableVariables,
+  formatVariableValue,
 } from './process-instance.logic.js';
 
 const EXEC_LABEL = { human: 'Человек', agent: 'Агент', service: 'Сервис' };
@@ -188,15 +191,18 @@ function HistoryStepRow({ step }) {
   );
 }
 
-/** T-0609: one name/value row of the process-variables table. */
+/** T-0609: one name/value row of the process-variables table.
+ *  T-0684 [capstone T-0647 P1]: value formatting is delegated to formatVariableValue
+ *  (the pure logic module) so a null/undefined/empty value renders the honest «—»,
+ *  never the JS literal "undefined" (the live capstone finding: `undefined`×3). The
+ *  name likewise never renders empty — falls back to «—» so no blank mono cell. */
 function VariableRow({ variable }) {
-  const displayValue = typeof variable.value === 'object' && variable.value !== null
-    ? JSON.stringify(variable.value)
-    : String(variable.value);
+  const displayValue = formatVariableValue(variable.value);
+  const displayName = typeof variable.name === 'string' && variable.name.trim() ? variable.name : '—';
   return (
     <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--chs-space-3)', padding: 'var(--chs-space-2) 0' }}>
       <Mono style={{ fontSize: 'var(--chs-text-sm)', flexShrink: 0, minWidth: 160 }}>
-        {variable.name}
+        {displayName}
       </Mono>
       <Mono style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', wordBreak: 'break-all' }}>
         {displayValue}
@@ -318,21 +324,32 @@ function ProcessInstanceScreen() {
           <div style={detailGridStyle}>
             {/* Main column */}
             <div style={{ minWidth: 0 }}>
-              {/* Title + status */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-4)', flexWrap: 'wrap', marginBottom: 'var(--chs-space-2)' }}>
-                <h1 style={{ margin: 0, fontSize: 'var(--chs-text-lg)', fontWeight: 'var(--chs-weight-semibold)' }}>
-                  {instance.name}
-                </h1>
-                <StatusChip status={instance.status} />
-              </div>
-              <div style={{ marginBottom: 'var(--chs-space-6)', display: 'flex', gap: 'var(--chs-space-4)', flexWrap: 'wrap' }}>
-                <MonoId>{instance.id}</MonoId>
-                {instance.procId && (
-                  <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-                    {instance.procId}
-                  </Mono>
-                )}
-              </div>
+              {/* Title + status.
+                  T-0684 [capstone T-0647 P1]: the title is the definition's HUMAN name,
+                  never the raw machine key (telLinear). deriveInstanceTitle promotes a
+                  real name and demotes the process key to the mono meta line below;
+                  when only the key is known it shows the honest generic «Процесс». */}
+              {(() => {
+                const { title, keyDemoted } = deriveInstanceTitle(instance);
+                return (
+                  <>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-4)', flexWrap: 'wrap', marginBottom: 'var(--chs-space-2)' }}>
+                      <h1 style={{ margin: 0, fontSize: 'var(--chs-text-lg)', fontWeight: 'var(--chs-weight-semibold)' }}>
+                        {title}
+                      </h1>
+                      <StatusChip status={instance.status} />
+                    </div>
+                    <div style={{ marginBottom: 'var(--chs-space-6)', display: 'flex', gap: 'var(--chs-space-4)', flexWrap: 'wrap' }}>
+                      <MonoId>{instance.id}</MonoId>
+                      {keyDemoted && (
+                        <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                          {keyDemoted}
+                        </Mono>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
 
               {/* Current nodes (incl. concurrent branches) */}
               <h2 style={sectionTitleStyle}>Текущий шаг</h2>
@@ -363,12 +380,16 @@ function ProcessInstanceScreen() {
 
               {/* T-0609: process variables (name/value) — best-effort from the engine's
                   historic-variable-instances read (GET /api/processes/:id). Rendered
-                  only when non-empty (not every process carries variables). */}
-              {hasVariables(instance) && (
+                  only when non-empty (not every process carries variables).
+                  T-0684 [capstone T-0647 P1]: gate + rows now go through
+                  hasRenderableVariables/renderableVariables so a payload of only
+                  phantom (nameless+valueless) rows renders NO section, and no row ever
+                  prints the literal "undefined" (VariableRow → formatVariableValue). */}
+              {hasRenderableVariables(instance) && (
                 <>
                   <h2 style={sectionTitleStyle}>Переменные процесса</h2>
                   <div>
-                    {instance.variables.map((v, i) => <VariableRow key={v.name || i} variable={v} />)}
+                    {renderableVariables(instance).map((v, i) => <VariableRow key={v.name || i} variable={v} />)}
                   </div>
                 </>
               )}
