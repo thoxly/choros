@@ -20,7 +20,13 @@
 import { describe, it, expect } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import FormDesigner from './FormDesigner.jsx';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const FORM_DESIGNER_SRC = readFileSync(join(__dirname, 'FormDesigner.jsx'), 'utf-8');
 
 // A tiny live schema + a matching document so the designer renders fields +
 // palette + a selected-nothing inspector, all without hitting the network
@@ -60,6 +66,81 @@ describe('FormDesigner — render smoke', () => {
     expect(html).toContain('Заголовок');
     // the fullscreen control is a real button, not a stub
     expect(html).toContain('На весь экран');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0665 (F1) — the process+step binding picker. LIVE_PROOF T-0656 found that
+// FormDesigner had NO UI to choose a process/step at all, so persistLayout()
+// always fell back to the hardcoded process_key='record' (no such process on
+// any real tenant) → save always 409'd.
+//
+// The full picker section only paints after `/api/applications` resolves
+// (pre-existing T-0544 gate: `if (!initialFields && applications === null)
+// return <LoadingState/>`), which renderToStaticMarkup cannot await (this
+// tier has no jsdom/act — see the file header). So these are source-presence
+// checks (same convention as screen-inbox.test.jsx) for the picker's wiring,
+// plus a static-markup check of the save-button gating via the
+// initialDocument/initialFields embedding path (which DOES render
+// synchronously, and exercises the same `doc.step` gate the picker feeds).
+// ---------------------------------------------------------------------------
+describe('FormDesigner — process/step binding picker (T-0665 F1)', () => {
+  it('renders a "Привязка" section with a real process picker (data-driven, not a stub)', () => {
+    expect(FORM_DESIGNER_SRC).toContain('Привязка');
+    expect(FORM_DESIGNER_SRC).toContain("<h4 style={{ marginTop: 0 }}>Привязка</h4>");
+    expect(FORM_DESIGNER_SRC).toContain('/api/process-catalog');
+  });
+
+  it('the process picker filters to PUBLISHED definitions only (drafts are not offered)', () => {
+    expect(FORM_DESIGNER_SRC).toContain("d.status === 'published'");
+  });
+
+  it('renders a free-text "Шаг процесса" field (not a fixed dropdown of invented steps)', () => {
+    const idx = FORM_DESIGNER_SRC.indexOf('Шаг процесса');
+    expect(idx).toBeGreaterThan(-1);
+    const block = FORM_DESIGNER_SRC.slice(idx, idx + 400);
+    expect(block).toContain('type="text"');
+    expect(block).toContain('placeholder="Например, Проверка заявки"');
+  });
+
+  it('offers real userTask id/name suggestions parsed from the chosen process BPMN (extractUserTasks), not invented data', () => {
+    expect(FORM_DESIGNER_SRC).toContain("import { extractUserTasks } from './bpmn-user-tasks.js'");
+    expect(FORM_DESIGNER_SRC).toContain('extractUserTasks(def.bpmnXml)');
+  });
+
+  it('selecting a process/step writes a real doc.step (persistLayout no longer only sees the hardcoded fallback)', () => {
+    // The fallback ('record'/'record-form') is a LAST-RESORT default when no
+    // step object is available at all — assert the picker's `step` argument
+    // takes priority over it (persistLayout(doc, step, ...) signature).
+    expect(FORM_DESIGNER_SRC).toContain('function persistLayout(doc, step, setSaveState, savedDocRef, setSaveGen)');
+    expect(FORM_DESIGNER_SRC).toContain("step?.processKey || doc.step?.processKey || 'record'");
+    expect(FORM_DESIGNER_SRC).toContain("step?.step || doc.step?.step || 'record-form'");
+  });
+
+  it('does NOT hardcode a case-specific process slug in the picker (D-064 anti-case) — options come from state, not a literal', () => {
+    // No `=== 'someCaseSlug'` branch anywhere in the file (other than the
+    // documented 'record' fallback) — the picker's option list is built from
+    // processCatalog (API response), never a literal array of case names.
+    expect(FORM_DESIGNER_SRC).not.toMatch(/process_key\s*===\s*['"](?!record['"])[a-zA-Z]/);
+    expect(FORM_DESIGNER_SRC).toContain('(processCatalog || []).map((d) => ({ value: d.process_key');
+  });
+
+  it('warns that a process+step must be chosen before the save button becomes usable (static-markup, embedding path)', () => {
+    const html = renderToStaticMarkup(<FormDesigner initialDocument={DOC} initialFields={FIELDS} />);
+    // DOC (the fixture at the top of this file) carries no `step` — the save
+    // button must render disabled and the hint must be visible, proving the
+    // gate is live (not just present in source, but actually wired to `doc`).
+    expect(html).toContain('Выберите процесс и шаг выше, чтобы сохранить форму.');
+    const btnIdx = html.indexOf('Сохранить раскладку');
+    expect(btnIdx).toBeGreaterThan(-1);
+    const buttonOpenTag = html.slice(Math.max(0, btnIdx - 300), btnIdx);
+    expect(buttonOpenTag).toMatch(/disabled=""|disabled(?!Guard)/);
+  });
+
+  it('a document that already carries doc.step (e.g. AI-emitted/embedded) does not need the picker to save', () => {
+    const DOC_WITH_STEP = { ...DOC, step: { processKey: 'purchaseApproval', step: 'approveRequest' } };
+    const html = renderToStaticMarkup(<FormDesigner initialDocument={DOC_WITH_STEP} initialFields={FIELDS} />);
+    expect(html).not.toContain('Выберите процесс и шаг выше, чтобы сохранить форму.');
   });
 });
 

@@ -39,6 +39,8 @@ import { ConsequenceSummary } from '../util/confirm-helpers.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { useDirtyGuard } from '../hooks/useDirtyGuard.js';
 import { parseRecordSchema } from '../screens/apps-schema.js';
+import { fetchProcessDef } from '../canvas/process-editor-api.js';
+import { extractUserTasks } from './bpmn-user-tasks.js';
 import FormDocumentRenderer from './FormDocumentRenderer.jsx';
 import {
   buildDefaultDocument, validateDocument,
@@ -546,6 +548,25 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   const [registryDefs, setRegistryDefs] = useState(null);
   const [selectedDefId, setSelectedDefId] = useState('');
   const [fields, setFields] = useState(initialFields || []);
+
+  // T-0665 (F1/F2): the process+step this form binds to. FormDesigner used to
+  // never set this — persistLayout() then always fell back to the hardcoded
+  // process_key='record'/form_key='record-form', which has no
+  // process_app_binding on any real tenant → save always 409'd (LIVE_PROOF
+  // T-0656 P0). `stepKey` stays free text (same pattern as FormBuilder.jsx's
+  // existing step field) — `bpmnUserTasks` only POPULATES a suggestion list,
+  // it is never the sole way to set a value (best-effort, ADR §3.1).
+  const [processCatalog, setProcessCatalog] = useState(null); // null = not loaded yet
+  const [catalogError, setCatalogError] = useState(null);
+  const [loadingCatalog, setLoadingCatalog] = useState(false);
+  const [selectedProcessKey, setSelectedProcessKey] = useState('');
+  const [stepKey, setStepKey] = useState('');
+  const [bpmnUserTasks, setBpmnUserTasks] = useState([]); // best-effort suggestions
+  // T-0665 (F3): whether an existing form_binding.layout was loaded for the
+  // current (selectedProcessKey, stepKey) pair — drives whether the
+  // registry-def-change effect below is allowed to rebuild a fresh document.
+  const [loadingExistingBinding, setLoadingExistingBinding] = useState(false);
+  const [existingBindingError, setExistingBindingError] = useState(null);
   // T-0544: the document lives inside a HistoryStack (undo/redo). doc = history.present.
   const [history, setHistory] = useState(() => (initialDocument ? initHistory(initialDocument) : null));
   // multiselect: a Set of path-keys.
@@ -600,6 +621,91 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
       .catch(() => setLoadError('Не удалось загрузить приложения.'));
   }, [initialFields]);
 
+  // T-0665 (F1): load the process catalog for the process picker — the SAME
+  // real tenant data FormBuilder.jsx already uses (/api/process-catalog),
+  // filtered to PUBLISHED definitions only (a draft's BPMN can still change
+  // or lose the step being bound, and classifyLayoutSave requires a real
+  // process_app_binding anyway — offering a draft would be a false promise).
+  // Anti-case (D-064): the picker's contents are DATA (this tenant's real
+  // definitions), never a hardcoded slug list.
+  const loadProcessCatalog = useCallback(() => {
+    if (initialFields) return; // embedding/test mode — no network (mirrors applications effect)
+    setLoadingCatalog(true);
+    setCatalogError(null);
+    fetch('/api/process-catalog', { headers: authHeaders() })
+      .then((r) => {
+        if (r.status === 403) return { definitions: [] }; // legitimately empty, not a failure
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data) => {
+        const defs = (data.definitions || []).filter((d) => d.status === 'published');
+        setProcessCatalog(defs);
+      })
+      .catch((err) => {
+        setCatalogError(String(err?.message || err));
+        setProcessCatalog([]);
+      })
+      .finally(() => setLoadingCatalog(false));
+  }, [initialFields]);
+
+  useEffect(() => { loadProcessCatalog(); }, [loadProcessCatalog]);
+
+  // T-0665 (F1): best-effort userTask id/name suggestions for the chosen
+  // process, parsed from its real bpmnXml (fetchProcessDef — the same call
+  // the BPMN process editor uses). Failure/absence → empty list; the step-key
+  // field stays free text either way (ADR §3.1).
+  useEffect(() => {
+    if (!selectedProcessKey) { setBpmnUserTasks([]); return; }
+    let cancelled = false;
+    fetchProcessDef(selectedProcessKey)
+      .then((def) => {
+        if (cancelled || !def) return;
+        setBpmnUserTasks(extractUserTasks(def.bpmnXml));
+      })
+      .catch(() => { if (!cancelled) setBpmnUserTasks([]); });
+    return () => { cancelled = true; };
+  }, [selectedProcessKey]);
+
+  // T-0665 (F3): when a process+step is chosen, load the EXISTING binding (if
+  // any) for that (processKey, stepKey) pair. If it carries a `layout`, that
+  // layout — NOT a freshly rebuilt document — becomes the designer's document,
+  // so reopening the designer for an already-bound step shows what was really
+  // saved (LIVE_PROOF T-0656 P0: reopening used to always discard the saved
+  // layout and rebuild a flat one from the field-set schema). If the binding
+  // has no layout (legacy) or does not exist (404), this is a no-op — the
+  // existing schema-driven build effect below runs exactly as before.
+  const skipNextSchemaRebuildRef = useRef(false);
+  useEffect(() => {
+    if (initialFields) return; // embedding/test mode — no network
+    if (!selectedProcessKey || !stepKey.trim()) return;
+    setLoadingExistingBinding(true);
+    setExistingBindingError(null);
+    fetch(
+      `/api/forms/binding?processKey=${encodeURIComponent(selectedProcessKey)}&stepKey=${encodeURIComponent(stepKey.trim())}`,
+      { headers: authHeaders() },
+    )
+      .then((r) => {
+        if (r.status === 404) return null;
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data) => {
+        if (!data) return; // no binding yet — schema-driven build proceeds normally
+        if (Array.isArray(data.fields)) setFields(data.fields);
+        if (data.layout && typeof data.layout === 'object' && data.layout.root) {
+          skipNextSchemaRebuildRef.current = true;
+          setHistory(initHistory(data.layout));
+          savedDocRef.current = data.layout;
+          setSelectedKeys(new Set());
+        }
+        // legacy binding (fields but no layout) — fall through to the
+        // schema-driven build effect below, unchanged behavior (NF3).
+      })
+      .catch((err) => setExistingBindingError(String(err?.message || err)))
+      .finally(() => setLoadingExistingBinding(false));
+  }, [initialFields, selectedProcessKey, stepKey]);
+
   // Load registry defs for the chosen app.
   useEffect(() => {
     if (!selectedAppId) { setRegistryDefs(null); return; }
@@ -610,8 +716,13 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   }, [selectedAppId]);
 
   // Derive live schema + default document when the registry def changes.
+  // T-0665 (F3): skipped ONCE right after an existing layout was loaded above
+  // (skipNextSchemaRebuildRef) — otherwise picking the SAME app/def that the
+  // loaded layout was built from would immediately overwrite it with a fresh
+  // flat rebuild, defeating the whole point of loading the saved layout.
   useEffect(() => {
     if (!selectedDefId || !registryDefs) return;
+    if (skipNextSchemaRebuildRef.current) { skipNextSchemaRebuildRef.current = false; return; }
     const def = registryDefs.find((d) => d.id === selectedDefId);
     if (!def) return;
     const parsed = parseRecordSchema(def.record_schema);
@@ -910,6 +1021,81 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
     >
       {/* ---- Palette + source picker ---- */}
       <aside className="chs-designer-palette">
+        {/* T-0665 (F1): process+step binding picker — WITHOUT this, saving always
+            fell back to the hardcoded process_key='record' (no such process on
+            any tenant) → 409 every time (LIVE_PROOF T-0656 P0). The process
+            list comes from /api/process-catalog (this tenant's real published
+            definitions, D-064 anti-case) — the step stays free text (mirrors
+            FormBuilder.jsx's existing pattern), with real userTask id/name
+            suggestions parsed best-effort from the chosen process's BPMN. */}
+        {!initialFields && (
+          <section style={{ marginBottom: 'var(--chs-space-4)', paddingBottom: 'var(--chs-space-4)', borderBottom: '1px solid var(--chs-color-border)' }}>
+            <h4 style={{ marginTop: 0 }}>Привязка</h4>
+            <label className="chs-label">Процесс</label>
+            <Select
+              value={selectedProcessKey}
+              onChange={(e) => { setSelectedProcessKey(e.target.value); setStepKey(''); setSaveState({ status: 'idle' }); }}
+              options={[
+                { value: '', label: '— выберите —' },
+                ...(processCatalog || []).map((d) => ({ value: d.process_key, label: d.name || d.process_key })),
+              ]}
+            />
+            {loadingCatalog && (
+              <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                Загрузка процессов…
+              </span>
+            )}
+            {catalogError && (
+              <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+                Не удалось загрузить список процессов.{' '}
+                <button
+                  type="button"
+                  onClick={loadProcessCatalog}
+                  style={{ background: 'none', border: 'none', padding: 0, color: 'var(--chs-color-accent)', cursor: 'pointer', fontSize: 'inherit', textDecoration: 'underline' }}
+                >
+                  Повторить
+                </button>
+              </span>
+            )}
+            {!loadingCatalog && !catalogError && processCatalog && processCatalog.length === 0 && (
+              <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                Нет опубликованных процессов в этом тенанте.
+              </span>
+            )}
+
+            <label className="chs-label" style={{ marginTop: 'var(--chs-space-3)' }}>Шаг процесса</label>
+            <input
+              className="chs-input"
+              type="text"
+              list="chs-form-designer-user-tasks"
+              value={stepKey}
+              onChange={(e) => { setStepKey(e.target.value); setSaveState({ status: 'idle' }); }}
+              placeholder="Например, Проверка заявки"
+              style={{ width: '100%' }}
+              disabled={!selectedProcessKey}
+            />
+            {bpmnUserTasks.length > 0 && (
+              <datalist id="chs-form-designer-user-tasks">
+                {bpmnUserTasks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </datalist>
+            )}
+            <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+              Совпадает со значением поля «Шаг» в карточке задачи инбокса
+              {bpmnUserTasks.length > 0 ? ' — подсказки из шагов процесса ниже' : ''}
+            </span>
+            {loadingExistingBinding && (
+              <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                Загрузка существующей раскладки…
+              </span>
+            )}
+            {existingBindingError && (
+              <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+                Не удалось проверить существующую привязку: {existingBindingError}
+              </span>
+            )}
+          </section>
+        )}
+
         {!initialFields && (
           <>
             <label className="chs-label">Приложение</label>
@@ -1051,11 +1237,25 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                 Несохранённые изменения
               </p>
             )}
+            {/* T-0665 (F1): a step MUST be chosen before saving — a save without
+                one falls back to the dead 'record'/'record-form' pair (no
+                process on any tenant has it) and always 409s. `doc.step` from
+                initialDocument (e.g. AI-emitted / embedded) satisfies this too,
+                so the picker is not forced on a caller that already supplied it. */}
+            {!(selectedProcessKey && stepKey.trim()) && !doc?.step && (
+              <p role="alert" style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
+                Выберите процесс и шаг выше, чтобы сохранить форму.
+              </p>
+            )}
             <Button
               variant="primary"
-              disabled={!validation.ok || saveState.status === 'saving'}
+              disabled={!validation.ok || saveState.status === 'saving' || !(doc?.step || (selectedProcessKey && stepKey.trim()))}
               loading={saveState.status === 'saving'}
-              onClick={() => persistLayout(doc, setSaveState, savedDocRef, setSaveGen)}
+              onClick={() => persistLayout(
+                doc,
+                { processKey: selectedProcessKey, step: stepKey.trim() },
+                setSaveState, savedDocRef, setSaveGen,
+              )}
               style={{ marginTop: 'var(--chs-space-2)', width: '100%' }}
             >
               Сохранить раскладку
@@ -1121,13 +1321,26 @@ function resolveKey(doc, key) {
 /**
  * Persist the form-document layout via POST /api/forms/binding.
  * T-0533: savedDocRef updated on success → isDirty resets; saveGen bump re-runs the memo.
+ *
+ * T-0665 (F1/F2): `step` ({processKey, step}) comes from the designer's own
+ * process/step picker state — `doc.step` is used ONLY as a fallback for a
+ * document that already carries one (e.g. an initialDocument supplied by an
+ * embedding caller or an AI-emitted document), and 'record'/'record-form'
+ * remain the last-resort default for the (now rare) case where neither is
+ * set. Previously `doc.step` was NEVER populated by this component at all,
+ * so every save silently hit that dead fallback (LIVE_PROOF T-0656 P0).
  */
-function persistLayout(doc, setSaveState, savedDocRef, setSaveGen) {
+function persistLayout(doc, step, setSaveState, savedDocRef, setSaveGen) {
   setSaveState({ status: 'saving' });
+  const processKey = step?.processKey || doc.step?.processKey || 'record';
+  const formKey = step?.step || doc.step?.step || 'record-form';
+  const docWithStep = (step?.processKey && step?.step)
+    ? { ...doc, step: { processKey: step.processKey, step: step.step } }
+    : doc;
   const body = {
-    process_key: doc.step?.processKey || 'record',
-    form_key: doc.step?.step || 'record-form',
-    layout: doc,
+    process_key: processKey,
+    form_key: formKey,
+    layout: docWithStep,
   };
   fetch('/api/forms/binding', {
     method: 'POST',
@@ -1136,7 +1349,7 @@ function persistLayout(doc, setSaveState, savedDocRef, setSaveGen) {
   })
     .then((r) => { if (!r.ok) throw new Error('save failed'); return r.json(); })
     .then(() => {
-      if (savedDocRef) savedDocRef.current = doc;
+      if (savedDocRef) savedDocRef.current = docWithStep;
       if (setSaveGen) setSaveGen((g) => g + 1);
       setSaveState({ status: 'saved' });
     })
