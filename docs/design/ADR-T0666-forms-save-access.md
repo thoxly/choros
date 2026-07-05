@@ -147,18 +147,36 @@ UI has nothing to attach the constructor-employee to).
 
 ## 5. Frozen-check note
 
-Migration 128 is a genuinely new file numbered ≥38, which trips
-`ci/checks/substitution-isolation.sh`'s FF-SUB5 "only 036/037 permitted"
-migration-seam guard (that check is scoped to T-0035's substitution feature,
-unrelated to this task — the same false-positive class T-0625/T-0628 hit for
-migrations 126/127). Per the established `auto_additive` sanction channel
-(`ci/checks/auto-sanction-additive.sh`, T-0232), this task appended a
-purely-additive relief block to `substitution-isolation.sh` (mirrors the
-126/127 relief blocks verbatim in structure) plus a sanction entry in
-`ci/checks/data/frozen-sanctions.jsonl` — independently verified via
-`auto-sanction-additive.sh --verify` (A-1..A-4 additivity + GRANT-ESCALATION
-family attestation bound to this file in the T-0152 catalog + corpus_ref
-`efa4b97`, same corpus blob T-0625/T-0628 attested against, unchanged).
-`ci/checks/frozen-checks-immutable.sh` confirms the sanction and passes clean.
-No frozen check's real invariant (036/037 stay the only migrations native to
-T-0035; `substitution_rule` / the substitution port untouched) is weakened.
+Migration 128 is a genuinely new file numbered ≥38 / outside a handful of
+other tasks' owned migration-seam guards, which trips THREE unrelated
+task-scoped static checks (a known recurring false-positive class — any new
+migration on any branch trips these until relieved — already hit by
+T-0625/T-0628 for migrations 126/127):
+
+- `ci/checks/substitution-isolation.sh` (T-0035) FF-SUB5 "only 036/037
+  permitted" migration-seam guard. Fixed via the established `auto_additive`
+  sanction channel (`ci/checks/auto-sanction-additive.sh`, T-0232): appended a
+  purely-additive relief block (mirrors the 126/127 relief blocks verbatim in
+  structure) + a sanction entry in `ci/checks/data/frozen-sanctions.jsonl`,
+  independently verified via `auto-sanction-additive.sh --verify` (A-1..A-4
+  additivity + GRANT-ESCALATION family attestation bound to this file in the
+  T-0152 catalog + `corpus_ref efa4b97`, the same corpus blob T-0625/T-0628
+  attested against, unchanged).
+- `ci/checks/dual-control-isolation.sh` (T-0044) FF-DC7 "only migration 031
+  permitted" guard. Same `auto_additive` channel — a second sanction entry
+  (TENANT-ISO family, same corpus_ref), same relief-block structure as the
+  126/127 precedent in that file.
+- `ci/checks/role-criticality-isolation.sh` (T-0040) FF-RC5/FF-RC6 "no new
+  migration" guard. This one already ships a **data-file** escape hatch
+  (`ci/checks/role-criticality-migration-excludes.txt`, NOT itself a `.sh`
+  file, so it falls outside the `ci/checks/[^/]+\.sh` glob
+  `frozen-checks-immutable.sh` protects — no sanction needed) — added one
+  line naming `128_process_designer_role_backfill` per that file's documented
+  format.
+
+`ci/checks/frozen-checks-immutable.sh` confirms both `.sh` sanctions and
+passes clean; `npm run fitness` (the full static-check chain) exits 0. No
+frozen check's real invariant is weakened — each relief independently
+re-parses migration 128's own SQL body (not trusting the filename) to confirm
+it introduces no CREATE/DROP TABLE, no RLS/POLICY statement, and touches
+neither the substitution domain nor `confirmed2_by`.
