@@ -404,3 +404,129 @@ describe("POST /api/forms/binding — fields DERIVED from layout (T-0665-e2e P0,
     } finally { await srv.close(); }
   });
 });
+
+// ===========================================================================
+// T-0680 — a FormDesigner layout carrying a COLLECTION table must SAVE, not
+// 409 WRONG_FLOOR. LIVE-defect T-0678: classifyLayoutSave folded a table's
+// column subKeys into the flat top-level KEY_SET and checked them against
+// resolveLiveSchemaFieldKeys (top-level `Object.keys(properties)` only) — so
+// EVERY collection column («Позиции».qty/product) read as a dangling binding
+// → Floor-2 → 409, forcing the live-proof to DELETE the table for a clean
+// save. The fix resolves the collection's NESTED sub-schema
+// (resolveLiveCollectionSubKeys) and R-4 checks each column against its
+// owning collection's own key set.
+//
+// MUTATIONAL: revert floor-boundary.ts channel-2 (subKey back into the flat
+// keySet) → this table-save 409s and the test goes RED.
+// ===========================================================================
+
+// A live record_schema with a `positions` COLLECTION (array-of-objects) whose
+// sub-schema keys (product/qty) are NESTED — deliberately NOT among the
+// top-level properties. A multi-select-style array (items:string) is included
+// to prove the resolver does not mistake it for a collection.
+const COLLECTION_SCHEMA = {
+  summa: { type: "number", "x-money": { currency: "RUB" } },
+  positions: {
+    type: "array",
+    items: {
+      type: "object",
+      properties: { product: { type: "string" }, qty: { type: "number" } },
+    },
+  },
+  tags: { type: "array", items: { type: "string" } }, // multi-select, NOT a collection
+};
+
+const COLLECTION_LAYOUT = {
+  schemaVersion: 1,
+  source: { applicationId: APP_ID },
+  root: {
+    type: "section",
+    id: "s1",
+    children: [
+      { type: "field", id: "f1", fieldKey: "summa", widget: "money", label: "Сумма" },
+      {
+        type: "table", id: "t1", fieldKey: "positions", label: "Позиции",
+        columns: [
+          { subKey: "product", widget: "text", label: "Товар" },
+          { subKey: "qty", widget: "number", label: "Кол-во" },
+        ],
+      },
+    ],
+  },
+};
+
+function makeCollectionStubPool(): pg.Pool {
+  const rows = new Map<string, StoredRow>();
+  const client = {
+    query: async (text: string, params?: unknown[]) => {
+      if (typeof text !== "string") return { rows: [] };
+      const t = text.trim();
+      if (/^(BEGIN|COMMIT|ROLLBACK|SET LOCAL|SET )/i.test(t)) return { rows: [] };
+      if (text.includes("role_assignment")) return { rows: [{ cnt: 1 }] };
+      if (text.includes("process_app_binding")) return { rows: [{ application_id: APP_ID, target_registry_slug: null }] };
+      if (text.includes("registry_def")) return { rows: [{ record_schema: { properties: COLLECTION_SCHEMA } }] };
+      if (text.includes("INSERT INTO choros.form_binding")) {
+        const p = params as [string, string, string, string, string, string | null, number];
+        const [, id, processKey, formKey, fieldsJson, layoutJson] = p;
+        rows.set(`${processKey}:${formKey}`, {
+          id, fields: JSON.parse(fieldsJson),
+          layout: layoutJson !== null ? JSON.parse(layoutJson) : null, version: 1,
+        });
+        return { rows: [] };
+      }
+      if (text.includes("FROM choros.form_binding") && text.includes("SELECT")) {
+        const p = params as [string, string, string];
+        const [, processKey, formKey] = p;
+        const row = rows.get(`${processKey}:${formKey}`);
+        if (!row) return { rows: [] };
+        return { rows: [{
+          id: row.id, process_key: processKey, form_key: formKey,
+          fields: row.fields, layout: row.layout, version: row.version,
+          created_at: "0", updated_at: "0",
+        }] };
+      }
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+  return { connect: async () => client } as unknown as pg.Pool;
+}
+
+describe("POST /api/forms/binding — a COLLECTION table layout SAVES (T-0680, no false 409)", () => {
+  it("a form with a «Позиции» table (collection + column subKeys) is Floor-1 → 201, NOT 409", async () => {
+    const srv = await startServer(makeCollectionStubPool());
+    try {
+      const post = await request(srv.port, "POST", "/api/forms/binding", {
+        process_key: PROCESS_KEY,
+        form_key: STEP_NAME,
+        layout: COLLECTION_LAYOUT,
+      });
+      // Before the fix: 409 WRONG_FLOOR ("R-4: ключ 'product' … висящий биндинг").
+      expect(post.status).not.toBe(409);
+      expect([200, 201]).toContain(post.status);
+
+      const get = await request(
+        srv.port, "GET",
+        `/api/forms/binding?processKey=${encodeURIComponent(PROCESS_KEY)}&stepKey=${encodeURIComponent(STEP_NAME)}`,
+      );
+      expect(get.status).toBe(200);
+      expect((get.body as { layout: unknown }).layout).toEqual(COLLECTION_LAYOUT);
+    } finally { await srv.close(); }
+  });
+
+  it("NEGATIVE — a column subKey NOT in the collection sub-schema STILL 409s (R-4 not weakened)", async () => {
+    const srv = await startServer(makeCollectionStubPool());
+    try {
+      const badLayout = {
+        schemaVersion: 1, source: { applicationId: APP_ID },
+        root: { type: "section", id: "s1", children: [
+          { type: "table", id: "t1", fieldKey: "positions", columns: [{ subKey: "ghost_col", widget: "text" }] },
+        ] },
+      };
+      const post = await request(srv.port, "POST", "/api/forms/binding", {
+        process_key: PROCESS_KEY, form_key: STEP_NAME, layout: badLayout,
+      });
+      expect(post.status).toBe(409);
+    } finally { await srv.close(); }
+  });
+});

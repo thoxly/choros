@@ -12,7 +12,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   PALETTE, paletteByGroup, isPaletteType, isClassBType,
-  DECLARATIVE_NODE_TYPES, DATA_NODE_TYPES, isWidgetCompatible, defaultWidgetForType,
+  DECLARATIVE_NODE_TYPES, isWidgetCompatible, defaultWidgetForType,
   WIDGET_COMPAT,
   nodeTypeForFieldType, buildDefaultDocument, nodeForField,
   keySet, hasCustomNode, validateDocument, brokenBindings, indexSchema,
@@ -262,6 +262,101 @@ describe('T-0678 PIN: the 7 previously-unsavable field types bind to a `field` n
       expect(widgets.length).toBeGreaterThan(0);
       expect(widgets[0]).toBe(EXPECTED_DEFAULT_WIDGET[field.type]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0680 PIN — R-4 / V-SUBKEY: a collection/table field's column subKeys are
+// COVERED by the parent collection binding, not falsely flagged as a dangling
+// binding when the schema view arrives WITHOUT the collection's sub-fields.
+//
+// LIVE-defect T-0678: a form with a «Позиции» table (CRM «Сделка») tripped a
+// false dangling-binding and the save had to DELETE the table. The base symptom
+// bites when the round-tripped `fields` view carries the collection field but
+// its `subFields` were dropped (the collection is present in the flat schema,
+// its nested sub-schema is not) — V-SUBKEY then flagged EVERY column as
+// dangling and `validateDocument().ok` went false → «Сохранить» disabled.
+//
+// MUTATIONAL: revert the `if (!subSchemaKnown) continue;` guard in
+// form-document.js and the FIRST case below goes RED (V-SUBKEY + broken keys).
+// The NEGATIVE case pins that a REAL bad column (subKey not in a KNOWN
+// sub-schema) still errors — the fix does not weaken R-4 in reverse.
+// ---------------------------------------------------------------------------
+describe('T-0680 PIN: collection column subKeys are covered by the parent binding (R-4)', () => {
+  // The «Сделка» shape: a money field + a «Позиции» collection with 2 columns.
+  const DEAL_DOC = buildDefaultDocument(
+    { applicationId: 'crm', registryDefId: 'deal' },
+    [
+      { key: 'summa', type: 'money', title: 'Сумма', required: true },
+      {
+        key: 'positions', type: 'collection', title: 'Позиции',
+        subFields: [
+          { key: 'product', type: 'string', label: 'Товар' },
+          { key: 'qty', type: 'number', label: 'Кол-во' },
+        ],
+      },
+    ],
+    { withIds: true },
+  );
+
+  it('table + full sub-schema (subFields present) → validation.ok, serializes for the Save button', () => {
+    const schemaWithSubs = [
+      { key: 'summa', type: 'money', title: 'Сумма', required: true },
+      {
+        key: 'positions', type: 'collection', title: 'Позиции',
+        subFields: [
+          { key: 'product', type: 'string', label: 'Товар' },
+          { key: 'qty', type: 'number', label: 'Кол-во' },
+        ],
+      },
+    ];
+    const res = validateDocument(DEAL_DOC, schemaWithSubs);
+    expect(res.errors.filter((e) => e.code === 'V-SUBKEY')).toEqual([]);
+    expect(res.ok).toBe(true);
+    expect(res.brokenKeys).toEqual([]);
+    // The Save button posts `layout: doc` verbatim (JSON.stringify) — round-trips.
+    expect(JSON.parse(JSON.stringify(DEAL_DOC))).toEqual(DEAL_DOC);
+  });
+
+  it('table + collection present but subFields DROPPED (round-trip) → still ok (covered by parent)', () => {
+    // The exact live shape: collection field survives, its sub-schema does not.
+    const schemaNoSubs = [
+      { key: 'summa', type: 'money', title: 'Сумма', required: true },
+      { key: 'positions', type: 'collection', title: 'Позиции' }, // NO subFields
+    ];
+    const res = validateDocument(DEAL_DOC, schemaNoSubs);
+    // Before the fix: two V-SUBKEY errors (product/qty "отсутствует") + broken keys
+    // → validation.ok === false → «Сохранить» disabled → the table had to be deleted.
+    expect(res.errors.filter((e) => e.code === 'V-SUBKEY')).toEqual([]);
+    expect(res.brokenKeys).toEqual([]);
+    expect(res.ok).toBe(true);
+  });
+
+  it('NEGATIVE — a real bad column (subKey absent from a KNOWN sub-schema) STILL errors', () => {
+    const schemaWithSubs = [
+      {
+        key: 'positions', type: 'collection', title: 'Позиции',
+        subFields: [{ key: 'product', type: 'string', label: 'Товар' }],
+      },
+    ];
+    const badDoc = { schemaVersion: 1, source: {}, root: { type: 'section', children: [
+      { type: 'table', fieldKey: 'positions', columns: [{ subKey: 'ghost_col', widget: 'text' }] },
+    ] } };
+    const res = validateDocument(badDoc, schemaWithSubs);
+    expect(res.ok).toBe(false);
+    expect(res.errors.some((e) => e.code === 'V-SUBKEY')).toBe(true);
+    expect(res.brokenKeys).toContain('positions.ghost_col');
+  });
+
+  it('NEGATIVE — a table bound to a NON-collection / absent field STILL errors (parent dangling)', () => {
+    const schema = [{ key: 'summa', type: 'money', title: 'Сумма' }];
+    const ghostTable = { schemaVersion: 1, source: {}, root: { type: 'section', children: [
+      { type: 'table', fieldKey: 'nope', columns: [{ subKey: 'x' }] },
+    ] } };
+    const res = validateDocument(ghostTable, schema);
+    expect(res.ok).toBe(false);
+    expect(res.errors.some((e) => e.code === 'V-KEY')).toBe(true);
+    expect(res.brokenKeys).toContain('nope');
   });
 });
 

@@ -48,7 +48,11 @@ import {
   type LiveSchemaView,
   type FormDocument,
 } from "../core/floor-boundary.js";
-import { resolveLiveSchemaFieldKeys, resolveLiveRecordSchema } from "../db/live-form-schema.js";
+import {
+  resolveLiveSchemaFieldKeys,
+  resolveLiveRecordSchema,
+  resolveLiveCollectionSubKeys,
+} from "../db/live-form-schema.js";
 import { deriveFieldDefsFromSchema } from "../core/form-schema-derive.js";
 
 // ---------------------------------------------------------------------------
@@ -301,7 +305,15 @@ export async function classifyLayoutSave(
         `"${processKey}" (no registry binding). Fail-closed → Floor-2 path required (T-0520).`,
     );
   }
-  const schemaView: LiveSchemaView = { fieldKeys: [...liveKeys] };
+  // T-0680: resolve the collection sub-schema so R-4 channel 2 (table column
+  // subKeys) is checked against each collection's OWN nested key set — not the
+  // flat top-level namespace, which falsely flagged every table column as a
+  // dangling binding and 409'd any form carrying a «Позиции»-style table (T-0678).
+  const subKeysByCollection = await resolveLiveCollectionSubKeys(client, tenantId, processKey);
+  const schemaView: LiveSchemaView = {
+    fieldKeys: [...liveKeys],
+    ...(subKeysByCollection ? { subKeysByCollection } : {}),
+  };
   // Normalize the form-document shape for the classifier. The FormDesigner /
   // form-document.js document is { schemaVersion, source, root: {type:"section",
   // children:[…]} } — the tree hangs off `.root`. classifyFloorBoundary walks a

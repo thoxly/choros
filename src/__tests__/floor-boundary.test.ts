@@ -35,9 +35,17 @@ import {
 // Helpers / fixtures
 // ---------------------------------------------------------------------------
 
-/** Живая схема с тремя существующими ключами. */
+/**
+ * Живая схема. T-0680: top-level `fieldKeys` содержит ТОЛЬКО top-level поля
+ * record_schema (amount/counterparty/items/total/name). Суб-ключи коллекции
+ * `items` (product/quantity) живут во ВЛОЖЕННОЙ sub-schema — `subKeysByCollection`,
+ * а НЕ в плоском `fieldKeys` (раньше их приходилось туда «подкладывать»
+ * обходным путём, что и маскировало LIVE-дефект T-0678). `ghost_col` намеренно
+ * отсутствует в sub-schema `items` → настоящий висящий столбец остаётся Floor-2.
+ */
 const SCHEMA: LiveSchemaView = {
-  fieldKeys: ["amount", "counterparty", "items", "product", "quantity", "total", "name"],
+  fieldKeys: ["amount", "counterparty", "items", "total", "name"],
+  subKeysByCollection: { items: ["product", "quantity"] },
   fields: [
     { key: "amount", type: "number", required: true, label: "Сумма" },
     { key: "name", type: "text", required: false, label: "Имя" },
@@ -388,6 +396,76 @@ describe("FB-4: R-4 three binding channels", () => {
     expect(r.floor).toBe("2");
     // only R-4 should be the lifter (R-1/R-2/R-3 clean)
     expect(r.reasons.every((x) => x.startsWith("R-4"))).toBe(true);
+  });
+});
+
+// ===========================================================================
+// T-0680 PIN — R-4 канал 2: суб-ключи коллекции покрыты РОДИТЕЛЬСКИМ биндингом,
+// НЕ висят на top-level `fieldKeys` (LIVE-дефект T-0678: форма с таблицей
+// «Позиции» → ложный 409 WRONG_FLOOR, из-за чего live-proof пришлось удалить
+// таблицу). МУТАЦИОННО-КРАСНЫЙ: revert канала-2 (subKey обратно в плоский
+// keySet) → кейс «table + валидные суб-ключи вне top-level» краснеет Floor-2.
+// ===========================================================================
+
+describe("T-0680 PIN: collection subKeys covered by parent binding (R-4 channel 2)", () => {
+  // Таблица «Позиции» с ДВУМЯ колонками, привязанная к живой коллекции `items`.
+  // subKey'и product/quantity ЖИВУТ во вложенной sub-schema — их НЕТ в top-level
+  // fieldKeys. До фикса subKey сваливался в плоский keySet и сверялся с top-level
+  // → ложный «висящий биндинг» → Floor-2 → 409.
+  const tableDoc: FormDocument = {
+    type: "root",
+    children: [
+      {
+        type: "table",
+        fieldKey: "items",
+        columns: [
+          { subKey: "product", widget: "text" },
+          { subKey: "quantity", widget: "number" },
+        ],
+      },
+    ],
+  };
+
+  it("table + valid collection + valid columns (via sub-schema) → Floor-1 (was false 409)", () => {
+    const r = classifyFloorBoundary(floor1Op({ doc: tableDoc }), SCHEMA);
+    expect(r.reasons.filter((x) => x.startsWith("R-4"))).toEqual([]);
+    expect(r.floor).toBe("1");
+  });
+
+  it("subKeys covered by parent EVEN when no sub-schema map is supplied (legacy caller)", () => {
+    // subKeysByCollection ОТСУТСТВУЕТ — subKey всё равно покрыт живым родителем
+    // `items` (родитель проверен каналом 1), НЕ висит. product/quantity намеренно
+    // НЕ в top-level fieldKeys → до фикса это был бы Floor-2.
+    const noSubSchema: LiveSchemaView = { fieldKeys: ["items", "amount"] };
+    const r = classifyFloorBoundary(floor1Op({ doc: tableDoc }), noSubSchema);
+    expect(r.reasons.filter((x) => x.startsWith("R-4"))).toEqual([]);
+    expect(r.floor).toBe("1");
+  });
+
+  it("NEGATIVE — a genuinely dangling column (not in sub-schema) STILL → Floor-2", () => {
+    // R-4 НЕ ослаблен в обратную: настоящий битый столбец ловится через sub-schema.
+    const badCol: FormDocument = {
+      type: "root",
+      children: [
+        { type: "table", fieldKey: "items", columns: [{ subKey: "ghost_col", widget: "text" }] },
+      ],
+    };
+    const r = classifyFloorBoundary(floor1Op({ doc: badCol }), SCHEMA);
+    expect(r.floor).toBe("2");
+    expect(r.reasons.some((x) => x.startsWith("R-4"))).toBe(true);
+  });
+
+  it("NEGATIVE — a table bound to a NON-existent collection STILL → Floor-2 (parent dangling)", () => {
+    // Канал 1: fieldKey table-узла нет в живой схеме → висящий родитель.
+    const ghostTable: FormDocument = {
+      type: "root",
+      children: [
+        { type: "table", fieldKey: "nope_collection", columns: [{ subKey: "product" }] },
+      ],
+    };
+    const r = classifyFloorBoundary(floor1Op({ doc: ghostTable }), SCHEMA);
+    expect(r.floor).toBe("2");
+    expect(r.reasons.some((x) => x.startsWith("R-4"))).toBe(true);
   });
 });
 

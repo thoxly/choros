@@ -207,6 +207,22 @@ export interface FloorEditOp {
 export interface LiveSchemaView {
   /** множество существующих fieldKey живой record_schema (для R-4). */
   fieldKeys: readonly string[];
+  /**
+   * T-0680: sub-schema ключей коллекций — map { <collectionFieldKey>: [subKey, …] }.
+   * R-4 канал 2 (table.columns[].subKey) НЕ живёт в плоском top-level `fieldKeys`
+   * (record_schema.properties[collection].items.properties — вложенный уровень).
+   * Раньше subKey сваливался в тот же плоский keySet и сверялся с top-level
+   * ключами → любая колонка коллекции («Позиции».qty/product) ложно висела
+   * (LIVE-дефект T-0678: форма с таблицей → 409 WRONG_FLOOR). Теперь subKey
+   * коллекции, чей РОДИТЕЛЬ (collection fieldKey) присутствует в живой схеме,
+   * покрыт родительским биндингом:
+   *   - есть запись для коллекции → subKey висит ⟺ subKey ∉ этой записи
+   *     (настоящий битый столбец — как V-SUBKEY клиента — ОСТАётся Floor-2);
+   *   - записи нет (sub-schema не передана) → subKey покрыт родителем, НЕ висит
+   *     (родитель уже проверен каналом 1).
+   * Отсутствие всей map (legacy-вызыватели) → тот же «покрыт родителем» fallback.
+   */
+  subKeysByCollection?: Readonly<Record<string, readonly string[]>>;
   /** named-binding поля (для делегирования validateFloor2Descriptor, FB-5). опционально. */
   fields?: readonly BindingField[];
 }
@@ -226,8 +242,21 @@ export interface FloorBoundaryResult {
 // ---------------------------------------------------------------------------
 
 interface DocScan {
-  /** все ключи record_schema, на которые ссылается документ (KEY_SET, три канала). */
+  /**
+   * Ключи record_schema канала 1+3 (fieldKey на field/table/readout/relation +
+   * relation.displayField) — сверяются с top-level `fieldKeys` живой схемы.
+   * T-0680: канал 2 (table.columns[].subKey) ВЫНЕСЕН из этого множества в
+   * `collectionSubKeys` — subKey живёт во вложенной sub-schema коллекции, а НЕ
+   * среди top-level ключей, поэтому сверять его с `fieldKeys` было неверно.
+   */
   keySet: Set<string>;
+  /**
+   * T-0680: канал 2 — subKey'и колонок таблиц, привязанные к ОБЪЕМЛЮЩЕЙ коллекции.
+   * `{ collectionKey, subKey }` — collectionKey = fieldKey table-узла (может быть
+   * пустой строкой, если у table нет fieldKey; тогда это уже висящий table-биндинг
+   * канала 1). Проверяются против sub-schema коллекции (см. LiveSchemaView).
+   */
+  collectionSubKeys: Array<{ collectionKey: string; subKey: string }>;
   /** true если в дереве есть code-несущий узел/поле (§3.4). */
   hasCodeSignal: boolean;
   /** true если в дереве есть узел type вне FLOOR1_DOC_NODE_TYPES (т.е. custom). */
@@ -243,6 +272,7 @@ interface DocScan {
 function scanDocument(doc: FormDocument | undefined): DocScan {
   const scan: DocScan = {
     keySet: new Set<string>(),
+    collectionSubKeys: [],
     hasCodeSignal: false,
     hasNonDeclarativeNode: false,
   };
@@ -310,11 +340,17 @@ function visitNode(node: FormDocNode | undefined, scan: DocScan, isRoot = false)
   }
 
   // --- §3 R-4 канал 2: table.columns[].subKey + NB-1: код-сигнал в объекте колонки ---
+  // T-0680: subKey записывается вместе с ОБЪЕМЛЮЩЕЙ коллекцией (fieldKey table-узла),
+  // НЕ в плоский keySet. subKey живёт во вложенной sub-schema коллекции
+  // (record_schema.properties[collection].items.properties) — сверять его с
+  // top-level `fieldKeys` было неверно и ложно валило любую форму с таблицей.
   if (Array.isArray(node.columns)) {
+    const collectionKey =
+      typeof node.fieldKey === "string" && node.fieldKey.length > 0 ? node.fieldKey : "";
     for (const col of node.columns) {
       if (col == null || typeof col !== "object") continue;
       if (typeof col.subKey === "string" && col.subKey.length > 0) {
-        scan.keySet.add(col.subKey);
+        scan.collectionSubKeys.push({ collectionKey, subKey: col.subKey });
       }
       // NB-1: §3.4 «где бы ни лежал» — code-несущее поле внутри объекта колонки
       // (мимо subKey) обязано поднимать этаж симметрично узлам.
@@ -432,12 +468,46 @@ export function classifyFloorBoundary(
   }
 
   // === R-4 (named-binding целостность): KEY_SET(doc) ⊆ живой record_schema ===
+  // Канал 1+3 (fieldKey / relation.displayField): сверяем с top-level ключами.
   for (const key of scan.keySet) {
     if (!liveKeys.has(key)) {
       reasons.push(
         `R-4: ключ "${key}" из KEY_SET(doc) отсутствует в живой record_schema — висящий биндинг → Floor-2`,
       );
     }
+  }
+  // T-0680 · Канал 2 (table.columns[].subKey): subKey живёт во ВЛОЖЕННОЙ sub-schema
+  // коллекции, НЕ среди top-level `fieldKeys`. Раньше subKey сверялся с плоским
+  // top-level множеством → колонки коллекции («Позиции».qty/product) ложно висли
+  // и валили сохранение любой формы с таблицей (LIVE-дефект T-0678). Теперь:
+  //   • родитель (collectionKey) ОБЯЗАН быть в живой схеме — иначе это настоящий
+  //     висящий table-биндинг (ловится каналом 1 через fieldKey table-узла; при
+  //     collectionKey==="" table вообще без fieldKey → тоже висящий, помечаем);
+  //   • при живом родителе: если для коллекции передана sub-schema — subKey висит
+  //     ⟺ его нет в ней (настоящий битый столбец → Floor-2, симметрично V-SUBKEY
+  //     клиента); если sub-schema НЕ передана — subKey ПОКРЫТ родительским
+  //     биндингом и висящим НЕ считается (родитель уже проверен каналом 1).
+  const subSchema = schema?.subKeysByCollection;
+  for (const { collectionKey, subKey } of scan.collectionSubKeys) {
+    if (collectionKey === "" || !liveKeys.has(collectionKey)) {
+      // table-узел без валидного collection-fieldKey — висящий родитель.
+      reasons.push(
+        `R-4: колонка "${subKey}" привязана к таблице без живого поля-коллекции ` +
+          `("${collectionKey || "∅"}") — висящий биндинг → Floor-2`,
+      );
+      continue;
+    }
+    const known =
+      subSchema && Object.prototype.hasOwnProperty.call(subSchema, collectionKey)
+        ? subSchema[collectionKey]
+        : undefined;
+    if (Array.isArray(known) && !known.includes(subKey)) {
+      reasons.push(
+        `R-4: колонка "${subKey}" отсутствует в sub-schema коллекции "${collectionKey}" ` +
+          `— висящий биндинг → Floor-2`,
+      );
+    }
+    // known === undefined → sub-schema не передана → subKey покрыт родителем (не висит).
   }
 
   // === Решение: floor = max(lexicalFloor, contentFloor) ===
