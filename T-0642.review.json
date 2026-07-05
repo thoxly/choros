@@ -2,6 +2,14 @@
   "task_id": "T-0642",
   "verdict": "approved",
   "ci_seen": { "green": true },
+  "fix_forward_round1": {
+    "prior_verdict": "BLOCKING (adversarial skeptic, security/XML-injection axis, round after this file's original approval)",
+    "finding": "injectCandidateGroups (src/core/user-task-role-mapper.ts:~219) wrote the DB-resolved role.slug into flowable:candidateGroups=\"<slug>\" WITHOUT XML-escaping. role.slug is attacker-controlled: POST /api/roles (src/http/seed-write.ts) accepted any non-empty string (typeof-only check, no charset validation; migrations/019_role.sql has no CHECK). Probe slug `x\" flowable:assignee=\"attacker` broke out of the candidateGroups attribute and injected an arbitrary flowable:assignee attribute into the deployed userTask XML, letting a tenant owner hard-assign Flowable tasks bypassing role-based routing. Sibling mapper agent-task-external-mapper.ts (T-0635) already had an escapeXml for its own injected values — T-0642 did not reuse it for this injection site.",
+    "fix": "Two layers, both verified: (1) escapeXml exported from agent-task-external-mapper.ts and reused (not duplicated) in user-task-role-mapper.ts — injectCandidateGroups now escapes roleSlug before interpolation. (2) POST /api/roles now validates slug against SLUG_RE (`^[a-z0-9][a-z0-9-]{0,63}$`, the same convention already used by applications.ts/registry-defs.ts) — a charset-violating slug is rejected with 400 VALIDATION before it ever reaches choros.role.slug. No migration added (app-level gate chosen over a CHECK constraint to avoid an existing-row migration hazard).",
+    "tests_added": "4 new security tests in user-task-role-mapper.test.ts (exact probe payload escaped + rogue attribute absent; &<>\" all escaped; clean slug unaffected regression; escaped output still lints) + 3 new tests in seed-write.authz.test.ts (probe payload -> 400; uppercase/space slug -> 400; normal dash slug -> 201 regression).",
+    "reverification": "Full targeted + full vitest suite re-run green post-fix (see T-0642.spec.md security_fix_round1.gates); tsc/build clean; anti-case-lock green; candidategroups-role-slug-linter.sh and role-migration-set.sh independently re-run green (no BPMN fixture or migration-set regression from this change).",
+    "residual_risk": "None identified for this injection site. Other choros.role.slug write paths (register.ts genesis/reader-role bootstrap, reader-grant.ts) use fixed system-literal slugs ('tenant-owner', 'reader'), not attacker input, and were left untouched — only POST /api/roles accepts a caller-supplied slug."
+  },
   "findings": [
     {
       "id": "F1",
