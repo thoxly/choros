@@ -13,6 +13,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PALETTE, paletteByGroup, isPaletteType, isClassBType,
   DECLARATIVE_NODE_TYPES, DATA_NODE_TYPES, isWidgetCompatible, defaultWidgetForType,
+  WIDGET_COMPAT,
   nodeTypeForFieldType, buildDefaultDocument, nodeForField,
   keySet, hasCustomNode, validateDocument, brokenBindings, indexSchema,
 } from './form-document.js';
@@ -168,6 +169,99 @@ describe('authoring validator (deliverable 3 — binding discipline)', () => {
     const res = validateDocument(doc, SCHEMA);
     expect(res.ok).toBe(false);
     expect(res.errors.some((e) => e.code === 'V-NODE')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0678 (P0, capstone T-0629): PIN — the 7 live-schema field types that
+// parseRecordSchema (apps-schema.js) emits but WIDGET_COMPAT_TABLE was missing.
+//
+// THE DEFECT (proven live by capstone T-0629): a form with a field of TYPE
+// `money` (the base CRM «Сделка».сумма) could not be saved — «Сохранить» was
+// hard-disabled (`disabled={!validation.ok}`) with "Узел «Поле» нельзя привязать
+// к полю (тип money)" (V-CONTRACT), and the Inspector widget-picker rendered
+// EMPTY (WIDGET_COMPAT[type] || []). Two independent gates failed for these
+// types on a `field` node:
+//   1. V-WIDGET  — defaultWidgetForType(type) fell back to 'text', and
+//                  isWidgetCompatible(type,'text') === false (no table entry).
+//   2. V-CONTRACT — money/multi-select/person/file resolve to their OWN
+//                  contract kind (not scalar/enum), so the old hardcoded
+//                  `scalar || enum` field-node whitelist rejected them even
+//                  though nodeForField/nodeTypeForFieldType had ALREADY routed
+//                  them to a `field` node.
+//
+// WHY THIS PINS (mutation-red): the OLD tests only checked
+// isWidgetCompatible('number','money') — a `money` WIDGET on a `number` FIELD.
+// They NEVER built a `field` node bound to a field of TYPE `money` (etc.) and
+// ran it through validateDocument — the exact gate the disabled Save button
+// reads. Revert either fix (WIDGET_COMPAT_TABLE entries OR the nodeTypeForFieldType
+// V-CONTRACT gate) and the matching case below goes RED.
+describe('T-0678 PIN: the 7 previously-unsavable field types bind to a `field` node', () => {
+  // One schema field per newly-supported type (parseRecordSchema output shape).
+  const T0678_SCHEMA = [
+    { key: 'summa', type: 'money', title: 'Сумма', required: true },
+    { key: 'when', type: 'datetime', title: 'Дата и время' },
+    { key: 'mail', type: 'email', title: 'Почта' },
+    { key: 'link', type: 'url', title: 'Ссылка' },
+    { key: 'owner', type: 'person', title: 'Ответственный' },
+    { key: 'tags', type: 'multi-select', title: 'Метки', options: ['a', 'b'] },
+    { key: 'doc', type: 'file', title: 'Договор' },
+  ];
+
+  // Each type → the widget defaultWidgetForType now stamps (first WIDGET_COMPAT
+  // entry). These are ALL widgets the renderer honors (FormDocumentRenderer
+  // .widgetToPresentation + FieldControl resolve the control off the schema TYPE).
+  const EXPECTED_DEFAULT_WIDGET = {
+    money: 'money',
+    datetime: 'datetime',
+    email: 'email',
+    url: 'url',
+    person: 'person',
+    'multi-select': 'multi-select',
+    file: 'file',
+  };
+
+  for (const field of T0678_SCHEMA) {
+    it(`type «${field.type}» → a savable \`field\` node (validation.ok, serializes)`, () => {
+      // nodeForField is the SINGLE builder the human palette AND the AI emitter
+      // use; it routes to a node type + stamps the default widget.
+      const node = nodeForField(field, { withId: true });
+      expect(node.type).toBe('field');
+      expect(node.widget).toBe(EXPECTED_DEFAULT_WIDGET[field.type]);
+      expect(isWidgetCompatible(field.type, node.widget)).toBe(true);
+
+      // The exact gate the disabled Save button reads (FormDesigner
+      // `disabled={!validation.ok}` → validateDocument(doc, fields)).
+      const doc = { schemaVersion: 1, source: {}, root: { type: 'section', children: [node] } };
+      const res = validateDocument(doc, T0678_SCHEMA);
+      expect(res.errors.filter((e) => e.code === 'V-CONTRACT')).toEqual([]);
+      expect(res.errors.filter((e) => e.code === 'V-WIDGET')).toEqual([]);
+      expect(res.ok).toBe(true);
+      expect(res.brokenKeys).toEqual([]);
+
+      // The Save button posts `layout: doc` verbatim (JSON.stringify) — assert
+      // it round-trips losslessly (a plain serializable form-document).
+      expect(JSON.parse(JSON.stringify(doc))).toEqual(doc);
+    });
+  }
+
+  it('the whole default document (all 7 types at once) validates — the capstone «Сделка» шейп', () => {
+    const doc = buildDefaultDocument({ applicationId: 'app', registryDefId: 'def' }, T0678_SCHEMA, { withIds: true });
+    const res = validateDocument(doc, T0678_SCHEMA);
+    expect(res.ok).toBe(true);
+    expect(res.errors).toEqual([]);
+  });
+
+  it('the Inspector widget-picker is NON-empty for every one of the 7 types (WIDGET_COMPAT[type])', () => {
+    // FormDesigner's Inspector reads `WIDGET_COMPAT[schemaField.type] || []` to
+    // populate the «Виджет» select. An empty list = an unrenderable picker (the
+    // live symptom). Every type must offer at least one widget.
+    for (const field of T0678_SCHEMA) {
+      const widgets = WIDGET_COMPAT[field.type];
+      expect(Array.isArray(widgets)).toBe(true);
+      expect(widgets.length).toBeGreaterThan(0);
+      expect(widgets[0]).toBe(EXPECTED_DEFAULT_WIDGET[field.type]);
+    }
   });
 });
 
