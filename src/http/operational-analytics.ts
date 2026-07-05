@@ -35,6 +35,7 @@ import {
   type ActorWorkloadRow,
 } from "../db/operational-analytics-dao.js";
 import { toCsv, toXlsx, sanitizeSheetName, type Tabular } from "./tabular-export.js";
+import { batchResolveActors, type ResolvedActor } from "../db/actor-resolver.js";
 
 // ---------------------------------------------------------------------------
 // Deps
@@ -238,9 +239,31 @@ async function handleGet(
 
   const result = await loadOperationalAnalytics(pool, tenantId, analyticsParams);
 
+  // T-0648 (D-064, UX-study §3): «Топ исполнителей» rendered the raw actor slug
+  // verbatim (TopActorsTable, screen-operational-analytics.jsx). Batch-resolve
+  // every DISTINCT actor across top_actors in ONE additional query (no N+1) and
+  // attach the display shape additively — `actor` (raw string) is unchanged for
+  // back-compat (CSV/XLSX export, existing tests); the frontend prefers
+  // `actorResolved` when present.
+  const responseBody: OperationalAnalyticsResult & {
+    top_actors: Array<ActorWorkloadRow & { actorResolved?: ResolvedActor }>;
+  } = { ...result, top_actors: result.top_actors };
+  if (result.top_actors.length > 0) {
+    try {
+      const ids = [...new Set(result.top_actors.map((r) => r.actor))];
+      const resolved = await batchResolveActors(pool, tenantId, ids);
+      responseBody.top_actors = result.top_actors.map((r) => ({
+        ...r,
+        ...(resolved.has(r.actor) ? { actorResolved: resolved.get(r.actor) } : {}),
+      }));
+    } catch {
+      // Degrade gracefully: keep the raw actor strings (read-projection).
+    }
+  }
+
   res.statusCode = 200;
   res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(result));
+  res.end(JSON.stringify(responseBody));
 }
 
 // ---------------------------------------------------------------------------

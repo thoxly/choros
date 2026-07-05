@@ -23,6 +23,7 @@ import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { queryGrantTrail, type GrantTrailRow } from "../db/audit-grant-trail.js";
 import { getOrgPool, DEV_TENANT_ID, resolveActorSlugFromAuth } from "../db/org.js";
+import { batchResolveActors, type ResolvedActor } from "../db/actor-resolver.js";
 
 // ---------------------------------------------------------------------------
 // Deps — injectable for tests and server.ts wiring.
@@ -252,11 +253,58 @@ async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string
 // no resolver is wired (no-DB degrade), exactly as registry-defs.ts does.
 // ---------------------------------------------------------------------------
 
+/**
+ * GrantTrailRowWithDisplay — GrantTrailRow (unchanged, wire-frozen) plus TWO
+ * additive optional fields carrying the T-0648 batch-resolved actor/subject
+ * display shape ({id, name, type, deactivated}). ADDITIVE ONLY: `actor` and
+ * `subject` on the row keep their original raw-string shape (existing readers/
+ * tests are untouched) — the frontend prefers `actorResolved`/`subjectResolved`
+ * when present and falls back to the raw string otherwise.
+ */
+type GrantTrailRowWithDisplay = GrantTrailRow & {
+  actorResolved?: ResolvedActor;
+  subjectResolved?: ResolvedActor;
+};
+
+/**
+ * T-0648: batch-resolve every DISTINCT actor/subject in a page of grant-trail
+ * rows in ONE query (batchResolveActors) — not one lookup per row. `subject`
+ * on an assignment/grant event is sometimes a role slug (not an employee), so
+ * an unresolved subject simply keeps no `subjectResolved` field (the frontend
+ * falls back to the raw string, exactly as it does today).
+ */
+async function attachResolvedActors(
+  pool: pg.Pool,
+  tenantId: string,
+  rows: GrantTrailRow[],
+): Promise<GrantTrailRowWithDisplay[]> {
+  const ids = new Set<string>();
+  for (const r of rows) {
+    if (r.actor) ids.add(r.actor);
+    if (r.subject) ids.add(r.subject);
+  }
+  if (ids.size === 0) return rows;
+
+  let resolved: Map<string, ResolvedActor>;
+  try {
+    resolved = await batchResolveActors(pool, tenantId, [...ids]);
+  } catch {
+    // Degrade gracefully: read-projection, never a write path.
+    return rows;
+  }
+
+  return rows.map((r) => ({
+    ...r,
+    ...(r.actor && resolved.has(r.actor) ? { actorResolved: resolved.get(r.actor) } : {}),
+    ...(r.subject && resolved.has(r.subject) ? { subjectResolved: resolved.get(r.subject) } : {}),
+  }));
+}
+
 export function registerGrantTrailRoutes(router: Router, deps?: GrantTrailRouteDeps): void {
   router.register("GET", "/api/grant-trail", withAuth(async (req, res) => {
     const parsed = extractQueryParams(req);
 
-    let rows: GrantTrailRow[];
+    let rows: GrantTrailRowWithDisplay[];
     let hasMore: boolean;
 
     const dbPool: pg.Pool | undefined = deps?.pool ?? (process.env["DATABASE_URL"] ? getOrgPool() : undefined);
@@ -277,7 +325,9 @@ export function registerGrantTrailRoutes(router: Router, deps?: GrantTrailRouteD
         limit: parsed.limit,
         beforeSeq: parsed.beforeSeq,
       });
-      rows = result.rows;
+      // T-0648: batch-resolve actor/subject display shape in ONE additional
+      // query (no N+1) — additive fields only, raw actor/subject unchanged.
+      rows = await attachResolvedActors(dbPool, tenantId, result.rows);
       hasMore = result.hasMore;
     } else {
       // Static fallback — no DATABASE_URL (NF-8 / AC-18).

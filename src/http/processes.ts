@@ -21,7 +21,7 @@ import {
 } from "./actor-inject-registrar.js";
 import { JobStore } from "../core/jobStore.js";
 import { tryLoadShowcasePack } from "./pack-serve.js";
-import { makeStartInstanceHandler, type StartInstanceDeps } from "./process-start.js";
+import { makeStartInstanceHandler, type StartInstanceDeps, type ActorsDisplayResolver } from "./process-start.js";
 import {
   listInstanceProjections,
   type InstanceProjection,
@@ -268,6 +268,14 @@ export interface InstanceHistoryDetail {
     startedAt: string | null;
     endedAt: string | null;
     completedBy: string | null;
+    /**
+     * T-0648 (D-064, UX-study §3): the human-readable resolution of
+     * `completedBy` (a raw Flowable assignee — an employee slug — otherwise
+     * rendered bare in the UI). Present only when a resolver was injected AND
+     * the slug resolved to a real choros.employee row; absent ⇒ the frontend
+     * falls back to `completedBy` itself (never worse than today).
+     */
+    completedByName?: string;
   }[];
   /** false when the engine could not be reached for the activity history. */
   historyAvailable: boolean;
@@ -276,6 +284,8 @@ export interface InstanceHistoryDetail {
 async function fetchInstanceHistoryDetail(
   flowable: FlowableClient,
   engineInstanceId: string,
+  tenantId?: string,
+  resolveActorsDisplay?: ActorsDisplayResolver,
 ): Promise<InstanceHistoryDetail> {
   // Both methods are OPTIONAL on FlowableClient (mirrors pingEngine — existing
   // partial test-stub clients across src/__tests__/ need no change). Absent ⇒
@@ -300,7 +310,27 @@ async function fetchInstanceHistoryDetail(
       }))
     : [];
 
-  return { variables, history, historyAvailable: actsResult.ok };
+  // T-0648: batch-resolve every DISTINCT completedBy slug in ONE query (no
+  // per-step round-trip) — this instance's history is typically a handful of
+  // steps, but the O(1)-queries invariant holds regardless of step count.
+  let historyWithNames = history;
+  if (tenantId && resolveActorsDisplay) {
+    const slugs = [...new Set(history.map((h) => h.completedBy).filter((v): v is string => !!v))];
+    if (slugs.length > 0) {
+      try {
+        const resolved = await resolveActorsDisplay(tenantId, slugs);
+        historyWithNames = history.map((h) => {
+          if (!h.completedBy) return h;
+          const hit = resolved.get(h.completedBy);
+          return hit ? { ...h, completedByName: hit.name } : h;
+        });
+      } catch {
+        // Degrade gracefully: keep the raw slug (read-projection, never throws).
+      }
+    }
+  }
+
+  return { variables, history: historyWithNames, historyAvailable: actsResult.ok };
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +503,12 @@ export function registerProcessesRoutes(
             // Best-effort: an engine error degrades to empty arrays +
             // historyAvailable:false, never a 500 (the instance's core fields
             // above do not depend on the engine being reachable).
-            const detail = await fetchInstanceHistoryDetail(startDeps.flowable, match.inst);
+            const detail = await fetchInstanceHistoryDetail(
+              startDeps.flowable,
+              match.inst,
+              tenantId,
+              startDeps.resolveActorsDisplay,
+            );
             res.statusCode = 200;
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ ...projectionToInstance(match), ...detail }));

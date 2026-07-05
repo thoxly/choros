@@ -635,3 +635,177 @@ describe("T-0609 · GET /api/processes/:id with a bare FlowableClient stub (no h
     expect(status).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0648 (D-064, UX-study §3) — completedBy resolves to a human name via the
+// injected ActorsDisplayResolver, in ONE call regardless of step count (no
+// per-step round-trip). processes.ts stays pg/db-import-free (FF-DISPLAY-4) —
+// the resolver is injected via StartInstanceDeps.resolveActorsDisplay, exactly
+// as resolveActorTenant/resolveSandboxPrivilege already are.
+// ---------------------------------------------------------------------------
+
+describe("T-0648 · GET /api/processes/:id resolves completedBy to a display name", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+  let harness: ReturnType<typeof buildServer>;
+  let resolveCallCount = 0;
+  let lastIdsArg: readonly string[] = [];
+
+  beforeAll(async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0648-completedby";
+    resolveCallCount = 0;
+    const flowableStub = {
+      getHistoricVariableInstances: async () => ({ ok: true as const, variables: [] }),
+      getHistoricActivityInstances: async () => ({
+        ok: true as const,
+        activities: [
+          {
+            activityId: "start1",
+            activityName: "Начало",
+            activityType: "startEvent",
+            startTime: "2026-07-03T10:00:00.000+0000",
+            endTime: "2026-07-03T10:00:00.000+0000",
+            assignee: null,
+          },
+          {
+            activityId: "task-a",
+            activityName: "Проверка А",
+            activityType: "userTask",
+            startTime: "2026-07-03T10:00:01.000+0000",
+            endTime: "2026-07-03T10:05:00.000+0000",
+            assignee: "e-fixture-assignee",
+          },
+          {
+            activityId: "task-b",
+            activityName: "Проверка Б",
+            activityType: "userTask",
+            startTime: "2026-07-03T10:05:01.000+0000",
+            endTime: null,
+            // Same assignee again — must NOT trigger a second resolver call
+            // (distinct-ids batching).
+            assignee: "e-fixture-assignee",
+          },
+        ],
+      }),
+    } as unknown as StartInstanceDeps["flowable"];
+
+    const deps: StartInstanceDeps = {
+      pool: makeProjectionPool([startedRow(LIVE_INST)]),
+      flowable: flowableStub,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorsDisplay: async (_tenantId, ids) => {
+        resolveCallCount += 1;
+        lastIdsArg = ids;
+        const m = new Map();
+        if (ids.includes("e-fixture-assignee")) {
+          m.set("e-fixture-assignee", {
+            id: "e-fixture-assignee",
+            name: "К. Орлов",
+            type: "human",
+            deactivated: false,
+            resolved: true,
+          });
+        }
+        return m;
+      },
+    };
+    harness = buildServer(deps);
+    await new Promise<void>((resolve) =>
+      harness.server.listen(0, "127.0.0.1", () => resolve()),
+    );
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = prevDbUrl;
+  });
+
+  it("attaches completedByName for a resolved completedBy slug", async () => {
+    const { status, json } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes/${LIVE_INST}`,
+      { "x-dev-user": ACTOR },
+    );
+    expect(status).toBe(200);
+    const data = json as { history: Array<Record<string, unknown>> };
+    const taskA = data.history.find((h) => h.step === "Проверка А");
+    expect(taskA?.completedBy).toBe("e-fixture-assignee");
+    expect(taskA?.completedByName).toBe("К. Орлов");
+  });
+
+  it("NO N+1: resolves the SAME distinct completedBy slug across multiple steps in exactly ONE call PER REQUEST", async () => {
+    // Delta-based (not absolute): an earlier `it` in this describe already
+    // issued one GET, so resolveCallCount carries over — assert the INCREMENT
+    // for THIS request is exactly 1 (one call per GET /api/processes/:id),
+    // regardless of how many prior requests ran.
+    const before = resolveCallCount;
+    await httpReq("GET", `${harness.baseUrl()}/api/processes/${LIVE_INST}`, {
+      "x-dev-user": ACTOR,
+    });
+    expect(resolveCallCount - before).toBe(1);
+    // Distinct-ids only: "e-fixture-assignee" appears twice in the activities but must be
+    // passed ONCE to the resolver.
+    expect(lastIdsArg).toEqual(["e-fixture-assignee"]);
+  });
+
+  it("a step with completedBy:null carries no completedByName (nothing to resolve)", async () => {
+    const { json } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes/${LIVE_INST}`,
+      { "x-dev-user": ACTOR },
+    );
+    const data = json as { history: Array<Record<string, unknown>> };
+    const start = data.history.find((h) => h.step === "Начало");
+    expect(start?.completedBy).toBeNull();
+    expect(start?.completedByName).toBeUndefined();
+  });
+});
+
+describe("T-0648 · GET /api/processes/:id honest degrade when resolveActorsDisplay is absent", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+  let harness: ReturnType<typeof buildServer>;
+
+  beforeAll(async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0648-no-resolver";
+    const flowableStub = {
+      getHistoricVariableInstances: async () => ({ ok: true as const, variables: [] }),
+      getHistoricActivityInstances: async () => ({
+        ok: true as const,
+        activities: [
+          {
+            activityId: "task-a",
+            activityName: "Проверка",
+            activityType: "userTask",
+            startTime: "2026-07-03T10:00:00.000+0000",
+            endTime: null,
+            assignee: "e-fixture-assignee",
+          },
+        ],
+      }),
+    } as unknown as StartInstanceDeps["flowable"];
+    // No resolveActorsDisplay on deps at all (mirrors an older composition root
+    // that has not wired the resolver yet).
+    harness = buildServer(makeDepsWithFlowable([startedRow(LIVE_INST)], flowableStub));
+    await new Promise<void>((resolve) =>
+      harness.server.listen(0, "127.0.0.1", () => resolve()),
+    );
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = prevDbUrl;
+  });
+
+  it("falls back to the raw completedBy slug — never a 500, never invents a name", async () => {
+    const { status, json } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes/${LIVE_INST}`,
+      { "x-dev-user": ACTOR },
+    );
+    expect(status).toBe(200);
+    const data = json as { history: Array<Record<string, unknown>> };
+    expect(data.history[0]?.completedBy).toBe("e-fixture-assignee");
+    expect(data.history[0]?.completedByName).toBeUndefined();
+  });
+});
