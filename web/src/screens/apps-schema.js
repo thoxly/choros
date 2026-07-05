@@ -151,6 +151,9 @@ export const FIELD_TYPES = [
   { value: "select", label: "Список (select)" },
   { value: "multi-select", label: "Мультивыбор" },
   { value: "date", label: "Дата" },
+  // T-0649: datetime — a date WITH time-of-day (spec's "тип «дата+время»
+  // нет вообще в таксономии"). Separate from "date" (no time component).
+  { value: "datetime", label: "Дата и время" },
   { value: "url", label: "Ссылка (URL)" },
   { value: "email", label: "Email" },
   { value: "money", label: "Сумма (₽)" },
@@ -598,6 +601,20 @@ export function buildRecordSchema(fields) {
   const list = Array.isArray(fields) ? fields : [];
   const properties = {};
   const required = [];
+  // T-0649: collectionDateFields — { [collectionFieldKey]: string[] of sub-field
+  // keys that are "date" columns }. AJV strict rejects an x-* keyword nested
+  // inside items.properties[subKey] or items itself (stripXExtensions, per
+  // record-schema-validator.ts, only strips ROOT-level x-* and top-level
+  // properties[key] x-* — it does NOT recurse into a property's own `items`).
+  // So a collection column's "date"-ness cannot be marked in-place the way a
+  // top-level date field uses x-date; it round-trips back as a bare
+  // { type:"string" } (see emitScalarProp) and is indistinguishable from a
+  // plain string column on read-back (the "x-date never recurses into
+  // collection rows" gap from the UX study §2). Fix: record which sub-field
+  // keys are dates as a ROOT-level annotation (same x-* convention/strip
+  // mechanism as x-field-order, T-0510) keyed by the owning collection field —
+  // parseRecordSchema reads this back to restore sfType:"date" post-hoc.
+  const collectionDateFields = {};
 
   for (const f of list) {
     const key = typeof f?.key === "string" ? f.key : "";
@@ -610,6 +627,7 @@ export function buildRecordSchema(fields) {
       const subList = Array.isArray(f.subFields) ? f.subFields : [];
       const subProperties = {};
       const subRequired = [];
+      const dateSubKeys = [];
 
       for (const sf of subList) {
         const sfKey = typeof sf?.key === "string" ? sf.key : "";
@@ -619,7 +637,10 @@ export function buildRecordSchema(fields) {
         if (sfLabel.length > 0) sfProp.title = sfLabel;
         subProperties[sfKey] = sfProp;
         if (sf.required) subRequired.push(sfKey);
+        // T-0649: record date-typed columns for the root-level annotation below.
+        if (sf.type === "date") dateSubKeys.push(sfKey);
       }
+      if (dateSubKeys.length > 0) collectionDateFields[key] = dateSubKeys;
 
       const itemsSchema = {
         type: "object",
@@ -717,6 +738,13 @@ export function buildRecordSchema(fields) {
       // into collection items.properties, so a date sub-field must stay plain string
       // (emitScalarProp) or AJV strict would throw on the nested x-date keyword.
       prop = { type: "string", "x-date": true };
+    } else if (f.type === "datetime") {
+      // T-0649: datetime → type:string + x-datetime extension (round-trip
+      // discriminator, same x-* convention as x-date). Stored value is an
+      // ISO-8601 datetime string ("YYYY-MM-DDTHH:mm"); parse restores type
+      // "datetime" so the record form renders <input type="datetime-local">
+      // and list/detail display "дд.мм.гггг чч:мм" (formatCellValue).
+      prop = { type: "string", "x-datetime": true };
     } else if (f.type === "file") {
       // T-0579: file → type:string + x-file extension (round-trip discriminator).
       // Same x-* strip convention as x-person/x-relation — AJV strips x-file before
@@ -761,6 +789,11 @@ export function buildRecordSchema(fields) {
   if (required.length > 0) schema.required = required;
   // Only emit x-field-order when there are fields (empty schema has nothing to order).
   if (xFieldOrder.length > 0) schema["x-field-order"] = xFieldOrder;
+  // T-0649: only emit x-collection-date-fields when at least one collection has a
+  // date column — keeps schemas without date sub-fields byte-identical to before.
+  if (Object.keys(collectionDateFields).length > 0) {
+    schema["x-collection-date-fields"] = collectionDateFields;
+  }
   return schema;
 }
 
@@ -842,6 +875,20 @@ export function parseRecordSchema(recordSchema) {
         : {};
       const itemRequired = Array.isArray(def.items.required) ? new Set(def.items.required.filter((k) => typeof k === "string")) : new Set();
 
+      // T-0649: restore date-column typing lost on the JSON-Schema round-trip.
+      // A collection sub-field cannot carry its own x-date (AJV strict rejects
+      // an x-* keyword nested inside items.properties[subKey] — stripXExtensions
+      // only strips ROOT-level and top-level properties[key] x-*, never a
+      // property's own `items`). buildRecordSchema instead records date sub-field
+      // keys as a ROOT-level x-collection-date-fields map (same strip mechanism
+      // as x-field-order). Read it back here so a date column survives reload
+      // instead of degrading to a plain string column forever.
+      const xCollectionDateFields = recordSchema["x-collection-date-fields"];
+      const dateKeysForThisField = (
+        xCollectionDateFields && typeof xCollectionDateFields === "object" && !Array.isArray(xCollectionDateFields)
+          && Array.isArray(xCollectionDateFields[key])
+      ) ? new Set(xCollectionDateFields[key].filter((k) => typeof k === "string")) : null;
+
       const subFields = Object.keys(itemProps).map((sfKey) => {
         const sfDef = itemProps[sfKey];
         const sfLabel = sfDef && typeof sfDef === "object" && typeof sfDef.title === "string" ? sfDef.title : "";
@@ -850,6 +897,9 @@ export function parseRecordSchema(recordSchema) {
         let sfType;
         if (sfHasEnum) {
           sfType = "select";
+        } else if (dateKeysForThisField && dateKeysForThisField.has(sfKey)) {
+          // T-0649: x-collection-date-fields says this column is a date.
+          sfType = "date";
         } else {
           const sfRawType = sfDef && typeof sfDef.type === "string" ? sfDef.type : "string";
           sfType = COLLECTION_SUB_FIELD_TYPES.includes(sfRawType) ? sfRawType : "string";
@@ -964,6 +1014,16 @@ export function parseRecordSchema(recordSchema) {
     if (xDate) {
       const title = typeof def.title === "string" ? def.title : "";
       return { key, type: "date", title, required: requiredSet.has(key) };
+    }
+
+    // T-0649: detect datetime fields by the presence of x-datetime annotation.
+    // Shape: { type: "string", "x-datetime": true }. Must be detected before the
+    // string fallthrough — mirrors x-date exactly (separate type, not merged with
+    // "date", since the control/display differ: time-of-day is part of the value).
+    const xDatetime = def && typeof def === "object" ? def["x-datetime"] : undefined;
+    if (xDatetime) {
+      const title = typeof def.title === "string" ? def.title : "";
+      return { key, type: "datetime", title, required: requiredSet.has(key) };
     }
 
     // T-0579: detect file fields by the presence of x-file annotation.

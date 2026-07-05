@@ -219,3 +219,31 @@ describe('screen-app-records — draft-sandbox banner wiring (T-0627)', () => {
     expect(src).toMatch(/if \(summary && summary\.allOk\) loadApp\(\);/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0649: no duplicate "Создано" column in the record list.
+//
+// buildFieldCatalog (list-view-panel.js) already appends a `created_at`
+// pseudo-column (label "Создано", visible by default) to the field catalog
+// `columns` is derived from — so columns.map already renders one "Создано"
+// header. The list ALSO had a hardcoded <th>Создано</th> + <td>{fmtTs(...)}</td>
+// → two identical columns, one always "—". The fix: render created_at ONLY via
+// columns (special-cased to read rec.created_at, not data.created_at), and the
+// hardcoded pair is guarded to fire ONLY when the active view hid created_at.
+// ---------------------------------------------------------------------------
+describe('screen-app-records — no duplicate «Создано» column (T-0649)', () => {
+  it('created_at is rendered via the columns loop (reads rec.created_at, not data)', () => {
+    // The columns.map body special-cases the created_at pseudo-column so it
+    // reads the native record column instead of data[c.key] (which is undefined).
+    expect(src).toMatch(/c\.type === 'created_at'/);
+  });
+
+  it('the hardcoded «Создано» header/cell only render as a FALLBACK (when the view hid created_at)', () => {
+    // Both the extra <th> and its <td> are guarded by
+    // !columns.some(c => c.type === 'created_at') — so when the active view
+    // already shows created_at (the default), the hardcoded duplicate does NOT
+    // render, eliminating the double column.
+    expect(src).toMatch(/!columns\.some\(\(c\) => c\.type === 'created_at'\) && <th>Создано<\/th>/);
+    expect(src).toMatch(/!columns\.some\(\(c\) => c\.type === 'created_at'\) && \(/);
+  });
+});

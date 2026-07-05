@@ -22,7 +22,7 @@
 
 import { describe, it, expect } from 'vitest';
 import React from 'react';
-import { FieldControl, CollectionField, RelationPickerField, DateRangeField } from './field-renderer.jsx';
+import { FieldControl, CollectionField, RelationPickerField, DateRangeField, MoneyInput } from './field-renderer.jsx';
 
 // ---------------------------------------------------------------------------
 // Tree-walk helpers (same pattern as field-renderer-d76.test.jsx)
@@ -726,7 +726,12 @@ describe('FieldControl D7-7 · non-regression: relation/date-range/money unaffec
       onChange: noop,
     });
     expect(tree.type).not.toBe(CollectionField);
-    const ruble = collectElements(tree, (el) => el.type === 'span' && el.props?.children === '₽');
+    // T-0649: money renders via <MoneyInput> — invoke it to inspect its tree
+    // (same pattern already used for RelationPickerField/DateRangeField).
+    const moneyEl = collectElements(tree, (el) => el.type === MoneyInput)[0];
+    expect(moneyEl).toBeDefined();
+    const moneyTree = MoneyInput(moneyEl.props);
+    const ruble = collectElements(moneyTree, (el) => el.type === 'span' && el.props?.children === '₽');
     expect(ruble.length).toBeGreaterThan(0);
   });
 });

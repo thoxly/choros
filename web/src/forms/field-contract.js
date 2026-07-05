@@ -32,11 +32,11 @@ const BINDING_CONTRACT_CATALOG = Object.freeze({
   scalar: {
     kind: 'scalar',
     schemaSlot: 'property',
-    presentations: ['text', 'textarea', 'number', 'checkbox', 'date', 'url', 'email'],
+    presentations: ['text', 'textarea', 'number', 'checkbox', 'date', 'datetime', 'url', 'email'],
     defaultPresentation: 'text',
     editable: true,
     label: 'Значение',
-    summary: 'Одно простое значение (текст, число, дата, да/нет, URL, email).',
+    summary: 'Одно простое значение (текст, число, дата, дата и время, да/нет, URL, email).',
   },
   enum: {
     kind: 'enum',
@@ -226,6 +226,10 @@ export function deriveContractFromFieldType(type) {
       return { kind: 'scalar', presentation: 'number' };
     case 'date':
       return { kind: 'scalar', presentation: 'date' };
+    // T-0649: datetime — separate presentation from date (time-of-day is part
+    // of the value; DateInput/DateTimeInput render/store differently).
+    case 'datetime':
+      return { kind: 'scalar', presentation: 'datetime' };
     case 'textarea':
       return { kind: 'scalar', presentation: 'textarea' };
     case 'url':
@@ -254,6 +258,9 @@ export function normaliseTypeToFieldType(type) {
       return 'number';
     case 'date':
       return 'date';
+    // T-0649: datetime is a distinct FieldType (not merged with date).
+    case 'datetime':
+      return 'datetime';
     case 'textarea':
       return 'textarea';
     case 'url':

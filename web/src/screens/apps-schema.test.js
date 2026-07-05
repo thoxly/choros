@@ -142,6 +142,53 @@ describe('apps-schema · supported types', () => {
     expect(parsed[0].type).toBe('string');
   });
 
+  it('T-0649: datetime emits { type:"string", "x-datetime":true } and round-trips back to "datetime"', () => {
+    const schema = buildRecordSchema([{ key: 'at', type: 'datetime', title: 'Момент', required: true }]);
+    expect(schema.properties.at).toEqual({ type: 'string', 'x-datetime': true, title: 'Момент' });
+    // x-datetime is stripped before AJV compile (root-level/property x-* strip).
+    expect(backendAccepts(schema)).toBe(true);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed).toEqual([{ key: 'at', type: 'datetime', title: 'Момент', required: true }]);
+  });
+
+  it('T-0649: a collection date column round-trips via x-collection-date-fields (not degraded to string)', () => {
+    const fields = [{
+      key: 'lines',
+      type: 'collection',
+      title: 'Позиции',
+      required: false,
+      subFields: [
+        { key: 'product', type: 'string', label: 'Товар', required: false },
+        { key: 'ship_by', type: 'date', label: 'Отгрузить до', required: false },
+      ],
+    }];
+    const schema = buildRecordSchema(fields);
+    // The date sub-field is stored as a bare string (no nested x-date — AJV strict).
+    expect(schema.properties.lines.items.properties.ship_by.type).toBe('string');
+    expect(schema.properties.lines.items.properties.ship_by['x-date']).toBeUndefined();
+    // The root-level annotation records which sub-field keys are dates.
+    expect(schema['x-collection-date-fields']).toEqual({ lines: ['ship_by'] });
+    // The schema (x-* stripped) is still AJV-valid.
+    expect(backendAccepts(schema)).toBe(true);
+    // Round-trip: ship_by is restored as a date column, product stays a string.
+    const parsed = parseRecordSchema(schema);
+    const lines = parsed.find((f) => f.key === 'lines');
+    const sf = Object.fromEntries(lines.subFields.map((s) => [s.key, s]));
+    expect(sf.ship_by.type).toBe('date');
+    expect(sf.product.type).toBe('string');
+  });
+
+  it('T-0649: a collection with NO date columns emits no x-collection-date-fields (byte-identical to before)', () => {
+    const fields = [{
+      key: 'lines',
+      type: 'collection',
+      required: false,
+      subFields: [{ key: 'product', type: 'string', label: '', required: false }],
+    }];
+    const schema = buildRecordSchema(fields);
+    expect(schema['x-collection-date-fields']).toBeUndefined();
+  });
+
   it('does not offer `format` (AJV strict throws on unknown formats)', () => {
     // sanity: the editor must never emit format — prove format would be rejected
     const withFormat = { type: 'object', properties: { f: { type: 'string', format: 'email' } } };

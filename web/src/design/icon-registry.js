@@ -36,6 +36,8 @@ export const ICON_REGISTRY = {
   // ── T-0597 additions (reveal-toggle на поле API-ключа, находка №3) ────────
   "eye":             { label: "Показать",        since: "T-0597", usedIn: ["screen-llm-connections"] },
   "eye-off":         { label: "Скрыть",           since: "T-0597", usedIn: ["screen-llm-connections"] },
+  // ── T-0649 addition (DateInput trigger decoration) ────────────────────────
+  "calendar":        { label: "Календарь",        since: "T-0649", usedIn: ["DateInput"] },
 };
 
 /** Set of all known icon names — used by KitIcon dev-warn fallback. */

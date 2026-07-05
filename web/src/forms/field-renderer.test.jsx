@@ -21,7 +21,7 @@
 
 import { describe, it, expect } from 'vitest';
 import React from 'react';
-import { FieldControl } from './field-renderer.jsx';
+import { FieldControl, DateInput } from './field-renderer.jsx';
 
 // ---------------------------------------------------------------------------
 // Tree-walk helpers — inspect the returned React element tree.
@@ -198,7 +198,13 @@ describe('FieldControl T-0450 Fix 2 · hideLabel=true → bare control, no label
     });
     const labels = findByType(tree, 'label');
     expect(labels).toHaveLength(0);
-    const inputs = findByType(tree, 'input');
+    // T-0649: date now renders via <DateInput> (native <input type="date">
+    // wrapped with a дд.мм.гггг overlay) — find it and invoke it to inspect
+    // the actual <input> it renders (same pattern as the money tests above).
+    const dateEl = findByType(tree, DateInput)[0];
+    expect(dateEl).toBeDefined();
+    const dateTree = DateInput(dateEl.props);
+    const inputs = findByType(dateTree, 'input');
     expect(inputs.length).toBeGreaterThan(0);
     expect(inputs[0].props.type).toBe('date');
   });
@@ -360,7 +366,12 @@ describe('FieldControl T-0404 · read-only mode → control rendered disabled', 
       field: { key: 'k', label: 'L', type: 'date', mode: 'read-only' },
       value: '2026-01-01', onChange: noop,
     });
-    expect(findControls(tree)[0].props.readOnly).toBe(true);
+    // T-0649: date renders via <DateInput> — invoke it to reach the real
+    // <input type="date"> (same pattern as the hideLabel date test above).
+    const dateEl = findByType(tree, DateInput)[0];
+    expect(dateEl).toBeDefined();
+    const dateTree = DateInput(dateEl.props);
+    expect(findControls(dateTree)[0].props.readOnly).toBe(true);
   });
 });
 
