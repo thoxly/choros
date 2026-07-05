@@ -22,6 +22,7 @@ import {
   applicationOptions,
   definitionOptions,
   bindingApplicationLabel,
+  bindingProcessLabel,
   triggerTypeLabel,
   mapBindingError,
   TRIGGER_TYPES,
@@ -307,5 +308,37 @@ describe('mapBindingError', () => {
 
   it('falls back generically for unexpected status', () => {
     expect(mapBindingError(500, null).message).toMatch(/HTTP 500/);
+  });
+});
+
+// T-0684 [capstone T-0647 P1]: the «Связи процессов с приложениями» ПРОЦЕСС column
+// resolves the human definition NAME (from the loaded definitions), slug demoted.
+// Live capstone finding: the column showed the raw slug (a machine key) as primary.
+describe('bindingProcessLabel — human process name primary, slug demoted', () => {
+  const defs = [
+    { process_key: 'widget-intake-3', name: 'Widget Intake Review' },
+    { process_key: 'no-name-key', name: '' },
+  ];
+
+  it('resolves the human name as primary and keeps the slug secondary', () => {
+    const out = bindingProcessLabel({ process_key: 'widget-intake-3' }, defs);
+    expect(out.name).toBe('Widget Intake Review'); // the human name, NOT the slug
+    expect(out.name).not.toBe('widget-intake-3');
+    expect(out.key).toBe('widget-intake-3');
+    expect(out.hasName).toBe(true);
+  });
+
+  it('falls back to the raw key ONLY when no matching definition carries a name', () => {
+    const missing = bindingProcessLabel({ process_key: 'orphan-key' }, defs);
+    expect(missing.name).toBe('orphan-key');
+    expect(missing.hasName).toBe(false);
+    const noName = bindingProcessLabel({ process_key: 'no-name-key' }, defs);
+    expect(noName.name).toBe('no-name-key');
+    expect(noName.hasName).toBe(false);
+  });
+
+  it('is defensive against missing definitions / fields', () => {
+    expect(bindingProcessLabel({ process_key: 'k' }, undefined).hasName).toBe(false);
+    expect(bindingProcessLabel({}, defs).name).toBe('—');
   });
 });

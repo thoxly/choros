@@ -1,0 +1,54 @@
+{
+  "task_id": "T-0684",
+  "status": "pr_open",
+  "branch": "task/T-0684",
+  "pr_url": "local:task/T-0684",
+  "ci_local": {
+    "build": true,
+    "build_result": "web `npm run build` (vite) green — 545 modules transformed, built in 2.26s, exit 0. server `tsc --noEmit` (node_modules/.bin/tsc) exit 0, zero type errors.",
+    "lint": true,
+    "lint_result": "eslint src on changed server files — 0 errors, 1 warning (pre-existing no-console at process-defs.ts:863, NOT in this diff). Web .jsx files are ignored by the root eslint config (web:lint scopes separately) — 0 errors.",
+    "types": true,
+    "types_result": "node_modules/.bin/tsc --noEmit — exit 0. New isAcceptedProcessName type-guard narrows the `unknown` request field to string on the accepted branch (no cast).",
+    "tests": true,
+    "tests_result": "FULL server vitest run: 297 files passed | 2 skipped (299); 5671 tests passed | 10 skipped (5681); exit 0. FULL web vitest run: 92 files passed (92); 2445 tests passed; exit 0. New pin tests: server process-name-policy.test.ts (6), process-defs.unit.test.ts +4 (create reject placeholder/whitespace, create accept real name, publish reject placeholder→422 deployBpmn-not-called); web process-name-policy.test.js (5), process-catalog.test.js +3 (bindingProcessLabel), process-instance.logic.test.js +9 (deriveInstanceTitle + formatVariableValue/renderableVariables/hasRenderableVariables), screen-process-editor.test.jsx +4 + screen-process-instance.test.jsx +2 (source-presence wiring locks). Mutation-verified: reverting the server placeholder check → 6 RED; reverting each of the 3 web helpers → 4 RED; all reverted clean, no leftover files.",
+    "fitness": true,
+    "fitness_result": "fitness:db SOLO (DATABASE_URL=...@localhost:55432/choros, --no-file-parallelism): 138 files passed, 1322 tests passed, exit 0 (== baseline 1322). anti-uuid-actor-render.sh: PASS (0 bare renders) + --self-test PASS. anti-case-lock.sh: PASS (Phase 1 delegates clean, Phase 2 aggregate 16 == baseline 16) + --self-test PASS. Neutralized the case-literal `Согласование` (denylisted) out of new test strings → «Обработка виджета» / «Widget Intake Review»."
+  },
+  "subbugs": [
+    "1. Enforce human process name (root: modeler never required a name — screen-process-editor.jsx derived name from key/placeholder «Новый процесс» and shipped it via `const name = processName || 'Новый процесс'` on save/publish; server create route only rejected empty, not the placeholder). FIX: new src/core/process-name-policy.ts (isRejectedProcessName/isAcceptedProcessName + UNNAMED_PROCESS_PLACEHOLDER + PROCESS_NAME_REQUIRED_MESSAGE «Укажите название процесса», one source of truth) enforced at BOTH the POST /api/process-defs create route (400) and publishProcessByKey (422 lint envelope, deployBpmn never reached — defense-in-depth). Client: editor now has an EDITABLE name INPUT in the toolbar (chs-edtoolbar__name-input, seeds from backend name on load, empty for new → author must type), aria-invalid nudge, and a pre-flight guard on handleSave/handlePublish (web mirror process-name-policy.js) blocking the network call with the same wording.",
+    "2. «Связи процессов с приложениями» screen showed raw slug (root: screen-processes.jsx bindings row rendered `<MonoId>{b.process_key}</MonoId>` primary). FIX: pure bindingProcessLabel(binding, definitions) in process-catalog.js resolves the human definition NAME from the SAME `defs` list the screen already loads (list-local analog of resolveDefinitionNames — no extra fetch), slug demoted to a mono secondary; slug stays sole label only when no name is known (engine-only key).",
+    "3. Instance title = machine key telLinear (root: server sends name=p.definitionName; for an engine-only def with no modeler row resolveDefinitionNames→fallbackDefinitionName echoes the raw KEY, so name===procId). FIX: pure deriveInstanceTitle(instance) in process-instance.logic.js promotes a real human name (name && name!==procId) and demotes the key to the mono meta line; when only the key is known it shows the honest generic «Процесс» (same posture as ProcessRef/deriveProcessRefPrimary), NEVER the machine key as the <h1> title.",
+    "4. process-variables rendered literal `undefined`×3 (root: VariableRow did String(variable.value) → 'undefined' for null/undefined, and the section rendered whenever variables.length>0 regardless of value). FIX: formatVariableValue (null/undefined/empty → «—», object → JSON, else String) + renderableVariables (drops phantom rows with no name AND no value; keeps a NAMED variable with null value → «—») + hasRenderableVariables gate in process-instance.logic.js; VariableRow + the section now go through these."
+  ],
+  "reuse_notes": [
+    "resolveDefinitionNames is REUSED conceptually, not duplicated: it is a PRIVATE function inside src/http/process-projection.ts (server, tenant-scoped DB batch). Sub-bug 2 is a CLIENT screen with the definitions already in hand — bindingProcessLabel is the list-local, same-shape analog (resolve name by process_key against the loaded definitions), no new server fetch/query added. Sub-bug 3's instance title consumes the name the server ALREADY resolves via resolveDefinitionNames (name=p.definitionName) and only fixes the client-side demotion when that resolver fell back to the raw key — no new resolver.",
+    "The «Новый процесс» placeholder literal lives in exactly ONE server constant (process-name-policy.ts) and ONE web constant (process-name-policy.js); every test imports it rather than hardcoding it (anti-case-lock: neutral values only in new test strings)."
+  ],
+  "existing_placeholder_data_note": "The 11 pre-existing definitions named «Новый процесс» found live are DATA, not enforcement's concern — this task STOPS new nameless definitions (create 400 + publish 422). Renaming the 11 existing rows is a separate owner-visible backfill (an author re-opens each in the modeler — which now seeds the name field with the placeholder and lights it red — and gives it a real name; the create/publish gates then require it). No data migration in this task (no schema/migration touched).",
+  "files_changed": [
+    "src/core/process-name-policy.ts",
+    "src/http/process-defs.ts",
+    "src/__tests__/process-name-policy.test.ts",
+    "src/__tests__/process-defs.unit.test.ts",
+    "web/src/screens/process-name-policy.js",
+    "web/src/screens/process-name-policy.test.js",
+    "web/src/screens/process-catalog.js",
+    "web/src/screens/process-catalog.test.js",
+    "web/src/screens/process-instance.logic.js",
+    "web/src/screens/process-instance.logic.test.js",
+    "web/src/screens/screen-process-editor.jsx",
+    "web/src/screens/screen-process-editor.test.jsx",
+    "web/src/screens/screen-process-instance.jsx",
+    "web/src/screens/screen-process-instance.test.jsx",
+    "web/src/screens/screen-processes.jsx",
+    "web/src/canvas/editor.css"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [
+    "Worktree had NO node_modules (root + web) — ran `npm ci --maxsockets=3` in both before any gate could run.",
+    "The task-supplied gate path `anti-uuid-actor-render.sh` is actually at ci/checks/ux/anti-uuid-actor-render.sh (ux/ subdir).",
+    "anti-case-lock initially FAILED (2 violations): the case-literal «Согласование» (on the read-pdp/rights-ui denylist) leaked into new test strings («Согласование заявок»). Neutralized to «Обработка виджета» / «Widget Intake Review» — gate green. Confirms the task's warning to keep case/process-name literals out of new lines even in tests.",
+    "Three pre-existing T-0609 source-presence tests asserted the OLD unfiltered variable wiring (hasVariables + instance.variables.map + String(value)) that this fix intentionally supersedes — updated them to lock the corrected hasRenderableVariables/renderableVariables path."
+  ]
+}

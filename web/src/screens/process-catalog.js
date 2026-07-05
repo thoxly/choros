@@ -206,6 +206,38 @@ export function definitionOptions(defs) {
 }
 
 /**
+ * T-0684 [capstone T-0647 P1]: resolve a binding row's PROCESS to its human definition
+ * NAME as the primary label, from the definitions list the catalog screen already
+ * holds (GET /api/process-catalog → definitions[], each { process_key, name }). The
+ * live capstone finding: the «Связи процессов с приложениями» table showed the raw
+ * process SLUG (novyy-protsess-6, …) in the ПРОЦЕСС column — a machine key where a
+ * human name belongs. This is the client-side, list-local analog of the server's
+ * resolveDefinitionNames batch (process-projection.ts): resolve by process_key against
+ * the SAME definitions the caller loaded, no extra fetch. Falls back honestly to the
+ * raw key ONLY when no matching definition carries a name (engine-only key, or a name
+ * that itself is empty) — the key is then secondary/mono in the screen, never primary
+ * when a name exists.
+ *
+ * @param {{process_key?}} b            the binding row
+ * @param {Array<{process_key?,name?}>} definitions  the catalog's definition list
+ * @returns {{ name: string, key: string, hasName: boolean }}
+ *   name    — the primary label (human name, or the key when none is known)
+ *   key     — the raw process_key (rendered secondary/demoted)
+ *   hasName — true iff a real human name was resolved (drives whether key is demoted)
+ */
+export function bindingProcessLabel(b, definitions) {
+  const key = str(b?.process_key).trim();
+  const defs = Array.isArray(definitions) ? definitions : [];
+  const match = defs.find(
+    (d) => d && typeof d.process_key === 'string' && d.process_key === key,
+  );
+  const name = match ? str(match.name).trim() : '';
+  if (name) return { name, key, hasName: true };
+  // No human name known — the key is the best honest label we have (shown mono).
+  return { name: key || '—', key, hasName: false };
+}
+
+/**
  * Render-friendly label for a binding row's target application. Falls back honestly
  * when the application has been deleted (LEFT JOIN → null) so we never show a stale
  * name as if it were live.

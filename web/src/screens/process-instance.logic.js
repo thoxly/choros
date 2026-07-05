@@ -117,6 +117,39 @@ export function hasSourceRecord(instance) {
 }
 
 /**
+ * T-0684 [capstone T-0647 P1]: derive the PRIMARY human title for a process-instance
+ * detail page + report whether the raw machine key still deserves a demoted secondary.
+ *
+ * Live capstone finding: the instance detail title rendered the machine key (telLinear)
+ * where a human name belongs. The server sends `name` (the definition's resolved name)
+ * and `procId` (the raw process_key). When a real modeler name exists, `name` is that
+ * human string and `procId` is the demoted key. But for an engine-only definition with
+ * no modeler row, the server's resolver falls back to the KEY itself, so `name ===
+ * procId` — a machine key masquerading as a human title.
+ *
+ * This helper (pure, mirrors deriveProcessRefPrimary's split) decides:
+ *   - a real human `name` (present AND not byte-equal to the raw key) → primary title,
+ *     key demoted secondary.
+ *   - else the honest generic «Процесс» as primary, the key demoted — the key is NEVER
+ *     the primary title when it is all we have (same posture as ProcessRef).
+ *
+ * @param {{ name?: string, procId?: string }|null|undefined} instance
+ * @returns {{ title: string, keyDemoted: string|null }}
+ *   title      — the primary human title (never a bare machine key)
+ *   keyDemoted — the raw process key to render as a demoted secondary, or null
+ */
+export function deriveInstanceTitle(instance) {
+  const name = instance && typeof instance.name === 'string' ? instance.name.trim() : '';
+  const key = instance && typeof instance.procId === 'string' ? instance.procId.trim() : '';
+  // A real human name is present and is NOT just the raw key echoed back.
+  if (name && name !== key) {
+    return { title: name, keyDemoted: key || null };
+  }
+  // Only the machine key is known — show the honest generic, demote the key.
+  return { title: 'Процесс', keyDemoted: key || null };
+}
+
+/**
  * T-0609: whether the instance carries any process variables to render. Live
  * acceptance finding — a P0 gateway-branch diagnosis previously required raw SQL
  * against the Flowable tables because no product surface showed instance
@@ -132,6 +165,63 @@ export function hasVariables(instance) {
     Array.isArray(instance.variables) &&
     instance.variables.length > 0,
   );
+}
+
+/**
+ * T-0684 [capstone T-0647 P1]: the process-variable value rendered honestly — NEVER
+ * the JS literal "undefined"/"null". The live capstone finding: the variables section
+ * rendered the literal string `undefined` three times because the row did
+ * `String(variable.value)` on a value that was undefined/null. This helper is the ONE
+ * place that formats a variable value: object → compact JSON, null/undefined → the
+ * honest em-dash «—», everything else → its String form.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function formatVariableValue(value) {
+  if (value === undefined || value === null) return '—';
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value); } catch { return '—'; }
+  }
+  const s = String(value);
+  return s === '' ? '—' : s;
+}
+
+/**
+ * T-0684 [capstone T-0647 P1]: the variables worth rendering — drops rows that carry
+ * NO human information at all (no name AND no value), so an all-undefined phantom row
+ * never reaches the table. A named variable with a null/undefined value is KEPT (its
+ * value renders as «—» via formatVariableValue) — that is honest information ("this
+ * variable exists but has no value"), not a phantom.
+ *
+ * @param {{ variables?: Array<{name?: unknown, value?: unknown}> }|null|undefined} instance
+ * @returns {Array<{name: string, value: unknown}>}
+ */
+export function renderableVariables(instance) {
+  if (!instance || !Array.isArray(instance.variables)) return [];
+  return instance.variables
+    .filter((v) => v && typeof v === 'object')
+    .map((v) => ({
+      name: typeof v.name === 'string' ? v.name : '',
+      value: v.value,
+    }))
+    .filter((v) => {
+      const hasName = v.name.trim().length > 0;
+      const hasValue = v.value !== undefined && v.value !== null && v.value !== '';
+      return hasName || hasValue;
+    });
+}
+
+/**
+ * T-0684: whether there is at least one RENDERABLE variable (post-filter). Replaces the
+ * pre-fix hasVariables() gate on the section so a payload of only phantom
+ * (nameless+valueless) rows renders NO section instead of a table of «undefined».
+ *
+ * @param {{ variables?: Array<object> }|null|undefined} instance
+ * @returns {boolean}
+ */
+export function hasRenderableVariables(instance) {
+  return renderableVariables(instance).length > 0;
 }
 
 /**

@@ -23,6 +23,7 @@ import {
   applicationOptions,
   definitionOptions,
   bindingApplicationLabel,
+  bindingProcessLabel,
   triggerTypeLabel,
   mapBindingError,
   TRIGGER_TYPES,
@@ -227,9 +228,27 @@ function ProcessCatalogSection() {
                 </tr>
               </thead>
               <tbody>
-                {bindings.map((b) => (
+                {bindings.map((b) => {
+                  // T-0684 [capstone T-0647 P1]: ПРОЦЕСС column shows the human
+                  // definition NAME (resolved from `defs` — the same list already
+                  // loaded), with the raw slug DEMOTED to a mono secondary. Was the
+                  // raw slug primary (novyy-protsess-6, …). When no name is known
+                  // (engine-only key) the slug stays as the sole honest label.
+                  const proc = bindingProcessLabel(b, defs);
+                  return (
                   <tr key={b.id}>
-                    <td><MonoId>{b.process_key}</MonoId></td>
+                    <td>
+                      {proc.hasName ? (
+                        <div className="chs-task">
+                          <span className="chs-task__txt">
+                            <span className="chs-task__name">{proc.name}</span>
+                            <span className="chs-task__step"><MonoId>{proc.key}</MonoId></span>
+                          </span>
+                        </div>
+                      ) : (
+                        <MonoId>{proc.key}</MonoId>
+                      )}
+                    </td>
                     <td>{bindingApplicationLabel(b)}</td>
                     <td style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
                       {triggerTypeLabel(b.trigger_type)}
@@ -240,7 +259,8 @@ function ProcessCatalogSection() {
                         : <span style={{ color: 'var(--chs-color-text-muted)' }}>—</span>}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}

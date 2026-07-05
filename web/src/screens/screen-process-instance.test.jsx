@@ -20,16 +20,22 @@ const path = await import('path');
 const screenPath = path.default.resolve(new URL(import.meta.url).pathname, '../screen-process-instance.jsx');
 const screenSrc = fs.default.readFileSync(screenPath, 'utf-8');
 
-describe('screen-process-instance — process variables section (T-0609)', () => {
-  it('imports hasVariables from the pure logic module', () => {
-    expect(screenSrc).toContain('hasVariables');
+describe('screen-process-instance — process variables section (T-0609, superseded by T-0684)', () => {
+  // T-0684 [capstone T-0647 P1]: the variables section now goes through the
+  // phantom-dropping / honest-value helpers (hasRenderableVariables /
+  // renderableVariables / formatVariableValue) instead of the pre-fix
+  // hasVariables + raw instance.variables.map + String(value) path that printed the
+  // literal "undefined". These assertions lock the CORRECTED wiring.
+  it('imports the honest variable helpers from the pure logic module', () => {
+    expect(screenSrc).toContain('hasRenderableVariables');
+    expect(screenSrc).toContain('formatVariableValue');
   });
-  it('renders a "Переменные процесса" heading gated on hasVariables(instance)', () => {
+  it('renders a "Переменные процесса" heading gated on hasRenderableVariables(instance)', () => {
     expect(screenSrc).toContain('Переменные процесса');
-    expect(screenSrc).toMatch(/hasVariables\(instance\)\s*&&/);
+    expect(screenSrc).toMatch(/hasRenderableVariables\(instance\)\s*&&/);
   });
-  it('maps instance.variables to rows (VariableRow)', () => {
-    expect(screenSrc).toMatch(/instance\.variables\.map/);
+  it('maps the FILTERED variables to rows (renderableVariables → VariableRow)', () => {
+    expect(screenSrc).toMatch(/renderableVariables\(instance\)\.map/);
   });
 });
 
@@ -61,5 +67,24 @@ describe('screen-process-instance — detailed transition history (T-0609)', () 
 describe('screen-process-instance — read-only invariant unchanged (T-0556 §3, regression)', () => {
   it('never POSTs/PUTs/PATCHes — GET-only fetches', () => {
     expect(screenSrc).not.toMatch(/method:\s*['"](POST|PUT|PATCH|DELETE)['"]/);
+  });
+});
+
+// T-0684 [capstone T-0647 P1]: title = human name (machine key demoted) + variables
+// never render the literal "undefined". Structural source-presence locks; the pure
+// behaviour is pin-tested in process-instance.logic.test.js.
+describe('screen-process-instance — human title + honest variables (T-0684)', () => {
+  it('derives the title via deriveInstanceTitle (never the raw machine key)', () => {
+    expect(screenSrc).toContain('deriveInstanceTitle');
+    // The raw name is no longer rendered directly as the <h1> title.
+    expect(screenSrc).not.toMatch(/<h1[^>]*>\s*\{instance\.name\}/);
+  });
+
+  it('gates + maps variables through the phantom-dropping / honest-value helpers', () => {
+    expect(screenSrc).toContain('hasRenderableVariables');
+    expect(screenSrc).toContain('renderableVariables');
+    expect(screenSrc).toContain('formatVariableValue');
+    // Regression: no longer coerces a raw value with String(...) (which printed "undefined").
+    expect(screenSrc).not.toMatch(/String\(variable\.value\)/);
   });
 });
