@@ -1,0 +1,43 @@
+{
+  "task_id": "T-0658",
+  "verdict": "approved",
+  "reviewer": "opus D-023 (senior security verifier, round 3 FINAL — correctness + adversarial)",
+  "ci_seen": {
+    "green": true,
+    "detail": "tsc --noEmit EXIT 0; eslint on 4 changed files EXIT 0 (0 errors); vitest run --dir ci/checks/db --no-file-parallelism rights-intents.db.test.ts user-mgmt.db.test.ts against live PG (choros-postgres-1 :55432, DATABASE_URL+LIVE wired) → 35 passed (rights-intents 10/10, user-mgmt 25/25), including the 4 new round-3 tests. Initial run failed only on missing DATABASE_URL/LIVE env (NO_DATABASE), not logic — re-run with env is fully green."
+  },
+  "findings": [
+    {
+      "id": "T0658-R3-RACE-LASTOWNER",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/user-mgmt.ts:527-582 (last-owner guard) + src/http/binding.ts:93-113 (withTenantTx)",
+      "issue": "FIX-2 last-owner guard has an open TOCTOU race (severity med, narrow window — NOT blocking per verifier directive). The guard reads 'is target an owner' + 'any OTHER active owner' inside a withTenantTx that uses a plain BEGIN = default READ COMMITTED, with NO SELECT..FOR UPDATE, NO SERIALIZABLE, NO advisory lock, and NO unique partial index. Worse, that read tx is SEPARATE from the later deactivation write (KC-first flow), so check and mutation are not even atomic. Concurrent scenario: two active owners A and B, two parallel PATCH{active:false} — one deactivating A, one deactivating B. Under READ COMMITTED each guard sees the other owner still active (the concurrent deactivation is uncommitted → invisible) → each counts >=1 other owner → both pass → both commit → tenant left with ZERO active owners. This is exactly the self-lockout brick FIX-2 was written to prevent, reachable only via simultaneous double-deactivation (uncommon admin op). The two db tests exercise only the serial path, so this window is untested and unblocked.",
+      "suggestion": "Follow-up (small task, founder to file): make the guard atomic — e.g. SELECT the OTHER active owners FOR UPDATE inside the SAME tx that performs the deactivation write, or run the guard+write under SERIALIZABLE with retry, or add a partial unique/count constraint enforcing >=1 active tenant-owner. Not required to land this fix; the primary security holes are closed and the serial guard is correct."
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "ac": "FIX-1 self-absence: deactivated actor cannot mint delegated Tier-2 grant (5th authority-resolver hole closed). AND deactivated_at IS NULL added to actor-resolve subquery (rights-intents.ts:1199); deactivated actor → 0 rows → 404 BEFORE role-holding gate and Tier-2 mint. Verified in code + mutation-honest test (positive control on identical seed with force_tier2:true mints a grant; deactivated variant with the ONLY delta = deactivated_at=500000 asserts 404 AND countMinted() unchanged, filtering granted_by='intent:self-absence' — proves mint BLOCKADE, not a data diff).",
+      "covered": true
+    },
+    {
+      "ac": "No 6th actor-authority path resolving an actor without deactivated_at. Swept every FROM choros.employee in src/ (grep). All disputed paths triaged: (a) owner/admin short-circuit = isGenesisOwnerForTenant + loadAdminContext (org.ts:737,790,813) all carry AND deactivated_at IS NULL (round-2); (b) grant PDP = getGrantsForSubject (grants-dao.ts:252) carries the predicate (round-1) and invoke.ts/capability-grants-dao delegate to it; (c) inbox claim/approve have their own explicit fail-closed deactivation gates (inbox.ts:1413-1418, 1640-1645, T-0588); (d) getRoleSlugsForActor (grants-dao.ts:437/448, NO predicate) is a pool-task-filter / claim-eligibility projection — doc-stated NOT a PDP decision, and both its authority callers (inbox) gate deactivation independently; (e) agents.ts:459/548/636, grants.ts:1468, rights-intents.ts:445 = write-TARGET existence / kind reads, actor authority upstream via loadAdminContext; (f) assistant.ts:1290/1783, solution-bundles.ts:113 = display/routing/type reads, not allow-deny. Conclusion: NO sixth authority path.",
+      "covered": true
+    },
+    {
+      "ac": "FIX-2 last-owner guard logic correct: only on active===false; target-is-active-owner AND no OTHER active (non-deactivated, confirmed, in-window) tenant-owner → 409 LAST_OWNER before any KC/DB mutation; reactivation (active:true) untouched. Verified in code (guard inside if(active===false)) + tests (sole-owner → 409 with KC untouched and deactivated_at still NULL; two-owner → first deactivation 200 then remaining last owner 409). Reactivation-unaffected corroborated by FF-583-4 {active:true} test still green.",
+      "covered": true
+    },
+    {
+      "ac": "No over-block of legitimate actors: active owner/admin/agent paths pass (positive controls green — self-absence active-actor mints, FF-583 owner create/patch/list/reactivate all pass).",
+      "covered": true
+    }
+  ],
+  "role_gap_evidence": [
+    "(a) self-absence deactivation hole: CLOSED — rights-intents.ts:1199 predicate + mutation-honest 404/no-mint test.",
+    "(b) sixth actor-authority path: NO — full grep sweep, every FROM choros.employee triaged; the only un-predicated actor-slug resolve (getRoleSlugsForActor) is a non-PDP eligibility projection whose authority callers gate deactivation independently.",
+    "(c) last-owner guard race: OPEN (nit, med, narrow) — READ COMMITTED, no FOR UPDATE/SERIALIZABLE/partial-index, and guard-read tx separate from write tx; simultaneous double-owner-deactivation can leave a tenant with zero active owners. Per verifier directive this does NOT block: primary holes closed, serial guard correct, rare window → founder to file a small follow-up (candidate for T-0662 systematization or its own task).",
+    "Systematization (single deactivation/identity layer or a fitness gate against recidivism) is correctly deferred to T-0662 (architect) — NOT required here; this task point-closes 5 concrete holes + honest triage."
+  ]
+}

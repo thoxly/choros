@@ -409,6 +409,114 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
   });
 
   // ---------------------------------------------------------------------
+  // T-0658 (round 3) FIX-2 — LAST-OWNER GUARD: the T-0658 deactivation gate
+  // (org.ts isGenesisOwnerForTenant / loadAdminContext) makes a deactivated
+  // owner isGenesisOwner=false. That closes the security hole but would brick a
+  // tenant if the LAST owner were deactivated (reactivation authz is
+  // loadAdminContext — no one left to reactivate). PATCH {active:false} must
+  // REFUSE to deactivate the last active tenant-owner (409 LAST_OWNER).
+  // ---------------------------------------------------------------------
+
+  // Resolve the owner's employee UUID from their slug (registerOne returns slug).
+  async function ownerEmployeeId(tenantId: string, ownerSlug: string): Promise<string> {
+    return withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+      const { rows } = await c.query<{ id: string }>(
+        `SELECT id FROM choros.employee WHERE tenant_id=$1 AND slug=$2 LIMIT 1`,
+        [tenantId, ownerSlug],
+      );
+      await c.query('COMMIT');
+      return rows[0]!.id;
+    });
+  }
+
+  it('T-0658 FIX-2: deactivating the SOLE tenant-owner is refused (409 LAST_OWNER)', async () => {
+    const t = await registerOne('lastowner');
+    kc.reset();
+    const ownerId = await ownerEmployeeId(t.tenantId, t.ownerSlug);
+
+    // registerOne creates a tenant with exactly ONE owner (the genesis owner).
+    // Deactivating them must be refused — there is no other owner to reactivate.
+    const res = await patchUser(ownerId, { active: false }, t.ownerSlug);
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json.error?.code ?? res.json.code).toBe('LAST_OWNER');
+    // Fail-closed BEFORE any KC/DB mutation: KC never touched, owner still active.
+    expect(kc.setEnabledCallCount).toBe(0);
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, ownerId],
+      );
+      await c.query('COMMIT');
+      expect(rows[0].deactivated_at).toBeNull(); // still active — not bricked
+    });
+  });
+
+  it('T-0658 FIX-2: with a SECOND owner present, deactivating one owner is allowed; the remaining last owner is then protected', async () => {
+    const t = await registerOne('twoowners');
+    kc.reset();
+    const ownerId = await ownerEmployeeId(t.tenantId, t.ownerSlug);
+
+    // Create a second human account, capture its slug (= KC userId, the actor
+    // identity dev-mode auth uses).
+    const login2 = `t0658-owner2-${Date.now()}`;
+    const email2 = `t0658-owner2-${Date.now()}@example.com`;
+    const create2 = await postUsers(
+      { tenant_id: t.tenantId, login: login2, email: email2, password: 'password12345', display_name: 'Owner Two' },
+      t.ownerSlug,
+    );
+    expect(create2.status, JSON.stringify(create2.json)).toBe(201);
+    const owner2Id = create2.json.employee_id as string;
+    const owner2Slug = kc.created[kc.created.length - 1].userId; // slug == KC userId
+
+    // Grant owner2 the tenant-owner role directly (confirmed, in-window) — two
+    // active owners now. Reuse the genesis owner's own org_scope so the scope is
+    // schema-valid without inventing one.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+      const { rows: roleRows } = await c.query<{ id: string }>(
+        `SELECT id FROM choros.role WHERE tenant_id=$1 AND slug='tenant-owner' LIMIT 1`,
+        [t.tenantId],
+      );
+      const ownerRoleId = roleRows[0]!.id;
+      const { rows: scopeRows } = await c.query<{ org_scope: unknown }>(
+        `SELECT org_scope FROM choros.role_assignment
+          WHERE tenant_id=$1 AND role_id=$2 AND employee_id=$3 LIMIT 1`,
+        [t.tenantId, ownerRoleId, ownerId],
+      );
+      const ownerScope = scopeRows[0]!.org_scope;
+      await c.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, $3, $4::jsonb,
+                 NULL, NULL, 'seed', 'seed', NULL, 'seed', NULL, 0, 0)`,
+        [t.tenantId, owner2Id, ownerRoleId, JSON.stringify(ownerScope)],
+      );
+      await c.query('COMMIT');
+    });
+
+    // Deactivating the FIRST owner is now allowed (a second active owner exists).
+    const res = await patchUser(ownerId, { active: false }, t.ownerSlug);
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(res.json.active).toBe(false);
+
+    // owner1 is now deactivated → they can no longer authz (loadAdminContext gate).
+    // Deactivating the SECOND (now LAST) owner, called AS owner2 (still active),
+    // is refused with 409 LAST_OWNER — the guard holds for whoever is last.
+    const res2 = await patchUser(owner2Id, { active: false }, owner2Slug);
+    expect(res2.status, JSON.stringify(res2.json)).toBe(409);
+    expect(res2.json.error?.code ?? res2.json.code).toBe('LAST_OWNER');
+  });
+
+  // ---------------------------------------------------------------------
   // FF-583-5: tenant isolation.
   // ---------------------------------------------------------------------
   it('FF-583-5: cross-tenant create/patch/list are all blocked', async () => {

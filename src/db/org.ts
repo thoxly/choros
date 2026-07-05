@@ -699,6 +699,23 @@ export async function resolveTenantBySlug(
 // Returns true iff the actor holds the tenant-owner role via a confirmed,
 // in-window role_assignment. isGenesisOwner is ALWAYS resolved from the DB
 // — never assumed or derived from a JWT claim (NF-3).
+//
+// T-0658 [security/системный, столп 4] — the inner slug→employee subquery
+// carries `AND deactivated_at IS NULL` (fail-closed). This is the OWNER/ADMIN
+// authority path, a SECOND resolver PARALLEL to getGrantsForSubject
+// (grants-dao.ts). Owner authority SHORT-CIRCUITS the grant PDP:
+// capability-grants-dao.ts (canConfigureLlmConnection / canActorOperateSystemAgents)
+// and validateAdminDelegation call THIS before ever consulting
+// getGrantsForSubject. Deactivation (PATCH /api/users, T-0583) only sets
+// employee.deactivated_at — it does NOT revoke the tenant-owner
+// role_assignment — so without this predicate a DEACTIVATED owner with a
+// still-live KC token (KC enabled:false blocks only NEW token issuance, not an
+// already-issued one before its TTL) kept returning true here and retained
+// full owner authority (seed-write employee/org mutation, LLM-key config,
+// system-agent operation, mgmt_object delegation, SoD-admin). The grant-side
+// gate (T-0658 getGrantsForSubject step 1) does NOT cover this path because
+// the short-circuit runs first. Mirrors the same predicate already applied in
+// grants-dao.ts findTenantOwnerSlug / findTenantOwnerEmployeeId.
 // ---------------------------------------------------------------------------
 
 export async function isGenesisOwnerForTenant(
@@ -716,7 +733,8 @@ export async function isGenesisOwnerForTenant(
         WHERE ra.tenant_id = $1
           AND ra.employee_id = (
                 SELECT id FROM choros.employee
-                 WHERE tenant_id = $1 AND slug = $2 LIMIT 1
+                 WHERE tenant_id = $1 AND slug = $2
+                   AND deactivated_at IS NULL LIMIT 1
               )
           AND r.slug = 'tenant-owner'
           AND ra.confirmed_by IS NOT NULL
@@ -734,11 +752,22 @@ export async function isGenesisOwnerForTenant(
 //
 // Builds the AdminContext needed by validateAdminDelegation.
 // Three-query sequence inside one withTenant call:
-//   1. isGenesisOwner (via isGenesisOwnerForTenant helper, re-using the
-//      already-acquired client to stay in the same transaction scope).
+//   1. isGenesisOwner (inlined here — same tenant tx — NOT via
+//      isGenesisOwnerForTenant, but the SAME predicate).
 //   2. All confirmed, in-window role_assignment rows for the actor.
 //   3. For each assignment, all confirmed, in-window, delegable=true grants
 //      on the assigned role where resource_type starts with mgmt_object:.
+//
+// T-0658 [security/системный, столп 4] — the slug→employee subqueries in BOTH
+// step 1 (owner-check) and step 2 (assignment-load) carry
+// `AND deactivated_at IS NULL` (fail-closed). loadAdminContext is the admin
+// authority resolver behind ~11 seed-write mgmt paths (assertOrgObjectAuthority
+// in seed-write.ts / user-mgmt.ts / rights-intents.ts) and validateAdminDelegation
+// — a SECOND authority path parallel to getGrantsForSubject. Without the gate a
+// DEACTIVATED admin/owner with a live token kept both isGenesisOwner=true and
+// their delegable mgmt_object:* grants. Same rationale as isGenesisOwnerForTenant
+// above; kept in sync so no third path resolves a deactivated subject to
+// authority.
 // ---------------------------------------------------------------------------
 
 export async function loadAdminContext(
@@ -757,7 +786,8 @@ export async function loadAdminContext(
         WHERE ra.tenant_id = $1
           AND ra.employee_id = (
                 SELECT id FROM choros.employee
-                 WHERE tenant_id = $1 AND slug = $2 LIMIT 1
+                 WHERE tenant_id = $1 AND slug = $2
+                   AND deactivated_at IS NULL LIMIT 1
               )
           AND r.slug = 'tenant-owner'
           AND ra.confirmed_by IS NOT NULL
@@ -779,7 +809,8 @@ export async function loadAdminContext(
         WHERE ra.tenant_id = $1
           AND ra.employee_id = (
                 SELECT id FROM choros.employee
-                 WHERE tenant_id = $1 AND slug = $2 LIMIT 1
+                 WHERE tenant_id = $1 AND slug = $2
+                   AND deactivated_at IS NULL LIMIT 1
               )
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)

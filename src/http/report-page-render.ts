@@ -202,8 +202,18 @@ async function defaultCheckReadGrant(
     await client.query("SET LOCAL search_path TO choros");
 
     // Resolve the actor's employee.id from slug (actorId is the slug in dev-mode).
+    //
+    // T-0658 [security/системный, столп 4] — `AND deactivated_at IS NULL`
+    // (fail-closed). This is the non-owner branch of the report-page read-authz
+    // resolver: a bespoke inline grant read (NOT via getGrantsForSubject), so
+    // the grant-side T-0658 gate does not cover it. Without this predicate a
+    // DEACTIVATED employee holding an application:read grant, with a still-live
+    // KC token, kept rendering report pages. The owner branch (step 1,
+    // loadAdminContext above) is already gated by the org.ts T-0658 fix; this
+    // closes the delegated-reader branch too so no parallel path resolves a
+    // deactivated subject to page-read authority.
     const { rows: empRows } = await client.query<{ id: string }>(
-      `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+      `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 AND deactivated_at IS NULL LIMIT 1`,
       [tenantId, actorId],
     );
     if (empRows.length === 0) {

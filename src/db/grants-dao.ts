@@ -213,13 +213,50 @@ export async function getGrantsForSubject(
 ): Promise<Grant[]> {
   return withTenantReadTx(pool, tenantId, async (client) => {
     // Step 1: resolve actor slug → employee id (within tenant, RLS-scoped).
+    //
+    // T-0658 [security/системный, столп 4] — `AND deactivated_at IS NULL`
+    // (fail-closed). Without this predicate a DEACTIVATED employee (T-0583/
+    // migration 125: KC login disabled, `deactivated_at` set) still resolved
+    // here — a still-live KC access token (KC `enabled:false` blocks only
+    // future token ISSUANCE, not an already-issued token before its TTL
+    // expires, a window of minutes) then passed EVERY PDP consumer of this
+    // single resolver (invoke.ts, records.ts field/read-visibility, org.ts
+    // capability-token, sandbox-gate-dao.ts, capability-grants-dao.ts,
+    // registry-digest-dao.ts) because steps 2-3 never re-check deactivation —
+    // they only see the employee id this step handed them.
+    //
+    // This mirrors the SAME predicate already applied by every other
+    // deactivation-aware reader in this file (getHoldersForRole,
+    // findTenantOwnerSlug, getAuthoringDraftHolderEmployeeIds,
+    // findTenantOwnerEmployeeId) — getGrantsForSubject was the one PDP-critical
+    // gap T-0588 did not close (it closed the role-HOLDER path, not this
+    // grant-RESOLVER path; inbox.ts's own BLOCK-3/RE-VERIFY gates,
+    // inbox.ts:1413-1417/1631-1643, are a per-path symptom of exactly this
+    // upstream gap — they stay in place as defence-in-depth, now redundant
+    // rather than the only line of defence).
+    //
+    // Human vs agent: this is ONE query against `choros.employee`, with no
+    // branch on `kind` — both human and agent subjects resolve through this
+    // same step (register.ts:364 confirms the agent branch has no separate
+    // resolution path). `deactivated_at` (migration 125) is a column on
+    // `employee` shared by both kinds, but its ONLY write site
+    // (`PATCH /api/users/:employee_id`, user-mgmt.ts) is structurally
+    // restricted to `kind === 'human'` (404 otherwise) — `agent_card`
+    // (migration 032) carries no deactivation column of its own. A
+    // `kind='agent'` row's `deactivated_at` is therefore always NULL in
+    // practice, so this unconditional predicate is a permanent no-op for
+    // agents (never filters a legitimate agent) while fail-closing the human
+    // deactivation gap — no `kind` branch needed for correctness.
     const { rows: empRows } = await client.query<{ id: string }>(
       `SELECT id FROM choros.employee
-        WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+        WHERE tenant_id = $1 AND slug = $2 AND deactivated_at IS NULL LIMIT 1`,
       [tenantId, actorSlug],
     );
     if (empRows.length === 0) {
-      // Unknown actor → no grants (fail open to empty, not an error).
+      // Unknown actor OR deactivated actor → no grants (fail-closed to empty,
+      // not an error — mirrors the "unknown actor" sentinel exactly; a
+      // deactivated actor is indistinguishable from an unknown one to every
+      // PDP consumer, which is the correct fail-closed shape).
       return [];
     }
     const employeeId = empRows[0]!.id;
