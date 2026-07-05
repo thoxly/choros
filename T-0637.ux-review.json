@@ -1,0 +1,54 @@
+{
+  "task_id": "T-0637",
+  "verdict": "approved",
+  "gate_seen": {
+    "green": true,
+    "red_rules": []
+  },
+  "themes_checked": ["light", "dark"],
+  "pattern_sources": [
+    {
+      "element": "AgentInstructionEditor (черновик/публикация)",
+      "pattern": "draft/publish tier editor mirrored 1:1 from screen-assistant-prompt.jsx PromptEditor (tierBadgeStyle/textareaStyle/bannerErr/bannerOk)",
+      "mcp_ref": "local-precedent:web/src/screens/screen-assistant-prompt.jsx",
+      "applied": true
+    },
+    {
+      "element": "кнопка «Опубликовать» (disabled с причиной)",
+      "pattern": "disabled-affordance-with-reason: Tooltip label всегда рендерит причину (не полагается на hover над disabled-элементом)",
+      "mcp_ref": "components.jsx Tooltip (visible-by-default bubble)",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-agents.jsx — AgentInstructionEditor, ветка state===false (loadErr)",
+      "issue": "GET /api/agents/:id/instruction требует admin-грант (holdsAgentMgmtUpdate) даже для ЧТЕНИЯ. Тогл «Инструкция агента» на карточке НЕ огорожен правами → рядовой сотрудник (если карточка агента ему видна) кликает тогл и получает ErrorState-карточку с текстом «Недостаточно прав…» вместо read-only-вида инструкции. Текст честный и человеческий, but это ошибка-карточка на месте, где приятнее был бы read-only просмотр.",
+      "suggestion": "Не блокер (текст честный, ложных обещаний нет). При следующем касании: либо read-only ветка для не-админа, либо прятать тогл когда actor не держит mgmt-грант (симметрично тому, как /users прячет nav не-владельцу)."
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-agents.jsx — заголовок секции <Icon name=\"assistant\" />",
+      "issue": "Для секции ИНСТРУКЦИИ АГЕНТА используется глиф «assistant» (чат-бабл фичи «ассистент»). Семантически это агент-сотрудник, а не фича-ассистент — иконка ближайшая из доступных, но не идеально точная.",
+      "suggestion": "Косметика. Если в icon.jsx появится глиф агента/инструкции — заменить. Сейчас допустимо."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "Секция понятна: человеческие русские подписи, не жаргон (label «Что умеет делать агент (компетенция)», не «instruction»/«prompt»); плейсхолдер даёт конкретный пример; tier-бейдж читаем (черновик/опубликовано/не задано)", "covered": true},
+    {"ac": "Плейсхолдер/подсказка объясняют ЗАЧЕМ: hint «вступают в силу только после публикации» + при tier=null честная строка «без инструкции агент откладывает шаги человеку (гейт «нет опубликованной инструкции»)» — подтверждено кодом run-agent-step.ts:204 (doubtReason «no published instruction for agent» → defer-to-human), НЕ маркетинг", "covered": true},
+    {"ac": "Draft→publish поток ясен: «Сохранить черновик» vs «Опубликовать» разделены; после публикации баннер «агент будет использовать её на следующем шаге» — коммуницирует что агент начинает работать", "covered": true},
+    {"ac": "Мёртвых кнопок нет: «Опубликовать» disabled с причиной через Tooltip; Tooltip рендерит bubble по умолчанию (visible=true) → причина реально достижима, не немой disabled. publishDisabledReason покрывает «сначала сохраните черновик» и «уже опубликовано»", "covered": true},
+    {"ac": "Тема/контраст/токены: только var(--chs-*), блок стилей зеркалит доказанный сосед screen-assistant-prompt.jsx; тест сканирует секцию на hardcoded hex (нет)", "covered": true},
+    {"ac": "Консистентность с соседями: та же collapsible-механика что «Активность», те же tier-бейдж/textarea/banner токены что редактор промпта ассистента", "covered": true},
+    {"ac": "Ошибки человеческие: 401/403/404/409 PUBLISHED_LOCKED / NOT_IN_DRAFT / NO_PROMOTE_GRANT / FORBIDDEN_AGENT_SELF_PROMOTE / сетевая — все замаплены на русский текст; коды совпадают с реальным бэком (agents.ts, artifacts.ts); сырой код не течёт (тест >409< guard)", "covered": true},
+    {"ac": "Публикация через СУЩЕСТВУЮЩИЙ общий маршрут POST /api/artifacts/:id/promote с artifact_table='agent_instruction' (зарегистрирован в CONFIG_TABLES artifacts.ts:211) — никакого нового promote-механизма", "covered": true},
+    {"ac": "Тесты фронта покрывают секцию: agents-form.test.js (12 кейсов error-mapping) + screen-agents.test.jsx (7 кейсов wiring/no-dead-button/token-discipline)", "covered": true},
+    {"ac": "web-тесты правленых файлов прогнаны соло: 87 passed (agents-form.test.js 66 + screen-agents.test.jsx 21)", "covered": true}
+  ]
+}

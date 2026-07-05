@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0637",
+  "status": "pr_open",
+  "branch": "task/T-0637-agent-instruction",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/db/agent-competence-dao.ts (NEW)",
+    "src/http/agents.ts",
+    "src/http/__tests__/agent-instruction-routes.test.ts (NEW)",
+    "src/http/__tests__/agent-instruction-promote.test.ts (NEW)",
+    "src/server/__tests__/agent-dispatch-loop.instruction.test.ts (NEW)",
+    "web/src/screens/screen-agents.jsx",
+    "web/src/screens/screen-agents.test.jsx",
+    "web/src/screens/agents-form.js",
+    "web/src/screens/agents-form.test.js",
+    "T-0637.pr-handoff.json (NEW)"
+  ],
+  "summary": "Authoring-слой поверх УЖЕ построенного T-0123 generic-контура agent_instruction (ноль миграций, ноль изменений мотора, ноль нового promote-механизма). Workforce-агент (kind='agent', НЕ синтетический 'assistant-agent') получает GET/PUT /api/agents/:id/instruction (src/http/agents.ts), ключуемый РЕАЛЬНЫМ employee_id, через тонкий facade src/db/agent-competence-dao.ts (0 логики, только реэкспорт agent-instruction-store.ts под нейтральным именем файла — обходит FF-COMP-6 http-scan, который матчит подстроку 'agent_instruction'/'agent-instruction' по ТЕКСТУ файла, включая саму строку импорта, не только идентификаторы). Publish идёт через УЖЕ существующий POST /api/artifacts/:id/promote (agent_instruction уже в CONFIG_TABLES artifacts.ts) — ни одной правки artifacts.ts/env-tier.ts. UI: новая секция «Инструкция агента» на карточке AgentRow (screen-agents.jsx), зеркалирующая PromptEditor из screen-assistant-prompt.jsx — textarea+tier-бейдж+«Сохранить черновик»+«Опубликовать» (кнопка публикации — первая в продукте живая UI-кнопка на promote-роут; проверено прямым чтением screen-assistant-prompt.jsx, что общего PublishButton-компонента нигде не существует). Мотор (run-agent-step.ts:199-207 'no published instruction for agent', agent-step-context.ts::assembleAgentStepContext, src/server/agent-dispatch-loop.ts::storeInstructionSource) НЕ тронут ни байтом — readPublished это ТА ЖЕ функция, что уже wired как production InstructionSource DI-порт, поэтому hasInstruction флипается автоматически при следующем job'е агента после публикации.",
+  "adr_decisions_applied": [
+    "ND-1 = Вариант А: обработчики добавлены В СУЩЕСТВУЮЩИЙ src/http/agents.ts (не новый файл роутов) — holdsAgentMgmtUpdate/loadAgentOrgScope переиспользованы буквально, без четвёртой копии authz-предиката.",
+    "NF2/AC-7 = Вариант (а): facade-модуль src/db/agent-competence-dao.ts, а НЕ расширение ALLOWED_RE в ci/checks/agent-instruction-runtime-dormant.sh — подтверждено структурным фактом (grep матчит текст файла целиком, включая строку импорта; переименование символов не помогает, только импорт из файла с другим именем).",
+    "ND-2 = Вариант А: ad-hoc fetch в AgentRow на POST /api/artifacts/:id/promote — общего PublishButton/usePromote-компонента не существует нигде в web/src/screens (verified), строить абстракцию на один сайт использования было бы преждевременной генерализацией."
+  ],
+  "tests_added": [
+    {
+      "file": "src/http/__tests__/agent-instruction-routes.test.ts",
+      "covers": "AC-1 (PUT пишет draft keyed на реальный employee_id, GET fallback draft->published->null), AC-2 (403 ADMIN_GATE_REJECTED без гранта / 200 с делегируемым грантом или genesis-owner / 401 без x-dev-user / 404 для чужого агента), AC-3 (published-lock: PUT на published-инструкцию -> 409 PUBLISHED_LOCKED, ноль записи), + валидация (non-string text -> 400, пустая строка -> валидный draft). 11 тестов, scripted fake pg.Pool (мирроринг agents-llm-connection.test.ts), без живой БД."
+    },
+    {
+      "file": "src/http/__tests__/agent-instruction-promote.test.ts",
+      "covers": "AC-4 сквозной контур: PUT /api/agents/:id/instruction -> POST /api/artifacts/:instruction_id/promote {artifact_table:'agent_instruction'} (СУЩЕСТВУЮЩИЙ роут, 0 правок) -> GET подтверждает tier='published'. Один shared fake-pool между registerAgentRoutes и registerArtifactRoutes доказывает, что оба независимо зарегистрированных набора роутов мутируют ОДНУ строку."
+    },
+    {
+      "file": "src/server/__tests__/agent-dispatch-loop.instruction.test.ts",
+      "covers": "AC-5 регресс мотора БЕЗ единой правки мотора: ДО публикации -> defer-to-human (signal=dormant, 'no published instruction for agent'), zero LLM calls; ПОСЛЕ saveDraft (реальный DAO-вызов) + tier-флип (та же мутация, что promoteTier делает) для ТОГО ЖЕ employee_id -> storeInstructionSource.readPublished (РЕАЛЬНАЯ production DI-порт реализация, не стаб) возвращает текст -> hasInstruction=true -> gate не срабатывает -> live-gate достигнут -> agent.proceeded. Импортирует ТОЛЬКО существующий composition-root entrypoint (runAgentDispatchOnce + storeInstructionSource из agent-dispatch-loop.ts) — ноль импортов из src/runtime/agent-dispatch/*.ts напрямую (frozen zone read-safety)."
+    },
+    {
+      "file": "web/src/screens/screen-agents.test.jsx (расширен)",
+      "covers": "Source-presence: GET/PUT /api/agents/:id/instruction wiring, «Инструкция агента» toggle (не мёртвая кнопка), promote-вызов на СУЩЕСТВУЮЩИЙ shared route (не новый механизм), честные loading/error состояния + человеческие метки тиров, кнопка публикации задизейблена с причиной (не мёртвый аффорданс), 409 не показывается сырым кодом, только --chs-* токены в новой секции."
+    },
+    {
+      "file": "web/src/screens/agents-form.test.js (расширен)",
+      "covers": "Юнит-тесты mapAgentInstructionError (409 PUBLISHED_LOCKED / 401 / 403 / 404 / fallback) и mapAgentInstructionPromoteError (409 NOT_IN_DRAFT / 403 NO_PROMOTE_GRANT / 403 FORBIDDEN_AGENT_SELF_PROMOTE / 401 / 404 / fallback)."
+    }
+  ],
+  "gates": {
+    "tsc_noemit": "green — npx tsc --noEmit -p ., 0 ошибок",
+    "npm_run_build": "green — tsc + seed/tsconfig.json, exit 0",
+    "eslint": "0 ошибок, только pre-existing no-console warnings (44, ни одного в новых/изменённых файлах этой задачи)",
+    "vitest_full_backend": "green — 279 test files passed | 2 skipped (281), 5438 tests passed | 10 skipped (5448), 0 failed",
+    "vitest_full_web": "green — 77 test files passed, 2127 tests passed, 0 failed (npx vitest run в web/)",
+    "web_build_isolated": "green — cd web && npm run build, vite build succeeds (только pre-existing chunk-size warning, не связан с этой задачей)",
+    "fitness_db": "green (с адверс-перепроверкой): npm run fitness:db (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros) — 124/126 файлов зелёных на первом прогоне; 2 файла (doc-regen.db.test.ts, doc-summary.db.test.ts — НЕ относятся к этой задаче, 0 упоминаний agent-instruction/agent_instruction) провалились под конкурентной нагрузкой параллельных worktree-сессий (T-0642/T-0643 гоняли npm run fitness/vitest на ТОЙ ЖЕ shared Postgres :55432 одновременно) — соло-перепрогон именно этих двух файлов дал 24/24 зелёных, подтверждая pre-existing флейк под нагрузкой (памятка choros-run-poehali-w2-2026-07-04: 'параллельные vitest+db флейкуют→соло-числа'), не регресс от этой задачи. Ни один DB-тест этой задачи не существует (наш DAO-контур покрыт fake-tx юнит-тестами, реальная схема agent_instruction/057 не тронута).",
+    "ff_comp6_runtime_dormant": "green — bash ci/checks/agent-instruction-runtime-dormant.sh (без правок скрипта/ALLOWED_RE) — 'PASS: agent-instruction-runtime-dormant — all checks green'; явный self-check grep -nE 'agent_instruction|agent-instruction' src/http/agents.ts -> 0 совпадений",
+    "ff_15_agent_bridge_contract": "green — bash ci/checks/agent-bridge-contract.sh — 'PASS [FF-15]: diff vs <merge-base с dev> does not touch any T-0586/T-0587/T-0588 owned path' (FORBIDDEN_PATHS: src/runtime/agent-dispatch/, src/core/assistant-analyst.ts, src/db/registry-digest-dao.ts, src/http/inbox.ts — ни один не в диффе)",
+    "anti_case_lock": "green — bash ci/checks/anti-case-lock.sh — Phase 1 aggregate 5 (baseline 7, строго меньше); Phase 2 aggregate 19 (baseline 24, не растёт) — ноль новых кейс-литералов в новых/изменённых файлах этой задачи",
+    "npm_run_fitness": "green — exit 0, полная цепочка ~250+ проверок включая FF-COMP-1/2/3/4/5/6/7/8 (agent-instruction-*.sh, все без правок содержимого), agent-bridge-contract.sh (FF-15), anti-case-lock.sh. FAIL-помеченные строки в логе — ЧУЖИЕ self-test фикстуры других гейтов (verified: каждая FAIL-строка находится внутри блока '--self-test: synthetic fixtures', немедленно за ней 'SELF-TEST PASS' — детекторы намеренно проверяют себя на планированных плохих примерах; ни одна реальная проверка против нашего диффа не провалилась)."
+  },
+  "liveproof_plan": "AC-11 (главный, ПЕРВЫЙ живой proceed workforce-агента на инструкции из продукта) и AC-12 (non-regression baseline) — на живом стенде Tailscale 100.121.76.86:3000, живой LLM-ключ тенанта (DeepSeek, T-0586), браузером, БЕЗ curl/admin-REST/SQL-обхода:\n\nAC-12 СНАЧАЛА (baseline, ДО публикации инструкции): (1) владелец публикует/стартует BPMN-процесс с шагом choros:executorType='agent' на реальном (не assistant-) workforce-агенте, с уже привязанным llm_connection (T-0586 путь на той же карточке); (2) агентский шаг уходит в дефолт-эскалацию 'Эскалации'/инбокс с доводом 'no published instruction for agent' — зафиксировать скриншотом.\n\nAC-11 (главный): (3) владелец открывает /agents -> карточка ТОГО ЖЕ агента -> НОВАЯ секция «Инструкция агента» -> вводит текст компетенции (данные тенанта, не кейс-литерал) -> «Сохранить черновик» -> видит статус «черновик»; (4) «Опубликовать» -> видит статус «опубликовано»; (5) стартует НОВЫЙ инстанс того же процесса с шагом на этого агента -> шаг НЕ уходит в 'no published instruction for agent' -> LLM вызывается -> шаг закрывается PROCEED с результат-сущностью, видимой в интерфейсе (карточка записи / история процесса / лента Активности агента той же карточки, T-0499 ActivityPanel — ожидаем событие 'agent.proceeded', не 'agent.deferred'/dormant).\n\nАРТЕФАКТЫ: скриншот карточки с текстом инструкции + статус «Опубликовано»; скриншот ленты Активности агента с 'agent.proceeded'; скриншот истории процесса с шагом закрытым (не висящим в эскалациях). Сравнение AC-12(до)/AC-11(после) — тот же процесс-тип, тот же агент, единственная переменная — наличие опубликованной инструкции.\n\nЗАВИСИМОСТЬ (не blocking для этой задачи, blocking для исполнения LIVE_PROOF): корректно привязанный agent-шаг в BPMN (T-0634 модельер) + executorType='agent' резолюция (T-0586), оба по памяти уже задеплоены на dev (choros-run-poehali-w2-2026-07-04). Если на момент проверки эта зависимость окажется незадеплоенной — AC-12 (defer-baseline) всё равно доказуем изолированно, AC-11 (proceed) откладывается с явным флагом фаундеру.\n\nNOT YET EXECUTED — требует живого браузера на dev-стенде (тестер/фаундер), вне возможностей этой сессии (headless coder-агент, без доступа к Tailscale-стенду и живому LLM-ключу тенанта). Задача готова к LIVE_PROOF-проверке.",
+  "deviations_from_adr": [
+    "Тестовый файл AC-5 размещён как src/server/__tests__/agent-dispatch-loop.instruction.test.ts (рекомендованный ADR путь), а не как расширение существующих src/runtime/agent-dispatch/__tests__/agent-step-weld.*.test.ts — по явной рекомендации ADR notes ('ПРЕДПОЧТИТЕЛЕН путь через runAgentDispatchOnce, меньше связности с внутренней структурой мотора'). Тест использует РЕАЛЬНЫЙ storeInstructionSource (не стаб instruction source, как в существующих weld-тестах) — это единственное отличие от существующего паттерна, необходимое именно для AC-5's claim о реальном DAO-контуре.",
+    "Facade agent-competence-dao.ts реэкспортирует AgentInstruction/AgentInstructionDraft типы из src/core/agent-instruction.ts (не из agent-instruction-store.ts, где они не переэкспортированы) — тривиальное уточнение источника типов, поведенчески идентично ADR-контракту."
+  ],
+  "open_questions": [
+    "AC-11/AC-12 LIVE_PROOF не исполнены в этой сессии (требуют браузера на живом dev-стенде + живого LLM-ключа тенанта — вне возможностей headless coder-сессии). План детализирован в liveproof_plan; исполнение — на тестере/фаундере на следующем шаге."
+  ],
+  "blocked_reason": "",
+  "friction_events": []
+}

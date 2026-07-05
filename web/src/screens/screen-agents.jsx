@@ -31,6 +31,7 @@ import {
   mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
   connectionOptions, buildLlmConnectionPayload, mapLlmConnectionError,
   outcomeMeta, formatActivityTime, activityContext, mapActivityError,
+  mapAgentInstructionError, mapAgentInstructionPromoteError,
 } from './agents-form.js';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
@@ -79,6 +80,66 @@ const activityItemStyle = {
   display: 'flex', alignItems: 'flex-start', gap: 'var(--chs-space-4)',
   padding: 'var(--chs-space-3) 0',
   borderTop: '1px solid var(--chs-color-border)',
+};
+
+// T-0637 — Instruction editor tokens (mirrors screen-assistant-prompt.jsx's
+// PromptEditor tierBadgeStyle/textareaStyle/bannerErrStyle/bannerOkStyle).
+const tierBadgeStyle = (tier) => ({
+  display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)',
+  padding: '2px 8px', borderRadius: 'var(--chs-radius-2)',
+  fontSize: 'var(--chs-text-xs)', fontWeight: 'var(--chs-weight-medium)',
+  background: tier === 'published'
+    ? 'var(--chs-color-success-soft)'
+    : tier === 'draft'
+      ? 'var(--chs-color-warning-soft)'
+      : 'var(--chs-color-surface-raised)',
+  color: tier === 'published'
+    ? 'var(--chs-color-success)'
+    : tier === 'draft'
+      ? 'var(--chs-color-warning)'
+      : 'var(--chs-color-text-muted)',
+  border: `1px solid ${tier === 'published'
+    ? 'var(--chs-color-success)'
+    : tier === 'draft'
+      ? 'var(--chs-color-warning)'
+      : 'var(--chs-color-border)'}`,
+});
+function instructionTierLabel(tier) {
+  if (tier === 'published') return 'опубликовано';
+  if (tier === 'draft') return 'черновик';
+  return 'не задано';
+}
+const instructionTextareaStyle = {
+  width: '100%', minHeight: 140,
+  fontFamily: 'var(--chs-font-mono, monospace)',
+  fontSize: 'var(--chs-text-sm)',
+  background: 'var(--chs-color-surface-raised)',
+  border: '1px solid var(--chs-color-border)',
+  borderRadius: 'var(--chs-radius-2)',
+  color: 'var(--chs-color-text)',
+  padding: 'var(--chs-space-4)',
+  resize: 'vertical',
+  boxSizing: 'border-box',
+  lineHeight: '1.6',
+  outline: 'none',
+};
+const instructionBannerErrStyle = {
+  marginTop: 'var(--chs-space-4)',
+  padding: 'var(--chs-space-4) var(--chs-space-5)',
+  background: 'var(--chs-color-danger-soft)',
+  border: '1px solid var(--chs-color-danger)',
+  borderRadius: 'var(--chs-radius-3)',
+  fontSize: 'var(--chs-text-sm)',
+  color: 'var(--chs-color-text)',
+};
+const instructionBannerOkStyle = {
+  marginTop: 'var(--chs-space-4)',
+  padding: 'var(--chs-space-4) var(--chs-space-5)',
+  background: 'var(--chs-color-success-soft)',
+  border: '1px solid var(--chs-color-success)',
+  borderRadius: 'var(--chs-radius-3)',
+  fontSize: 'var(--chs-text-sm)',
+  color: 'var(--chs-color-text)',
 };
 
 /* ---------------------------------------------------------------------------
@@ -184,6 +245,175 @@ function ActivityPanel({ agentId }) {
 }
 
 /* ---------------------------------------------------------------------------
+   T-0637 — «Инструкция агента»: компетентностная инструкция, задаваемая владель-
+   цем/админом из UI (не кейс-литерал — данные тенанта). Читает/пишет ЧЕРНОВИК
+   через GET/PUT /api/agents/:id/instruction; публикация — через уже существующий
+   маршрут POST /api/artifacts/:id/promote (никакого нового promote-механизма).
+   Lazy: загружается по клику на тогл (та же collapsible-механика, что «Активность»).
+   --------------------------------------------------------------------------- */
+function AgentInstructionEditor({ agentId }) {
+  const [state, setState] = useState(null);    // null = загрузка; false = ошибка загрузки
+  const [loadErr, setLoadErr] = useState(null);
+  const [text, setText] = useState('');
+  const [saveErr, setSaveErr] = useState(null);
+  const [saveOk, setSaveOk] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [publishErr, setPublishErr] = useState(null);
+  const [publishOk, setPublishOk] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoadErr(null);
+    setState(null);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/instruction`, { headers: authHeaders() });
+      if (!res.ok) {
+        let parsed = null;
+        try { parsed = await res.json(); } catch { /* non-JSON */ }
+        setLoadErr(mapAgentInstructionError(res.status, parsed));
+        setState(false);
+        return;
+      }
+      const data = await res.json();
+      setState(data);
+      setText(data.text ?? '');
+    } catch {
+      setLoadErr('Сетевая ошибка — не удалось загрузить инструкцию агента.');
+      setState(false);
+    }
+  }, [agentId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleSaveDraft = async (e) => {
+    e.preventDefault();
+    setSaveOk(false);
+    setSaveErr(null);
+    setPublishOk(false);
+    setPublishErr(null);
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/instruction`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ text }),
+      });
+      if (res.ok) {
+        setSaveOk(true);
+        await load();
+        return;
+      }
+      let parsed = null;
+      try { parsed = await res.json(); } catch { /* non-JSON */ }
+      setSaveErr(mapAgentInstructionError(res.status, parsed));
+    } catch {
+      setSaveErr('Сетевая ошибка — не удалось сохранить черновик инструкции.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handlePublish = async () => {
+    if (!state || !state.instruction_id || state.tier !== 'draft') return;
+    setPublishOk(false);
+    setPublishErr(null);
+    setPublishing(true);
+    try {
+      const res = await fetch(`/api/artifacts/${state.instruction_id}/promote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ artifact_table: 'agent_instruction' }),
+      });
+      if (res.ok) {
+        setPublishOk(true);
+        await load();
+        return;
+      }
+      let parsed = null;
+      try { parsed = await res.json(); } catch { /* non-JSON */ }
+      setPublishErr(mapAgentInstructionPromoteError(res.status, parsed));
+    } catch {
+      setPublishErr('Сетевая ошибка — не удалось опубликовать инструкцию.');
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  if (state === null) {
+    return <LoadingState label="Загрузка инструкции…" />;
+  }
+  if (state === false) {
+    return (
+      <ErrorState
+        title="Не удалось загрузить инструкцию агента"
+        message={loadErr ?? 'Неизвестная ошибка.'}
+        onRetry={load}
+      />
+    );
+  }
+
+  const canPublish = state.tier === 'draft' && !!state.instruction_id;
+  const publishDisabledReason = !state.instruction_id
+    ? 'Сначала сохраните черновик инструкции.'
+    : state.tier === 'published'
+      ? 'Инструкция уже опубликована.'
+      : undefined;
+
+  return (
+    <div>
+      <div style={{ marginBottom: 'var(--chs-space-3)' }}>
+        <span style={tierBadgeStyle(state.tier)}>{instructionTierLabel(state.tier)}</span>
+        {state.tier === null && (
+          <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginLeft: 'var(--chs-space-3)' }}>
+            — без инструкции агент откладывает шаги человеку (гейт «нет опубликованной инструкции»).
+          </span>
+        )}
+      </div>
+
+      <form onSubmit={handleSaveDraft}>
+        <label style={{ display: 'block', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text)', fontWeight: 'var(--chs-weight-medium)', marginBottom: 'var(--chs-space-3)' }}>
+          Что умеет делать агент (компетенция)
+        </label>
+        <textarea
+          style={instructionTextareaStyle}
+          value={text}
+          onChange={(e) => { setText(e.target.value); setSaveOk(false); setSaveErr(null); }}
+          placeholder="Опишите, что агент умеет делать в целом — например: «Проверяй заявки на закупку и считай итоговую сумму по позициям»."
+          aria-label="Инструкция агента (черновик)"
+          spellCheck={false}
+        />
+        <p style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', margin: 'var(--chs-space-2) 0 var(--chs-space-4) 0' }}>
+          Изменения сохраняются как черновик и вступают в силу только после публикации.
+        </p>
+
+        {saveErr && <div style={instructionBannerErrStyle}>{saveErr}</div>}
+        {saveOk && <div style={instructionBannerOkStyle}>Черновик сохранён.</div>}
+        {publishErr && <div style={instructionBannerErrStyle}>{publishErr}</div>}
+        {publishOk && <div style={instructionBannerOkStyle}>Инструкция опубликована — агент будет использовать её на следующем шаге.</div>}
+
+        <div style={{ display: 'flex', gap: 'var(--chs-space-5)', marginTop: 'var(--chs-space-5)', flexWrap: 'wrap' }}>
+          <Button type="submit" variant="primary" size="sm" disabled={saving} loading={saving}>
+            {saving ? 'Сохраняю…' : 'Сохранить черновик'}
+          </Button>
+          <Tooltip label={publishDisabledReason || 'Опубликовать текущий черновик'}>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={!canPublish || publishing}
+              loading={publishing}
+              onClick={handlePublish}
+            >
+              {publishing ? 'Публикую…' : 'Опубликовать'}
+            </Button>
+          </Tooltip>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------------
    Список агентов — карточка читаема в ОБЕИХ темах (токены surface/text/muted).
    T-0498: на карточке — селектор LLM-подключения (именованный профиль). Текущее
    значение показано; при выборе → PUT /api/agents/:id/llm-connection. Подключения
@@ -204,6 +434,8 @@ function AgentRow({ agent, onBind, connections, connectionsAvailable, onConnecti
   const [connOk, setConnOk] = useState(false);
   // T-0499: «Активность» — лента исходов из реального журнала (lazy, по клику).
   const [activityOpen, setActivityOpen] = useState(false);
+  // T-0637: «Инструкция агента» — компетентностная инструкция (lazy, по клику).
+  const [instructionOpen, setInstructionOpen] = useState(false);
 
   const options = connectionOptions(connections);
 
@@ -268,6 +500,14 @@ function AgentRow({ agent, onBind, connections, connectionsAvailable, onConnecti
         </Button>
         <Button
           variant="ghost" size="sm"
+          aria-expanded={instructionOpen}
+          onClick={() => setInstructionOpen((v) => !v)}
+          title="Инструкция агента — что он умеет делать"
+        >
+          {instructionOpen ? 'Скрыть инструкцию' : 'Инструкция агента'}
+        </Button>
+        <Button
+          variant="ghost" size="sm"
           aria-expanded={activityOpen}
           onClick={() => setActivityOpen((v) => !v)}
           title="Активность агента — что он делал"
@@ -319,6 +559,19 @@ function AgentRow({ agent, onBind, connections, connectionsAvailable, onConnecti
           </div>
         )}
       </div>
+
+      {/* T-0637 — «Инструкция агента»: компетентностная инструкция (черновик/публикация). */}
+      {instructionOpen && (
+        <div style={{ width: '100%', marginTop: 'var(--chs-space-4)', paddingTop: 'var(--chs-space-4)', borderTop: '1px solid var(--chs-color-border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)', marginBottom: 'var(--chs-space-3)' }}>
+            <Icon name="assistant" />
+            <span style={{ fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>
+              Инструкция агента
+            </span>
+          </div>
+          <AgentInstructionEditor agentId={agent.id} />
+        </div>
+      )}
 
       {/* T-0499 — «Активность»: лента исходов агента из реального журнала. */}
       {activityOpen && (

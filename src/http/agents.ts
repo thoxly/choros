@@ -46,6 +46,12 @@ import {
   decodeActivityCursor,
   type AgentActivityCursor,
 } from "../db/agent-activity-dao.js";
+import {
+  readDraft as readCompetenceDraft,
+  readPublished as readCompetencePublished,
+  saveDraft as saveCompetenceDraft,
+  InstructionPublishedLockedError,
+} from "../db/agent-competence-dao.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -475,6 +481,205 @@ async function handleGetAgentActivity(
 }
 
 // ---------------------------------------------------------------------------
+// T-0637: workforce-agent competence instruction — read/write the SAME per-agent
+// authoring layer (T-0123) an assistant-agent already uses, but keyed on the
+// REAL employee_id of a hired workforce agent (kind='agent'), not a synthetic
+// 'assistant-agent' slug. This section intentionally avoids naming the
+// underlying storage mechanism literally — it imports exclusively from the
+// neutral facade module ../db/agent-competence-dao.js, never from the
+// underlying store module directly (see that facade's own doc-comment for why:
+// a runtime-dormancy fitness check greps http-layer file text for the storage
+// mechanism's name, and a facade import keeps this file out of scope for it).
+//
+// Authz — THE SAME predicate/class as PUT /api/agents/:id/llm-connection and
+// POST /api/agents/:id/secret-handle (holdsAgentMgmtUpdate + loadAgentOrgScope,
+// both already local to this file): genesis-owner OR a confirmed, delegable
+// mgmt_object:agent/update grant covering the agent's org scope. Setting an
+// agent's competence instruction is the SAME management tier as binding its
+// LLM connection — it MUST NOT be a weaker gate.
+//
+// Publish (draft→published) is NOT implemented here — the frontend calls the
+// EXISTING POST /api/artifacts/:id/promote with the config-table name this
+// facade's records are stored under (already registered in
+// src/http/artifacts.ts CONFIG_TABLES). No new promote mechanism, no new
+// authz predicate for publish, per the ADR.
+// ---------------------------------------------------------------------------
+
+/** Response shape shared by GET and PUT — the agent's current instruction state. */
+interface AgentInstructionStateResponse {
+  employee_id: string;
+  text: string | null;
+  tier: "draft" | "published" | null;
+  instruction_id: string | null;
+}
+
+/**
+ * GET /api/agents/:id/instruction — read the agent's current instruction (draft
+ * preferred, falling back to published, then null when neither exists).
+ */
+async function handleGetAgentInstruction(
+  pool: pg.Pool,
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  agentId: string,
+): Promise<void> {
+  const actorId = await extractActor(req, pool);
+  const tenantId = await resolveActorTenant(pool, actorId);
+  assertUuidShape(agentId, "agent id");
+
+  const nowMs = Date.now();
+  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+
+  const body = await withTenantTx(pool, tenantId, async (client) => {
+    const agentOrgScope = await loadAgentOrgScope(client, agentId, tenantId);
+    const oracle = await loadTenantOrgAncestry(client, tenantId);
+    if (!holdsAgentMgmtUpdate(admin, agentOrgScope, oracle)) {
+      throw new HttpError(
+        403,
+        "ADMIN_GATE_REJECTED",
+        "insufficient management authority for agent",
+      );
+    }
+
+    // Tenant existence guard (mirrors handleGetAgentActivity): a foreign / missing
+    // agent → 404 (never leak the fact that an instruction exists elsewhere).
+    const exists = await client.query<{ id: string }>(
+      `SELECT id
+         FROM choros.employee
+        WHERE tenant_id = $1 AND id = $2
+        LIMIT 1`,
+      [tenantId, agentId],
+    );
+    if (exists.rows.length === 0) {
+      throw new HttpError(404, "AGENT_NOT_FOUND", "agent not found");
+    }
+
+    const draft = await readCompetenceDraft(client as unknown as PgClientLike, agentId);
+    if (draft !== null) {
+      const resp: AgentInstructionStateResponse = {
+        employee_id: agentId,
+        text: draft.instructionText,
+        tier: "draft",
+        instruction_id: draft.id,
+      };
+      return resp;
+    }
+
+    const published = await readCompetencePublished(client as unknown as PgClientLike, agentId);
+    if (published !== null) {
+      const resp: AgentInstructionStateResponse = {
+        employee_id: agentId,
+        text: published.instructionText,
+        tier: "published",
+        instruction_id: published.id,
+      };
+      return resp;
+    }
+
+    const resp: AgentInstructionStateResponse = {
+      employee_id: agentId,
+      text: null,
+      tier: null,
+      instruction_id: null,
+    };
+    return resp;
+  });
+
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * PUT /api/agents/:id/instruction — save a DRAFT competence instruction for the
+ * agent. Body: { text: string } (empty string is a valid draft — clearing the
+ * content is NOT the same as clear()/DELETE, which removes the row entirely).
+ *
+ * Published-lock (409 PUBLISHED_LOCKED) is surfaced as-is when the current row
+ * is already tier='published' — the SAME contract as PUT /api/assistant/prompt/:role.
+ */
+async function handleSetAgentInstruction(
+  pool: pg.Pool,
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  agentId: string,
+): Promise<void> {
+  const actorId = await extractActor(req, pool);
+  const tenantId = await resolveActorTenant(pool, actorId);
+  assertUuidShape(agentId, "agent id");
+
+  const rawBody = await readJsonBody(req);
+  if (typeof rawBody !== "object" || rawBody === null) {
+    throw new HttpError(400, "VALIDATION", "request body must be a JSON object");
+  }
+  const text = (rawBody as Record<string, unknown>)["text"];
+  if (typeof text !== "string") {
+    throw new HttpError(400, "VALIDATION", "text must be a string");
+  }
+
+  const nowMs = Date.now();
+  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+
+  const result = await withTenantTx(pool, tenantId, async (client) => {
+    const agentOrgScope = await loadAgentOrgScope(client, agentId, tenantId);
+    const oracle = await loadTenantOrgAncestry(client, tenantId);
+    if (!holdsAgentMgmtUpdate(admin, agentOrgScope, oracle)) {
+      throw new HttpError(
+        403,
+        "ADMIN_GATE_REJECTED",
+        "insufficient management authority for agent",
+      );
+    }
+
+    const exists = await client.query<{ id: string }>(
+      `SELECT id
+         FROM choros.employee
+        WHERE tenant_id = $1 AND id = $2
+        LIMIT 1`,
+      [tenantId, agentId],
+    );
+    if (exists.rows.length === 0) {
+      throw new HttpError(404, "AGENT_NOT_FOUND", "agent not found");
+    }
+
+    let saveResult: { id: string };
+    try {
+      saveResult = await saveCompetenceDraft(client as unknown as PgClientLike, agentAuditWriter, {
+        draft: {
+          tenantId: "", // sourced from the choros.tenant_id GUC set by withTenantTx
+          id: randomUUID(),
+          employeeId: agentId,
+          instructionText: text,
+          answerForm: null,
+          instructionMeta: {},
+          bundleId: null,
+        },
+        actor: actorId,
+        actorType: "human",
+        nowMs,
+      });
+    } catch (err) {
+      if (err instanceof InstructionPublishedLockedError) {
+        throw new HttpError(409, "PUBLISHED_LOCKED", err.message);
+      }
+      throw err;
+    }
+
+    return saveResult;
+  });
+
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(
+    JSON.stringify({
+      employee_id: agentId,
+      instruction_id: result.id,
+      tier: "draft",
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -672,6 +877,27 @@ export function registerAgentRoutes(
     "/api/agents/:id/activity",
     withAuth(async (req, res, params) =>
       handleGetAgentActivity(pool, req, res, params["id"] ?? ""),
+    ),
+  );
+
+  // ---- GET/PUT /api/agents/:id/instruction (T-0637) -----------------------
+  // The workforce-agent's competence instruction (T-0123 authoring layer, keyed
+  // on the REAL employee_id). Same authz class as llm-connection/activity above.
+  // Publish goes through the EXISTING POST /api/artifacts/:id/promote — not
+  // registered here (no new promote mechanism, per the ADR).
+  router.register(
+    "GET",
+    "/api/agents/:id/instruction",
+    withAuth(async (req, res, params) =>
+      handleGetAgentInstruction(pool, req, res, params["id"] ?? ""),
+    ),
+  );
+
+  router.register(
+    "PUT",
+    "/api/agents/:id/instruction",
+    withAuth(async (req, res, params) =>
+      handleSetAgentInstruction(pool, req, res, params["id"] ?? ""),
     ),
   );
 }

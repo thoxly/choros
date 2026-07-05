@@ -404,3 +404,71 @@ export function mapActivityError(status, body) {
   if (status === 404) return 'Агент не найден (возможно, в другом тенанте).';
   return serverMsg || `Не удалось загрузить активность агента (HTTP ${status}).`;
 }
+
+// ---------------------------------------------------------------------------
+// T-0637 — Agent COMPETENCE INSTRUCTION (GET/PUT /api/agents/:id/instruction +
+// publish via the existing POST /api/artifacts/:id/promote).
+//
+// WIRED CONTRACT (exact, read from src/http/agents.ts
+// handleGetAgentInstruction / handleSetAgentInstruction):
+//   GET /api/agents/:id/instruction
+//     → 200 { employee_id, text: string|null, tier: 'draft'|'published'|null,
+//             instruction_id: string|null }
+//   PUT /api/agents/:id/instruction  { text: string }
+//     → 200 { employee_id, instruction_id, tier: 'draft' }
+//     → 409 PUBLISHED_LOCKED  (existing row is published — save a new draft
+//                              cannot overwrite it directly)
+// Publish: POST /api/artifacts/:instruction_id/promote { artifact_table: 'agent_instruction' }
+//   → 200 { promoted:true, artifact_id, artifact_table, tier:'published' }
+//   → 409 NOT_IN_DRAFT (already published)
+//   → 403 NO_PROMOTE_GRANT (actor lacks mgmt_object:tier_promote authority)
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a GET/PUT /api/agents/:id/instruction failure to a human Russian message.
+ * @param {number} status
+ * @param {unknown} body parsed JSON (may be null/non-object)
+ * @returns {string}
+ */
+export function mapAgentInstructionError(status, body) {
+  const obj = body && typeof body === 'object' ? body : undefined;
+  const code = obj ? (obj.error?.code || obj.code) : undefined;
+  const serverMsg = obj ? (obj.error?.message || obj.message) : undefined;
+
+  if (status === 409 && code === 'PUBLISHED_LOCKED') {
+    return 'Инструкция опубликована — измените и сохраните новый черновик поверх, затем опубликуйте снова.';
+  }
+  if (status === 400) return serverMsg || 'Проверьте текст инструкции.';
+  if (status === 401) return 'Сессия не авторизована — войдите заново.';
+  if (status === 403) {
+    return 'Недостаточно прав: задавать инструкцию агенту может только администратор с грантом управления агентами.';
+  }
+  if (status === 404) return 'Агент не найден (возможно, в другом тенанте).';
+  return serverMsg || `Не удалось сохранить инструкцию агента (HTTP ${status}).`;
+}
+
+/**
+ * Map a POST /api/artifacts/:id/promote failure (publishing an agent instruction)
+ * to a human Russian message.
+ * @param {number} status
+ * @param {unknown} body parsed JSON (may be null/non-object)
+ * @returns {string}
+ */
+export function mapAgentInstructionPromoteError(status, body) {
+  const obj = body && typeof body === 'object' ? body : undefined;
+  const code = obj ? (obj.error?.code || obj.code) : undefined;
+  const serverMsg = obj ? (obj.error?.message || obj.message) : undefined;
+
+  if (status === 409 && code === 'NOT_IN_DRAFT') {
+    return 'Инструкция уже опубликована.';
+  }
+  if (status === 403 && code === 'NO_PROMOTE_GRANT') {
+    return 'Недостаточно прав для публикации: нужен грант продвижения артефактов (tier_promote).';
+  }
+  if (status === 403 && code === 'FORBIDDEN_AGENT_SELF_PROMOTE') {
+    return 'Агенты не могут публиковать инструкцию сами — нужен человек-администратор.';
+  }
+  if (status === 401) return 'Сессия не авторизована — войдите заново.';
+  if (status === 404) return 'Черновик инструкции не найден — сохраните его заново и повторите публикацию.';
+  return serverMsg || `Не удалось опубликовать инструкцию (HTTP ${status}).`;
+}

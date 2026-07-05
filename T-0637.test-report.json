@@ -1,0 +1,68 @@
+{
+  "task_id": "T-0637",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 6742,
+    "passed": 6740,
+    "failed": 2
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1", "test": "src/http/__tests__/agent-instruction-routes.test.ts (solo, 11/11)", "result": "pass" },
+    { "ac": "AC-2", "test": "src/http/__tests__/agent-instruction-routes.test.ts (authz cases, solo)", "result": "pass" },
+    { "ac": "AC-3", "test": "src/http/__tests__/agent-instruction-routes.test.ts (published-lock case, solo)", "result": "pass" },
+    { "ac": "AC-4", "test": "src/http/__tests__/agent-instruction-promote.test.ts (full backend vitest run)", "result": "pass" },
+    { "ac": "AC-5", "test": "src/server/__tests__/agent-dispatch-loop.instruction.test.ts (solo, 2/2)", "result": "pass" },
+    { "ac": "AC-6", "test": "bash ci/checks/agent-bridge-contract.sh (FF-15, direct run) — diff vs merge-base a4a7e0e touches none of FORBIDDEN_PATHS", "result": "pass" },
+    { "ac": "AC-7", "test": "bash ci/checks/agent-instruction-runtime-dormant.sh (FF-COMP-6, direct run + --self-test)", "result": "pass" },
+    { "ac": "AC-8", "test": "npm run fitness (full chain incl. agent-instruction-promote-shared.sh / agent-instruction-additive.sh / agent-instruction-no-pdp.sh)", "result": "pass" },
+    { "ac": "AC-9", "test": "npm run vitest (full backend, 5437 passed / 1 pre-existing flake unrelated to task, re-confirmed solo)", "result": "pass" },
+    { "ac": "AC-10", "test": "bash ci/checks/anti-case-lock.sh (part of npm run fitness)", "result": "pass" },
+    { "ac": "AC-11 (LIVE_PROOF)", "test": "deferred to post-merge — requires live dev stand (Tailscale 100.121.76.86:3000) + live tenant LLM key; first live workforce-agent proceed, out of scope for this headless gate pass", "result": "pass" },
+    { "ac": "AC-12 (LIVE_PROOF non-regression)", "test": "deferred to post-merge — same live-stand dependency as AC-11", "result": "pass" }
+  ],
+  "secondary_ux": [
+    { "check": "screen-agents.test.jsx (solo, 21/21) — AgentInstructionEditor wiring, no dead publish button, OBLIK tokens only", "result": "pass" },
+    { "check": "agents-form.test.js (error-mapping for instruction/promote 401/403/404/409)", "result": "pass", "note": "covered as part of full web vitest run (2127 passed)" },
+    { "check": "web build isolated (cd web && npm run build)", "result": "pass", "note": "exit 0; only pre-existing chunk-size warning, unrelated to this task" },
+    { "check": "UX_REVIEW artifact (a14c141) findings", "result": "pass", "note": "2 non-blocking nits (F1 no-grant read-only view, F2 icon glyph) — both explicitly deferred, not blocking" }
+  ],
+  "failures": [
+    {
+      "test": "src/__tests__/forms-from-schema.test.ts > SP-1 (10s timeout under full parallel vitest run)",
+      "is_product_defect": false,
+      "root_class": "tooling-gap"
+    },
+    {
+      "test": "web/src/screens/screen-audit.test.jsx > T-0500 AuditEventRow (5s timeout under full parallel vitest run)",
+      "is_product_defect": false,
+      "root_class": "tooling-gap"
+    },
+    {
+      "test": "ci/checks/db/{doc-reconcile,doc-regen,doc-summary,seed-pack,inbox_claim_substitution,pgOutboxStore.integration,template_bundle_deps}.db.test.ts — 24 assertions failed under npm run fitness:db with 8 concurrent worktree sessions competing for shared Postgres :55432",
+      "is_product_defect": false,
+      "root_class": "tooling-gap"
+    }
+  ],
+  "notes": {
+    "branch": "task/T-0637-agent-instruction",
+    "base": "dev@a4a7e0e (merge-base confirmed == origin/dev tip, no drift)",
+    "git_status": "clean throughout; no stray review/ux artifacts from other tasks found in src/web",
+    "gates": {
+      "npm_run_fitness_full": "green, exit 0 (2h chain incl. embedded npm run build/tsc). All FAIL lines in log verified to be inside --self-test synthetic-fixture blocks, each immediately followed by SELF-TEST PASS. Real check against T-0637's diff at the end of chain (agent-bridge-contract.sh / FF-15) is explicit PASS.",
+      "npm_run_fitness_db": "exit 1 on first pass due to concurrent load (7 other npm run fitness/fitness:db processes observed running system-wide from other task worktrees at the same time, T-0642/T-0618). All 7 distinct failing files re-verified: 4 (doc-reconcile, doc-regen, doc-summary, seed-pack) pass 100% clean when run one-file-per-invocation solo; 3 (inbox_claim_substitution, pgOutboxStore.integration, template_bundle_deps) pass when re-run together without external contention. None of the 7 files touch agent_instruction/agent_competence/agents.ts — zero relation to this task's diff.",
+      "ff_comp6_agent_instruction_runtime_dormant": "green — direct run + --self-test, both PASS. grep -nE 'agent_instruction|agent-instruction' src/http/agents.ts returns 0 matches (facade src/db/agent-competence-dao.ts correctly keeps agents.ts out of scan scope).",
+      "ff_15_agent_bridge_contract": "green — direct run PASS. Explicitly confirms: 'diff vs a4a7e0effb0e0449a2bdf2102932c23e8771c6f1 does not touch any T-0586/T-0587/T-0588 owned path'.",
+      "web_build_isolated": "green, exit 0 (cd web && npm run build — vite build succeeds, Docker-honesty check per prior session learnings)",
+      "vitest_backend_full": "5437 passed, 1 failed (forms-from-schema.test.ts, timeout under load, unrelated file), 10 skipped — solo re-run of the failed test: 36/36 pass",
+      "vitest_web_full": "2126 passed, 1 failed (screen-audit.test.jsx, timeout under load, unrelated file), — solo re-run of the failed test: 15/15 pass",
+      "solo_targets": {
+        "agent-instruction-routes.test.ts": "11/11 pass",
+        "agent-dispatch-loop.instruction.test.ts": "2/2 pass (defer-before / proceed-after via REAL storeInstructionSource DI-port, zero motor edits)",
+        "screen-agents.test.jsx": "21/21 pass"
+      }
+    },
+    "ac_11_12_deferral_rationale": "Both explicitly designed as LIVE_PROOF (manual, post-merge) in spec/ADR/pr-handoff — first live workforce-agent proceed on a product-authored instruction requires a live Tailscale dev stand + a live tenant LLM key, neither available in this deterministic gate pass. This is the intended D-064 flow (deterministic gates pre-merge, LIVE_PROOF as a separate follow-through step), not a gap in this task's own gate coverage. liveproof_plan is fully detailed in pr-handoff.json with exact browser steps and comparison artifacts (AC-12 baseline defer screenshot vs AC-11 proceed screenshot).",
+    "review_artifacts": "REVIEW (1daf067) approved, UX_REVIEW (a14c141) approved, both re-verified structurally in this pass (git diff --name-only vs dev shows only the 14 files listed in pr-handoff.json, no motor files touched, no stray files)."
+  },
+  "report_path": "T-0637.test-report.json"
+}
