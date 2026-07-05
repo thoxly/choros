@@ -32,5 +32,37 @@
   "friction_events": [
     "worktree был без node_modules при старте — npm ci --maxsockets=3 потребовался перед tsc/eslint/vitest (без флейка).",
     "миграции против общего Postgres :55432 (контейнер choros-postgres-1, разделяемый несколькими worktree) уже были применены к моменту старта — npm run migrate вернул 'nothing to apply', схема registry_def/application подтверждена напрямую через information_schema перед написанием DB-теста."
-  ]
+  ],
+  "live_proof": {
+    "date": "2026-07-05",
+    "stand": "http://100.121.76.86:3000 @ d7a7fb3 (SSH-verified: git log + docker compose ps, choros-choros-1 freshly restarted before run)",
+    "browser": "Playwright chromium headless, real Keycloak Authorization Code form login (e-owner), not dev-shortcut",
+    "verdict": "GREEN",
+    "steps": [
+      "0. Verified LLM circuit alive via UI (LLM-соединения → 'Проверить подключение' button on both connectors → both 'Подключение работает'; assigned T0586 DS v2 as assistant default via 'Назначить ассистенту' button).",
+      "1. Reused pre-existing natural slug collision in tenant data: registry_def slug 'soglasovanie' exists under two applications — t0588-tier2-trigger (id 5bcbf15f-e8ff-4f98-9571-bc95c6ab50b5) and tel-approval (id a7000000-0000-0000-0000-000000000003, the live TEL purchase-approval process). Captured baseline record_schema/updated_at for both before acting.",
+      "2. Opened Ассистент chat (Constructor nav), sent a directive slug-addressed edit request ('...используя как идентификатор сам слаг soglasovanie...'). Assistant called edit_jsonschema_non_destructive with registryDefId='soglasovanie'.",
+      "3. Verified via UI (Приложения → each app → Данные → Согласование field-set) AND cross-checked via DB that NEITHER registry_def was mutated after the refusal.",
+      "4. Retried in a new conversation using the raw UUID (a7000000-0000-0000-0000-000000000003) named in the refusal message. Assistant applied the add_field op as DRAFT.",
+      "5. Verified via UI AND DB that ONLY the tel-approval registry gained the new 'Комментарий доп.' (extra_comment) column; t0588-tier2-trigger's registry remained at 1 column (РЕШЕНИЕ), byte-identical to baseline."
+    ],
+    "observed": {
+      "ambiguous_refusal_text_verbatim": "Ни одна из 1 операций не была выполнена. Ниже — фактические исходы.\n\n✗ Обновление поля «extra_comment» (add_field) в схеме реестра «soglasovanie»: Добавлено текстовое поле для дополнительного комментария в раздел согласования — edit_jsonschema_non_destructive: слаг «soglasovanie» неоднозначен — существует в нескольких приложениях этого пространства (T0588 Tier2 Trigger [t0588-tier2-trigger], Согласование заявок (ТЭЛ) [tel-approval]). Уточните: укажите raw UUID нужного реестра (registryDefId).\n\nЧасть операций не удалась — исправьте причину и повторите. Ничего лишнего не создано и не перезаписано (все изменения — в черновике).",
+      "uuid_success_text_verbatim": "Поле успешно добавлено в черновик (DRAFT).\n\n**Что сделано:**\n- В registry_def `a7000000-0000-0000-0000-000000000003` добавлено текстовое поле:\n  - **Ключ:** `extra_comment`\n  - **Подпись:** «Комментарий доп.»\n  - **Тип:** строка (текстовое поле)\n\nИзменение находится в черновике. [...]",
+      "db_cross_check": "registry_def 5bcbf15f-...: updated_at unchanged (1783194891822) both before/after ambiguous attempt AND after UUID-targeted success on the OTHER registry. registry_def a7000000-...: updated_at 0 -> 1783244156859 only after the UUID-targeted call, record_schema gained exactly one new field (extra_comment), all 4 pre-existing fields untouched.",
+      "llm_circuit": "alive — both llm_connection rows (T0586 DS v2 deepseek/deepseek-chat, T0586 DeepSeek anthropic-labeled/deepseek-chat) passed 'Проверить подключение' (1766ms/116 tokens and 2105ms/133 tokens respectively). T0586 DS v2 assigned as assistant default via UI. No provider staleness blocker this run (unlike w3 founder_request finding)."
+    },
+    "workarounds_p0_findings": [
+      "e-owner KC password reset via Keycloak Admin REST (admin-side prep, not part of the tested user path) — prior session's password (2026-07-04) was unknown/stale in this session.",
+      "Reused a pre-existing natural slug collision instead of creating a new one via the constructor UI (explicitly permitted by the task brief) — not a workaround of the product, just reuse of existing tenant state.",
+      "Baseline/verification schema snapshots also cross-checked via direct SQL to registry_def, in ADDITION to (not instead of) the primary UI-based verification (Конструктор → Приложения → Данные field-set columns) — extra rigor, not a substitute for the UI proof."
+    ],
+    "friction": [
+      "classifyIntent (src/core/assistant-intent.ts) is a brittle per-message keyword classifier; a phrasing without configurator keywords ('Просто попробуй...') fell through to the analyst persona, which refused on role grounds ('моя роль — только читать') rather than exercising the resolver at all — required a more directive follow-up message to reach edit_jsonschema_non_destructive.",
+      "Even when correctly classified as configurator, the LLM's first instinct was to ask the user for the UUID up front rather than attempt the op with the slug it was given — conservative LLM behavior (not a resolver bug), but means a typical user may rarely hit the ambiguous-refusal path at all without being told to 'just try it now'.",
+      "Unrelated data artifact noticed: llm_connection 'T0586 DeepSeek' has provider='anthropic' but model='deepseek-chat' pointed at the deepseek endpoint — label/provider mismatch from a prior run, not investigated further, not a T-0611 blocker."
+    ],
+    "evidence_dir": "docs/live-proof/T-0611-evidence/ (22 screenshots, 00-landing.png through 21-t0588-AFTER.png)",
+    "report": "docs/live-proof/T-0611.live-proof.md"
+  }
 }
