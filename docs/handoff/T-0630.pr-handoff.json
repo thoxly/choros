@@ -2,6 +2,15 @@
   "task_id": "T-0630",
   "status": "pr_open",
   "branch": "task/T-0630-accounts-read-authz",
+  "live_proof": {
+    "verdict": "GREEN",
+    "stand": "http://100.121.76.86:3000 dev@e8c735d",
+    "method": "Playwright chromium, real Keycloak Authorization Code + PKCE via KC login form (not dev-shortcut); direct fetch('/api/users/accounts') from within the authenticated browser session using the actor's own Bearer accessToken (from localStorage chs-kc-session) — same request the SPA itself issues, not a bypass.",
+    "rank_and_file_actor": "e-orlov (no mgmt_object:employee grant, not owner) -> GET /api/users/accounts => 403 NOT_OWNER, body has zero employee rows; /users UI page shows human-readable 'Не удалось загрузить пользователей (HTTP 403)', no list rendered.",
+    "owner_actor": "e-owner (genesis owner) -> GET /api/users/accounts => 200, full account list (32 employees) rendered in UI and present in fetch body.",
+    "report": "docs/live-proof/T-0630.live-proof.md",
+    "evidence_dir": "docs/live-proof/T-0630-evidence/"
+  },
   "ci_local": {
     "build": true,
     "lint": true,
