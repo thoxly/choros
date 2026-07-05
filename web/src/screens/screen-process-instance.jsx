@@ -24,7 +24,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  Button, Mono, MonoId, StatusChip, ExecGlyph,
+  Button, Mono, MonoId, StatusChip, ExecGlyph, ActorChip, RecordRef,
   LoadingState, ErrorState, EmptyState, KitIcon,
 } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
@@ -109,17 +109,25 @@ function ProgressBar({ progress }) {
   );
 }
 
-/** One history row, mirroring the Audit screen's event line (redacted projection). */
+/**
+ * One history row, mirroring the Audit screen's event line (redacted
+ * projection). T-0648: the actor renders through ActorChip. GET /api/audit
+ * attaches `actorDisplay` (the T-0648 batch-resolved shape {id, name, type,
+ * deactivated, resolved}) alongside the raw `actor` slug/UUID — this prefers
+ * actorDisplay and falls back to the raw string (both as name and id) when
+ * the field is absent (older cached response shape), same pattern as
+ * screen-audit.jsx's AuditEventRow.
+ */
 function HistoryRow({ ev }) {
   const type = execTypeOf(ev.action);
+  const display = ev.actorDisplay;
   return (
     <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--chs-space-3)', padding: 'var(--chs-space-2) 0' }}>
       <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', flexShrink: 0 }}>
         {fmtTs(ev.ts)}
       </Mono>
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', flexWrap: 'wrap' }}>
-        <ExecGlyph type={type} size={8} />
-        <span style={{ fontSize: 'var(--chs-text-sm)' }}>{ev.actor}</span>
+        <ActorChip type={display?.type || type} name={display?.name || ev.actor} id={display?.id || ev.actor} />
         <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           {ev.summary || ev.action}
         </span>
@@ -133,6 +141,13 @@ function HistoryRow({ ev }) {
  * gateway/endEvent) — distinct from HistoryRow above, which renders the OLD
  * best-effort audit-projection filter. Shown only when the backend reports
  * historyAvailable:true (hasDetailedHistory).
+ *
+ * T-0648: `step.step` is already best-effort human-readable (backend prefers
+ * the BPMN node's `name`, falling back to the technical activityId only when
+ * the node has none — src/http/processes.ts fetchInstanceHistoryDetail). The
+ * raw `completedBy` slug is shown through ActorChip, preferring the backend's
+ * resolved `completedByName` (T-0648 batch resolver) and falling back to the
+ * raw slug honestly when unresolved (never worse than before this change).
  */
 function HistoryStepRow({ step }) {
   return (
@@ -154,8 +169,8 @@ function HistoryStepRow({ step }) {
         </span>
       )}
       {step.completedBy && (
-        <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-          · {step.completedBy}
+        <span style={{ display: 'inline-flex', alignItems: 'center' }}>
+          · <ActorChip type="human" name={step.completedByName} id={step.completedBy} />
         </span>
       )}
     </div>
@@ -425,7 +440,7 @@ function ProcessInstanceScreen() {
               {hasSourceRecord(instance) && (
                 <div style={{ ...fieldRowStyle, borderBottom: 'none' }}>
                   <span style={labelStyle}>Запись-источник</span>
-                  <MonoId>{instance.recordId}</MonoId>
+                  <RecordRef recordId={instance.recordId} headers={authHeaders()} />
                 </div>
               )}
             </aside>

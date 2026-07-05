@@ -15,7 +15,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Button, MonoId, Mono, ExecutorBadge, StatusChip,
+  Button, MonoId, Mono, ExecutorBadge, ActorChip, StatusChip,
   Drawer, EmptyState, LoadingState, ErrorState, KitIcon,
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
@@ -946,7 +946,10 @@ function InboxScreen() {
                 const isTaken = claimedByServer || !!taken[t.id];
                 const inPool = t.pool && !isTaken;
                 // Who took it (server display name) + when — the «взято кем, когда».
-                const takenName = t.execName || "—";
+                // T-0648: execName/execType now come pre-resolved from the backend
+                // (batchResolveActors, src/http/inbox.ts) — no more hardcoded "human".
+                const takenName = t.execName || t.claimedBy || "—";
+                const takenType = t.execType || "human";
                 const whenLabel = takenWhen(t.claimedAt);
                 return (
                   <tr key={t.id} data-taken={isTaken ? "true" : undefined}>
@@ -964,9 +967,9 @@ function InboxScreen() {
                       {inPool ? (
                         <span className="chs-pool"><span className="chs-pool__glyph" /> в пуле</span>
                       ) : isTaken ? (
-                        <ExecutorBadge type="human" name={takenName} />
+                        <ActorChip type={takenType} name={takenName} id={t.claimedBy} />
                       ) : (
-                        <ExecutorBadge type={t.execType} name={t.execName} />
+                        <ActorChip type={t.execType} name={t.execName} id={t.claimedBy} />
                       )}
                     </td>
                     <td><SLACell sla={t.sla} deadline={t.deadline} /></td>

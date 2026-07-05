@@ -43,6 +43,29 @@
 }
 .chs-monoid__pre { color: var(--chs-color-text-faint); }
 
+/* ---------------- ActorChip (T-0648) ---------------- */
+.chs-actorchip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chs-space-2);
+}
+
+/* ---------------- RecordRef (T-0648) ---------------- */
+.chs-recordref {
+  font-size: var(--chs-text-sm);
+}
+.chs-recordref--loading {
+  color: var(--chs-color-text-faint);
+  font-style: italic;
+}
+.chs-recordref--link {
+  color: var(--chs-color-accent);
+  text-decoration: none;
+}
+.chs-recordref--link:hover {
+  text-decoration: underline;
+}
+
 /* ---------------- Mono value (числа/таймстамп/бюджет) ---------------- */
 .chs-mono {
   font-family: var(--chs-font-mono);

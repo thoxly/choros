@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  ExecutorBadge, MonoId, Mono, OpChip, Button, KitIcon, LoadingState, ErrorState,
+  ActorChip, MonoId, Mono, OpChip, Button, KitIcon, LoadingState, ErrorState,
   DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
 } from '../../components/components.jsx';
 import { TRAIL as TRAIL_SEED, ProvenanceTag, SectionHead } from './ra-data.jsx';
@@ -40,9 +40,19 @@ function apiRowToDisplay(r) {
   // Format occurred_at (epoch-ms) to a display timestamp string.
   const ts = formatDate(r.occurred_at);
 
-  // Subject display: actor and subject are plain strings in the API response.
-  const actorDisplay = { type: "human", name: r.actor };
-  const subjectDisplay = { type: "human", name: r.subject ?? "—" };
+  // T-0648 (D-064, UX-study §3 + §6.2 /rights/trail crash): actor/subject were
+  // hardcoded to { type: "human", ... } regardless of the real actor kind (a
+  // service/automation actor like "policy-sync" rendered as a human — wrong
+  // glyph, not a crash, but a real semantic bug). GET /api/grant-trail now
+  // attaches `actorResolved`/`subjectResolved` (T-0648 batch resolver,
+  // src/http/grant-trail.ts attachResolvedActors) — prefer those; fall back to
+  // the raw string with an honest "service" default (never fabricate "human")
+  // when unresolved. `id` always carries the raw slug/UUID for ActorChip's
+  // tooltip/technical-id fallback — never the bare id in the main text.
+  const actorDisplay = r.actorResolved || { type: "service", name: r.actor, id: r.actor, resolved: false };
+  const subjectDisplay = r.subject
+    ? (r.subjectResolved || { type: "service", name: r.subject, id: r.subject, resolved: false })
+    : { type: "service", name: "—", id: null, resolved: false };
 
   // Scope display: render nodeId or a JSON snippet for other scope kinds.
   let scopeDisplay = "—";
@@ -185,8 +195,8 @@ function GrantTrailScreen() {
                     <span className={`chs-actchip chs-actchip--${am.cls}`}><span className="chs-actchip__dot" />{am.label}</span>
                     {r.crit && <span className="chs-trailcrit" title="критичный грант">крит.</span>}
                   </DataTableCell>
-                  <DataTableCell className="chs-trailcell"><ExecutorBadge type={r.actor.type} name={r.actor.name} /></DataTableCell>
-                  <DataTableCell className="chs-trailcell"><ExecutorBadge type={r.subject.type} name={r.subject.name} /></DataTableCell>
+                  <DataTableCell className="chs-trailcell"><ActorChip type={r.actor.type} name={r.actor.name} id={r.actor.id} /></DataTableCell>
+                  <DataTableCell className="chs-trailcell"><ActorChip type={r.subject.type} name={r.subject.name} id={r.subject.id} /></DataTableCell>
                   <DataTableCell className="chs-trailcell chs-trailcell--grant">
                     <span className="chs-trailrole">{r.role}</span>
                     <span className="chs-trailgrant"><OpChip op={r.op} /><Mono className="chs-trailres">{r.res.replace(/^mcp:\/\//, "")}</Mono></span>
@@ -226,4 +236,9 @@ function GrantTrailScreen() {
   );
 }
 
+// T-0648: named export for the pure row-mapping logic — lets the node test
+// tier (web/vitest.config.js — no DOM) exercise the actor/subject resolution
+// fallback (the exact shape that used to crash /rights/trail with React #31,
+// see ra-grant-trail.test.js) without rendering the screen.
+export { apiRowToDisplay };
 export default GrantTrailScreen;
