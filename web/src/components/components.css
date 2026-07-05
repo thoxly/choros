@@ -23,6 +23,11 @@
 .chs-exec--service { color: var(--chs-exec-service); background: var(--chs-exec-service-soft); border-color: var(--chs-exec-service-border); }
 .chs-exec--bare { background: transparent; border-color: transparent; padding-left: 0; }
 .chs-exec--dot { gap: var(--chs-space-3); }
+/* T-0648 FIX-3: deactivated actor — muted + struck-through name. The
+   «(деактивирован)» marker in the accessible name (ExecutorBadge chs-sr-only)
+   carries the meaning for AT; this is the visual echo (never colour-only). */
+.chs-exec--deactivated { opacity: 0.55; }
+.chs-exec--deactivated > span:not(.chs-sr-only) { text-decoration: line-through; }
 
 /* ---------------- MonoId ---------------- */
 .chs-monoid {
@@ -42,6 +47,29 @@
   color: var(--chs-color-text);
 }
 .chs-monoid__pre { color: var(--chs-color-text-faint); }
+
+/* ---------------- ActorChip (T-0648) ---------------- */
+.chs-actorchip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chs-space-2);
+}
+
+/* ---------------- RecordRef (T-0648) ---------------- */
+.chs-recordref {
+  font-size: var(--chs-text-sm);
+}
+.chs-recordref--loading {
+  color: var(--chs-color-text-faint);
+  font-style: italic;
+}
+.chs-recordref--link {
+  color: var(--chs-color-accent);
+  text-decoration: none;
+}
+.chs-recordref--link:hover {
+  text-decoration: underline;
+}
 
 /* ---------------- Mono value (числа/таймстамп/бюджет) ---------------- */
 .chs-mono {

@@ -22,6 +22,7 @@ import { registerGrantProposeRoute, defaultGrantProposeDeps } from "./http/grant
 import { registerSecretHandleRoutes } from "./http/secret-handle.js";
 import { actorInjectRegistrar } from "./http/actor-inject-registrar.js";
 import { registerProcessesRoutes } from "./http/processes.js";
+import { batchResolveActors } from "./db/actor-resolver.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
 import { registerAgentListRoutes } from "./http/agents-list.js";
@@ -682,6 +683,10 @@ function buildRouter(
           flowable: flowableClient,
           resolveActorTenant: (actorSlug: string) =>
             resolveActorTenant(getOrgPool(), actorSlug),
+          // T-0648: batch actor-display resolver for the instance-history
+          // `completedBy` slugs (processes.ts stays pg/db-import-free — FF-DISPLAY-4).
+          resolveActorsDisplay: (tenantId: string, ids: readonly string[]) =>
+            batchResolveActors(grantsPool, tenantId, ids),
         }
       : undefined,
     // T-0328 G1: actor-slug resolver (kind='human') for the actor-inject façade so the

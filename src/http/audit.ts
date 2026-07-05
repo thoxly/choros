@@ -51,6 +51,7 @@ import {
   decodeAuditCursor,
   type AuditLogCursor,
 } from "../db/audit-read-dao.js";
+import { batchResolveActors, resolveActorDisplay, type ResolvedActor } from "../db/actor-resolver.js";
 import {
   runDemoLegalPrecheck,
   demoApproveDenied,
@@ -573,9 +574,28 @@ async function handleGetAuditLog(
     ),
   );
 
+  // T-0648 (W4-UX/столп 4): batch-resolve every DISTINCT actor id on this page in ONE
+  // query (batchResolveActors) — not a per-row lookup. A resolver failure degrades to
+  // an empty map (every item then falls back to resolveActorDisplay's honest fallback
+  // shape — raw id as name, resolved:false), never turning a redacted read into a 500.
+  const distinctActors = [...new Set(page.items.map((item) => item.actor))];
+  let actorResolved: Map<string, ResolvedActor> = new Map();
+  if (distinctActors.length > 0) {
+    try {
+      actorResolved = await batchResolveActors(pool, tenantId, distinctActors);
+    } catch {
+      actorResolved = new Map();
+    }
+  }
+
+  const events = page.items.map((item) => ({
+    ...item,
+    actorDisplay: resolveActorDisplay(actorResolved, item.actor),
+  }));
+
   res.statusCode = 200;
   res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify({ events: page.items, nextCursor: page.nextCursor }));
+  res.end(JSON.stringify({ events, nextCursor: page.nextCursor }));
 }
 
 // ---------------------------------------------------------------------------

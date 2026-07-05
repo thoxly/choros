@@ -135,6 +135,20 @@ export type ActorPrivilegeResolver = (
   nowMs: number,
 ) => Promise<ActorPrivilege>;
 
+/**
+ * T-0648 (D-064, UX-study §3): resolve a batch of actor identifiers (employee
+ * slugs, e.g. a process instance's history `completedBy` list) to their
+ * display shape {id, name, type, deactivated, resolved} in ONE query. Mirrors
+ * ActorTenantResolver/ActorPrivilegeResolver's injection pattern: the
+ * PRODUCTION binding is batchResolveActors(pool, tenantId, ids)
+ * (src/db/actor-resolver.ts) wired in server.ts — processes.ts (FF-DISPLAY-4:
+ * no pg/db imports) calls ONLY this injected function, never the DAO directly.
+ */
+export type ActorsDisplayResolver = (
+  tenantId: string,
+  ids: readonly string[],
+) => Promise<Map<string, { id: string; name: string; type: "human" | "agent" | "service"; deactivated: boolean; resolved: boolean }>>;
+
 export interface StartInstanceDeps {
   pool: pg.Pool;
   flowable: FlowableClient;
@@ -151,6 +165,12 @@ export interface StartInstanceDeps {
    * Injected so unit tests can drive the refuse / allow branches without a live DB.
    */
   resolveProcessSandboxState?: ProcessSandboxStateResolver;
+  /**
+   * T-0648: OPTIONAL batch actor-display resolver (see {@link ActorsDisplayResolver}).
+   * When absent, processes.ts's history detail keeps the raw `completedBy` slug
+   * unresolved (honest degrade — never a 500, never invented data).
+   */
+  resolveActorsDisplay?: ActorsDisplayResolver;
 }
 
 /**

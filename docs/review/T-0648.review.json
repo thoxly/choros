@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0648",
+  "verdict": "approved",
+  "coherence_check": {
+    "purpose": "T-0648 указан как разработанный ДВУМЯ параллельными агент-сессиями в одном worktree из-за сбоя (документировано автором в T-0648.spec.md notes.concurrent_session и pr-handoff.json deviations_from_adr/friction_events) — первая обязанность ревью: подтвердить, что финальное дерево — консолидация, а не полу-мёрж.",
+    "git_status": "чисто (nothing to commit, working tree clean) на момент начала ревью",
+    "commits_dev_to_head": [
+      "28add1b spec+design(T-0648): анти-UUID актор-резолвер — спека + ADR",
+      "e8fe03b feat(T-0648): бек-резолвер batchResolveActors + применение в 5 читателях",
+      "9d764dd feat(T-0648): фронт-примитивы ActorChip/RecordRef + фикс /rights/trail",
+      "44a8b71 feat(T-0648): анти-UUID гейт (repo-wide REQUIRED, мутационно проверен)",
+      "6b14a24 chore(T-0648): pr-handoff"
+    ],
+    "no_duplicate_resolver_leftover": "Подтверждено: нет файла actor-display-dao.ts (упомянутого в spec.md как переименованный/поглощённый дубликат) нигде в дереве и в истории веток — find по 'actor-display' пуст. single-resolver.sh (FF-A5) PASS — нет второго resolve-энтрипоинта.",
+    "independent_gate_reruns": {
+      "tsc_noEmit": "0 ошибок (server) — перегнан независимо, ЧИСТО",
+      "server_vitest": "5526 passed, 10 skipped, 285 файлов — ТОЧНО совпадает с заявленным в pr-handoff.json ci_local.tests_result",
+      "web_vitest": "2166 passed, 80 файлов — ТОЧНО совпадает с заявленным",
+      "new_web_tests_isolated_run": "actor-chip.test.jsx (18) + ra-grant-trail.test.js (10) = 28/28 passed в изолированном прогоне, без предупреждений 'Invalid hook call' (2 таких предупреждения встретились в ПОЛНОМ web-прогоне, но не в этих файлах — не связаны с диффом T-0648, полный прогон всё равно 100% green)",
+      "db_tier_tests_solo": "ci/checks/db/actor-resolver.db.test.ts (4) + ci/checks/db/inbox-actor-resolve.db.test.ts (1) = 5/5 passed против РЕАЛЬНОГО Postgres :55432 (не полный fitness:db — соло по инструкции координатора, во избежание флейка параллельных worktree)",
+      "verdict": "Дерево КОГЕРЕНТНО. Гонка двух сессий устранена консолидацией, не оставила осадка — все независимо перегнанные числа сходятся byte-for-byte с заявленными."
+    }
+  },
+  "ci_seen": {
+    "green": true,
+    "known_red": []
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/screens/screen-process-instance.jsx:173 (HistoryStepRow) + src/http/processes.ts fetchInstanceHistoryDetail",
+      "issue": "Единственный из 5 читателей, где ActorChip получает захардкоженный type=\"human\" вместо резолвнутого типа: <ActorChip type=\"human\" name={step.completedByName} id={step.completedBy} />. Backend (fetchInstanceHistoryDetail) прикладывает только completedByName (строка имени) из resolved.get(...).name, но никогда не прокидывает resolved.get(...).type — хотя batchResolveActors уже вычисляет честный type (human/agent/service) в той же самой строке (325: `hit ? { ...h, completedByName: hit.name } : h`). Итог: шаг истории, завершённый АГЕНТОМ (agentTask), в UI получит человеческий глиф — ровно тот класс невидимости столпа 4 (\"агенты видны как сотрудники\"), который вся задача призвана устранить, просто в самом узком из 5 применений. Не блокирует: имя всё ещё резолвится корректно (не regresses raw-UUID баг), только глиф/тип неверен для агентских шагов; остальные 4 читателя (inbox/audit/grant-trail/analytics) прокидывают реальный type исправно.",
+      "suggestion": "Follow-up: прокинуть completedByType (hit.type) аналогично completedByName в fetchInstanceHistoryDetail, и заменить hardcoded type=\"human\" на step.completedByType в HistoryStepRow с honest-fallback на \"human\" при отсутствии поля (не хуже текущего состояния)."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/db/actor-resolver.ts batchResolveActors (dual slug/id indexing) + docs/handoff/T-0648.pr-handoff.json deviations_from_adr",
+      "issue": "Задокументированное автором отклонение от исходного дизайна: Map индексируется БЕЗУСЛОВНО по обоим slug и id (не только по фактически запрошенным caller'ом ключам) — согласовано ad hoc с уже написанным во время гонки unit-тестом (case g, ожидавшим Map.size===2×N). Само по себе не баг (проверил: ни один из 5 читателей не полагается на .size), но расширяет контракт функции без соответствующего обновления doc-комментария ADR (ADR фиксирует только финальную форму, не сам компромисс) — если будущий caller решит проверять resolved.size как прокси \"сколько акторов реально резолвилось\", получит вдвое завышенное число.",
+      "suggestion": "Не требует правки сейчас — комментарий в самом коде (actor-resolver.ts:186-191) уже честно предупреждает следующего caller'а. Можно перенести то же предупреждение в ADR при следующей правке документа."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "batch-no-N+1", "covered": true, "note": "Unit-тест (fake pool, честный queryCount со фильтром на FROM choros.employee, исключающий BEGIN/SET LOCAL/COMMIT) — 25 distinct id -> 1 запрос, независимо перепрогнан. Live-DB тест (реальный pg.Pool.connect(), инструментированный client.query wrapper) — 10 акторов -> 1 запрос против настоящего Postgres, независимо перепрогнан живьём (5/5 passed)."},
+    {"ac": "agent-visible-tenant-scoped-graceful-fallback", "covered": true, "note": "Агенты резолвятся из choros.employee kind='agent' (без join к agent_card, подтверждено чтением миграций 032/093 через комментарий кода). Тенант-scope: WHERE tenant_id=$1 внутри withTenant (SET LOCAL choros.tenant_id + FORCE RLS), AC-isolation live-тест доказывает cross-tenant slug НЕ резолвится под NOBYPASSRLS choros_app ролью — независимо перепрогнан. Нерезолвленный id -> honest fallback {name:id, type:'service', resolved:false}, никогда throw — подтверждено кодом и тестом (e) unresolved."},
+    {"ac": "5-readers-batched-processes-injected", "covered": true, "note": "Все 5 читателей (inbox.ts claimedBy×3 пути через один claimerResolved, audit.ts actorDisplay, grant-trail.ts attachResolvedActors actor+subject, operational-analytics.ts top_actors actorResolved, processes.ts completedByName) строят distinct-set ОДИН раз перед единственным вызовом. processes.ts НЕ импортирует pg/db напрямую — использует инъецированный ActorsDisplayResolver (тип в process-start.ts), подключённый в server.ts к batchResolveActors через closure; ci/checks/demo/pack-serve-no-write.sh (FF-DISPLAY-4) независимо перепрогнан, PASS."},
+    {"ac": "actorchip-recordref-no-dup-glyph-id-secondary", "covered": true, "note": "ActorChip переиспользует ExecutorBadge/ExecGlyph (не дублирует отрисовку глифа); id уходит только в title/MonoId chip при showId=true, никогда в основной текст. RecordRef честно фоллбэчит на MonoId (обёрнутый, не голый) при unresolved/denied состоянии."},
+    {"ac": "rights-trail-real-type-asRenderableText", "covered": true, "note": "apiRowToDisplay больше не хардкодит {type:'human'} — предпочитает r.actorResolved/subjectResolved от бэка, честный фоллбэк type:'service' (никогда не изобретает 'human'). Diff проверен построчно. asRenderableText коэрсит объект-актор в безопасную строку, никогда не бросает — проверено кодом (components.jsx:103-112) и живым мутационным сценарием (React#31 класса)."},
+    {"ac": "anti-uuid-gate-mutation-caught-self-test", "covered": true, "note": "Независимо перепрогнан --self-test (4/4 sub-checks PASS) и production scan (0 находок). Мутационный тест ПОВТОРЁН ЛИЧНО ревьюером (не поверил заявлению автора на слово): временный откат screen-audit.jsx:39 к до-фикс форме <span>{ev.actor}</span> -> гейт FAIL exit=1 с точным file:line; оригинал восстановлен, git diff чист, гейт снова PASS exit=0. Гейт вплетён в npm run fitness (REQUIRED, не advisory) вместе со своим --self-test — подтверждено grep по package.json."},
+    {"ac": "anti-case-no-literal-content", "covered": true, "note": "bash ci/checks/anti-case-lock.sh независимо перепрогнан: PASS, aggregate 18 (baseline 18), e-larina: 2 (baseline 2) OK — не растёт. Файл, созданный T-0648 (ra-grant-trail.test.js), использует e-fixture-user, не литерал — подтверждено grep'ом; предсуществующие e-larina-вхождения в других файлах — известный baseline-долг, не внесены этой задачей."}
+  ],
+  "coverage_summary": "Гонка двух сессий над одним worktree — главный риск этого ревью — устранена автором чистой консолидацией (единый src/db/actor-resolver.ts, явно задокументированная в spec.md/handoff история конфликта, никаких файлов-сирот). Независимо перегнал tsc --noEmit (0 ошибок), полный server vitest (5526/10/285 — точное совпадение с заявленным) и полный web vitest (2166/80 — точное совпадение), плюс соло-прогон обоих новых db-tier тестов против живого Postgres (5/5). Прочитал batchResolveActors целиком: один SQL-запрос на батч (Set-дедуп + querying WHERE tenant_id=$1 AND (slug=ANY OR id=ANY)), RLS-scoped через SET LOCAL choros.tenant_id внутри withTenant, honest fallback для нерезолвленных id. Проверил все 5 читателей построчно — каждый строит distinct-set один раз перед единственным вызовом резолвера; processes.ts подтверждённо НЕ импортирует pg напрямую (инъекция через ActorsDisplayResolver, FF-DISPLAY-4 gate независимо перепрогнан PASS). Лично повторил мутационный тест анти-UUID гейта (не поверил автору на слово) — откат screen-audit.jsx к до-фикс форме поймал регрессию с точным file:line, восстановление подтверждено чистым git diff. /rights/trail фикс (apiRowToDisplay) убирает хардкод type:'human', честно фоллбэчит на 'service'. Единственная находка: HistoryStepRow (screen-process-instance.jsx) — единственный из 5 применений ActorChip, где type захардкожен 'human' вместо резолвнутого значения (backend прокидывает только имя, не тип) — узкий, некритичный пробел именно в столп-4-видимости агентских шагов истории процесса; помечен nit/follow-up, не блокирует, т.к. имя всё равно резолвится верно и это не регресс исходного UUID-бага.",
+  "role_gap_evidence": [
+    "Не поверил заявленным в pr-handoff.json числам тестов на слово — независимо перегнал server vitest и web vitest с чистого дерева; оба сошлись byte-for-byte (5526/10/285 и 2166/80) с заявленным, что подтверждает отсутствие 'осадка гонки' (stale/несинхронизированных тестов после консолидации двух сессий).",
+    "Не поверил заявленному 'мутационно проверен' по анти-UUID гейту — лично воспроизвёл: временно откатил screen-audit.jsx к до-фикс форме, убедился что гейт падает с точным file:line, восстановил файл и проверил git status чист + гейт снова зелёный.",
+    "Прочитал вручную все 5 read-путей (inbox.ts/audit.ts/grant-trail.ts/operational-analytics.ts/processes.ts) построчно на предмет N+1: подтвердил, что distinct-set строится РОВНО один раз до единственного вызова резолвера в каждом, а не что автор просто утверждает это в комментарии.",
+    "Обнаружил незадокументированный (в ADR/спеке) пробел в HistoryStepRow — единственное из 5 применений ActorChip, где type жёстко зашит 'human' вместо резолвнутого значения — не упомянутый ни в pr-handoff.json readers_fixed, ни в ADR/спеке как известное ограничение."
+  ]
+}

@@ -25,7 +25,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Button, Select, Field, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
+import { Button, Select, Field, ActorChip, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 
 // ---------------------------------------------------------------------------
@@ -254,14 +254,28 @@ function WorkloadTable({ rows, hasSums, fieldKey, title, onExport, exportDisable
 // TopActorsTable — топ исполнителей за последние 30 дней
 // ---------------------------------------------------------------------------
 
+/**
+ * T-0648 (D-064, UX-study §3): the actor column used to render the raw
+ * employee slug/UUID directly in a <td>. The backend
+ * (src/http/operational-analytics.ts handleGet) now attaches `actorResolved`
+ * (the T-0648 batch-resolved shape) to each top_actors row additively — this
+ * carries it through the client-side dedupe/aggregation (first non-null wins;
+ * every row for the same actor resolves identically) and renders through
+ * ActorChip. Falls back to the raw slug (as both name and id) when
+ * unresolved, same honest-degrade as the other T-0648 call sites.
+ */
 function TopActorsTable({ rows }) {
   const byActor = useMemo(() => {
     const m = new Map();
     for (const r of rows) {
-      m.set(r.actor, (m.get(r.actor) ?? 0) + r.count);
+      const prev = m.get(r.actor);
+      m.set(r.actor, {
+        count: (prev?.count ?? 0) + r.count,
+        actorResolved: prev?.actorResolved || r.actorResolved,
+      });
     }
     return Array.from(m.entries())
-      .map(([actor, count]) => ({ actor, count }))
+      .map(([actor, v]) => ({ actor, count: v.count, actorResolved: v.actorResolved }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 15);
   }, [rows]);
@@ -285,7 +299,14 @@ function TopActorsTable({ rows }) {
           <tbody>
             {byActor.map((r) => (
               <tr key={r.actor}>
-                <td style={tdStyle}>{r.actor}</td>
+                <td style={tdStyle}>
+                  <ActorChip
+                    type={r.actorResolved?.type || 'human'}
+                    name={r.actorResolved?.name || r.actor}
+                    id={r.actorResolved?.id || r.actor}
+                    deactivated={r.actorResolved?.deactivated}
+                  />
+                </td>
                 <td style={tdStyle}>
                   <MiniBar value={r.count} max={maxCount} />
                 </td>

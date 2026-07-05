@@ -10,14 +10,24 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  ExecGlyph, MonoId, Mono, Button, Field, Select,
+  ExecGlyph, ActorChip, MonoId, Mono, Button, Field, Select,
   LoadingState, ErrorState, EmptyState,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { execTypeOf, fmtTs, humanError, buildAuditUrl } from './screen-audit.logic.js';
 
+/**
+ * T-0648 (D-064, UX-study §3): the actor used to render as a bare slug/UUID
+ * string (`{ev.actor}`). GET /api/audit now attaches `actorDisplay` — the
+ * T-0648 batch-resolved shape {id, name, type, deactivated, resolved} — so
+ * this renders through ActorChip (name in the main text, raw id only in the
+ * tooltip/technical-id chip). Falls back to the raw `ev.actor` string when
+ * `actorDisplay` is absent (older cached response shape) — never worse than
+ * before this change.
+ */
 function AuditEventRow({ ev }) {
   const type = execTypeOf(ev.action);
+  const display = ev.actorDisplay;
   return (
     <div className="chs-ev">
       <div className="chs-ev__time">{fmtTs(ev.ts)}</div>
@@ -26,7 +36,7 @@ function AuditEventRow({ ev }) {
       </div>
       <div className="chs-ev__body">
         <div className="chs-ev__line">
-          <span className={`chs-ev__actor chs-ev__actor--${type}`}>{ev.actor}</span>
+          <ActorChip type={display?.type || type} name={display?.name || ev.actor} id={display?.id || ev.actor} deactivated={display?.deactivated} />
           <span>{ev.summary || ev.action}</span>
           {ev.target && <MonoId chip>{ev.target}</MonoId>}
           <MonoId>{ev.action}</MonoId>

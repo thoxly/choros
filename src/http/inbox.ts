@@ -30,6 +30,7 @@ import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { findEmployee } from "./org.js";
+import { batchResolveActors, resolveActorDisplay, type ResolvedActor } from "../db/actor-resolver.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant, resolveActorSlugFromAuth } from "../db/org.js";
 import { findEmployeeById } from "../db/org.js";
@@ -139,6 +140,21 @@ type InboxItem = {
   escalated?: boolean;
   execType?: ExecKind;
   execName?: string;
+  /**
+   * T-0648 (W4-UX): raw actor identifier behind execName (employee slug, or the raw
+   * id when unresolved) — carried alongside execName so the client's ActorChip can
+   * show the machine id as a secondary/tooltip affordance instead of as the primary
+   * label. Additive optional field; absent implies execName IS already the display
+   * name with no separate raw id (seed fixtures, e.g.).
+   */
+  execSlug?: string;
+  /**
+   * T-0648 FIX-3: the claimer's soft-deactivation marker (ResolvedActor.
+   * deactivated). Additive optional field — lets the client's ActorChip show
+   * the «(деактивирован)» marker for a claim held by an actor who was
+   * subsequently deactivated (a lost signal today). Absent ⇒ active/unknown.
+   */
+  execDeactivated?: boolean;
   pool?: boolean;
   sla: { min: number; left: number };
   due: string;
@@ -689,15 +705,19 @@ async function findInboxItems(
     // Tenant isolation: only this actor's tenant. Foreign-tenant tasks never leak.
     .filter((item) => item.tenant === tenantId);
 
-  // Resolve display names for the distinct claimers present in this tenant view, so a
-  // claimed row can render «взято <name>» rather than a raw slug. findEmployee is
-  // tolerant of unknown ids (returns null) — we fall back to the slug in that case.
-  const claimerNames = new Map<string, string>();
-  for (const seed of tenantItems) {
-    const claim = claimStateMap.get(seed.id);
-    if (claim && !claimerNames.has(claim.claimedBy)) {
-      const claimer = await findEmployee(claim.claimedBy);
-      claimerNames.set(claim.claimedBy, claimer?.name ?? claim.claimedBy);
+  // T-0648 (W4-UX/столп 4): resolve display info for EVERY distinct claimer across
+  // the WHOLE claim-state map (seed + defer + instance items all share claimStateMap)
+  // in ONE batched query — not one findEmployee() call per distinct claimer, and not
+  // three separate resolutions (one per item block below). A resolver failure
+  // degrades to an empty map (every item then falls back to the raw claimedBy id via
+  // resolveActorDisplay below), never turning a read into a 500.
+  const distinctClaimers = [...new Set([...claimStateMap.values()].map((c) => c.claimedBy))];
+  let claimerResolved: Map<string, ResolvedActor> = new Map();
+  if (hasDb() && distinctClaimers.length > 0) {
+    try {
+      claimerResolved = await batchResolveActors(getOrgPool(), tenantId, distinctClaimers);
+    } catch {
+      claimerResolved = new Map();
     }
   }
 
@@ -715,11 +735,14 @@ async function findInboxItems(
       // (who + when) as first-class wire fields — the UI reflects it, not guesses it.
       const mine =
         devUserId !== undefined && devUserId !== null && devUserId === claim.claimedBy;
+      const claimerInfo = resolveActorDisplay(claimerResolved, claim.claimedBy);
       return {
         ...item,
         pool: false,
-        execType: "human" as const,
-        execName: claimerNames.get(claim.claimedBy) ?? claim.claimedBy,
+        execType: claimerInfo.type,
+        execName: claimerInfo.name,
+        execSlug: claim.claimedBy,
+        execDeactivated: claimerInfo.deactivated,
         claimedBy: claim.claimedBy,
         claimedAt: claim.claimedAt,
         mine,
@@ -779,11 +802,14 @@ async function findInboxItems(
       if (claim) {
         const mine =
           devUserId !== undefined && devUserId !== null && devUserId === claim.claimedBy;
+        const claimerInfo = resolveActorDisplay(claimerResolved, claim.claimedBy);
         return {
           ...base,
           pool: false,
-          execType: "human" as const,
-          execName: claim.claimedBy,
+          execType: claimerInfo.type,
+          execName: claimerInfo.name,
+          execSlug: claim.claimedBy,
+          execDeactivated: claimerInfo.deactivated,
           claimedBy: claim.claimedBy,
           claimedAt: claim.claimedAt,
           mine,
@@ -868,11 +894,14 @@ async function findInboxItems(
       if (claim) {
         const mine =
           devUserId !== undefined && devUserId !== null && devUserId === claim.claimedBy;
+        const claimerInfo = resolveActorDisplay(claimerResolved, claim.claimedBy);
         return {
           ...base,
           pool: false,
-          execType: "human" as const,
-          execName: claim.claimedBy,
+          execType: claimerInfo.type,
+          execName: claimerInfo.name,
+          execSlug: claim.claimedBy,
+          execDeactivated: claimerInfo.deactivated,
           claimedBy: claim.claimedBy,
           claimedAt: claim.claimedAt,
           mine,
@@ -926,7 +955,14 @@ async function findInboxItems(
   const dedupedDefer = deferItems.filter((i) => !seenIds.has(i.id));
   for (const i of dedupedDefer) seenIds.add(i.id);
   const dedupedInstance = instanceItems.filter((i) => !seenIds.has(i.id));
-  return [...dedupedDefer, ...dedupedInstance];
+  const merged = [...dedupedDefer, ...dedupedInstance];
+
+  // T-0648 (D-064, UX-study §3): claimer display (execName/execType/execSlug) for
+  // every claimed row across seed/defer/instance is ALREADY resolved above, at
+  // construction time, from the single claimerResolved batch built once per
+  // request (see the resolveActorDisplay calls in each item-building block) — no
+  // second pass needed here.
+  return merged;
 }
 
 // ---------------------------------------------------------------------------

@@ -90,38 +90,112 @@ function ExecGlyph({ type, size = 9, filled = true }) {
   );
 }
 
-/* ExecutorBadge — единый цвето-иконочный код типа исполнителя */
-function ExecutorBadge({ type = "human", label, name, bare = false, showLabel = true }) {
+/**
+ * asRenderableText — T-0648 (React error #31 hardening): React refuses to
+ * render a plain object/array as a child ("Objects are not valid as a React
+ * child"). Every primitive here ultimately reaches a bare `{displayName}` (or
+ * similar) JSX slot — this guard makes that CRASH-PROOF even if a caller
+ * mistakenly passes a {type,name,...} actor object instead of its `.name`
+ * string (the exact shape of the /rights/trail regression this task fixes).
+ * Never silently drops information: an unexpected object still surfaces
+ * SOMETHING inspectable (JSON), just never throws.
+ */
+function asRenderableText(value) {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string" || typeof value === "number") return value;
+  if (typeof value === "object") {
+    // Most common accidental shape: a ResolvedActor-like {name, id, ...}.
+    if (typeof value.name === "string") return value.name;
+    try { return JSON.stringify(value); } catch { return String(value); }
+  }
+  return String(value);
+}
+
+/* ExecutorBadge — единый цвето-иконочный код типа исполнителя.
+ *
+ * T-0648 FIX-1 (a11y, столп 4): the actor TYPE (human/agent/service) must be
+ * in the ACCESSIBLE NAME in EVERY mode — not only visually via the glyph+colour
+ * and not only in `title=` (a hover tooltip is not reliably announced by AT).
+ * Otherwise a screen-reader user hears just the name, cannot tell an agent from
+ * a human, and столп 4 ("agents are visible AS employees") is invisible to them.
+ * We surface the type (and the T-0648 FIX-3 deactivation marker) as a
+ * `chs-sr-only` (visually-hidden) span that reads right after the name, so the
+ * accessible name becomes e.g. "Счёт-агент (агент)" / "И. Петров (человек, деактивирован)".
+ * The glyph stays aria-hidden (decorative — colour/shape duplicate the type).
+ */
+function ExecutorBadge({ type = "human", label, name, bare = false, showLabel = true, deactivated = false }) {
   const meta = EXEC_META[type] || EXEC_META.human;
-  const displayName = name || label || meta.label;
+  const displayName = asRenderableText(name) || asRenderableText(label) || meta.label;
+  // Screen-reader suffix: the type is always spoken; deactivation adds a marker.
+  const srSuffix = deactivated ? `(${meta.label}, деактивирован)` : `(${meta.label})`;
   return (
     <span
-      className={`chs-exec ${meta.cls} ${bare ? "chs-exec--bare" : ""}`}
-      aria-label={showLabel ? undefined : meta.label}
+      className={`chs-exec ${meta.cls} ${bare ? "chs-exec--bare" : ""} ${deactivated ? "chs-exec--deactivated" : ""}`}
       title={meta.label}
     >
       <ExecGlyph type={type} />
       {showLabel && <span>{displayName}</span>}
+      {/* Type (and deactivation) in the accessible name — announced in ALL modes,
+          including bare/showLabel=false where there is no visible label. */}
+      <span className="chs-sr-only">{showLabel ? ` ${srSuffix}` : `${displayName} ${srSuffix}`}</span>
+    </span>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   ActorChip — T-0648 (D-064, UX-study §3: «UUID и машинный ключ не являются
+   контентом»). Единый примитив показа ЛЮБОГО актора (человек/агент/сервис):
+   глиф по типу (ExecutorBadge/ExecGlyph — переиспользованы, не задублированы)
+   + человекочитаемое имя в основном тексте + сырой id ТОЛЬКО как tooltip/
+   моно-метка (никогда голым текстом в потоке).
+
+   Props:
+     type   — "human" | "agent" | "service" (см. EXEC_META); по умолчанию "human".
+     name   — человекочитаемое имя. Если отсутствует — честный фоллбэк на id
+              (D2 honest-empty: НЕ выдумываем имя, но и не рендерим объект).
+     id     — сырой идентификатор (slug или UUID) — уходит в title/aria и в
+              МОНО-метку (data-testid="technical-id"), не в основной текст.
+     showId — раскрыть моно-метку с id рядом с именем (по умолчанию false —
+              id живёт только в tooltip, чтобы не плодить визуальный шум в
+              плотных списках; экраны с явной колонкой «id» могут showId=true).
+     bare   — без текстовой подписи вовсе (только глиф) — проксируется в
+              ExecutorBadge, id остаётся в title.
+     deactivated — T-0648 FIX-3: сотрудник soft-деактивирован (employee.
+              deactivated_at, приходит с резолвом ResolvedActor.deactivated).
+              Приглушённый визуальный стиль + «(деактивирован)» в accessible-
+              name/тултипе — потерянный сигнал теперь виден в аудите/трейле.
+   ---------------------------------------------------------------------------- */
+function ActorChip({ type = "human", name, id, showId = false, bare = false, deactivated = false }) {
+  const meta = EXEC_META[type] || EXEC_META.human;
+  const safeId = asRenderableText(id);
+  const displayName = asRenderableText(name) || safeId || meta.label;
+  // T-0648 FIX-3: deactivation surfaces in the visible tooltip too (not only AT).
+  const typeLabel = deactivated ? `${meta.label} · деактивирован` : meta.label;
+  const tooltip = safeId && safeId !== displayName ? `${typeLabel} · ${safeId}` : typeLabel;
+  return (
+    <span className="chs-actorchip" title={tooltip}>
+      <ExecutorBadge type={type} name={displayName} bare={bare} deactivated={deactivated} />
+      {showId && safeId && <MonoId chip>{safeId}</MonoId>}
     </span>
   );
 }
 
 /* MonoId — машинный идентификатор */
-function MonoId({ children, prefix, chip = false }) {
+function MonoId({ children, prefix, chip = false, "data-testid": dataTestId = "technical-id", ...rest }) {
   const cls = `chs-monoid ${chip ? "chs-monoid--chip" : ""}`;
   // Расщепляем префикс только для простых строк; иначе рендерим как есть.
   if (typeof children !== "string") {
-    return <span className={cls}>{children}</span>;
+    return <span className={cls} data-testid={dataTestId} {...rest}>{children}</span>;
   }
-  let pre = prefix, rest = children;
+  let pre = prefix, restText = children;
   if (!prefix && children.includes("-")) {
     const i = children.indexOf("-");
     pre = children.slice(0, i);
-    rest = children.slice(i);
+    restText = children.slice(i);
   }
   return (
-    <span className={cls}>
-      {pre && <span className="chs-monoid__pre">{pre}</span>}{rest}
+    <span className={cls} data-testid={dataTestId} {...rest}>
+      {pre && <span className="chs-monoid__pre">{pre}</span>}{restText}
     </span>
   );
 }
@@ -129,6 +203,98 @@ function MonoId({ children, prefix, chip = false }) {
 /* Mono — общий машинный вывод (числа/таймстампы) */
 function Mono({ children, className = "", ...rest }) {
   return <span className={`chs-mono ${className}`} {...rest}>{children}</span>;
+}
+
+/* ----------------------------------------------------------------------------
+   RecordRef — T-0648 (D-064, UX-study §3): «запись-источник» ссылалась голым
+   UUID без title и без ссылки (напр. карточка инстанса процесса). Единый
+   примитив: лениво резолвит title записи через GET /api/records/:id и рендерит
+   его как ссылку на саму запись — никогда голый id в основном тексте.
+
+   Deliberately dependency-free (kit modules import only React + design/*, per
+   the existing convention — see the file's own imports): callers that already
+   have their own auth-header helper (devHeaders/authHeaders) pass it in via
+   `headers`, rather than this module reaching into app-shell/dev-auth.js
+   itself (kit stays leaf-level, no auth-layer coupling).
+
+   Title derivation mirrors records-form.js::deriveRecordLabel (first non-empty
+   string/finite-number field value, id-prefix fallback) — same
+   canonical rule, kept as an independent small copy here so the kit layer does
+   not import a screens-layer module (kit → screens would invert the existing
+   screens → components dependency direction).
+
+   Props:
+     recordId    — the record UUID (required to resolve).
+     appId       — the record's owning application id, if already known by the
+                   caller (used to build the link without waiting on
+                   application_id from the fetch response).
+     headers     — optional fetch headers (devHeaders()/authHeaders() from the
+                   caller's own auth layer); defaults to none.
+     fetchImpl   — optional fetch override (tests).
+   ---------------------------------------------------------------------------- */
+function deriveRecordRefLabel(record) {
+  if (!record) return null;
+  const data = record.data && typeof record.data === "object" ? record.data : {};
+  for (const key of Object.keys(data)) {
+    const v = data[key];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  return typeof record.id === "string" ? record.id.slice(0, 8) + "…" : null;
+}
+
+function RecordRef({ recordId, appId, headers, fetchImpl }) {
+  const [state, setState] = useState("loading"); // 'loading'|'resolved'|'denied'
+  const [label, setLabel] = useState(null);
+  const [targetAppId, setTargetAppId] = useState(appId || null);
+  const doFetch = fetchImpl || (typeof fetch !== "undefined" ? fetch : undefined);
+
+  useEffect(() => {
+    if (!recordId || !doFetch) {
+      setState("denied");
+      return undefined;
+    }
+    let cancelled = false;
+    setState("loading");
+    doFetch(`/api/records/${encodeURIComponent(recordId)}`, { headers: headers || {} })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) {
+          setState("denied");
+          return;
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        const derived = deriveRecordRefLabel(data);
+        if (!derived) {
+          setState("denied");
+          return;
+        }
+        setLabel(derived);
+        setTargetAppId(data.application_id || appId || null);
+        setState("resolved");
+      })
+      .catch(() => { if (!cancelled) setState("denied"); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordId, appId]);
+
+  if (state === "loading") {
+    return <span className="chs-recordref chs-recordref--loading">…</span>;
+  }
+  if (state === "denied" || !label) {
+    // Honest sentinel (D2) — never fall back to rendering the raw id bare.
+    return recordId ? <MonoId chip>{recordId}</MonoId> : <span>—</span>;
+  }
+  const href = targetAppId ? `/apps/${targetAppId}/records/${recordId}` : undefined;
+  if (!href) {
+    return <span className="chs-recordref">{label}</span>;
+  }
+  return (
+    <a className="chs-recordref chs-recordref--link" href={href} title={`Открыть запись · ${recordId}`}>
+      {label}
+    </a>
+  );
 }
 
 /* StatusChip */
@@ -308,12 +474,14 @@ function TaskRow({ status = "running", name, sub, execType = "human", execName, 
 
 /* AuditEvent — строка аудит-лога */
 function AuditEvent({ ts, actorType = "service", actor, action, target }) {
+  // T-0648 (React error #31 hardening): `actor` must never reach this <b> as a
+  // bare object — asRenderableText coerces defensively (see its own doc-comment).
   return (
     <div className="chs-audit">
       <span className="chs-audit__time">{ts}</span>
       <span className="chs-audit__rail"><ExecGlyph type={actorType} size={8} /></span>
       <span className="chs-audit__body">
-        <b>{actor}</b> {action} {target && <MonoId chip>{target}</MonoId>}
+        <b>{asRenderableText(actor)}</b> {action} {target && <MonoId chip>{target}</MonoId>}
       </span>
     </div>
   );
@@ -947,7 +1115,7 @@ function DataTableCell({ children, numeric = false, right = false, center = fals
 }
 
 export {
-  ExecGlyph, ExecutorBadge, MonoId, Mono, StatusChip, Button, Field, Select,
+  ExecGlyph, ExecutorBadge, ActorChip, MonoId, Mono, RecordRef, StatusChip, Button, Field, Select,
   BudgetMeter, ReservationMeter, RoleAssignment, OpChip, DerivedChip,
   TaskRow, AuditEvent, EXEC_META, STATUS_META,
   KitIcon, Spinner,
@@ -955,4 +1123,7 @@ export {
   Popover, Tooltip, Toast, ToastViewport, useToasts, Notice,
   Badge, Card,
   DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
+  // T-0648: exported for unit-testability (mirrors records-form.js::deriveRecordLabel,
+  // which is exported for the SAME reason — pure label-derivation logic, no hooks).
+  asRenderableText, deriveRecordRefLabel,
 };
