@@ -390,15 +390,41 @@ export class PostgresAgentJobFetcher implements AgentJobFetcher {
         jobs = jobRows.map((r) => ({
           id: r.id,
           topic: r.topic,
-          variables: { ...r.variables, __tenantId: r.tenant_id },
+          // T-0677: inject the authoritative process_def_id/instance_id (migration
+          // 111, T-0534 — captured from the Flowable ExternalTask engine metadata at
+          // enqueue time) into job.variables under the SAME keys the (frozen,
+          // FF-15-owned) agent-step-context.ts::readJobVars() already probes
+          // (`instanceId` / `procKey`). This is the call-site injection point: the
+          // frozen readJobVars stays byte-identical and finds the correct value
+          // through its existing variables lookup — no edit to the frozen zone.
+          // Spread order: ...r.variables FIRST, then the injected keys OVERRIDE when
+          // the migration-111 column carries a non-empty value — the DB column is the
+          // authoritative engine-captured correlation id and wins over any stale
+          // business-variable of the same name; when the column is NULL/empty the
+          // injection is skipped and readJobVars falls back to whatever variables
+          // already carried (legacy jobs enqueued before migration 111). __tenantId is
+          // stamped last so it is never shadowed.
+          variables: {
+            ...r.variables,
+            ...(r.instance_id != null && r.instance_id !== ""
+              ? { instanceId: r.instance_id }
+              : {}),
+            ...(r.process_def_id != null && r.process_def_id !== ""
+              ? { procKey: r.process_def_id }
+              : {}),
+            __tenantId: r.tenant_id,
+          },
           state: r.state as Job["state"],
           retries: r.retries,
           lockOwner: r.lock_owner ?? undefined,
           lockExpiry: r.lock_expiry !== null ? Number(r.lock_expiry) : undefined,
           createdAt: Number(r.created_at),
           available_at: Number(r.available_at),
-          // T-0677: thread process_def_id/instance_id from the row (migration 111)
-          // onto the Job object so readJobVars() can read the authoritative DB value.
+          // T-0677: also thread process_def_id/instance_id onto the Job object's
+          // (non-frozen, types.ts) optional fields — the authoritative machine-readable
+          // copy, useful for DB-level assertions and any future non-frozen consumer.
+          // The functional wiring that feeds readJobVars is the variables injection
+          // above; these top-level fields are the belt to that suspenders.
           processDefId: r.process_def_id ?? null,
           instanceId: r.instance_id ?? null,
         }));

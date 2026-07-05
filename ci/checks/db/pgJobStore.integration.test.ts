@@ -367,6 +367,36 @@ describe("T-0677: fetchAndLock threads process_def_id/instance_id onto Job", () 
     });
   });
 
+  it("enqueue()'s OWN return value carries instanceId/processDefId (RETURNING parity, R-2)", async () => {
+    const clock = makeFixedClock(1000);
+    await runAsTenant(TENANT_A, clock, async (store) => {
+      // Isolate enqueue()'s return value (no subsequent fetchAndLock/getById) — the
+      // plain-insert path's RETURNING list must select the columns too.
+      const enqueued = await store.enqueue(
+        "agent-step",
+        { agentEmployeeId: "agent-1" },
+        3,
+        undefined, // no idempotency key → plain-insert RETURNING path
+        "telLinear",
+        "inst-enq-1",
+      );
+      expect(enqueued.instanceId).toBe("inst-enq-1");
+      expect(enqueued.processDefId).toBe("telLinear");
+    });
+  });
+
+  it("enqueue() idempotent-conflict SELECT-back also carries instanceId/processDefId", async () => {
+    const clock = makeFixedClock(1000);
+    await runAsTenant(TENANT_A, clock, async (store) => {
+      const key = "idem-t0677-conflict";
+      await store.enqueue("agent-step", { a: 1 }, 3, key, "procX", "inst-X-1");
+      // Second enqueue with the SAME key → ON CONFLICT DO NOTHING → SELECT-back path.
+      const second = await store.enqueue("agent-step", { a: 2 }, 3, key, "procX", "inst-X-1");
+      expect(second.instanceId).toBe("inst-X-1");
+      expect(second.processDefId).toBe("procX");
+    });
+  });
+
   it("getById also threads instanceId/processDefId (SELECT list parity with fetchAndLock)", async () => {
     const clock = makeFixedClock(1000);
     await runAsTenant(TENANT_A, clock, async (store) => {

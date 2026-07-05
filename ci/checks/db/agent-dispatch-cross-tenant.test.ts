@@ -305,6 +305,15 @@ describe("T-0677: PostgresAgentJobFetcher threads process_def_id/instance_id ont
     // enqueue time, not be absent/undefined/empty.
     expect(job!.instanceId).toBe("99573238");
     expect(job!.processDefId).toBe("telLinear");
+
+    // FUNCTIONAL WIRING (post FF-15 relocation): the call site also injects these
+    // into job.variables under the SAME keys the frozen agent-step-context.ts::
+    // readJobVars() already probes (`instanceId` / `procKey`) — this is what makes
+    // readJobVars return the real instanceId WITHOUT any edit to the frozen file.
+    // This is the mutation-red assertion of record: pre-fix, variables carried no
+    // instanceId/procKey and readJobVars → ctx.instanceId="" (repro 99573238).
+    expect(job!.variables["instanceId"]).toBe("99573238");
+    expect(job!.variables["procKey"]).toBe("telLinear");
   });
 
   it("backward compatibility: a legacy row with NULL process_def_id/instance_id → fields are null, fetch does not crash", async () => {
@@ -330,6 +339,88 @@ describe("T-0677: PostgresAgentJobFetcher threads process_def_id/instance_id ont
     expect(job).toBeDefined();
     expect(job!.instanceId).toBeNull();
     expect(job!.processDefId).toBeNull();
+    // NULL columns → no injection into variables → readJobVars falls back to
+    // whatever variables already carried (nothing here) → "" downstream. No crash,
+    // no spurious empty-string key stamped.
+    expect(job!.variables["instanceId"]).toBeUndefined();
+    expect(job!.variables["procKey"]).toBeUndefined();
+  });
+
+  it("legacy fallback: a job whose variables already carry instanceId/procKey but has NULL columns keeps the variables value (readJobVars fallback preserved)", async () => {
+    const now = Date.now();
+    const jobId = uuid();
+    // Seed a job with process_def_id/instance_id NULL at the DB level but with
+    // instanceId/procKey already present INSIDE variables (a legacy shape). The
+    // call-site injection is skipped (columns NULL) so the variables value survives.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query(
+        `INSERT INTO choros.job
+           (tenant_id, id, topic, variables, state, retries,
+            lock_owner, lock_expiry, created_at, available_at,
+            process_def_id, instance_id)
+         VALUES ($1,$2,$3,$4,'CREATED',0,NULL,NULL,$5,$5,NULL,NULL)`,
+        [
+          TENANT_A,
+          jobId,
+          AGENT_TOPIC,
+          JSON.stringify({ instanceId: "legacy-inst", procKey: "legacyProc" }),
+          now - 100,
+        ],
+      );
+    });
+
+    const batches = await fetcher.fetchAndLockAgentJobs({
+      workerId: WORKER,
+      topics: [AGENT_TOPIC],
+      maxJobs: 10,
+      lockMs: 30_000,
+      nowMs: now,
+    });
+    const job = batches.find((b) => b.tenantId === TENANT_A)!.jobs.find((j) => j.id === jobId);
+    expect(job).toBeDefined();
+    // Columns NULL → injection skipped → the legacy variables value is preserved.
+    expect(job!.variables["instanceId"]).toBe("legacy-inst");
+    expect(job!.variables["procKey"]).toBe("legacyProc");
+    expect(job!.instanceId).toBeNull();
+    expect(job!.processDefId).toBeNull();
+  });
+
+  it("override: when BOTH a DB column and a stale variables value exist, the migration-111 column wins (authoritative engine-captured id)", async () => {
+    const now = Date.now();
+    const jobId = uuid();
+    // Column carries the real engine id; variables carries a stale/wrong value.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query(
+        `INSERT INTO choros.job
+           (tenant_id, id, topic, variables, state, retries,
+            lock_owner, lock_expiry, created_at, available_at,
+            process_def_id, instance_id)
+         VALUES ($1,$2,$3,$4,'CREATED',0,NULL,NULL,$5,$5,$6,$7)`,
+        [
+          TENANT_A,
+          jobId,
+          AGENT_TOPIC,
+          JSON.stringify({ instanceId: "stale-legacy-value" }),
+          now - 100,
+          "telLinear",
+          "authoritative-999",
+        ],
+      );
+    });
+
+    const batches = await fetcher.fetchAndLockAgentJobs({
+      workerId: WORKER,
+      topics: [AGENT_TOPIC],
+      maxJobs: 10,
+      lockMs: 30_000,
+      nowMs: now,
+    });
+    const job = batches.find((b) => b.tenantId === TENANT_A)!.jobs.find((j) => j.id === jobId);
+    expect(job).toBeDefined();
+    // The DB column (engine-captured at enqueue) overrides the stale business var.
+    expect(job!.variables["instanceId"]).toBe("authoritative-999");
+    expect(job!.variables["procKey"]).toBe("telLinear");
+    expect(job!.instanceId).toBe("authoritative-999");
   });
 
   it("each tenant's process_def_id/instance_id are scoped to their own job (no cross-tenant field bleed)", async () => {

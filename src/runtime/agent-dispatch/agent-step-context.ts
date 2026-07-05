@@ -198,21 +198,6 @@ export interface AssembleDeps {
  * The dispatcher reads the agent identity + step intent from these. Day-1 we read
  * a conservative set; missing fields degrade to safe defaults (which steer the
  * motor toward defer, never proceed).
- *
- * T-0677 (upstream fix for T-0534/T-0638): instanceId/procKey now prefer the
- * AUTHORITATIVE job.instanceId / job.processDefId columns (choros.job.instance_id
- * / process_def_id, migration 111) — captured directly from the Flowable engine's
- * ExternalTask wire shape at enqueue time (externalTaskBridge.ts), now threaded
- * through fetchAndLock/rowToJob (pgJobStore.ts, agent-dispatch-loop.ts) onto the
- * Job object. The `variables` lookup (business/process variables, best-effort
- * conventional key names) is now only a FALLBACK for legacy jobs enqueued before
- * this column existed, or jobs whose enqueue path never captured process scope.
- * Previously this function read ONLY from `variables`, which the live agent
- * dispatch path never populates with an `instanceId`/`processInstanceId` key
- * (those are Flowable engine metadata, not BPMN business variables) — so every
- * fresh agentTask job produced instanceId="" here, making T-0638's defer-resolve
- * fix inert (empty payload.instance_id → deferred-inbox-store.ts's null-coalesce
- * → 404 DEFER_NOT_ROUTABLE).
  */
 function readJobVars(job: Job): {
   instanceId: string;
@@ -229,20 +214,8 @@ function readJobVars(job: Job): {
   // absent we leave it "" — the close path uses the job id as the aggregate id and
   // the engine maps NOT_FOUND → idempotent success, so a missing ext-task id is safe.
   return {
-    instanceId:
-      (typeof job.instanceId === "string" && job.instanceId.trim() !== ""
-        ? job.instanceId.trim()
-        : "") ||
-      str("instanceId") ||
-      str("processInstanceId") ||
-      str("inst"),
-    procKey:
-      (typeof job.processDefId === "string" && job.processDefId.trim() !== ""
-        ? job.processDefId.trim()
-        : "") ||
-      str("procKey") ||
-      str("processKey") ||
-      str("proc_key"),
+    instanceId: str("instanceId") || str("processInstanceId") || str("inst"),
+    procKey: str("procKey") || str("processKey") || str("proc_key"),
     agentEmployeeId:
       str("agentEmployeeId") || str("agent_employee_id") || str("executorId"),
     roleId: str("roleId") || str("role_id"),
