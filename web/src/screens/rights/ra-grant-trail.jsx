@@ -10,6 +10,7 @@ import {
 } from '../../components/components.jsx';
 import { TRAIL as TRAIL_SEED, ProvenanceTag } from './ra-data.jsx';
 import { formatDate } from '../../lib/format.js';
+import { authHeaders } from '../../app-shell/dev-auth.js';
 
 const ACTION_META = {
   grant:  { label: "выдан",  cls: "grant" },
@@ -161,6 +162,29 @@ function apiRowToDisplay(r) {
 }
 
 /**
+ * fetchGrantTrail — the ONE place /rights/trail talks to GET /api/grant-trail.
+ *
+ * P0 (re-verify fix-forward №3): the two call sites used to `fetch()` WITHOUT
+ * any auth header, so a live browser request returned 401 «missing Authorization
+ * header» → the screen ALWAYS fell through to the TRAIL_SEED fallback (fake seed
+ * data instead of the tenant's live grant-trail). /rights/trail was the only
+ * screen not using the shared auth helper (audit/inbox/processes/… all do).
+ * Centralising the fetch here (a) guarantees BOTH the initial load and the
+ * "load more" cursor request carry `authHeaders()` (mode-aware: keycloak→Bearer,
+ * dev→X-Dev-User), and (b) makes the auth wiring unit-testable in the node tier
+ * (fetch mocked, assert the header is present) without rendering the hooked
+ * screen. Returns the raw Response — callers keep their own ok/json handling.
+ *
+ * @param {string} [queryString] e.g. "before_seq=42" (no leading "?").
+ * @param {typeof fetch} [fetchImpl] test override; defaults to global fetch.
+ */
+function fetchGrantTrail(queryString, fetchImpl) {
+  const doFetch = fetchImpl || fetch;
+  const url = queryString ? `/api/grant-trail?${queryString}` : '/api/grant-trail';
+  return doFetch(url, { headers: authHeaders() });
+}
+
+/**
  * GrantTrailRow — ONE trail row, extracted as a PURE (hook-free) component so
  * the node test tier (web/vitest.config.js, no jsdom) can render it and walk
  * the element tree for the React #31 regression: NO field may reach a bare JSX
@@ -210,7 +234,10 @@ function GrantTrailScreen() {
     setLoading(true);
     setLoadError(null);
     try {
-      const r = await fetch('/api/grant-trail');
+      // P0 (re-verify fix-forward №3): fetchGrantTrail carries authHeaders() —
+      // without it the live request 401'd and the screen ALWAYS fell to the
+      // TRAIL_SEED fallback (fake seed data instead of the tenant's live trail).
+      const r = await fetchGrantTrail();
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       if (Array.isArray(data.rows)) {
@@ -235,7 +262,7 @@ function GrantTrailScreen() {
     const minSeq = Math.min(...allRows.map((r) => r._seq));
     setLoadMoreError(null);
     try {
-      const r = await fetch(`/api/grant-trail?before_seq=${minSeq}`);
+      const r = await fetchGrantTrail(`before_seq=${minSeq}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       if (Array.isArray(data.rows)) {
@@ -324,6 +351,8 @@ function GrantTrailScreen() {
 // `apiRowToDisplay` exercises the actor/subject resolution + coercion; the pure
 // `GrantTrailRow` component lets the test RENDER a row and walk the element tree
 // to assert NO object ever reaches a bare JSX child (the exact React #31 crash
-// that a SEED-shape row triggered live — see ra-grant-trail.test.js).
-export { apiRowToDisplay, GrantTrailRow };
+// that a SEED-shape row triggered live — see ra-grant-trail.test.js);
+// `fetchGrantTrail` lets the test assert the request carries the auth header
+// (the P0 that made the screen always fall to seed — re-verify fix-forward №3).
+export { apiRowToDisplay, GrantTrailRow, fetchGrantTrail };
 export default GrantTrailScreen;
