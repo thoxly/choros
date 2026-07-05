@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0666",
+  "status": "pr_open",
+  "branch": "task/T-0666-forms-save-access",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "T-0666.spec.md",
+    "docs/design/ADR-T0666-forms-save-access.md",
+    "src/http/binding.ts",
+    "src/http/floor1-editor.ts",
+    "src/http/dmn-rule-table.ts",
+    "src/http/forms-document-ops.ts",
+    "src/core/register.ts",
+    "migrations/128_process_designer_role_backfill.sql",
+    "src/__tests__/binding-owner-bypass.test.ts",
+    "src/__tests__/floor1-editor.test.ts",
+    "src/__tests__/register.test.ts",
+    "ci/checks/db/migration-128-process-designer-backfill.test.ts",
+    "ci/checks/substitution-isolation.sh",
+    "ci/checks/data/frozen-sanctions.jsonl"
+  ],
+  "decision": "Variant A (required, implemented) — owner bypass in checkRole via isGenesisOwnerForTenant, the SAME owner-authority resolver capability-grants-dao.ts already uses (canConfigureLlmConnection / canActorOperateSystemAgents). Variant B (additive, implemented) — seed the process_designer role (created, NOT auto-assigned, same posture as role-constructor-admin) in register.ts (new tenants) + migrations/128_process_designer_role_backfill.sql (existing tenants). Both implemented per the task brief's 'minimum A, B if it's the right layer' guidance — B is the right layer because a role must exist before it can be delegated to a non-owner form-builder employee.",
+  "owner_access_path": "checkRole (src/http/binding.ts) now takes a `pool: pg.Pool` parameter. In keycloak auth mode, before the process_designer role_assignment lookup, it calls `isGenesisOwnerForTenant(pool, tenantId, actorSlug, Date.now())` and returns early (bypass) if true. isGenesisOwnerForTenant (src/db/org.ts:721) is POST-T-0658: its inner slug->employee subquery carries `AND deactivated_at IS NULL` (confirmed by reading the function's own T-0658 doc-comment and by the existing ci/checks/db/org-admin-deactivation.db.test.ts, which stayed green through this change) — deactivation is inherited, not reopened. No new employee-lookup was written; this is the fifth authority path (per T-0658's own enumeration), not a sixth.",
+  "role_seeded": true,
+  "migration_number": "128_process_designer_role_backfill.sql (next free slot after 127_employee_email.sql; verified via `ls migrations/ | sort -t_ -k1 -n | tail`, no collision)",
+  "tests": {
+    "owner_can_save": "src/__tests__/binding-owner-bypass.test.ts AC-2 — tenant owner, NO process_designer role_assignment, real signed keycloak Bearer (local JWKS mock) -> POST /api/forms/binding -> 201. Mutation-verified RED: reverting src/http/binding.ts's checkRole change (git stash) makes this test fail with 403 instead of 201; all other tests in the file (AC-3/AC-4/positive-control) remain unaffected by the revert, confirming the test isolates exactly the bypass behavior.",
+    "deactivated_owner_cannot": "src/__tests__/binding-owner-bypass.test.ts AC-3 — simulates isGenesisOwnerForTenant resolving false (what a deactivated owner's slug resolves to, per T-0658's own fail-closed gate, independently proven live-PG by ci/checks/db/org-admin-deactivation.db.test.ts which passed unchanged in this task's fitness:db run) -> POST /api/forms/binding -> 403. Confirms the bypass does not resurrect a deactivated owner.",
+    "rank_and_file_403": "src/__tests__/binding-owner-bypass.test.ts AC-4 — non-owner, no process_designer role -> 403 (access not spilled to everyone); positive control — non-owner WITH process_designer role -> 201 (pre-existing convention still works). floor1-editor.test.ts AC-31 mirrors AC-2/AC-4 at the floor1-editor.ts HTTP surface (owner=true -> 200; owner=false -> 403), proving the bypass ripples to that route without any owner-specific code there.",
+    "mutation_verified": true,
+    "register_ts_ff4": "src/__tests__/register.test.ts FF-4 (live-PG, DATABASE_URL-gated) updated 4->5 expected roles + a new process_designer-unassigned assertion; run live against :55432 both before (RED: 'expected length 5 but got 4' after reverting register.ts) and after (GREEN) the register.ts change.",
+    "migration_128_db_test": "ci/checks/db/migration-128-process-designer-backfill.test.ts — AC-pre (pre-T-0666 tenant genuinely lacks the role), AC-1 (backfill seeds exactly 1 row), AC-2 (idempotent across 2nd/3rd run), AC-unassigned (0 role_assignment rows), anti-drift (register.ts's own seed shape + a re-run of the migration on top of it stays at exactly 1 role, 0 assignments) — all 6 tests pass live against Postgres :55432."
+  },
+  "gate_results": {
+    "npm_ci": "clean (--maxsockets=3, pre-existing EBADENGINE warning only)",
+    "tsc_noEmit": "0 errors",
+    "eslint_src": "0 errors (44 pre-existing console warnings, none in touched files)",
+    "vitest_server_no_db": "5563 passed, 10 skipped (289 files) — up from 5555/287 baseline (+8 tests: binding-owner-bypass.test.ts x4, floor1-editor.test.ts AC-31 x2, register.test.ts unassigned-assertion additions, net file/test deltas)",
+    "vitest_server_with_db_DATABASE_URL": "register.test.ts 42/42, floor1-editor.test.ts 69/69, binding-owner-bypass.test.ts 4/4 — all pass live against :55432",
+    "fitness_db": "135 test files, 1284 tests passed (up from 134/1278 baseline — migration-128 db-test adds 1 file/6 tests) — migrations run clean including 128 (npm run migrate + fitness:db:setup-template both applied 128 with zero errors)",
+    "npm_run_fitness_full_chain": "exit 0 (entire static-check chain green, including the newly-sanctioned substitution-isolation.sh and frozen-checks-immutable.sh)",
+    "http_route_auth_coverage": "PASS (FF-0328-1/2/3 clean)",
+    "grant_resolver_isolation": "PASS (FF-R6 clean, frozen modules untouched)",
+    "dual_control_isolation": "PASS (FF-DC1..DC8/DC11 clean)",
+    "anti_case_lock": "PASS (aggregate literal counts unchanged/decreased vs baseline, no new anti-case literal added)",
+    "role_migration_set": "PASS (scoped to migrations 019-021, untouched by this task)",
+    "substitution_isolation_sanctioned": "PASS — required an auto_additive frozen-sanction (see deviations_from_adr) because migration 128 (a new file numbered >=38) trips FF-SUB5's 'only 036/037' guard, a known false-positive class T-0625/T-0628 already hit for migrations 126/127. Verified independently via `bash ci/checks/auto-sanction-additive.sh --verify T-0666 ci/checks/substitution-isolation.sh ba8dba4053c4bccdb2231180fdb243f4f5043bfc <sanction_json>` -> PASS (A-1..A-4 additive, GRANT-ESCALATION family bound to the file in the T-0152 catalog, corpus_ref efa4b97 unchanged/ancestor)."
+  },
+  "deviations_from_adr": [
+    "The ADR anticipated a possible migration-numbering collision check but did not anticipate substitution-isolation.sh's FF-SUB5 migration-seam guard flagging the new migration file as belonging to a foreign task's domain. Resolved via the pre-established auto_additive sanction channel (ci/checks/auto-sanction-additive.sh, T-0232) — added a purely-additive relief block to substitution-isolation.sh (structurally identical to the existing 126/127 relief blocks) plus a sanction entry in ci/checks/data/frozen-sanctions.jsonl, independently verified. Documented in ADR-T0666 §5 (added after this was discovered during the gate run, not anticipated in the original design)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [
+    "floor1-editor.test.ts's existing makeStubPool() returned {rows:[{cnt:roleCount}]} for ANY query containing 'role_assignment' — after adding the isGenesisOwnerForTenant call (which ALSO queries role_assignment, keyed on r.slug='tenant-owner'), the stub could not distinguish the two queries, causing 2 pre-existing tests (AC-27, AC-29's missing-role case) to flip from 403 to 200 (a non-empty stub row for cnt:0 still satisfies isGenesisOwnerForTenant's `rows.length > 0` check). Fixed by branching the stub on the literal 'tenant-owner' vs the process_designer query shape, with an explicit isOwner parameter (default false) so existing callers keep their original behavior unless they opt in.",
+    "Discovered mid-gate-run that adding migrations/128_*.sql trips ci/checks/substitution-isolation.sh's FF-SUB5 migration-seam guard (a T-0035-scoped check unrelated to this task) — the SAME false-positive class documented in T-0625/T-0628's own frozen-sanctions.jsonl entries for migrations 126/127. Followed the established auto_additive relief pattern rather than inventing a new mechanism.",
+    "src/__tests__/register.test.ts's FF-4 live-PG fitness test hardcodes an exact role-count invariant (was 4, now 5) — had to update it in lockstep with register.ts's new seed step; verified RED-before/GREEN-after via git stash on register.ts against a live Postgres at :55432."
+  ],
+  "live_proof_todo": [
+    "On the dev stand: log in as the tenant owner (e-owner or equivalent, WITHOUT any manually-granted process_designer role_assignment — verify via a DB read that none exists), open the FormDesigner / form builder UI, and save a form binding (POST /api/forms/binding via the UI). Expect 200/201, not 403 — this directly reverses the LIVE_PROOF T-0656 workaround (docs/handoff/T-0656.pr-handoff.json's `pre_existing_blocker_not_t0656` / `workarounds_used`).",
+    "Confirm a rank-and-file (non-owner, no process_designer role) employee still gets 403 attempting the same save — the bypass must not have spilled access.",
+    "Confirm the process_designer role now appears in the tenant's role list (e.g. via /api/org or the rights-assignment UI) as an assignable, unassigned role — proving the owner can now delegate form-building to a real employee without a manual DB grant."
+  ],
+  "findings": [
+    "T-0656's own pr-handoff.json (docs/handoff/T-0656.pr-handoff.json, live_proof.pre_existing_blocker_not_t0656) already documented this exact defect and its DB-grant workaround before this task existed — this PR is the promised fix for that residue.",
+    "checkRole is reused verbatim by THREE HTTP surfaces (binding.ts's two POST routes, floor1-editor.ts's authorizeEditor, dmn-rule-table.ts's authorizeDesigner) plus one internal seam (forms-document-ops.ts, the T-0656 agent op-apply path) — fixing the shared function fixed all four/five call sites in one change, consistent with the codebase's existing 'single source of truth for the process_designer authz convention' discipline documented in checkRole's own comment.",
+    "Follow-up candidate (not filed as a task, flagging for awareness): no OTHER conventional (non-PDP-grant) role checks were found still lacking an owner bypass in this pass, but the pattern (a role gate with no owner short-circuit) is worth a repo-wide grep if a similar substrate/P0 surfaces again."
+  ]
+}
