@@ -1,0 +1,31 @@
+{
+  "task_id": "T-0677",
+  "verdict": "changes_requested",
+  "ci_seen": {"green": false},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 6,
+      "location": "docs/handoff/T-0677.pr-handoff.json:47 (gate_results.agent_bridge_contract_sh) vs ci/checks/agent-bridge-contract.sh FF-15",
+      "issue": "The handoff claims `bash ci/checks/agent-bridge-contract.sh — PASS (FF-1/FF-6/FF-12/FF-15, including FF-15's diff-vs-base check that this task does not touch T-0586/T-0587/T-0588-owned zones)`. Re-ran the script against the stated base (dev@ed75608, confirmed unchanged): it deterministically FAILS with exit code 1 — `FAIL [FF-15]: diff touches forbidden zone path: src/runtime/agent-dispatch/`. `git diff --name-only $(git merge-base HEAD dev)...HEAD` shows this diff touches both `src/runtime/agent-dispatch/agent-step-context.ts` and `src/runtime/agent-dispatch/__tests__/agent-dispatch-loop.test.ts`, which are exactly the zone FF-15 forbids (T-0636's own script comment: 'diff does not touch the T-0586/T-0587/T-0588 owned zones (src/runtime/agent-dispatch/**, ...)'). This gate is wired into the mandatory `npm run fitness` chain (package.json) and was introduced same-week (363343b, 2026-07-04) specifically to prevent exactly this kind of concurrent-worktree collision on this zone — it is not stale or advisory. The fix itself is real and necessary (readJobVars() genuinely lives in this file and genuinely needed the change — confirmed by mutation-red testing), so the technical work is not in question. What is in question: the handoff asserts a specific gate result that is false, with no acknowledgment anywhere in the spec/ADR/handoff that this task crosses a zone frozen for other in-flight tasks (per founder memory, T-0586/T-0587 are open/blocked, not closed — real collision risk, not theoretical). No deviation note, no escalation, no coordinator sign-off recorded.",
+      "suggestion": "Either: (a) get explicit sign-off from whoever owns the T-0586/T-0587/T-0588 zone-freeze (or confirm those tasks are actually closed/superseded, then update/relax the FF-15 forbidden-path list to reflect that) before merging this diff into the frozen zone, and correct the handoff to describe FF-15 as a deliberately-overridden gate with the sign-off recorded — not a false PASS; or (b) if sign-off isn't obtainable, relocate the readJobVars() fix out of agent-step-context.ts's frozen surface (e.g. thread the corrected instanceId/procKey in at the call site in agent-dispatch-loop.ts, which is NOT in the forbidden list) so the diff genuinely stays out of the frozen zone. Either way, the pr-handoff's gate_results entry must be corrected to reflect what actually happened, not a fabricated green."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/core/postgres/pgJobStore.ts enqueue() RETURNING lists (both plain-insert and idempotent-conflict-select-back paths)",
+      "issue": "The handoff's side_effects_checked note is honest that no current caller reads enqueue()'s returned Job.instanceId/processDefId (externalTaskBridge.ts only uses the count), so widening these two RETURNING/SELECT lists is precautionary completeness rather than a defect fix. Not a problem — just flagging that this is the one part of the diff not directly exercised by a failing-before/passing-after mutation test (it's covered by the 'enqueue → fetchAndLock returns populated fields' test, which conflates enqueue+fetchAndLock, and separately by the getById test, but there's no test isolating enqueue()'s own return value).",
+      "suggestion": "Optional: a trivial assertion that `store.enqueue(...)`'s own return value (not a subsequent fetchAndLock/getById) carries instanceId/processDefId would close this gap, but it's low value given no consumer reads it today."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-a", "covered": true},
+    {"ac": "AC-b", "covered": true},
+    {"ac": "AC-c", "covered": true},
+    {"ac": "AC-d", "covered": true},
+    {"ac": "AC-e", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
