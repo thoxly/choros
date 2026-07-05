@@ -1,0 +1,100 @@
+{
+  "task_id": "T-0644",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 6674,
+    "passed": 6664,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "src/__tests__/externalTaskBridge.test.ts — keystone regression: completeTask вызывается с injected bridgeWorkerId, игнорируя другой payload.workerId",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "src/__tests__/externalTaskBridge.test.ts — симметричный keystone regression для failTask",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "src/__tests__/agent-dispatch-bridge-workerid.test.ts — реальный applyAgentOutcome → реальный makeExternalTaskDeliver, сквозной путь без mismatch",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "src/__tests__/lifecycle-bridge.test.ts — startLifecycleBridge прокидывает одно и то же workerId в startBridgePollLoop и makeExternalTaskDeliver (с/без FLOWABLE_WORKER_ID)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "src/__tests__/externalTaskBridge.test.ts — старые AC-6/AC-10-style ассерты переписаны на calledWorkerId===bridgeWorkerId, не равный payload.workerId",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "ci/checks/db/pgOutboxStore.integration.test.ts — reviveDeadOutboxRows на живом Postgres :55432 (35 тестов в файле, включая mismatch-revive, fail-closed non-revive, eventType/state scope, идемпотентность, кросс-тенантность)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "LIVE_PROOF на стенде после деплоя (verifiable_as=manual, defer-путь не требует LLM) — post-merge, не верифицируется в рамках кодового ревью/приёмки",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "Полный vitest (276 файлов/5424 теста) + fitness:db (126 файлов/1240 тестов) — T-0636 мультитенантность/ISO-8601 наборы зелёные без изменений",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "dev drift — origin/dev tip vs база задачи 970ab08",
+      "result": "pass",
+      "note": "git fetch origin dev; origin/dev == 970ab08ef0befb36e08154b4184c9d654a62d6bf побайтово; 970ab08 IS ancestor of origin/dev. Ничего не смержено в dev после базы задачи, дрейфа нет."
+    },
+    {
+      "check": "frozen zone T-0586 (src/runtime/agent-dispatch/**) — нулевой диф",
+      "result": "pass",
+      "note": "git diff 970ab08 -- src/runtime/agent-dispatch/ — 0 строк. FF-15 (agent-bridge-contract.sh) лично прогнан: PASS, 'diff vs 970ab08... does not touch any T-0586/T-0587/T-0588 owned path'."
+    },
+    {
+      "check": "npm run fitness (полная статик-цепочка, ~370 проверок + tsc + build)",
+      "result": "pass",
+      "note": "Прогнан ДВАЖДЫ (соло, без параллельных агентов) для устранения флейка — оба раза exit 0, идентичное число PASS/FAIL строк между прогонами. Известный флейк doc-reconcile-isolation — перепроверен, PASS на обоих прогонах, флейка не воспроизвелось."
+    },
+    {
+      "check": "npm run fitness:db (live PG :55432, --no-file-parallelism)",
+      "result": "pass",
+      "note": "126 test files passed, 1240 tests passed, 0 failed. Включает ci/checks/db/pgOutboxStore.integration.test.ts (35 тестов) в составе полного набора."
+    },
+    {
+      "check": "npm test (полный vitest)",
+      "result": "pass",
+      "note": "276 test files passed, 2 skipped (pre-existing); 5424 tests passed, 10 skipped, 0 failed — совпадает с заявленным в pr-handoff.json."
+    },
+    {
+      "check": "Соло: externalTaskBridge.test.ts + agent-dispatch-bridge-workerid.test.ts + lifecycle-bridge.test.ts",
+      "result": "pass",
+      "note": "npx vitest run --no-file-parallelism — 3 test files, 46/46 tests passed (37+1+8)."
+    },
+    {
+      "check": "Соло: ci/checks/db/pgOutboxStore.integration.test.ts (live PG, изолированно)",
+      "result": "pass",
+      "note": "1 test file, 35/35 tests passed, T-0147 clone-template изоляция подтверждена в логах."
+    },
+    {
+      "check": "git diff --stat vs 970ab08 совпадает с files_changed из pr-handoff.json",
+      "result": "pass",
+      "note": "12 файлов изменено, включая 2 новых (agent-dispatch-bridge-workerid.test.ts, outbox-revive-runner.ts) — точное совпадение со списком в handoff."
+    },
+    {
+      "check": "Рабочее дерево чистое (судьи не оставили мусора)",
+      "result": "pass",
+      "note": "git status --porcelain пуст на протяжении всей приёмки, ничего откатывать не потребовалось."
+    }
+  ],
+  "failures": [],
+  "blocked_reason": ""
+}

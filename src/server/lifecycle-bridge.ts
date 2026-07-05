@@ -24,6 +24,7 @@ import { makeFlowableClient } from "../core/flowable-client.js";
 import {
   startBridgePollLoop,
   makeExternalTaskDeliver,
+  DEFAULT_BRIDGE_WORKER_ID,
 } from "../core/externalTaskBridge.js";
 import { startOutboxDispatcherLoop, defaultBackoff, type Deliver, type RunOutboxOptions } from "../core/outboxDispatcher.js";
 import { PostgresJobStore } from "../core/jobStore.js";
@@ -287,12 +288,20 @@ export function startLifecycleBridge(
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
 
+  // T-0644 (P0/столп4): SINGLE source of truth for the bridge's Flowable
+  // lock-holder identity — read ONCE, used for BOTH fetchAndLock (poll loop,
+  // below) AND completeTask/failTask (externalTaskDeliver, below). Threading
+  // the SAME value to both call-sites is what keeps the lock-holder and the
+  // completer/failer in sync (a mismatch is REJECTED by the Flowable engine —
+  // LIVE_PROOF diagnosis of the bug this constant closes).
+  const bridgeWorkerId = env["FLOWABLE_WORKER_ID"] ?? DEFAULT_BRIDGE_WORKER_ID;
+
   // (1) Poll loop: Flowable external tasks → outbox rows.
   // T-0636 (P0-6/F3/F4): pass the pool so runBridgeOnce can enqueue each fetched
   // task under its OWN tenant's GUC-scoped transaction (multi-tenant bridge).
   const pollLoop = startBridgePollLoop(flowableClient, deps.jobStore, {
     topics,
-    workerId: env["FLOWABLE_WORKER_ID"] ?? "choros-bridge",
+    workerId: bridgeWorkerId,
     pool: deps.pool,
     ...(deps.intervalMs !== undefined ? { pollIntervalMs: deps.intervalMs } : {}),
     ...(deps.setIntervalFn !== undefined ? { setIntervalFn: deps.setIntervalFn } : {}),
@@ -324,7 +333,15 @@ export function startLifecycleBridge(
   const registry: ChannelRegistry =
     deps.notificationRegistry ?? new Map([[inAppNoOpDriver.key, inAppNoOpDriver]]);
   const notificationDeliver = makeNotificationDeliver(registry);
-  const externalTaskDeliver = makeExternalTaskDeliver(flowableClient, deps.jobStore);
+  // T-0644 (P0/столп4): pass the SAME bridgeWorkerId used for fetchAndLock above
+  // (onDispatched is intentionally omitted here — undefined, mirrors pre-existing
+  // call-shape; the 4th positional arg is bridgeWorkerId).
+  const externalTaskDeliver = makeExternalTaskDeliver(
+    flowableClient,
+    deps.jobStore,
+    undefined,
+    bridgeWorkerId,
+  );
 
   // Composed deliver: notification rows → notificationDeliver,
   // all other rows → externalTaskDeliver.

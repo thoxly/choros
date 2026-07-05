@@ -51,6 +51,9 @@ async function seedOutbox(params: {
   state?: string;
   availableAt?: number;
   attempts?: number;
+  /** T-0644: override eventType/payload (default 'evt' / {} for pre-existing ACs). */
+  eventType?: string;
+  payload?: Record<string, unknown>;
 }): Promise<string> {
   const id = params.id ?? uuid();
   await withClient(migratorUrl(), async (c) => {
@@ -59,7 +62,7 @@ async function seedOutbox(params: {
          (tenant_id, id, aggregate_kind, aggregate_id, event_type, payload,
           state, idempotency_key, attempts, created_at, available_at,
           dispatched_at)
-       VALUES ($1, $2, 'test', $3, 'evt', '{}'::jsonb,
+       VALUES ($1, $2, 'test', $3, $8, $9::jsonb,
                $4, $5, $6, 0, $7,
                CASE WHEN $4 = 'dispatched' THEN 0 ELSE NULL END)
        ON CONFLICT DO NOTHING`,
@@ -71,10 +74,27 @@ async function seedOutbox(params: {
         `idk-${id}`,
         params.attempts ?? 0,
         params.availableAt ?? 0,
+        params.eventType ?? "evt",
+        JSON.stringify(params.payload ?? {}),
       ]
     );
   });
   return id;
+}
+
+/** Read back a single outbox row's state/attempts by id (migrator, no RLS). */
+async function readOutboxRow(
+  id: string
+): Promise<{ state: string; attempts: number; last_error: string | null } | undefined> {
+  let found: { state: string; attempts: number; last_error: string | null } | undefined;
+  await withClient(migratorUrl(), async (c) => {
+    const { rows } = await c.query<{ state: string; attempts: number; last_error: string | null }>(
+      `SELECT state, attempts, last_error FROM choros.outbox WHERE id = $1`,
+      [id]
+    );
+    found = rows[0];
+  });
+  return found;
 }
 
 async function truncateOutbox(): Promise<void> {
@@ -683,5 +703,148 @@ describe("AC-16: getOutboxHealth", () => {
     const store = new PostgresOutboxStore(badPool, makeFixedClock(0));
     await expect(store.getOutboxHealth()).rejects.toBeDefined();
     await badPool.end().catch(() => {});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0644 (P0/столп4): reviveDeadOutboxRows — scoped one-time reconciliation for
+// rows dead-lettered by the bridge/agent-dispatcher workerId mismatch.
+// ---------------------------------------------------------------------------
+describe("T-0644: reviveDeadOutboxRows — scoped dead → pending reconciliation", () => {
+  const BRIDGE_WORKER_ID = "choros-bridge";
+
+  it("revives a dead task_completed row whose payload.workerId differs from the bridge's own", async () => {
+    const id = await seedOutbox({
+      tenantId: TENANT_A,
+      state: "dead",
+      attempts: 5,
+      eventType: "task_completed",
+      payload: { workerId: "choros-agent-dispatcher", variables: { source: "agent", outcome: "defer" } },
+    });
+
+    const store = new PostgresOutboxStore(migratorPool, makeFixedClock(9999));
+    const revived = await store.reviveDeadOutboxRows(BRIDGE_WORKER_ID);
+    expect(revived).toBe(1);
+
+    const row = await readOutboxRow(id);
+    expect(row).toBeDefined();
+    expect(row!.state).toBe("pending");
+    expect(row!.attempts).toBe(0);
+    expect(row!.last_error).toBeNull();
+  });
+
+  it("revives a dead task_failed row with a mismatched payload.workerId too", async () => {
+    const id = await seedOutbox({
+      tenantId: TENANT_A,
+      state: "dead",
+      attempts: 5,
+      eventType: "task_failed",
+      payload: { workerId: "choros-agent-dispatcher", errorMessage: "llm_error", retries: 0, retryTimeout: 30000 },
+    });
+
+    const store = new PostgresOutboxStore(migratorPool, makeFixedClock(0));
+    const revived = await store.reviveDeadOutboxRows(BRIDGE_WORKER_ID);
+    expect(revived).toBe(1);
+
+    const row = await readOutboxRow(id);
+    expect(row!.state).toBe("pending");
+  });
+
+  it("does NOT revive a dead row whose payload.workerId ALREADY matches the bridge (died for another reason)", async () => {
+    const id = await seedOutbox({
+      tenantId: TENANT_A,
+      state: "dead",
+      attempts: 5,
+      eventType: "task_completed",
+      payload: { workerId: BRIDGE_WORKER_ID, variables: {} },
+    });
+
+    const store = new PostgresOutboxStore(migratorPool, makeFixedClock(0));
+    const revived = await store.reviveDeadOutboxRows(BRIDGE_WORKER_ID);
+    expect(revived).toBe(0);
+
+    const row = await readOutboxRow(id);
+    expect(row!.state).toBe("dead"); // untouched — fail-closed, never guess.
+  });
+
+  it("does NOT revive a dead row with a mismatched workerId but a DIFFERENT eventType (e.g. worker_lock_expired)", async () => {
+    const id = await seedOutbox({
+      tenantId: TENANT_A,
+      state: "dead",
+      attempts: 5,
+      eventType: "worker_lock_expired",
+      payload: { workerId: "choros-agent-dispatcher" },
+    });
+
+    const store = new PostgresOutboxStore(migratorPool, makeFixedClock(0));
+    const revived = await store.reviveDeadOutboxRows(BRIDGE_WORKER_ID);
+    expect(revived).toBe(0);
+
+    const row = await readOutboxRow(id);
+    expect(row!.state).toBe("dead");
+  });
+
+  it("does NOT touch a 'pending' or 'dispatched' row even with a mismatched workerId (only 'dead' is in scope)", async () => {
+    const pendingId = await seedOutbox({
+      tenantId: TENANT_A,
+      state: "pending",
+      eventType: "task_completed",
+      payload: { workerId: "choros-agent-dispatcher" },
+    });
+    const dispatchedId = await seedOutbox({
+      tenantId: TENANT_A,
+      state: "dispatched",
+      eventType: "task_completed",
+      payload: { workerId: "choros-agent-dispatcher" },
+    });
+
+    const store = new PostgresOutboxStore(migratorPool, makeFixedClock(0));
+    const revived = await store.reviveDeadOutboxRows(BRIDGE_WORKER_ID);
+    expect(revived).toBe(0);
+
+    expect((await readOutboxRow(pendingId))!.state).toBe("pending");
+    expect((await readOutboxRow(dispatchedId))!.state).toBe("dispatched");
+  });
+
+  it("is idempotent — running twice revives once, second run is a no-op", async () => {
+    await seedOutbox({
+      tenantId: TENANT_A,
+      state: "dead",
+      attempts: 5,
+      eventType: "task_completed",
+      payload: { workerId: "choros-agent-dispatcher" },
+    });
+
+    const store = new PostgresOutboxStore(migratorPool, makeFixedClock(0));
+    const first = await store.reviveDeadOutboxRows(BRIDGE_WORKER_ID);
+    expect(first).toBe(1);
+
+    // Row is now 'pending' — the scoped WHERE (state='dead') no longer matches.
+    const second = await store.reviveDeadOutboxRows(BRIDGE_WORKER_ID);
+    expect(second).toBe(0);
+  });
+
+  it("scopes across ALL tenants (operator action, no GUC) — revives rows from both TENANT_A and TENANT_B", async () => {
+    const idA = await seedOutbox({
+      tenantId: TENANT_A,
+      state: "dead",
+      attempts: 5,
+      eventType: "task_completed",
+      payload: { workerId: "choros-agent-dispatcher" },
+    });
+    const idB = await seedOutbox({
+      tenantId: TENANT_B,
+      state: "dead",
+      attempts: 5,
+      eventType: "task_completed",
+      payload: { workerId: "choros-agent-dispatcher" },
+    });
+
+    const store = new PostgresOutboxStore(migratorPool, makeFixedClock(0));
+    const revived = await store.reviveDeadOutboxRows(BRIDGE_WORKER_ID);
+    expect(revived).toBe(2);
+
+    expect((await readOutboxRow(idA))!.state).toBe("pending");
+    expect((await readOutboxRow(idB))!.state).toBe("pending");
   });
 });

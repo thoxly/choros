@@ -325,4 +325,60 @@ export class PostgresOutboxStore {
     const deadCount = Number(rows[0].dead_count);
     return { pendingLagMs, deadCount };
   }
+
+  // -------------------------------------------------------------------------
+  // T-0644 (P0/столп4) — reviveDeadOutboxRows: one-time reconciliation for
+  // rows that went 'dead' BECAUSE OF the workerId mismatch this task fixes.
+  //
+  // Rationale: before this fix, EVERY task_completed/task_failed row produced
+  // by a component OTHER than the bridge itself (concretely: the agent
+  // dispatcher, whose payload carries "choros-agent-dispatcher" as workerId)
+  // was rejected by Flowable on every delivery attempt (workerId mismatch vs
+  // the actual lock-holder) → 5 attempts exhausted → state='dead' (terminal,
+  // NEVER re-claimed by the normal dispatch loop, ADR §4.2 monotonicity). Those
+  // rows are now safely deliverable (makeExternalTaskDeliver ignores
+  // payload.workerId and always uses the bridge's own workerId), but a 'dead'
+  // row is never automatically re-picked-up — someone has to explicitly move
+  // it back to 'pending' once the fix is deployed.
+  //
+  // This is NOT a blanket "revive everything dead" operation (a row can be
+  // dead for many OTHER legitimate reasons — a genuinely gone Flowable
+  // instance, a permanently invalid payload, etc. — resurrecting those would
+  // just burn another 5 attempts for nothing). It is scoped tightly:
+  //   - eventType IN ('task_completed', 'task_failed')  — the two event types
+  //     this bug's outbox payload shape applies to (worker_lock_expired and
+  //     notification rows are untouched — no-op / different producer).
+  //   - state = 'dead'                                  — only terminal rows.
+  //   - payload->>'workerId' <> bridgeWorkerId           — the diagnostic
+  //     fingerprint of THIS bug: a row whose payload workerId does not match
+  //     the bridge's own identity is exactly the shape this fix targets. A
+  //     dead row whose payload.workerId ALREADY equals the bridge's own
+  //     identity died for some OTHER reason (e.g. a genuinely gone instance)
+  //     and is deliberately left alone (fail-closed — never guess).
+  //
+  // Resets attempts=0 and last_error=NULL so the row gets the FULL retry
+  // budget again under the (now-fixed) delivery path — a fresh start, not a
+  // continuation of the old failure count.
+  //
+  // Callable manually (via a one-shot script — see src/outbox-revive-runner.ts)
+  // AFTER the fix is deployed; NEVER auto-run on every pass (that would risk
+  // masking a future, different systemic failure as "just replay it").
+  // Executes WITHOUT GUC (migrator pool, mirrors getOutboxHealth) — this is an
+  // operator action across all tenants, by design (the bug was tenant-agnostic).
+  // -------------------------------------------------------------------------
+  async reviveDeadOutboxRows(bridgeWorkerId: string): Promise<number> {
+    const now = this.clock.now();
+    const { rowCount } = await this.pool.query(
+      `UPDATE choros.outbox
+       SET state = 'pending',
+           attempts = 0,
+           available_at = $2,
+           last_error = NULL
+       WHERE state = 'dead'
+         AND event_type IN ('task_completed', 'task_failed')
+         AND payload->>'workerId' IS DISTINCT FROM $1`,
+      [bridgeWorkerId, now],
+    );
+    return rowCount ?? 0;
+  }
 }
