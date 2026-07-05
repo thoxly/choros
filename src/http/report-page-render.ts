@@ -55,6 +55,7 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
 import {
   isNarrowerOrEqual,
+  type Grant,
   type ScopeElement,
   type AncestryOracle,
 } from "../core/grant-lattice.js";
@@ -68,6 +69,14 @@ import {
   type CycleTimeAnalytics,
   type ActorTypeBreakdown,
 } from "../db/transition-journal.js";
+// T-0632 (security, столп 4): the SAME per-row READ-PDP predicate GET
+// /api/records and the analyst (T-0587 registry-digest-dao.ts) already use —
+// single-resolver, NOT a second authority path (NF-1).
+import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
+// T-0632: pure, IO-free Floor-1 aggregate accumulator over an
+// ALREADY-READ-PDP-FILTERED row stream (mirrors visible-aggregate.ts, T-0587
+// §1.4, generalized to the full Floor-1 vocab: group_by / filter / list).
+import { VisibleAggregator, matchesFilter, type VisibleFilterSpec } from "../core/visible-record-agg.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -78,6 +87,16 @@ const UUID_RE =
 
 /** Maximum records returned by Floor-2 data API per request. */
 export const MAX_DATA_LIMIT = 100;
+
+/**
+ * T-0632 (security, столп 4 / NF-3 bounded): maximum candidate records
+ * scanned per Floor-1 metric when computing an aggregate over the
+ * READ-PDP-visible subset. Mirrors `registry-digest-dao.ts`'s `scanLimit`
+ * (T-0587 §1.4) — the aggregate is bounded, not an unbounded `SELECT *`.
+ * When the DB returns exactly this many candidate rows, the aggregate MAY
+ * understate the true visible set (see `truncated` on `MetricResult`).
+ */
+export const AGG_SCAN_LIMIT = 5000;
 
 /**
  * Strict field-key charset guard (adversarial AC — SQL injection prevention).
@@ -163,6 +182,41 @@ export interface ReportPageRenderAuthzDeps {
     nowMs: number,
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }
+
+// ---------------------------------------------------------------------------
+// T-0632 (security, столп 4): record-level READ-PDP visibility resolver.
+//
+// ADDITIVE, OPTIONAL — mirrors `ReadVisibilityResolver` in `src/http/records.ts`
+// / the production wiring in `src/server.ts` (:875-885) BYTE-FOR-BYTE: the same
+// `getGrantsForSubject` + `loadTenantOrgAncestry` → `makeResourceAncestryOracle`
+// composition. NOT a second authority path (NF-1) — this resolver returns
+// exactly the `{ grants, ancestry }` shape `isRecordReadable` (T-0570,
+// src/core/read-visibility.ts) already consumes.
+//
+// THE DEFECT this closes (adversary finding T-0587, ADR-T0587 §1.1): the
+// Floor-1 aggregate renderer used to compute SUM/AVG/COUNT/MIN/MAX/LIST as a
+// raw SQL aggregate over EVERY record in a registry, gated only by the
+// application-level `checkReadGrant` above — never a record-level READ-PDP
+// check. An actor with a narrow record-scope grant (sees a subset of a
+// registry's rows) received an aggregate computed over rows they cannot read
+// individually. This resolver is the record-level gate ADR-T0587 §1.1
+// deliberately declined to build INTO the analyst (reusing this exact module
+// would have leaked) — T-0632 closes it here, at the source.
+//
+// HONEST-DEGRADE (mirrors records.ts's ReadVisibilityResolver / NF-2): this
+// parameter is OPTIONAL on `registerReportPageRenderRoutes` so existing unit
+// tests that do not pass it keep compiling; when absent, `renderFloor1`
+// degrades to the OLD (pre-T-0632) full-registry aggregate — a deliberate,
+// documented test-only degradation, NOT a sanctioned production state.
+// `src/server.ts` MUST wire this resolver (this is a security fix, not an
+// opt-in feature).
+// ---------------------------------------------------------------------------
+
+export type ReportAggReadVisibilityResolver = (
+  actorSlug: string,
+  tenantId: string,
+  nowMs: number,
+) => Promise<{ grants: Grant[]; ancestry: AncestryOracle }>;
 
 async function defaultCheckReadGrant(
   pool: pg.Pool,
@@ -510,17 +564,124 @@ function parseMetrics(pageDef: unknown): Floor1Metric[] {
 }
 
 // ---------------------------------------------------------------------------
-// buildAggSql — builds parameterized SQL for one Floor-1 metric.
+// buildFilterClause — parameterized WHERE-filter builder shared by BOTH the
+// legacy full-registry SQL aggregate (honest-degrade fallback, no resolver
+// wired) and the new raw-row fetch (T-0632 default path).
+//
+// SECURITY: field_key is used as a jsonb-path string literal in the SQL text
+// ONLY AFTER both charset and schema-whitelist validation — unchanged from
+// the original buildAggSql (NF-5, ci/checks/report-page-render-isolation.sh).
+// filter.value is ALWAYS a $N parameter — never in SQL text.
+// ---------------------------------------------------------------------------
+
+interface FilterClauseResult {
+  clause: string;
+  params: unknown[];
+  nextParamIdx: number;
+}
+
+function buildFilterClause(
+  filter: Floor1Filter | undefined,
+  schemaProps: Record<string, unknown>,
+  startParamIdx: number,
+): FilterClauseResult {
+  if (filter === undefined) {
+    return { clause: "", params: [], nextParamIdx: startParamIdx };
+  }
+  assertFieldKeySafe(filter.field_key, `filter.field_key`);
+  assertFieldKeyInSchema(filter.field_key, schemaProps, `filter.field_key`);
+
+  let paramIdx = startParamIdx;
+  const params: unknown[] = [];
+  let clause: string;
+
+  if (filter.op === "in") {
+    if (!Array.isArray(filter.value)) {
+      throw new HttpError(400, "INVALID_FILTER", `filter.op='in' requires value to be an array`);
+    }
+    const placeholders = (filter.value as unknown[]).map(() => {
+      const ph = `$${paramIdx}`;
+      paramIdx++;
+      return ph;
+    });
+    for (const v of filter.value as unknown[]) {
+      params.push(v);
+    }
+    // Safe: filter.field_key is charset-guarded + whitelist-validated
+    clause = ` AND data->>'${filter.field_key}' IN (${placeholders.join(",")})`;
+  } else {
+    params.push(filter.value);
+    const ph = `$${paramIdx}`;
+    paramIdx++;
+    // Safe: filter.field_key is charset-guarded + whitelist-validated
+    // op comes from closed set ["=","!=","<",">"] — no injection possible
+    clause = ` AND (data->>'${filter.field_key}') ${filter.op} ${ph}`;
+  }
+
+  return { clause, params, nextParamIdx: paramIdx };
+}
+
+// ---------------------------------------------------------------------------
+// buildRawRecordSql — T-0632 (security, столп 4) — DEFAULT Floor-1 aggregate
+// path. Instead of computing SUM/AVG/COUNT/MIN/MAX/LIST as a raw SQL
+// aggregate over EVERY record in a registry (the pre-T-0632 behavior, which
+// let an actor with a narrow record-scope READ grant see an aggregate over
+// rows they cannot read individually — ADR-T0587 §1.1 finding), this fetches
+// a BOUNDED (AGG_SCAN_LIMIT, NF-3) candidate window of raw `{id, data}` rows
+// — the SAME WHERE tenant/registry/filter predicate the old SQL aggregate
+// used — and lets the caller (renderFloor1) filter each row through
+// `isRecordReadable` BEFORE folding it into the aggregate (VisibleAggregator,
+// src/core/visible-record-agg.ts).
+//
+// SECURITY: identical charset+whitelist guard discipline as the legacy path —
+// field_key/group_by are validated before being referenced by
+// buildFilterClause; filter.value is always parameterized.
+// ---------------------------------------------------------------------------
+
+interface BuiltRawRowQuery {
+  sql: string;
+  params: unknown[];
+}
+
+function buildRawRecordSql(
+  metric: Floor1Metric,
+  schemaProps: Record<string, unknown>,
+  tenantId: string,
+  registryDefId: string,
+): BuiltRawRowQuery {
+  const { field_key, group_by } = metric;
+
+  // Dual guard: charset + whitelist (unchanged from the original buildAggSql).
+  assertFieldKeySafe(field_key, `metrics[field_key]`);
+  assertFieldKeyInSchema(field_key, schemaProps, `metrics[field_key]`);
+  if (group_by !== undefined) {
+    assertFieldKeySafe(group_by, `metrics[group_by]`);
+    assertFieldKeyInSchema(group_by, schemaProps, `metrics[group_by]`);
+  }
+
+  const { clause: filterClause, params: filterParams } = buildFilterClause(
+    metric.filter,
+    schemaProps,
+    4,
+  );
+
+  const sql = `SELECT id, data
+    FROM choros.record
+   WHERE tenant_id = $1 AND registry_id = $2${filterClause}
+   ORDER BY created_at DESC, id ASC
+   LIMIT $3`;
+
+  return { sql, params: [tenantId, registryDefId, ...filterParams, AGG_SCAN_LIMIT] };
+}
+
+// ---------------------------------------------------------------------------
+// buildAggSql — LEGACY full-registry SQL aggregate. Retained ONLY for the
+// honest-degrade fallback path (no `resolveReadVisibility` resolver wired —
+// test-only, see ReportAggReadVisibilityResolver doc comment above). NOT used
+// when a resolver is present (the production path, T-0632 default).
 //
 // SECURITY: field_key and group_by are used as jsonb-path string literals in
 // the SQL text ONLY AFTER both charset and schema-whitelist validation.
-// The pattern used is: (data->>'<field_key>')::cast
-// This is safe because:
-//   (a) FIELD_KEY_SAFE_RE guarantees no SQL metacharacters.
-//   (b) The schema whitelist guarantees the key exists in the registry.
-//   (c) The single-quotes wrapping are part of the jsonb operator syntax
-//       and cannot be injected out of because the charset guard blocks quotes.
-//
 // filter.value is ALWAYS a $N parameter — never in SQL text.
 //
 // Returns: { sql, params, isGrouped }
@@ -538,7 +699,7 @@ function buildAggSql(
   tenantId: string,
   registryDefId: string,
 ): BuiltQuery {
-  const { field_key, agg, group_by, filter } = metric;
+  const { field_key, agg, group_by } = metric;
 
   // Dual guard: charset + whitelist
   assertFieldKeySafe(field_key, `metrics[field_key]`);
@@ -548,41 +709,12 @@ function buildAggSql(
     assertFieldKeyInSchema(group_by, schemaProps, `metrics[group_by]`);
   }
 
-  const params: unknown[] = [tenantId, registryDefId];
-  let paramIdx = 3;
-
-  // Validate and build WHERE filter clause if present
-  let filterClause = "";
-  if (filter !== undefined) {
-    assertFieldKeySafe(filter.field_key, `filter.field_key`);
-    assertFieldKeyInSchema(filter.field_key, schemaProps, `filter.field_key`);
-
-    if (filter.op === "in") {
-      // value must be an array
-      if (!Array.isArray(filter.value)) {
-        throw new HttpError(400, "INVALID_FILTER", `filter.op='in' requires value to be an array`);
-      }
-      // Build $N,$M,... for array elements (all parameterized)
-      const placeholders = (filter.value as unknown[]).map(() => {
-        const ph = `$${paramIdx}`;
-        paramIdx++;
-        return ph;
-      });
-      for (const v of filter.value as unknown[]) {
-        params.push(v);
-      }
-      // Safe: filter.field_key is charset-guarded + whitelist-validated
-      filterClause = ` AND data->>'${filter.field_key}' IN (${placeholders.join(",")})`;
-    } else {
-      // Scalar comparison — value is parameterized
-      params.push(filter.value);
-      const ph = `$${paramIdx}`;
-      paramIdx++;
-      // Safe: filter.field_key is charset-guarded + whitelist-validated
-      // op comes from closed set ["=","!=","<",">"] — no injection possible
-      filterClause = ` AND (data->>'${filter.field_key}') ${filter.op} ${ph}`;
-    }
-  }
+  const { clause: filterClause, params: filterParams } = buildFilterClause(
+    metric.filter,
+    schemaProps,
+    3,
+  );
+  const params: unknown[] = [tenantId, registryDefId, ...filterParams];
 
   const isGrouped = group_by !== undefined;
 
@@ -633,12 +765,149 @@ export interface MetricResult {
   title?: string;
   result: unknown;            // scalar for non-grouped
   grouped?: Array<{ group_key: string; result: unknown }>; // for group_by
+  /**
+   * T-0632 (NF-3, mirrors registry-digest-dao.ts's `truncated`): true when the
+   * bounded candidate-row scan for THIS metric hit `AGG_SCAN_LIMIT` exactly —
+   * there may be more visible (or invisible) rows this aggregate never saw.
+   * Only meaningful on the T-0632 READ-PDP-filtered path (absent/false on the
+   * legacy honest-degrade fallback, which has no such bound).
+   */
+  truncated?: boolean;
 }
 
 export interface RenderResult {
   page_id: string;
   floor: "1";
   metrics: MetricResult[];
+}
+
+// ---------------------------------------------------------------------------
+// runVisibilityFilteredMetric — T-0632 (security, столп 4) DEFAULT path.
+//
+// Fetches a BOUNDED window of raw `{id, data}` candidate rows (buildRawRecordSql
+// — same tenant/registry/filter WHERE predicate as the legacy aggregate, same
+// charset+whitelist guards), filters EACH row through `isRecordReadable`
+// (T-0570 — the exact predicate GET /api/records and the analyst digest use),
+// and folds ONLY the rows that pass into a VisibleAggregator
+// (src/core/visible-record-agg.ts, pure/IO-free). A row failing the predicate
+// contributes to NOTHING — not count, not sum, not any group.
+//
+// filter (metric.filter) is applied by buildRawRecordSql's WHERE clause AS
+// BEFORE (parameterized, unchanged semantics) — matchesFilter here is used
+// only defensively (belt-and-suspenders — the SQL WHERE already narrows the
+// candidate set; re-checking in JS costs nothing and guards against any future
+// refactor accidentally dropping the SQL filter clause).
+// ---------------------------------------------------------------------------
+
+async function runVisibilityFilteredMetric(
+  client: pg.PoolClient,
+  metric: Floor1Metric,
+  schemaProps: Record<string, unknown>,
+  tenantId: string,
+  registryDefId: string,
+  grants: readonly Grant[],
+  ancestry: AncestryOracle,
+  nowMs: number,
+): Promise<MetricResult> {
+  const { sql, params } = buildRawRecordSql(metric, schemaProps, tenantId, registryDefId);
+
+  const { rows } = await client.query<{ id: string; data: unknown }>(sql, params);
+
+  const aggregator = new VisibleAggregator(metric.agg, metric.field_key, metric.group_by);
+
+  const filterSpec: VisibleFilterSpec | undefined = metric.filter
+    ? { fieldKey: metric.filter.field_key, op: metric.filter.op, value: metric.filter.value }
+    : undefined;
+
+  for (const row of rows) {
+    const rowAncestry: RowAncestry = {
+      recordId: row.id,
+      registryId: registryDefId,
+      applicationId: "", // application-level containment already enforced by checkReadGrant (step 2); record-scope/root-sentinel rules (ADR §2.1 rules 1/2) don't need this field.
+    };
+    if (!isRecordReadable(rowAncestry, grants, ancestry, nowMs)) continue;
+    if (filterSpec !== undefined && !matchesFilter(row.data, filterSpec)) continue;
+    // INVARIANT (FR-1): everything below runs ONLY for a row that already
+    // passed BOTH isRecordReadable and the filter — mirrors the
+    // isRecordReadable-then-accumulate discipline in registry-digest-dao.ts.
+    aggregator.fold(row.data);
+  }
+
+  const { result, grouped } = aggregator.finalize();
+  // T-0632 LEAK B (adversary, LOW — ACCEPTED as-is): `truncated` is computed
+  // from the PRE-filter candidate count (rows.length === AGG_SCAN_LIMIT), which
+  // reveals only "the scan window was exhausted" — a coarse ≥AGG_SCAN_LIMIT
+  // signal, never an exact hidden-record count. This is BYTE-IDENTICAL to the
+  // already-accepted T-0587 precedent (registry-digest-dao.ts:
+  // `recRes.rows.length === scanLimit`). Computing it from the visible fold-count
+  // instead would be semantically WRONG — `truncated` must mean "candidate scan
+  // may be incomplete" (a pre-filter property of the window), not "visible set
+  // may be incomplete"; a registry of 5000 candidates with 3 visible rows still
+  // needs the truncation flag. Kept consistent with T-0587; see ADR-T0632 §7.
+  const truncated = rows.length === AGG_SCAN_LIMIT;
+
+  const metricResult: MetricResult = {
+    source_registry_def_id: registryDefId,
+    field_key: metric.field_key,
+    agg: metric.agg,
+    result: grouped ? null : result,
+    ...(grouped ? { grouped } : {}),
+    ...(truncated ? { truncated: true } : {}),
+  };
+  if (metric.title !== undefined) {
+    metricResult.title = metric.title;
+  }
+  return metricResult;
+}
+
+// ---------------------------------------------------------------------------
+// runLegacyFullRegistryMetric — honest-degrade fallback (NO resolveReadVisibility
+// wired). Reproduces the pre-T-0632 behavior byte-for-byte: a raw SQL aggregate
+// over EVERY record in the registry, gated only by the application-level
+// checkReadGrant. Test-only / documented degradation — production
+// (src/server.ts) always wires the resolver, so this path never runs there.
+// ---------------------------------------------------------------------------
+
+async function runLegacyFullRegistryMetric(
+  client: pg.PoolClient,
+  metric: Floor1Metric,
+  schemaProps: Record<string, unknown>,
+  tenantId: string,
+  registryDefId: string,
+): Promise<MetricResult> {
+  const { sql, params, isGrouped } = buildAggSql(metric, schemaProps, tenantId, registryDefId);
+
+  const { rows: aggRows } = await client.query(sql, params);
+
+  let metricResult: MetricResult;
+
+  if (isGrouped) {
+    const grouped = aggRows.map((row: Record<string, unknown>) => ({
+      group_key: String(row["group_key"] ?? ""),
+      result: row["agg_result"] ?? null,
+    }));
+    metricResult = {
+      source_registry_def_id: registryDefId,
+      field_key: metric.field_key,
+      agg: metric.agg,
+      result: null,
+      grouped,
+    };
+  } else {
+    const row = aggRows[0] as Record<string, unknown> | undefined;
+    metricResult = {
+      source_registry_def_id: registryDefId,
+      field_key: metric.field_key,
+      agg: metric.agg,
+      result: row?.["agg_result"] ?? null,
+    };
+  }
+
+  if (metric.title !== undefined) {
+    metricResult.title = metric.title;
+  }
+
+  return metricResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -652,8 +921,17 @@ async function renderFloor1(args: {
   actor: string;
   nowMs: number;
   authzDeps: ReportPageRenderAuthzDeps;
+  /**
+   * T-0632 (security, столп 4): OPTIONAL record-level READ-PDP resolver. When
+   * present (production, src/server.ts), every metric's aggregate is computed
+   * STRICTLY over records `isRecordReadable` allows for THIS actor — closing
+   * the ADR-T0587 §1.1 finding. When absent (honest-degrade, test-only — see
+   * ReportAggReadVisibilityResolver doc comment), falls back to the legacy
+   * full-registry SQL aggregate (pre-T-0632 behavior).
+   */
+  resolveReadVisibility?: ReportAggReadVisibilityResolver;
 }): Promise<RenderResult> {
-  const { pool, tenantId, pageId, actor, nowMs, authzDeps } = args;
+  const { pool, tenantId, pageId, actor, nowMs, authzDeps, resolveReadVisibility } = args;
 
   return withTenantTx(pool, tenantId, async (client) => {
     // 1. Load page (RLS-gated) — must happen first to obtain app_id for PDP gate.
@@ -679,6 +957,9 @@ async function renderFloor1(args: {
     // 2. PDP gate: application read grant scoped to this page's app_id (ADR §6 + T-0193 R-6).
     // Called after page load so we can pass app_id for scope-containment check.
     // The pool is passed separately (defaultCheckReadGrant opens its own connection).
+    // FR-3 (T-0632): this application-level gate remains FIRST and MANDATORY —
+    // the record-level READ-PDP filter below is an ADDITIONAL, second gate on
+    // top of it, never a replacement.
     const gateResult = await authzDeps.checkReadGrant(pool, tenantId, actor, page.app_id, nowMs);
     if (!gateResult.ok) {
       throw new HttpError(403, "NO_READ_GRANT", `read on application denied: ${gateResult.reason}`);
@@ -690,6 +971,15 @@ async function renderFloor1(args: {
     if (metrics.length === 0) {
       return { page_id: pageId, floor: "1", metrics: [] };
     }
+
+    // 3b. T-0632: resolve the actor's record-level READ-PDP visibility ONCE
+    // for the whole render call (NF-1 single-resolver; mirrors records.ts's
+    // ReadVisibilityResolver — grants/ancestry resolved once per request, not
+    // once per row/metric). Honest-degrade: absent resolver → undefined →
+    // every metric below falls back to the legacy full-registry SQL aggregate.
+    const visibility = resolveReadVisibility
+      ? await resolveReadVisibility(actor, tenantId, nowMs)
+      : undefined;
 
     // 4. Group metrics by source_registry_def_id for batched schema lookup
     const byRegistryDef = new Map<string, Floor1Metric[]>();
@@ -731,42 +1021,18 @@ async function renderFloor1(args: {
 
       // Run each metric aggregate
       for (const metric of metricGroup) {
-        const { sql, params, isGrouped } = buildAggSql(
-          metric,
-          schemaProps,
-          tenantId,
-          registryDefId,
-        );
-
-        const { rows: aggRows } = await client.query(sql, params);
-
-        let metricResult: MetricResult;
-
-        if (isGrouped) {
-          const grouped = aggRows.map((row: Record<string, unknown>) => ({
-            group_key: String(row["group_key"] ?? ""),
-            result: row["agg_result"] ?? null,
-          }));
-          metricResult = {
-            source_registry_def_id: registryDefId,
-            field_key: metric.field_key,
-            agg: metric.agg,
-            result: null,
-            grouped,
-          };
-        } else {
-          const row = aggRows[0] as Record<string, unknown> | undefined;
-          metricResult = {
-            source_registry_def_id: registryDefId,
-            field_key: metric.field_key,
-            agg: metric.agg,
-            result: row?.["agg_result"] ?? null,
-          };
-        }
-
-        if (metric.title !== undefined) {
-          metricResult.title = metric.title;
-        }
+        const metricResult = visibility
+          ? await runVisibilityFilteredMetric(
+              client,
+              metric,
+              schemaProps,
+              tenantId,
+              registryDefId,
+              visibility.grants,
+              visibility.ancestry,
+              nowMs,
+            )
+          : await runLegacyFullRegistryMetric(client, metric, schemaProps, tenantId, registryDefId);
 
         results.push(metricResult);
       }
@@ -833,7 +1099,14 @@ export function flattenRenderResultToTable(result: RenderResult): Tabular {
 //
 // Returns raw record rows for a given registry_def, subject to:
 //   - RLS: tenant isolation via GUC choros.tenant_id.
-//   - PDP: checkReadGrant (application read grant).
+//   - PDP (application-level): checkReadGrant (application read grant) — FIRST,
+//     mandatory gate.
+//   - PDP (record-level, T-0632): each row filtered through isRecordReadable;
+//     total_count is the VISIBLE count, not a full-registry COUNT(*). This is
+//     the raw-row twin of the /render aggregate fix — without it, a narrow
+//     record-scope actor read the FULL data of EVERY record here (bypassing the
+//     READ-PDP the /render fix added). Active whenever resolveReadVisibility is
+//     wired (production); absent → honest-degrade legacy full-registry dump.
 //   - No DB credentials in response.
 //   - limit capped at MAX_DATA_LIMIT (100).
 //   - offset must be >= 0.
@@ -859,8 +1132,20 @@ async function dataFloor2(args: {
   actor: string;
   nowMs: number;
   authzDeps: ReportPageRenderAuthzDeps;
+  /**
+   * T-0632 (security, столп 4): OPTIONAL record-level READ-PDP resolver. When
+   * present (production, src/server.ts), the raw-record dump is filtered
+   * STRICTLY to records `isRecordReadable` allows for THIS actor and
+   * `total_count` reflects only the VISIBLE count — closing the sibling of
+   * the ADR-T0587 §1.1 finding (the /data endpoint is the raw-row twin of the
+   * /render aggregate; the application-level checkReadGrant alone let a narrow
+   * record-scope actor read the FULL data of EVERY record + an exact
+   * full-registry COUNT). When absent (honest-degrade, test-only), falls back
+   * to the pre-T-0632 full-registry dump.
+   */
+  resolveReadVisibility?: ReportAggReadVisibilityResolver;
 }): Promise<DataResult> {
-  const { pool, tenantId, pageId, registryDefId, limit, offset, actor, nowMs, authzDeps } = args;
+  const { pool, tenantId, pageId, registryDefId, limit, offset, actor, nowMs, authzDeps, resolveReadVisibility } = args;
 
   return withTenantTx(pool, tenantId, async (client) => {
     // 1. Load page to verify it exists and is floor=2 (and belongs to this tenant).
@@ -885,7 +1170,8 @@ async function dataFloor2(args: {
     }
 
     // 2. PDP gate: application read grant scoped to this page's app_id (ADR §6 + T-0193 R-6).
-    // Checked after page existence/floor validated, before any data is returned.
+    // FR-3 (T-0632): this application-level gate remains FIRST and MANDATORY — the
+    // record-level READ-PDP filter below is an ADDITIONAL, second gate on top of it.
     const gateResult = await authzDeps.checkReadGrant(pool, tenantId, actor, page.app_id, nowMs);
     if (!gateResult.ok) {
       throw new HttpError(403, "NO_READ_GRANT", `read on application denied: ${gateResult.reason}`);
@@ -904,35 +1190,111 @@ async function dataFloor2(args: {
       );
     }
 
-    // 4. Count total records (for pagination metadata)
-    const { rows: countRows } = await client.query<{ total: string }>(
-      `SELECT COUNT(*) AS total
-         FROM choros.record
-        WHERE tenant_id = $1 AND registry_id = $2`,
-      [tenantId, registryDefId],
-    );
-    const totalCount = parseInt(countRows[0]?.total ?? "0", 10);
+    // 3b. T-0632: resolve the actor's record-level READ-PDP visibility ONCE
+    // (NF-1 single-resolver — mirrors records.ts). Honest-degrade: absent
+    // resolver → the legacy full-registry dump path (step 4/5 below).
+    const visibility = resolveReadVisibility
+      ? await resolveReadVisibility(actor, tenantId, nowMs)
+      : undefined;
 
-    // 5. Fetch records with limit+offset (all parameterized — no interpolation)
-    const { rows: recordRows } = await client.query<{
+    if (visibility === undefined) {
+      // -----------------------------------------------------------------------
+      // LEGACY / honest-degrade path (no resolver wired — test-only; production
+      // src/server.ts ALWAYS wires the resolver). Byte-identical to pre-T-0632:
+      // full-registry COUNT + SQL LIMIT/OFFSET dump. NOT a sanctioned prod state.
+      // -----------------------------------------------------------------------
+      const { rows: countRows } = await client.query<{ total: string }>(
+        `SELECT COUNT(*) AS total
+           FROM choros.record
+          WHERE tenant_id = $1 AND registry_id = $2`,
+        [tenantId, registryDefId],
+      );
+      const totalCount = parseInt(countRows[0]?.total ?? "0", 10);
+
+      const { rows: recordRows } = await client.query<{
+        id: string;
+        data: unknown;
+        created_at: string;
+        updated_at: string;
+      }>(
+        `SELECT id, data, created_at, updated_at
+           FROM choros.record
+          WHERE tenant_id = $1 AND registry_id = $2
+          ORDER BY created_at ASC, id ASC
+          LIMIT $3 OFFSET $4`,
+        [tenantId, registryDefId, limit, offset],
+      );
+
+      return {
+        page_id: pageId,
+        floor: "2",
+        registry_def_id: registryDefId,
+        records: recordRows.map((r) => ({
+          id: r.id,
+          data: r.data,
+          created_at: r.created_at,
+          updated_at: r.updated_at,
+        })),
+        total_count: totalCount,
+        limit,
+        offset,
+      };
+    }
+
+    // -------------------------------------------------------------------------
+    // T-0632 DEFAULT (production) path: fetch a BOUNDED candidate window
+    // (AGG_SCAN_LIMIT, NF-3 — same bound the /render aggregate uses), filter
+    // EACH row through isRecordReadable (the SAME predicate GET /api/records
+    // and the analyst use — NF-1), then paginate the VISIBLE subset in-memory
+    // and derive total_count from the VISIBLE count (NOT a full-registry
+    // COUNT(*), which would itself leak the exact hidden-record count).
+    //
+    // The application_id per row is needed for the RowAncestry the predicate
+    // walks (record-scope self-match rule 1 / root-sentinel rule 2 both work
+    // via the record's own id / the root oracle; the join carries application_id
+    // for completeness / any future registry/app-scope narrowing, exactly as
+    // registry-digest-dao.ts joins it).
+    // -------------------------------------------------------------------------
+    const { rows: candidateRows } = await client.query<{
       id: string;
       data: unknown;
       created_at: string;
       updated_at: string;
+      application_id: string;
     }>(
-      `SELECT id, data, created_at, updated_at
-         FROM choros.record
-        WHERE tenant_id = $1 AND registry_id = $2
-        ORDER BY created_at ASC, id ASC
-        LIMIT $3 OFFSET $4`,
-      [tenantId, registryDefId, limit, offset],
+      `SELECT r.id, r.data, r.created_at, r.updated_at, rd.application_id
+         FROM choros.record r
+         JOIN choros.registry_def rd
+           ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
+        WHERE r.tenant_id = $1 AND r.registry_id = $2
+        ORDER BY r.created_at ASC, r.id ASC
+        LIMIT $3`,
+      [tenantId, registryDefId, AGG_SCAN_LIMIT],
     );
+
+    const visibleRows = candidateRows.filter((r) => {
+      const rowAncestry: RowAncestry = {
+        recordId: r.id,
+        registryId: registryDefId,
+        applicationId: r.application_id,
+      };
+      return isRecordReadable(rowAncestry, visibility.grants, visibility.ancestry, nowMs);
+    });
+
+    // total_count = count of VISIBLE records only (never the full-registry
+    // COUNT(*) — that would leak the number of records the actor cannot read).
+    const totalCount = visibleRows.length;
+
+    // Paginate the visible subset in-memory (offset/limit already validated +
+    // capped at the route). Slice is byte-identical to what SQL LIMIT/OFFSET
+    // would produce over the visible-only ordered set.
+    const pageRowsSlice = visibleRows.slice(offset, offset + limit);
 
     return {
       page_id: pageId,
       floor: "2",
       registry_def_id: registryDefId,
-      records: recordRows.map((r) => ({
+      records: pageRowsSlice.map((r) => ({
         id: r.id,
         data: r.data,
         created_at: r.created_at,
@@ -958,6 +1320,17 @@ async function dataFloor2(args: {
  * @param resolveActorTenant - T-0489 [SECURITY]: optional tenant resolver. When wired
  *   (server.ts) every route runs in the caller's REAL tenant (fail-closed) instead of
  *   the hardcoded Dev Silo. Omitted in unit tests → DEV_TENANT_ID (unchanged).
+ * @param resolveReadVisibility - T-0632 [SECURITY, столп 4]: optional record-level
+ *   READ-PDP resolver (ReportAggReadVisibilityResolver). When wired (server.ts, the
+ *   SAME getGrantsForSubject+loadTenantOrgAncestry→makeResourceAncestryOracle
+ *   composition as records.ts's ReadVisibilityResolver), it gates BOTH sibling
+ *   endpoints: (1) /render + /export — every Floor-1 aggregate is computed STRICTLY
+ *   over records isRecordReadable allows for the actor; (2) /data — the raw-record
+ *   dump is filtered to visible records only + total_count is the visible count.
+ *   Closes the ADR-T0587 §1.1 finding AND its /data raw-row sibling (a narrow
+ *   record-scope grant used to receive a SUM/COUNT over the WHOLE registry via
+ *   /render AND the FULL data of EVERY record via /data). Omitted (test-only) →
+ *   legacy full-registry behavior on both (pre-T-0632, honest-degrade).
  *
  * T-0489 G2: every handler is withAuth-wrapped at the registration site — keycloak
  * mode REQUIRES a valid Bearer (401 otherwise; x-dev-user no longer bypasses); dev
@@ -968,6 +1341,7 @@ export function registerReportPageRenderRoutes(
   _poolHint?: pg.Pool,
   deps: ReportPageRenderAuthzDeps = defaultRenderAuthzDeps,
   resolveActorTenant?: ActorTenantResolver,
+  resolveReadVisibility?: ReportAggReadVisibilityResolver,
 ): void {
   // -------------------------------------------------------------------------
   // GET /api/report-pages/:id/render — Floor-1 server-side aggregate renderer
@@ -993,6 +1367,7 @@ export function registerReportPageRenderRoutes(
         actor,
         nowMs: Date.now(),
         authzDeps: deps,
+        resolveReadVisibility,
       });
 
       res.statusCode = 200;
@@ -1012,8 +1387,11 @@ export function registerReportPageRenderRoutes(
   //   - renderFloor1(...): the EXACT same function /render calls. It applies the
   //     same PDP read-grant gate (authzDeps.checkReadGrant, scope-contained to the
   //     page's app_id), the same RLS tenant-narrowed queries (withTenantTx GUC),
-  //     and the same field_key charset+schema injection guards. The export does NOT
-  //     re-implement any query — it consumes renderFloor1's already-authorized result.
+  //     the same field_key charset+schema injection guards, and (T-0632) the SAME
+  //     record-level READ-PDP filter (resolveReadVisibility/isRecordReadable) — an
+  //     export can never reveal a wider aggregate than /render would for the same
+  //     actor. The export does NOT re-implement any query — it consumes
+  //     renderFloor1's already-authorized result.
   //   - MAX_DATA_LIMIT: Floor-1 aggregates collapse the dataset (count/sum/...), so
   //     no row stream crosses the wire; the export is BOUNDED by the same aggregate
   //     vocabulary as /render (no raw-row dump, no limit bypass).
@@ -1054,6 +1432,7 @@ export function registerReportPageRenderRoutes(
         actor,
         nowMs: Date.now(),
         authzDeps: deps,
+        resolveReadVisibility,
       });
 
       const table = flattenRenderResultToTable(result);
@@ -1136,6 +1515,7 @@ export function registerReportPageRenderRoutes(
         actor,
         nowMs: Date.now(),
         authzDeps: deps,
+        resolveReadVisibility,
       });
 
       res.statusCode = 200;

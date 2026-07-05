@@ -50,7 +50,10 @@ import { registerNotificationPrefRoutes } from "./http/notification-prefs.js";
 import { registerNotificationRoutes } from "./http/notifications.js";
 import { registerEmailChannelConfigRoutes } from "./http/email-channel-config.js";
 import { registerReportPageRoutes } from "./http/report-pages.js";
-import { registerReportPageRenderRoutes } from "./http/report-page-render.js";
+import {
+  registerReportPageRenderRoutes,
+  type ReportAggReadVisibilityResolver,
+} from "./http/report-page-render.js";
 import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
 import { registerFloor1EditorRoutes } from "./http/floor1-editor.js";
 import { registerDmnRuleTableRoutes } from "./http/dmn-rule-table.js";
@@ -969,8 +972,35 @@ function buildRouter(
   // Register Floor-1 aggregate renderer + Floor-2 RLS-gated data API (T-0181 T-0121g).
   // T-0489 G2 [SECURITY]: withAuth-wrapped at the registration site + tenant from the
   // actor's own row (resolveActorTenant, fail-closed) instead of the hardcoded Dev Silo.
-  registerReportPageRenderRoutes(router, undefined, undefined, (actorSlug: string) =>
-    resolveActorTenant(getOrgPool(), actorSlug),
+  //
+  // T-0632 [SECURITY, столп 4]: record-level READ-PDP resolver — active in production,
+  // BYTE-IDENTICAL composition to registerRecordRoutes's resolveReadVisibility above
+  // (getGrantsForSubject + loadTenantOrgAncestry → makeResourceAncestryOracle;
+  // single-resolver, NF-1). Closes ADR-T0587 §1.1's finding: without this, a Floor-1
+  // aggregate (SUM/COUNT/...) was computed over the WHOLE registry regardless of the
+  // actor's record-scope READ grant — only the application-level checkReadGrant gated
+  // page visibility, never row visibility. Honest-degrade to undefined (legacy
+  // full-registry aggregate) ONLY when grantsPool is null (no DATABASE_URL — the whole
+  // render path 503s on DB access anyway in that case).
+  const reportAggReadVisibility: ReportAggReadVisibilityResolver | undefined = grantsPool
+    ? async (actorSlug: string, tenantId: string, nowMs: number) => {
+        const [grants, orgOracle] = await Promise.all([
+          getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+          loadTenantOrgAncestry(grantsPool, tenantId),
+        ]);
+        const emptyRowIndex = new Map<string, RowAncestry>();
+        return {
+          grants,
+          ancestry: makeResourceAncestryOracle(orgOracle, emptyRowIndex),
+        };
+      }
+    : undefined;
+  registerReportPageRenderRoutes(
+    router,
+    undefined,
+    undefined,
+    (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+    reportAggReadVisibility,
   );
 
   // Register Floor-1 form editor (T-0073 E11.2 — stateless pure transform).
