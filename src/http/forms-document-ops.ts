@@ -86,7 +86,10 @@ export function registerFormDocumentOpsRoute(
     const nowMs = Date.now();
 
     const result = await withTenantTx(pool, tenantId, async (client) => {
-      await checkRole(client, tenantId, actor);
+      // Owner bypass (T-0666, ADR-T0666 §2.1) — same checkRole change as
+      // /api/forms/binding; mechanical signature update only, no change to
+      // this seam's op-apply / Floor gate logic (T-0656 scope untouched).
+      await checkRole(client, pool, tenantId, actor);
 
       const existing = await getBindingLayout(client, tenantId, processKey, stepKey);
       if (!existing || existing.layout === null || existing.layout === undefined) {

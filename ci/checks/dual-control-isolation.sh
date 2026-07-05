@@ -201,6 +201,7 @@ _dc_mig124_failed=0                                                             
 _dc_mig125_failed=0                                                                # T0583-DC-MIG125-GUARD track when 125 triggers the FF-DC7 fail
 _dc_mig126_failed=0                                                                # T0625-DC-MIG126-GUARD track when 126 triggers the FF-DC7 fail
 _dc_mig127_failed=0                                                                # T0628-DC-MIG127-GUARD track when 127 triggers the FF-DC7 fail
+_dc_mig128_failed=0                                                                # T0666-DC-MIG128-GUARD track when 128 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -301,6 +302,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/127_employee_email.sql" ]]; then               # T0628-DC-MIG127-GUARD
       _dc_mig127_failed=1                                                     # T0628-DC-MIG127-GUARD
     fi                                                                        # T0628-DC-MIG127-GUARD
+    # Track specifically when 128 triggers this FAIL (and nothing else).     # T0666-DC-MIG128-GUARD
+    if [[ "${m}" == "migrations/128_process_designer_role_backfill.sql" ]]; then # T0666-DC-MIG128-GUARD
+      _dc_mig128_failed=1                                                     # T0666-DC-MIG128-GUARD
+    fi                                                                        # T0666-DC-MIG128-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -939,6 +944,34 @@ if [[ "${_dc_mig127_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0628-employee-email]: migration 127_employee_email.sql is a single additive ADD COLUMN (employee.email text NULL, no CREATE TABLE/RLS/confirmed2_by) — does NOT touch dual-control authority domain — relief granted" # T0628-DC-MIG127-GUARD
   fi                                                                          # T0628-DC-MIG127-GUARD
 fi                                                                            # T0628-DC-MIG127-GUARD
+
+# T-0666: additive relief for migration 128_process_designer_role_backfill.sql — # T0666-DC-MIG128-GUARD
+# a single ADDITIVE INSERT...SELECT into the EXISTING choros.role table (seeds   # T0666-DC-MIG128-GUARD
+# a process_designer role row per tenant lacking it — the conventional role     # T0666-DC-MIG128-GUARD
+# checkRole in src/http/binding.ts looks up; seeded but NOT auto-assigned). No  # T0666-DC-MIG128-GUARD
+# CREATE/DROP TABLE, no RLS/POLICY change (choros.role inherits its existing    # T0666-DC-MIG128-GUARD
+# RLS policy, migration 019, unchanged), no confirmed2_by — the T-0044          # T0666-DC-MIG128-GUARD
+# dual-control invariant (031 is the ONLY dual-control migration; confirmed2_by # T0666-DC-MIG128-GUARD
+# stays derived-additive) is UNTOUCHED. Like the sibling reliefs, this cancels  # T0666-DC-MIG128-GUARD
+# ONLY the _dc_mig128_failed increment (set exclusively in the loop above when  # T0666-DC-MIG128-GUARD
+# 128 is the unexpected file), scoped so it cannot absorb any other migration's # T0666-DC-MIG128-GUARD
+# FF-DC7 failure.                                                              # T0666-DC-MIG128-GUARD
+_dc_mig128_stem="migrations/128_process_designer_role_backfill.sql"           # T0666-DC-MIG128-GUARD
+if [[ "${_dc_mig128_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig128_stem}"; then # T0666-DC-MIG128-GUARD
+  _dc_mig128_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig128_stem}" 2>/dev/null || true)" # T0666-DC-MIG128-GUARD
+  _dc_mig128_bad=0                                                            # T0666-DC-MIG128-GUARD
+  if echo "${_dc_mig128_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0666-DC-MIG128-GUARD
+    _dc_mig128_bad=1                                                          # T0666-DC-MIG128-GUARD introduces DDL/RLS
+  fi                                                                          # T0666-DC-MIG128-GUARD
+  if echo "${_dc_mig128_content}" | grep -iqE "confirmed2_by"; then           # T0666-DC-MIG128-GUARD
+    _dc_mig128_bad=1                                                          # T0666-DC-MIG128-GUARD touches confirmed2_by invariant
+  fi                                                                          # T0666-DC-MIG128-GUARD
+  if [[ "${_dc_mig128_bad}" -eq 0 ]]; then                                   # T0666-DC-MIG128-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                  # T0666-DC-MIG128-GUARD cancel false-red
+    _dc_mig128_failed=0                                                       # T0666-DC-MIG128-GUARD
+    echo "PASS [FF-DC7-T0666-process-designer-role-backfill]: migration 128_process_designer_role_backfill.sql is a single additive INSERT...SELECT (choros.role, no CREATE TABLE/RLS/confirmed2_by) — does NOT touch dual-control authority domain — relief granted" # T0666-DC-MIG128-GUARD
+  fi                                                                          # T0666-DC-MIG128-GUARD
+fi                                                                            # T0666-DC-MIG128-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

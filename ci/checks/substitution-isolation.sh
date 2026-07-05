@@ -180,6 +180,8 @@ for f in "${MIGRATIONS_DIR}"/*.sql; do
       : # T0625-SUB-MIG126-GUARD — see additive relief below; do not double-count here.
     elif [[ "${base}" == "127_employee_email.sql" ]]; then
       : # T0628-SUB-MIG127-GUARD — see additive relief below; do not double-count here.
+    elif [[ "${base}" == "128_process_designer_role_backfill.sql" ]]; then
+      : # T0666-SUB-MIG128-GUARD — see additive relief below; do not double-count here.
     else
       echo "FAIL [FF-SUB5]: forbidden migration number introduced: ${base} (only 036/037 permitted)"
       ERRORS=$((ERRORS + 1))
@@ -245,6 +247,34 @@ if [[ -f "${MIGRATIONS_DIR}/127_employee_email.sql" ]]; then                  # 
     ERRORS=$((ERRORS + 1))                                                     # T0628-SUB-MIG127-GUARD
   fi                                                                           # T0628-SUB-MIG127-GUARD
 fi                                                                              # T0628-SUB-MIG127-GUARD
+
+# T-0666: additive relief for migration 128_process_designer_role_backfill.sql —  # T0666-SUB-MIG128-GUARD
+# a single ADDITIVE INSERT...SELECT into the EXISTING choros.role table          # T0666-SUB-MIG128-GUARD
+# (seeds a `process_designer` role row per tenant that lacks it — the           # T0666-SUB-MIG128-GUARD
+# conventional role checkRole in src/http/binding.ts looks up; seeded but NOT   # T0666-SUB-MIG128-GUARD
+# auto-assigned). No CREATE/DROP TABLE, no RLS/POLICY change (choros.role       # T0666-SUB-MIG128-GUARD
+# inherits its existing RLS policy, migration 019, unchanged), completely       # T0666-SUB-MIG128-GUARD
+# unrelated to the substitution-authority domain (T-0035's substitution_rule    # T0666-SUB-MIG128-GUARD
+# table / grant-resolver.ts substitution port — this migration touches          # T0666-SUB-MIG128-GUARD
+# neither). Independent verification (parses the migration file itself), same  # T0666-SUB-MIG128-GUARD
+# additive-relief class as the 126/127 reliefs above.                          # T0666-SUB-MIG128-GUARD
+_sub_mig128_stem="migrations/128_process_designer_role_backfill.sql"           # T0666-SUB-MIG128-GUARD
+if [[ -f "${MIGRATIONS_DIR}/128_process_designer_role_backfill.sql" ]]; then  # T0666-SUB-MIG128-GUARD
+  _sub_mig128_content="$(awk '/^[[:space:]]*--/{next}1' "${MIGRATIONS_DIR}/128_process_designer_role_backfill.sql" 2>/dev/null || true)" # T0666-SUB-MIG128-GUARD
+  _sub_mig128_bad=0                                                            # T0666-SUB-MIG128-GUARD
+  if echo "${_sub_mig128_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0666-SUB-MIG128-GUARD
+    _sub_mig128_bad=1                                                          # T0666-SUB-MIG128-GUARD introduces DDL/RLS
+  fi                                                                           # T0666-SUB-MIG128-GUARD
+  if echo "${_sub_mig128_content}" | grep -iqE "substitution"; then            # T0666-SUB-MIG128-GUARD
+    _sub_mig128_bad=1                                                          # T0666-SUB-MIG128-GUARD touches substitution domain
+  fi                                                                           # T0666-SUB-MIG128-GUARD
+  if [[ "${_sub_mig128_bad}" -eq 0 ]]; then                                   # T0666-SUB-MIG128-GUARD
+    echo "PASS [FF-SUB5-T0666-process-designer-role-backfill]: migration 128_process_designer_role_backfill.sql is a single additive INSERT...SELECT (choros.role, no CREATE TABLE/RLS/substitution-domain touch) — unrelated to T-0035 substitution authority — relief granted" # T0666-SUB-MIG128-GUARD
+  else                                                                         # T0666-SUB-MIG128-GUARD
+    echo "FAIL [FF-SUB5-T0666-process-designer-role-backfill]: migration 128_process_designer_role_backfill.sql failed independent additive verification (DDL/RLS or substitution-domain touch found) — relief DENIED" # T0666-SUB-MIG128-GUARD
+    ERRORS=$((ERRORS + 1))                                                     # T0666-SUB-MIG128-GUARD
+  fi                                                                           # T0666-SUB-MIG128-GUARD
+fi                                                                              # T0666-SUB-MIG128-GUARD
 
 # ---- FF-SUB6: known_tenant_tables.txt lists substitution_rule ---------------
 before=${ERRORS}
