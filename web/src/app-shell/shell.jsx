@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef, useContext, useMemo, useCallback } from 'react';
 import { useNavigate, useLocation, Routes, Route, Navigate, Link } from 'react-router-dom';
-import { Button, Modal, Tooltip, Popover, LoadingState, EmptyState } from '../components/components.jsx';
+import { Button, Modal, Tooltip, Popover, LoadingState, EmptyState, Field, KitIcon } from '../components/components.jsx';
 import { ToastProvider, useToastContext } from './toast-context.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
@@ -14,6 +14,12 @@ import { loadAuthConfig, getAuthConfig, isKeycloakMode } from './auth-mode.js';
 import * as kc from './keycloak-auth.js';
 import { NAV, ZONES, NAV_HOME, visibleItems, visibleZones, effectiveStatus } from './nav-config.js';
 import { groupAppsBySection } from './nav-sections.js';
+// T-0651 (sidebar-workspace): per-user prefs (collapsed groups) + sidebar section/app
+// management (+ Раздел, context menu, DnD) — reuses the T-0551/T-0567 modals/API as-is.
+import { getAllUserPrefs, setUserPref, SIDEBAR_COLLAPSED_GROUPS_KEY } from './user-prefs-api.js';
+import { buildSidebarAppMenuItems } from './sidebar-app-menu.js';
+import { computeAppMove, computeArrowMove, computeSectionArrowMove, computeSectionDrop } from './sidebar-dnd.js';
+import { RenameAppModal, SetSectionModal } from '../screens/screen-apps.jsx';
 import LoginScreen from '../screens/screen-login.jsx';
 import RegisterScreen from '../screens/screen-register.jsx';
 import OverviewScreen from '../screens/screen-overview.jsx';
@@ -225,7 +231,7 @@ function ThemeToggle({ theme, setTheme }) {
   );
 }
 
-function NavItem({ item, active }) {
+function NavItem({ item, active, liveCount }) {
   const navigate = useNavigate();
   const status = effectiveStatus(item);
   const isSoon = status === "soon";
@@ -243,6 +249,9 @@ function NavItem({ item, active }) {
   // render these seed counts. Honest, content-derived counts live inside the
   // screens (inbox tab counts, rights rail count), which remain the source of
   // truth. Re-introduce a sidebar count only when it is wired to the same feed.
+  // T-0651: `liveCount` (a caller-supplied prop, NOT item.count) IS wired to
+  // the same feed as the screen — GET /api/inbox's counts.mine for the
+  // «Мои задачи» item — so it renders here where the old comment invited it.
   // The visible «демо»/«скоро» word IS the honest status label; an aria-label
   // spells out the meaning for assistive tech. We do NOT nest a focusable kit
   // Tooltip trigger inside this <button> (that is invalid nested-interactive
@@ -250,7 +259,8 @@ function NavItem({ item, active }) {
   // which sits OUTSIDE its button and can host a tooltip cleanly (T-0307 #5).
   const badge =
     status === "demo" ? <span className="chs-navitem__demo" aria-label="демо — данные иллюстративные">демо</span> :
-    isSoon ? <span className="chs-navitem__soon" aria-label="скоро — раздел ещё не готов">скоро</span> : null;
+    isSoon ? <span className="chs-navitem__soon" aria-label="скоро — раздел ещё не готов">скоро</span> :
+    (typeof liveCount === "number") ? <span className="chs-navitem__count">{liveCount}</span> : null;
   return (
     <button
       type="button"
@@ -263,6 +273,276 @@ function NavItem({ item, active }) {
       <span className="chs-navitem__label">{item.label}</span>
       {badge}
     </button>
+  );
+}
+
+/**
+ * T-0651: collapsible zone header — заменяет статичный `.chs-nav__grouplabel` для
+ * зон Конструктор/Наблюдаемость/Администрирование (РАБОТА никогда не сворачивается —
+ * caller просто не оборачивает её этим компонентом). Клавиатурно доступен: реальная
+ * `<button>` с `aria-expanded` + `aria-controls`, Enter/Space разворачивает (нативно).
+ */
+function CollapsibleZoneHeader({ zone, collapsed, onToggle, panelId }) {
+  return (
+    <button
+      type="button"
+      className="chs-nav__grouplabel chs-nav__grouplabel--collapsible"
+      aria-expanded={!collapsed}
+      aria-controls={panelId}
+      onClick={onToggle}
+    >
+      <KitIcon name={collapsed ? "chevron-up" : "chevron-down"} className="chs-nav__group-chevron" />
+      <span>{zone.label}</span>
+    </button>
+  );
+}
+
+/**
+ * T-0651: одна строка приложения в сайдбаре — навигация + контекст-меню
+ * (Переименовать / В раздел → / Настроить поля) + кнопки ▲/▼ (клавиатурная
+ * доступность, ПЕРВОКЛАССНАЯ, не запасной вариант) + ручной HTML5 DnD (паттерн
+ * kanban-board.jsx, T-0582 — без библиотеки). ⋯-меню появляется на hover/focus строки
+ * через CSS (см. app.css .chs-nav__app-row) — не занимает место, когда не нужно.
+ */
+function SidebarAppRow({
+  app, isActive, isFirst, isLast, onNavigate, onMoveArrow,
+  onOpenRename, onOpenSection,
+  onDragStart, onDragOver, onDrop, onDragEnd, isDragOver, isDragging,
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const navigate = useNavigate();
+
+  const menuItems = buildSidebarAppMenuItems(app, {
+    openRename: onOpenRename,
+    openSection: onOpenSection,
+    navigate,
+  });
+
+  return (
+    <div
+      className={`chs-nav__app-row${isDragOver ? ' chs-nav__app-row--dragover' : ''}${isDragging ? ' chs-nav__app-row--dragging' : ''}`}
+      draggable
+      onDragStart={(e) => { e.dataTransfer.setData('text/plain', app.id); onDragStart(app.id); }}
+      onDragOver={(e) => { e.preventDefault(); onDragOver(app.id); }}
+      onDrop={(e) => { e.preventDefault(); onDrop(app.id); }}
+      onDragEnd={onDragEnd}
+    >
+      <button
+        type="button"
+        className="chs-navitem chs-nav__app-row__nav"
+        aria-current={isActive ? "true" : undefined}
+        onClick={onNavigate}
+      >
+        <Icon name="apps" className="chs-navitem__icon" />
+        <span className="chs-navitem__label">{app.display_name}</span>
+      </button>
+      <div className="chs-nav__app-row__actions">
+        <Button
+          variant="ghost" size="sm" aria-label={`Переместить «${app.display_name}» вверх`}
+          disabled={isFirst} onClick={() => onMoveArrow(app.id, -1)}
+          className="chs-nav__app-row__arrow"
+        >
+          <KitIcon name="chevron-up" />
+        </Button>
+        <Button
+          variant="ghost" size="sm" aria-label={`Переместить «${app.display_name}» вниз`}
+          disabled={isLast} onClick={() => onMoveArrow(app.id, 1)}
+          className="chs-nav__app-row__arrow"
+        >
+          <KitIcon name="chevron-down" />
+        </Button>
+        <Popover
+          open={menuOpen}
+          onClose={() => setMenuOpen(false)}
+          placement="bottom"
+          align="end"
+          isMenu
+          trigger={
+            <Button
+              variant="ghost" size="sm"
+              aria-label={`Действия · ${app.display_name}`}
+              className="chs-nav__app-row__menu-trigger"
+              onClick={() => setMenuOpen((v) => !v)}
+            >
+              <KitIcon name="more-horizontal" />
+            </Button>
+          }
+        >
+          <div role="menu" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', minWidth: '180px' }}>
+            {menuItems.map((mi) => (
+              <Button
+                key={mi.key}
+                variant="ghost" size="sm" role="menuitem"
+                style={{ justifyContent: 'flex-start', width: '100%' }}
+                onClick={() => { setMenuOpen(false); mi.run(); }}
+              >
+                {mi.label}
+              </Button>
+            ))}
+          </div>
+        </Popover>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * T-0651: заголовок группы-раздела в сайдбаре — инлайн-переименование (Enter
+ * сохраняет, Escape отменяет — тот же паттерн, что `screen-sections.jsx` SectionRow),
+ * ▲/▼ для порядка разделов между собой, drop-target и для приложений (перенести В этот
+ * раздел), и для других разделов (DnD reorder разделов). «Без раздела» (fallback=true,
+ * section_id=null) — не редактируемо/не перемещаемо (это не сущность, а «нет раздела»).
+ */
+function SidebarSectionGroup({
+  section, isFirst, isLast, onRename, onMoveArrow,
+  onDragOverSection, onDropSection, isDragOverSection, isDraggingThisSection,
+  onDragStartSection, onDragEndSection,
+  children,
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(section.section);
+  const isFallback = !!section.fallback;
+
+  useEffect(() => { setDraft(section.section); }, [section.section]);
+
+  const commit = useCallback(() => {
+    const trimmed = draft.trim();
+    if (trimmed.length === 0 || trimmed === section.section) { setEditing(false); setDraft(section.section); return; }
+    onRename(section.section_id, trimmed);
+    setEditing(false);
+  }, [draft, section.section, section.section_id, onRename]);
+
+  return (
+    <div
+      className={`chs-nav__subgroup${isDragOverSection ? ' chs-nav__subgroup--dragover' : ''}${isDraggingThisSection ? ' chs-nav__subgroup--dragging' : ''}`}
+      onDragOver={isFallback ? undefined : (e) => { e.preventDefault(); onDragOverSection(section.section_id); }}
+      onDrop={isFallback ? undefined : (e) => { e.preventDefault(); onDropSection(section.section_id); }}
+    >
+      <div
+        className="chs-nav__subgrouplabel chs-nav__subgrouplabel--section"
+        draggable={!isFallback}
+        onDragStart={isFallback ? undefined : (e) => { e.dataTransfer.setData('text/plain', section.section_id); onDragStartSection(section.section_id); }}
+        onDragEnd={isFallback ? undefined : onDragEndSection}
+      >
+        {editing ? (
+          <Field
+            label={null}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            autoFocus
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); commit(); }
+              if (e.key === 'Escape') { setEditing(false); setDraft(section.section); }
+            }}
+          />
+        ) : (
+          <span
+            className="chs-nav__subgrouplabel__text"
+            onDoubleClick={isFallback ? undefined : () => setEditing(true)}
+          >
+            {section.section}
+          </span>
+        )}
+        {!isFallback && !editing && (
+          <div className="chs-nav__subgrouplabel__actions">
+            <Button
+              variant="ghost" size="sm" aria-label={`Переименовать раздел «${section.section}»`}
+              onClick={() => setEditing(true)}
+            >
+              <KitIcon name="pencil" />
+            </Button>
+            <Button
+              variant="ghost" size="sm" aria-label={`Раздел «${section.section}» вверх`}
+              disabled={isFirst} onClick={() => onMoveArrow(section.section_id, -1)}
+            >
+              <KitIcon name="chevron-up" />
+            </Button>
+            <Button
+              variant="ghost" size="sm" aria-label={`Раздел «${section.section}» вниз`}
+              disabled={isLast} onClick={() => onMoveArrow(section.section_id, 1)}
+            >
+              <KitIcon name="chevron-down" />
+            </Button>
+          </div>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * T-0651: «+ Раздел» — инлайн-создание раздела прямо в сайдбаре (спека §1B: «Создать
+ * раздел можно только на /sections … из сайдбара нельзя ничего» — эта задача чинит
+ * именно это). POST /api/sections (T-0551, без изменений) — тот же контракт, что
+ * SectionsScreen/SetSectionModal уже используют.
+ */
+function SidebarCreateSection({ onCreated }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [err, setErr] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const reset = useCallback(() => { setOpen(false); setName(''); setErr(null); setSubmitting(false); }, []);
+
+  const handleSubmit = useCallback(async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    const trimmed = name.trim();
+    if (trimmed.length === 0) { setErr('Введите название'); return; }
+    setSubmitting(true); setErr(null);
+    try {
+      const res = await fetch('/api/sections', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...devHeaders() },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (res.status === 201) {
+        const created = await res.json();
+        reset();
+        onCreated(created);
+        return;
+      }
+      let parsed = null;
+      try { parsed = await res.json(); } catch { /* ignore */ }
+      setErr(res.status === 409 ? 'Раздел с таким названием уже есть' : (parsed?.message || `Ошибка ${res.status}`));
+      setSubmitting(false);
+    } catch (ex) {
+      setErr(String(ex?.message || ex));
+      setSubmitting(false);
+    }
+  }, [name, reset, onCreated]);
+
+  if (!open) {
+    return (
+      <Button
+        variant="ghost" size="sm"
+        glyph={<Icon name="plus" className="chs-btn__glyph" />}
+        className="chs-nav__add-section-btn"
+        onClick={() => setOpen(true)}
+      >
+        Раздел
+      </Button>
+    );
+  }
+
+  return (
+    <form className="chs-nav__add-section-form" onSubmit={handleSubmit}>
+      <Field
+        label={null}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Название раздела"
+        autoFocus
+        invalid={Boolean(err)}
+        onKeyDown={(e) => { if (e.key === 'Escape') reset(); }}
+      />
+      <div className="chs-nav__add-section-form__actions">
+        <Button type="submit" variant="primary" size="sm" loading={submitting}>Создать</Button>
+        <Button type="button" variant="ghost" size="sm" onClick={reset}>Отмена</Button>
+      </div>
+      {err && <span className="chs-nav__add-section-form__err">{err}</span>}
+    </form>
   );
 }
 
@@ -728,6 +1008,15 @@ function AppShell() {
   // T-0551: разделы-сущности тенанта (GET /api/sections) — задают порядок (sort_order)
   // нав-групп зоны РАБОТА. Тянутся рядом с navApps (сайдбар = long-lived).
   const [navSections, setNavSections] = useState([]);
+  // T-0651: свёрнутые группы (per-user, persisted через /api/user-prefs). Дефолт ДО
+  // загрузки с сервера — Конструктор/Наблюдаемость/Администрирование свёрнуты (спека
+  // §2A: «43 пункта → ~10 видимых»), чтобы не мигать «всё открыто → схлопнулось» на
+  // каждой загрузке. РАБОТА никогда не в этом множестве (всегда развёрнута).
+  const DEFAULT_COLLAPSED = useMemo(() => ['constructor', 'observability', 'admin'], []);
+  const [collapsedGroups, setCollapsedGroups] = useState(DEFAULT_COLLAPSED);
+  // T-0651: счётчик «Мои задачи» — GET /api/inbox уже возвращает counts.mine (T-0401);
+  // читаем его здесь (best-effort, honest-degrade — badge просто не рендерится при сбое).
+  const [inboxMineCount, setInboxMineCount] = useState(null);
   const [authConfig, setAuthConfig] = useState(() => getAuthConfig());
   const [currentUser, setCurrentUser] = useState(null);
   const [authError, setAuthError] = useState(null);
@@ -890,6 +1179,73 @@ function AppShell() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser, (location.pathname === '/sections' || location.pathname === '/apps') ? location.pathname : null]);
 
+  // T-0651: перечитать разделы/приложения после сайдбарных мутаций (создать раздел,
+  // переименовать, DnD/▲▼) — тот же паттерн, что триггер на /sections|/apps выше, но
+  // вызывается напрямую из обработчиков сайдбара (см. refreshSidebarData ниже), а не
+  // только при переходе на экраны управления.
+  const refreshSidebarData = useCallback(async () => {
+    if (!currentUser) return;
+    try {
+      const [appsRes, sectionsRes] = await Promise.all([
+        fetch('/api/applications', { headers: devHeaders() }),
+        fetch('/api/sections', { headers: devHeaders() }),
+      ]);
+      if (appsRes.ok) {
+        const d = await appsRes.json();
+        setNavApps(Array.isArray(d.applications) ? d.applications : []);
+      }
+      if (sectionsRes.ok) {
+        const d = await sectionsRes.json();
+        setNavSections(Array.isArray(d.sections) ? d.sections : []);
+      }
+    } catch { /* non-fatal: сайдбар останется на предыдущем известном состоянии */ }
+  }, [currentUser]);
+
+  // T-0651: загрузка per-user настроек (свёрнутые группы сайдбара) один раз при логине.
+  // Best-effort: сбой сети/сервера оставляет DEFAULT_COLLAPSED (честная деградация — та
+  // же дисциплина, что navApps/navSections best-effort GET выше).
+  useEffect(() => {
+    if (!currentUser) return undefined;
+    let cancelled = false;
+    (async () => {
+      const prefs = await getAllUserPrefs();
+      if (cancelled) return;
+      const stored = prefs[SIDEBAR_COLLAPSED_GROUPS_KEY];
+      if (Array.isArray(stored)) setCollapsedGroups(stored);
+    })();
+    return () => { cancelled = true; };
+  }, [currentUser]);
+
+  // T-0651: счётчик «Мои задачи» — читает counts.mine из GET /api/inbox (T-0401, уже
+  // в ответе). Обновляется при логине и при возврате на /inbox (задача выполнена/взята
+  // в работу могла изменить счёт). Best-effort — сбой просто не рендерит бейдж.
+  useEffect(() => {
+    if (!currentUser) { setInboxMineCount(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/inbox?tab=all&limit=1', { headers: devHeaders() });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled && data && data.counts && typeof data.counts.mine === 'number') {
+          setInboxMineCount(data.counts.mine);
+        }
+      } catch { /* non-fatal: счётчик просто не рендерится */ }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser, location.pathname === '/inbox' ? location.pathname : null]);
+
+  // T-0651: переключить свёрнутость одной группы — обновляет state немедленно
+  // (отзывчивый UI) и персистит в фоне (не блокирует клик on the round-trip).
+  const toggleGroupCollapsed = useCallback((zoneId) => {
+    setCollapsedGroups((prev) => {
+      const next = prev.includes(zoneId) ? prev.filter((z) => z !== zoneId) : [...prev, zoneId];
+      setUserPref(SIDEBAR_COLLAPSED_GROUPS_KEY, next); // fire-and-forget, honest-degrade
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("chs-theme", theme);
@@ -914,6 +1270,90 @@ function AppShell() {
     setRightsFocus(roleId || null);
     navigate('/rights');
   };
+
+  // ---------------------------------------------------------------------------
+  // T-0651: sidebar «+ Раздел» / context-menu / DnD / ▲▼ — state + handlers.
+  // ---------------------------------------------------------------------------
+
+  // Context-menu modals (reuse T-0551/T-0567 modals as-is — no duplicate UI).
+  const [sidebarRenameApp, setSidebarRenameApp] = useState(null); // app object or null
+  const [sidebarSectionApp, setSidebarSectionApp] = useState(null); // app object or null
+
+  // DnD drag/drop-target tracking — apps.
+  const [draggingAppId, setDraggingAppId] = useState(null);
+  const [dragOverAppId, setDragOverAppId] = useState(null);
+  // DnD drag/drop-target tracking — sections (dropping one section header onto another).
+  const [draggingSectionId, setDraggingSectionId] = useState(null);
+  const [dragOverSectionId, setDragOverSectionId] = useState(null);
+
+  const navGroupsForDnd = useMemo(() => groupAppsBySection(navApps, navSections), [navApps, navSections]);
+
+  // Fire a batch of { id, section_id?, sort_order } PATCHes against
+  // /api/applications/:id (T-0651: sort_order added to the existing PATCH route) and
+  // refresh once all have settled — optimistic-free (simple + correct over clever):
+  // the sidebar re-reads server truth after the writes rather than hand-rolling local
+  // reorder state, since section groups are cheap to refetch (best-effort GETs already
+  // used everywhere else in this shell).
+  const patchApplications = useCallback(async (payloads) => {
+    if (!payloads || payloads.length === 0) return;
+    await Promise.all(payloads.map(({ id, ...patch }) =>
+      fetch(`/api/applications/${id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', ...devHeaders() },
+        body: JSON.stringify(patch),
+      }).catch(() => null)));
+    await refreshSidebarData();
+  }, [refreshSidebarData]);
+
+  const patchSections = useCallback(async (payloads) => {
+    if (!payloads || payloads.length === 0) return;
+    await Promise.all(payloads.map(({ id, ...patch }) =>
+      fetch(`/api/sections/${id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', ...devHeaders() },
+        body: JSON.stringify(patch),
+      }).catch(() => null)));
+    await refreshSidebarData();
+  }, [refreshSidebarData]);
+
+  // ▲/▼ — app reorder within its own group (first-class keyboard alternative to DnD).
+  const handleAppArrowMove = useCallback((appId, dir) => {
+    const group = navGroupsForDnd.find((g) => (g.apps || []).some((a) => a.id === appId));
+    if (!group) return;
+    patchApplications(computeArrowMove(group.apps, appId, dir));
+  }, [navGroupsForDnd, patchApplications]);
+
+  // ▲/▼ — section reorder.
+  const handleSectionArrowMove = useCallback((sectionId, dir) => {
+    const ordered = navGroupsForDnd.filter((g) => !g.fallback).map((g) => ({ id: g.section_id, sort_order: navSections.find((s) => s.id === g.section_id)?.sort_order ?? 0 }));
+    patchSections(computeSectionArrowMove(ordered, sectionId, dir));
+  }, [navGroupsForDnd, navSections, patchSections]);
+
+  // Rename a section (inline, sidebar) — PATCH /api/sections/:id { name }.
+  const handleSectionRename = useCallback(async (sectionId, name) => {
+    await patchSections([{ id: sectionId, name }]);
+  }, [patchSections]);
+
+  // Create a section (inline, sidebar «+ Раздел») — data already POSTed by the caller;
+  // this just refreshes the sidebar's own section/app cache.
+  const handleSectionCreated = useCallback(() => { refreshSidebarData(); }, [refreshSidebarData]);
+
+  // DnD — app dropped onto a section group (reorder within, or move across).
+  const handleAppDrop = useCallback((targetSectionId, beforeAppId) => {
+    const draggedId = draggingAppId;
+    setDraggingAppId(null); setDragOverAppId(null);
+    if (!draggedId) return;
+    patchApplications(computeAppMove(navGroupsForDnd, draggedId, targetSectionId, beforeAppId));
+  }, [draggingAppId, navGroupsForDnd, patchApplications]);
+
+  // DnD — section header dropped onto another section header (reorder sections).
+  const handleSectionDrop = useCallback((targetSectionId) => {
+    const draggedId = draggingSectionId;
+    setDraggingSectionId(null); setDragOverSectionId(null);
+    if (!draggedId) return;
+    const ordered = navGroupsForDnd.filter((g) => !g.fallback).map((g) => ({ id: g.section_id, sort_order: navSections.find((s) => s.id === g.section_id)?.sort_order ?? 0 }));
+    patchSections(computeSectionDrop(ordered, draggedId, targetSectionId));
+  }, [draggingSectionId, navGroupsForDnd, navSections, patchSections]);
 
   const keycloak = isKeycloakMode(authConfig);
 
@@ -1029,36 +1469,69 @@ function AppShell() {
             const renderZoneItems = () => {
               if (zone.id === "work") {
                 // Фиксированные пункты (inbox, processes) — из nav-config.
+                // T-0651: «Мои задачи» получает честный счётчик (та же лента, что
+                // сам экран инбокса читает — GET /api/inbox → counts.mine, T-0401).
                 const fixedItems = items.map((item) => (
-                  <NavItem key={item.id} item={item} active={screen === item.id} />
+                  <NavItem
+                    key={item.id}
+                    item={item}
+                    active={screen === item.id}
+                    liveCount={item.id === "inbox" ? (inboxMineCount ?? undefined) : undefined}
+                  />
                 ));
                 // T-0551: динамические группы из раздела-сущности (section_id).
                 // Порядок — из navSections (sort_order). Видимость: groupAppsBySection
                 // работает поверх навApps, отфильтрованных RLS / capability-фильтром
                 // T-0539 на сервере. «Без раздела» — последней.
-                const navGroups = groupAppsBySection(navApps, navSections);
-                const sectionItems = navGroups.map((sec) => (
-                  <div className="chs-nav__subgroup" key={sec.section_id || '__none__'}>
-                    <div className="chs-nav__subgrouplabel">{sec.section}</div>
-                    {sec.apps.map((app) => {
-                      const appPath = `/app-records/${app.id}`;
-                      const isActive = location.pathname === appPath;
-                      return (
-                        <button
-                          key={app.id}
-                          type="button"
-                          className="chs-navitem"
-                          aria-current={isActive ? "true" : undefined}
-                          onClick={() => navigate(appPath)}
-                        >
-                          <Icon name="apps" className="chs-navitem__icon" />
-                          <span className="chs-navitem__label">{app.display_name}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ));
-                return [...fixedItems, ...sectionItems];
+                // T-0651: + инлайн-управление (создать/переименовать/▲▼/DnD) — спека §1B/C.
+                const namedGroups = navGroupsForDnd.filter((g) => !g.fallback);
+                const sectionItems = navGroupsForDnd.map((sec) => {
+                  const namedIdx = namedGroups.findIndex((g) => g.section_id === sec.section_id);
+                  return (
+                    <SidebarSectionGroup
+                      key={sec.section_id || '__none__'}
+                      section={sec}
+                      isFirst={namedIdx <= 0}
+                      isLast={sec.fallback || namedIdx === namedGroups.length - 1}
+                      onRename={handleSectionRename}
+                      onMoveArrow={handleSectionArrowMove}
+                      onDragStartSection={setDraggingSectionId}
+                      onDragEndSection={() => { setDraggingSectionId(null); setDragOverSectionId(null); }}
+                      onDragOverSection={setDragOverSectionId}
+                      onDropSection={handleSectionDrop}
+                      isDragOverSection={dragOverSectionId === sec.section_id && draggingSectionId !== sec.section_id}
+                      isDraggingThisSection={draggingSectionId === sec.section_id}
+                    >
+                      {sec.apps.length === 0 && (
+                        <div className="chs-nav__subgroup-empty">Пусто — перетащите сюда приложение</div>
+                      )}
+                      {sec.apps.map((app, appIdx) => {
+                        const appPath = `/app-records/${app.id}`;
+                        const isActive = location.pathname === appPath;
+                        return (
+                          <SidebarAppRow
+                            key={app.id}
+                            app={app}
+                            isActive={isActive}
+                            isFirst={appIdx === 0}
+                            isLast={appIdx === sec.apps.length - 1}
+                            onNavigate={() => navigate(appPath)}
+                            onMoveArrow={handleAppArrowMove}
+                            onOpenRename={() => setSidebarRenameApp(app)}
+                            onOpenSection={() => setSidebarSectionApp(app)}
+                            onDragStart={setDraggingAppId}
+                            onDragOver={setDragOverAppId}
+                            onDrop={(overAppId) => handleAppDrop(sec.section_id, overAppId === draggingAppId ? undefined : overAppId)}
+                            onDragEnd={() => { setDraggingAppId(null); setDragOverAppId(null); }}
+                            isDragOver={dragOverAppId === app.id && draggingAppId !== app.id}
+                            isDragging={draggingAppId === app.id}
+                          />
+                        );
+                      })}
+                    </SidebarSectionGroup>
+                  );
+                });
+                return [...fixedItems, ...sectionItems, <SidebarCreateSection key="__create_section__" onCreated={handleSectionCreated} />];
               }
 
               if (zone.id !== "admin") {
@@ -1114,12 +1587,27 @@ function AppShell() {
               });
             };
 
+            // T-0651: РАБОТА — постоянный домашний слой (не сворачивается, спека §2A).
+            // Остальные зоны — collapsible со свёрнутым дефолтом (per-user, user_pref).
+            const collapsible = zone.id !== "work";
+            const isCollapsed = collapsible && collapsedGroups.includes(zone.id);
+            const panelId = `chs-nav-zone-${zone.id}`;
+
             return (
               <React.Fragment key={zone.id}>
                 <div className="chs-nav__space-divider" aria-hidden="true" />
                 <div className="chs-nav__group">
-                  <div className="chs-nav__grouplabel">{zone.label}</div>
-                  {renderZoneItems()}
+                  {collapsible ? (
+                    <CollapsibleZoneHeader
+                      zone={zone}
+                      collapsed={isCollapsed}
+                      onToggle={() => toggleGroupCollapsed(zone.id)}
+                      panelId={panelId}
+                    />
+                  ) : (
+                    <div className="chs-nav__grouplabel">{zone.label}</div>
+                  )}
+                  {!isCollapsed && <div id={panelId}>{renderZoneItems()}</div>}
                 </div>
               </React.Fragment>
             );
@@ -1135,6 +1623,27 @@ function AppShell() {
           orgLabel={orgLabel}
         />
       </aside>
+
+      {/* T-0651: контекст-меню приложения из сайдбара — реюз тех же модалок, что
+          /apps использует (RenameAppModal/SetSectionModal, экспортированы из
+          screen-apps.jsx). Рендерятся на уровне shell (вне <aside>), управляются
+          state sidebarRenameApp/sidebarSectionApp. onUpdated → перечитать сайдбар. */}
+      {sidebarRenameApp && (
+        <RenameAppModal
+          open
+          app={sidebarRenameApp}
+          onClose={() => setSidebarRenameApp(null)}
+          onUpdated={() => { setSidebarRenameApp(null); refreshSidebarData(); }}
+        />
+      )}
+      {sidebarSectionApp && (
+        <SetSectionModal
+          open
+          app={sidebarSectionApp}
+          onClose={() => setSidebarSectionApp(null)}
+          onUpdated={() => { setSidebarSectionApp(null); refreshSidebarData(); }}
+        />
+      )}
 
       <main className="chs-main">
         <Topbar screen={screen} pathname={location.pathname} />

@@ -81,6 +81,72 @@
   color: var(--chs-color-text-faint); padding: 0 var(--chs-space-4);
   margin-bottom: var(--chs-space-3);
 }
+/* T-0651: collapsible zone header — реальная <button> (клавиатурно доступна),
+   тот же вид что статичный grouplabel + шеврон-индикатор состояния. */
+.chs-nav__grouplabel--collapsible {
+  display: flex; align-items: center; gap: var(--chs-space-3);
+  width: 100%; border: none; background: transparent; cursor: pointer;
+  text-align: left; font-family: var(--chs-font-sans);
+}
+.chs-nav__grouplabel--collapsible:hover { color: var(--chs-color-text-muted); }
+.chs-nav__grouplabel--collapsible:focus-visible {
+  outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; border-radius: var(--chs-radius-1);
+}
+.chs-nav__group-chevron { width: 12px; height: 12px; flex: none; color: var(--chs-color-text-faint); }
+
+/* T-0651: строка приложения в сайдбаре — навигация + действия (▲▼ + ⋯).
+   Действия скрыты, пока строка не в hover/focus-within (не занимают место). */
+.chs-nav__app-row {
+  display: flex; align-items: center; border-radius: var(--chs-radius-2);
+}
+.chs-nav__app-row__nav { flex: 1; min-width: 0; }
+.chs-nav__app-row__actions {
+  display: none; align-items: center; gap: 1px; flex: none; padding-right: var(--chs-space-2);
+}
+.chs-nav__app-row:hover .chs-nav__app-row__actions,
+.chs-nav__app-row:focus-within .chs-nav__app-row__actions { display: flex; }
+.chs-nav__app-row__actions .chs-btn { padding: 2px; min-width: 22px; height: 22px; }
+.chs-nav__app-row--dragover { box-shadow: inset 0 -2px 0 var(--chs-color-accent); }
+.chs-nav__app-row--dragging { opacity: 0.5; }
+
+/* T-0651: заголовок раздела с инлайн-действиями + drop-подсветка. */
+.chs-nav__subgroup { margin-top: var(--chs-space-4); border-radius: var(--chs-radius-2); }
+.chs-nav__subgroup--dragover { box-shadow: inset 0 0 0 1px var(--chs-color-accent); }
+.chs-nav__subgroup--dragging { opacity: 0.5; }
+.chs-nav__subgrouplabel {
+  font-size: var(--chs-text-2xs); font-weight: var(--chs-weight-semibold);
+  letter-spacing: var(--chs-tracking-wide); text-transform: uppercase;
+  color: var(--chs-color-text-faint); padding: 0 var(--chs-space-4);
+  margin-bottom: var(--chs-space-2);
+}
+.chs-nav__subgrouplabel--section {
+  display: flex; align-items: center; gap: var(--chs-space-2); cursor: grab;
+}
+.chs-nav__subgrouplabel__text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chs-nav__subgrouplabel__actions { display: none; align-items: center; gap: 1px; flex: none; }
+.chs-nav__subgrouplabel--section:hover .chs-nav__subgrouplabel__actions,
+.chs-nav__subgroup:focus-within .chs-nav__subgrouplabel__actions { display: flex; }
+.chs-nav__subgrouplabel__actions .chs-btn { padding: 2px; min-width: 20px; height: 20px; }
+.chs-nav__subgroup-empty {
+  font-size: var(--chs-text-2xs); color: var(--chs-color-text-faint);
+  padding: var(--chs-space-2) var(--chs-space-4); font-style: italic;
+}
+
+/* T-0651: «+ Раздел» кнопка/форма в сайдбаре. */
+.chs-nav__add-section-btn {
+  margin-top: var(--chs-space-3); width: 100%; justify-content: flex-start;
+  color: var(--chs-color-text-faint);
+}
+.chs-nav__add-section-btn:hover { color: var(--chs-color-text-muted); }
+.chs-nav__add-section-form {
+  margin-top: var(--chs-space-3); padding: 0 var(--chs-space-4);
+  display: flex; flex-direction: column; gap: var(--chs-space-2);
+}
+.chs-nav__add-section-form__actions { display: flex; gap: var(--chs-space-2); }
+.chs-nav__add-section-form__err {
+  font-size: var(--chs-text-2xs); color: var(--chs-color-danger);
+}
+
 .chs-navitem {
   display: flex; align-items: center; gap: var(--chs-space-5);
   height: 30px; padding: 0 var(--chs-space-4); border-radius: var(--chs-radius-2);
