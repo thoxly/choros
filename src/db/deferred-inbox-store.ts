@@ -13,6 +13,7 @@
  */
 
 import pg from "pg";
+import { humanizeDoubtReason } from "../core/defer-inbox-producer.js";
 
 // ---------------------------------------------------------------------------
 // UUID guard — mirrors audit-grant-trail.ts pattern.
@@ -81,6 +82,19 @@ export interface DeferredInboxRow {
   step: string;
   /** Subject reference (audit_event.subject, e.g. 'agent:<id>'). */
   inst: string;
+  /**
+   * T-0638 (F1): the REAL Flowable process-instance id (payload.instance_id),
+   * when the defer event carries it (live agent-dispatch path,
+   * dispatch-outcome.ts's deferredAuditEvent). null for legacy/legal-precheck
+   * events authored before this field existed (run-precheck.ts's demo-run
+   * path does not thread ctx.instanceId the same way) — a null instanceId
+   * means this defer row cannot be routed to a live engine instance (there is
+   * no instance to drive), which the /action route surfaces as an honest 404
+   * rather than attempting (and failing) an engine call.
+   */
+  instanceId: string | null;
+  /** T-0638 (F1): payload.proc_key, alongside instanceId — null when absent. */
+  procKey: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,21 +143,32 @@ export async function listDeferredInboxTasks(
       const payload = r.payload ?? {};
       const scope = r.scope ?? {};
 
-      const doubtReason =
+      const rawDoubtReason =
         typeof payload["doubt_reason"] === "string" && payload["doubt_reason"].trim() !== ""
           ? payload["doubt_reason"]
           : "требуется проверка агентом-человеком";
+      // T-0638 (defect #3): defensive humanization at the READ boundary too —
+      // covers rows written BEFORE planDeferTask's own translation existed
+      // (legacy audit_event rows already carry the raw English forever; the
+      // write-side fix alone would not fix rows already persisted).
+      const doubtReason = humanizeDoubtReason(rawDoubtReason);
 
       const role =
         typeof payload["defer_role"] === "string" && payload["defer_role"].trim() !== ""
           ? payload["defer_role"]
           : "fin-ctrl"; // safe default role (matches day-1 demo)
 
-      // name: prefer defer_name from payload (set by updated run-precheck), fallback to «Проверить: <doubtReason>».
-      const nameRaw =
-        typeof payload["defer_name"] === "string" && payload["defer_name"].trim() !== ""
-          ? payload["defer_name"]
-          : `Проверить: ${doubtReason}`;
+      // name: T-0638 — ALWAYS rebuilt from the (humanized) doubtReason, never
+      // trusted verbatim from payload.defer_name. defer_name is a fully
+      // DERIVED field (planDeferTask sets it to exactly "Проверить: "+doubtReason,
+      // truncated) — a legacy row's stored defer_name was derived from the RAW
+      // pre-humanization doubtReason (defect #3), so trusting it verbatim would
+      // re-leak the raw English literal even after doubtReason itself is fixed
+      // here. Recomputing from the already-humanized doubtReason is the single
+      // source of truth and stays byte-identical to planDeferTask's own formula
+      // for any row written by the current (fixed) write path.
+      const namePrefix = "Проверить: ";
+      const nameRaw = `${namePrefix}${doubtReason}`;
       const name = nameRaw.length > 120 ? `${nameRaw.slice(0, 119)}…` : nameRaw;
 
       const slaMinutes =
@@ -156,6 +181,19 @@ export async function listDeferredInboxTasks(
 
       const inst = r.subject ?? `agent:${r.actor}`;
 
+      // T-0638 (F1): real Flowable instance/proc-key, when the write path
+      // threaded them (dispatch-outcome.ts's deferredAuditEvent — the live
+      // agent-dispatch path). null for legacy events that never carried these
+      // (e.g. run-precheck.ts's demo-run path, or events written before T-0638).
+      const instanceId =
+        typeof payload["instance_id"] === "string" && payload["instance_id"].trim() !== ""
+          ? payload["instance_id"]
+          : null;
+      const procKey =
+        typeof payload["proc_key"] === "string" && payload["proc_key"].trim() !== ""
+          ? payload["proc_key"]
+          : null;
+
       return {
         id: r.id,
         role,
@@ -166,6 +204,8 @@ export async function listDeferredInboxTasks(
         occurredAt: r.occurred_at,
         step,
         inst,
+        instanceId,
+        procKey,
       };
     });
   });

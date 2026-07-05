@@ -27,6 +27,7 @@
  * (same HTTP shape, same error codes).
  */
 import pg from "pg";
+import { randomUUID } from "node:crypto";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { findEmployee } from "./org.js";
@@ -54,6 +55,7 @@ import { parsePaginationParams, paginateInMemory } from "../core/data-access-por
 // makeDbSubstitutionPort) are available for callers that use the single-task
 // resolveExecutor path — they are not used in the batch path here.
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
+import { makePgAuditWriter } from "../db/audit-writer.js";
 import {
   APPROVE_TASK_NAME,
   appendTaskApproved,
@@ -366,6 +368,11 @@ export interface InboxWriteDeps {
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// T-0638 (F2): canonical audit writer for the defer-resolve branch of the
+// approve action route (agent.defer_resolved event) — same single-writer
+// discipline as process-projection.ts's module-scope `writer`.
+const deferResolveAuditWriter = makePgAuditWriter();
 
 /**
  * Run fn inside a tenant-scoped tx (SET LOCAL choros.tenant_id + FORCE RLS),
@@ -771,6 +778,27 @@ async function findInboxItems(
   let deferItems: InboxItem[] = [];
   try {
     const deferRows = await listDeferredInboxTasks(getOrgPool(), tenantId);
+
+    // T-0638 (F6, defect #4): honest addressing — a defer task addressed to a
+    // role with NO confirmed holders in this tenant must not go to a
+    // literal-hardcoded fallback role that may hold nobody either (the bug:
+    // dispatch-outcome.ts / run-precheck.ts / deferred-inbox-store.ts each
+    // fall back to a code-literal role — "role-approver" / "fin-ctrl" —
+    // regardless of whether that role has a live holder). Reuse the SAME
+    // batched fallback resolver already proven for instance tasks (T-0380 D4,
+    // resolveExecutorFallbackBatch below) so an unfilled role routes to the
+    // tenant owner (routed_to_fallback:"role_unfilled"), instead of silently
+    // becoming unclaimable by anyone. Only UNCLAIMED rows need resolution —
+    // a claimed row already has a real assignee.
+    const unclaimedDeferTasks = deferRows
+      .filter((row) => !claimStateMap.get(row.id))
+      .map((row) => ({ id: row.id, role: row.role }));
+    const deferFallbackPatches = await resolveExecutorFallbackBatch(
+      unclaimedDeferTasks,
+      tenantId,
+      nowMs,
+    );
+
     deferItems = deferRows.map((row) => {
       // SLA: if slaMinutes set, use it; otherwise default to 60 min.
       const slaMin = row.slaMinutes ?? 60;
@@ -797,6 +825,10 @@ async function findInboxItems(
         deadline,
         // T-0221 AC-5 / FF-9: doubt_reason from payload, never reasoning_trace_ref.
         doubt_reason: row.doubtReason,
+        // T-0638 (F7, defect #2): a defer task IS an escalation by definition —
+        // the agent declined to act autonomously and a human must decide. Drives
+        // the «Эскалации» tab (inTab('esc',...) already checks item.escalated).
+        escalated: true,
       };
 
       if (claim) {
@@ -814,6 +846,13 @@ async function findInboxItems(
           claimedAt: claim.claimedAt,
           mine,
         };
+      }
+
+      // T-0638 (F6): apply the honest-addressing fallback patch when this
+      // role has no live holders — same shape as the instance-task path.
+      const fallbackPatch = deferFallbackPatches.get(row.id);
+      if (fallbackPatch) {
+        return { ...base, ...fallbackPatch };
       }
 
       return base;
@@ -1656,7 +1695,155 @@ export function registerInboxRoutes(
       // The task must be a WAITING instance user-task in the actor's tenant.
       const task = await findWaitingInstanceTask(pool, tenantId, taskId);
       if (!task) {
-        throw new HttpError(404, "NOT_FOUND", "no waiting instance task with this id");
+        // T-0638 (defect #1): taskId may address a DEFER task (agent.deferred
+        // audit event) rather than an ordinary instance userTask. A defer row
+        // is NEVER in listInstanceInboxTasks (it is a different audit type,
+        // agent.deferred vs process.started/process.next_task) — the OLD
+        // unconditional 404 here left a claimed defer task permanently stuck:
+        // ACCEPTED DECISION 1 (dispatch-outcome.ts) already closed the
+        // agent's OWN external task at defer time and advanced the engine
+        // token downstream, but nothing surfaced/completed that downstream
+        // step from a defer-card click — see docs/design/ADR-T0638-defer-task-complete.md.
+        const deferRows = await listDeferredInboxTasks(pool, tenantId);
+        const deferRow = deferRows.find((r) => r.id === taskId);
+
+        if (!deferRow) {
+          throw new HttpError(404, "NOT_FOUND", "задача не найдена — обновите страницу");
+        }
+        if (!deferRow.instanceId) {
+          // Legacy defer event (no payload.instance_id — e.g. run-precheck.ts's
+          // demo-run path, or a row written before T-0638): there is no live
+          // engine instance to drive. Honest 404 — never a silent no-op 200,
+          // never an attempt to call the engine with an id we know is absent.
+          throw new HttpError(
+            404,
+            "DEFER_NOT_ROUTABLE",
+            "эта отложенная задача не привязана к процессу — продвинуть её нельзя",
+          );
+        }
+
+        // Authz: same approve-grant discipline as the ordinary instance path
+        // (deny-by-default) — the actor must hold the role the defer task is
+        // addressed to, or a Tier-2 substitution licenses them to act for it.
+        const deferNowMs = Date.now();
+        const deferMyRoles = await resolveRolesForActor(actor, tenantId, deferNowMs);
+        if (!deferMyRoles.includes(deferRow.role)) {
+          const onBehalf = await resolveTier2SubstitutionClaim(
+            pool,
+            tenantId,
+            actor,
+            deferRow.role,
+            deferNowMs,
+          );
+          if (onBehalf === undefined) {
+            throw new HttpError(
+              403,
+              "NOT_ELIGIBLE",
+              "actor does not hold the approve grant for this task",
+            );
+          }
+        }
+
+        if (hasDb()) {
+          const actingEmp = await findEmployeeById(pool, tenantId, actor);
+          if (actingEmp?.deactivatedAt != null) {
+            throw new HttpError(403, "NOT_ELIGIBLE", "actor account is deactivated and cannot approve tasks");
+          }
+        }
+
+        // Record the human's resolution of the escalation as ONE audit event
+        // (open-vocabulary type, mirrors agent.deferred/agent.proceeded/
+        // agent.blocked — NO new table, D-064/defer-no-new-table.sh NF-2).
+        await withTenantTx(pool, tenantId, async (client) => {
+          await deferResolveAuditWriter.appendAuditEvent(
+            client as unknown as import("../db/audit-writer.js").PgClientLike,
+            {
+              id: randomUUID(),
+              type: "agent.defer_resolved",
+              actor,
+              subject: `agent:${deferRow.execName}`,
+              scope: { skill: deferRow.step, instance_id: deferRow.instanceId },
+              via: "inbox-action",
+              proposed_by: null,
+              confirmed_by: null,
+              payload: {
+                inbox_task_id: taskId,
+                resolved_by: actor,
+                instance_id: deferRow.instanceId,
+                proc_key: deferRow.procKey,
+                outcome: outcomeName,
+              },
+              occurred_at: deferNowMs,
+            },
+          );
+        });
+
+        // Drive the engine: the agent's OWN external task is ALREADY closed
+        // (ACCEPTED DECISION 1) — what remains is whatever userTask the token
+        // reached downstream. Resolve-by-instance (approvedTaskDefKey omitted)
+        // is the SAME mechanism the base process.started approve path already
+        // uses (T-0571 §2.1) — no new engine API, no re-attempt to complete an
+        // already-closed external task.
+        if (!writeDepsFlowable) {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              instanceId: deferRow.instanceId,
+              status: "done",
+              action: "approve",
+              outcome: outcomeName,
+              engine: "not_configured",
+            }),
+          );
+          return;
+        }
+
+        const driveResult = await reconcileInstanceEngineDrive(
+          pool,
+          tenantId,
+          writeDepsFlowable,
+          {
+            instanceId: deferRow.instanceId,
+            procKey: deferRow.procKey ?? "process:unknown",
+            completeEngineTask: true,
+            actor,
+            driveDeadlineMs: resolveEngineDriveDeadlineMs(),
+          },
+        );
+
+        if (!driveResult.ok) {
+          const isStructural =
+            driveResult.code === ENGINE_TASK_NOT_FOUND ||
+            driveResult.code === AMBIGUOUS_ACTIVE_TASK ||
+            driveResult.code === ENGINE_DRIVE_TIMEOUT;
+          res.statusCode = 502;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: {
+                code: isStructural ? driveResult.code : "ENGINE_DRIVE_FAILED",
+                stage: driveResult.stage,
+                engineCode: driveResult.code,
+                instanceId: deferRow.instanceId,
+              },
+            }),
+          );
+          return;
+        }
+
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            instanceId: deferRow.instanceId,
+            status: "done",
+            action: "approve",
+            outcome: outcomeName,
+            engine: driveResult.alreadyEnded ? "already" : "completed",
+          }),
+        );
+        return;
       }
 
       // T-0588 (RE-VERIFY, symmetry with BLOCK-3): a deactivated actor must not

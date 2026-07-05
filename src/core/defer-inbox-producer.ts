@@ -53,6 +53,70 @@ const NAME_MAX_LEN = 120;
 const FALLBACK_DOUBT_REASON = "требуется проверка агентом-человеком";
 
 // ---------------------------------------------------------------------------
+// humanizeDoubtReason — T-0638 (defect #3): translate KNOWN structural
+// doubtReason literals (authored by the engine itself — run-agent-step.ts,
+// run-precheck.ts, agent-precheck-motor.ts classifyOutcome) into human-readable
+// Russian. Exact-match table ONLY — this is a dictionary of ENGINEERING
+// constants (D-064 anti-case: these are code literals we author, not case
+// content), never a rewrite of free-form text. Any string NOT in the table
+// (an LLM-authored draft summary, a dynamic "model confidence 0.42 below
+// floor 0.70" message, or a future signal not yet catalogued here) passes
+// through byte-identical — never losing diagnostic detail for an unfamiliar
+// reason, mirroring the "unmapped code still legible" principle already used
+// by actionErrorMessage/claimErrorMessage (web/src/screens/screen-inbox.jsx).
+// ---------------------------------------------------------------------------
+
+/**
+ * Exact-match table: raw engine-authored doubtReason literal → human Russian
+ * sentence. Keys are the literal strings emitted by run-agent-step.ts /
+ * run-precheck.ts / agent-precheck-motor.ts (classifyOutcome's own ??
+ * defaults) — the FULL closed set of structural (non-LLM-generated) reasons
+ * as of T-0638. New structural reasons introduced later should add an entry
+ * here rather than leaving the raw English literal to leak to the human
+ * reviewer.
+ */
+const DOUBT_REASON_TRANSLATIONS: ReadonlyMap<string, string> = new Map([
+  [
+    "no published instruction for agent",
+    "агенту не назначена инструкция — требуется настройка перед автономной работой",
+  ],
+  [
+    "llm runtime dormant — inference not available",
+    "модель агента не подключена (нет активного ключа) — решение принимает человек",
+  ],
+  [
+    "llm runtime dormant — no inference available",
+    "модель агента не подключена (нет активного ключа) — решение принимает человек",
+  ],
+  [
+    "autonomy threshold not met",
+    "агент не уверен в решении настолько, чтобы действовать самостоятельно",
+  ],
+  [
+    "answer marked ambiguous",
+    "ответ агента признан неоднозначным — нужна проверка человеком",
+  ],
+  [
+    "critical operation — agent never executes critical steps (F3); escalated to human",
+    "это критичный шаг — агенту не разрешено выполнять его самостоятельно",
+  ],
+  [
+    "instance budget exhausted — deferred to human",
+    "у процесса исчерпан бюджет на автономные действия агента — дальше решает человек",
+  ],
+]);
+
+/**
+ * Translate a raw doubtReason to human-readable Russian when it exactly
+ * matches a known structural literal; otherwise return it unchanged (honest
+ * passthrough — never drops diagnostic content for an unfamiliar reason,
+ * e.g. LLM-generated draft summaries or a dynamic confidence-value message).
+ */
+export function humanizeDoubtReason(raw: string): string {
+  return DOUBT_REASON_TRANSLATIONS.get(raw) ?? raw;
+}
+
+// ---------------------------------------------------------------------------
 // planDeferTask — pure transform.
 // ---------------------------------------------------------------------------
 
@@ -75,10 +139,14 @@ export function planDeferTask(
 ): DeferTaskPlan {
   // Normalise doubtReason — must be non-empty (INV AC-5).
   const rawDoubt = outcome.doubtReason;
-  const doubtReason =
+  const normalisedDoubt =
     !rawDoubt || rawDoubt.trim() === "" || rawDoubt === "pending"
       ? FALLBACK_DOUBT_REASON
       : rawDoubt.trim();
+  // T-0638 (defect #3): translate KNOWN structural literals to human Russian.
+  // Unknown/free-form text (LLM draft summaries, dynamic confidence messages)
+  // passes through unchanged — see humanizeDoubtReason doc-comment.
+  const doubtReason = humanizeDoubtReason(normalisedDoubt);
 
   // Build name: «Проверить: <doubtReason>» truncated to NAME_MAX_LEN.
   const prefix = "Проверить: ";

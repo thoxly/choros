@@ -496,6 +496,10 @@ const ACTION_ERROR_MESSAGE = {
   NOT_FOUND: "Эта задача уже недоступна — обновите страницу",
   VALIDATION: "Не удалось отправить запрос — обновите страницу и попробуйте снова",
   FORM_VALIDATION: "Форма заполнена некорректно — проверьте значения полей",
+  // T-0638 (F4): a defer (agent-escalation) task whose audit event carries no
+  // live process instance — legacy row, nothing to route to. See
+  // src/http/inbox.ts POST /api/inbox/:id/action defer-resolve branch.
+  DEFER_NOT_ROUTABLE: "Эта отложенная задача не привязана к процессу — продвинуть её нельзя",
 };
 
 /**

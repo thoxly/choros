@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { planDeferTask, type DeferTaskPlan } from "../defer-inbox-producer.js";
+import { planDeferTask, humanizeDoubtReason, type DeferTaskPlan } from "../defer-inbox-producer.js";
 import type { PrecheckOutcome } from "../agent-precheck-motor.js";
 
 // ---------------------------------------------------------------------------
@@ -126,5 +126,53 @@ describe("planDeferTask — PURE golden (T-0221 §5.1)", () => {
       expect(plan.name.startsWith("Проверить:")).toBe(true);
       expect(plan.originOutcome).toBe("defer");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0638 (defect #3) — humanizeDoubtReason: known structural literals →
+// human Russian; unknown/free-form text passes through unchanged.
+// ---------------------------------------------------------------------------
+
+describe("humanizeDoubtReason — T-0638 known-literal translation table", () => {
+  it("translates the known engine-authored literals to Russian", () => {
+    expect(humanizeDoubtReason("no published instruction for agent")).toMatch(/[а-яА-Я]/);
+    expect(humanizeDoubtReason("no published instruction for agent")).not.toBe(
+      "no published instruction for agent",
+    );
+    expect(humanizeDoubtReason("llm runtime dormant — inference not available")).toMatch(/[а-яА-Я]/);
+    expect(humanizeDoubtReason("autonomy threshold not met")).toMatch(/[а-яА-Я]/);
+    expect(humanizeDoubtReason("answer marked ambiguous")).toMatch(/[а-яА-Я]/);
+    expect(
+      humanizeDoubtReason(
+        "critical operation — agent never executes critical steps (F3); escalated to human",
+      ),
+    ).toMatch(/[а-яА-Я]/);
+    expect(humanizeDoubtReason("instance budget exhausted — deferred to human")).toMatch(/[а-яА-Я]/);
+  });
+
+  it("passes through unknown/free-form text unchanged (never loses diagnostic detail)", () => {
+    const dynamic = "model confidence 0.42 below floor 0.70";
+    expect(humanizeDoubtReason(dynamic)).toBe(dynamic);
+    const llmDraft = "Partial analysis completed — requires human review";
+    expect(humanizeDoubtReason(llmDraft)).toBe(llmDraft);
+  });
+
+  it("planDeferTask applies humanization to doubtReason and name", () => {
+    const outcome = makeDeferOutcome({ doubtReason: "no published instruction for agent" });
+    const plan = planDeferTask(outcome, DEFAULT_CTX);
+
+    expect(plan.doubtReason).not.toBe("no published instruction for agent");
+    expect(plan.doubtReason).toMatch(/[а-яА-Я]/);
+    expect(plan.name).toContain(plan.doubtReason);
+    expect(plan.name).not.toContain("no published instruction for agent");
+  });
+
+  it("planDeferTask leaves unknown doubtReason untranslated (existing golden behaviour)", () => {
+    const outcome = makeDeferOutcome({ doubtReason: "model confidence too low" });
+    const plan = planDeferTask(outcome, DEFAULT_CTX);
+
+    expect(plan.doubtReason).toBe("model confidence too low");
+    expect(plan.name).toBe("Проверить: model confidence too low");
   });
 });
