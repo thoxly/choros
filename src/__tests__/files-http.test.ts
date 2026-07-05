@@ -1260,3 +1260,153 @@ describe("GET /api/files/:fileVersionId/download?disposition=inline (T-0579)", (
     expect(res.status).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0618: Content-Type sanitization on the download route.
+//
+// A stored mime containing a control byte (\x00-\x1f, \x7f) cannot be passed
+// to res.setHeader('Content-Type', ...) as-is — Node throws ERR_INVALID_CHAR
+// synchronously, which (uncaught here) propagates through withAuth/router.ts
+// into a generic 500. Today's only HTTP writer (POST /files) normalizes
+// Content-Type before storing, so this isn't reachable through it — but
+// core/file-attachment.ts::addVersion accepts an arbitrary mime string with
+// no byte-level validation, so a secondary writer (document-render.ts today,
+// any future seed/import/migration path tomorrow) could store one. These
+// tests seed a version row directly (bypassing the upload route entirely,
+// exactly like a secondary writer would) and prove the download route
+// degrades to a safe default instead of crashing, and that the sanitization
+// never opens an inline/XSS path for a mime that was rejected.
+// ---------------------------------------------------------------------------
+
+describe("GET /api/files/:fileVersionId/download — Content-Type sanitization (T-0618)", () => {
+  function writeTempFile(contents: string): string {
+    const tmpFile = path.join(os.tmpdir(), `choros-test-sanitize-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`);
+    fs.writeFileSync(tmpFile, contents);
+    return tmpFile;
+  }
+
+  function fsObjectStoreFor(tmpFile: string): ObjectStore {
+    const expiresAt = Date.now() + 300_000;
+    const fileUrl = `file://${tmpFile}?expires=${expiresAt}`;
+    return {
+      async put(_key: string, _body: Uint8Array, _meta: { mime: string; size: number }): Promise<void> { /* no-op */ },
+      async presignGet(_key: string, _ttl: number): Promise<string> { return fileUrl; },
+      async erase(_key: string): Promise<void> { /* no-op */ },
+    };
+  }
+
+  it("AC-1: control-byte mime (NUL) → 200 with application/octet-stream + attachment, NOT 500", async () => {
+    const tmpFile = writeTempFile("hello world");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "text/plain\x00evil" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.status).not.toBe(500);
+    expect(res.headers["content-type"]).toBe("application/octet-stream");
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+    expect(res.body).toBe("hello world");
+  });
+
+  it("AC-1: control-byte mime (CRLF header-injection attempt) → 200 octet-stream, no injected header", async () => {
+    const tmpFile = writeTempFile("hello world");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "text/plain\r\nX-Injected: 1" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("application/octet-stream");
+    expect(res.headers["x-injected"]).toBeUndefined();
+  });
+
+  it("AC-3/XSS-regression: control-byte html-ish mime with ?disposition=inline → STILL attachment, octet-stream (never inline text/html)", async () => {
+    const tmpFile = writeTempFile("<script>alert(1)</script>");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "text/html\x00" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("application/octet-stream");
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  it("AC-2 regression: valid mime (text/plain) passthrough unchanged after sanitization added", async () => {
+    const tmpFile = writeTempFile("plain content");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "text/plain" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("text/plain");
+    expect(res.headers["content-disposition"]).toMatch(/^attachment/);
+  });
+
+  it("AC-2 regression: valid inline-safe mime (image/png) + ?disposition=inline still inlines after sanitization added", async () => {
+    const tmpFile = writeTempFile("fake-png-bytes");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "image/png" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download?disposition=inline`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("image/png");
+    expect(res.headers["content-disposition"]).toMatch(/^inline/);
+  });
+
+  it("AC-4: absurdly long mime → 200 application/octet-stream (not passed through as-is)", async () => {
+    const tmpFile = writeTempFile("hello world");
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "text/plain" + "a".repeat(5000) }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsObjectStoreFor(tmpFile) as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(`${baseUrl()}/api/files/${VERSION_ID}/download`, { "x-dev-user": ACTOR_A });
+
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("application/octet-stream");
+  });
+});
