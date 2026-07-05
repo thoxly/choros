@@ -1,0 +1,24 @@
+{
+  "task_id": "T-0638",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/db/deferred-inbox-store.ts:159",
+      "issue": "The pre-existing `role` fallback (`payload['defer_role']` missing → literal `\"fin-ctrl\"`) is the SAME class of hardcoded-address bug this task fixes for the READ-side routed_to_fallback path, but this specific line is untouched by the T-0638 diff (confirmed via `git log -p dev...HEAD` — only surrounding lines for doubtReason/name were touched) and is not part of this task's four stated defects. Leaving it is correct scope discipline, not an omission in this task.",
+      "suggestion": "Optional follow-up task: replace the bare `\"fin-ctrl\"` role-slug default with a config-primitive (mirrors resolveDefaultApproverRole()) so a defer event missing payload.defer_role doesn't silently address a case-specific role literal."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-a", "covered": true},
+    {"ac": "AC-b", "covered": true},
+    {"ac": "AC-c", "covered": true},
+    {"ac": "AC-d", "covered": true},
+    {"ac": "AC-e", "covered": true},
+    {"ac": "AC-f", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
