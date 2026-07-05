@@ -37,9 +37,16 @@
  * (the owner RECORD's grant governs; no separate file ACL — FF-NOACL). Tenant
  * is resolved from the actor identity — NEVER from a header or body arg.
  *
- * Atomicity: insertFile + addVersion are sequenced in a single withTenantTx;
- * if addVersion fails (PDP deny, S3 put error, DB insert error), the outer
- * ROLLBACK undoes the choros.file row too — no orphan metadata rows.
+ * Atomicity: insertFile + addVersion are sequenced in a single withTenantTx AND
+ * (T-0621) both actually RUN on that transaction's `pg.PoolClient` — insertFile
+ * is called with the client as its explicit executor, and addVersion is handed
+ * `fileStore.boundTo(client)` as its `meta` (not the plain fileStore), so every
+ * DAO call addVersion makes internally (getFile/maxVersionNo/insertVersion/
+ * setCurrentVersion) also runs on that same client. If addVersion fails (PDP
+ * deny, S3 put error, DB insert error) the outer ROLLBACK now undoes the
+ * ENTIRE sequence — no DML above it has committed independently on a separate
+ * connection, so no orphan metadata row can survive a mid-way failure of any
+ * kind (PDP deny — T-0620 — or a genuine mid-transaction DB error — T-0621).
  */
 
 import { createReadStream } from "node:fs";
@@ -323,18 +330,27 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
 
         // T-0620 [P0/orphan-fix]: AUTHORIZE THE WRITE **BEFORE** insertFile.
         //
-        // Why not rely on addVersion's own deny to roll back: PgFileStore.insertFile
-        // / insertVersion / setCurrentVersion each run on their OWN pooled connection
-        // (this.pool.query), NOT on the withTenantTx client — so they autocommit
-        // independently and the tx's ROLLBACK cannot undo the insertFile row. A deny
-        // that fires INSIDE addVersion (after insertFile) therefore left an orphan
-        // choros.file row (current_version=NULL, 0 versions) regardless of any throw.
+        // Historical note (fixed by T-0621, kept for context): at the time this
+        // pre-check was written, PgFileStore.insertFile/insertVersion/
+        // setCurrentVersion each ran on their OWN pooled connection
+        // (this.pool.query), NOT on the withTenantTx client — so they autocommitted
+        // independently and the tx's ROLLBACK could not undo the insertFile row. A
+        // deny that fired INSIDE addVersion (after insertFile) therefore left an
+        // orphan choros.file row (current_version=NULL, 0 versions) regardless of
+        // any throw. T-0621 closed that residual gap by threading the SAME tx
+        // client through insertFile + every DAO call addVersion makes (see the
+        // withTenantTx callback below and PgFileStore.boundTo) — so a genuine
+        // mid-transaction DB error now also rolls back cleanly, not just a PDP
+        // deny. This pre-check below remains valuable independently of that fix:
+        // it avoids taking a DB write at all on the (common) deny path, and keeps
+        // the write-authority decision explicit and up front.
         //
-        // The fix: decide the write authority up front, on the OWNER RECORD, via the
-        // SAME resolver addVersion would consult (authorizeFileOp maps upload→`update`
-        // on the record). On deny we return 403 and NEVER call insertFile — zero
-        // orphan by construction. On allow we proceed; addVersion re-checks the same
-        // authority (belt-and-suspenders) and, on the success path, both agree.
+        // The fix (T-0620): decide the write authority up front, on the OWNER
+        // RECORD, via the SAME resolver addVersion would consult (authorizeFileOp
+        // maps upload→`update` on the record). On deny we return 403 and NEVER
+        // call insertFile — zero orphan by construction. On allow we proceed;
+        // addVersion re-checks the same authority (belt-and-suspenders) and, on
+        // the success path, both agree.
         const reg = await loadRecordRegistryId(pool, tenantId, recordId);
         if (reg === null) {
           // Record not visible in this tenant → treat as a deny (no leak, no insert).
@@ -375,20 +391,41 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
 
         // Authorized. Now insert the file + first version. (withTenantTx sets the
         // tenant GUC; the PgFileStore ops are tenant-scoped by explicit tenant_id.)
-        const result = await withTenantTx(pool, tenantId, async (_client) => {
+        //
+        // T-0621 [P0/tx-atomicity]: insertFile AND every DAO call addVersion makes
+        // (getFile/maxVersionNo/insertVersion/setCurrentVersion) now run on THIS
+        // SAME tx `client` — not PgFileStore's own autocommitting `this.pool`
+        // connection. `fileStore.insertFile(..., client)` passes the client as the
+        // explicit executor; `fileStore.boundTo(client)` hands addVersion (which
+        // only knows the pure-core `FileMetaSource` shape and is NOT allowed to
+        // import `pg` — FF-PURE) a metadata-source VIEW that transparently runs
+        // every call on `client` too. Before this fix each DAO op ran on a
+        // separate pooled connection and autocommitted independently — a mid-way
+        // DB error in insertVersion (thrown AFTER insertFile's row had already
+        // committed on its own connection) left an orphan `choros.file` row that
+        // this outer ROLLBACK could not undo (T-0620's pr-handoff named this
+        // exact residual gap: "withTenantTx is cosmetic for PgFileStore"). Now a
+        // throw anywhere in this callback rolls back the ENTIRE sequence — no DML
+        // above this line has committed independently, so nothing survives.
+        const result = await withTenantTx(pool, tenantId, async (client) => {
+          const txMeta = fileStore.boundTo(client);
+
           // Insert the choros.file metadata row (current_version NULL until addVersion).
-          await fileStore.insertFile({
-            tenantId,
-            id: fileId,
-            recordId,
-            originalName,
-            currentVersion: null,
-            retentionState: "active",
-            retentionPolicyRef: null,
-            createdBy: actor,
-            createdAt: now,
-            updatedAt: now,
-          });
+          await fileStore.insertFile(
+            {
+              tenantId,
+              id: fileId,
+              recordId,
+              originalName,
+              currentVersion: null,
+              retentionState: "active",
+              retentionPolicyRef: null,
+              createdBy: actor,
+              createdAt: now,
+              updatedAt: now,
+            },
+            client,
+          );
 
           // addVersion internally calls store.put (FsObjectStore: write to disk;
           // S3: PutObject) BEFORE the DB insertVersion row is committed. If the
@@ -396,12 +433,15 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
           // object (honest-cleanup, T-0521 п.3); a server-side S3 lifecycle GC is
           // the production backstop (see addVersion in core/file-attachment.ts).
           // The authority was already granted above; addVersion re-checks it (same
-          // resolver) and agrees on the success path.
+          // resolver) and agrees on the success path. `meta: txMeta` (not the
+          // plain `metaStore`) is what makes getFile/maxVersionNo/insertVersion/
+          // setCurrentVersion below run on `client` instead of `fileStore`'s own
+          // pool connection (T-0621).
           const vResult = await addVersion(
             {
               resolver,
               store: objectStore,
-              meta: metaStore,
+              meta: txMeta,
               hash: sha256,
             },
             fileId,

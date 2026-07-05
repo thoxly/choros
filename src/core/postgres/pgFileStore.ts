@@ -28,6 +28,40 @@ import type {
 } from "../file-attachment.js";
 import { type DataClass } from "../data-classification.js";
 
+/**
+ * T-0621 [P0/tx-atomicity]: minimal structural shape every write/read op below
+ * needs from its query executor. Satisfied by both `pg.Pool` and
+ * `pg.PoolClient` (mirrors `Queryable` in pgJobStore.ts — the T-0636 P0-6
+ * precedent for this exact seam). Every method below accepts an OPTIONAL
+ * trailing `executor` and defaults to `this.pool` (today's behaviour,
+ * unchanged for every existing caller that omits it).
+ *
+ * WHY THIS EXISTS: src/http/files.ts's upload route wraps insertFile +
+ * addVersion in `withTenantTx` (a dedicated `pg.PoolClient` with
+ * `SET LOCAL choros.tenant_id` + `BEGIN`/`COMMIT`/`ROLLBACK`), but every
+ * PgFileStore method historically queried `this.pool` directly — a SEPARATE,
+ * autocommitting connection. `insertFile` committed the moment it ran,
+ * regardless of what happened afterward; a mid-way DB error in `insertVersion`
+ * (thrown AFTER insertFile's row was already durable) could not be undone by
+ * the outer tx's ROLLBACK, leaving an orphan `choros.file` row
+ * (`current_version = NULL`, zero versions). T-0620 closed the DENY-path
+ * instance of this (authorize before insertFile, so a clean PDP deny never
+ * reaches insertFile at all) but did not change WHERE insertFile/insertVersion
+ * actually run — a genuine mid-transaction DB error (not a PDP deny) between
+ * insertFile and insertVersion committing was, and without this seam remains,
+ * unrecoverable. Passing the SAME `pg.PoolClient` withTenantTx already opened
+ * (which already carries the `SET LOCAL choros.tenant_id` GUC — RLS scope is
+ * inherited, not re-derived) as `executor` to both insertFile and (via a
+ * request-scoped FileMetaSource view) insertVersion/getFile/maxVersionNo/
+ * setCurrentVersion makes every DML of one upload part of ONE Postgres
+ * transaction: a mid-way throw anywhere in that sequence rolls back all of it,
+ * so no `choros.file` row can ever be orphaned by a DB-level failure.
+ */
+export interface Queryable {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  query<T = any>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
+}
+
 // ---------------------------------------------------------------------------
 // DB row shapes (snake_case → camelCase)
 // ---------------------------------------------------------------------------
@@ -124,8 +158,18 @@ export class PgFileStore implements FileMetaSource {
    * but needed at the composition root to create a file before its first version.
    * current_version is NULL until addVersion runs.
    */
-  async insertFile(file: Omit<FileRow, "registryId">): Promise<void> {
-    await this.pool.query(
+  /**
+   * T-0621: optional trailing `executor` — the query executor to run the
+   * INSERT on. Defaults to `this.pool` (today's behaviour, unchanged for
+   * every existing caller). A caller that opened its own tx client (e.g.
+   * `withTenantTx` in src/http/files.ts) passes that client here so this
+   * INSERT commits/rolls back as part of the SAME transaction as any
+   * subsequent op the caller runs on that client (see the Queryable doc
+   * comment above for the full atomicity rationale).
+   */
+  async insertFile(file: Omit<FileRow, "registryId">, executor?: Queryable): Promise<void> {
+    const q = executor ?? this.pool;
+    await q.query(
       `INSERT INTO choros.file
          (tenant_id, id, record_id, original_name, current_version,
           retention_state, retention_policy_ref, created_by, created_at, updated_at)
@@ -145,8 +189,9 @@ export class PgFileStore implements FileMetaSource {
     );
   }
 
-  async getFile(tenantId: string, fileId: string): Promise<FileRow | null> {
-    const { rows } = await this.pool.query<FileDbRow>(
+  async getFile(tenantId: string, fileId: string, executor?: Queryable): Promise<FileRow | null> {
+    const q = executor ?? this.pool;
+    const { rows } = await q.query<FileDbRow>(
       `SELECT f.tenant_id, f.id, f.record_id, r.registry_id,
               f.original_name, f.current_version, f.retention_state,
               f.retention_policy_ref, f.created_by, f.created_at, f.updated_at
@@ -159,8 +204,13 @@ export class PgFileStore implements FileMetaSource {
     return rowToFile(rows[0]);
   }
 
-  async getVersion(tenantId: string, versionId: string): Promise<FileVersionRow | null> {
-    const { rows } = await this.pool.query<FileVersionDbRow>(
+  async getVersion(
+    tenantId: string,
+    versionId: string,
+    executor?: Queryable,
+  ): Promise<FileVersionRow | null> {
+    const q = executor ?? this.pool;
+    const { rows } = await q.query<FileVersionDbRow>(
       `SELECT tenant_id, id, file_id, version_no, object_key, mime_type, size_bytes,
               content_hash, data_class, is_snapshot, cycle_ref, content_erased_at,
               uploaded_by, uploaded_at
@@ -172,8 +222,9 @@ export class PgFileStore implements FileMetaSource {
     return rowToVersion(rows[0]);
   }
 
-  async maxVersionNo(tenantId: string, fileId: string): Promise<number> {
-    const { rows } = await this.pool.query<{ max_no: string | null }>(
+  async maxVersionNo(tenantId: string, fileId: string, executor?: Queryable): Promise<number> {
+    const q = executor ?? this.pool;
+    const { rows } = await q.query<{ max_no: string | null }>(
       `SELECT MAX(version_no) AS max_no
        FROM choros.file_version
        WHERE tenant_id = $1 AND file_id = $2`,
@@ -183,8 +234,9 @@ export class PgFileStore implements FileMetaSource {
     return v === null || v === undefined ? 0 : Number(v);
   }
 
-  async insertVersion(row: FileVersionRow): Promise<void> {
-    await this.pool.query(
+  async insertVersion(row: FileVersionRow, executor?: Queryable): Promise<void> {
+    const q = executor ?? this.pool;
+    await q.query(
       `INSERT INTO choros.file_version
          (tenant_id, id, file_id, version_no, object_key, mime_type, size_bytes,
           content_hash, data_class, is_snapshot, cycle_ref, content_erased_at,
@@ -214,10 +266,12 @@ export class PgFileStore implements FileMetaSource {
     fileId: string,
     versionId: string,
     atMs: number,
+    executor?: Queryable,
   ): Promise<void> {
     // Pointer-only update on choros.file. This is NOT a file_version content
     // mutation — version rows stay immutable (FF-V).
-    await this.pool.query(
+    const q = executor ?? this.pool;
+    await q.query(
       `UPDATE choros.file
          SET current_version = $3, updated_at = $4
        WHERE tenant_id = $1 AND id = $2`,
@@ -225,18 +279,54 @@ export class PgFileStore implements FileMetaSource {
     );
   }
 
+  /**
+   * T-0621: bind a `FileMetaSource` VIEW of this store to a specific executor
+   * (typically a `withTenantTx` client). Every read/write method on the
+   * returned object delegates to `this.<method>(..., executor)` — so a
+   * pure-core caller that only knows the `FileMetaSource` shape (e.g.
+   * `addVersion` in core/file-attachment.ts, which is NOT allowed to import
+   * `pg` — FF-PURE) can be handed a metadata source that transparently runs
+   * every query on the SAME connection/transaction as the caller's other DML,
+   * without core/file-attachment.ts ever knowing a `pg.PoolClient` exists.
+   *
+   * This is the seam src/http/files.ts's upload route uses: it opens
+   * `withTenantTx`, calls `fileStore.insertFile(file, client)` directly, then
+   * passes `fileStore.boundTo(client)` as `addVersion`'s `meta` — so
+   * insertFile + addVersion's getFile/maxVersionNo/insertVersion/
+   * setCurrentVersion all run on the one tx client. A mid-way DB error
+   * anywhere in that sequence throws, `withTenantTx`'s catch ROLLBACKs, and
+   * NOTHING commits (not insertFile, not a partial insertVersion) — no
+   * orphaned `choros.file` row survives a mid-transaction failure.
+   */
+  boundTo(executor: Queryable): FileMetaSource {
+    return {
+      getFile: (tenantId, fileId) => this.getFile(tenantId, fileId, executor),
+      getVersion: (tenantId, versionId) => this.getVersion(tenantId, versionId, executor),
+      maxVersionNo: (tenantId, fileId) => this.maxVersionNo(tenantId, fileId, executor),
+      insertVersion: (row) => this.insertVersion(row, executor),
+      setCurrentVersion: (tenantId, fileId, versionId, atMs) =>
+        this.setCurrentVersion(tenantId, fileId, versionId, atMs, executor),
+      markContentErased: (tenantId, versionId, atMs) =>
+        this.markContentErased(tenantId, versionId, atMs, executor),
+      updateRetentionState: (tenantId, fileId, newState, atMs) =>
+        this.updateRetentionState(tenantId, fileId, newState, atMs, executor),
+    };
+  }
+
   async updateRetentionState(
     tenantId: string,
     fileId: string,
     newState: FileRow["retentionState"],
     atMs: number,
+    executor?: Queryable,
   ): Promise<void> {
     // T-0202: retention lifecycle state move on choros.file. Pointer/state-only —
     // this UPDATEs choros.file, NEVER a choros.file_version content column, so the
     // immutable-version invariant (FF-V) is preserved. The CHECK constraint on
     // retention_state (migration 058) is the schema-side backstop; the lawful
     // transition is decided in setRetentionState before this runs.
-    await this.pool.query(
+    const q = executor ?? this.pool;
+    await q.query(
       `UPDATE choros.file
          SET retention_state = $3, updated_at = $4
        WHERE tenant_id = $1 AND id = $2`,
@@ -244,11 +334,12 @@ export class PgFileStore implements FileMetaSource {
     );
   }
 
-  async markContentErased(tenantId: string, versionId: string, atMs: number): Promise<void> {
+  async markContentErased(tenantId: string, versionId: string, atMs: number, executor?: Queryable): Promise<void> {
     // The ONLY post-insert mutation of a file_version: the retention tombstone.
     // content_hash / object_key / size / mime are NOT touched — metadata survives
     // the byte erase (NF-5 / T-0016 append-only).
-    await this.pool.query(
+    const q = executor ?? this.pool;
+    await q.query(
       `UPDATE choros.file_version
          SET content_erased_at = $3
        WHERE tenant_id = $1 AND id = $2 AND content_erased_at IS NULL`,

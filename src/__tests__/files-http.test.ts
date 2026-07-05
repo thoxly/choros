@@ -163,6 +163,21 @@ class FakeFileStore implements FileMetaSource {
     this.insertedFiles.push(fRow);
   }
 
+  /**
+   * T-0621: PgFileStore-specific method needed for the deps cast (mirrors
+   * insertFile above — this test double is cast to PgFileStore at the call
+   * site, so every method the route calls on it must exist). The real
+   * PgFileStore.boundTo(executor) returns a FileMetaSource view that runs
+   * every op on a specific `pg.PoolClient`/executor for tx-atomicity; this
+   * fake has a single shared in-memory Map with no real transaction/executor
+   * concept, so the executor argument is accepted (matches the real
+   * signature — callers should not need to know the difference) and simply
+   * ignored — `this` already IS the one shared store every op reads/writes.
+   */
+  boundTo(_executor: unknown): FileMetaSource {
+    return this;
+  }
+
   /** List files for a record — used by the GET list route.
    * T-0579 fix-forward (review m1): versionIds mirrors PgFileStore's
    * behaviour — EVERY version id recorded for the file, not just current. */
