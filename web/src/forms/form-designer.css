@@ -34,17 +34,30 @@
   outline-offset: -2px;
 }
 
-/* --- fullscreen canvas: fills the viewport, keeps palette/inspector reachable
-   via the in-canvas toggle rendered by FormDesigner (not removed from the DOM). */
-.chs-designer-canvas--fullscreen {
+/* --- fullscreen: expand the WHOLE workspace (palette + canvas + inspector),
+   not just the canvas. UX-2 fix — putting position:fixed on the canvas alone
+   orphaned its grid siblings (palette/inspector), so a field could not be
+   dragged in nor properties edited in fullscreen. The overlay is the whole grid,
+   so all three panels stay present and functional. */
+.chs-form-designer--fullscreen {
   position: fixed;
   inset: 0;
   z-index: var(--chs-z-overlay);
   margin: 0;
+  height: 100vh;
   max-height: 100vh;
-  overflow: auto;
   background: var(--chs-color-bg);
   padding: var(--chs-space-6);
+  /* grid stays 3-column; each column scrolls its own overflow. */
+}
+
+/* In fullscreen, the palette / canvas / inspector each scroll independently so a
+   long form or a long palette never pushes the others off-screen. */
+.chs-form-designer--fullscreen > .chs-designer-palette,
+.chs-form-designer--fullscreen > .chs-designer-canvas,
+.chs-form-designer--fullscreen > .chs-designer-inspector {
+  max-height: calc(100vh - 2 * var(--chs-space-6));
+  overflow: auto;
 }
 
 /* the fullscreen toggle button row inside the canvas */

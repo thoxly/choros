@@ -53,8 +53,9 @@ import {
 import {
   initHistory, pushHistory, undo as undoHistory, redo as redoHistory, canUndo, canRedo,
 } from './history-stack.js';
-import { computeAutoscrollDelta } from './canvas-autoscroll.js';
+import { computeAutoscrollDelta, prefersReducedMotion } from './canvas-autoscroll.js';
 import { announceMove, announceCut, announcePaste, cloneForClipboard } from './canvas-a11y.js';
+import { containerIsDropTarget } from './canvas-path.js';
 import './form-designer.css';
 
 // ---------------------------------------------------------------------------
@@ -178,9 +179,9 @@ function containerKey(containerPath, tabIndex) {
 // own emphasis and asks the CONTAINER to highlight via onContainerHover.
 // ---------------------------------------------------------------------------
 
-function DropIndicator({ containerPath, tabIndex, insertAt, onDrop, onHoverContainer, hoverKey }) {
+function DropIndicator({ containerPath, tabIndex, insertAt, onDrop, onHoverContainer, hover }) {
   const myKey = `${containerKey(containerPath, tabIndex)}:${insertAt}`;
-  const active = hoverKey === myKey;
+  const active = hover?.key === myKey;
   return (
     <div
       className={`chs-drop-indicator${active ? ' chs-drop-indicator--active' : ''}`}
@@ -200,9 +201,9 @@ function DropIndicator({ containerPath, tabIndex, insertAt, onDrop, onHoverConta
   );
 }
 
-function EmptyDropZone({ containerPath, tabIndex, onDrop, onHoverContainer, hoverKey }) {
+function EmptyDropZone({ containerPath, tabIndex, onDrop, onHoverContainer, hover }) {
   const myKey = `${containerKey(containerPath, tabIndex)}:0`;
-  const active = hoverKey === myKey;
+  const active = hover?.key === myKey;
   return (
     <div
       className={`chs-empty-drop${active ? ' chs-empty-drop--over' : ''}`}
@@ -236,7 +237,7 @@ function EmptyDropZone({ containerPath, tabIndex, onDrop, onHoverContainer, hove
 function CanvasNode({
   node, containerPath, index, tabIndex,
   selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, brokenKeys,
-  siblingCount, onMoveUp, onMoveDown, onHoverContainer, hoverKey,
+  siblingCount, onMoveUp, onMoveDown, onHoverContainer, hover,
 }) {
   const descriptor = getWidget(node.type);
   const key = pathKey(containerPath, index, tabIndex);
@@ -244,9 +245,14 @@ function CanvasNode({
   const userLabel = node.label || node.title || '';
   const broken = node.fieldKey && brokenKeys.includes(node.fieldKey);
   const isContainer = descriptor && (descriptor.isContainer === true);
-  const containerHighlighted = isContainer && hoverKey && hoverKey.startsWith(`${containerKey(childContainerPath(containerPath, index, tabIndex), undefined)}`);
 
   const myPath = childContainerPath(containerPath, index, tabIndex);
+  // STRUCTURAL container highlight (UX-1 fix): this container lights up iff the
+  // drag hover is INSIDE it — its own children-path is a SEGMENT prefix of the
+  // hover container path (canvas-path.js). The previous string.startsWith on
+  // concatenated keys false-matched container 1 while dragging inside container
+  // 10 (and nested [0,1] vs [0,10]); segment compare has real boundaries.
+  const containerHighlighted = isContainer && containerIsDropTarget(myPath, hover?.path ?? null);
 
   // T-0529/T-0656: keyboard handler — Alt+Up/Down (legacy) and plain Up/Down
   // (T-0656 — the natural arrow-key expectation once a block is selected)
@@ -327,14 +333,14 @@ function CanvasNode({
         <TabsCanvas node={node} containerPath={myPath} selectedKeys={selectedKeys}
           onSelectNode={onSelectNode} onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
           onMoveUp={onMoveUp} onMoveDown={onMoveDown}
-          onHoverContainer={onHoverContainer} hoverKey={hoverKey}
+          onHoverContainer={onHoverContainer} hover={hover}
           brokenKeys={brokenKeys} />
       )}
       {isContainer && !descriptor.isTabs && (
         <ChildrenCanvas node={node} containerPath={myPath} selectedKeys={selectedKeys}
           onSelectNode={onSelectNode} onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
           onMoveUp={onMoveUp} onMoveDown={onMoveDown}
-          onHoverContainer={onHoverContainer} hoverKey={hoverKey}
+          onHoverContainer={onHoverContainer} hover={hover}
           brokenKeys={brokenKeys} />
       )}
     </div>
@@ -342,15 +348,15 @@ function CanvasNode({
 }
 
 /** Render a container's children with interleaved DropIndicators (section/columns). */
-function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, onHoverContainer, hoverKey, brokenKeys }) {
+function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, onHoverContainer, hover, brokenKeys }) {
   const kids = Array.isArray(node.children) ? node.children : [];
   return (
     <div className="chs-canvas-children" role="group" style={{ marginTop: 'var(--chs-space-2)', marginLeft: 'var(--chs-space-3)', paddingLeft: 'var(--chs-space-2)', borderLeft: '2px solid var(--chs-color-border)' }}>
       {kids.length === 0 ? (
-        <EmptyDropZone containerPath={containerPath} onDrop={onDrop} onHoverContainer={onHoverContainer} hoverKey={hoverKey} />
+        <EmptyDropZone containerPath={containerPath} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
       ) : (
         <>
-          <DropIndicator containerPath={containerPath} insertAt={0} onDrop={onDrop} onHoverContainer={onHoverContainer} hoverKey={hoverKey} />
+          <DropIndicator containerPath={containerPath} insertAt={0} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
           {kids.map((child, i) => (
             <React.Fragment key={child.id || `${child.type}-${i}`}>
               <CanvasNode
@@ -359,10 +365,10 @@ function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRem
                 selectedKeys={selectedKeys} onSelectNode={onSelectNode}
                 onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
                 onMoveUp={onMoveUp} onMoveDown={onMoveDown}
-                onHoverContainer={onHoverContainer} hoverKey={hoverKey}
+                onHoverContainer={onHoverContainer} hover={hover}
                 brokenKeys={brokenKeys}
               />
-              <DropIndicator containerPath={containerPath} insertAt={i + 1} onDrop={onDrop} onHoverContainer={onHoverContainer} hoverKey={hoverKey} />
+              <DropIndicator containerPath={containerPath} insertAt={i + 1} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
             </React.Fragment>
           ))}
         </>
@@ -372,7 +378,7 @@ function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRem
 }
 
 /** Render a tabs node's children: a tab switcher + the active tab's children. */
-function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, onHoverContainer, hoverKey, brokenKeys }) {
+function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, onHoverContainer, hover, brokenKeys }) {
   const tabs = Array.isArray(node.tabs) ? node.tabs : [];
   const [active, setActive] = useState(0);
   const tabIdx = Math.min(active, Math.max(0, tabs.length - 1));
@@ -413,10 +419,10 @@ function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove,
         style={{ paddingLeft: 'var(--chs-space-2)', borderLeft: '2px solid var(--chs-color-border)' }}
       >
         {kids.length === 0 ? (
-          <EmptyDropZone containerPath={containerPath} tabIndex={tabIdx} onDrop={onDrop} onHoverContainer={onHoverContainer} hoverKey={hoverKey} />
+          <EmptyDropZone containerPath={containerPath} tabIndex={tabIdx} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
         ) : (
           <>
-            <DropIndicator containerPath={containerPath} tabIndex={tabIdx} insertAt={0} onDrop={onDrop} onHoverContainer={onHoverContainer} hoverKey={hoverKey} />
+            <DropIndicator containerPath={containerPath} tabIndex={tabIdx} insertAt={0} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
             {kids.map((child, i) => (
               <React.Fragment key={child.id || `${child.type}-${i}`}>
                 <CanvasNode
@@ -425,10 +431,10 @@ function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove,
                   selectedKeys={selectedKeys} onSelectNode={onSelectNode}
                   onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
                   onMoveUp={onMoveUp} onMoveDown={onMoveDown}
-                  onHoverContainer={onHoverContainer} hoverKey={hoverKey}
+                  onHoverContainer={onHoverContainer} hover={hover}
                   brokenKeys={brokenKeys}
                 />
-                <DropIndicator containerPath={containerPath} tabIndex={tabIdx} insertAt={i + 1} onDrop={onDrop} onHoverContainer={onHoverContainer} hoverKey={hoverKey} />
+                <DropIndicator containerPath={containerPath} tabIndex={tabIdx} insertAt={i + 1} onDrop={onDrop} onHoverContainer={onHoverContainer} hover={hover} />
               </React.Fragment>
             ))}
           </>
@@ -547,9 +553,12 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   const [saveState, setSaveState] = useState({ status: 'idle' });
   const [loadError, setLoadError] = useState(null);
   const [saveGen, setSaveGen] = useState(0);
-  // T-0656: canvas-wide drag-hover key — which insertion point (and thus which
+  // T-0656: canvas-wide drag-hover state — which insertion point (and thus which
   // container) is the current drop target, so the WHOLE container highlights.
-  const [hoverKey, setHoverKey] = useState(null);
+  // `key` (exact string) drives the hovered INDICATOR's own bar; `path` (segment
+  // array + tab) drives the CONTAINER highlight via STRUCTURAL prefix compare
+  // (canvas-path.js) — NOT string.startsWith, which false-matches "10" under "1".
+  const [hover, setHover] = useState(null); // null | { key, path, tabIndex }
   // T-0656: fullscreen canvas toggle (local state, no routing).
   const [isFullscreen, setIsFullscreen] = useState(false);
   // T-0656: live-region announcement text for screen readers.
@@ -565,7 +574,12 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   const savedDocRef = useRef(initialDocument ?? null);
 
   // T-0656: shared hover handler passed to every DropIndicator/EmptyDropZone.
-  const onHoverContainer = useCallback((key) => setHoverKey(key), []);
+  // Stores the exact key (for the indicator) AND the structured path (for the
+  // structural container-highlight compare). Called with null to clear.
+  const onHoverContainer = useCallback((key, containerPath, tabIndex) => {
+    if (key === null || key === undefined) { setHover(null); return; }
+    setHover({ key, path: containerPath, tabIndex });
+  }, []);
 
   // commit a doc transform through history (single source of truth for edits).
   const commit = useCallback((fn) => {
@@ -724,7 +738,7 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   // --- drop dispatch (nested, path-aware) ---
   const handleDrop = useCallback((dropTarget, e) => {
     const data = readDrag(e);
-    setHoverKey(null);
+    setHover(null);
     if (!data) return;
     const { containerPath, tabIndex, insertAt } = dropTarget;
     if (data.kind === 'reorder') {
@@ -838,9 +852,13 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   }, [doUndo, doRedo, cutSelected, pasteClipboard, selectedKeys.size, isFullscreen]);
 
   // T-0656: autoscroll the canvas when a drag hovers near its top/bottom edge.
+  // Reduced-motion (accessibility): skip the continuous rAF loop (that IS the
+  // "motion") and do a single discrete nudge per dragover — the off-screen drop
+  // target stays reachable without a continuously animated scroll.
   useEffect(() => {
     const el = canvasRef.current;
     if (!el) return undefined;
+    const reduced = prefersReducedMotion();
     let raf = null;
     let delta = 0;
     const step = () => {
@@ -853,7 +871,13 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
     };
     const onDragOver = (e) => {
       delta = computeAutoscrollDelta(el.getBoundingClientRect(), e.clientY);
-      if (delta !== 0 && raf === null) raf = requestAnimationFrame(step);
+      if (delta === 0) return;
+      if (reduced) {
+        // discrete single nudge, no continuous loop
+        el.scrollTop += delta;
+        return;
+      }
+      if (raf === null) raf = requestAnimationFrame(step);
     };
     const stop = () => { delta = 0; if (raf !== null) { cancelAnimationFrame(raf); raf = null; } };
     el.addEventListener('dragover', onDragOver);
@@ -880,7 +904,10 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   const selectedSchemaField = selectedNode && selectedNode.fieldKey ? fields.find((f) => f.key === selectedNode.fieldKey) : null;
 
   return (
-    <div className="chs-form-designer" style={{ display: 'grid', gridTemplateColumns: '240px 1fr 380px', gap: 'var(--chs-space-4)' }}>
+    <div
+      className={`chs-form-designer${isFullscreen ? ' chs-form-designer--fullscreen' : ''}`}
+      style={{ display: 'grid', gridTemplateColumns: '240px 1fr 380px', gap: 'var(--chs-space-4)' }}
+    >
       {/* ---- Palette + source picker ---- */}
       <aside className="chs-designer-palette">
         {!initialFields && (
@@ -932,28 +959,31 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
       {/* ---- Canvas (nested tree) ---- */}
       <main
         ref={canvasRef}
-        className={`chs-designer-canvas${isFullscreen ? ' chs-designer-canvas--fullscreen' : ''}`}
+        className="chs-designer-canvas"
         role="tree"
         aria-label="Дерево конструктора"
         onDragOver={(e) => e.preventDefault()}
         onDrop={handleRootDrop}
-        onDragLeave={(e) => { if (e.currentTarget === e.target) setHoverKey(null); }}
+        onDragLeave={(e) => { if (e.currentTarget === e.target) setHover(null); }}
         style={{ minHeight: 200, padding: 'var(--chs-space-3)', border: '1px dashed var(--chs-color-border)', borderRadius: 'var(--chs-radius-md)' }}
       >
-        {/* T-0656: canvas action bar — fullscreen toggle (works; not a stub). */}
+        {/* T-0656: canvas action bar — fullscreen toggle (works; not a stub).
+            UX-2 fix: fullscreen expands the WHOLE workspace (palette + canvas +
+            inspector), not just the canvas — so a field can still be dragged in
+            and properties still edited. The on-screen hint is now TRUE. */}
         <div className="chs-designer-canvas__bar">
           <Button
             variant="ghost"
             onClick={() => setIsFullscreen((v) => !v)}
-            title={isFullscreen ? 'Выйти из полноэкранного режима (Esc)' : 'Развернуть канвас на весь экран'}
+            title={isFullscreen ? 'Выйти из полноэкранного режима (Esc)' : 'Развернуть конструктор на весь экран'}
             aria-pressed={isFullscreen}
-            aria-label={isFullscreen ? 'Свернуть канвас' : 'Развернуть канвас на весь экран'}
+            aria-label={isFullscreen ? 'Свернуть конструктор' : 'Развернуть конструктор на весь экран'}
           >
             {isFullscreen ? '🗗 Свернуть' : '⛶ На весь экран'}
           </Button>
           {isFullscreen && (
             <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-              Палитра и свойства — по краям экрана. Esc — выйти.
+              Палитра слева, свойства справа. Esc — выйти.
             </span>
           )}
         </div>
@@ -964,10 +994,10 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
         {!doc ? (
           <EmptyState title="Выберите набор полей" description="Слева выберите приложение и набор полей — форма соберётся из них." />
         ) : rootChildren.length === 0 ? (
-          <EmptyDropZone containerPath={[]} onDrop={handleDrop} onHoverContainer={onHoverContainer} hoverKey={hoverKey} />
+          <EmptyDropZone containerPath={[]} onDrop={handleDrop} onHoverContainer={onHoverContainer} hover={hover} />
         ) : (
           <>
-            <DropIndicator containerPath={[]} insertAt={0} onDrop={handleDrop} onHoverContainer={onHoverContainer} hoverKey={hoverKey} />
+            <DropIndicator containerPath={[]} insertAt={0} onDrop={handleDrop} onHoverContainer={onHoverContainer} hover={hover} />
             {rootChildren.map((node, i) => (
               <React.Fragment key={node.id || `${node.type}-${i}`}>
                 <CanvasNode
@@ -976,10 +1006,10 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                   selectedKeys={selectedKeys} onSelectNode={selectNode}
                   onRemove={removeAt} onDuplicate={duplicateAt} onDrop={handleDrop}
                   onMoveUp={moveNodeUp} onMoveDown={moveNodeDown}
-                  onHoverContainer={onHoverContainer} hoverKey={hoverKey}
+                  onHoverContainer={onHoverContainer} hover={hover}
                   brokenKeys={validation.brokenKeys}
                 />
-                <DropIndicator containerPath={[]} insertAt={i + 1} onDrop={handleDrop} onHoverContainer={onHoverContainer} hoverKey={hoverKey} />
+                <DropIndicator containerPath={[]} insertAt={i + 1} onDrop={handleDrop} onHoverContainer={onHoverContainer} hover={hover} />
               </React.Fragment>
             ))}
           </>

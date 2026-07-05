@@ -2,8 +2,8 @@
  * web/src/forms/canvas-autoscroll.test.js  (T-0656)
  */
 
-import { describe, it, expect } from 'vitest';
-import { computeAutoscrollDelta, AUTOSCROLL_EDGE_PX, AUTOSCROLL_MAX_SPEED_PX } from './canvas-autoscroll.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { computeAutoscrollDelta, prefersReducedMotion, AUTOSCROLL_EDGE_PX, AUTOSCROLL_MAX_SPEED_PX } from './canvas-autoscroll.js';
 
 const RECT = { top: 100, bottom: 500 };
 
@@ -44,5 +44,30 @@ describe('computeAutoscrollDelta', () => {
   it('is a no-op with a missing rect or non-numeric clientY', () => {
     expect(computeAutoscrollDelta(null, 200)).toBe(0);
     expect(computeAutoscrollDelta(RECT, undefined)).toBe(0);
+  });
+});
+
+describe('prefersReducedMotion', () => {
+  afterEach(() => {
+    delete globalThis.window;
+  });
+
+  it('returns false when there is no window / matchMedia (test/node env)', () => {
+    expect(prefersReducedMotion()).toBe(false);
+  });
+
+  it('returns true when matchMedia reports the reduce preference', () => {
+    globalThis.window = { matchMedia: (q) => ({ matches: q.includes('reduce') }) };
+    expect(prefersReducedMotion()).toBe(true);
+  });
+
+  it('returns false when matchMedia reports no preference', () => {
+    globalThis.window = { matchMedia: () => ({ matches: false }) };
+    expect(prefersReducedMotion()).toBe(false);
+  });
+
+  it('is defensive: matchMedia throwing does not blow up', () => {
+    globalThis.window = { matchMedia: () => { throw new Error('boom'); } };
+    expect(prefersReducedMotion()).toBe(false);
   });
 });

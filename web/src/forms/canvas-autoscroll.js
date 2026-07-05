@@ -19,6 +19,22 @@ export const AUTOSCROLL_EDGE_PX = 48;
 export const AUTOSCROLL_MAX_SPEED_PX = 18;
 
 /**
+ * True iff the user asked for reduced motion. The autoscroll caller uses this to
+ * skip the continuous requestAnimationFrame loop (which IS the "motion") and
+ * fall back to a single discrete scroll per dragover — the off-screen drop
+ * target stays reachable, but nothing animates continuously. Guarded for
+ * non-browser / test environments where matchMedia is absent.
+ */
+export function prefersReducedMotion() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Compute how many pixels to scroll THIS frame, given the scroll container's
  * bounding rect and the current drag cursor Y (viewport coordinates).
  *
