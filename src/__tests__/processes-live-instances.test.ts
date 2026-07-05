@@ -820,3 +820,130 @@ describe("T-0648 · GET /api/processes/:id honest degrade when resolveActorsDisp
     expect(data.history[0]?.completedByName).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0648 LIVE_PROOF (§2) — the REAL history shape Flowable returns, WITH the
+// `sequenceFlow` transition entries the live stand actually had. These are the
+// two RED symptoms the browser proof caught:
+//   (A) raw `sf-*` sequenceFlow ids shown as "step names" (empty activityName
+//       falls back to the technical activityId), and
+//   (B) completedBy never rendered — sequenceFlows have no assignee, and the
+//       instance in question interleaved them with the userTasks.
+// The fix filters out sequenceFlow entries so ONLY real BPMN nodes remain.
+// This test uses the exact `sf-start-fin` / `sf-timer-esc` / `sf-fin-converge`
+// / `sf-converge-end` ids from the live-proof report — it REDs on the pre-fix
+// code (those steps were present) and proves completedBy survives.
+// ---------------------------------------------------------------------------
+
+describe("T-0648 LIVE_PROOF §2 · sequenceFlow transitions are filtered from step history", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+  let harness: ReturnType<typeof buildServer>;
+
+  beforeAll(async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0648-seqflow";
+    const flowableStub = {
+      getHistoricVariableInstances: async () => ({ ok: true as const, variables: [] }),
+      getHistoricActivityInstances: async () => ({
+        ok: true as const,
+        // Real-world ordering: node, transition, node, transition, … exactly
+        // like the completed instance in the live-proof report.
+        activities: [
+          {
+            activityId: "start1", activityName: "Начало", activityType: "startEvent",
+            startTime: "2026-07-03T10:00:00.000+0000", endTime: "2026-07-03T10:00:00.000+0000",
+            assignee: null,
+          },
+          // sequenceFlow: EMPTY name (falls back to raw id) + NO assignee.
+          {
+            activityId: "sf-start-fin", activityName: "", activityType: "sequenceFlow",
+            startTime: "2026-07-03T10:00:00.100+0000", endTime: "2026-07-03T10:00:00.100+0000",
+            assignee: null,
+          },
+          {
+            activityId: "task-fin", activityName: "Проверка бюджета", activityType: "userTask",
+            startTime: "2026-07-03T10:00:01.000+0000", endTime: "2026-07-03T10:05:00.000+0000",
+            assignee: "e-fixture-assignee",
+          },
+          {
+            activityId: "sf-timer-esc", activityName: "", activityType: "sequenceFlow",
+            startTime: "2026-07-03T10:05:00.100+0000", endTime: "2026-07-03T10:05:00.100+0000",
+            assignee: null,
+          },
+          {
+            activityId: "sf-fin-converge", activityName: "", activityType: "sequenceFlow",
+            startTime: "2026-07-03T10:05:00.200+0000", endTime: "2026-07-03T10:05:00.200+0000",
+            assignee: null,
+          },
+          {
+            activityId: "sf-converge-end", activityName: "", activityType: "sequenceFlow",
+            startTime: "2026-07-03T10:05:00.300+0000", endTime: "2026-07-03T10:05:00.300+0000",
+            assignee: null,
+          },
+          {
+            activityId: "end1", activityName: "Готово", activityType: "endEvent",
+            startTime: "2026-07-03T10:05:01.000+0000", endTime: "2026-07-03T10:05:01.000+0000",
+            assignee: null,
+          },
+        ],
+      }),
+    } as unknown as StartInstanceDeps["flowable"];
+
+    const deps: StartInstanceDeps = {
+      pool: makeProjectionPool([startedRow(LIVE_INST)]),
+      flowable: flowableStub,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorsDisplay: async (_tenantId, ids) => {
+        const m = new Map();
+        if (ids.includes("e-fixture-assignee")) {
+          m.set("e-fixture-assignee", {
+            id: "e-fixture-assignee", name: "Д. Гаврилов", type: "human",
+            deactivated: false, resolved: true,
+          });
+        }
+        return m;
+      },
+    };
+    harness = buildServer(deps);
+    await new Promise<void>((resolve) =>
+      harness.server.listen(0, "127.0.0.1", () => resolve()),
+    );
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = prevDbUrl;
+  });
+
+  it("NO raw sf-* sequenceFlow ids appear as step names (the live-proof RED §2-A)", async () => {
+    const { status, json } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes/${LIVE_INST}`,
+      { "x-dev-user": ACTOR },
+    );
+    expect(status).toBe(200);
+    const data = json as { history: Array<Record<string, unknown>> };
+    const stepNames = data.history.map((h) => h.step);
+    // Every sf-* transition id from the live-proof report must be gone.
+    for (const sf of ["sf-start-fin", "sf-timer-esc", "sf-fin-converge", "sf-converge-end"]) {
+      expect(stepNames).not.toContain(sf);
+    }
+    // No `sequenceFlow`-kind step survives at all.
+    expect(data.history.every((h) => h.kind !== "sequenceFlow")).toBe(true);
+    // Only the 3 real nodes remain, with human names.
+    expect(stepNames).toEqual(["Начало", "Проверка бюджета", "Готово"]);
+  });
+
+  it("the completed userTask still carries completedBy resolved to a name (the live-proof RED §2-B)", async () => {
+    const { json } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes/${LIVE_INST}`,
+      { "x-dev-user": ACTOR },
+    );
+    const data = json as { history: Array<Record<string, unknown>> };
+    const task = data.history.find((h) => h.step === "Проверка бюджета");
+    expect(task?.completedBy).toBe("e-fixture-assignee");
+    expect(task?.completedByName).toBe("Д. Гаврилов");
+    expect(task?.completedByType).toBe("human");
+  });
+});
