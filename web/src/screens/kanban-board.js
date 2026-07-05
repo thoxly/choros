@@ -138,6 +138,57 @@ export function isFieldRequired(recordSchema, fieldKey) {
 }
 
 // ---------------------------------------------------------------------------
+// resolveCardLabel (T-0626) — the card's title/aria-label, extracted as a
+// PURE function so the fallback contract is unit-testable without React/hooks
+// (KanbanCard uses useCallback, so it cannot be called as a plain function in
+// this repo's hook-free, jsdom-free vitest tier — see kanban-board.jsx.test.js
+// header note; the render-affecting VALUE is what matters, so it lives here).
+// ---------------------------------------------------------------------------
+
+/**
+ * resolveCardLabel — the human-readable label for one kanban card.
+ *
+ * When card_fields IS configured (fields.length > 0): unchanged v1 behaviour
+ * — render the FIRST configured field's value (formatCellValue), falling
+ * back to a short id ref only if that specific field renders to a non-string
+ * for this record.
+ *
+ * When card_fields is EMPTY (T-0626 fix, capstone T-0584 LIVE_PROOF finding):
+ * previously fell back to a raw `Запись ${id.slice(0,8)}` UUID prefix. Now
+ * defers to deriveRecordLabel — the SAME record-title convention already used
+ * by relation fields (RelationCell/RelationPicker) and the record list/detail
+ * screens (records-form.js, T-0447): first non-empty string/number value in
+ * record.data, or a short id ref (never a bare full UUID) if the record has
+ * no textual field at all.
+ *
+ * @param {{id:string, data:object}} record
+ * @param {string[]} cardFields                configured card_fields (may be empty/undefined)
+ * @param {Map<string,{key,label,type}>} fieldMetaByKey
+ * @param {(v:unknown, type:string) => (string|symbol)} formatCellValueFn
+ * @param {(field:object, data:object) => unknown} computeComputedFieldValueFn
+ * @param {(record:object) => string} deriveRecordLabelFn
+ * @returns {string}
+ */
+export function resolveCardLabel(
+  record,
+  cardFields,
+  fieldMetaByKey,
+  formatCellValueFn,
+  computeComputedFieldValueFn,
+  deriveRecordLabelFn,
+) {
+  const data = record && typeof record.data === "object" && record.data !== null ? record.data : {};
+  const fields = Array.isArray(cardFields) ? cardFields : [];
+  if (fields.length === 0) {
+    return deriveRecordLabelFn(record);
+  }
+  const first = fieldMetaByKey.get(fields[0]);
+  const v = first && first.type === "computed" ? computeComputedFieldValueFn(first, data) : data[fields[0]];
+  const rendered = formatCellValueFn(v, first ? first.type : "string");
+  return typeof rendered === "string" ? rendered : `Запись ${record.id.slice(0, 8)}`;
+}
+
+// ---------------------------------------------------------------------------
 // readSelectEnum — mirror of src/core/view-config.ts's enumValuesForSelectField
 // (client-side; the SAME read as the server helper of the same intent, kept as
 // a small local mirror since this module stays framework/build-target-neutral
