@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0611",
+  "status": "pr_open",
+  "branch": "task/T-0611-slug-resolve-ambiguity",
+  "pr_url": "local:task/T-0611-slug-resolve-ambiguity",
+  "summary": "T-0607 review F4 (medium, non-blocking): resolveIdBySlug (src/http/assistant.ts) резолвило registry_def-слаг через `WHERE tenant_id=$1 AND slug=$2 LIMIT 1` — без фильтра application_id и без ORDER BY, хотя схема разрешает UNIQUE(tenant_id, application_id, slug), т.е. один и тот же слаг МОЖЕТ легально существовать в двух разных приложениях одного тенанта. На коллизии старый запрос молча выбирал ПРОИЗВОЛЬНУЮ строку — конфигуратор мог отредактировать НЕ ТОТ реестр, а честный отчёт всё равно показывал ложный ✓ (операция реально выполнилась — но на чужой цели). Не дыра безопасности (в пределах тенанта, в пределах прав, RLS не обойдено) — дефект корректности/доверия столпа 5.",
+  "mechanism": {
+    "resolver": "resolveIdBySlug теперь возвращает дискриминированный SlugResolveResult = {kind:'id',id} | {kind:'not_found'} | {kind:'ambiguous', slug, candidates:[{registryDefId, applicationSlug, applicationDisplayName}]}. UUID passthrough не тронут (нулевая стоимость на мажоритарном пути). application (UNIQUE(tenant_id, slug)) — ORDER BY id, максимум 1 строка (без изменения наблюдаемого поведения). registry_def — JOIN на application, ORDER BY rd.id, ВСЕ совпадения; 0 строк→not_found, 1→id, >=2→ambiguous со списком кандидатов (слаг+имя приложения).",
+    "call_sites": "Все 5 точек вызова в src/http/assistant.ts обновлены под новый дискриминированный результат. 3 registry_def-точки (relate_application source; relate_application(link) target; edit_jsonschema_non_destructive) на kind==='ambiguous' делают ROLLBACK (НИКАКОЙ мутации) и возвращают честную op-error строку с перечислением слага + приложений-кандидатов + инструкцией передать raw UUID реестра. 2 application-точки (author_binding — тоже ROLLBACK+честное сообщение на ambiguous, хотя недостижимо на практике; generate_process grounding — ambiguous трактуется как not_found, деградация к null-grounding, т.к. это мягкая подсказка, не запись) обновлены под новый тип, поведение для kind='id'/'not_found' байт-в-байт то же, что раньше.",
+    "no_context_threading": "Не вводился 'текущее приложение' контекст диалога ассистента (потребовал бы новых tool-schema параметров + LLM-промптинга — отдельная фича, не бажный фикс; см. ADR §«Why not thread application_id context instead»). Детерминированный отказ — это страховочный пол независимо от будущего контекст-фиче."
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npm run build (tsc + seed/tsconfig) — 0 ошибок. npx tsc --noEmit — 0 ошибок.",
+    "lint": true,
+    "lint_result": "npx eslint src — exit 0, 44 pre-existing no-console warnings (0 связаны с T-0611, тот же паттерн что T-0607/T-0600), 0 errors.",
+    "types": true,
+    "types_result": "покрыто npx tsc --noEmit — 0 ошибок; дискриминированный union SlugResolveResult проверен exhaustively на всех 5 call sites (TS требует явной обработки kind==='ambiguous' — без неё компиляция падает на unwrap .id).",
+    "tests": true,
+    "tests_result": "npx vitest run — 283 файла passed | 2 skipped (285), 5488 тестов passed | 10 skipped (5498), exit 0. Без db: обычный unit-набор не тронут (resolveIdBySlug — internal helper, используется только в assistant.ts + db-тестах).",
+    "fitness": true,
+    "fitness_result": "npm run fitness (полная цепочка ~180 гейтов, включая npm run build) — exit 0. Целевые гейты: bash ci/checks/single-resolver.sh → PASS; bash ci/checks/grant-resolver-isolation.sh → PASS; bash ci/checks/registry-defs-pdp-isolation.sh → PASS (FF-RDP1..7 все зелёные). npm run fitness:db (Postgres :55432, migrations актуальны) — 129 файлов passed, 1250 тестов passed, exit 0, включая НОВЫЙ ci/checks/db/registry-def-slug-ambiguity.test.ts (2 теста: AC-1/2 честный отказ без мутации ни одного реестра; AC-3 raw-UUID escape hatch адресует ровно один реестр) и НЕИЗМЕНЁННЫЙ ci/checks/db/edit-jsonschema-slug-resolve.test.ts (T-0607 AC-6a/b/c, 1 тест) — оба зелёные."
+  },
+  "files_changed": [
+    "T-0611.spec.md",
+    "docs/design/ADR-T0611-slug-resolve-disambiguation.md",
+    "src/http/assistant.ts",
+    "ci/checks/db/registry-def-slug-ambiguity.test.ts",
+    "docs/handoff/T-0611.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [
+    "worktree был без node_modules при старте — npm ci --maxsockets=3 потребовался перед tsc/eslint/vitest (без флейка).",
+    "миграции против общего Postgres :55432 (контейнер choros-postgres-1, разделяемый несколькими worktree) уже были применены к моменту старта — npm run migrate вернул 'nothing to apply', схема registry_def/application подтверждена напрямую через information_schema перед написанием DB-теста."
+  ]
+}

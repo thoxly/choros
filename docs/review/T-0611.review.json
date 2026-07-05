@@ -1,0 +1,35 @@
+{
+  "task_id": "T-0611",
+  "reviewer": "independent-judge (D-007: not the author)",
+  "reviewed_sha": "6411cbe0f6540afc3feeae0f5111633018fa7341",
+  "base_sha": "1e52cd7af1177ae24b6d7ce3c9694d01ed85adb9",
+  "branch": "task/T-0611-slug-resolve-ambiguity",
+  "verdict": "approved",
+  "verdict_rationale": "resolveIdBySlug now returns a discriminated SlugResolveResult (id|not_found|ambiguous) instead of `string|null`. All 5 call sites in src/http/assistant.ts (lines 625, 651, 765, 836, 1036) handle all three members — verified by reading each call site plus tsc: because the union is discriminated and the code narrows via `if (kind==='not_found') return; if (kind==='ambiguous') return;` before touching `.id`, a missing branch would fail to compile (not_found/ambiguous variants have no `.id` field); `npx tsc --noEmit` is clean, confirming exhaustiveness at all 5 sites. The 3 registry_def sites (relate_application source+link-target, edit_jsonschema_non_destructive) ROLLBACK with zero mutation and a Russian human message naming the slug + listing candidate apps (slug+display name) + UUID escape-hatch instruction on ambiguous. The 2 application sites (author_binding, generate_process grounding) are provably unreachable for 'ambiguous' given UNIQUE(tenant_id, slug) on choros.application (migrations/003_application.sql:15, confirmed by direct read) — author_binding still handles it defensively (rollback+message), grounding correctly collapses ambiguous into the same null-degrade as not_found (a soft hint path, never a write, byte-identical prior behavior). registry_def is UNIQUE(tenant_id, application_id, slug) with no UNIQUE(tenant_id,slug) (migrations/004_registry_def.sql:20, confirmed) — the cross-app collision precondition is real, not hypothetical. Ran the new live-Postgres test directly against :55432 (real DB, not mocked): both AC tests pass (2/2) — AC-1/2 proves honest refusal with NO mutation to either registry's record_schema; AC-3 proves the raw-UUID escape hatch resolves exactly one registry. Also reran the neighboring T-0607 db-test (edit-jsonschema-slug-resolve.test.ts) — still green (6/6 in that filtered run), confirming the non-ambiguous path is untouched. Spec, ADR and pr-handoff are internally consistent with the diff (call-site count, message wording, schema claims all check out against the actual migrations and code). No case-content (закупка/ТЭЛ/purchaseApproval literals) appears anywhere in the diff itself — anti-case gate holds for this change. One legitimate scope finding (not a blocker, and explicitly out of scope per this task's own spec non-goals): the same slug->LIMIT-1-without-ORDER-BY pattern exists unaddressed in ~10 other files (employee, tenant, grants, sod, org, etc.) — flagged as F1 for a future task, since none of those tables are documented as having a matching cross-scope ambiguity precondition and auditing each is a separate investigation.",
+  "ci_seen": {
+    "green": true,
+    "tsc_noemit": "PASS (0 errors) — run directly, confirms exhaustive discriminated-union handling at all 5 call sites",
+    "new_db_test": "PASS — `DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism -t T-0611` → registry-def-slug-ambiguity.test.ts: 2/2 passed (AC-1/2 honest refusal + no mutation; AC-3 UUID escape hatch)",
+    "regression_db_test": "PASS — same runner with -t T-0607 → edit-jsonschema-slug-resolve.test.ts and 3 other T-0607-tagged files: 6/6 passed, confirms non-ambiguous path (T-0607 AC-6a/b/c) unmodified",
+    "anti_case_diff_scan": "PASS — `git diff dev...HEAD | grep -iE закупк|ТЭЛ|purchaseApproval|zakupki` returns no matches"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/db/org.ts:681,719,760,782; src/db/grants-dao.ts:218,401,412; src/http/rights-intents.ts:1095,1182; src/http/rights-sod.ts:274; src/db/sod-dao.ts:396; src/db/substitution-dao.ts:204,245,292; src/http/rights-overview.ts:211; src/http/pdp-explain.ts:120; src/http/report-page-render.ts:206; src/http/rights-change-requests.ts:172; src/http/solution-bundles.ts:113; src/http/grants.ts:1444; src/http/assistant.ts:1290,1783",
+      "issue": "The same `WHERE tenant_id = $1 AND slug = $2 LIMIT 1` (no ORDER BY) pattern this task fixed for registry_def appears in ~10 other files, mostly resolving `employee` by slug and a couple of `tenant`/role-slug lookups. Not evaluated for this review (out of scope per T-0611.spec.md non-goals, and the task's own premise is registry_def-specific), but worth a dedicated audit: `employee.slug` uniqueness scope should be checked (is it UNIQUE(tenant_id, slug) like `application`, or could a compound-scoped uniqueness allow collision the way registry_def did?) — if any of these tables allow the same slug at more than one tenant-scoped row, the identical wrong-target-silent-mutation risk applies.",
+      "suggestion": "File a follow-up task to audit employee/tenant/role slug-resolution call sites for the same LIMIT-1-without-ORDER-BY class of bug; only file if a matching multi-row-per-tenant schema is actually found (do not assume — this review did not check each table's constraints)."
+    }
+  ],
+  "adversarial_mutations": [],
+  "acceptance_coverage": [
+    {"ac": "AC-1 (ambiguous signal returned, not either id / not null)", "covered": true},
+    {"ac": "AC-2 (honest op-error, no db mutation, both candidates named)", "covered": true},
+    {"ac": "AC-3 (raw UUID / unique-slug paths unchanged, T-0607 AC-6 stays green)", "covered": true},
+    {"ac": "AC-4 (application resolution unaffected, author_binding/generate_process unregressed)", "covered": true},
+    {"ac": "AC-5 (no schema migration, no NEEDS-DESIGN escalation)", "covered": true}
+  ],
+  "pillar_alignment": "Столп 5 (ассистент в контуре прав/настройка через ИИ): closes a silent wrong-target mutation risk in the assistant's configurator tool-layer — the fix converts an undetectable wrong-registry edit into an honest, actionable refusal. No pillar regressed; no new NEEDS-DESIGN surface introduced (context-threading explicitly deferred per ADR, with sound reasoning for why the deterministic-refusal floor is required regardless)."
+}
