@@ -63,6 +63,16 @@ const DEV_TENANT_ID =
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// slug: lowercase alphanumerics + dashes, 1..64 chars. Matches the SLUG_RE
+// convention in applications.ts / registry-defs.ts. T-0642 fix-forward
+// (adversarial finding): POST /api/roles previously accepted ANY non-empty
+// string as slug (no charset check) — role.slug is later written UNQUOTED-
+// ADJACENT into BPMN XML as flowable:candidateGroups="<slug>" (see
+// user-task-role-mapper.ts). escapeXml at the injection site is the primary
+// fix; this charset gate is defense-in-depth so a malformed/hostile slug is
+// rejected at creation time with a human 400 instead of reaching publish.
+const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
 function assertUuidShape(value: string, label: string): void {
   if (!UUID_RE.test(value)) {
     throw new HttpError(400, "VALIDATION", `${label} must be a valid UUID`);
@@ -661,6 +671,17 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     const slug = b["slug"];
     if (typeof slug !== "string" || slug.length === 0) {
       throw new HttpError(400, "VALIDATION", "slug is required");
+    }
+    // T-0642 fix-forward: charset gate (defense-in-depth alongside the
+    // escapeXml fix at the candidateGroups injection site in
+    // user-task-role-mapper.ts) — role.slug must be a safe, URL/XML-attribute-
+    // shaped identifier, not arbitrary text.
+    if (!SLUG_RE.test(slug)) {
+      throw new HttpError(
+        400,
+        "VALIDATION",
+        "slug must be a lowercase alphanumeric/dash string (1-64 chars)",
+      );
     }
     const display_name = b["display_name"];
     if (typeof display_name !== "string" || display_name.length === 0) {
