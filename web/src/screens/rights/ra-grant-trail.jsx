@@ -60,8 +60,28 @@ function coerceActorField(v, resolved) {
   return { type: "service", name: String(v), id: String(v), resolved: false };
 }
 
-/** Human-readable role label — NEVER an object (seed subject is {type,name}). */
-function roleLabelOf(subject) {
+/**
+ * Human-readable role/grant label for the "Роль · грант" column — ALWAYS a
+ * primitive string (never a bare object → the React #31 crash-guard stays).
+ *
+ * Priority (symmetric with action/ts/scope/op/res/confirmed above — "prefer the
+ * row's OWN field when it is a non-empty STRING, else derive"):
+ *   1. r.role as a NON-EMPTY STRING — the SEED (ra-data.jsx TRAIL) carries a
+ *      real, distinct grant/role label here ("Согласование ≤ ₽250 000",
+ *      "Приёмник эскалаций агентов", …) — that is the WHOLE POINT of the
+ *      column. F-1: the previous version ignored it and showed subject.name
+ *      instead (duplicating the "Кому" actor-name column — data loss on the
+ *      exact fallback path a real user hits when the API is down).
+ *   2. otherwise fall back to the subject's label (API rows have no explicit
+ *      `role`; the role there IS the subject slug). A subject OBJECT (seed
+ *      shape) coerces to its `.name`; a string stays a string.
+ */
+function roleLabelOf(r) {
+  if (typeof r.role === "string" && r.role.trim() !== "") return r.role;
+  // r.role present but NOT a plain string (e.g. an object in some future shape):
+  // never render it bare — coerce to its .name, else fall through to subject.
+  if (r.role && typeof r.role === "object" && typeof r.role.name === "string") return r.role.name;
+  const subject = r.subject;
   if (subject === null || subject === undefined || subject === "") return "—";
   if (typeof subject === "object") {
     return typeof subject.name === "string" ? subject.name : String(subject.name ?? "—");
@@ -110,10 +130,11 @@ function apiRowToDisplay(r) {
   const payload = r.payload && typeof r.payload === "object" ? r.payload : {};
   const op = typeof r.op === "string" ? r.op : String(payload.operation ?? payload.roleId ?? r.type ?? "—");
   const res = typeof r.res === "string" ? r.res : String(payload.resourceType ?? payload.roleId ?? "—");
-  // role is ALWAYS a primitive string — seed `subject` is a {type,name} OBJECT,
-  // so `r.subject ?? "—"` would leak an object into the bare `{r.role}` JSX child
-  // (the React #31 crash). roleLabelOf coerces object → its .name.
-  const role = roleLabelOf(r.subject);
+  // role is ALWAYS a primitive string. F-1: prefer the row's OWN `role` label
+  // (the SEED carries a real, distinct grant/role name — that is the point of
+  // the "Роль · грант" column); only derive from subject when no explicit role.
+  // Never a bare object → the React #31 crash-guard is preserved.
+  const role = roleLabelOf(r);
 
   // confirmed: seed rows carry a `confirmed` string-array already; API rows carry
   // a single `confirmed_by` string. Normalise to an array of strings either way.

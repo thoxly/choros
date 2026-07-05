@@ -233,10 +233,25 @@ describe('T-0648 LIVE_PROOF · SEED-shape rows (actor/subject are {type,name} ob
     expect(typeof d.res).toBe('string');
     expect(typeof d.scope).toBe('string');
     expect(typeof d.ts).toBe('string');
-    // role derives from `subject` (as it does for API rows: role === subject).
-    // For the seed's {type,name} subject that is the human name — NOT the object,
-    // NOT "[object Object]", NOT JSON.
-    expect(d.role).toBe('Е. Ларина');
+  });
+
+  it('F-1: the "Роль · грант" column shows the seed ROLE LABEL, not the actor name', () => {
+    // F-1 regression: the seed carries its OWN distinct grant/role label in
+    // `role` — that is the whole point of the "Роль · грант" column. The role
+    // must be that LABEL ("Роль-грант ≤ ₽250 000"), NOT subject.name ("Е. Ларина",
+    // which is already shown in the neighbouring "Кому" column — showing it twice
+    // is data loss on the exact fallback path a real user hits when the API is down).
+    const d = apiRowToDisplay(SEED_ROW);
+    expect(d.role).toBe('Роль-грант ≤ ₽250 000');
+    expect(d.role).not.toBe(d.subject.name); // never duplicate the actor name
+  });
+
+  it('F-1: with NO explicit role (API-shape row) the label falls back to the subject slug', () => {
+    // API rows have no distinct `role` field — there the role IS the subject
+    // (a role slug). The subject-derivation fallback must still work.
+    const apiRow = baseRow({ subject: 'role-fin-approve-250', subjectResolved: undefined });
+    const d = apiRowToDisplay(apiRow);
+    expect(d.role).toBe('role-fin-approve-250');
   });
 
   it('apiRowToDisplay on a seed row: actor/subject carry their OWN type + a STRING name (never nested)', () => {
