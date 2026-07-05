@@ -50,6 +50,8 @@ import {
   mapSchemaError,
   blankField,
   blankSubField,
+  deriveFieldKeyFromTitle,
+  uniqueFieldKey,
 } from './apps-schema.js';
 
 // Scalar types permitted inside a «Список строк» column — label map for the
@@ -80,9 +82,16 @@ const inputCls = (invalid) => `chs-input ${invalid ? 'chs-input--invalid' : ''}`
 // .chs-itable <td> cells, which fights the dense 34px row contract (controls are
 // 30px tall but the option-textarea blows the cell height out). The editor is a
 // FORM, not a data table — render it as a CSS grid instead: one aligned grid row
-// per field (key · type · title · required · reorder), with the select-options
-// textarea and inline errors flowing into a full-width sub-row below.
-const editorGridCols = 'minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1.6fr) auto auto';
+// per field, with the select-options textarea, the KEY preview, and inline errors
+// flowing into a full-width sub-row below.
+//
+// T-0686 INVERSION: the human «Название» is now the PRIMARY, first column
+// (widest) — the author names the field and the machine KEY auto-derives. The
+// KEY input moved OUT of the dense row into the sub-row (a SlugField-style
+// «ключ: … · изменить» preview), so the top row is: title · type · required ·
+// reorder (no hand-written latin key up front — that was the field-level
+// «слаг-ад» the capstone T-0647 proved).
+const editorGridCols = 'minmax(0, 2fr) minmax(0, 1fr) auto auto';
 const fieldRowGrid = {
   display: 'grid',
   gridTemplateColumns: editorGridCols,
@@ -559,7 +568,81 @@ function FormulaConfigEditor({ field, errors, allFields, onChange }) {
 }
 
 /**
- * FieldRow — one editable field: key · type · title · required · reorder/remove.
+ * FieldKeyPreview — T-0686: the per-field machine KEY, presented SlugField-style
+ * (T-0650). The human «Название» is primary; the key is a derived machine detail
+ * shown here in the field's sub-row, not a mandatory first-column input.
+ *
+ * Two states (mirrors SlugField, but the key grammar is FIELD_KEY_RE — snake_case,
+ * NOT the kebab-case app/set slug):
+ *   • !keyTouched (default) — live preview «ключ: `summa_avansa` · изменить»,
+ *     auto-derived from the title (deriveFieldKeyFromTitle) + de-duplicated
+ *     against sibling keys (uniqueFieldKey). No direct key input. When the title
+ *     is empty the preview reads «ключ сгенерируется из названия».
+ *   • keyTouched — a normal mono input (after «изменить»): the author hand-edits
+ *     the key; further title edits no longer re-derive it (dirty semantics, owned
+ *     by the field object's keyTouched flag — parent-owned, hook-free).
+ *
+ * @param {{ field, siblingKeys: string[], error?: string, onChange: (patch)=>void }} props
+ *        siblingKeys — the keys of the OTHER fields in the set (for the unique preview)
+ */
+function FieldKeyPreview({ field, siblingKeys, error, onChange }) {
+  const keyTouched = Boolean(field.keyTouched);
+  const takenBySiblings = new Set(siblingKeys);
+  // Live preview: derive from the title, then uniquify against siblings.
+  const previewKey = uniqueFieldKey(deriveFieldKeyFromTitle(field.title), takenBySiblings);
+  const hasTitle = typeof field.title === 'string' && field.title.trim().length > 0;
+
+  if (keyTouched) {
+    return (
+      <div style={{ marginTop: 'var(--chs-space-3)', maxWidth: '360px' }}>
+        <span className="chs-label" style={{ display: 'block', marginBottom: 'var(--chs-space-2)' }}>
+          Ключ поля
+        </span>
+        <input
+          className={`${inputCls(Boolean(error))} chs-input--mono`}
+          value={field.key}
+          onChange={(e) => onChange({ key: e.target.value })}
+          placeholder="field_key"
+          aria-label="Ключ поля"
+          aria-invalid={Boolean(error) || undefined}
+        />
+        <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+          Латинские буквы/цифры/подчёркивание. Стабилен после сохранения — записи ссылаются на него.
+        </span>
+        {error && <span style={errStyle}>{error}</span>}
+      </div>
+    );
+  }
+
+  // Default (untouched): live preview mirrored from the title, no direct input.
+  return (
+    <div style={{ marginTop: 'var(--chs-space-2)' }}>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-3)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+        {hasTitle ? (
+          <>
+            ключ:{' '}
+            <MonoId>{previewKey}</MonoId>
+          </>
+        ) : (
+          'ключ сгенерируется из названия'
+        )}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => onChange({ keyTouched: true, key: previewKey })}
+        >
+          изменить
+        </Button>
+      </span>
+      {error && <span style={errStyle}>{error}</span>}
+    </div>
+  );
+}
+
+/**
+ * FieldRow — one editable field: title · type · required · reorder/remove, with
+ * the machine KEY shown SlugField-style in the sub-row (T-0686 inversion).
  * Controlled entirely by the parent (FieldEditor) via onChange/onMove/onRemove.
  *
  * T-0294: when type="select", a textarea for entering option values (one per line)
@@ -571,7 +654,7 @@ function FormulaConfigEditor({ field, errors, allFields, onChange }) {
  * FieldEditor and passed down) for the target selector. targetRegistryId stored
  * on the field object.
  */
-function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError, allFields, onCreateRelatedApp }) {
+function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError, allFields, siblingKeys, onCreateRelatedApp }) {
   const set = (patch) => onChange({ ...field, ...patch });
 
   // T-0463 [D8-G2]: inline "create related app" state for the relation picker.
@@ -614,25 +697,22 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
     set({ options: text.split('\n') });
   };
 
-  // T-0512: multi-select also shows the options textarea (same as select).
-  const hasSubRow = field.type === 'select' || field.type === 'multi-select' || field.type === 'relation'
-    || field.type === 'collection' || field.type === 'computed'
-    || Boolean(errors.key) || Boolean(errors.type) || Boolean(errors.title)
-    || Boolean(errors.options) || Boolean(errors.targetRegistryId)
-    || Boolean(errors.rollupSource) || Boolean(errors.rollupOp)
-    || Boolean(errors.rollupValueField) || Boolean(errors.rollupFactorField)
-    || Boolean(errors.formulaExpr);
+  // T-0686: the sub-row is ALWAYS present now — it hosts the per-field KEY preview
+  // («ключ: … · изменить», SlugField-style) in addition to the type-specific
+  // editors and inline errors it already carried.
+  const hasSubRow = true;
 
   return (
     <div role="group" aria-label={`Поле ${index + 1}`} style={fieldRowGrid}>
-      {/* key */}
+      {/* T-0686: title is now PRIMARY (first, widest) — the human names the field;
+          the machine key auto-derives (shown SlugField-style in the sub-row). */}
       <input
-        className={`${inputCls(Boolean(errors.key))} chs-input--mono`}
-        value={field.key}
-        onChange={(e) => set({ key: e.target.value })}
-        placeholder="field_key"
-        aria-label="Ключ поля"
-        aria-invalid={Boolean(errors.key) || undefined}
+        className={inputCls(Boolean(errors.title))}
+        value={field.title}
+        onChange={(e) => set({ title: e.target.value })}
+        placeholder="Название поля"
+        aria-label="Название поля"
+        aria-invalid={Boolean(errors.title) || undefined}
       />
       {/* type */}
       <select
@@ -645,15 +725,6 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
           <option key={t.value} value={t.value}>{t.label}</option>
         ))}
       </select>
-      {/* title */}
-      <input
-        className={inputCls(Boolean(errors.title))}
-        value={field.title}
-        onChange={(e) => set({ title: e.target.value })}
-        placeholder="Название (опц.)"
-        aria-label="Название поля"
-        aria-invalid={Boolean(errors.title) || undefined}
-      />
       {/* required — hidden for computed fields (a computed value is never stored
           in record.data so it can never satisfy a required constraint; T-0452). */}
       {field.type !== 'computed' ? (
@@ -685,7 +756,14 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
           the dense single-line row. */}
       {hasSubRow && (
         <div style={{ gridColumn: '1 / -1', marginTop: 'var(--chs-space-2)' }}>
-          {errors.key && <span style={errStyle}>Ключ: {errors.key}</span>}
+          {/* T-0686: per-field KEY — auto-derived from «Название», SlugField-style
+              preview + «изменить». errors.key (grammar/dup) surfaces inside it. */}
+          <FieldKeyPreview
+            field={field}
+            siblingKeys={Array.isArray(siblingKeys) ? siblingKeys : []}
+            error={errors.key}
+            onChange={set}
+          />
           {errors.type && <span style={errStyle}>Тип: {errors.type}</span>}
           {errors.title && <span style={errStyle}>Название: {errors.title}</span>}
           {/* T-0294: options input for select type */}
@@ -1136,9 +1214,10 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
             display: 'grid', gridTemplateColumns: editorGridCols, gap: 'var(--chs-space-4)',
             padding: '0 0 var(--chs-space-3) 0', borderBottom: '1px solid var(--chs-color-border)',
           }}>
-            <span style={colHeadStyle}>Ключ</span>
-            <span style={colHeadStyle}>Тип</span>
+            {/* T-0686: «Название» first (primary); the machine «Ключ» moved to the
+                sub-row (auto-derived, SlugField-style) so it is not a header column. */}
             <span style={colHeadStyle}>Название</span>
+            <span style={colHeadStyle}>Тип</span>
             <span style={{ ...colHeadStyle, textAlign: 'center' }}>Обяз.</span>
             <span style={{ ...colHeadStyle, textAlign: 'right' }}>Порядок</span>
           </div>
@@ -1156,6 +1235,15 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
               registryDefsLoading={allRegistryDefsLoading}
               registryDefsError={allRegistryDefsError}
               allFields={fields}
+              // T-0686: keys of the OTHER fields (explicit keys as-is; a still-unkeyed
+              // sibling's key auto-derives from its title) — for the unique key preview.
+              siblingKeys={fields
+                .filter((_, j) => j !== i)
+                .map((sf) => {
+                  const k = typeof sf?.key === 'string' ? sf.key.trim() : '';
+                  return k.length > 0 ? k : uniqueFieldKey(deriveFieldKeyFromTitle(sf?.title), new Set());
+                })
+                .filter(Boolean)}
               onCreateRelatedApp={createRelatedApp}
             />
           ))}
