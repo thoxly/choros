@@ -1076,7 +1076,22 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
             />
             {bpmnUserTasks.length > 0 && (
               <datalist id="chs-form-designer-user-tasks">
-                {bpmnUserTasks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                {/* T-0665-e2e (P0 fix, #4 step-resolve): the datalist option's
+                    VALUE is what fills the input on selection — it must be
+                    t.name (the BPMN userTask's human-readable `name`
+                    attribute), NOT t.id (the technical node id, e.g.
+                    "Activity_0dsh0ls"). LIVE_PROOF T-0665-e2e found the
+                    picker previously suggested t.id as the fillable value,
+                    so a form saved via this picker's suggestion was keyed
+                    on a value that NEVER matches a real inbox task's
+                    item.step — src/http/process-start.ts's
+                    `step: firstActiveTask.name` (T-0575 BUG-015) proves the
+                    live engine surfaces the userTask's NAME, not its id, as
+                    the inbox step label GET /api/forms/binding is looked up
+                    by. Using the same string as both the visible label and
+                    the fillable value keeps the picker's suggestion and the
+                    real lookup key identical by construction. */}
+                {bpmnUserTasks.map((t) => <option key={t.id} value={t.name}>{t.name}</option>)}
               </datalist>
             )}
             <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
