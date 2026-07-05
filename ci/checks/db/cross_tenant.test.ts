@@ -1337,6 +1337,20 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'user_pref': {
+      // T-0651 (migration 129) — per-actor key/value store. PK=(tenant_id, id),
+      // UNIQUE (tenant_id, actor, key), no cross-table FK (actor is a soft ref,
+      // same "not enforced FK" reasoning as audit_event.actor). Standalone seed.
+      const id = uuid();
+      await c.query(
+        `INSERT INTO choros.user_pref
+           (tenant_id, id, actor, key, value, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, '{}'::jsonb, 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, 'seed-actor', 'seed.key'],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1701,6 +1715,7 @@ const SEEDED_TABLES = new Set<string>([
   'matrix_lookup_cell',
   'section',
   'list_view',
+  'user_pref',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
