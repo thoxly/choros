@@ -83,10 +83,20 @@ export interface CatalogInstance {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Friendly fallback name for an engine-only definition key. */
+/**
+ * Friendly fallback name for a process-definition key that has no modeler
+ * row (choros.process_definition) to name it.
+ *
+ * T-0616 [F-2, D-064 анти-кейс]: this used to special-case the literal key
+ * "telLinear" → the case-literal display string "Канонический линейный ТЭЛ" —
+ * a micro-case-hardcode (every unnamed/engine-only key that HAPPENED to equal
+ * "telLinear" got a specific human-facing name baked into platform code,
+ * instead of the generic "no name known → show the machine key" fallback this
+ * function otherwise implements for every OTHER key). Removed: the fallback
+ * is now uniformly the process_key itself for every key, no exceptions — the
+ * honest "I don't know a display name" signal, not a ТЭЛ-flavoured guess.
+ */
 export function fallbackDefinitionName(processKey: string): string {
-  // The canonical linear ТЭЛ is the seeded engine example — name it honestly.
-  if (processKey === "telLinear") return "Канонический линейный ТЭЛ";
   return processKey;
 }
 
