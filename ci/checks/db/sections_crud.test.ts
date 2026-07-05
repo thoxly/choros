@@ -342,4 +342,34 @@ describe('sections API — CRUD (T-0551)', () => {
     const lbB = JSON.parse(listB.body) as { sections: Array<Record<string, unknown>> };
     expect(lbB.sections.some((s) => s['id'] === bId)).toBe(true);
   }));
+
+  // T-0651 (sidebar-workspace): applications gained a manual `sort_order`
+  // column (migration 129) — the sidebar's within-section DnD/▲▼ persists
+  // through the SAME PATCH /api/applications/:id route sections.ts's sibling
+  // registers (no new route invented, findings §1 of the UX study).
+  it('PATCH /api/applications/:id { sort_order } persists + defaults to 0', requireDb(async () => {
+    let appId = '';
+    await withClient(migratorUrl(), async (c) => {
+      appId = await seedApplicationDirect(c, TENANT_A, `sortorder-app-${uuid().slice(0, 8)}`);
+    });
+    cleanupApps.push({ tenantId: TENANT_A, id: appId });
+
+    // Default is 0 for a freshly-seeded row (column DEFAULT 0).
+    const got = await makeRequest(baseUrl, 'GET', `/api/applications/${appId}`, undefined, { 'x-dev-user': 'actor-a' });
+    expect(got.statusCode).toBe(200);
+    expect((JSON.parse(got.body) as Record<string, unknown>)['sort_order']).toBe(0);
+
+    const patched = await makeRequest(
+      baseUrl, 'PATCH', `/api/applications/${appId}`, { sort_order: 7 }, { 'x-dev-user': 'actor-a' },
+    );
+    expect(patched.statusCode).toBe(200);
+    const pb = JSON.parse(patched.body) as Record<string, unknown>;
+    expect(pb['sort_order']).toBe(7);
+
+    // Rejects a non-integer.
+    const bad = await makeRequest(
+      baseUrl, 'PATCH', `/api/applications/${appId}`, { sort_order: 'top' }, { 'x-dev-user': 'actor-a' },
+    );
+    expect(bad.statusCode).toBe(400);
+  }));
 });

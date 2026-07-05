@@ -201,8 +201,10 @@ function CreateAppModal({ open, onClose, onCreated }) {
  * Выбор из существующих разделов (GET /api/sections) + инлайн «＋ Создать новый раздел»
  * (POST /api/sections, затем выбрать). PATCH /api/applications/:id { section_id }.
  * Свободный текстовый ввод убран → нет опечаток-призраков.
+ * Exported (T-0651): переиспользуется сайдбаром (shell.jsx) для контекст-меню
+ * приложения «В раздел →» — тот же компонент, не дублируем модалку.
  */
-function SetSectionModal({ open, app, onClose, onUpdated }) {
+export function SetSectionModal({ open, app, onClose, onUpdated }) {
   const [sections, setSections] = useState(null); // null=loading, [...]=loaded
   const [sectionId, setSectionId] = useState(app.section_id || ""); // "" = «Без раздела»
   const [creating, setCreating] = useState(false); // inline create mode
@@ -367,8 +369,10 @@ function SetSectionModal({ open, app, onClose, onUpdated }) {
  * PATCH /api/applications/:id { display_name } → 200 (контракт существует, T-0540).
  * Успех → onUpdated(updated) обновляет строку in-place и закрывает модалку.
  * slug (URL-идентификатор) НЕ трогаем — он неизменяем после создания.
+ * Exported (T-0651): переиспользуется сайдбаром (shell.jsx) для контекст-меню
+ * приложения «Переименовать» — тот же компонент, не дублируем модалку.
  */
-function RenameAppModal({ open, app, onClose, onUpdated }) {
+export function RenameAppModal({ open, app, onClose, onUpdated }) {
   const [name, setName] = useState(app.display_name || "");
   const [fieldErr, setFieldErr] = useState(null);
   const [submitErr, setSubmitErr] = useState(null);

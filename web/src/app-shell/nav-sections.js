@@ -39,6 +39,11 @@ export const FALLBACK_SECTION_LABEL = NO_SECTION_LABEL;
  * - Группа «Без раздела» — всегда последней (если есть).
  * - Пустой массив → пустой результат (нет шума в нав).
  * - sum(result[].apps.length) === apps.length (нет потерь, нет дублей).
+ * - T-0651: приложения ВНУТРИ каждой группы упорядочены по app.sort_order
+ *   (ties → display_name, ru-локаль) — ручной порядок из ▲/▼ или DnD
+ *   (PATCH /api/applications/:id { sort_order }). Отсутствующий sort_order
+ *   трактуется как 0 (обратная совместимость: приложения, созданные до
+ *   T-0651, просто делят самую верхнюю позицию, сортируясь по имени).
  *
  * @param {NavApp[]} apps        Массив приложений из GET /api/applications
  * @param {NavSection[]} [sections]  Разделы из GET /api/sections (для sort_order)
@@ -84,6 +89,14 @@ export function groupAppsBySection(apps, sections) {
     }
   }
 
+  // T-0651: stable within-group order — sort_order ascending, ties → display_name (ru).
+  const byAppOrder = (a, b) => {
+    const oa = typeof a.sort_order === 'number' ? a.sort_order : 0;
+    const ob = typeof b.sort_order === 'number' ? b.sort_order : 0;
+    if (oa !== ob) return oa - ob;
+    return (a.display_name || '').localeCompare(b.display_name || '', 'ru');
+  };
+
   const result = [...named.entries()]
     .sort(([idA, a], [idB, b]) => {
       const oa = orderById.has(idA) ? orderById.get(idA) : 0;
@@ -95,11 +108,11 @@ export function groupAppsBySection(apps, sections) {
       section_id: sid,
       section: group.name,
       fallback: false,
-      apps: group.apps,
+      apps: [...group.apps].sort(byAppOrder),
     }));
 
   if (noSection.length > 0) {
-    result.push({ section_id: null, section: NO_SECTION_LABEL, fallback: true, apps: noSection });
+    result.push({ section_id: null, section: NO_SECTION_LABEL, fallback: true, apps: [...noSection].sort(byAppOrder) });
   }
 
   return result;

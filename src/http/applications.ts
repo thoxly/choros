@@ -146,6 +146,7 @@ export interface ApplicationRow {
   section: string | null;  // T-0540 (DEPRECATED, T-0551): legacy free-text раздел.
   section_id: string | null; // T-0551: FK на choros.section; NULL → «Без раздела».
   section_name: string | null; // T-0551: denormalized section.name (LEFT JOIN), for nav/list.
+  sort_order: number; // T-0651: manual position within a section (sidebar DnD/▲▼).
   tier: string;
   created_at: string | number; // bigint comes back as a string from node-postgres
   updated_at: string | number;
@@ -160,6 +161,7 @@ function serializeApplication(row: ApplicationRow): Record<string, unknown> {
     section: row.section ?? null,  // T-0540 legacy (DEPRECATED); kept until column drop.
     section_id: row.section_id ?? null,    // T-0551: раздел-сущность; null = «Без раздела».
     section_name: row.section_name ?? null, // T-0551: имя раздела (для нав/списка без доп.запроса).
+    sort_order: Number(row.sort_order ?? 0), // T-0651: позиция внутри раздела.
     tier: row.tier,
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
@@ -171,7 +173,7 @@ function serializeApplication(row: ApplicationRow): Record<string, unknown> {
 // = «Без раздела». INSERT/UPDATE re-select via this fragment to populate section_name.
 const APP_READ_SELECT = `
   SELECT a.id, a.slug, a.display_name, a.description, a.section,
-         a.section_id, s.name AS section_name, a.tier, a.created_at, a.updated_at
+         a.section_id, s.name AS section_name, a.sort_order, a.tier, a.created_at, a.updated_at
     FROM choros.application a
     LEFT JOIN choros.section s
       ON s.tenant_id = a.tenant_id AND s.id = a.section_id`;
@@ -239,6 +241,7 @@ async function patchApplication(
     section_id?: string | null;
     display_name?: string;
     description?: string | null;
+    sort_order?: number;
   },
   nowMs: number,
 ): Promise<ApplicationRow | null> {
@@ -275,6 +278,10 @@ async function patchApplication(
     if ("description" in patch) {
       params.push(patch.description ?? null);
       setClauses.push(`description = $${params.length}`);
+    }
+    if ("sort_order" in patch && patch.sort_order !== undefined) {
+      params.push(patch.sort_order);
+      setClauses.push(`sort_order = $${params.length}`);
     }
 
     if (setClauses.length === 0) {
@@ -648,9 +655,11 @@ export function registerApplicationRoutes(
   );
 
   // PATCH /api/applications/:id — T-0540/T-0551: update section_id (раздел-сущность),
-  // legacy section string, display_name, description.
-  // Primary use: назначение раздела (screen-apps.jsx SetSectionModal + агент).
-  // Body: { section_id?: string|null, section?: string|null, display_name?: string, description?: string|null }
+  // legacy section string, display_name, description; T-0651: sort_order (позиция
+  // внутри раздела — sidebar ▲/▼ + DnD).
+  // Primary use: назначение раздела (screen-apps.jsx SetSectionModal + агент);
+  // reorder (сайдбар, T-0651).
+  // Body: { section_id?: string|null, section?: string|null, display_name?: string, description?: string|null, sort_order?: number }
   // Returns 200 with updated application; 404 if app OR referenced section_id not in caller's tenant.
   router.register(
     "PATCH",
@@ -673,6 +682,7 @@ export function registerApplicationRoutes(
         section_id?: string | null;
         display_name?: string;
         description?: string | null;
+        sort_order?: number;
       } = {};
 
       // T-0551: section_id (раздел-сущность). null = «Без раздела». Foreign/unknown id → 404.
@@ -723,6 +733,14 @@ export function registerApplicationRoutes(
         } else {
           patch.description = null;
         }
+      }
+
+      // T-0651: sort_order — manual position within a section (sidebar ▲/▼ + DnD).
+      if ("sort_order" in body) {
+        if (typeof body["sort_order"] !== "number" || !Number.isInteger(body["sort_order"])) {
+          throw new HttpError(400, "VALIDATION", "sort_order must be an integer");
+        }
+        patch.sort_order = body["sort_order"] as number;
       }
 
       const tenantId = await resolveActorTenant(actor);
