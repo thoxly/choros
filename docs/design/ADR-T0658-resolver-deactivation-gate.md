@@ -123,6 +123,25 @@ human). Простой единый `AND` — минимальная, наибо
 
 ## 3. Риппл-анализ потребителей
 
+> **ПОПРАВКА (CHANGES_REQUESTED, адверс-скептик REAL_HOLE severity HIGH).**
+> Первая редакция этого раздела строила риппл ТОЛЬКО на
+> `grep getGrantsForSubject src/` и заявляла «closes the gap for every
+> consumer». Это заявление было **ЛОЖНЫМ для owner/admin-класса**. Владелец и
+> админ тенанта авторизуются НЕ через `getGrantsForSubject`, а через ВТОРОЙ,
+> ПАРАЛЛЕЛЬНЫЙ резолвер (`src/db/org.ts`: `isGenesisOwnerForTenant`,
+> `loadAdminContext`), у которого свои инлайн-подзапросы slug→employee БЕЗ
+> `deactivated_at IS NULL`. Owner-авторитет к тому же ЗАКОРАЧИВАЕТ грант-PDP
+> (`capability-grants-dao.ts` owner-short-circuit `if (await
+> isGenesisOwnerForTenant(...)) return true;` отрабатывает ДО
+> `getGrantsForSubject`). Деактивация трогает только `deactivated_at`, а НЕ
+> `role_assignment` tenant-owner → без гейта в org.ts деактивированный ВЛАДЕЛЕЦ
+> (самый привилегированный субъект, ровно угроза «уволили, токен ещё жив») с
+> живым токеном сохранял полную власть: seed-write сотрудников/оргструктуры
+> (×11), LLM-ключи, системные агенты, mgmt_object-делегирование, SoD-админ.
+> Раздел ниже перечисляет ОБА резолвера и подтверждает, что оба закрыты.
+
+### 3.1. Резолвер А — грант-путь (`getGrantsForSubject`, шаг 1)
+
 Полный список (`grep -rn getGrantsForSubject src/` — исключая тесты и
 комментарии):
 
@@ -138,16 +157,73 @@ human). Простой единый `AND` — минимальная, наибо
 | `src/db/registry-digest-dao.ts:189` | registry-digest доступ | ПРАВИЛЬНО |
 | `src/db/role-grant-dao.ts` | НЕ вызывает `getGrantsForSubject` (комментарий "mirrors" — параллельная, но отдельная функция, читает гранты РОЛИ напрямую, не субъекта) | вне скоупа этого резолвера |
 
-**Не найдено НИ ОДНОГО потребителя, полагающегося на то, что деактивированный
-субъект резолвится в НЕПУСТОЙ грант-набор** — ни административного
-аудит-пути ("показать права уволенного"), ни отчётного пути. Все найденные
-consumers — live PDP-решения authorize-or-deny в реальном времени. Audit-трейл
-деактивации (`userMgmtAuditWriter.appendAuditEvent`, `user-mgmt.ts:543-550`)
-пишет СОБСТВЕННЫЕ audit-события (`user_account.deactivate`/`.reactivate`) в
-отдельный append-only журнал — НЕ читает и не зависит от `getGrantsForSubject`,
-так что не затронут.
+**Не найдено НИ ОДНОГО потребителя грант-пути, полагающегося на то, что
+деактивированный субъект резолвится в НЕПУСТОЙ грант-набор** — ни
+административного аудит-пути ("показать права уволенного"), ни отчётного пути.
+Все найденные consumers — live PDP-решения authorize-or-deny в реальном
+времени. Audit-трейл деактивации (`userMgmtAuditWriter.appendAuditEvent`,
+`user-mgmt.ts:543-550`) пишет СОБСТВЕННЫЕ audit-события
+(`user_account.deactivate`/`.reactivate`) в отдельный append-only журнал — НЕ
+читает и не зависит от `getGrantsForSubject`, так что не затронут.
 
-**Вывод: БЕЗОПАСНО.** Фикс — чистое СУЖЕНИЕ (может только запретить то, что
+### 3.2. Резолвер B — owner/admin-путь (`org.ts`, ЗАКОРАЧИВАЕТ грант-PDP)
+
+Этот резолвер `grep getGrantsForSubject` НЕ находит — он вызывается ОТДЕЛЬНО и
+ПЕРЕД грант-путём (owner-short-circuit). Закрыт тем же fail-closed предикатом:
+
+| функция / строки | что резолвит | кто вызывает (short-circuit) | вердикт после фикса |
+|---|---|---|---|
+| `src/db/org.ts` `isGenesisOwnerForTenant` (инлайн slug→employee подзапрос) | владелец ли субъект (tenant-owner role_assignment) | `capability-grants-dao.ts:57/78` (`canConfigureLlmConnection`/`canActorOperateSystemAgents` — `return true` ДО грантов), `seed-write.ts:153` (`isForestOwner`) | деактивированный владелец → FALSE (был TRUE); теряет LLM-config/system-agent/seed-write власть |
+| `src/db/org.ts` `loadAdminContext` step 1 (owner-check подзапрос) | владелец ли (тот же tenant-owner) | `seed-write.ts` ×11, `report-page-render.ts:175`, `llm-config.ts:124/244/354`, `rights-sod-admin.ts:159`, `pdp-explain.ts:367` — все гейтят на `admin.isGenesisOwner` | деактивированный → `isGenesisOwner=false` |
+| `src/db/org.ts` `loadAdminContext` step 2 (assignment-load подзапрос) | делегируемые `mgmt_object:*` гранты админа | те же ×11 seed-write mgmt-пути (`validateAdminDelegation`) | деактивированный админ → `adminGrants=[]` (теряет делегированную mgmt-власть) |
+
+Обоснование выбора места: ВСЕ owner/admin-гейты в системе (`seed-write.ts` ×11,
+`llm-config.ts`, `report-page-render.ts`, `rights-sod-admin.ts`,
+`pdp-explain.ts`, `capability-grants-dao.ts`) сходятся ровно на эти две функции
+(`isGenesisOwnerForTenant` / `loadAdminContext`) — закрытие ДВУХ функций (трёх
+подзапросов) закрывает всю owner/admin-поверхность у ИСТОЧНИКА, без правки
+десятка колл-сайтов. Проверено `grep -rn "isGenesisOwnerForTenant\|loadAdminContext"`.
+
+### 3.3. Резолвер C — report-page delegated-reader (`report-page-render.ts`)
+
+`report-page-render.ts::defaultCheckReadGrant` step 2 (не-owner ветка) имел
+СВОЙ инлайн slug→employee + прямой `application`/`read` грант-JOIN (НЕ через
+`getGrantsForSubject`). Деактивированный не-владелец с `application:read`
+грантом мог рендерить отчёт-страницы в окне жизни токена. Закрыт тем же
+`AND deactivated_at IS NULL` в подзапросе (step 1 owner-ветки уже закрыт через
+`loadAdminContext` из §3.2).
+
+### 3.4. Что проверено и НЕ является authority-резолвером (гейт НЕ добавлен намеренно)
+
+Прочёсан весь `grep "FROM choros.employee"`/`"SELECT id FROM choros.employee"`
+по `src/`. Остальные инлайн slug→employee подзапросы — НЕ authority-грантующие,
+гейт им не нужен (а некоторым ВРЕДЕН — fail-OPEN для ограничений):
+
+- `src/db/sod-dao.ts:395` (`PgSodSource`) — SoD это ОГРАНИЧЕНИЕ (separation of
+  duties), не грант. Гейт тут вычел бы назначения деактивированного →
+  «нет SoD-нарушения» = fail-OPEN для ограничения. НЕ трогаем (к тому же его
+  гранты уже пусты через резолвер А).
+- `src/db/substitution-dao.ts:203/291` — деактивированный substitute уже
+  исключён на уровне `SUBST_SELECT` JOIN (`e_sub.deactivated_at IS NULL`,
+  T-0588 BLOCK-2, строка 179); step-1 подзапрос — только slug→id.
+- `src/http/rights-sod.ts:273` — SoD-нарушение-репорт (то же, что sod-dao).
+- `src/http/rights-overview.ts:211` (`resolveCallerEmployeeId`) — резолвит
+  СВОЙ id для ДИСПЛЕЯ прав; authority-решение (`canManage`, строка 450) идёт
+  через `loadAdminContext` (уже закрыт §3.2).
+- `src/http/pdp-explain.ts:119` — ДИАГНОСТИЧЕСКИЙ explain-эндпоинт; его
+  собственная authz — `loadAdminContext` (закрыт) + self-query. Трасса грантов
+  субъекта — explain-фиделити, не live-авторизация. Отмечено в §9 как
+  follow-up на фиделити (сейчас explain деактивированного может показать
+  гранты, которые real-PDP уже не чтит — расхождение диагностики, НЕ дыра).
+- `src/http/assistant.ts:1290` (avoid self-notify), `:1783` (agent budget —
+  агент, не деактивируется), `src/http/grants.ts:1468` / `rights-intents.ts`
+  (резолв по `id`/write-target existence), `org.ts:156/257/317` (display-списки),
+  `org.ts:534` `humanEmployeeSlugExists` (identity-mapping для sub→slug
+  auth-резолюции, не грант) — все не-authority.
+
+**Вывод: БЕЗОПАСНО.** Оба (три) live authority-резолвера — грант-путь (А),
+owner/admin-путь (B) и report-page delegated-reader (C) — закрыты одним и тем
+же fail-closed предикатом. Фикс — чистое СУЖЕНИЕ (может только запретить то, что
 было ошибочно разрешено; никогда не разрешает то, что было запрещено).
 
 ## 4. Существующие тесты — влияние
@@ -168,24 +244,40 @@ subject в непустой набор (баг-как-фича отсутств�
 ## 5. Object model / contracts
 
 Без миграции — колонка `deactivated_at` уже существует (migration 125),
-меняется только READ-предикат одной функции.
+меняются только READ-предикаты трёх authority-резолверов.
 
-- `src/db/grants-dao.ts` — `getGrantsForSubject` шаг 1: добавлен
+- `src/db/grants-dao.ts` — резолвер А: `getGrantsForSubject` шаг 1: добавлен
   `AND deactivated_at IS NULL` + расширенный комментарий (см. §2.1/§2.2).
   Остальное тело функции (шаги 2-3) не тронуто.
-- Новый db-тест: `ci/checks/db/grants-dao-subject-deactivation.db.test.ts` —
-  живой Postgres, доказывает AC-2/AC-3/AC-4 (см. спеку §5), мирроря стиль
-  `invoke-grant-resolver.db.test.ts` (T-0610) и
-  `grants-dao-deactivated.db.test.ts` (T-0588): свежий per-suite tenant,
-  `uuid()`-суффиксные фикстуры, без кейс-литералов.
+- `src/db/org.ts` — резолвер B (owner/admin): `AND deactivated_at IS NULL` в
+  ТРЁХ инлайн slug→employee подзапросах: `isGenesisOwnerForTenant`,
+  `loadAdminContext` step 1 (owner-check), `loadAdminContext` step 2
+  (assignment-load) + расширенные комментарии над обеими функциями (см. §3.2).
+- `src/http/report-page-render.ts` — резолвер C: `AND deactivated_at IS NULL`
+  в инлайн slug→employee подзапросе не-owner ветки `defaultCheckReadGrant`
+  (owner-ветка step 1 закрыта через `loadAdminContext`; см. §3.3).
+- Новый db-тест: `ci/checks/db/grants-dao-subject-deactivation.db.test.ts`
+  (резолвер А) — живой Postgres, AC-2/AC-3/AC-4 (см. спеку §5).
+- Новый db-тест: `ci/checks/db/org-admin-deactivation.db.test.ts` (резолвер B)
+  — живой Postgres, доказывает: деактивированный владелец →
+  `isGenesisOwnerForTenant`=false и `loadAdminContext.isGenesisOwner`=false;
+  деактивированный админ → `adminGrants=[]`; активные владелец/админ →
+  сохраняют власть. Мутационно проверено (без предиката 3 гейт-теста краснеют).
+- Оба новых db-теста мирроят стиль `grants-dao-deactivated.db.test.ts`
+  (T-0588): свежий per-suite tenant, `uuid()`-суффиксные фикстуры, без
+  кейс-литералов (кроме структурного slug `'tenant-owner'` — имя корня
+  решётки, migration 026, не бизнес-литерал).
 
 ## 6. Fitness functions
 
 | id | rule | ci_check |
 |----|------|----------|
-| FF-658-DEACTIVATION-GATE | деактивированный сотрудник с валидным (confirmed + in-window + dual-confirmed, если критичный) грантом → `getGrantsForSubject` возвращает `[]`. Живой PG. | `npm run fitness:db` (новый db-тест) |
-| FF-658-ACTIVE-REGRESSION | активный сотрудник с тем же самым грантом → грант присутствует (happy-path не сломан). Живой PG. | `npm run fitness:db` (тот же новый db-тест) |
-| FF-658-AGENT-UNAFFECTED | `kind='agent'` сотрудник (без `deactivated_at`, как и все agent-строки в проде) резолвится не затронутым гейтом деактивации — его гранты присутствуют как прежде. Живой PG. | `npm run fitness:db` (тот же новый db-тест) |
+| FF-658-DEACTIVATION-GATE (резолвер А) | деактивированный сотрудник с валидным (confirmed + in-window + dual-confirmed, если критичный) грантом → `getGrantsForSubject` возвращает `[]`. Живой PG. | `npm run fitness:db` (`grants-dao-subject-deactivation.db.test.ts`) |
+| FF-658-ACTIVE-REGRESSION (резолвер А) | активный сотрудник с тем же самым грантом → грант присутствует (happy-path не сломан). Живой PG. | `npm run fitness:db` (тот же db-тест) |
+| FF-658-AGENT-UNAFFECTED (резолвер А) | `kind='agent'` сотрудник (без `deactivated_at`, как и все agent-строки в проде) резолвится не затронутым гейтом деактивации — его гранты присутствуют как прежде. Живой PG. | `npm run fitness:db` (тот же db-тест) |
+| FF-658-OWNER-GATE (резолвер B) | деактивированный tenant-owner → `isGenesisOwnerForTenant`=false И `loadAdminContext.isGenesisOwner`=false (теряет owner-short-circuit во всех ×11 seed-write / LLM-config / system-agent / report-page путях). Живой PG, мутационно проверен. | `npm run fitness:db` (`org-admin-deactivation.db.test.ts`) |
+| FF-658-ADMIN-GATE (резолвер B) | деактивированный админ (делегируемый `mgmt_object:*` грант, не владелец) → `loadAdminContext.adminGrants=[]`. Живой PG. | `npm run fitness:db` (тот же db-тест) |
+| FF-658-OWNER-ADMIN-REGRESSION (резолвер B) | активный владелец → `isGenesisOwner=true`; активный админ → сохраняет делегируемый `mgmt_object` грант (happy-path не сломан). Живой PG. | `npm run fitness:db` (тот же db-тест) |
 | FF-658-REGRESSION | существующие unit/db-тесты (`src/__tests__/grants-dao.test.ts`, `ci/checks/db/invoke-grant-resolver.db.test.ts`, `ci/checks/db/grants-dao-deactivated.db.test.ts` и весь остальной набор) проходят без перекраски. | `npx vitest run` + `npm run fitness:db` |
 | grant-resolver-isolation (inherited, unchanged) | `src/core/grant-resolver.ts` не тронут этим таском вовсе. | `ci/checks/grant-resolver-isolation.sh` |
 | dual-control-isolation (inherited, unchanged) | шаг 3 (`criticalGrantPredicate`, `confirmed2_by`) не тронут — additive `AND` в шаге 1 ортогонален дуал-контрольному домену. | `ci/checks/dual-control-isolation.sh` |
@@ -208,7 +300,8 @@ subject в непустой набор (баг-как-фича отсутств�
 | AC-2 (деактивированный + валидный грант → []) | новый db-тест `grants-dao-subject-deactivation.db.test.ts`, describe "AC-2" |
 | AC-3 (активный + тот же грант → грант есть) | тот же файл, describe "AC-3" (позитив-контроль) |
 | AC-4 (агент не задет) | тот же файл, describe "AC-4" |
-| AC-5 (риппл документирован) | §3 этого ADR |
+| AC-5 (риппл документирован, оба резолвера) | §3.1 (грант-путь) + §3.2 (owner/admin-путь) + §3.3 (report-page) + §3.4 (не-authority сайты) |
+| AC-owner/AC-admin (owner/admin-путь закрыт, мутационно проверен) | §3.2 + `org-admin-deactivation.db.test.ts` |
 | AC-6 (существующие тесты без перекраски) | §4 этого ADR + прогон `npx vitest run` |
 | AC-7 (tsc/eslint/vitest зелёные) | стандартный гейт |
 | AC-8 (fitness:db зелёный вкл. новый тест) | §5/§6 |
@@ -229,5 +322,14 @@ subject в непустой набор (баг-как-фича отсутств�
   задача вне рамок T-0658 (спека §7).
 - **`inbox.ts` локальные гейты (T-0588) остаются** — избыточны, но не
   конфликтуют (оба фейлят в одну сторону). Не удаляются в этом таске.
+- **`pdp-explain.ts` фиделити (follow-up, НЕ дыра)** — диагностический
+  explain-эндпоинт (`src/http/pdp-explain.ts:119`) грузит гранты субъекта своим
+  локальным grant-source без deactivation-гейта. Его СОБСТВЕННАЯ authz
+  (`loadAdminContext`, §3.2) закрыта, так что деактивированный не может вызвать
+  explain о чужом субъекте. Но при self-query explain деактивированного может
+  показать гранты, которые real-PDP (резолвер А) уже НЕ чтит — расхождение
+  ДИАГНОСТИКИ, а не выдача прав. Выравнивание explain-фиделити с real-PDP —
+  отдельный follow-up (нужно, чтобы explain не «врал», но это не security-дыра,
+  т.к. explain ничего не авторизует — только объясняет).
 - **Нет миграции** — колонка уже существует и применяется к уже существующим
-  строкам; меняется только то, какой SQL их читает.
+  строкам; меняется только то, какой SQL её читает.
