@@ -1,0 +1,29 @@
+{
+  "task_id": "T-0613",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/core/registry-title-field.ts:105-108 (isTitleLikeKey / step 2)",
+      "issue": "Step 2 (name/title-shaped key match) returns the key on name match alone, without checking deriveFieldType — so a title-like-named field that is itself non-scalar (enum/date/etc.) can be selected. pickSampleValue still degrades gracefully for that one row (falls through to the generic scan when the value is blank/non-scalar), so this is not a defect, just a documented tradeoff (explicitly called out by the module's own unit test 'step 2 fires before step 3 even looks at types'). No action required.",
+      "suggestion": "None — informational; leaving here for the record in case a future registry surfaces a real-world case where a title-named enum field produces a less-useful sample than the step-3 textual fallback would have."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
