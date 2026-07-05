@@ -746,3 +746,46 @@ export async function filterProvisionedAgentEmployeeIds(
     return new Set<string>(rows.map((r) => r.id));
   });
 }
+
+// ---------------------------------------------------------------------------
+// resolveRoleSlugsByIds — T-0642 [столп1/P0, publish-time]: role.id → role.slug
+// bulk resolution, scoped to the publishing tenant (RLS-isolated read).
+//
+// Used by the process-publish path (process-defs.ts, via
+// user-task-role-mapper.ts's injected ResolveRoleSlug port) to translate a
+// userTask's authored `choros:assignedRoleId` (the role's UUID — role.id,
+// written by the properties panel from GET /api/org/tenant-state → roles[].id,
+// T-0325) into the SLUG every routing consumer actually matches against:
+// executor-resolver.ts::resolveExecutor's `roleSlug` param, getHoldersForRole's
+// `WHERE r.slug = $2` (just above), and inbox.ts (reads candidateGroups[0] off
+// the live engine task verbatim as roleSlug). Writing the raw UUID into
+// candidateGroups would resolve to an always-empty pool — this bulk lookup is
+// the missing translation.
+//
+// Mirrors filterProvisionedAgentEmployeeIds exactly (same dedup + UUID-filter +
+// tenant-scoped ANY($2::uuid[]) read), but resolves to a VALUE (slug) rather
+// than a boolean membership check — a Map, not a Set. An id that does not
+// resolve (deleted role / never existed / cross-tenant UUID collision) is
+// simply absent from the returned Map; callers degrade (leave that userTask
+// without candidateGroups) rather than fail publish.
+// ---------------------------------------------------------------------------
+
+export async function resolveRoleSlugsByIds(
+  pool: pg.Pool,
+  tenantId: string,
+  roleIds: readonly string[],
+): Promise<Map<string, string>> {
+  const candidateIds = Array.from(new Set(roleIds)).filter((id) => UUID_RE.test(id));
+  if (candidateIds.length === 0) return new Map<string, string>();
+
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ id: string; slug: string }>(
+      `SELECT id, slug
+         FROM choros.role
+        WHERE tenant_id = $1
+          AND id = ANY($2::uuid[])`,
+      [tenantId, candidateIds],
+    );
+    return new Map<string, string>(rows.map((r) => [r.id, r.slug]));
+  });
+}

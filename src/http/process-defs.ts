@@ -38,10 +38,11 @@ import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
 import { mapTimerEscalation } from "../core/timer-escalation-mapper.js";
 import { mapAgentTaskToExternal, extractAgentTaskConfigs } from "../core/agent-task-external-mapper.js";
+import { mapUserTaskRoleToCandidateGroups } from "../core/user-task-role-mapper.js";
 import { normalizeBpmnForDeploy, InvalidProcessKeyForDeployError } from "../core/bpmn-deploy-normalizer.js";
 import { lintBpmn, type LintViolation } from "../core/bpmn-linter.js";
 import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
-import { getHoldersForRole, filterProvisionedAgentEmployeeIds } from "../db/grants-dao.js";
+import { getHoldersForRole, filterProvisionedAgentEmployeeIds, resolveRoleSlugsByIds } from "../db/grants-dao.js";
 import { loadPublishedRuleTables } from "../db/dmn-rule-table-store.js";
 
 // ---------------------------------------------------------------------------
@@ -678,7 +679,31 @@ export async function publishProcessByKey(
   // ran at draft-save time and its output (carrying flowable:* the modeler's
   // choros-only moddle extension cannot parse back) was persisted straight into the
   // draft, so re-opening a published draft failed with "unparsable content".
-  const publishXml = mapAgentTaskToExternal(row.bpmn_xml);
+  const agentWiredXml = mapAgentTaskToExternal(row.bpmn_xml);
+
+  // Step 1.5 [T-0642, столп1/P0, LIVE_PROOF T-0586]: userTask assignedRoleId →
+  // candidateGroups. The properties panel lets an author assign a role
+  // (choros:assignedRoleId, the role's UUID) to ANY task element — but until
+  // this fix, only lane-role-mapper (T-0457, from the lane name) and
+  // timer-escalation-mapper (T-0458, from choros:escalateTo) ever wrote
+  // flowable:candidateGroups for a userTask. A plain userTask with a
+  // panel-assigned role published WITHOUT candidateGroups — Flowable placed the
+  // task in an empty pool, unreachable by any inbox. Resolve each userTask's
+  // assignedRoleId (a UUID) to its role slug (the format every routing
+  // consumer — executor-resolver.ts, getHoldersForRole, inbox.ts — actually
+  // matches against) via a tenant-scoped DB read, and inject candidateGroups.
+  // Same placement discipline as mapAgentTaskToExternal: operates on a LOCAL
+  // variable, never persisted back to row.bpmn_xml (the draft stays the
+  // author's choros:assignedRoleId UUID attribute). Runs AFTER the agent-task
+  // transform (disjoint element sets — userTask vs serviceTask, no interaction)
+  // and BEFORE lint, so lint / buildUnfilledRoleWarnings see the final,
+  // candidateGroups-wired XML. Non-blocking: an assignedRoleId that does not
+  // resolve (deleted role / cross-tenant collision) leaves that userTask
+  // without candidateGroups rather than failing publish.
+  const publishXml = await mapUserTaskRoleToCandidateGroups(agentWiredXml, async (roleId) => {
+    const resolved = await resolveRoleSlugsByIds(pool, tenantId, [roleId]);
+    return resolved.get(roleId) ?? null;
+  });
 
   // Step 2: Lint — fail-closed gate (T-0027). Load published rule tables (advisory).
   let ruleTables: import("../core/dmn-middle.js").DmnRuleTable[] | undefined;
