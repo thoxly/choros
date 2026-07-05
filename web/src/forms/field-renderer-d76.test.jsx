@@ -27,7 +27,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
-import { FieldControl, RelationPickerField, DateRangeField } from './field-renderer.jsx';
+import { FieldControl, RelationPickerField, DateRangeField, MoneyInput } from './field-renderer.jsx';
 
 // ---------------------------------------------------------------------------
 // Tree-walk helpers (same pattern as field-renderer.test.jsx)
@@ -458,8 +458,14 @@ describe('FieldControl D7-6 · non-regression: money/multi-select/person still w
     expect(tree).not.toBeNull();
     expect(tree.type).not.toBe(RelationPickerField);
     expect(tree.type).not.toBe(DateRangeField);
-    // Should contain a ₽ span somewhere.
-    const ruble = collectElements(tree, (el) => el.type === 'span' && el.props?.children === '₽');
+    // T-0649: money now renders via <MoneyInput> (₽ decorator inside the
+    // field, not a floating suffix span) — find it in the tree and invoke it
+    // (same pattern this file already uses for RelationPickerField/
+    // DateRangeField) to inspect its own returned element tree.
+    const moneyEl = collectElements(tree, (el) => el.type === MoneyInput)[0];
+    expect(moneyEl).toBeDefined();
+    const moneyTree = MoneyInput(moneyEl.props);
+    const ruble = collectElements(moneyTree, (el) => el.type === 'span' && el.props?.children === '₽');
     expect(ruble.length).toBeGreaterThan(0);
   });
 

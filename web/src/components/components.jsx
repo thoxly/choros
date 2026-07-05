@@ -45,6 +45,8 @@ function KitIcon({ name, size, className = "", strokeWidth = 1.6 }) {
       {/* ── T-0597 additions (reveal-toggle, находка №3) ──────────────── */}
       {name === "eye"             && (<><path {...p} d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" /><circle {...p} cx="8" cy="8" r="2" /></>)}
       {name === "eye-off"         && (<><path {...p} d="M2 2l12 12" /><path {...p} d="M6.6 4.4C7 4.3 7.5 4.3 8 4.3c4 0 6.5 4.5 6.5 4.5s-.8 1.4-2.2 2.6M4.4 5.9C2.8 7 1.5 8.8 1.5 8.8s2.5 4.5 6.5 4.5c.9 0 1.7-.2 2.4-.5" /><path {...p} d="M6.7 9.3a2 2 0 0 0 2.8 -2.8" /></>)}
+      {/* ── T-0649 addition (DateInput trigger) ───────────────────────── */}
+      {name === "calendar"        && (<><rect {...p} x="2" y="3.5" width="12" height="10.5" rx="1" /><path {...p} d="M2 6.5h12" /><path {...p} d="M5 2v3M11 2v3" /></>)}
       {/* ── fallback: unknown name → visible placeholder + dev-warn ─── */}
       {!KNOWN_NAMES.has(name) && (
         <>

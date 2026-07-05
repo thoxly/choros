@@ -49,7 +49,7 @@ import { KitIcon } from '../components/components.jsx';
 // the load-bearing logic is unit-testable without a React runtime (codebase
 // convention — cf. records-form.js). Re-export it for callers/tests.
 import { resolveFieldContract, resolveFieldMode } from './field-contract.js';
-import { formatError } from '../lib/format.js';
+import { formatError, formatShortDate, formatShortDateTime } from '../lib/format.js';
 // Auth headers — same helper every screen uses (mode-aware: dev X-Dev-User /
 // keycloak Bearer). RelationPickerField needs it to attach auth to the
 // tenant-scoped GET /api/records?registry_def_id= candidate fetch.
@@ -88,17 +88,27 @@ export { resolveFieldContract, resolveFieldMode };
  * Keycloak-registered human, slug === the KC user UUID) into a display name,
  * instead of rendering the raw slug/UUID. One source of truth for "slug → name
  * via /api/org" rather than a second parallel fetcher.
+ *
+ * P1 FIX (T-0649, UX study 2026-07-05 §2): this used to call bare
+ * `fetch('/api/org')` with NO auth headers at all, on the mistaken assumption
+ * that "the browser sends cookies automatically" in keycloak mode. Choros's
+ * keycloak auth is Bearer-JWT-only (src/http/auth.ts `authenticate()` requires
+ * an `Authorization` header and 401s BEFORE any identity resolution runs when
+ * it's absent) — there is no cookie-based session. That made this the ONLY
+ * fetch in this file with no auth headers (RelationPickerField/FileField below
+ * both attach devHeaders()) and PersonPicker DETERMINISTICALLY 401'd on every
+ * call in keycloak mode, even for a legitimate admin with a live session (the
+ * live symptom: "GET /api/org → 401" while a POST record create in the same
+ * moment succeeded — that POST went through a code path that DID attach
+ * headers). fetchWithAuthRetry (dev-auth.js, T-0608) attaches the correct
+ * mode-aware headers on every call AND additionally self-heals a genuinely
+ * TRANSIENT 401 (an access token that expires mid-session) via one silent
+ * refresh + one retry before falling back to a login redirect — so this same
+ * fix also covers "no auto-retry on a transient 401" for the case where the
+ * token really did expire between render and click.
  */
 export async function fetchEmployees() {
-  // Use the same auth headers pattern as the rest of the SPA: check for
-  // the authHeaders helper; fall back to empty headers (dev-no-db path).
-  // We can't import devHeaders/authHeaders from screen-app-records without
-  // a cross-boundary import, but for the same-origin /api/org call the browser
-  // sends cookies automatically (the auth middleware checks the session cookie
-  // in keycloak mode). In dev mode the x-dev-user header is injected by the
-  // dev-proxy layer. We pass no extra headers here to keep this component
-  // self-contained; if auth fails the component shows an honest error.
-  const res = await fetch('/api/org');
+  const res = await fetchWithAuthRetry('/api/org', { headers: devHeaders() });
   if (!res.ok) throw new Error(formatError(res.status));
   const data = await res.json();
   const employees = [];
@@ -109,7 +119,11 @@ export async function fetchEmployees() {
       const people = Array.isArray(pos.people) ? pos.people : [];
       for (const p of people) {
         if (p && p.type === 'human' && p.id) {
-          employees.push({ id: p.id, name: p.name || p.id });
+          // T-0649: carry the position title additively — PersonPicker's search
+          // matches "имя + должность" (UX study §2). Existing callers (e.g.
+          // screen-record-detail.jsx's created_by resolver) only read .id/.name
+          // and are unaffected by the extra field.
+          employees.push({ id: p.id, name: p.name || p.id, position: pos.title || '' });
         }
       }
     }
@@ -119,7 +133,14 @@ export async function fetchEmployees() {
 
 /**
  * PersonPicker — inline employee selector for a record form.
- * Renders a <select> of human employees from the org; stores the employee id.
+ * Renders a search box + a <select> of human employees from the org (filtered
+ * by name OR position — T-0649, UX study §2 "поиск по имени, «имя +
+ * должность»"); stores the employee id.
+ *
+ * Honest error state (T-0649 P1): a failed fetch shows the reason (not a mute
+ * grey box) AND a «Повторить» button that re-runs the fetch — the original
+ * live bug (GET /api/org 401 for a live-session admin) left the field
+ * permanently dead with no way to recover short of a full page reload.
  *
  * @param {{ field, value, onChange, error, idPrefix, isRequired, readOnly, invalid }} props
  */
@@ -131,6 +152,10 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
 
   const [employees, setEmployees] = useState(null); // null=loading
   const [fetchError, setFetchError] = useState(null);
+  const [filter, setFilter] = useState('');
+  // T-0649: bump to re-trigger the fetch effect from the "Повторить" button
+  // without duplicating the fetch logic in a second callback.
+  const [retryTick, setRetryTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -139,7 +164,12 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
       .then((list) => { if (!cancelled) setEmployees(list); })
       .catch((err) => { if (!cancelled) { setFetchError(String(err?.message || err)); setEmployees([]); } });
     return () => { cancelled = true; };
-  }, []);
+  }, [retryTick]);
+
+  const handleRetry = () => {
+    setEmployees(null); // back to the honest "Загрузка…" state while retrying
+    setRetryTick((t) => t + 1);
+  };
 
   const inputStyle = { display: 'block', width: '100%', boxSizing: 'border-box' };
   const inputClass = `chs-input${invalid ? ' chs-input--invalid' : ''}`;
@@ -162,8 +192,22 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
   let control;
   if (fetchError) {
     control = (
-      <div className="chs-input" style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }} aria-live="polite">
-        Не удалось загрузить список сотрудников
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)', flexWrap: 'wrap' }}>
+        <div
+          className="chs-input"
+          style={{ ...inputStyle, width: 'auto', flex: 1, color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-sm)' }}
+          role="alert"
+        >
+          Не удалось загрузить список сотрудников: {fetchError}
+        </div>
+        <button
+          type="button"
+          className="chs-input"
+          onClick={handleRetry}
+          style={{ width: 'auto', cursor: 'pointer', color: 'var(--chs-color-accent)', background: 'none' }}
+        >
+          Повторить
+        </button>
       </div>
     );
   } else if (employees === null) {
@@ -179,24 +223,54 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
       </div>
     );
   } else {
+    // T-0649: search filters by name OR position (case-insensitive substring).
+    const filterLower = filter.trim().toLowerCase();
+    const filtered = filterLower
+      ? employees.filter((emp) => (
+        emp.name.toLowerCase().includes(filterLower)
+        || (emp.position || '').toLowerCase().includes(filterLower)
+      ))
+      : employees;
+
     control = (
-      <select
-        id={id}
-        className={inputClass}
-        value={value ?? ''}
-        onChange={(e) => onChange(field.key, e.target.value)}
-        aria-required={isRequired || undefined}
-        aria-invalid={invalid || undefined}
-        aria-describedby={errorId}
-        disabled={readOnly || undefined}
-        aria-disabled={readOnly || undefined}
-        style={inputStyle}
-      >
-        <option value="">— выберите сотрудника —</option>
-        {employees.map((emp) => (
-          <option key={emp.id} value={emp.id}>{emp.name}</option>
-        ))}
-      </select>
+      <>
+        <input
+          type="text"
+          className="chs-input"
+          placeholder="Поиск по имени или должности…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          aria-label={`Поиск: ${label}`}
+          style={{ ...inputStyle, marginBottom: 'var(--chs-space-2)' }}
+          disabled={readOnly || undefined}
+          aria-disabled={readOnly || undefined}
+        />
+        <select
+          id={id}
+          className={inputClass}
+          value={value ?? ''}
+          onChange={(e) => onChange(field.key, e.target.value)}
+          aria-required={isRequired || undefined}
+          aria-invalid={invalid || undefined}
+          aria-describedby={errorId}
+          disabled={readOnly || undefined}
+          aria-disabled={readOnly || undefined}
+          style={inputStyle}
+          size={Math.min(filtered.length + 1, 6)}
+        >
+          <option value="">— выберите сотрудника —</option>
+          {filtered.map((emp) => (
+            <option key={emp.id} value={emp.id}>
+              {emp.position ? `${emp.name} — ${emp.position}` : emp.name}
+            </option>
+          ))}
+        </select>
+        {filtered.length === 0 && (
+          <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+            Никого не найдено по «{filter}»
+          </span>
+        )}
+      </>
     );
   }
 
@@ -1044,6 +1118,204 @@ export function CollectionField({ field, value, onChange, error, idPrefix = 'fie
 }
 
 // ---------------------------------------------------------------------------
+// T-0649: MoneyInput — money contract's control (₽ inside the field, thousands
+// separators while typing, kopecks preserved exactly on input AND display).
+//
+// THE P1 BUG THIS FIXES (data integrity, caught live 2026-07-05): storage was
+// ALWAYS exact — serializeRecordData (records-form.js) does `Number(str)` with
+// no rounding, a plain JS number round-trips through JSONB exactly. The loss
+// was 100% a DISPLAY bug: formatCellValue's money branch passed
+// `maximumFractionDigits: 0` to toLocaleString, so 150000.5 (150 000 rubles 50
+// kopecks) rendered as "150 001 ₽" — kopecks silently rounded away on EVERY
+// read (list/kanban/detail, all three call formatCellValue). That is fixed in
+// records-form.js (minimumFractionDigits:0, maximumFractionDigits:2). This
+// component is the INPUT side: same value/onChange contract the old bare
+// `<input type="number">` had (a numeric string, e.g. "150000.5" — unchanged,
+// so serializeRecordData needs no change), but rendered with a live
+// thousands-grouped display ("150 000,5") and the ₽ glyph positioned INSIDE
+// the input (an absolutely-positioned decorator + left padding) instead of
+// floating outside the border where it visibly clipped.
+//
+// Implementation note: the control keeps ONE source of truth — the numeric
+// string passed in as `value` (same shape serializeRecordData expects) — and
+// derives a grouped display string from it for rendering. On focus it shows
+// the RAW value (so editing mid-number doesn't fight the user's cursor with
+// live-inserted separators); on blur it re-renders grouped. This avoids the
+// classic "cursor jumps to the end on every keystroke" bug that live
+// re-formatting while typing causes.
+// ---------------------------------------------------------------------------
+
+/**
+ * Group the integer part of a numeric string with narrow no-break spaces
+ * (ru-RU thousands separator convention) while leaving the fractional part
+ * (kopecks) untouched — never rounds, never truncates digits.
+ *
+ * @param {string} raw - a numeric string, e.g. "150000.5" or "150000,50"
+ * @returns {string} - e.g. "150 000,5"
+ */
+export function groupThousands(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return '';
+  // Accept both '.' and ',' as the decimal separator on input; always DISPLAY
+  // with ',' (ru-RU convention) — never touches the fractional digits.
+  const normalized = raw.replace(',', '.');
+  const negative = normalized.startsWith('-');
+  const unsigned = negative ? normalized.slice(1) : normalized;
+  const [intPart, fracPart] = unsigned.split('.');
+  const groupedInt = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const sign = negative ? '-' : '';
+  return fracPart !== undefined ? `${sign}${groupedInt},${fracPart}` : `${sign}${groupedInt}`;
+}
+
+/**
+ * MoneyInput — the `money` contract's editable control.
+ *
+ * @param {{ id, inputClass, value, onChange, isRequired, invalid, errorId, readOnly, style }} props
+ * @param {string} props.value - numeric string (same shape as a plain number
+ *   input — "" when empty), e.g. "150000.5". NEVER pre-formatted with grouping.
+ * @param {(nextValue: string) => void} props.onChange - called with the RAW
+ *   numeric string (no grouping) — same contract serializeRecordData expects.
+ */
+export function MoneyInput({ id, inputClass, value, onChange, isRequired = false, invalid = false, errorId, readOnly = false, style }) {
+  // Deliberately HOOK-FREE (no useState/useEffect): this codebase's web test
+  // tier runs vitest in a plain "node" environment with no jsdom/react-dom/
+  // react-test-renderer — components that use hooks cannot be reliably
+  // invoked as plain functions outside a real React tree in that harness
+  // (see field-renderer.test.jsx / screen-llm-connections.states.test.jsx).
+  // The grouped display is derived PURELY from the `value` prop on every
+  // render (a fully controlled input) — no separate "focused" state.
+  const rawValue = value ?? '';
+  const displayValue = groupThousands(String(rawValue));
+
+  const handleChange = (e) => {
+    // Strip grouping characters (spaces/no-break-spaces) a user might paste;
+    // keep digits, one decimal separator (,  or .), and a leading '-'.
+    const cleaned = e.target.value.replace(/\s/g, '').replace(',', '.');
+    onChange(cleaned);
+  };
+
+  return (
+    <div style={{ position: 'relative', display: 'block', width: '100%', boxSizing: 'border-box' }}>
+      <span
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          left: 'var(--chs-space-3)',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          fontSize: 'var(--chs-text-sm)',
+          color: 'var(--chs-color-text-muted)',
+          pointerEvents: 'none',
+        }}
+      >
+        ₽
+      </span>
+      <input
+        id={id}
+        className={inputClass}
+        type="text"
+        inputMode="decimal"
+        value={displayValue}
+        onChange={handleChange}
+        aria-required={isRequired || undefined}
+        aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
+        readOnly={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
+        style={{ ...style, paddingLeft: 'calc(var(--chs-space-3) + 1.2em)' }}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// T-0649: DateInput — the `date`/`datetime` presentation's control.
+//
+// THE BUG THIS FIXES (UX study §2): a bare <input type="date"> renders its
+// TEXT in the browser/OS's own locale/format — "серое dd/mm/yyyy, вид зависит
+// от браузера/локали". Keyboard entry into the native control already worked
+// live ("05072026 → принялось") — that path is NOT touched (this stays a real
+// <input type="date">/<input type="datetime-local">, full native keyboard +
+// picker-affordance + a11y semantics). What changes is DISPLAY: the native
+// input's own text is made transparent (CSS `color: transparent`; the
+// browser's calendar-picker-indicator icon is UNAFFECTED by color and stays
+// visible/clickable) and a locale-independent "05.07.2026[ 14:32]" label is
+// rendered on top via an absolutely-positioned overlay — so the visible text
+// is ALWAYS дд.мм.гггг regardless of the visiting browser's OS locale.
+// ---------------------------------------------------------------------------
+
+/**
+ * DateInput — `date`/`datetime` contract control. Native `<input type="date">`
+ * (or `type="datetime-local"` when `withTime`) with a locale-independent
+ * "дд.мм.гггг[ чч:мм]" overlay + a calendar glyph decoration.
+ *
+ * @param {{ id, inputClass, value, onChange, isRequired, invalid, errorId, readOnly, style, withTime }} props
+ * @param {string} props.value - ISO date ("YYYY-MM-DD") or ISO datetime
+ *   ("YYYY-MM-DDTHH:mm") string — SAME shape the native input already used;
+ *   storage/serialization is unchanged.
+ * @param {(nextValue: string) => void} props.onChange
+ * @param {boolean} [props.withTime] - datetime-local instead of date.
+ */
+export function DateInput({ id, inputClass, value, onChange, isRequired = false, invalid = false, errorId, readOnly = false, style, withTime = false }) {
+  const rawValue = value ?? '';
+  const displayLabel = rawValue
+    ? (withTime ? formatShortDateTime(rawValue) : formatShortDate(rawValue))
+    : '';
+
+  return (
+    <div style={{ position: 'relative', display: 'block', width: '100%', boxSizing: 'border-box' }}>
+      <input
+        id={id}
+        className={inputClass}
+        type={withTime ? 'datetime-local' : 'date'}
+        value={rawValue}
+        onChange={(e) => onChange(e.target.value)}
+        aria-required={isRequired || undefined}
+        aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
+        readOnly={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
+        // The native text render is made transparent — the browser's own
+        // calendar-picker-indicator affordance is a separate pseudo-element
+        // that ignores `color` and stays visible/clickable. Keyboard focus,
+        // typing, and the native picker popover are all fully preserved; only
+        // the OS-locale-dependent TEXT is hidden in favour of the overlay
+        // below. paddingRight leaves room for the calendar glyph decoration.
+        style={{ ...style, color: 'transparent', paddingRight: 'calc(var(--chs-space-3) + 1.2em)' }}
+      />
+      {displayLabel && (
+        <span
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: 'var(--chs-space-3)',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            fontSize: 'var(--chs-text-sm)',
+            color: 'var(--chs-color-text)',
+            pointerEvents: 'none',
+          }}
+        >
+          {displayLabel}
+        </span>
+      )}
+      <span
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          right: 'var(--chs-space-3)',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          color: 'var(--chs-color-text-muted)',
+          pointerEvents: 'none',
+        }}
+      >
+        <KitIcon name="calendar" size="1em" />
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // FieldControl — the single field component the schema-driven forms render.
 // ---------------------------------------------------------------------------
 
@@ -1175,7 +1447,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   // T-0516: url and email are also scalarish (rendered as typed text inputs).
   const isScalarish = presentation === 'text' || presentation === 'textarea'
     || presentation === 'number' || presentation === 'checkbox'
-    || presentation === 'date' || presentation === 'select' || presentation === 'radio'
+    || presentation === 'date' || presentation === 'datetime' || presentation === 'select' || presentation === 'radio'
     || presentation === 'money' || presentation === 'multi-select' || presentation === 'person'
     || presentation === 'url' || presentation === 'email';
 
@@ -1407,41 +1679,59 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
       />
     );
   } else if (presentation === 'money') {
-    // T-0509: money — numeric input with a ₽ suffix label. The user types a plain
-    // number (stored as type:number); the ₽ label makes the currency visible in input.
+    // T-0509/T-0649: MoneyInput — ₽ INSIDE the field (was floating outside the
+    // border, where it visibly clipped — live bug from the UX study), thousands
+    // separators while typing, kopecks preserved exactly (P1 data-integrity:
+    // the ONLY prior rounding was in formatCellValue's DISPLAY formatting, not
+    // storage/input — this control does not introduce any new rounding either).
     control = (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)' }}>
-        <input
-          id={id}
-          className={inputClass}
-          type="number"
-          step="any"
-          value={value ?? ''}
-          onChange={(e) => onChange(field.key, e.target.value)}
-          aria-required={isRequired || undefined}
-          aria-invalid={invalid || undefined}
-          aria-describedby={errorId}
-          readOnly={readOnly || undefined}
-          aria-disabled={readOnly || undefined}
-          style={{ ...inputStyle, flex: 1 }}
-        />
-        <span aria-hidden="true" style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', whiteSpace: 'nowrap' }}>₽</span>
-      </div>
+      <MoneyInput
+        id={id}
+        inputClass={inputClass}
+        value={value}
+        onChange={(v) => onChange(field.key, v)}
+        isRequired={isRequired}
+        invalid={invalid}
+        errorId={errorId}
+        readOnly={readOnly}
+        style={inputStyle}
+      />
     );
   } else if (presentation === 'date') {
+    // T-0649: DateInput — was a bare <input type="date">, whose text rendering
+    // is browser/OS-locale-dependent (the UX study's "серое dd/mm/yyyy, вид
+    // зависит от браузера/локали"). Keyboard entry already worked live
+    // ("05072026 → принялось") — DateInput keeps the SAME native input (zero
+    // regression to that keyboard path or to a11y) but overlays a
+    // locale-INDEPENDENT "05.07.2026" label so the visible text is always
+    // дд.мм.гггг regardless of OS locale.
     control = (
-      <input
+      <DateInput
         id={id}
-        className={inputClass}
-        type="date"
-        value={value ?? ''}
-        onChange={(e) => onChange(field.key, e.target.value)}
-        aria-required={isRequired || undefined}
-        aria-invalid={invalid || undefined}
-        aria-describedby={errorId}
-        readOnly={readOnly || undefined}
-        aria-disabled={readOnly || undefined}
+        inputClass={inputClass}
+        value={value}
+        onChange={(v) => onChange(field.key, v)}
+        isRequired={isRequired}
+        invalid={invalid}
+        errorId={errorId}
+        readOnly={readOnly}
         style={inputStyle}
+      />
+    );
+  } else if (presentation === 'datetime') {
+    // T-0649: datetime — <input type="datetime-local"> + дд.мм.гггг чч:мм overlay.
+    control = (
+      <DateInput
+        id={id}
+        inputClass={inputClass}
+        value={value}
+        onChange={(v) => onChange(field.key, v)}
+        isRequired={isRequired}
+        invalid={invalid}
+        errorId={errorId}
+        readOnly={readOnly}
+        style={inputStyle}
+        withTime
       />
     );
   } else if (presentation === 'url') {
