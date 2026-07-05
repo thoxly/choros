@@ -1445,6 +1445,142 @@ describe("T-0458 — non-timer events are not flagged", () => {
 });
 
 // ===========================================================================
+// T-0612 — timer_escalation_no_convergence: the "zombie instance" bug found
+// live in purchaseApproval (finance-director approval, PT2M boundary timer,
+// non-interrupting escalation). See ADR-T0612-purchase-escalation-convergence.
+// ===========================================================================
+
+/**
+ * Build the DEFECTIVE shape observed live: a NON-INTERRUPTING boundary timer
+ * on the guarded task, whose escalation branch dead-ends at ITS OWN endEvent
+ * instead of reconnecting to the main path:
+ *   start → task-fin (boundary timer PT2M, cancelActivity=false) → end-main
+ *                 │ (timer fires)
+ *                 └→ task-esc → end-esc   (DISCONNECTED from end-main)
+ *
+ * If task-fin completes before the timer fires, the main token reaches
+ * end-main — but the still-live, never-cancelled boundary timer's token never
+ * reaches anything (it hasn't fired, so it never even enters task-esc) NOR
+ * does Flowable retire it, because a non-interrupting boundary event remains
+ * armed until it fires or the process ends — which it can't, because BPMN
+ * requires every token (including an armed-but-unfired boundary event) to
+ * resolve before an instance completes. The zombie is the ARMED boundary
+ * event itself; this fixture's disconnected end-esc reproduces the authored
+ * shape that made the defect visible (no join for the fired case either).
+ */
+function makeNonInterruptingTimerNoConvergenceBpmn(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:flowable="http://flowable.org/bpmn" targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="task-fin" flowable:candidateGroups="role-fin"/>
+    <boundaryEvent id="bnd-fin-timeout" attachedToRef="task-fin" cancelActivity="false">
+      <timerEventDefinition><timeDuration>PT2M</timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-esc" flowable:candidateGroups="role-owner"/>
+    <endEvent id="end-main"/>
+    <endEvent id="end-esc"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="task-fin"/>
+    <sequenceFlow id="f1" sourceRef="task-fin" targetRef="end-main"/>
+    <sequenceFlow id="sf-timer-esc" sourceRef="bnd-fin-timeout" targetRef="task-esc"/>
+    <sequenceFlow id="f2" sourceRef="task-esc" targetRef="end-esc"/>
+  </process>
+</definitions>`;
+}
+
+describe("T-0612 — timer_escalation_no_convergence: zombie shape fails closed (422)", () => {
+  it("non-interrupting boundary timer + disconnected escalation end → violation", () => {
+    const result = lintBpmn(makeNonInterruptingTimerNoConvergenceBpmn());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "timer_escalation_no_convergence");
+      expect(v).toBeDefined();
+      expect(v?.elementId).toBe("bnd-fin-timeout");
+      expect(v?.elementKind).toBe("boundaryEvent");
+      expect(v?.message).toMatch(/never reconnecting|never completes/);
+    }
+  });
+});
+
+describe("T-0612 — timer_escalation_no_convergence: fixed shapes pass (200)", () => {
+  it("non-interrupting timer whose escalation branch REJOINS the main path via a converging gateway passes", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:flowable="http://flowable.org/bpmn" targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="task-fin" flowable:candidateGroups="role-fin"/>
+    <boundaryEvent id="bnd-fin-timeout" attachedToRef="task-fin" cancelActivity="false">
+      <timerEventDefinition><timeDuration>PT2M</timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-esc" flowable:candidateGroups="role-owner"/>
+    <exclusiveGateway id="join"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="task-fin"/>
+    <sequenceFlow id="f1" sourceRef="task-fin" targetRef="join"/>
+    <sequenceFlow id="sf-timer-esc" sourceRef="bnd-fin-timeout" targetRef="task-esc"/>
+    <sequenceFlow id="f2" sourceRef="task-esc" targetRef="join"/>
+    <sequenceFlow id="f3" sourceRef="join" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+
+  it("non-interrupting timer whose escalation branch flows straight back into the SAME endEvent as the main path passes", () => {
+    // This is exactly makeBoundaryTimerBpmn()'s default shape (both branches
+    // target the literal same endEvent id="end") — proving the existing T-0458
+    // happy-path fixture is unaffected by this additive check.
+    const xml = makeBoundaryTimerBpmn().replace('cancelActivity="true"', 'cancelActivity="false"');
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+
+  it("INTERRUPTING timer (cancelActivity=true, default) with a disconnected escalation end is NOT flagged by this check", () => {
+    // cancelActivity="true" cancels task-fin the instant the timer fires — only
+    // one token is ever live on that boundary, so no convergence question
+    // arises. Swap only the attribute in the defective fixture; must NOT
+    // produce timer_escalation_no_convergence.
+    const xml = makeNonInterruptingTimerNoConvergenceBpmn().replace(
+      'cancelActivity="false"',
+      'cancelActivity="true"',
+    );
+    const result = lintBpmn(xml);
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "timer_escalation_no_convergence")).toBe(false);
+    } else {
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it("cancelActivity ABSENT (BPMN default = interrupting) with a disconnected escalation end is NOT flagged", () => {
+    const xml = makeNonInterruptingTimerNoConvergenceBpmn().replace(' cancelActivity="false"', "");
+    const result = lintBpmn(xml);
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "timer_escalation_no_convergence")).toBe(false);
+    } else {
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it("an intermediate (non-boundary) timer is never subject to this check regardless of cancelActivity", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <intermediateCatchEvent id="wait1">
+      <timerEventDefinition><timeDuration>PT2M</timeDuration></timerEventDefinition>
+    </intermediateCatchEvent>
+    <endEvent id="end-a"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="wait1"/>
+    <sequenceFlow id="f1" sourceRef="wait1" targetRef="end-a"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+});
+
+// ===========================================================================
 // T-0459 [D8-R4] — message_event_incoherent: message/signal catch coherence.
 //
 // A message-catch MUST have a guarding TIMEOUT (R3 — else infinite wait), a

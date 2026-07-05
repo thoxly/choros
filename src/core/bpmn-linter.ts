@@ -44,6 +44,17 @@ import type { DmnRuleTable } from "./dmn-middle.js";
 //   publish transform — otherwise the bridge never enqueues an agent job (half-wired
 //   agent step). Self-contained (checkAgentTaskCoherence) — a sibling task may also
 //   touch this file.
+// T-0612: "timer_escalation_no_convergence" added additively — closes the
+//   "note on whole-process balance ... out of v1 scope" gap this file's own
+//   T-0456 comment named, SCOPED to the one shape that produces a live zombie
+//   instance (act_hi_procinst.end_time stays NULL forever): a NON-INTERRUPTING
+//   boundary timer (cancelActivity="false") whose escalation branch never
+//   reconnects to the main flow before reaching its own endEvent. When the
+//   guarded task completes normally (finishes before the timer fires), Flowable
+//   leaves the escalation branch's token alive forever on that dangling branch
+//   — the main path reaches ITS endEvent, but the PROCESS INSTANCE never ends,
+//   because BPMN only ends an instance when every token has reached an end.
+//   See docs/design/ADR-T0612-purchase-escalation-convergence.md.
 export type LintViolationType =
   | "raw_object_binding"
   | "malformed_xml"
@@ -53,6 +64,7 @@ export type LintViolationType =
   | "timer_malformed"
   | "message_event_incoherent"
   | "agent_task_incoherent"
+  | "timer_escalation_no_convergence"
   // T-0559: publish-coherence — a live (published) process binds a sandbox (draft)
   // application. Emitted by the publish-time DB-backed gate in process-defs.ts, NOT
   // by the pure linter (which has no DB). Reuses the LintViolation envelope so the
@@ -381,6 +393,16 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
   const allFlowSourceRefs: string[] = []; // sourceRef of every sequenceFlow (= outgoing of source node)
   const allFlowTargetRefs: string[] = []; // targetRef of every sequenceFlow (= incoming of target node)
 
+  // T-0612: full sequenceFlow edge list (paired source→target, same index as the two
+  // arrays above but kept as pairs for graph traversal) + every endEvent element id.
+  // Collected unconditionally (structural, no opts gate) — feeds
+  // checkTimerEscalationConvergence, which needs to WALK the flow graph forward from
+  // an escalation target, not just count in/out arity per node (T-0456's per-gateway
+  // counts are insufficient for this — the defect is a REACHABILITY question: does the
+  // escalation branch ever rejoin a path that reaches the same end as the main flow).
+  const flowEdges: Array<{ source: string; target: string }> = [];
+  const endEventIds = new Set<string>();
+
   // T-0458 [D8-R3]: timer event collection — always on (structural well-formedness,
   // no opts gate). We collect every boundaryEvent / intermediateCatchEvent that carries
   // a <timerEventDefinition>, plus the timer-body text (timeDuration / timeDate /
@@ -557,6 +579,18 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
         const tgtAttr = attrs.find((a) => a.name === "targetRef");
         if (srcAttr?.value) allFlowSourceRefs.push(srcAttr.value);
         if (tgtAttr?.value) allFlowTargetRefs.push(tgtAttr.value);
+        // T-0612: keep the pair together for graph traversal (see flowEdges above).
+        if (srcAttr?.value && tgtAttr?.value) {
+          flowEdges.push({ source: srcAttr.value, target: tgtAttr.value });
+        }
+      }
+
+      // T-0612: collect every endEvent element id — the convergence check needs to
+      // know which reached nodes are a TRUE process end (vs. just "no more collected
+      // edges" for a node this pure structural scan does not otherwise track, e.g. a
+      // userTask that is simply the last node authored so far).
+      if (localName === "endEvent") {
+        if (elementId) endEventIds.add(elementId);
       }
 
       // T-0458 [D8-R3]: timer event collection. boundaryEvent / intermediateCatchEvent
@@ -920,6 +954,11 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
       outgoing: t.id ? allFlowSourceRefs.filter((r) => r === t.id).length : 0,
     }));
     checkTimerCoherence(timers, violations);
+
+    // T-0612: escalation-branch convergence — ALWAYS on, scoped to BOUNDARY timers
+    // only (an intermediate timer has no "guarded task main path" to converge
+    // with — it IS the main path). See checkTimerEscalationConvergence doc-comment.
+    checkTimerEscalationConvergence(timers, flowEdges, endEventIds, violations);
   }
 
   // T-0459 [D8-R4]: message/signal catch coherence — ALWAYS on. Every message-catch
@@ -1204,6 +1243,160 @@ function checkTimerCoherence(
         message:
           `<${elemDesc}> has no outgoing sequence flow — when the deadline fires there is ` +
           `no escalation target to route to. Connect the timer to the escalation step`,
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0612: Timer/escalation branch convergence check
+//
+// THE ZOMBIE-INSTANCE BUG THIS CLOSES (found live, purchaseApproval acceptance
+// 2026-07-01/07-02): a boundary timer guarding a userTask, authored with
+// cancelActivity="false" (non-interrupting — the escalation is meant to be a
+// REMINDER, not a cancellation of the guarded approval) and an escalation
+// branch that dead-ends at its OWN endEvent instead of reconnecting to the
+// path the guarded task's normal completion takes. When the guarded task
+// finishes BEFORE the deadline fires (the common, happy-path case — the
+// approver was on time), Flowable leaves the escalation branch un-fired but
+// STILL LIVE (a non-interrupting boundary event is not cancelled by the
+// guarded task completing — that is exactly what "non-interrupting" means).
+// The main path reaches its endEvent; the instance nonetheless never ends
+// (act_hi_procinst.end_time stays NULL forever), because BPMN only completes
+// a process instance when EVERY token — including one still parked on a
+// never-fired, never-cancelled boundary event — has reached an end.
+//
+// T-0456's own note ("a full reachability/path analysis is out of v1 scope")
+// left this exact gap open for parallel gateways; this check closes the
+// narrower, tractable, HIGH-VALUE slice of it: only for non-interrupting
+// boundary timers (the shape that actually produced a live zombie instance),
+// verify the escalation branch reconnects to a node also reachable from the
+// guarded task's own outgoing flow(s) — i.e. a converging gateway or a shared
+// downstream node — BEFORE the escalation branch reaches an endEvent of its
+// own. An INTERRUPTING timer (cancelActivity="true", the BPMN default when
+// the attribute is absent) needs no such check: cancelActivity="true" means
+// Flowable cancels the guarded task the instant the timer fires, so there is
+// only ever ONE live token on that boundary — no convergence question arises.
+//
+// ALGORITHM (pure graph reachability over the flowEdges/endEventIds collected
+// during the token walk — no IO, no DB):
+//   1. For each boundary timer with cancelActivity===false and a resolved
+//      escalation target (its first outgoing flow's targetRef):
+//      a. mainReachable = every node reachable by following flowEdges forward
+//         from the GUARDED task's own outgoing flows (attachedToRef's targets),
+//         EXCLUDING the timer element itself (so the timer's own branch is not
+//         trivially "reachable from the main path" through a shared start).
+//      b. Walk forward from the escalation target. If this walk reaches an
+//         endEvent WITHOUT first visiting a node in mainReachable → violation
+//         (the escalation branch has its own, disconnected ending — a zombie
+//         token is guaranteed whenever the timer never fires).
+//      c. If the walk reaches a node in mainReachable before any endEvent →
+//         OK (the branches converge — e.g. into a converging gateway, or the
+//         escalation step itself flows back into the main sequence).
+//      d. If the walk reaches neither (dangles) → already caught as
+//         timer_malformed by checkTimerCoherence (dangling, 0 outgoing) or is
+//         a cycle with no end at all — out of scope here, Flowable's own
+//         deploy-time validation catches genuinely unreachable graphs.
+//
+// Pure: no IO, no DB, no side effects. Graph size is the size of one BPMN
+// document — plain BFS with a visited-set is more than sufficient.
+// ---------------------------------------------------------------------------
+
+function reachableSet(
+  startIds: readonly string[],
+  edges: ReadonlyArray<{ source: string; target: string }>,
+): Set<string> {
+  const adjacency = new Map<string, string[]>();
+  for (const e of edges) {
+    const list = adjacency.get(e.source);
+    if (list) list.push(e.target);
+    else adjacency.set(e.source, [e.target]);
+  }
+  const visited = new Set<string>();
+  const queue: string[] = [...startIds];
+  while (queue.length > 0) {
+    const cur = queue.shift() as string;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    const next = adjacency.get(cur);
+    if (next) {
+      for (const n of next) if (!visited.has(n)) queue.push(n);
+    }
+  }
+  return visited;
+}
+
+/**
+ * Verify every NON-INTERRUPTING boundary timer's escalation branch reconnects
+ * to the guarded task's own downstream path before reaching an endEvent of its
+ * own. See the block comment above for the full rationale and algorithm.
+ * Pure: no IO, no DB, no side effects.
+ */
+function checkTimerEscalationConvergence(
+  timers: TimerEventInfo[],
+  flowEdges: ReadonlyArray<{ source: string; target: string }>,
+  endEventIds: ReadonlySet<string>,
+  violations: LintViolation[],
+): void {
+  for (const t of timers) {
+    // Scope: boundary timers only, non-interrupting only, must resolve to an
+    // escalation target (interrupting timers and dangling timers are handled
+    // elsewhere — see the algorithm note above).
+    if (t.kind !== "boundary") continue;
+    if (t.cancelActivity) continue; // interrupting → no convergence question
+    if (!t.attachedToRef) continue; // already flagged (BOUNDARY WITHOUT ATTACH)
+    const escalationTarget = flowEdges.find((e) => e.source === t.id)?.target;
+    if (!escalationTarget) continue; // already flagged (dangling, 0 outgoing)
+
+    // mainReachable: everything reachable forward from the guarded task's OWN
+    // outgoing flows (NOT from the timer itself, and not from the guarded task
+    // id directly — we want what the task's normal completion leads to).
+    const guardedTaskOutgoing = flowEdges
+      .filter((e) => e.source === t.attachedToRef)
+      .map((e) => e.target);
+    if (guardedTaskOutgoing.length === 0) continue; // guarded task itself dangles — a different check's concern
+    const mainReachable = reachableSet(guardedTaskOutgoing, flowEdges);
+
+    // Walk forward from the escalation target; stop at the first endEvent OR
+    // the first node already in mainReachable (convergence found).
+    const visited = new Set<string>();
+    const queue: string[] = [escalationTarget];
+    let converged = false;
+    let reachedOwnEnd = false;
+    while (queue.length > 0 && !converged) {
+      const cur = queue.shift() as string;
+      if (visited.has(cur)) continue;
+      visited.add(cur);
+      if (mainReachable.has(cur)) {
+        converged = true;
+        break;
+      }
+      if (endEventIds.has(cur)) {
+        reachedOwnEnd = true;
+        continue; // an endEvent has no outgoing flows to expand — nothing more to walk here
+      }
+      for (const e of flowEdges) {
+        if (e.source === cur && !visited.has(e.target)) queue.push(e.target);
+      }
+    }
+
+    if (!converged && reachedOwnEnd) {
+      const elemDesc = t.id ? `boundaryEvent id="${t.id}"` : "boundaryEvent (no id)";
+      violations.push({
+        type: "timer_escalation_no_convergence",
+        elementId: t.id,
+        elementKind: "boundaryEvent",
+        message:
+          `<${elemDesc}> is a NON-INTERRUPTING boundary timer (cancelActivity="false") ` +
+          `whose escalation branch reaches its own endEvent WITHOUT reconnecting to the ` +
+          `guarded task's own downstream path. If the guarded task (attachedToRef="` +
+          `${t.attachedToRef}") completes before the deadline fires, the escalation ` +
+          `branch's token is never cancelled and never reaches an end either — the ` +
+          `process instance never completes (act_hi_procinst.end_time stays NULL forever), ` +
+          `even though the main path finished. Fix: either route the escalation branch ` +
+          `into a gateway that also receives the guarded task's normal completion flow ` +
+          `(so both paths converge before ending), or set cancelActivity="true" if the ` +
+          `escalation is meant to CANCEL the guarded task rather than merely remind`,
       });
     }
   }
