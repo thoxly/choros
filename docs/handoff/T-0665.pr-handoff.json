@@ -62,6 +62,32 @@
     "If reachable: repeat with an agent-driven POST /api/forms/document-ops edit (T-0656 seam) on the same binding, then reopen the inbox task — the agent's edit should also be visible (same layout column, same GET, same renderer).",
     "Confirm a PRE-EXISTING legacy binding (saved via the old FormBuilder-only path, no layout) still renders via the flat FieldControl list, unchanged — proves NF3 live, not just in tests."
   ],
+  "live_proof": {
+    "date": "2026-07-05",
+    "stand": "http://100.121.76.86:3000 (dev@69cb01f)",
+    "browser": "Playwright chromium headless, real Keycloak Authorization Code + PKCE (not dev-shortcut), actor e-owner",
+    "verdict": "RED — one P0 found via source-code proof; assembly/binding-picker/owner-save/reopen-layout all GREEN live",
+    "report": "docs/live-proof/T-0665-e2e.live-proof.md",
+    "evidence_dir": "docs/live-proof/T-0665-e2e-evidence/",
+    "per_link": {
+      "assembly_ui": "GREEN — 2-3 blocks assembled via real palette clicks (field chip + 2 layout blocks), no API bypass used for the final saved form.",
+      "binding_picker_F1": "GREEN with a finding — process+step picker works and resolves real BPMN userTask suggestions, but the application picker is NOT synced to the real process_app_binding (an inconsistent process+app pairing authors cleanly and only fails at Save with an opaque 409).",
+      "owner_save_no_manual_role_T0666": "GREEN — POST /api/forms/binding as e-owner (no process_designer role_assignment granted in this session) returned 201, not 403. Confirms checkRole's isGenesisOwnerForTenant bypass live.",
+      "reopen_layout_F3": "GREEN — GET /api/forms/binding on fresh navigation returned the SAME 3-node tree (field/section/text) byte-identical to what was authored; FormDesigner's canvas visually reconstructed it 1:1 (see 14-reopen-same-step.png).",
+      "render_to_assignee_F4_F5": "RED — P0, proved by direct source reading, not reached via a live task-card screenshot (no role-approver credentials available in this session; owner correctly got 403 NOT_ELIGIBLE on claim). See finding below."
+    },
+    "p0_found": "InboxTaskForm (web/src/screens/screen-inbox.jsx line ~189) does `const fields = binding.fields || []; if (fields.length === 0) return null;` BEFORE computing `hasLayout` (line ~210). src/http/binding.ts's POST handler (line ~543-545) stores `fields = []` whenever the request carries `layout` but no explicit `fields` key — which is exactly what FormDesigner.jsx's persistLayout() always sends (confirmed live: GET after save returned `\"fields\":[]` in the body). Net effect: ANY form assembled via the flagship FormDesigner drag-n-drop path renders as 'no form' (early return null) for the assignee — the F5 layout-render branch is unreachable in practice. screen-inbox.test.jsx's T-0665-F5 tests are source-presence only (assert the branch text exists) and do not catch the guard-ordering bug.",
+    "medium_findings": [
+      "FormDesigner's application picker is independent of process_app_binding — an operator can pick any process + any unrelated application; authoring shows no error, only Save's 409 (no registry binding) reveals the mismatch.",
+      "telLinear (the reference ТЭЛ process, source=engine/status=deployed, 25 live instances, the one process with a battle-tested live-schema resolution) is excluded from the process picker by the status==='published' filter (modeler-only processes pass).",
+      "A field with type==='money' (not number+widget) breaks default form assembly: widget-registry.js's WIDGET_COMPAT_TABLE has no 'money' key, so nodeTypeForFieldType defaults to 'field'/contract scalar, which resolveFieldContract({type:'money'}) never satisfies — V-CONTRACT authoring error on any money field included by default build.",
+      "The step datalist suggestion's <option value> is the BPMN userTask id (e.g. Activity_0dsh0ls), not its human-readable name — but the real inbox item.step used by InboxTaskForm's GET query is the human-readable name (e.g. 'Согласование'). Picking the suggested id silently creates a binding that will never resolve for any real inbox task (no error at save time)."
+    ],
+    "residue": [
+      "form_binding rows: novyy-protsess-2/Activity_0dsh0ls (v1) and novyy-protsess-2/Согласование (v1) — both valid UI-authored saves, left in place (no DELETE API).",
+      "form_binding probe row: novyy-protsess-2/liveproof-probe-step (id 00468bc2-50c8-4d2b-ba0a-99a6427d652a) — empty-layout reconnaissance probe via direct fetch, not a UI save, left in place (no DELETE API)."
+    ]
+  },
   "findings": [
     "FormDocumentRenderer.jsx's renderableField() had a latent mode-source bug independent of this task's 3 assigned gaps: it derived per-step field mode ONLY from the layout node's own node.mode, never from the schema field's server-side per-step mode (form_binding.fields[].mode, T-0404) that the legacy FieldControl-per-row path already enforces. Fixed in-scope (F6) because leaving it would have made the NEW layout render path behave differently from the legacy path on the exact same binding data (a field marked hidden/read-only at this step would have rendered wrong only under the new path) — a regression this task would have introduced if left alone, not merely a pre-existing gap.",
     "ci/checks/candidategroups-role-slug-linter.sh has a genuine, pre-existing, unrelated failure on docs/live-proof/T-0612-evidence/T-0612-liveproof-defect.bpmn20.xml (T-0612's intentionally-named defect fixture referencing unseeded roles). This blocks a clean `npm run fitness` run for ANY task branched from dev@73f86df until someone either seeds the roles, renames/excludes the evidence fixture from the linter's scan, or moves T-0612's evidence out of a path the linter scans. Recommend a follow-up task to fix this so the fitness chain is genuinely green end-to-end for the next task that runs it.",
