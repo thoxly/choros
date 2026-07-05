@@ -113,6 +113,34 @@ function asRenderableText(value) {
   return String(value);
 }
 
+/**
+ * MACHINE_ID_RE — a raw machine key (UUID v1–v5) that must NEVER be surfaced as
+ * a PRIMARY human label. Shared by ActorChip (T-0685) and ProcessRef (T-0683,
+ * which re-exports it as PROCESSREF_UUID_RE below) — one definition, two
+ * readers, so the two "is this a raw key?" checks can never drift apart.
+ */
+const MACHINE_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * isMachineActorLabel — T-0685 (D-064, wave-5 human-layer; capstone T-0647
+ * finding on /rights/trail): true when a candidate ActorChip primary label is
+ * itself a bare machine key with no human meaning — a raw UUID (an actor the
+ * batch resolver could not map to an employee, so its name === the raw id) or
+ * an `agent:`/`instance:`/`flw:` synthetic key. Such a value must be DEMOTED
+ * (tooltip / mono chip) exactly like ProcessRef/RecordRef do — never rendered
+ * as the primary text a human reads. A slug fallback ("policy-sync", "e-ghost")
+ * is NOT a machine key: it is a stable human-legible handle and stays primary.
+ */
+export function isMachineActorLabel(value) {
+  if (typeof value !== "string") return false;
+  const s = value.trim();
+  if (s === "") return false;
+  if (MACHINE_ID_RE.test(s)) return true;
+  if (/^(agent|instance|flw):/i.test(s)) return true;
+  return false;
+}
+
 /* ExecutorBadge — единый цвето-иконочный код типа исполнителя.
  *
  * T-0648 FIX-1 (a11y, столп 4): the actor TYPE (human/agent/service) must be
@@ -170,14 +198,31 @@ function ExecutorBadge({ type = "human", label, name, bare = false, showLabel = 
 function ActorChip({ type = "human", name, id, showId = false, bare = false, deactivated = false }) {
   const meta = EXEC_META[type] || EXEC_META.human;
   const safeId = asRenderableText(id);
-  const displayName = asRenderableText(name) || safeId || meta.label;
+  const rawName = asRenderableText(name);
+  // T-0685 (capstone T-0647, /rights/trail «КОМУ»/«КТО-ВЫДАЛ»): when the batch
+  // resolver could NOT map an actor to an employee, the caller's honest fallback
+  // hands us the raw id AS the name (name === id === a UUID). Rendering that as
+  // the PRIMARY text is the exact machine-layer-leaks-into-human-layer defect
+  // this task closes — a bare `e0000000-…-000000000007` in the operator's face.
+  // Mirror ProcessRef/RecordRef: a UUID/`agent:`-shaped label is NEVER primary —
+  // it is DEMOTED to the tooltip + (opt-in) mono chip, and the primary falls to
+  // the honest generic type label. A human-legible SLUG fallback ("policy-sync",
+  // "e-ghost") is NOT a machine key and is kept as primary (unchanged behaviour).
+  const nameIsMachineKey = isMachineActorLabel(rawName);
+  const idIsMachineKey = isMachineActorLabel(safeId);
+  const displayName = (!nameIsMachineKey && rawName) || (!idIsMachineKey && safeId) || meta.label;
+  // The raw id must always remain reachable (tooltip / mono chip) even when it
+  // was demoted from the primary. `shownId` is the id we surface secondarily:
+  // the explicit `id` prop when present, else the machine-key `name` we hid from
+  // the primary (so a UUID passed only as `name` is still tooltip-reachable).
+  const shownId = safeId || (nameIsMachineKey ? rawName : null);
   // T-0648 FIX-3: deactivation surfaces in the visible tooltip too (not only AT).
   const typeLabel = deactivated ? `${meta.label} · деактивирован` : meta.label;
-  const tooltip = safeId && safeId !== displayName ? `${typeLabel} · ${safeId}` : typeLabel;
+  const tooltip = shownId && shownId !== displayName ? `${typeLabel} · ${shownId}` : typeLabel;
   return (
     <span className="chs-actorchip" title={tooltip}>
       <ExecutorBadge type={type} name={displayName} bare={bare} deactivated={deactivated} />
-      {showId && safeId && <MonoId chip>{safeId}</MonoId>}
+      {showId && shownId && <MonoId chip>{shownId}</MonoId>}
     </span>
   );
 }
@@ -332,23 +377,27 @@ function RecordRef({ recordId, appId, headers, fetchImpl }) {
      fetchImpl   — fetch override (tests / RecordRef).
    ---------------------------------------------------------------------------- */
 
-/** UUID (v1–v5) shape — a raw machine key that must never be a primary label. */
-const PROCESSREF_UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** UUID (v1–v5) shape — a raw machine key that must never be a primary label.
+ *  T-0685: aliases the shared MACHINE_ID_RE (defined next to asRenderableText)
+ *  so ActorChip and ProcessRef test the SAME UUID shape from one source. */
+const PROCESSREF_UUID_RE = MACHINE_ID_RE;
 
 /**
  * isMachineInst — true when `inst` is a bare machine key with no human meaning:
- * a raw UUID, an `agent:<...>` / `instance:<...>` synthetic key, or empty. A
+ * a raw UUID, an `agent:<...>` / `instance:<...>` synthetic key, or EMPTY. A
  * human-friendly fixture label like "INS-7731" is NOT a machine key.
+ *
+ * T-0685: delegates the UUID/`agent:`-prefix test to the shared
+ * isMachineActorLabel (one predicate, no duplicated regex). The ONE intentional
+ * difference lives HERE, at the wrapper: for a process instance a MISSING/EMPTY
+ * inst carries no human value → treated as a machine key (no primary label to
+ * show); isMachineActorLabel keeps empty === NOT-a-machine-key so an empty actor
+ * NAME simply falls through to the next honest fallback (id → type label). Do
+ * NOT collapse these two empty-string policies — they are deliberately opposite.
  */
 export function isMachineInst(inst) {
   if (typeof inst !== "string" || inst.trim() === "") return true;
-  const s = inst.trim();
-  if (PROCESSREF_UUID_RE.test(s)) return true;
-  if (/^(agent|instance|flw):/i.test(s)) return true;
-  // Bare UUID embedded after a known synthetic prefix already handled above; a
-  // plain hex-ish blob with no separators reads as machine too.
-  return false;
+  return isMachineActorLabel(inst);
 }
 
 /**

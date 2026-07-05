@@ -1,0 +1,28 @@
+{
+  "task_id": "T-0685",
+  "status": "pr_open",
+  "branch": "task/T-0685",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "web/src/components/components.jsx",
+    "web/src/screens/rights/ra-grant-trail.jsx",
+    "src/http/grant-trail.ts",
+    "web/src/components/actor-chip.test.jsx",
+    "web/src/screens/rights/ra-grant-trail.test.js"
+  ],
+  "deviations_from_adr": [
+    "Scope widened beyond the two named columns (subject «КОМУ» + granter «КТО-ВЫДАЛ»): the LIVE_PROOF render with the exact capstone employee-UUIDs exposed the SAME leak class in two adjacent spots on the same row — the «Роль · грант» column (roleLabelOf's subject-fallback surfaced a raw subject-UUID) and the «КТО-ПОДТВЕРДИЛ» provenance column (confirmed_by). Both are now closed under the same T-0648 resolver + machine-key-demotion path (server: confirmed_by added to the existing batchResolveActors call, no extra query; web: honest generic fallback). Not fixing them would have left the row still leaking a raw UUID first-class — the exact defect the task closes."
+  ],
+  "friction_events": [
+    "Root cause was NOT 'resolver not applied to subject/granter' — the T-0648 server resolver already resolved actor+subject (batchResolveActors matches slug OR employee-UUID via id::text = ANY). The real leak was the WEB honest-fallback: when the resolver MISSES (a stale/cross-tenant employee UUID, or a subject that is a grant/assignment TARGET uuid, not an employee), coerceActorField returns {name:<uuid>, id:<uuid>} and ActorChip's displayName = name || id || label rendered the raw UUID as PRIMARY text. Fixed at the ActorChip primitive (right depth): a UUID/agent:/instance:/flw: machine-key name is never primary — demoted to tooltip+mono, honest generic type label shown instead. This also fixes the same leak on screen-audit / screen-inbox / screen-process-instance / operational-analytics (all pass name={display?.name || rawId}).",
+    "Live DB snapshot in this worktree differs from the capstone's: only ONE real grant-trail row exists (actor=e-owner slug resolves fine; subject=f5d1417b-… is a grant/assignment TARGET uuid that resolves to NO employee — the honest-fallback case). The defect-named UUIDs (e0000000-…/3462410f-…) were not present live, so LIVE_PROOF was done via a unit render feeding the exact capstone UUID shapes with resolver-miss (actorResolved/subjectResolved/confirmedResolved all undefined) — visible primary text: 'выдан Сервис Сервис — role-x role-x org:fin заведено человеком подтверждено', zero UUIDs.",
+    "Two worktrees share /tmp: an accidental `vitest run --root /tmp` picked up other worktrees' fixtures and failed noisily — switched to running the live-proof as a temp test INSIDE web/src (proper JSX transform), then deleted it. Permanent pins live in ra-grant-trail.test.js + actor-chip.test.jsx.",
+    "Dependencies were absent in the fresh worktree — npm ci in both root and web/ (maxsockets=3) before any gate could run."
+  ]
+}

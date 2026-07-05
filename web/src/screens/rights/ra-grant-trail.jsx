@@ -7,6 +7,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   ActorChip, MonoId, Mono, OpChip, Button, KitIcon, LoadingState, ErrorState,
   DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
+  isMachineActorLabel,
 } from '../../components/components.jsx';
 import { TRAIL as TRAIL_SEED, ProvenanceTag } from './ra-data.jsx';
 import { formatDate } from '../../lib/format.js';
@@ -84,10 +85,17 @@ function roleLabelOf(r) {
   if (r.role && typeof r.role === "object" && typeof r.role.name === "string") return r.role.name;
   const subject = r.subject;
   if (subject === null || subject === undefined || subject === "") return "—";
+  // T-0685: the subject-fallback is the SECOND place a raw subject-UUID leaks
+  // into the human layer (the first is the «Кому» ActorChip). On an ASSIGNMENT
+  // event the subject is an employee (a UUID/slug), not a role slug — surfacing
+  // that UUID as the «Роль · грант» label is the same machine-layer leak the
+  // capstone T-0647 flagged. A machine-key subject → honest generic «—» here
+  // (the assignment's real role, when present, already comes from `op` = roleId).
   if (typeof subject === "object") {
-    return typeof subject.name === "string" ? subject.name : String(subject.name ?? "—");
+    const name = typeof subject.name === "string" ? subject.name : String(subject.name ?? "—");
+    return isMachineActorLabel(name) ? "—" : name;
   }
-  return String(subject);
+  return isMachineActorLabel(String(subject)) ? "—" : String(subject);
 }
 
 function apiRowToDisplay(r) {
@@ -137,12 +145,31 @@ function apiRowToDisplay(r) {
   // Never a bare object → the React #31 crash-guard is preserved.
   const role = roleLabelOf(r);
 
-  // confirmed: seed rows carry a `confirmed` string-array already; API rows carry
-  // a single `confirmed_by` string. Normalise to an array of strings either way.
+  // confirmed: seed rows carry a `confirmed` string-array already (human display
+  // names); API rows carry a single `confirmed_by` string (an employee slug/UUID).
+  // Normalise to an array of HUMAN-READABLE strings either way.
+  //
+  // T-0685 (capstone T-0647 live-proof — the «КТО-ПОДТВЕРДИЛ» provenance column):
+  // confirmed_by is the THIRD actor identifier on the row. GET /api/grant-trail
+  // now attaches `confirmedResolved` (src/http/grant-trail.ts attachResolvedActors
+  // — the SAME batch resolver as actor/subject, no extra query) — prefer its human
+  // name. If the confirmer did NOT resolve (stale/cross-tenant UUID) and the raw
+  // value is a bare machine key, DEMOTE it to the honest generic «подтверждено»
+  // rather than leaking a raw UUID into the operator's face (mirrors ActorChip).
   let confirmed;
-  if (Array.isArray(r.confirmed)) confirmed = r.confirmed.map((c) => (typeof c === "string" ? c : String(c ?? "")));
-  else if (r.confirmed_by) confirmed = [String(r.confirmed_by)];
-  else confirmed = [];
+  if (Array.isArray(r.confirmed)) {
+    confirmed = r.confirmed.map((c) => (typeof c === "string" ? c : String(c ?? "")));
+  } else if (r.confirmed_by) {
+    const resolvedName =
+      r.confirmedResolved && typeof r.confirmedResolved === "object" && typeof r.confirmedResolved.name === "string"
+        ? r.confirmedResolved.name
+        : null;
+    const raw = String(r.confirmed_by);
+    const label = resolvedName || (isMachineActorLabel(raw) ? "подтверждено" : raw);
+    confirmed = [label];
+  } else {
+    confirmed = [];
+  }
 
   return {
     id: r.id,
