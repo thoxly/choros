@@ -456,6 +456,78 @@ function ProcessRef({ processName, inst, recordId, appId, stepFallback, headers,
   );
 }
 
+/* ----------------------------------------------------------------------------
+   StepRef — T-0687 (D-064, wave-5 human-layer; capstone T-0647 finding): the
+   task-detail drawer led with a RAW BPMN node id as the primary «Шаг» /
+   «Текущий шаг» value — «legal_precheck», a machine key the operator cannot
+   read. This is the step-level sibling of ProcessRef (inst) / ActorChip (actor):
+   a human step label is primary; a bare machine key (snake_case/kebab BPMN id,
+   no space/Cyrillic) is DEMOTED to a mono secondary chip, never the primary
+   text. A step value that ALREADY reads human ("Проверка реквизитов · этап A",
+   any label with a space / «·» / Cyrillic) stays primary unchanged.
+
+   Pure decision (deriveStepLabel) is exported + hook-free so the render branch
+   and the tests agree — the exact split ProcessRef/deriveProcessRefPrimary uses.
+   ---------------------------------------------------------------------------- */
+
+/**
+ * isMachineStepKey — true when `step` is a bare BPMN node id with no human
+ * reading: a snake_case / kebab-case / dotted token that carries NO whitespace,
+ * no Cyrillic, and no «·» separator (e.g. "legal_precheck", "userTask_1",
+ * "approve.step"). An empty/missing step is treated as a machine key (no human
+ * value to show). A value with a space, a «·», or any Cyrillic letter is a
+ * human-authored step name and is NOT a machine key.
+ *
+ * Deliberately DISTINCT from isMachineInst (UUID/`agent:` shape): a step key is
+ * never a UUID — it is a modeler-authored node id whose machine-ness is «looks
+ * like a code token, not a sentence». Kept as its own predicate so the two
+ * checks never drift.
+ */
+export function isMachineStepKey(step) {
+  if (typeof step !== "string") return true;
+  const s = step.trim();
+  if (s === "") return true;
+  // Any space, middle-dot separator, or Cyrillic letter ⇒ human-authored label.
+  if (/\s/.test(s)) return false;
+  if (s.includes("·")) return false;
+  if (/[а-яё]/i.test(s)) return false;
+  // A single-token, space-free, latin/underscore/dot/dash string ⇒ machine key.
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(s);
+}
+
+/**
+ * deriveStepLabel — PURE decision (hook-free, unit-testable, mirrors
+ * deriveProcessRefPrimary): pick the PRIMARY human label for a process step and
+ * report whether the raw key still deserves a demoted mono secondary.
+ *
+ * Returns { label, showKey }:
+ *   - label:   human step name when `step` reads human; else the honest generic
+ *              «Шаг процесса» — NEVER the raw machine node id as primary text.
+ *   - showKey: true iff `step` is a machine key (so the component renders it as a
+ *              demoted mono chip for traceability) — false when `step` is already
+ *              a human label (there is no separate key to show).
+ */
+export function deriveStepLabel(step) {
+  const s = typeof step === "string" ? step.trim() : "";
+  if (s && !isMachineStepKey(s)) return { label: s, showKey: false };
+  // Machine key (or empty): generic human primary; the raw key is demoted.
+  return { label: "Шаг процесса", showKey: s.length > 0 };
+}
+
+function StepRef({ step }) {
+  const { label, showKey } = deriveStepLabel(step);
+  const rawKey = asRenderableText(step);
+  return (
+    <span className="chs-stepref">
+      <span className="chs-stepref__name" title={showKey && rawKey ? rawKey : undefined}>
+        {label}
+      </span>
+      {/* Raw BPMN node id is DEMOTED to a mono secondary — never the primary. */}
+      {showKey && rawKey && <MonoId chip>{rawKey}</MonoId>}
+    </span>
+  );
+}
+
 /* StatusChip */
 const STATUS_META = {
   running: { label: "Выполняется", cls: "chs-chip--running" },
@@ -1274,7 +1346,7 @@ function DataTableCell({ children, numeric = false, right = false, center = fals
 }
 
 export {
-  ExecGlyph, ExecutorBadge, ActorChip, MonoId, Mono, RecordRef, ProcessRef, StatusChip, Button, Field, Select,
+  ExecGlyph, ExecutorBadge, ActorChip, MonoId, Mono, RecordRef, ProcessRef, StepRef, StatusChip, Button, Field, Select,
   BudgetMeter, ReservationMeter, RoleAssignment, OpChip, DerivedChip,
   TaskRow, AuditEvent, EXEC_META, STATUS_META,
   KitIcon, Spinner,

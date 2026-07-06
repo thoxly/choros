@@ -388,3 +388,61 @@ describe('screen-inbox — T-0683: «ПРОЦЕСС» column uses ProcessRef, no
     expect(rowsBody).not.toMatch(/<MonoId>\{t\.inst\}<\/MonoId>/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0687 (D-064, wave-5 human-layer; capstone T-0647-A): the task-detail drawer
+// leaked machine keys («Шаг: legal_precheck», «Инстанс: agent:», «Ключ процесса:
+// telLinear») as PRIMARY values and never showed the source RECORD's title/link.
+// These source-level pins fail on a revert to the pre-fix raw renders. The pure
+// step-humanization behaviour is covered mutationally in step-ref.test.jsx.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0687-A: drawer humanizes step + shows RecordRef, never raw machine keys', () => {
+  it('imports RecordRef and StepRef from the component kit', () => {
+    expect(src).toMatch(/import\s*\{[^}]*\bRecordRef\b[^}]*\}\s*from\s*'\.\.\/components\/components\.jsx'/s);
+    expect(src).toMatch(/import\s*\{[^}]*\bStepRef\b[^}]*\}\s*from\s*'\.\.\/components\/components\.jsx'/s);
+    expect(src).toContain("import { deriveStepLabel } from '../components/components.jsx'");
+  });
+
+  it('MUTATION pin: the drawer «Шаг» uses <StepRef>, NOT the raw `<Mono>{detail.item.step}</Mono>`', () => {
+    // The task-info section must render a humanized StepRef for the step.
+    expect(src).toMatch(/<StepRef step=\{detail\.item\.step\} \/>/);
+    // The exact pre-fix raw-key render the capstone flagged is gone.
+    expect(src).not.toMatch(/<Mono>\{detail\.item\.step\}<\/Mono>/);
+  });
+
+  it('the drawer task-info section renders an explicit «Запись» RecordRef (title + link to the source record)', () => {
+    // There is a «Запись» label followed by a RecordRef resolving the source
+    // record id (item.recordId, falling back to the projection's recordId).
+    expect(src).toContain('Запись');
+    expect(src).toMatch(/<RecordRef\s+recordId=\{detail\.item\.recordId \?\? detail\.projection\?\.recordId\}/);
+  });
+
+  it('MUTATION pin: the projection «Текущий шаг» uses <StepRef>, NOT raw `<span style={S.val}>{detail.projection.step}</span>`', () => {
+    expect(src).toMatch(/<StepRef step=\{detail\.projection\.step\} \/>/);
+    expect(src).not.toMatch(/<span style=\{S\.val\}>\{detail\.projection\.step\}<\/span>/);
+  });
+
+  it('MUTATION pin: the raw «Инстанс»/«Ключ процесса» rows are DEMOTED (no bare primary MonoId/Mono rows)', () => {
+    // The capstone flagged prominent «Инстанс» / «Ключ процесса» rows. They are
+    // now collapsed under a single demoted «Идентификаторы» line — the standalone
+    // key-labelled rows are gone.
+    expect(src).not.toMatch(/<span style=\{S\.key\}>Инстанс<\/span>\s*<MonoId>/);
+    expect(src).not.toMatch(/<span style=\{S\.key\}>Ключ процесса<\/span>\s*<Mono>/);
+  });
+
+  it('the list task NAME carries record context (RecordRef) to distinguish identical names', () => {
+    const rowsIdx = src.indexOf('{rows.map((t) => {');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('</table>', rowsIdx));
+    // The name cell appends a RecordRef for the task's record when present.
+    expect(rowsBody).toMatch(/chs-task__name/);
+    expect(rowsBody).toMatch(/<RecordRef recordId=\{t\.recordId\}/);
+  });
+
+  it('MUTATION pin: the list step subtitle is humanized (deriveStepLabel), not the raw `{t.step}`', () => {
+    const rowsIdx = src.indexOf('{rows.map((t) => {');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('</table>', rowsIdx));
+    expect(rowsBody).toMatch(/deriveStepLabel\(t\.step\)\.label/);
+    // The bare `<span className="chs-task__step">{t.step}</span>` is gone.
+    expect(rowsBody).not.toMatch(/chs-task__step">\{t\.step\}</);
+  });
+});

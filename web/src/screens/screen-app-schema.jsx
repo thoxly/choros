@@ -27,7 +27,7 @@
    несуществующих --chs-bg-primary/--chs-border). Ноль хардкода цвета (G6).
    ============================================================================ */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Button, MonoId, StatusChip, Field, Select, EmptyState, ErrorState, LoadingState, KitIcon,
@@ -938,7 +938,7 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
  * T-0444: fetches all tenant registry_defs (tenant-wide, no application_id filter) to
  * populate the «На какой набор ссылается» dropdown in relation FieldRows.
  */
-function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
+function FieldEditor({ applicationId, editingDef, defaultName, onSaved, onCancel }) {
   const isEdit = Boolean(editingDef);
   const [slug, setSlug] = useState(editingDef?.slug || '');
   // T-0650 [UX-study §7]: SlugField dirty flag — true once the user clicked
@@ -946,7 +946,14 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
   // displayName). Existing defs are always "touched" (their slug is immutable
   // post-creation — SlugField renders it locked, see below).
   const [slugTouched, setSlugTouched] = useState(isEdit);
-  const [displayName, setDisplayName] = useState(editingDef?.display_name || '');
+  // T-0687 (capstone T-0647-B): for the AUTO-first set, seed the name with a
+  // human default ("Основные поля") so the operator lands directly on the field
+  // list — the internal registry_def «набор полей» abstraction no longer forces
+  // a naming step before ANY field can be added. `defaultName` is applied ONLY on
+  // create (editingDef===null); editing a set keeps its stored display_name.
+  const [displayName, setDisplayName] = useState(
+    editingDef?.display_name || (isEdit ? '' : (defaultName || '')),
+  );
   const [fields, setFields] = useState(() =>
     isEdit ? parseRecordSchema(editingDef.record_schema) : [blankField()]
   );
@@ -1297,6 +1304,46 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
   );
 }
 
+// T-0687 (capstone T-0647-B): the human-facing default set name. Zone2/§2.6
+// finding — the first «Настроить поля» forced «+ Новый набор полей» before ANY
+// field could be added, surfacing the internal registry_def «набор полей»
+// abstraction. The spec prescribed auto-creating a default set. We seed the
+// create-editor with this name so the operator lands directly on the field list
+// and never has to invent a set name to add their first field. The server
+// derives the slug from it (T-0650 auto-slug: «Основные поля» → "osnovnye-polya").
+export const DEFAULT_FIELD_SET_NAME = 'Основные поля';
+
+/**
+ * shouldAutoOpenDefaultSet — PURE, hook-free decision (unit-testable):
+ * should the schema screen auto-open the create-editor seeded with the default
+ * set, INSTEAD of showing the empty-state that forces a manual «+ Новый набор
+ * полей»?
+ *
+ * True IFF ALL hold:
+ *   - the defs list has LOADED (defs !== null — never act on the loading state),
+ *   - it is EMPTY (list.length === 0 — application has no field set yet),
+ *   - the editor is CLOSED (editing === undefined — don't stomp an open editor),
+ *   - we have NOT already auto-opened for this app (alreadyAuto === false).
+ *
+ * IDEMPOTENCY: the `alreadyAuto` latch is the guard that stops this from
+ * re-firing — once we auto-open (or the user creates/cancels), the latch stays
+ * set for the app, and once ANY set exists list.length>0 makes this false
+ * forever. This is why the auto path can NEVER plow a second «main»/default set:
+ * it fires at most once, only while the app has zero sets.
+ *
+ * @param {Array|null} defs        the loaded defs (null = still loading)
+ * @param {undefined|null|object} editing  editor state (undefined = closed)
+ * @param {boolean} alreadyAuto    whether we already auto-opened for this app
+ * @returns {boolean}
+ */
+export function shouldAutoOpenDefaultSet(defs, editing, alreadyAuto) {
+  if (defs === null) return false;                // still loading — wait
+  if (!Array.isArray(defs) || defs.length !== 0) return false; // a set exists
+  if (editing !== undefined) return false;        // editor already open
+  if (alreadyAuto) return false;                  // already auto-opened once
+  return true;
+}
+
 function AppSchemaScreen() {
   const { appId } = useParams();
   const navigate = useNavigate();
@@ -1304,6 +1351,14 @@ function AppSchemaScreen() {
   const [error, setError] = useState(null);
   const [app, setApp] = useState(null);     // resolved application meta (for crumb/title)
   const [editing, setEditing] = useState(undefined); // undefined = closed; null = create; def = edit
+  // T-0687 (capstone T-0647-B): whether we auto-opened the default-set editor for
+  // THIS app already. A ref (not state) — flipping it must NOT re-render, and it
+  // must survive the editor open→cancel cycle so a cancel does NOT re-trap the
+  // user in an endless auto-open loop (they then fall through to the honest
+  // empty-state). Reset when the app (appId) changes.
+  const autoOpenedRef = useRef(false);
+  // Whether the currently-open editor was auto-seeded (drives the default name).
+  const [autoSeeding, setAutoSeeding] = useState(false);
 
   const load = useCallback(async () => {
     if (!appId) { setError('Не указано приложение'); return; }
@@ -1336,10 +1391,40 @@ function AppSchemaScreen() {
 
   useEffect(() => { load(); loadApp(); }, [load, loadApp]);
 
+  // T-0687 (capstone T-0647-B): a new app (appId change) gets a fresh auto-open
+  // budget — otherwise navigating between two empty apps in one session would
+  // auto-open only the first.
+  useEffect(() => {
+    autoOpenedRef.current = false;
+    setAutoSeeding(false);
+  }, [appId]);
+
+  // T-0687 (capstone T-0647-B): auto-open the create-editor seeded with the
+  // default set when the app has zero field sets — so the operator adds fields
+  // immediately instead of first inventing a «набор полей». Latched via
+  // autoOpenedRef so it fires AT MOST ONCE per app (idempotent — never plows a
+  // second default set; see shouldAutoOpenDefaultSet).
+  useEffect(() => {
+    if (shouldAutoOpenDefaultSet(defs, editing, autoOpenedRef.current)) {
+      autoOpenedRef.current = true;
+      setAutoSeeding(true);
+      setEditing(null); // create mode; defaultName seeds the display_name
+    }
+  }, [defs, editing]);
+
   const handleSaved = useCallback(() => {
     setEditing(undefined);
+    setAutoSeeding(false);
     load();
   }, [load]);
+
+  // T-0687: cancelling the editor clears the auto-seeding flag. The autoOpenedRef
+  // latch stays SET, so a cancel drops the user to the honest empty-state (which
+  // still offers manual «Новый набор полей») rather than instantly re-opening.
+  const handleCancel = useCallback(() => {
+    setEditing(undefined);
+    setAutoSeeding(false);
+  }, []);
 
   const list = defs || [];
 
@@ -1372,8 +1457,11 @@ function AppSchemaScreen() {
           <FieldEditor
             applicationId={appId}
             editingDef={editing}
+            // T-0687: only the AUTO-opened first-set editor is pre-seeded with the
+            // default name; a manual «Новый набор полей» stays blank as before.
+            defaultName={autoSeeding ? DEFAULT_FIELD_SET_NAME : undefined}
             onSaved={handleSaved}
-            onCancel={() => setEditing(undefined)}
+            onCancel={handleCancel}
           />
         ) : null}
 
