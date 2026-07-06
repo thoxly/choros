@@ -50,8 +50,8 @@ import {
   mapSchemaError,
   blankField,
   blankSubField,
-  deriveFieldKeyFromTitle,
-  uniqueFieldKey,
+  previewAutoKeyAt,
+  previewAutoSubKeyAt,
 } from './apps-schema.js';
 
 // Scalar types permitted inside a «Список строк» column — label map for the
@@ -110,7 +110,11 @@ const colHeadStyle = {
 
 // Sub-field (column) grid — narrower than the top-level field grid because the
 // sub-editor is inset (no separate reorder column; add/remove only).
-const subFieldGridCols = 'minmax(0,1.2fr) minmax(0,1fr) minmax(0,1.4fr) auto auto';
+// T-0689 INVERSION (mirror of the top-level T-0686 field grid): «Название» is now
+// PRIMARY (first, widest) — the author names the column and the machine KEY
+// auto-derives (shown SlugField-style in the column's sub-row). The KEY input
+// moved OUT of the dense row. So the row is: label · type · required · remove.
+const subFieldGridCols = 'minmax(0,2fr) minmax(0,1fr) auto auto';
 const subFieldRowGrid = {
   display: 'grid',
   gridTemplateColumns: subFieldGridCols,
@@ -121,12 +125,80 @@ const subFieldRowGrid = {
 };
 
 /**
+ * SubFieldKeyPreview — T-0689: the per-COLUMN machine KEY, presented SlugField-style
+ * (mirror of the top-level FieldKeyPreview / T-0686, one level down). The human
+ * «Название» (label) is primary; the column key is a derived machine detail shown
+ * in the column's sub-row, not a mandatory first-column input.
+ *
+ * Two states (same shape as FieldKeyPreview, grammar FIELD_KEY_RE snake_case):
+ *   • !subKeyTouched (default) — live preview «ключ: `data_otezda` · изменить».
+ *     The `previewKey` is computed by the PARENT via previewAutoSubKeyAt (the
+ *     ORDERED withAutoSubFieldKeys pass), so it matches exactly the column key
+ *     buildRecordSchema will save. Empty label → «ключ сгенерируется из названия».
+ *   • subKeyTouched — a mono input (after «изменить»): the author hand-edits the
+ *     column key; further label edits no longer re-derive it. STABLE-KEY INVARIANT:
+ *     a loaded column arrives subKeyTouched:true (parseRecordSchema), so its stored
+ *     key is shown and never re-derived.
+ *
+ * @param {{ subField, previewKey: string, onChange: (patch)=>void }} props
+ */
+function SubFieldKeyPreview({ subField, previewKey, onChange }) {
+  const touched = Boolean(subField.subKeyTouched);
+  const hasLabel = typeof subField.label === 'string' && subField.label.trim().length > 0;
+
+  if (touched) {
+    return (
+      <div style={{ marginTop: 'var(--chs-space-2)', maxWidth: '320px' }}>
+        <input
+          className={`${inputCls(false)} chs-input--mono`}
+          value={subField.key}
+          onChange={(e) => onChange({ key: e.target.value })}
+          placeholder="col_key"
+          aria-label="Ключ колонки"
+        />
+        <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+          Латинские буквы/цифры/подчёркивание. Стабилен после сохранения — записи ссылаются на него.
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 'var(--chs-space-2)' }}>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-3)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+        {hasLabel ? (
+          <>
+            ключ:{' '}
+            <MonoId>{previewKey}</MonoId>
+          </>
+        ) : (
+          'ключ сгенерируется из названия'
+        )}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => onChange({ subKeyTouched: true, key: previewKey })}
+        >
+          изменить
+        </Button>
+      </span>
+    </div>
+  );
+}
+
+/**
  * CollectionSubFieldEditor — nested editor for the sub-fields (columns) of a
  * «Список строк» (collection) field. Rendered inside FieldRow when type is
  * «collection». Uses the same .chs-input / token conventions as the top-level
  * editor so inputs are visible in both themes (G2, G6).
  *
  * Product-language labels:  «Колонки» / «Колонка» — no «sub-field»/«collection».
+ *
+ * T-0689 INVERSION (mirror of the top-level T-0686 field inversion): «Название»
+ * (label) is PRIMARY+first; the machine column KEY auto-derives from it and is
+ * shown SlugField-style in the column's sub-row (SubFieldKeyPreview) — the author
+ * no longer hand-writes a latin column key (the «слаг-ад» one level down).
  *
  * T-0450 Fix 1 (G3 BLOCKING): when a column's type is «select», a
  * «Варианты (по одному на строку)» textarea is rendered in a full-width
@@ -159,11 +231,11 @@ function CollectionSubFieldEditor({ subFields, subFieldsError, onChange }) {
 
       {subFields.length > 0 && (
         <>
-          {/* Column header */}
+          {/* Column header — T-0689: «Название» first (primary); the machine «Ключ»
+              moved to each column's sub-row (auto-derived), so it is not a header. */}
           <div style={{ display: 'grid', gridTemplateColumns: subFieldGridCols, gap: 'var(--chs-space-3)', padding: '0 0 var(--chs-space-2) 0', borderBottom: '1px solid var(--chs-color-border)' }}>
-            <span style={colHeadStyle}>Ключ</span>
-            <span style={colHeadStyle}>Тип</span>
             <span style={colHeadStyle}>Название</span>
+            <span style={colHeadStyle}>Тип</span>
             <span style={{ ...colHeadStyle, textAlign: 'center' }}>Обяз.</span>
             <span />
           </div>
@@ -173,16 +245,22 @@ function CollectionSubFieldEditor({ subFields, subFieldsError, onChange }) {
             const setSfOptionsFromText = (text) => {
               updateCol(i, { options: text.split('\n') });
             };
+            // T-0689 / FU-1: the ORDERED auto-derived key for this column (the same
+            // key buildRecordSchema will save), so the preview matches the save
+            // (no phantom `_2` on the first of two same-named unsaved columns).
+            const sfPreviewKey = previewAutoSubKeyAt(subFields, i);
             return (
               <React.Fragment key={i}>
                 <div role="group" aria-label={`Колонка ${i + 1}`} style={subFieldRowGrid}>
-                  {/* sub-field key */}
+                  {/* T-0689: sub-field label is now PRIMARY (first, widest) — the
+                      human names the column; the machine key auto-derives (shown
+                      SlugField-style in the sub-row below). */}
                   <input
-                    className={`${inputCls(false)} chs-input--mono`}
-                    value={sf.key}
-                    onChange={(e) => updateCol(i, { key: e.target.value })}
-                    placeholder="col_key"
-                    aria-label="Ключ колонки"
+                    className={inputCls(false)}
+                    value={sf.label}
+                    onChange={(e) => updateCol(i, { label: e.target.value })}
+                    placeholder="Название колонки"
+                    aria-label="Название колонки"
                   />
                   {/* sub-field type (scalars only — depth cap 1) */}
                   <select
@@ -195,14 +273,6 @@ function CollectionSubFieldEditor({ subFields, subFieldsError, onChange }) {
                       <option key={t} value={t}>{COLUMN_TYPE_LABELS[t] || t}</option>
                     ))}
                   </select>
-                  {/* sub-field label */}
-                  <input
-                    className={inputCls(false)}
-                    value={sf.label}
-                    onChange={(e) => updateCol(i, { label: e.target.value })}
-                    placeholder="Название (опц.)"
-                    aria-label="Название колонки"
-                  />
                   {/* required */}
                   <label style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }}>
                     <input
@@ -219,6 +289,15 @@ function CollectionSubFieldEditor({ subFields, subFieldsError, onChange }) {
                   >
                     <KitIcon name="close" />
                   </Button>
+                </div>
+                {/* T-0689: per-column KEY — auto-derived from «Название», SlugField-
+                    style preview + «изменить» (mirror of the top-level FieldKeyPreview). */}
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <SubFieldKeyPreview
+                    subField={sf}
+                    previewKey={sfPreviewKey}
+                    onChange={(patch) => updateCol(i, patch)}
+                  />
                 </div>
                 {/* T-0450 Fix 1 (G3 BLOCKING): select-type column requires a variants
                     textarea so the author can supply options. Without options the cell
@@ -574,22 +653,26 @@ function FormulaConfigEditor({ field, errors, allFields, onChange }) {
  *
  * Two states (mirrors SlugField, but the key grammar is FIELD_KEY_RE — snake_case,
  * NOT the kebab-case app/set slug):
- *   • !keyTouched (default) — live preview «ключ: `summa_avansa` · изменить»,
- *     auto-derived from the title (deriveFieldKeyFromTitle) + de-duplicated
- *     against sibling keys (uniqueFieldKey). No direct key input. When the title
- *     is empty the preview reads «ключ сгенерируется из названия».
+ *   • !keyTouched (default) — live preview «ключ: `summa_avansa` · изменить».
+ *     The preview key is computed by the PARENT via previewAutoKeyAt (T-0689) — the
+ *     ORDERED withAutoFieldKeys pass — and passed in as `previewKey`, so it matches
+ *     exactly the key buildRecordSchema will save. When the title is empty the
+ *     preview reads «ключ сгенерируется из названия».
  *   • keyTouched — a normal mono input (after «изменить»): the author hand-edits
  *     the key; further title edits no longer re-derive it (dirty semantics, owned
  *     by the field object's keyTouched flag — parent-owned, hook-free).
  *
- * @param {{ field, siblingKeys: string[], error?: string, onChange: (patch)=>void }} props
- *        siblingKeys — the keys of the OTHER fields in the set (for the unique preview)
+ * T-0689 / FU-1: `previewKey` is now passed IN (ordered, from previewAutoKeyAt),
+ * not computed here from a flat sibling-key set. The old flat-set computation
+ * uniquified each field against ALL others, so two unsaved same-named fields BOTH
+ * previewed `base_2`; the ordered pass gives the first `base` and only the second
+ * `base_2`, matching the save.
+ *
+ * @param {{ field, previewKey: string, error?: string, onChange: (patch)=>void }} props
+ *        previewKey — the ORDERED auto-derived key for this field (from the parent)
  */
-function FieldKeyPreview({ field, siblingKeys, error, onChange }) {
+function FieldKeyPreview({ field, previewKey, error, onChange }) {
   const keyTouched = Boolean(field.keyTouched);
-  const takenBySiblings = new Set(siblingKeys);
-  // Live preview: derive from the title, then uniquify against siblings.
-  const previewKey = uniqueFieldKey(deriveFieldKeyFromTitle(field.title), takenBySiblings);
   const hasTitle = typeof field.title === 'string' && field.title.trim().length > 0;
 
   if (keyTouched) {
@@ -654,8 +737,15 @@ function FieldKeyPreview({ field, siblingKeys, error, onChange }) {
  * FieldEditor and passed down) for the target selector. targetRegistryId stored
  * on the field object.
  */
-function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError, allFields, siblingKeys, onCreateRelatedApp }) {
+function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError, allFields, onCreateRelatedApp }) {
   const set = (patch) => onChange({ ...field, ...patch });
+
+  // T-0689 / FU-1: the auto-derived KEY preview, computed the SAME way the save
+  // will assign it — the ORDERED withAutoFieldKeys pass over the whole list, read
+  // at this field's index (previewAutoKeyAt). This makes the pre-save preview
+  // match the saved key exactly (no phantom `_2` on the first of two same-named
+  // unsaved fields, the T-0686 preview bug).
+  const previewKey = previewAutoKeyAt(Array.isArray(allFields) ? allFields : [], index);
 
   // T-0463 [D8-G2]: inline "create related app" state for the relation picker.
   // When the desired relation target doesn't exist, the user names it here and
@@ -760,7 +850,7 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
               preview + «изменить». errors.key (grammar/dup) surfaces inside it. */}
           <FieldKeyPreview
             field={field}
-            siblingKeys={Array.isArray(siblingKeys) ? siblingKeys : []}
+            previewKey={previewKey}
             error={errors.key}
             onChange={set}
           />
@@ -1242,15 +1332,6 @@ function FieldEditor({ applicationId, editingDef, defaultName, onSaved, onCancel
               registryDefsLoading={allRegistryDefsLoading}
               registryDefsError={allRegistryDefsError}
               allFields={fields}
-              // T-0686: keys of the OTHER fields (explicit keys as-is; a still-unkeyed
-              // sibling's key auto-derives from its title) — for the unique key preview.
-              siblingKeys={fields
-                .filter((_, j) => j !== i)
-                .map((sf) => {
-                  const k = typeof sf?.key === 'string' ? sf.key.trim() : '';
-                  return k.length > 0 ? k : uniqueFieldKey(deriveFieldKeyFromTitle(sf?.title), new Set());
-                })
-                .filter(Boolean)}
               onCreateRelatedApp={createRelatedApp}
             />
           ))}

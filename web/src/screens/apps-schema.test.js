@@ -41,6 +41,9 @@ import {
   deriveFieldKeyFromTitle,
   uniqueFieldKey,
   withAutoFieldKeys,
+  withAutoSubFieldKeys,
+  previewAutoKeyAt,
+  previewAutoSubKeyAt,
   FIELD_KEY_RE,
 } from './apps-schema.js';
 
@@ -134,8 +137,10 @@ describe('apps-schema · supported types', () => {
     expect(backendAccepts(schema)).toBe(true);
     // Round-trip: the editor restores type "date" (not "string").
     const parsed = parseRecordSchema(schema);
+    // T-0689 / FU-2: a parsed (loaded) field carries keyTouched:true so the editor
+    // shows the persisted key instead of re-deriving it from the loaded title.
     expect(parsed).toEqual([
-      { key: 'due', type: 'date', title: 'Срок', required: true },
+      { key: 'due', type: 'date', title: 'Срок', required: true, keyTouched: true },
     ]);
   });
 
@@ -152,7 +157,8 @@ describe('apps-schema · supported types', () => {
     // x-datetime is stripped before AJV compile (root-level/property x-* strip).
     expect(backendAccepts(schema)).toBe(true);
     const parsed = parseRecordSchema(schema);
-    expect(parsed).toEqual([{ key: 'at', type: 'datetime', title: 'Момент', required: true }]);
+    // T-0689 / FU-2: loaded field carries keyTouched:true (persisted key shown).
+    expect(parsed).toEqual([{ key: 'at', type: 'datetime', title: 'Момент', required: true, keyTouched: true }]);
   });
 
   it('T-0649: a collection date column round-trips via x-collection-date-fields (not degraded to string)', () => {
@@ -263,9 +269,11 @@ describe('apps-schema · parseRecordSchema (round-trip)', () => {
       { key: 'amount', type: 'number', title: 'Сумма', required: false },
     ];
     const parsed = parseRecordSchema(buildRecordSchema(fields));
+    // T-0689 / FU-2: parsed (loaded) fields carry keyTouched:true so the editor
+    // shows their persisted keys instead of re-deriving from the loaded titles.
     expect(parsed).toEqual([
-      { key: 'company_name', type: 'string', title: 'Компания', required: true },
-      { key: 'amount', type: 'number', title: 'Сумма', required: false },
+      { key: 'company_name', type: 'string', title: 'Компания', required: true, keyTouched: true },
+      { key: 'amount', type: 'number', title: 'Сумма', required: false, keyTouched: true },
     ]);
   });
 
@@ -1066,10 +1074,19 @@ describe('apps-schema T-0450 · collection sub-field key validation', () => {
     subFields,
   });
 
-  it('rejects a sub-field with an empty key', () => {
+  it('T-0689 inversion: empty key AND empty label is rejected — requires the NAME', () => {
+    // T-0689: the column KEY now auto-derives from the «Название» (label). An
+    // empty key is only an error when there is ALSO no label to derive from —
+    // and then we ask for the NAME (mirror of the top-level T-0686 inversion),
+    // not for a hand-written key.
     const err = validateField(makeCol([{ key: '', type: 'string' }]));
     expect(err.subFields).toBeTruthy();
-    expect(err.subFields).toMatch(/ключ/i);
+    expect(err.subFields).toMatch(/название/i);
+  });
+
+  it('T-0689 inversion: empty key + a label is VALID — the column key auto-derives', () => {
+    const err = validateField(makeCol([{ key: '', type: 'string', label: 'Товар' }]));
+    expect(err.subFields).toBeUndefined();
   });
 
   it('rejects a sub-field key that starts with a digit', () => {
@@ -2796,5 +2813,251 @@ describe('apps-schema T-0686 · buildRecordSchema auto-keys title-only fields', 
     ]);
     expect(Object.keys(schema.properties)).toEqual(['stable_key']);
     expect(schema.properties.stable_key.title).toBe('Переименовано');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0689 · collection COLUMN auto-key (invert «Название»↔«Ключ» one level down,
+// reuse T-0686 deriveFieldKeyFromTitle/uniqueFieldKey) + FU-1 ordered preview +
+// FU-2 loaded-field keyTouched. Mirrors the T-0686 top-level auto-key, applied
+// to collection sub-fields (columns) whose «Название» is the `label`.
+// Anti-case: all values are neutral/generic (Товар/Цена/Дата/Колонка) — never
+// an entity-specific literal (D-064).
+// ---------------------------------------------------------------------------
+describe('apps-schema T-0689 · withAutoSubFieldKeys (column auto-key from label)', () => {
+  it('derives a snake_case column key from the label (reuses deriveFieldKeyFromTitle)', () => {
+    const out = withAutoSubFieldKeys([
+      { key: '', type: 'string', label: 'Дата отгрузки' },
+    ]);
+    expect(out[0].key).toBe('data_otgruzki');
+    expect(FIELD_KEY_RE.test(out[0].key)).toBe(true);
+    // The reused helper produces the SAME key when called directly.
+    expect(out[0].key).toBe(deriveFieldKeyFromTitle('Дата отгрузки'));
+  });
+
+  it('two label-only columns with the SAME name get distinct keys (base, base_2)', () => {
+    const out = withAutoSubFieldKeys([
+      { key: '', type: 'string', label: 'Цена' },
+      { key: '', type: 'number', label: 'Цена' },
+    ]);
+    expect(out[0].key).toBe('tsena');
+    expect(out[1].key).toBe('tsena_2'); // uniqueFieldKey suffix, within the collection
+  });
+
+  it('an auto-derived column key colliding with an EXISTING explicit key is suffixed', () => {
+    const out = withAutoSubFieldKeys([
+      { key: 'tsena', type: 'number', label: 'Явный ключ' }, // explicit `tsena`
+      { key: '', type: 'string', label: 'Цена' },            // derives to `tsena` → suffixed
+    ]);
+    expect(out[0].key).toBe('tsena');
+    expect(out[1].key).toBe('tsena_2');
+  });
+
+  it('INVARIANT: renaming a keyed column\'s label does NOT change its key (mutational)', () => {
+    // A column key is a property name inside the collection's items.properties —
+    // changing it orphans every stored row's cell. So a keyed column is never
+    // re-derived when its label is edited.
+    const before = { key: 'orig_col', type: 'string', label: 'Старое имя' };
+    const after = withAutoSubFieldKeys([{ ...before, label: 'Совершенно другое' }]);
+    expect(after[0].key).toBe('orig_col');
+  });
+
+  it('label-only column requiring a name falls back to the generic key (anti-case)', () => {
+    const out = withAutoSubFieldKeys([{ key: '', type: 'string', label: '' }]);
+    // empty label → generic fallback (never an entity default), still valid key.
+    expect(out[0].key).toBe('field');
+    expect(FIELD_KEY_RE.test(out[0].key)).toBe(true);
+  });
+
+  it('is PURE — does not mutate the input sub-fields', () => {
+    const input = [{ key: '', type: 'string', label: 'Колонка' }];
+    const snapshot = JSON.parse(JSON.stringify(input));
+    withAutoSubFieldKeys(input);
+    expect(input).toEqual(snapshot); // input[0].key still ''
+  });
+});
+
+describe('apps-schema T-0689 · buildRecordSchema auto-keys label-only columns', () => {
+  it('a column with only a label is emitted under its derived key (not dropped)', () => {
+    const schema = buildRecordSchema([{
+      key: 'lines', type: 'collection', title: 'Строки', required: false,
+      subFields: [{ key: '', type: 'string', label: 'Товар', required: false }],
+    }]);
+    const itemProps = schema.properties.lines.items.properties;
+    expect(Object.keys(itemProps)).toEqual(['tovar']);
+    expect(itemProps.tovar.title).toBe('Товар');
+    expect(backendAccepts(schema)).toBe(true); // real AJV-strict accepts it
+  });
+
+  it('two same-named label-only columns are emitted under distinct keys (base, base_2)', () => {
+    const schema = buildRecordSchema([{
+      key: 'lines', type: 'collection', title: 'Строки', required: false,
+      subFields: [
+        { key: '', type: 'number', label: 'Сумма', required: false },
+        { key: '', type: 'number', label: 'Сумма', required: false },
+      ],
+    }]);
+    const keys = Object.keys(schema.properties.lines.items.properties);
+    expect(keys).toEqual(['summa', 'summa_2']);
+    expect(backendAccepts(schema)).toBe(true);
+  });
+
+  it('a required label-only column lands in items.required under its derived key', () => {
+    const schema = buildRecordSchema([{
+      key: 'lines', type: 'collection', title: 'Строки', required: false,
+      subFields: [{ key: '', type: 'string', label: 'Товар', required: true }],
+    }]);
+    expect(schema.properties.lines.items.required).toContain('tovar');
+  });
+
+  it('INVARIANT (mutational): a keyed column keeps its key when its label changes on build', () => {
+    const schema = buildRecordSchema([{
+      key: 'lines', type: 'collection', title: 'Строки', required: false,
+      subFields: [{ key: 'stable_col', type: 'string', label: 'Переименовано', required: false }],
+    }]);
+    const itemProps = schema.properties.lines.items.properties;
+    expect(Object.keys(itemProps)).toEqual(['stable_col']); // NOT re-derived from label
+    expect(itemProps.stable_col.title).toBe('Переименовано');
+  });
+
+  it('a mix of keyed + label-only columns: keyed stable, label-only derived', () => {
+    const schema = buildRecordSchema([{
+      key: 'lines', type: 'collection', title: 'Строки', required: false,
+      subFields: [
+        { key: 'kept_key', type: 'string', label: 'Первая', required: false }, // explicit key
+        { key: '', type: 'number', label: 'Количество', required: false },      // auto
+      ],
+    }]);
+    expect(Object.keys(schema.properties.lines.items.properties)).toEqual(['kept_key', 'kolichestvo']);
+  });
+});
+
+describe('apps-schema T-0689 · validateField collection column inversion', () => {
+  const makeCol = (subFields) => ({ key: 'lines', type: 'collection', subFields });
+
+  it('empty column key + a label is VALID (auto-derives — no error)', () => {
+    const err = validateField(makeCol([{ key: '', type: 'string', label: 'Товар' }]));
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('empty column key + empty label requires the NAME (not the key)', () => {
+    const err = validateField(makeCol([{ key: '', type: 'string', label: '' }]));
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/название/i);
+  });
+
+  it('an explicit column key is still grammar-validated (backward-compat)', () => {
+    const err = validateField(makeCol([{ key: 'bad-key', type: 'string', label: 'Товар' }]));
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/латинск/i);
+  });
+
+  it('two same-named label-only columns do NOT trip the duplicate guard (auto-suffixed)', () => {
+    // Both derive from «Цена»; withAutoSubFieldKeys gives tsena / tsena_2, so the
+    // resolved keys are distinct — no false "ключ уже используется".
+    const err = validateField(makeCol([
+      { key: '', type: 'number', label: 'Цена' },
+      { key: '', type: 'number', label: 'Цена' },
+    ]));
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('validateFields: a collection with label-only columns is valid end-to-end', () => {
+    const r = validateFields([makeCol([
+      { key: '', type: 'string', label: 'Товар' },
+      { key: '', type: 'integer', label: 'Количество' },
+    ])]);
+    expect(r.valid).toBe(true);
+  });
+});
+
+describe('apps-schema T-0689 · previewAutoKeyAt / previewAutoSubKeyAt (FU-1 ordered preview)', () => {
+  it('FU-1 top-level: first of two same-named unsaved fields previews `base`, second `base_2`', () => {
+    // The BUG: the old flat-set preview showed `_2` on BOTH. The ordered pass
+    // (withAutoFieldKeys) gives the first the base, the second the suffix.
+    const fields = [
+      { key: '', type: 'string', title: 'Сумма' },
+      { key: '', type: 'string', title: 'Сумма' },
+    ];
+    expect(previewAutoKeyAt(fields, 0)).toBe('summa');   // NOT summa_2 (the FU-1 lie)
+    expect(previewAutoKeyAt(fields, 1)).toBe('summa_2');
+  });
+
+  it('FU-1 top-level: preview equals the key buildRecordSchema actually saves', () => {
+    const fields = [
+      { key: '', type: 'string', title: 'Цена' },
+      { key: '', type: 'string', title: 'Цена' },
+    ];
+    const saved = Object.keys(buildRecordSchema(fields).properties);
+    expect([previewAutoKeyAt(fields, 0), previewAutoKeyAt(fields, 1)]).toEqual(saved);
+  });
+
+  it('FU-1 columns: first of two same-named unsaved columns previews `base`, second `base_2`', () => {
+    const subFields = [
+      { key: '', type: 'number', label: 'Цена' },
+      { key: '', type: 'number', label: 'Цена' },
+    ];
+    expect(previewAutoSubKeyAt(subFields, 0)).toBe('tsena');   // NOT tsena_2
+    expect(previewAutoSubKeyAt(subFields, 1)).toBe('tsena_2');
+  });
+
+  it('FU-1 columns: preview equals the column key buildRecordSchema actually saves', () => {
+    const subFields = [
+      { key: '', type: 'string', label: 'Товар' },
+      { key: '', type: 'string', label: 'Товар' },
+    ];
+    const schema = buildRecordSchema([{ key: 'lines', type: 'collection', subFields }]);
+    const saved = Object.keys(schema.properties.lines.items.properties);
+    expect([previewAutoSubKeyAt(subFields, 0), previewAutoSubKeyAt(subFields, 1)]).toEqual(saved);
+  });
+
+  it('a keyed field/column previews its OWN stable key (never re-derived)', () => {
+    expect(previewAutoKeyAt([{ key: 'orig', type: 'string', title: 'Другое имя' }], 0)).toBe('orig');
+    expect(previewAutoSubKeyAt([{ key: 'orig_col', type: 'string', label: 'Другое' }], 0)).toBe('orig_col');
+  });
+});
+
+describe('apps-schema T-0689 · FU-2 loaded fields/columns carry keyTouched (persisted key shown)', () => {
+  it('every parsed top-level field carries keyTouched:true', () => {
+    const schema = buildRecordSchema([
+      { key: 'summa_avansa', type: 'number', title: 'Сумма аванса', required: false },
+    ]);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0].keyTouched).toBe(true);
+    // The persisted key is preserved (the preview would show it, not re-derive).
+    expect(parsed[0].key).toBe('summa_avansa');
+  });
+
+  it('FU-2 regression: a loaded field is NOT re-derived from its title', () => {
+    // A field persisted as `summa_avansa` titled «Авансовый платёж» must show the
+    // stored key, not a fresh derivation of the title. keyTouched:true guarantees
+    // the editor's FieldKeyPreview renders field.key, not deriveFieldKeyFromTitle.
+    const schema = {
+      type: 'object', additionalProperties: false,
+      properties: { summa_avansa: { type: 'number', title: 'Авансовый платёж' } },
+    };
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0].keyTouched).toBe(true);
+    expect(parsed[0].key).toBe('summa_avansa');
+    // Guard: the re-derived key would DIFFER — proving the flag matters.
+    expect(deriveFieldKeyFromTitle('Авансовый платёж')).not.toBe('summa_avansa');
+  });
+
+  it('every parsed collection COLUMN carries subKeyTouched:true (persisted column key shown)', () => {
+    const schema = buildRecordSchema([{
+      key: 'lines', type: 'collection', title: 'Строки', required: false,
+      subFields: [{ key: 'data_otgruzki', type: 'date', label: 'Авансовый платёж', required: false }],
+    }]);
+    const parsed = parseRecordSchema(schema);
+    const col = parsed[0].subFields[0];
+    expect(col.subKeyTouched).toBe(true);
+    expect(col.key).toBe('data_otgruzki'); // persisted, not re-derived from label
+  });
+
+  it('blankSubField starts label-first, unkeyed, subKeyTouched:false (auto-derive path)', () => {
+    const b = blankSubField();
+    expect(b.key).toBe('');
+    expect(b.label).toBe('');
+    expect(b.subKeyTouched).toBe(false);
   });
 });
