@@ -15,9 +15,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Button, MonoId, Mono, ExecutorBadge, ActorChip, ProcessRef, StatusChip,
+  Button, MonoId, Mono, ExecutorBadge, ActorChip, ProcessRef, RecordRef, StepRef, StatusChip,
   Drawer, EmptyState, LoadingState, ErrorState, KitIcon,
 } from '../components/components.jsx';
+// T-0687: deriveStepLabel — the SAME pure step-humanization the drawer's StepRef
+// uses, applied to the list row's step subtitle so a raw BPMN node id
+// ("legal_precheck") never surfaces as bare text in the main task list either.
+import { deriveStepLabel } from '../components/components.jsx';
 // T-0683: auth headers for the nested RecordRef fetch inside ProcessRef (resolves
 // the source record's TITLE). Same helper the rest of this screen already uses.
 import { authHeaders } from '../app-shell/dev-auth.js';
@@ -661,8 +665,27 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
               <span style={S.key}>Название</span>
               <span style={S.val}>{detail.item.name}</span>
 
+              {/* T-0687 (capstone T-0647-A): «Шаг» led with a RAW BPMN node id
+                  ("legal_precheck") as the primary value. StepRef renders a human
+                  step name primary and DEMOTES the machine key to a mono chip —
+                  the step-level sibling of ProcessRef/ActorChip. */}
               <span style={S.key}>Шаг</span>
-              <Mono>{detail.item.step}</Mono>
+              <StepRef step={detail.item.step} />
+
+              {/* T-0687 (capstone T-0647-A): explicit «Запись» row — the source
+                  record's TITLE + link (reuses RecordRef, T-0648) so the assignee
+                  can see WHICH record this task belongs to (the capstone finding:
+                  8× identical task names, indistinguishable without the record).
+                  Only shown when the process was started on_create from a record. */}
+              {(detail.item.recordId ?? detail.projection?.recordId) && (
+                <>
+                  <span style={S.key}>Запись</span>
+                  <RecordRef
+                    recordId={detail.item.recordId ?? detail.projection?.recordId}
+                    headers={authHeaders()}
+                  />
+                </>
+              )}
 
               {/* T-0683: process shown as a HUMAN name (+ source record) — the raw
                   instance-UUID is demoted inside ProcessRef, not the primary key. */}
@@ -670,7 +693,7 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
               <ProcessRef
                 processName={detail.item.processName}
                 inst={detail.item.inst}
-                recordId={detail.item.recordId}
+                recordId={detail.item.recordId ?? detail.projection?.recordId}
                 stepFallback={detail.item.name || detail.item.step}
                 headers={authHeaders()}
               />
@@ -725,20 +748,17 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
             <section style={S.section}>
               <h3 style={S.title}>Процесс</h3>
               <div style={S.grid}>
-                {/* T-0683: lead with the HUMAN process-definition name (deТЭЛ
-                    T-0614) — the raw instance-UUID follows as a demoted mono
-                    detail, not the first thing the operator reads. */}
+                {/* T-0683: lead with the HUMAN process-definition name (деТЭЛ
+                    T-0614) — never the raw procKey. */}
                 <span style={S.key}>Процесс</span>
                 <span style={S.val}>{detail.projection.definitionName || detail.projection.procKey}</span>
 
-                <span style={S.key}>Инстанс</span>
-                <MonoId>{detail.projection.inst}</MonoId>
-
-                <span style={S.key}>Ключ процесса</span>
-                <Mono>{detail.projection.procKey}</Mono>
-
+                {/* T-0687 (capstone T-0647-A): «Текущий шаг» led with the RAW
+                    BPMN node id ("legal_precheck"). StepRef renders a human step
+                    primary and demotes the machine key — same primitive as «Шаг»
+                    above (single source of truth for step humanization). */}
                 <span style={S.key}>Текущий шаг</span>
-                <span style={S.val}>{detail.projection.step}</span>
+                <StepRef step={detail.projection.step} />
 
                 <span style={S.key}>Состояние</span>
                 <StatusChip status={detail.projection.status} label={STATUS_LABEL[detail.projection.status]} />
@@ -747,6 +767,18 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
                 <Mono style={S.muted}>
                   {new Date(detail.projection.startedAt).toLocaleString('ru-RU')}
                 </Mono>
+
+                {/* T-0687 (capstone T-0647-A): the raw engine instance-UUID and
+                    the process definition KEY are pure machine identifiers —
+                    DEMOTED to a single secondary «технические идентификаторы»
+                    line (mono, muted), never leading rows the operator reads
+                    first. The capstone found these surfaced as prominent, raw
+                    «Инстанс» / «Ключ процесса» rows the operator could not read. */}
+                <span style={S.key}>Идентификаторы</span>
+                <span style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)' }}>
+                  <MonoId style={S.muted}>{detail.projection.inst}</MonoId>
+                  <Mono style={S.muted}>{detail.projection.procKey}</Mono>
+                </span>
               </div>
             </section>
           )}
@@ -1059,8 +1091,23 @@ function InboxScreen() {
                       <div className="chs-task">
                         <span className="chs-task__marker" style={{ background: MARKER_COLOR[t.status] }} />
                         <span className="chs-task__txt">
-                          <span className="chs-task__name">{t.name}</span>
-                          <span className="chs-task__step">{t.step}</span>
+                          {/* T-0687 (capstone T-0647-A): the name carries RECORD
+                              context so the 8× identical «Проверить: агенту…» /
+                              «Подача заявки» rows are distinguishable — the source
+                              record's TITLE + link (reuses RecordRef, T-0648)
+                              renders right after the name when the task belongs to
+                              a record. The step subtitle is humanized (deriveStepLabel)
+                              so a raw BPMN node id never shows as bare text. */}
+                          <span className="chs-task__name">
+                            {t.name}
+                            {t.recordId && (
+                              <span className="chs-task__record">
+                                {' — '}
+                                <RecordRef recordId={t.recordId} headers={authHeaders()} />
+                              </span>
+                            )}
+                          </span>
+                          <span className="chs-task__step">{deriveStepLabel(t.step).label}</span>
                         </span>
                       </div>
                     </td>

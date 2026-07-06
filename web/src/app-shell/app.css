@@ -449,6 +449,9 @@
 .chs-task__marker { width: 6px; height: 6px; border-radius: var(--chs-radius-full); flex: none; }
 .chs-task__txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .chs-task__name { font-size: var(--chs-text-base); color: var(--chs-color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* T-0687: record-context suffix on a task name — muted, so the record title reads
+   as a disambiguator of the task, not a competing primary. */
+.chs-task__record { color: var(--chs-color-text-muted); font-weight: var(--chs-weight-regular); }
 .chs-task__step { font-size: var(--chs-text-2xs); color: var(--chs-color-text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .chs-sla { display: inline-flex; align-items: center; gap: var(--chs-space-4); }

@@ -93,6 +93,23 @@
   color: var(--chs-color-text-muted);
 }
 
+/* ---------------- StepRef (T-0687) — humanized process step ---------------- */
+.chs-stepref {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chs-space-3);
+  min-width: 0;
+}
+.chs-stepref__name {
+  font-size: var(--chs-text-sm);
+  color: var(--chs-color-text);
+  font-weight: var(--chs-weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
 /* ---------------- Mono value (числа/таймстамп/бюджет) ---------------- */
 .chs-mono {
   font-family: var(--chs-font-mono);
