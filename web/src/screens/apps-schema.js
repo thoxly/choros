@@ -312,6 +312,92 @@ export function withAutoFieldKeys(fields) {
 }
 
 /**
+ * T-0689: the auto-derived KEY the editor's preview should show for the field at
+ * `index`, computed the SAME way buildRecordSchema will assign it — by running
+ * withAutoFieldKeys over the WHOLE list and reading back index `index`. This is
+ * the single source of truth that makes the pre-save preview MATCH the saved key.
+ *
+ * FU-1 (T-0686 preview bug): the previous per-field preview uniquified against a
+ * flat set of "all OTHER fields' derived keys", so two unsaved same-named fields
+ * BOTH previewed `base_2` (each saw the other's `base` in its taken-set) even
+ * though the ordered assignment gives the first `base` and only the second
+ * `base_2`. Deriving from the ordered withAutoFieldKeys pass removes that lie:
+ * the preview is exactly the key that gets built.
+ *
+ * A field that already carries an explicit key is returned unchanged (stable-key
+ * invariant — withAutoFieldKeys never re-derives a keyed field).
+ *
+ * @param {Array<{key?:string, title?:string}>} fields
+ * @param {number} index
+ * @returns {string} the key at `index` after auto-derivation ('' if out of range)
+ */
+export function previewAutoKeyAt(fields, index) {
+  const keyed = withAutoFieldKeys(Array.isArray(fields) ? fields : []);
+  const f = keyed[index];
+  return typeof f?.key === "string" ? f.key : "";
+}
+
+/**
+ * T-0689: fill in an auto-derived KEY for every collection SUB-FIELD (column) that
+ * has no key yet, deriving from the human «Название» (the sub-field's `label`,
+ * NOT `title` — collection columns carry `label`), leaving keyed columns UNTOUCHED.
+ *
+ * This is the collection-level mirror of withAutoFieldKeys (T-0686): the SAME
+ * «слаг-ад» inversion one level down — the author names a column and its machine
+ * KEY (the property name inside items.properties of the collection's array schema)
+ * auto-derives, so no hand-written latin column key is ever required.
+ *
+ * STABLE-KEY INVARIANT (critical — a column key is a property name inside the
+ * collection's sub-schema; changing it orphans every stored row's cell): a column
+ * that already carries a key is never re-derived, so renaming its «Название» never
+ * moves the key. Only NEW (empty-key) columns get an auto key. Existing columns
+ * loaded via parseRecordSchema always carry their key, so they are never touched.
+ *
+ * Uniqueness is resolved WITHIN THE COLLECTION (base, base_2) — collection column
+ * keys are property names inside ONE items.properties object, so duplicates would
+ * collapse silently. Reuses deriveFieldKeyFromTitle + uniqueFieldKey (T-0686) — no
+ * new derivation grammar.
+ *
+ * PURE — returns a new array; does not mutate the input sub-fields.
+ *
+ * @param {Array<{key?:string, label?:string}>} subFields
+ * @returns {Array<{key:string, label?:string}>}
+ */
+export function withAutoSubFieldKeys(subFields) {
+  const list = Array.isArray(subFields) ? subFields : [];
+  const taken = new Set();
+  for (const sf of list) {
+    const k = typeof sf?.key === "string" ? sf.key.trim() : "";
+    if (k.length > 0) taken.add(k);
+  }
+  return list.map((sf) => {
+    const existing = typeof sf?.key === "string" ? sf.key.trim() : "";
+    if (existing.length > 0) return sf; // stable-key invariant: never touch a keyed column
+    const base = deriveFieldKeyFromTitle(sf?.label);
+    const key = uniqueFieldKey(base, taken);
+    taken.add(key);
+    return { ...sf, key };
+  });
+}
+
+/**
+ * T-0689: the auto-derived KEY the sub-field editor's preview should show for the
+ * column at `index`, computed the SAME way buildRecordSchema assigns it — by
+ * running withAutoSubFieldKeys over the whole column list and reading index
+ * `index`. Mirror of previewAutoKeyAt for collection columns (FU-1: ordered,
+ * so preview == saved key; no phantom `_2` on the first of two same-named cols).
+ *
+ * @param {Array<{key?:string, label?:string}>} subFields
+ * @param {number} index
+ * @returns {string}
+ */
+export function previewAutoSubKeyAt(subFields, index) {
+  const keyed = withAutoSubFieldKeys(Array.isArray(subFields) ? subFields : []);
+  const sf = keyed[index];
+  return typeof sf?.key === "string" ? sf.key : "";
+}
+
+/**
  * T-0580: derive a fieldKey → operand-type map ("number"|"date"|"other") from
  * the EDITOR's in-memory field list (allFields), for the inline formula
  * preview's type-checker. Mirrors formula-typecheck-web.js's classification
@@ -586,21 +672,45 @@ export function validateField(field, allFields) {
     } else {
       const subErrors = [];
       let hasSubError = false;
+      // T-0689: validate keys against the AUTO-KEYED view (the same keys
+      // buildRecordSchema will emit) — an empty-key column derives its key from
+      // its «Название» (label), so we reason about the resolved key, not the raw
+      // empty one. Order-aligned with subList (withAutoSubFieldKeys preserves order).
+      const keyedSubList = withAutoSubFieldKeys(subList);
       const seenSubKeys = new Set();
-      for (const sf of subList) {
+      for (let sfi = 0; sfi < subList.length; sfi++) {
+        const sf = subList[sfi];
         const sfType = typeof sf?.type === "string" ? sf.type : "";
-        const sfKey = typeof sf?.key === "string" ? sf.key : "";
+        const sfRawKey = typeof sf?.key === "string" ? sf.key : "";
+        const sfLabel = typeof sf?.label === "string" ? sf.label : "";
+        // The resolved (post-auto-derive) key this column will be emitted under.
+        const sfKey = typeof keyedSubList[sfi]?.key === "string" ? keyedSubList[sfi].key : "";
         const sfErrs = [];
 
-        // Key validation (mirrors top-level FIELD_KEY_RE guard).
-        if (sfKey.length === 0) {
-          sfErrs.push("Укажите ключ колонки");
-        } else if (!FIELD_KEY_RE.test(sfKey)) {
+        // T-0689 — INVERSION (mirror of the top-level T-0686 key/title inversion):
+        // the human «Название» (label) is now PRIMARY; the machine column KEY
+        // auto-derives from it (withAutoSubFieldKeys). So:
+        //   • empty raw key + non-empty label → OK (the key auto-generates).
+        //   • empty raw key + empty label → require the NAME (nothing to derive from).
+        //   • explicit raw key present → still grammar-validated against FIELD_KEY_RE
+        //     (backward-compat: a hand-written column key must stay a valid identifier).
+        if (sfRawKey.length === 0) {
+          if (sfLabel.trim().length === 0) {
+            sfErrs.push("Укажите название колонки");
+          }
+          // else: key auto-derives from the label — no key error.
+        } else if (!FIELD_KEY_RE.test(sfRawKey)) {
           sfErrs.push("Ключ: латинская буква/подчёркивание, затем буквы/цифры/_ (1–64)");
-        } else if (seenSubKeys.has(sfKey)) {
-          sfErrs.push("Ключ уже используется в этом списке");
-        } else {
-          seenSubKeys.add(sfKey);
+        }
+        // Duplicate detection runs on the RESOLVED key (auto-derived or explicit),
+        // so two same-named auto-keyed columns are already distinct (base, base_2)
+        // and a hand-written key colliding with a resolved one is still caught.
+        if (sfKey.length > 0) {
+          if (seenSubKeys.has(sfKey)) {
+            sfErrs.push("Ключ уже используется в этом списке");
+          } else {
+            seenSubKeys.add(sfKey);
+          }
         }
 
         // Type validation (depth cap 1: no nested collection or relation).
@@ -775,7 +885,13 @@ export function buildRecordSchema(fields) {
     if (f.type === "collection") {
       // T-0448: collection → native JSON Schema array with typed sub-record items.
       // Sub-fields are scalars only (depth cap 1; no collection/relation sub-fields).
-      const subList = Array.isArray(f.subFields) ? f.subFields : [];
+      // T-0689: auto-derive a KEY for any column the author named (label) but did
+      // not key, so a label-only column is emitted with a real property name
+      // instead of being silently dropped by the empty-key skip below. Columns
+      // that already carry a key are untouched (stable-key invariant — renaming a
+      // column's label never changes its stored key). Collisions within the
+      // collection are resolved (base, base_2) before emit.
+      const subList = withAutoSubFieldKeys(Array.isArray(f.subFields) ? f.subFields : []);
       const subProperties = {};
       const subRequired = [];
       const dateSubKeys = [];
@@ -999,6 +1115,23 @@ export function parseRecordSchema(recordSchema) {
   }
 
   return orderedKeys.map((key) => {
+    // T-0689 / FU-2: EVERY field parsed here is a LOADED field that already
+    // carries its persisted KEY — so keyTouched:true. Without it the editor's
+    // per-field preview (FieldKeyPreview, T-0686) would re-derive the key from
+    // the loaded title and display a DIFFERENT value than the one persisted
+    // (e.g. show `avansovyy_platezh` for a field saved as `summa_avansa`), even
+    // though the SAVE keeps the persisted key (stable-key invariant — withAuto
+    // FieldKeys never re-derives a keyed field). Setting keyTouched:true here
+    // makes the preview honestly show the stored key. Applied ONCE to every
+    // parsed field (below) regardless of type, so no per-branch return is missed.
+    const parsed = parseOneField(key);
+    return { ...parsed, keyTouched: true };
+  });
+
+  // Inner helper: parse ONE property key into an editor field row (all the
+  // type-detection branches). Kept as a closure over props/requiredSet/etc. so
+  // the single keyTouched:true stamp above covers every return path uniformly.
+  function parseOneField(key) {
     const def = props[key];
     const rawType = def && typeof def === "object" ? def.type : undefined;
 
@@ -1055,7 +1188,12 @@ export function parseRecordSchema(recordSchema) {
           const sfRawType = sfDef && typeof sfDef.type === "string" ? sfDef.type : "string";
           sfType = COLLECTION_SUB_FIELD_TYPES.includes(sfRawType) ? sfRawType : "string";
         }
-        const sfField = { key: sfKey, type: sfType, label: sfLabel, required: itemRequired.has(sfKey) };
+        // T-0689 / FU-2: a LOADED column already carries its persisted KEY, so
+        // subKeyTouched:true — the editor must SHOW that stored key, never
+        // re-derive it from the label (same as the top-level keyTouched stamp).
+        // Without this the preview would show a re-derived key while the SAVE
+        // keeps the persisted one (stable-key invariant).
+        const sfField = { key: sfKey, type: sfType, label: sfLabel, required: itemRequired.has(sfKey), subKeyTouched: true };
         if (sfHasEnum) sfField.options = sfDef.enum.filter((o) => typeof o === "string");
         return sfField;
       });
@@ -1209,7 +1347,7 @@ export function parseRecordSchema(recordSchema) {
     const title =
       def && typeof def === "object" && typeof def.title === "string" ? def.title : "";
     return { key, type, title, required: requiredSet.has(key) };
-  });
+  }
 }
 
 /**
@@ -1279,9 +1417,15 @@ export function blankField() {
 /**
  * A blank sub-field descriptor for a collection field's sub-field list.
  * Sub-fields use `label` (displayed in rows) instead of `title` (top-level field
- * convention) to avoid confusion. `key` must be set by the user; `type` defaults
- * to "string" (simplest scalar). T-0448.
+ * convention) to avoid confusion. T-0448.
+ *
+ * T-0689 INVERSION (mirror of the top-level T-0686 blankField): a fresh column
+ * starts with an EMPTY `key` and `subKeyTouched:false` — the machine KEY
+ * auto-derives from the human «Название» (`label`) and is shown as a live preview
+ * («ключ: … · изменить»), just like a top-level field. The author no longer has
+ * to hand-write a latin column key (the «слаг-ад» one level down). `type` defaults
+ * to "string" (simplest scalar).
  */
 export function blankSubField() {
-  return { key: "", type: "string", label: "", required: false, options: [] };
+  return { key: "", type: "string", label: "", required: false, keyTouched: false, subKeyTouched: false, options: [] };
 }
