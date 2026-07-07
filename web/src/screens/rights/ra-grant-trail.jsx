@@ -223,11 +223,23 @@ const CSV_HEADER = [
   'Операция', 'Ресурс', 'Охват', 'Происхождение', 'Подтвердил',
 ];
 
+/** REV-P1-CSV-FORMULA-INJECTION: поле, чьё первое отображаемое значение
+ *  начинается с = + - @ (а также TAB/CR), Excel/LibreOffice/Sheets трактуют
+ *  как формулу — роль/имя вида '=HYPERLINK(...)' исполнится при открытии
+ *  экспорта. RFC4180-кавычки НЕ нейтрализуют формулу (кавычки её не глушат).
+ *  OWASP-митигация: префиксуем ведущим апострофом ДО RFC4180-шага и форсируем
+ *  кавычки на такой ячейке, чтобы апостроф не потерялся при импорте обратно. */
+function neutralizeFormula(s) {
+  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+}
+
 /** RFC4180-экранирование одного поля: кавычки удваиваются, поле с
- *  запятой/кавычкой/переводом строки берётся в кавычки. */
+ *  запятой/кавычкой/переводом строки берётся в кавычки. Перед этим —
+ *  нейтрализация formula-injection (см. neutralizeFormula). */
 function csvEscape(value) {
-  const s = value === null || value === undefined ? '' : String(value);
-  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  const raw = value === null || value === undefined ? '' : String(value);
+  const s = neutralizeFormula(raw);
+  if (s !== raw || /[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
   return s;
 }
 
@@ -378,11 +390,21 @@ function GrantTrailScreen() {
         <span className="chs-trail__append"><span className="chs-trail__appenddot" />журнал неизменяем</span>
         {/* T-0652 (§6.2): раньше кнопка была без onClick (мертва). Теперь —
             клиентский CSV из уже загруженных строк. Нечего экспортировать →
-            честный disabled с ВИДИМОЙ причиной (не фейк-кнопка, §6.1). */}
-        {displayRows.length === 0 ? (
+            честный disabled с ВИДИМОЙ причиной (не фейк-кнопка, §6.1).
+            REV-N1: экспортируются ОТФИЛЬТРОВАННЫЕ строки (rows), поэтому
+            гард тоже смотрит на rows — иначе при нулевом матче фильтра
+            кнопка была активна и выгружала CSV из одного заголовка. */}
+        {rows.length === 0 ? (
           <span className="chs-trail__stub">
-            <Button variant="secondary" size="sm" aria-disabled="true" className="chs-btn--stub" title="Нет записей для экспорта" onClick={(e) => e.preventDefault()}>Экспорт</Button>
-            <span className="chs-trail__stubhint">нет записей</span>
+            <Button
+              variant="secondary"
+              size="sm"
+              aria-disabled="true"
+              className="chs-btn--stub"
+              title={displayRows.length === 0 ? "Нет записей для экспорта" : "Фильтр не даёт совпадений — нечего экспортировать"}
+              onClick={(e) => e.preventDefault()}
+            >Экспорт</Button>
+            <span className="chs-trail__stubhint">{displayRows.length === 0 ? "нет записей" : "нет совпадений фильтра"}</span>
           </span>
         ) : (
           <Button variant="secondary" size="sm" onClick={() => downloadCsv(rowsToCsv(rows), 'grant-trail.csv')}>

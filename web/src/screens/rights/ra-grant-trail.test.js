@@ -42,6 +42,13 @@ vi.mock('../../app-shell/dev-auth.js', () => ({
 import { apiRowToDisplay, GrantTrailRow, fetchGrantTrail, rowsToCsv, csvEscape } from './ra-grant-trail.jsx';
 import { TRAIL as TRAIL_SEED } from './ra-data.jsx';
 
+// REV-N1 fix-forward source-presence check (see describe block near EOF):
+// module-level await, matching the pattern in screen-rights.test.jsx.
+const fs = await import('fs');
+const path = await import('path');
+const screenSrcPath = path.default.resolve(new URL(import.meta.url).pathname, '../ra-grant-trail.jsx');
+const screenSrc = fs.default.readFileSync(screenSrcPath, 'utf-8');
+
 // ---------------------------------------------------------------------------
 // Tree-walk helpers (mirror web/src/forms/field-renderer.test.jsx) — render a
 // component as a plain function and recurse its element tree WITHOUT a DOM.
@@ -591,6 +598,119 @@ describe('T-0652 · grant-trail CSV export (rowsToCsv / csvEscape)', () => {
 
   it('rowsToCsv: starts with a UTF-8 BOM so Excel reads Cyrillic correctly', () => {
     expect(rowsToCsv([]).charCodeAt(0)).toBe(0xFEFF);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REV-P1-CSV-FORMULA-INJECTION (fix-forward): RFC4180 quoting alone does NOT
+// stop a cell whose value begins with = + - @ (or leading TAB/CR) from being
+// evaluated as a formula when the CSV is opened in Excel/LibreOffice/Sheets.
+// Role names and resolved display names are user/admin-authored and flow
+// un-guarded into cell starts — csvEscape must prefix a leading apostrophe
+// (OWASP mitigation) BEFORE RFC4180-quoting, and force-quote such a cell.
+// ---------------------------------------------------------------------------
+describe('T-0652 fix-forward · CSV formula-injection neutralization (csvEscape / rowsToCsv)', () => {
+  it('csvEscape: a value starting with "=" is prefixed with an apostrophe and quoted', () => {
+    expect(csvEscape('=HYPERLINK("http://evil","click")')).toBe('"\'=HYPERLINK(""http://evil"",""click"")"');
+  });
+
+  it('csvEscape: values starting with + - @ are each neutralized', () => {
+    expect(csvEscape('+cmd|/c calc')).toBe('"\'+cmd|/c calc"');
+    expect(csvEscape('-2+3')).toBe('"\'-2+3"');
+    expect(csvEscape('@SUM(A1:A2)')).toBe('"\'@SUM(A1:A2)"');
+  });
+
+  it('csvEscape: a leading TAB or CR is also neutralized', () => {
+    expect(csvEscape('\t=1+1')).toBe('"\'\t=1+1"');
+    expect(csvEscape('\rmalicious')).toBe('"\'\rmalicious"');
+  });
+
+  it('csvEscape: a formula char NOT in leading position is left alone (no false positive)', () => {
+    expect(csvEscape('a=b+c')).toBe('a=b+c');
+    expect(csvEscape('Иванов (=менеджер)')).toBe('Иванов (=менеджер)');
+  });
+
+  it('csvEscape: plain values and RFC4180 cases are unaffected by the new guard', () => {
+    expect(csvEscape('abc')).toBe('abc');
+    expect(csvEscape('a,b')).toBe('"a,b"');
+    expect(csvEscape('he said "hi"')).toBe('"he said ""hi"""');
+  });
+
+  it('rowsToCsv: a ROLE name beginning with "=HYPERLINK(...)" is neutralized in the emitted CSV', () => {
+    const row = {
+      ts: '2026-01-01', id: 'g10', action: 'grant',
+      actor: { type: 'human', name: 'Иванов' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: '=HYPERLINK("http://evil.example","click me")',
+      op: 'invoke', res: 'x', scope: '—', proposed: 'human', confirmed: [],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    // Not raw-executable: the field must not start with a bare "=" — it is
+    // quoted and apostrophe-prefixed.
+    expect(dataLine).not.toMatch(/(^|,)=HYPERLINK/);
+    expect(dataLine).toContain("'=HYPERLINK(\"\"http://evil.example\"\",\"\"click me\"\")");
+  });
+
+  it('rowsToCsv: a display NAME beginning with "+cmd|" (DDE injection) is neutralized', () => {
+    const row = {
+      ts: '2026-01-01', id: 'g11', action: 'revoke',
+      actor: { type: 'human', name: '+cmd|\' /C calc\'!A1' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: 'Роль', op: 'invoke', res: 'x', scope: '—', proposed: 'human', confirmed: [],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).not.toMatch(/(^|,)\+cmd\|/);
+    expect(dataLine).toContain("'+cmd|");
+  });
+
+  // ---- existing RFC4180 behaviour must remain green alongside the new guard ----
+  it('rowsToCsv: still escapes a name that contains a comma (RFC4180 unaffected)', () => {
+    const row = {
+      ts: '2026-01-01', id: 'g2', action: 'grant',
+      actor: { type: 'human', name: 'Соколов, М.' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: 'Роль', op: 'invoke', res: 'x', scope: '—', proposed: 'human', confirmed: [],
+    };
+    const csv = rowsToCsv([row]);
+    const dataLine = csv.replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).toContain('"Соколов, М."');
+  });
+
+  it('rowsToCsv: still starts with a UTF-8 BOM', () => {
+    expect(rowsToCsv([]).charCodeAt(0)).toBe(0xFEFF);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REV-N1-EXPORT-USES-FILTERED-ROWS-BUT-GUARD-ON-ALL (fix-forward): the export
+// button serialises the FILTERED set (`rows`), but the disabled guard used to
+// test `displayRows.length===0` (ALL loaded rows). A filter that matches zero
+// rows left the button active and exported a header-only CSV while the UI
+// still showed "нет записей" (a lie — displayRows was non-empty). Source-
+// presence check (project convention — see screen-rights.test.jsx): the
+// screen component isn't render-tested at this node tier (no jsdom), so the
+// guard's wiring is asserted structurally against the actual source text.
+// ---------------------------------------------------------------------------
+describe('T-0652 fix-forward · export guard follows the FILTERED row set (REV-N1)', () => {
+  it('the export disabled-guard tests rows.length (filtered), not displayRows.length (all)', () => {
+    // The stub/disabled BRANCH SWITCH (the ternary that decides stub-vs-live
+    // button) must be keyed off the filtered set that is actually handed to
+    // downloadCsv/rowsToCsv — not the unfiltered displayRows. (displayRows
+    // is still legitimately read INSIDE the stub branch, to pick the honest
+    // empty-state wording — that's a separate, narrower check below.)
+    expect(screenSrc).toMatch(/\{rows\.length === 0 \? \(\s*<span className="chs-trail__stub">/);
+    expect(screenSrc).not.toMatch(/\{displayRows\.length === 0 \? \(\s*<span className="chs-trail__stub">/);
+  });
+
+  it('the live export button still serialises the filtered `rows`, not `displayRows`', () => {
+    expect(screenSrc).toMatch(/downloadCsv\(rowsToCsv\(rows\), 'grant-trail\.csv'\)/);
+  });
+
+  it('the empty-state reason distinguishes "no rows at all" from "filter matched nothing" (honest cause)', () => {
+    // Two distinct human-readable reasons must exist, gated on whether
+    // displayRows (unfiltered) is itself empty.
+    expect(screenSrc).toMatch(/displayRows\.length === 0 \? .Нет записей для экспорта./);
+    expect(screenSrc).toMatch(/Фильтр не даёт совпадений/);
   });
 });
 

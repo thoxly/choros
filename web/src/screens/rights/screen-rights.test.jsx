@@ -450,3 +450,29 @@ describe('T-0652 · role-card actions in the header (§6.5)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// UX-N1 fix-forward: chs-readmode--ro was applied on the read-only badge
+// (screen-rights.jsx:504) but never DEFINED anywhere — a dead modifier class,
+// so the badge was visually indistinguishable from the plain .chs-readmode
+// base. Fixed by defining the modifier in rights-admin.css with a visually
+// distinct info-tinted pill (matches the .chs-actchip--narrow convention in
+// the same file). This asserts the class used in markup is actually styled.
+// ---------------------------------------------------------------------------
+describe('UX-N1 fix-forward · «только просмотр» badge modifier is a real (non-dead) class', () => {
+  const rightsAdminCssPath = path.default.resolve(new URL(import.meta.url).pathname, '../rights-admin.css');
+  const rightsAdminCss = fs.default.readFileSync(rightsAdminCssPath, 'utf-8');
+
+  it('screen-rights.jsx applies chs-readmode--ro on the read-only badge', () => {
+    expect(screenSrc).toContain('chs-readmode chs-readmode--ro');
+  });
+
+  it('chs-readmode--ro is DEFINED in rights-admin.css (not a dead modifier)', () => {
+    expect(rightsAdminCss).toMatch(/\.chs-readmode--ro\s*\{/);
+  });
+
+  it('the modifier is visually distinct from the plain .chs-readmode base (uses an accent token, not just muted text)', () => {
+    const rule = rightsAdminCss.match(/\.chs-readmode--ro\s*\{[^}]*\}/)?.[0] || '';
+    expect(rule).toMatch(/--chs-color-info(-soft)?/);
+  });
+});
+

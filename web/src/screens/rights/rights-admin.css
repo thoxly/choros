@@ -548,3 +548,17 @@
   overflow-x: auto;
   white-space: pre-wrap;
 }
+
+/* ---- T-0652 (§6.5, UX-N1 fix-forward) · бейдж «только просмотр» карточки роли ----
+   Модификатор .chs-readmode--ro раньше применялся, но нигде не был определён
+   (мёртвый класс — бейдж визуально не отличался от нейтрального .chs-readmode).
+   Тон следует конвенции .chs-actchip--narrow / .chs-subtab__demo этого же файла:
+   info-tinted пилюля, а не голый текст — «только просмотр» читается как статус,
+   а не как ещё одна серая подпись. */
+.chs-readmode--ro {
+  color: var(--chs-color-info);
+  background: var(--chs-color-info-soft);
+  padding: 2px var(--chs-space-4);
+  border-radius: var(--chs-radius-1);
+}
+.chs-readmode--ro .chs-readmode__dot { background: var(--chs-color-info); }
