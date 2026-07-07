@@ -1,0 +1,52 @@
+{
+  "task_id": "T-0688",
+  "verdict": "approved",
+  "summary": "Two independent fixes verified against the real code paths they claim to mirror/replace. #1 (stale-drawer honest 200) is a faithful, minimal mirror of the pre-existing GET /api/inbox/:id detail-route 'done projection' check, placed correctly before the defer-row fallback in POST /api/inbox/:id/action. #2 (flat-mode column cap) is correctly scoped via a direct-child CSS combinator that provably does not affect grouped mode. Both #2 (clickable rows, T-0653) and #4 (CSV export, T-0652) claims of prior closure were independently confirmed in dev git history and not duplicated in this diff.",
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "info",
+      "area": "POST /api/inbox/:id/action honest-200",
+      "description": "Confirmed via source trace: InstanceProjection.status (real, DB-backed, used by listInstanceProjections) is typed 'running' | 'waiting' | 'done' (src/http/process-projection.ts:111) — there is NO 'failed'/'error' state in the live engine-drive projection at all. The broader InboxItem.status union that includes 'failed' (src/http/inbox.ts:133) is only ever set to 'failed' on the hardcoded seed/demo fixture 't6' (line 287); no code path derives a real instance-backed InboxItem with status:'failed'. Therefore the reviewer's core adversarial concern ('does the done-check mask a genuine failure?') does not apply to this codebase's data model — there is nothing un-modeled being masked. 'done' is derived strictly from engine-gated instance.ended audit events or the pre-T-0443 task.approved backward-compat fallback (process-projection.ts:1062-1068), both facts the server itself wrote, never client-supplied — the same trust basis the existing GET-detail route already relies on."
+    },
+    {
+      "id": "R-2",
+      "severity": "info",
+      "area": "POST honest-200 vs 404 regression",
+      "description": "Live-executed both new unit tests (not just read) via `npx vitest run --no-file-parallelism` against the real fake-pg-backed handler (not a mocked route): (a) double-approve on the same taskId returns 200 the second time with status:done/engine:already, exercising the real appendProcessStarted + real audit-event write + real handler, not a tautological stub; (b) a genuinely unknown taskId with an unrelated WAITING (not done) task seeded alongside it still returns 404 NOT_FOUND, proving no accidental cross-match on inboxTaskId or status. Handler prelude was read line-by-line (inbox.ts:1877-1936) confirming there is no earlier short-circuit before findWaitingInstanceTask that would make test (a) trivially pass without reaching the new branch."
+    },
+    {
+      "id": "R-3",
+      "severity": "P2-non-blocking",
+      "area": "POST honest-200 coverage gap (pre-existing, symmetric with GET)",
+      "description": "listInstanceProjections only iterates 'started' (base process.started) rows to compute inboxTaskId (process-projection.ts:1056-1103) — it never covers process.next_task rows (post-gateway waiting steps, e.g. task-extra-approve on the 6M branch), whose own row.id is a DIFFERENT id used only by listInstanceInboxTasks (line 1238), not listInstanceProjections. Consequence: if a human clicks approve on a post-gateway step that completed in the background between drawer-load and click, the new done-check will NOT find a match (inboxTaskId never equals a next_task row's id) and falls through to the old generic 404 — the stale-drawer defect persists for post-gateway steps. This is NOT a new gap introduced by T-0688: the GET /api/inbox/:id detail route it mirrors (inbox.ts:1573) has the identical limitation already. Non-blocking because the fix delivers exactly the parity it claims (matching the GET path, no more no less) and does not regress anything. Candidate follow-up: extend the same correlation to next_task rows in both routes together."
+    },
+    {
+      "id": "R-4",
+      "severity": "info",
+      "area": "Frontend contract compatibility",
+      "description": "web/src/screens/screen-inbox.jsx approveTask (line 1055) only branches on res.ok (HTTP status), never inspects the response body's status/engine fields — so the new 200 response is fully backward compatible with zero frontend changes required; a repeat click after this fix simply refreshes the list silently instead of showing 'задача уже недоступна'. engine:'already' is not a novel literal — it reuses the exact vocabulary already established at inbox.ts:2115/2401 (driveResult.alreadyEnded ? 'already' : 'completed')."
+    },
+    {
+      "id": "R-5",
+      "severity": "info",
+      "area": "CSS scoping correctness (flat vs grouped)",
+      "description": "Traced DOM nesting in screen-inbox.jsx precisely: flat mode renders <table class=\"chs-itable\"> as a DIRECT CHILD of .chs-inbox__scroll (line 1536-1537); grouped mode nests it three levels deeper (.chs-inbox__scroll > .chs-inbox__groups > .chs-inbox__group > table, lines 1504-1529). The new rules use the direct-child combinator '.chs-inbox__scroll > .chs-itable ...', which by CSS semantics can only match the flat-mode table. Verified LIVE in a real browser (Chrome via CDP) with the actual production app.css/components.css/tokens.css loaded against synthetic markup matching screen-inbox.jsx's real output: in grouped-mode markup, computed max-width on .chs-task/.chs-processref/.chs-actorchip read 'none' (rule did not apply) while table-layout:fixed and the grouped-mode's own chs-r 140px rule remained intact — zero regression to T-0653."
+    },
+    {
+      "id": "R-6",
+      "severity": "info",
+      "area": "CSS fix has real, measured effect (not a no-op)",
+      "description": "Live-measured before/after in a real browser at 1280px container width with realistic-length content (long task name / process name / role label, matching the spec's described adversarial scenario): BEFORE (simulated by disabling the three max-width rules) the action column's right edge sat at 2404px against a 1280px container (scrollWidth 2385 vs clientWidth 1280 — genuinely overflowed, matching the reported defect). AFTER (fix applied) scrollWidth === clientWidth === 1280, action column fully within the container, no horizontal scroll needed under this realistic content. Confirms AC-3 as coded, not just as commented."
+    },
+    {
+      "id": "R-7",
+      "severity": "info",
+      "area": "NUL-byte side-note (out of scope, correctly deferred)",
+      "description": "Confirmed 2 raw NUL bytes still present in src/http/inbox.ts on task/T-0688 (breaks naive grep, as the spec warns). Verified this was already fixed independently in dev at commit 92b4b94c (T-0716, merged after task/T-0688's branch point at 7e586936) — task/T-0688 branched before that fix landed, so this is a branch-timing artifact that resolves naturally on merge/rebase, not a regression this task introduced or should have fixed. The spec's framing of this as 'not in this task, follow-up candidate' is accurate; no action needed from this task."
+    }
+  ],
+  "anti_case": {
+    "checked": "Reviewed for a scenario where the done-check would produce a FALSE 200 (task not actually done, human told it succeeded when it didn't). Traced status derivation to engine-gated instance.ended events / audited task.approved rows only — no client input feeds into the 'done' determination. Could not construct a scenario within this codebase's actual data model where the check returns a false positive. The only real coverage gap found (R-3) is a false NEGATIVE (still-404s for a case it could theoretically also fix), which is safe-by-default, not a masking risk."
+  }
+}

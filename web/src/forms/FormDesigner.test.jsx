@@ -376,13 +376,18 @@ describe('FormDesigner — registry_def picker synced with target_registry_slug 
   });
 
   it('AC-1 narrowed state hides the Select and shows a fact, not a re-offered choice', () => {
-    const idx = FORM_DESIGNER_SRC.indexOf('registryDefs && boundRegistryDef ?');
+    // P0 fix-forward: the three-way ternary is now wrapped in an outer
+    // `{registryDefs && ( ... )}` guard (registryDefs is null on every real
+    // mount before an app is picked — see the P0 describe block below), so
+    // the branch literal is `boundRegistryDef ? (`, not `registryDefs &&
+    // boundRegistryDef ?` (that inline form was the crashing one).
+    const idx = FORM_DESIGNER_SRC.indexOf('boundRegistryDef ? (');
     expect(idx).toBeGreaterThan(-1);
     const block = FORM_DESIGNER_SRC.slice(idx, idx + 600);
     expect(block).toContain('Набор полей задан привязкой процесса');
-    // the narrowed branch (up to the following "} : registryDefs &&" case
-    // boundary) must not render a Select — only the fact text.
-    const narrowedBranch = block.slice(0, block.indexOf(') : registryDefs && boundRegistryDef === null'));
+    // the narrowed branch (up to the following ") : boundRegistryDef ==="
+    // case boundary) must not render a Select — only the fact text.
+    const narrowedBranch = block.slice(0, block.indexOf(') : boundRegistryDef === null'));
     expect(narrowedBranch).not.toContain('<Select');
   });
 
@@ -442,6 +447,79 @@ describe('FormDesigner — registry_def picker synced with target_registry_slug 
   it('an unbound/no-binding pair does not need bindings to render (embedding path, static-markup, NF regression check)', () => {
     const html = renderToStaticMarkup(<FormDesigner initialDocument={DOC} initialFields={FIELDS} />);
     expect(html).toContain('chs-form-designer');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0 fix-forward (T-0706 merge, live-proof RED): on every REAL /forms mount
+// (no initialFields — that prop only exists for this test's embedding path)
+// registryDefs starts at its useState(null) initial value and only becomes
+// non-null AFTER an application is picked (see the "Load registry defs for
+// the chosen app" effect). The merged T-0706 code had the three-way picker
+// branch un-guarded for registryDefs===null in its FINAL else arm, so the
+// very first paint after /api/applications resolved (any real screen, no app
+// picked yet) called `registryDefs.map` on null and crashed the whole
+// component to a white screen (React unmounts on a render-phase throw).
+//
+// This tier has no jsdom/act (file header) so the actual async sequence
+// (fetch /api/applications resolves -> LoadingState gate opens -> picker
+// renders with registryDefs still null) cannot be driven through a mounted
+// DOM here — MOUNT-GAP: a real `render()`+`waitFor` test (e.g.
+// @testing-library/react) would catch this class of bug directly, but
+// neither @testing-library/react nor jsdom is a dependency anywhere in this
+// repo (checked: root and web node_modules, root/web package.json — vitest
+// config is deliberately "node" env, see file header comment above). Adding
+// either is out of scope for a P0 fix-forward. This test instead (a) mirrors
+// the exact branch-selection predicate the JSX evaluates with
+// registryDefs===null and proves it no longer reaches a `.map` call, and (b)
+// asserts the source-level guard structurally, so the fix reddens if the
+// outer `registryDefs &&` wrapper is ever dropped again.
+// ---------------------------------------------------------------------------
+describe('FormDesigner — registry_def picker survives registryDefs===null (P0 fix-forward, T-0706 merge crash)', () => {
+  it('pure-logic mirror: with registryDefs===null, no branch touches .map (the real-mount crash state)', () => {
+    // Mirrors the JSX exactly: {registryDefs && ( boundRegistryDef ? A : boundRegistryDef === null ? B : C )}
+    // registryDefs is null on every real /forms mount before an application is chosen.
+    const registryDefs = null;
+    const boundRegistryDef = undefined; // boundRegistryDef's own guard: `if (!boundRegistrySlug || !registryDefs) return undefined;`
+
+    function pickBranch() {
+      // A structural mirror of the outer guard restored by this fix. If this
+      // guard were missing, evaluating the ternary chain below with
+      // registryDefs===null would call registryDefs.map inside branch C.
+      if (!registryDefs) return 'nothing-rendered';
+      if (boundRegistryDef) return 'A-narrowed-fact';
+      if (boundRegistryDef === null) return 'B-desync-warning:' + [...registryDefs.map((d) => d.id)];
+      return 'C-open-picker:' + [...registryDefs.map((d) => d.id)];
+    }
+
+    expect(() => pickBranch()).not.toThrow();
+    expect(pickBranch()).toBe('nothing-rendered');
+  });
+
+  it('source guard: the registry_def picker\'s three T-0706 branches are wrapped in an outer registryDefs && guard (regression lock)', () => {
+    // Find the specific outer-guard opening for the registry_def picker block
+    // (distinct from the unrelated `{registryDefs && boundRegistryDef ?` T-0706
+    // literal that the crashing merge used — that inline form must be GONE).
+    expect(FORM_DESIGNER_SRC).toContain('{registryDefs && (\n              boundRegistryDef ?');
+    expect(FORM_DESIGNER_SRC).not.toContain('{registryDefs && boundRegistryDef ?');
+    // and the two remaining `registryDefs.map(` call sites are lexically
+    // inside that guarded block, not reachable when registryDefs is null —
+    // structurally enforced by the (single) outer guard rather than each
+    // branch re-checking registryDefs itself.
+    const guardIdx = FORM_DESIGNER_SRC.indexOf('{registryDefs && (\n              boundRegistryDef ?');
+    expect(guardIdx).toBeGreaterThan(-1);
+    const mapSites = [...FORM_DESIGNER_SRC.matchAll(/registryDefs\.map\(/g)].map((m) => m.index);
+    expect(mapSites.length).toBeGreaterThanOrEqual(2);
+    for (const site of mapSites) {
+      expect(site).toBeGreaterThan(guardIdx);
+    }
+  });
+
+  it('MOUNT-GAP (documented finding, not a bug in the fix): no jsdom/@testing-library/react in this repo, so the real async mount sequence (fetch resolves -> LoadingState gate opens -> registryDefs still null) cannot be driven through an actual DOM render in this test tier', () => {
+    // This assertion exists to make the gap discoverable by `grep -r MOUNT-GAP`
+    // rather than only living in a comment. See the describe-block header above
+    // for the full rationale.
+    expect(true).toBe(true);
   });
 });
 

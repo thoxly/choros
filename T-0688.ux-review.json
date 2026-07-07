@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0688",
+  "verdict": "approved",
+  "summary": "Flat-mode inbox table columns no longer overflow the viewport under realistic content; action column (Взять/Согласовать) remains visible and reachable without discovering a hidden bottom scrollbar. Horizontal scroll fallback (.chs-inbox__scroll, overflow:auto) remains available and functional for adversarially-long content or very narrow viewports. Grouped mode (T-0653) unaffected. Theming uses existing design-system classes only, no new hardcoded colors/spacing introduced.",
+  "checks": [
+    {
+      "id": "UX-1",
+      "result": "pass",
+      "description": "Live-measured in a real browser at 1280px viewport with realistic-length Russian task name / process name / role label content: all 6 columns (Задача/Процесс/Исполнитель/SLA/Дедлайн/Действие) fit within the container — actionTdRight (1300px incl. padding) <= scroll container right edge, scrollWidth === clientWidth (no overflow triggered under this content profile)."
+    },
+    {
+      "id": "UX-2",
+      "result": "pass",
+      "description": "Confirmed the fix has real effect by disabling it and re-measuring: without the cap, the action column's right edge fell at 2404px against a 1280px container — genuinely off-screen, reproducing the reported defect. This rules out the CSS being a cosmetic no-op."
+    },
+    {
+      "id": "UX-3",
+      "result": "pass",
+      "description": "Ellipsis truncation (text-overflow:ellipsis + overflow:hidden + white-space:nowrap) is applied on the innermost text node of each capped column (.chs-task__txt path via .chs-task, .chs-processref__name, .chs-actorchip .chs-exec > span:not(.chs-sr-only)) with min-width:0 on the flex-container ancestors — the standard pattern required for ellipsis to work inside flex children; verified these ancestor chains are flex containers in components.jsx (ActorChip renders a flex-ish span with ExecutorBadge child; chs-task is a flex row per existing app.css rules)."
+    },
+    {
+      "id": "UX-4",
+      "result": "pass",
+      "description": "Horizontal-scroll fallback: .chs-inbox__scroll retains overflow:auto (pre-existing, untouched by this diff) — confirmed still the honest degrade path for content that exceeds even the capped widths (e.g. simultaneous adversarial-length values in every column, or viewports narrower than 1280px). Not removed, demoted to an edge case as the spec claims."
+    },
+    {
+      "id": "UX-5",
+      "result": "pass",
+      "description": "Action column (Взять/Согласовать buttons, .chs-r) stays pinned at a fixed 140px in flat mode via the new rule, matching the pre-existing pattern T-0653 already established for grouped mode (same width value, same rationale) — visual consistency between the two modes preserved."
+    },
+    {
+      "id": "UX-6",
+      "result": "pass",
+      "description": "Column-visibility toggle safety (T-0653 'Настроить' panel): the new CSS selectors target by CONTENT class (.chs-task, .chs-processref, .chs-actorchip) rather than column position (nth-child) — verified this is structurally necessary and correct, since col('name')/col('process')/col('executor') in screen-inbox.jsx conditionally omit <td> elements independently (lines ~1190, ~1215 onward), which would shift positional indices. A position-based selector would have silently capped the wrong column after any one column was hidden; the content-class approach avoids this class of bug entirely."
+    },
+    {
+      "id": "UX-7",
+      "result": "pass",
+      "description": "Theming: no new color/spacing literals introduced — all new rules use max-width/width/overflow/white-space/text-overflow properties only (layout mechanics, not visual tokens). No CSS custom properties (--chs-*) needed or bypassed."
+    },
+    {
+      "id": "UX-8",
+      "result": "pass (regression check)",
+      "description": "Grouped mode (T-0653) verified live and unaffected: table-layout:fixed intact, grouped-mode's own chs-r 140px rule intact, and the new flat-only max-width rules computed to 'none' when the identical markup was nested inside .chs-inbox__group instead of being a direct child of .chs-inbox__scroll — confirms the '>' direct-child CSS combinator correctly disjoins the two modes by construction, not by accident."
+    },
+    {
+      "id": "UX-9",
+      "result": "not-applicable (correctly out of scope)",
+      "description": "Clickable rows (#2) and CSV export (#4) were independently confirmed via dev git log to be genuinely closed by prior tasks (T-0653 commit b0e04a78/0d5e8c4b for clickable rows with stopPropagation on nested interactive elements; T-0652 commits fff9dcfb/6f485a5e for CSV export with RFC4180 escaping + formula-injection neutralization). This diff does not touch either area — no duplication found."
+    }
+  ],
+  "blocking_findings": []
+}

@@ -1,0 +1,40 @@
+{
+  "task_id": "T-0708",
+  "verdict": "approved",
+  "gates": {
+    "tsc_noEmit": { "status": "pass", "detail": "npx tsc --noEmit — clean, no output/errors" },
+    "npm_build": { "status": "pass", "detail": "npm run build (tsc + seed tsconfig) — clean" },
+    "web_vitest_full": {
+      "status": "pass",
+      "test_files": 97,
+      "tests": 2659,
+      "detail": "npx vitest run in web/ — 97 files, 2659 tests passed, matches the claimed number exactly. Duration 8.44s."
+    },
+    "processes_live_instances_test": {
+      "status": "pass",
+      "tests": 30,
+      "detail": "npx vitest run --no-file-parallelism src/__tests__/processes-live-instances.test.ts — 30/30 passed, includes the 6 new T-0708 describe-block tests (record match, no-recordId drop, empty-record honest-empty, no-param byte-compat, blank-param no-filter, no-DB honest-empty)."
+    },
+    "processes_e2e_test": {
+      "status": "pass",
+      "tests": 6,
+      "detail": "npx vitest run --no-file-parallelism src/__tests__/processes.e2e.test.ts — 6/6 passed."
+    },
+    "anti_case_lock": {
+      "status": "pass",
+      "detail": "bash ci/checks/anti-case-lock.sh — Phase 1 (point gates) PASS, Phase 2 (full D-064 §5 denylist) PASS, aggregate 15 (baseline 16), no regression."
+    },
+    "anti_uuid_actor_render": {
+      "status": "pass",
+      "detail": "bash ci/checks/ux/anti-uuid-actor-render.sh — 0 bare raw-identifier renders found under web/src/screens/."
+    },
+    "http_route_auth_coverage": {
+      "status": "pass",
+      "detail": "bash ci/checks/http-route-auth-coverage.sh — FF-0328-1/2/3 all PASS; GET /api/processes remains withAuth-wrapped, no new route added, frozen surfaces unchanged."
+    }
+  },
+  "notes": [
+    "All gates specified in the spec and the judge brief were run and pass. Full web test count (2659) matches the claim exactly.",
+    "Encoding round-trip (client encodeURIComponent -> server URLSearchParams.get) verified manually with a Node script — no double-decoding or mismatch risk for recordId values containing special characters."
+  ]
+}

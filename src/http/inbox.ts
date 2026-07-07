@@ -1179,7 +1179,7 @@ export function matchesInboxFilters(item: InboxItem, f: InboxFilters): boolean {
     const needle = f.q.toLowerCase();
     const hay = [item.name, item.step, item.processName, item.inst, item.procKey]
       .filter((s): s is string => typeof s === "string")
-      .join("   ")
+      .join(" · ")
       .toLowerCase();
     if (!hay.includes(needle)) return false;
   }
@@ -1187,7 +1187,7 @@ export function matchesInboxFilters(item: InboxItem, f: InboxFilters): boolean {
     const needle = f.process.toLowerCase();
     const hay = [item.procKey, item.processName, item.inst]
       .filter((s): s is string => typeof s === "string")
-      .join("   ")
+      .join(" · ")
       .toLowerCase();
     if (!hay.includes(needle)) return false;
   }
@@ -1935,6 +1935,38 @@ export function registerInboxRoutes(
       // The task must be a WAITING instance user-task in the actor's tenant.
       const task = await findWaitingInstanceTask(pool, tenantId, taskId);
       if (!task) {
+        // T-0688 (stale-drawer, capstone T-0647 minor finding): findWaitingInstanceTask
+        // returns null both for a genuinely unknown taskId AND for a task that
+        // WAS this exact instance's waiting step a moment ago but has SINCE
+        // completed — most commonly via the T-0522 engine-drive reconcile-on-read
+        // net (GET /api/inbox self-heals a missed post-approve engine drive on
+        // every list read) or a concurrent duplicate click/tab. In that second
+        // case the step DID complete successfully — the human just did not cause
+        // THIS click to be the one that completed it. Before falling through to
+        // the defer-row branch (and its own honest 404), check the projection
+        // track for a `done` row correlated to THIS taskId (inboxTaskId) — the
+        // SAME check GET /api/inbox/:id already performs (line ~1573 above) to
+        // keep serving detail for a just-completed task. A match here means
+        // "already done" — return the ordinary 200 success shape (idempotent),
+        // not the scary "задача уже недоступна" error a genuine 404 implies.
+        // No new query: listInstanceProjections is the same read GET already uses.
+        const doneProjections = await listInstanceProjections(pool, tenantId);
+        const doneProj = doneProjections.find((p) => p.inboxTaskId === taskId && p.status === "done");
+        if (doneProj) {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              instanceId: doneProj.inst,
+              status: "done",
+              action: "approve",
+              outcome: outcomeName,
+              engine: "already",
+            }),
+          );
+          return;
+        }
+
         // T-0638 (defect #1): taskId may address a DEFER task (agent.deferred
         // audit event) rather than an ordinary instance userTask. A defer row
         // is NEVER in listInstanceInboxTasks (it is a different audit type,

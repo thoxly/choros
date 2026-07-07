@@ -557,6 +557,33 @@
 .chs-inbox__group .chs-itable th.chs-r,
 .chs-inbox__group .chs-itable td.chs-r { width: 140px; white-space: nowrap; overflow: visible; }
 
+/* ── T-0688 (capstone T-0647 minor finding #3): FLAT (ungrouped) table let
+   «Задача»/«Процесс»/«Исполнитель» grow to their content's full intrinsic width
+   (plain auto table-layout, no cap) — a long task name / ProcessRef / ActorChip
+   routinely pushed «Дедлайн»/«Действие» past the viewport's right edge.
+   .chs-inbox__scroll DOES carry overflow:auto and technically scrolls there, but
+   the scrollbar sits at the very bottom of a tall, mostly-vertically-scrolling
+   table and is not a discoverable affordance — LIVE_PROOF read it as "the
+   columns are clipped", not "scroll right". Cap the three open-ended columns so
+   «Дедлайн»/«Действие» stay inside the viewport under realistic content; the
+   row still truncates (ellipsis) rather than wrapping, and .chs-inbox__scroll
+   remains the honest fallback for content that still doesn't fit (an
+   adversarially long value on every column at once, or a very narrow viewport).
+   Scoped to .chs-inbox__scroll (flat mode only) — the grouped-mode fixed-layout
+   rule above and the shared .chs-table/.chs-itable base elsewhere are untouched. */
+.chs-inbox__scroll > .chs-itable td.chs-r,
+.chs-inbox__scroll > .chs-itable th.chs-r { width: 140px; white-space: nowrap; }
+/* Target by CONTENT class, not column position — column-visibility toggles
+   (T-0653 «Настроить») can drop any of name/process/executor independently, so
+   an nth-child selector would silently cap the wrong column once one is hidden. */
+.chs-inbox__scroll > .chs-itable td .chs-task { max-width: 320px; min-width: 0; }
+.chs-inbox__scroll > .chs-itable td .chs-task__txt { min-width: 0; }
+.chs-inbox__scroll > .chs-itable td .chs-processref { max-width: 200px; min-width: 0; }
+.chs-inbox__scroll > .chs-itable td .chs-processref__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.chs-inbox__scroll > .chs-itable td .chs-actorchip { max-width: 160px; min-width: 0; }
+.chs-inbox__scroll > .chs-itable td .chs-actorchip .chs-exec { max-width: 100%; min-width: 0; overflow: hidden; }
+.chs-inbox__scroll > .chs-itable td .chs-actorchip .chs-exec > span:not(.chs-sr-only) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
 /* ── T-0653: compact density — tighter row padding ── */
 .chs-itable--compact tbody td { padding-top: var(--chs-space-3); padding-bottom: var(--chs-space-3); }
 .chs-itable--compact .chs-task__step { display: none; }
