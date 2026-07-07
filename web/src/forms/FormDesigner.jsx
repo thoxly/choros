@@ -1271,52 +1271,63 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                 gate is src/db/live-form-schema.ts's resolveLiveRecordSchema,
                 which resolves ONE registry off the binding's
                 target_registry_slug (natural key guarantees at most one
-                binding per process+app, migrations 075/119). */}
-            {registryDefs && boundRegistryDef ? (
-              // AC-1: the binding fixes a slug AND it resolved against a real
-              // registry_def — no open choice, show the fact (selectedDefId
-              // is auto-set by the effect above).
-              <p role="status" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-3)' }}>
-                Набор полей задан привязкой процесса: «{boundRegistryDef.display_name || boundRegistryDef.slug || boundRegistryDef.id}».
-              </p>
-            ) : registryDefs && boundRegistryDef === null ? (
-              // AC-6: the binding fixes a slug but NO registry_def of this
-              // application matches it (data desync) — say so honestly
-              // instead of silently narrowing to nothing or picking a guess.
-              // The picker stays open (fail-open on the UI hint only, same
-              // posture as T-0669 §3.1's bindings-fetch-error fallback) so
-              // authoring is not blocked by a data problem outside this task.
-              <>
-                <p role="status" style={{ color: 'var(--chs-color-warning)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-3)' }}>
-                  {REGISTRY_SLUG_NOT_FOUND_PREFIX}{boundRegistrySlug}{REGISTRY_SLUG_NOT_FOUND_SUFFIX}
+                binding per process+app, migrations 075/119).
+
+                Outer `registryDefs &&` guard restored (P0 fix-forward): before
+                an application is picked, registryDefs is still its useState(null)
+                initial value, and every branch below reads registryDefs.map —
+                without this guard the FINAL else branch (no fixed slug / not
+                yet resolved) rendered unconditionally and crashed the whole
+                /forms mount with "Cannot read properties of null (reading
+                'map')" (live-proof RED, T-0706 merge). Nothing to pick from
+                yet, so nothing renders until an app is selected. */}
+            {registryDefs && (
+              boundRegistryDef ? (
+                // AC-1: the binding fixes a slug AND it resolved against a real
+                // registry_def — no open choice, show the fact (selectedDefId
+                // is auto-set by the effect above).
+                <p role="status" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-3)' }}>
+                  Набор полей задан привязкой процесса: «{boundRegistryDef.display_name || boundRegistryDef.slug || boundRegistryDef.id}».
                 </p>
-                <label className="chs-label">Набор полей</label>
-                <Select
-                  value={selectedDefId}
-                  onChange={(e) => setSelectedDefId(e.target.value)}
-                  options={[{ value: '', label: '— выберите —' }, ...registryDefs.map((d) => ({ value: d.id, label: d.display_name || d.slug || d.id }))]}
-                />
-              </>
-            ) : (
-              <>
-                <label className="chs-label" style={{ marginTop: 'var(--chs-space-3)' }}>Набор полей</label>
-                <Select
-                  value={selectedDefId}
-                  onChange={(e) => setSelectedDefId(e.target.value)}
-                  options={[{ value: '', label: '— выберите —' }, ...registryDefs.map((d) => ({ value: d.id, label: d.display_name || d.slug || d.id }))]}
-                />
-                {/* AC-2: binding is known (not still loading) but does not fix
-                    a slug (NULL → server-side default fallback, invisible to
-                    the client — §3.2/out-of-scope: we do not guess the env
-                    default here), AND the app genuinely has >1 registry to
-                    disambiguate between (AC-4: a single-registry app has no
-                    ambiguity, no warning). */}
-                {selectedBinding && !boundRegistrySlug && registryDefs.length > 1 && (
-                  <p role="status" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
-                    {REGISTRY_NOT_FIXED_HINT}
+              ) : boundRegistryDef === null ? (
+                // AC-6: the binding fixes a slug but NO registry_def of this
+                // application matches it (data desync) — say so honestly
+                // instead of silently narrowing to nothing or picking a guess.
+                // The picker stays open (fail-open on the UI hint only, same
+                // posture as T-0669 §3.1's bindings-fetch-error fallback) so
+                // authoring is not blocked by a data problem outside this task.
+                <>
+                  <p role="status" style={{ color: 'var(--chs-color-warning)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-3)' }}>
+                    {REGISTRY_SLUG_NOT_FOUND_PREFIX}{boundRegistrySlug}{REGISTRY_SLUG_NOT_FOUND_SUFFIX}
                   </p>
-                )}
-              </>
+                  <label className="chs-label">Набор полей</label>
+                  <Select
+                    value={selectedDefId}
+                    onChange={(e) => setSelectedDefId(e.target.value)}
+                    options={[{ value: '', label: '— выберите —' }, ...registryDefs.map((d) => ({ value: d.id, label: d.display_name || d.slug || d.id }))]}
+                  />
+                </>
+              ) : (
+                <>
+                  <label className="chs-label" style={{ marginTop: 'var(--chs-space-3)' }}>Набор полей</label>
+                  <Select
+                    value={selectedDefId}
+                    onChange={(e) => setSelectedDefId(e.target.value)}
+                    options={[{ value: '', label: '— выберите —' }, ...registryDefs.map((d) => ({ value: d.id, label: d.display_name || d.slug || d.id }))]}
+                  />
+                  {/* AC-2: binding is known (not still loading) but does not fix
+                      a slug (NULL → server-side default fallback, invisible to
+                      the client — §3.2/out-of-scope: we do not guess the env
+                      default here), AND the app genuinely has >1 registry to
+                      disambiguate between (AC-4: a single-registry app has no
+                      ambiguity, no warning). */}
+                  {selectedBinding && !boundRegistrySlug && registryDefs.length > 1 && (
+                    <p role="status" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
+                      {REGISTRY_NOT_FIXED_HINT}
+                    </p>
+                  )}
+                </>
+              )
             )}
           </>
         )}
