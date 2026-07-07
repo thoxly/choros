@@ -49,10 +49,10 @@ import {
   buildCatalogDefinitions,
   serializeInstance,
   overlayLiveSteps,
-  pickPrimaryLiveNode,
+  resolveLiveNodesByInstance,
   type CatalogDefinition,
+  type CatalogEnginePort,
   type CatalogInstance,
-  type LiveActiveNode,
   type ProcessDefRow,
 } from "../core/process-catalog-view.js";
 
@@ -71,25 +71,6 @@ function assertUuidShape(value: string, label: string): void {
 
 /** Resolve an actor slug/sub to a tenant UUID (same shape as the other route modules). */
 export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
-
-/**
- * T-0709 [E16/P1]: the minimal engine port the catalog needs to read each running
- * instance's LIVE active user-task set — a structural subset of FlowableClient's
- * getActiveUserTasks (mirrors process-projection.ts's TimerReconcileEnginePort). Kept
- * structural so this module stays decoupled from the concrete client type and the
- * server can pass the shared FlowableClient unchanged.
- */
-export interface CatalogEnginePort {
-  getActiveUserTasks(
-    instanceId: string,
-  ): Promise<
-    | {
-        ok: true;
-        tasks: readonly { readonly name: string; readonly candidateGroups: readonly string[] }[];
-      }
-    | { ok: false; code: string }
-  >;
-}
 
 /** Injected deps. When absent the routes are NOT registered (no-DB honest degrade). */
 export interface ProcessCatalogDeps {
@@ -324,33 +305,14 @@ async function registryExistsUnderApp(
 // ---------------------------------------------------------------------------
 
 /**
- * T-0709 [E16/P1]: resolve the LIVE active-node facts for a batch of running
- * instances, keyed by instance id, from the engine's active user-task set. Best-effort
- * per instance: an engine error / no-active-task / empty result simply omits that key,
- * leaving its projection on the audit snapshot (overlayLiveSteps returns it unchanged).
- * Never throws — a total engine outage yields an empty map (the catalog degrades to the
- * exact pre-T-0709 snapshot values, still a 200). Bounded fan-out (the projection page
- * itself is already capped at 200 by listInstanceProjections).
+ * T-0709-R-P2-1 (judge): shared per-request wall-clock budget for the best-effort
+ * live-node overlay. A uniformly-slow-but-alive engine could otherwise stall the read
+ * for tens of seconds (up to ~30s per instance × the 200-instance page). This caps the
+ * WHOLE overlay: past it, the read degrades to the audit snapshot (never worse). Kept
+ * short — the overlay is a display nicety, not load-bearing. Reused by the detail plane
+ * (processes.ts) via the SAME resolveLiveNodesByInstance so both surfaces bound identically.
  */
-async function resolveLiveNodesByInstance(
-  flowable: CatalogEnginePort,
-  instanceIds: readonly string[],
-): Promise<Map<string, LiveActiveNode>> {
-  const byInst = new Map<string, LiveActiveNode>();
-  await Promise.all(
-    instanceIds.map(async (inst) => {
-      try {
-        const result = await flowable.getActiveUserTasks(inst);
-        if (!result.ok) return; // engine error for THIS instance → keep snapshot.
-        const node = pickPrimaryLiveNode(result.tasks);
-        if (node !== null) byInst.set(inst, node);
-      } catch {
-        // Best-effort: a per-instance engine failure must not fail the catalog read.
-      }
-    }),
-  );
-  return byInst;
-}
+export const LIVE_OVERLAY_DEADLINE_MS = 2_000;
 
 export function registerProcessCatalogRoutes(
   router: Router,
@@ -392,7 +354,9 @@ export function registerProcessCatalogRoutes(
           .filter((p) => p.status !== "done")
           .map((p) => p.inst);
         if (runningInstIds.length > 0) {
-          const liveByInst = await resolveLiveNodesByInstance(flowable, runningInstIds);
+          const liveByInst = await resolveLiveNodesByInstance(flowable, runningInstIds, {
+            deadlineMs: LIVE_OVERLAY_DEADLINE_MS,
+          });
           displayProjections = overlayLiveSteps(projections, liveByInst);
         }
       }

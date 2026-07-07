@@ -1,0 +1,75 @@
+{
+  "task_id": "T-0709",
+  "reviewer": "independent-judge",
+  "verdict": "changes_requested",
+  "summary": "Core mechanism (overlayLiveSteps/pickPrimaryLiveNode) is clean, pure, well-tested, anti-case-compliant, and honestly degrades. But the spec's central factual premise — that GET /api/processes/:inst reads the LIVE engine via getHistoricActivityInstances for its current step, and that this fix brings the catalog into consistency with it — is FALSE. Verified directly: /api/processes/:inst's node/nodes field comes from the SAME audit-snapshot projection (listInstanceProjections) the catalog used pre-fix; getHistoricActivityInstances only feeds a separate history[] array, never node. So T-0709 does not fix a catalog-vs-detail divergence — it introduces a NEW one (catalog now live, detail still snapshot), while claiming the opposite in the spec and in code comments. Acceptance criterion #3 is not met as stated.",
+  "findings": [
+    {
+      "id": "T-0709-R-P0-1",
+      "severity": "P0",
+      "area": "source-of-truth divergence",
+      "title": "/api/processes/:inst does NOT read live engine for current step — spec premise and Acceptance #3 are false",
+      "detail": "src/http/processes.ts:517-565 (GET /api/processes/:id): responds with `{ ...projectionToInstance(match), ...detail }` (line 545). projectionToInstance (processes.ts:201-245) sets node: p.step and nodes from p.concurrentSteps — both sourced ENTIRELY from the InstanceProjection returned by listInstanceProjections (src/http/process-projection.ts:995-1104), which folds Postgres audit_event rows (process.started / task.approved / process.next_task). This is the SAME audit-snapshot the catalog itself used before T-0709. `detail` (from fetchInstanceHistoryDetail, processes.ts:293-365, which does call flowable.getHistoricActivityInstances) only contributes `variables`, `history`, `historyAvailable` — it never overwrites `node`/`nodes`. The doc-comment in src/core/process-catalog-view.ts:29-30 and :182-184 ('the instance-detail route reads the LIVE engine ... and shows the truth') and the spec's Problem/Root-cause/Acceptance-#3 sections are factually incorrect for this codebase as it stands.",
+      "impact": "After this change, GET /api/process-catalog shows the LIVE Flowable node while GET /api/processes/:inst (the detail screen) still shows the FROZEN audit snapshot for the same instance. This is the exact 'two surfaces disagree' bug class T-0709 set out to fix — just moved to the other side. A user opening the detail screen for the same instance can now see a DIFFERENT step/role than the catalog list showed them, which is a regression relative to the claimed fix, not a resolution of it.",
+      "evidence": [
+        "src/http/processes.ts:517-565",
+        "src/http/processes.ts:201-245 (projectionToInstance)",
+        "src/http/processes.ts:293-365 (fetchInstanceHistoryDetail — only populates history[], not node)",
+        "src/http/process-projection.ts:995-1104 (listInstanceProjections — audit fold, not live engine)",
+        "src/core/process-catalog-view.ts:29-30, 182-184 (incorrect doc-comment claim)"
+      ],
+      "required_action": "Either (a) apply the SAME overlayLiveSteps/pickPrimaryLiveNode (or equivalent) to the /api/processes/:id and /api/processes list routes so both surfaces derive current step/role from the same live source, or (b) correct the spec/doc-comments to stop claiming consistency with instance-detail is achieved, and track the actual instance-detail fix as an explicit follow-up task — but then Acceptance #3 as currently written is not satisfied and should be removed/reworded, and the PR should not claim the divergence is resolved."
+    },
+    {
+      "id": "T-0709-R-P1-1",
+      "severity": "P1",
+      "area": "multi-task ordering / parallel gateway",
+      "title": "pickPrimaryLiveNode's tasks[0] selection relies on an undocumented, unenforced Flowable REST order",
+      "detail": "getActiveUserTasks (src/core/flowable-client.ts:1104-1149) calls `GET {baseUrl}/runtime/tasks?processInstanceId={id}` with NO `sort=` parameter — contrast with getHistoricActivityInstances (flowable-client.ts ~1238-1242) which explicitly appends `&sort=startTime` and documents 'the engine honors it, client does not re-sort.' No equivalent ordering guarantee exists for getActiveUserTasks anywhere in this codebase. pickPrimaryLiveNode (src/core/process-catalog-view.ts:247-278) picks `tasks[0]` as the 'primary' node on a parallel-gateway (AND-split) instance with >1 concurrent active user-task, with only a comment ('the FIRST active user-task (by the engine's own order) is the primary node') that does not establish or verify what that order actually is.",
+      "impact": "On any AND-split instance, which branch is reported as the catalog's single step/role is effectively arbitrary and potentially unstable (could differ across two consecutive GETs if Flowable's underlying query plan/order is not literally stable, e.g. depends on internal row/creation order which is usually stable in practice but is not a documented contract here). This is architecturally inconsistent with the codebase's own established precedent: process-projection.ts's engine-drive path treats >1 active task for the base-step resolve-by-instance case as a structural anomaly (AMBIGUOUS_ACTIVE_TASK, process-projection.ts:1719-1726, 'the base step owns EXACTLY ONE active user-task for this instance by construction... >1 is a genuine structural anomaly'), not something to silently collapse via array-index-0.",
+      "evidence": [
+        "src/core/flowable-client.ts:1104-1149 (getActiveUserTasks, no sort param)",
+        "src/core/flowable-client.ts ~1238-1242 (getHistoricActivityInstances, documented sort=startTime, contrast)",
+        "src/core/process-catalog-view.ts:247-278 (pickPrimaryLiveNode, tasks[0] selection)",
+        "src/http/process-projection.ts:1690-1726 (AMBIGUOUS_ACTIVE_TASK precedent for >1 active task)"
+      ],
+      "required_action": "Either document/verify a real ordering contract for getActiveUserTasks (e.g. add sort= and a matching comment), or make the primary-node selection deterministic by an intrinsic property (e.g. taskDefinitionKey lexical order, or earliest task `id`/creation time if available) rather than raw response-array order, and add a test that asserts stability isn't merely 'whatever the stub returns first.' At minimum, downgrade the confidence of the 'no divergence' claim for AND-split instances in the spec."
+    },
+    {
+      "id": "T-0709-R-P2-1",
+      "severity": "P2",
+      "area": "performance / critical-path fan-out",
+      "title": "Fan-out is bounded but synchronous in the request path; a uniformly-slow (not down) engine can stall the catalog GET for up to ~30s",
+      "detail": "resolveLiveNodesByInstance (src/http/process-catalog.ts:335-353) fires one getActiveUserTasks call per running instance via Promise.all, unbounded concurrency (no p-limit/batching), and is awaited synchronously before the HTTP response is written (src/http/process-catalog.ts ~386-403). getActiveUserTasks itself uses withRetry with timeoutMs=10_000 and maxRetries=3 (src/core/flowable-client.ts:318-319, 721-722) — worst case ~30s per instance before that instance's call resolves 'not ok.' With listInstanceProjections capped at 200 (process-projection.ts:1000, `Math.min(opts?.limit ?? 200, 500)`), a uniformly slow-but-not-down Flowable could keep GET /api/process-catalog hanging for tens of seconds. Each getActiveUserTasks call also internally fans out further per-task identitylinks fetches (flowable-client.ts:1082-1102, 1117-1137) when candidateGroups aren't inlined — so worst case is N (instances) + M (active tasks across them) concurrent Flowable calls per single catalog GET.",
+      "impact": "Not a crash/500 risk (best-effort try/catch, honest degrade to snapshot on error), but the spec's framing ('off the critical path') doesn't match the implementation: the overlay IS on the critical path of the synchronous HTTP response, just fault-tolerant. On a large tenant with 100+ running instances and a struggling-but-alive Flowable, this could turn the catalog into an effectively-unusable multi-second/tens-of-second load.",
+      "evidence": [
+        "src/http/process-catalog.ts:335-353",
+        "src/core/flowable-client.ts:318-319, 721-722 (timeoutMs 10s, maxRetries 3)",
+        "src/http/process-projection.ts:1000 (200-instance cap)"
+      ],
+      "required_action": "Non-blocking for this PR given the bounded worst-case and honest degrade, but recommend a follow-up: cap fan-out concurrency and/or apply a tighter per-call timeout budget specific to this best-effort display overlay (e.g. 1-2s) so a degraded engine can't meaningfully slow the catalog page."
+    },
+    {
+      "id": "T-0709-R-N-1",
+      "severity": "non-blocking",
+      "area": "observability",
+      "title": "Engine-down vs no-active-task vs done are all silently indistinguishable to operators",
+      "detail": "resolveLiveNodesByInstance swallows both `!result.ok` (engine error) and pickPrimaryLiveNode returning null (no active user-task) identically — the map entry is simply absent, with no log/metric differentiating 'engine unreachable' from 'token legitimately between user-tasks.' Per the task's own review question (b): this does not maskan actual failure from the user (honest degrade to snapshot, never worse), but it does make a real engine outage invisible to operators reading logs, since nothing distinguishes it from the normal/expected 'token on gateway/service-task' case.",
+      "evidence": ["src/http/process-catalog.ts:335-353"],
+      "required_action": "Optional: add a debug-level log or counter when `!result.ok` specifically, so a real engine outage is observable without changing the honest-degrade wire behavior."
+    },
+    {
+      "id": "T-0709-R-OK-1",
+      "severity": "info",
+      "area": "positive findings",
+      "title": "Confirmed clean on: tenant scope, degrade honesty, anti-case discipline, wire-shape stability",
+      "detail": "(a) Tenant scope: instanceIds fed to getActiveUserTasks come from listInstanceProjections(pool, tenantId), which is genuinely tenant-scoped via WHERE tenant_id = $2 under SET LOCAL choros.tenant_id (process-projection.ts readEvents, ~line 778, 820-868) — no cross-tenant leak path; getActiveUserTasks itself has no tenant awareness but this matches established precedent (process-start.ts, records.ts, process-projection.ts all call it the same way after tenant-scoped resolution). (b) Degrade: overlayLiveSteps returns the ORIGINAL projection reference unchanged (byte-identical, tested at process-catalog-view.test.ts:195-224) whenever no live entry exists (no flowable dep, per-instance engine error, empty active-task set, done instance) — never fabricates, never worse than pre-T-0709, never a 500 (try/catch wraps every per-instance call). (c) Anti-case: pickPrimaryLiveNode/overlayLiveSteps take step/role purely as caller-supplied data, zero case literals; anti-case-lock.sh / read-pdp-anti-case.sh both PASS with the aggregate count actually decreasing vs baseline. (d) Wire-shape: web/ is empty in `git diff dev...task/T-0709` (0 lines) — confirmed no frontend changes; CatalogInstance's step/role fields are overlaid in-place with the same string type, no new/removed wire fields.",
+      "evidence": [
+        "src/http/process-projection.ts (readEvents tenant WHERE clause)",
+        "src/__tests__/process-catalog-view.test.ts:195-224 (byte-identical degrade tests)",
+        "git diff dev...task/T-0709 -- web/ → 0 lines",
+        "ci/checks/anti-case-lock.sh PASS, ci/checks/read-pdp-anti-case.sh PASS"
+      ]
+    }
+  ]
+}
