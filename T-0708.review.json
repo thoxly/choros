@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0708",
+  "verdict": "approved",
+  "summary": "Query-filter ?record=<id> on the existing withAuth GET /api/processes is applied strictly AFTER listInstanceProjections(pool, tenantId) — tenant scope is inherited, not re-derived, so a foreign-tenant record id cannot widen visibility (it can only fail to match any of this tenant's own instances, yielding honest-empty). No new PDP surface: the unfiltered GET /api/processes already returns the FULL tenant instance list to any tenant member with no per-instance authorization check beyond tenant scope — the record filter can only narrow that pre-existing set, never broaden it, so no new privilege-escalation vector is introduced by this change.",
+  "checks": [
+    {
+      "id": "tenant-scope",
+      "verdict": "pass",
+      "detail": "filterInstancesByRecord() runs on the `instances` array already produced by projections.map(projectionToInstance) where `projections = await listInstanceProjections(startDeps.pool, tenantId)` — tenantId resolved from the authenticated actor via resolveActorTenant(actorSlug) BEFORE the filter is even read. A record id belonging to another tenant simply matches zero rows in this tenant's already-scoped list (no cross-tenant recordId collision possible since recordId is a foreign key into that tenant's own records table). Verified by reading src/http/processes.ts:494-527 directly."
+    },
+    {
+      "id": "pdp-enumeration-risk",
+      "verdict": "pass-with-note",
+      "detail": "Confirmed the UNFILTERED /api/processes route has no per-instance PDP/capability check beyond tenant membership (grep for PDP/checkAccess/authorize in processes.ts returns only an unrelated comment). This is pre-existing behaviour, not introduced by T-0708. The ?record= filter is therefore not a new enumeration primitive — a user who could already see all tenant instances via the unfiltered list can trivially enumerate the same set by any recordId; the filter narrows what's shown, it does not gate access that wasn't already open. Flagged as a pre-existing architectural note, not a T-0708 regression — out of scope for this task per spec's own scope boundary."
+    },
+    {
+      "id": "byte-compat-no-filter",
+      "verdict": "pass",
+      "detail": "readRecordFilter() returns null for absent AND blank ?record= (trimmed empty string treated as absent), and the DB-mode / no-DB-mode code paths only apply filterInstancesByRecord when recordFilter !== null. The `recordId` field on ProjectionToInstance's output already existed on dev pre-T-0708 (T-0414/T-0356, for the process-instance card's own RecordRef feature) — this diff does not touch that mapper. Verified via `git show dev:src/http/processes.ts` — recordId?: string and its spread were already present before this task. Unit test 'WITHOUT the record param the list is byte-unchanged' and 'blank record param (?record=) is treated as NO filter' both pass."
+    },
+    {
+      "id": "current-step-source-parity",
+      "verdict": "pass",
+      "detail": "RelatedProcessRow imports currentNodes and deriveInstanceTitle from './process-instance.logic.js' — the SAME module and SAME functions screen-process-instance.jsx itself uses (confirmed via grep: process-instance.jsx line 34/271 imports and calls currentNodes identically, rendered through the same StepRef component). This is genuine reuse, not a parallel reimplementation — any 'next-step-shown-as-current' defect, if it exists, is shared with the already-shipped process-instance card and is explicitly out of this task's scope (T-0709 owns the process-catalog step resolver; this reads the instance projection's own node/nodes fold, per spec's stated scope boundary, not process-catalog)."
+    },
+    {
+      "id": "error-empty-masking",
+      "verdict": "pass-with-note",
+      "detail": "RelatedProcessesPanel collapses loading/empty/fetch-error all to `return null` (section hidden), matching the pre-existing CrossAppLinksPanel convention IN THE SAME FILE (which does the identical collapse for cross-app links, including a genuine network .catch()). This is an intentional, spec-mandated, and precedented degrade — not a new masking pattern invented by this task. Non-blocking note: a real 500/network failure is indistinguishable from a legitimately-empty record to the end user (no toast/log), but this exactly matches CrossAppLinksPanel's existing behaviour on the same screen, so it is a pre-existing UX tradeoff, not a regression introduced here."
+    },
+    {
+      "id": "auth-helper-on-fetch",
+      "verdict": "pass",
+      "detail": "RelatedProcessesPanel uses `fetch(..., { headers: devHeaders() })` — raw fetch + devHeaders(), NOT fetchWithAuthRetry. Initially flagged as a possible spec deviation (spec text says 'auth-хелпер (fetchWithAuthRetry/devHeaders)'), but devHeaders() is itself the canonical mode-aware auth-header builder (dev X-Dev-User / keycloak Bearer, see web/src/app-shell/dev-auth.js) and raw-fetch+devHeaders() is the DOMINANT pattern across the codebase for simple display-plane GETs (CrossAppLinksPanel in this exact same file, screen-overview.jsx, screen-sections.jsx, shell.jsx, etc.). fetchWithAuthRetry is reserved for flows needing 401-retry/refresh (file downloads, critical POST forms). This is consistent with established convention, not a gap."
+    },
+    {
+      "id": "anti-uuid-anti-case",
+      "verdict": "pass",
+      "detail": "Process name via deriveInstanceTitle (never bare procId/key — falls back to generic 'Процесс' label with key demoted, same as instance card). Step via StepRef (deriveStepLabel demotes machine keys to a secondary mono chip, never primary text). instance.id appears only in href/title attributes, confirmed by test assertion `expect(rowSrc).not.toMatch(/>\\s*\\{instance\\.id\\}\\s*</)` and by direct source read. ci/checks/ux/anti-uuid-actor-render.sh and ci/checks/anti-case-lock.sh both PASS."
+    }
+  ],
+  "non_blocking": [
+    "screen-record-detail.test.jsx's T-0708 tests are source-string-grep assertions (src.indexOf / toContain), not real React Testing Library DOM-mount renders — consistent with this file's documented pre-existing convention ('vitest node environment, no React mount' per file header), not a shortcut unique to this task, but it means the loading→populated transition and actual nodes[0]/StepRef prop-plumbing are never exercised against a real render. Low risk given StepRef/StatusChip are shared, already-proven components.",
+    "Real fetch errors (500/network) and legitimate empty-record states are visually indistinguishable to the end user (both hide the section silently) — matches CrossAppLinksPanel's pre-existing behaviour on the same screen, not a new tradeoff introduced by T-0708."
+  ]
+}

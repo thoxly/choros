@@ -245,6 +245,40 @@ function projectionToInstance(p: InstanceProjection): ProcessInstance {
 }
 
 // ---------------------------------------------------------------------------
+// T-0708 [E16 §6, capstone T-0691]: record-scoped filter for GET /api/processes.
+// Pure + exported so the wiring (the record→instance reverse link on the record
+// card) is unit-testable without an HTTP round-trip. Two small helpers:
+//   - readRecordFilter: extract a trimmed non-empty `record` query param, else null
+//     (null = "no filter", the byte-unchanged legacy full-list path).
+//   - filterInstancesByRecord: keep only instances whose recordId === the filter.
+//     An instance with a different OR absent recordId is dropped; the filter is
+//     applied AFTER tenant-scoped projection so it can never widen visibility.
+// ---------------------------------------------------------------------------
+
+/** Extract the `?record=<id>` filter, or null when absent/blank (no filter). */
+function readRecordFilter(req: import("node:http").IncomingMessage): string | null {
+  const rawUrl = req.url ?? "";
+  const qIdx = rawUrl.indexOf("?");
+  if (qIdx < 0) return null;
+  const value = new URLSearchParams(rawUrl.slice(qIdx + 1)).get("record");
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Keep only the instances whose `recordId` exactly equals `recordId`. An instance
+ * with a different or absent recordId is excluded (never fabricated). Exported for
+ * the unit tier.
+ */
+export function filterInstancesByRecord(
+  instances: ProcessInstance[],
+  recordId: string,
+): ProcessInstance[] {
+  return instances.filter((i) => i.recordId === recordId);
+}
+
+// ---------------------------------------------------------------------------
 // T-0609: instance history detail (variables + BPMN activity history), read
 // live from the engine via the two new FlowableClient read-only methods
 // (getHistoricVariableInstances / getHistoricActivityInstances). This is the
@@ -460,6 +494,14 @@ export function registerProcessesRoutes(
   // T-0564: wrapped in withAuth so getAuthContext(req) is populated in keycloak mode
   // (in dev mode withAuth is a pass-through, so the x-dev-user branch is unchanged).
   router.register("GET", "/api/processes", withAuth(async (req, res) => {
+    // T-0708 [E16 §6, capstone T-0691]: optional `?record=<recordId>` filter — the
+    // record-detail card's reverse link (запись→инстансы). The existing card→record
+    // link («ЗАПИСЬ-ИСТОЧНИК») made the pair one-directional; this closes it. The
+    // filter is applied AFTER the tenant-scoped projection fold, so it never widens
+    // visibility (a foreign record id can only match this tenant's own instances)
+    // and needs no new route — it lives on this already-withAuth-wrapped GET.
+    const recordFilter = readRecordFilter(req);
+
     // DB mode: serve ONLY real tenant-scoped projections (T-0301).
     if (hasDb() && startDeps) {
       // T-0564: resolve sub→slug (keycloak) or x-dev-user (dev) BEFORE the tenant lookup.
@@ -476,6 +518,9 @@ export function registerProcessesRoutes(
           instances = [];
         }
       }
+
+      // T-0708: apply the record filter over the ALREADY tenant-scoped list.
+      if (recordFilter !== null) instances = filterInstancesByRecord(instances, recordFilter);
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
@@ -494,9 +539,14 @@ export function registerProcessesRoutes(
       return;
     }
 
+    // T-0708: the seed/pack fixtures carry NO recordId, so a record-scoped query in
+    // no-DB mode is honestly empty (we do not fabricate a record binding for a
+    // fixture). Without the filter the legacy full-list behaviour is byte-unchanged.
+    const list = recordFilter !== null ? filterInstancesByRecord(base, recordFilter) : base;
+
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ instances: base }));
+    res.end(JSON.stringify({ instances: list }));
   }));
 
   // GET /api/processes/:id — return specific instance or 404.

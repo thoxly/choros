@@ -359,3 +359,49 @@ describe('screen-record-detail — PersonFieldValue wiring (T-0673)', () => {
     expect(fetchMatches.length).toBe(1);
   });
 });
+
+describe('screen-record-detail — RelatedProcessesPanel reverse link (T-0708, E16 §6)', () => {
+  it('fetches the record-scoped process list (GET /api/processes?record=<id>), not the full list', () => {
+    expect(src).toContain('/api/processes?record=${encodeURIComponent(recordId)}');
+    // Auth-helper headers, not a bare fetch (dev-auth contract).
+    const fnStart = src.indexOf('function RelatedProcessesPanel(');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnSrc = src.slice(fnStart, fnStart + 1200);
+    expect(fnSrc).toContain('headers: devHeaders()');
+  });
+
+  it('renders the section only when the record has ≥1 related instance (hidden otherwise — clean degrade)', () => {
+    const fnStart = src.indexOf('function RelatedProcessesPanel(');
+    const fnSrc = src.slice(fnStart, fnStart + 1600);
+    // Loading + empty + error all collapse to a hidden section (return null).
+    expect(fnSrc).toContain('if (loading) return null;');
+    expect(fnSrc).toContain('if (!instances || instances.length === 0) return null;');
+    // A fetch error settles to an empty list (never blocks the native fields).
+    expect(fnSrc).toMatch(/\.catch\(\(\) => \{[\s\S]*setInstances\(\[\]\)/);
+  });
+
+  it('is wired into the card render right after the cross-app links panel', () => {
+    expect(src).toContain('<RelatedProcessesPanel recordId={record.id} />');
+  });
+
+  it('renders each instance through the SAME human-layer primitives as the process card (no bare UUID)', () => {
+    // Human process title via deriveInstanceTitle; current step via StepRef;
+    // status via StatusChip — reused from the instance card, not re-invented.
+    expect(src).toContain("import { deriveInstanceTitle, currentNodes } from './process-instance.logic.js'");
+    const rowStart = src.indexOf('function RelatedProcessRow(');
+    expect(rowStart).toBeGreaterThan(-1);
+    const rowSrc = src.slice(rowStart, rowStart + 1400);
+    expect(rowSrc).toContain('deriveInstanceTitle(instance)');
+    expect(rowSrc).toContain('<StepRef step={nodes[0]} />');
+    expect(rowSrc).toContain('<StatusChip status={instance.status} />');
+    // The raw instance id appears ONLY in the link href / title, never as bare text.
+    expect(rowSrc).toContain('to={`/processes/${encodeURIComponent(instance.id)}`}');
+    expect(rowSrc).not.toMatch(/>\s*\{instance\.id\}\s*</);
+  });
+
+  it('a done instance shows the honest terminal note instead of an empty step', () => {
+    const rowStart = src.indexOf('function RelatedProcessRow(');
+    const rowSrc = src.slice(rowStart, rowStart + 1400);
+    expect(rowSrc).toContain("'Процесс завершён'");
+  });
+});
