@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0681",
+  "role": "reviewer",
+  "verdict": "approved",
+  "scope": "git diff dev...task/T-0681 (b4afe752 + 124435fa): target_registry_slug write path through POST /api/process-app-bindings + assistant author_binding + BindProcessModal UI.",
+  "adversarial_checks": {
+    "a_registry_tenant_scope": {
+      "status": "pass",
+      "detail": "registryExistsUnderApp runs inside withTenantTx (SET LOCAL choros.tenant_id) against choros.registry_def which has FORCE ROW LEVEL SECURITY + registry_def_tenant_isolation policy (migration 004). Query is DOUBLE-guarded: RLS policy AND explicit WHERE tenant_id=$1 AND application_id=$2 AND slug=$3. tenantId comes from resolveActorTenant(actor) — NEVER from body/header. applicationId is UUID_RE-validated. A cross-tenant registry is invisible (RLS + explicit predicate); a cross-app registry is filtered by application_id → 400 REGISTRY_NOT_FOUND. SQL injection impossible — all three params bound ($1/$2/$3), no string interpolation of slug."
+    },
+    "b_authz_surface_unchanged": {
+      "status": "pass",
+      "detail": "POST /api/process-app-bindings uses withAuth (authentication-only, any tenant member) — this is the PRE-EXISTING gate; the task did NOT add or widen it. The new code adds only a tenant+app-scoped existence read (fail-closed narrowing, never widening). NOTE (non-blocking): the sibling form-binding writer POST /api/forms/binding (src/http/binding.ts) is role-gated (process_designer OR isGenesisOwnerForTenant, T-0666), while POST /api/process-app-bindings is not — an asymmetry that predates this task and is out of scope."
+    },
+    "c_backward_compat": {
+      "status": "pass",
+      "detail": "Old clients that omit target_registry_slug: the guard is `\"target_registry_slug\" in body && !== null && !== undefined`; absent key → targetRegistrySlug stays null → column NULL → readers fall back to resolveDefaultStepResultSlug(). Byte-identical to prior behavior. Empty/whitespace string → trimmed → null (never a 400). Verified by AC-3/AC-3b tests (green)."
+    },
+    "d_five_readers_consistent": {
+      "status": "pass",
+      "detail": "All readers (src/db/live-form-schema.ts:206, src/db/step-applier.ts:469, src/db/process-instance-resolver.ts:329, src/http/process-defs.ts:388 publish-gate) use the identical idiom `slug && slug.trim() !== '' ? slug : resolveDefaultStepResultSlug()`. The writer stores either a validated non-empty slug or NULL (serializer also normalizes '' → null). No reader assumes seed-only. Reader regression suite green (live-form/step-applier/instance-resolver/process-defs.steptarget/floor-boundary — 144+135 tests)."
+    },
+    "e_assistant_symmetry": {
+      "status": "pass",
+      "detail": "assistant.ts author_binding applies the SAME fail-closed guard: parameterized SELECT 1 FROM registry_def WHERE tenant_id=$1 AND application_id=$2 AND slug=$3 inside the tenant tx (SET LOCAL choros.tenant_id), using resolvedAppId (already in-tenant resolved). On miss → ROLLBACK + user-facing error string (consistent with sibling branches). tenantId is a function param resolved via resolveActorTenant at the call site — no body-derived tenant. Not an obfuscated bypass."
+    },
+    "f_anti_case": {
+      "status": "pass",
+      "detail": "No denylist case-literals in added src/web code (only occurrences are inside T-0681.spec.md AC-6 text describing what is forbidden). Slug is request-body data; registry is tenant data. anti-case-lock.sh green (aggregate 16 = baseline 16)."
+    },
+    "upsert_overwrite_semantics": {
+      "status": "pass-by-spec",
+      "detail": "ON CONFLICT DO UPDATE SET target_registry_slug = EXCLUDED.target_registry_slug means a re-bind that sends null clears an existing slug to NULL. AC-1 explicitly specifies re-upsert UPDATES the column — consistent with how form_key/trigger_type/field_mapping already behave on conflict. Intended, not a defect. (See non-blocking UI foot-gun note.)"
+    }
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "NB-1",
+      "severity": "P3",
+      "area": "authz-asymmetry",
+      "text": "POST /api/process-app-bindings is withAuth-only (any tenant member) while the sibling POST /api/forms/binding is role-gated (process_designer/owner, T-0666). Pre-existing, out of scope for T-0681, but the two binding writers having different authz floors is a latent inconsistency worth a future harmonization task."
+    },
+    {
+      "id": "NB-2",
+      "severity": "P3",
+      "area": "ui-rebind-footgun",
+      "text": "BindProcessModal is a blank create/upsert form and does not pre-fill an existing binding's current target_registry_slug. Because the server upsert overwrites the column with EXCLUDED, re-binding an existing (process, app) pair while leaving the picker at '— по умолчанию —' silently clears a previously-set non-default slug back to NULL, re-arming the very 409 trap this task removes for that binding. Spec scopes the modal to fresh bindings; pre-fill on re-bind is a reasonable follow-up."
+    },
+    {
+      "id": "NB-3",
+      "severity": "P3",
+      "area": "test-coverage",
+      "text": "The write path is covered only by a fake-pool unit test (src/__tests__/process-catalog-target-registry.test.ts, 7/7 green) — no live-PG db test in ci/checks/db exercises the real RLS-scoped registryExistsUnderApp SELECT or the actual column upsert (grep target_registry_slug in ci/checks/db = 0). Risk is low (migration 119 column exists; readers already run against it in live PG), but a db-level write test would harden AC-1/AC-2 against RLS/column drift."
+    },
+    {
+      "id": "NB-4",
+      "severity": "P4",
+      "area": "ui-minor",
+      "text": "When an app has exactly one registry (which is its default), the picker offers it as a selectable non-default option alongside '— по умолчанию —'; picking it just sets the slug explicitly to the default. Harmless (server validates existence → 201) but mildly redundant. When an app has zero listable registries the picker is hidden entirely (falls to default) — correct, no user signal needed."
+    }
+  ]
+}

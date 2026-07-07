@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0681",
+  "role": "design-steward",
+  "verdict": "approved",
+  "surface": "BindProcessModal target-registry picker (web/src/screens/screen-processes.jsx) + mapBindingError (web/src/screens/process-catalog.js)",
+  "checks": {
+    "human_language_and_why": {
+      "status": "pass",
+      "detail": "Label «Реестр результата (необязательно)» is plain Russian and marks the field optional. Helper hint explains the PURPOSE (ЗАЧЕМ): «Куда попадает результат шага процесса. По умолчанию — реестр приложения по умолчанию.» — a human sentence, no slugs/jargon. The empty first option «— по умолчанию —» communicates the default path."
+    },
+    "error_display_russian_at_field": {
+      "status": "pass",
+      "detail": "REGISTRY_NOT_FOUND is mapped by mapBindingError to { field: 'target_registry_slug', message: serverMsg || 'Реестр не найден в этом приложении.' } and rendered as <span className='chs-hint chs-hint--invalid'> directly under the picker, replacing the helper hint. aria-invalid is set on the select. The error is anchored on the right field, in Russian, not a raw code."
+    },
+    "design_tokens": {
+      "status": "pass",
+      "detail": "Uses the same primitives as the sibling fields in this modal: chs-field / chs-label / chs-input / chs-input--invalid / chs-hint / chs-hint--invalid, and var(--chs-color-text-muted) for the muted hint. No raw hex, no bespoke styling. Consistent with the trigger-type and application selects immediately adjacent."
+    },
+    "empty_or_single_registry_state": {
+      "status": "pass",
+      "detail": "The picker renders only when `applicationId && regOpts.length > 0`. An app with no listable registries hides the picker entirely and the binding uses the default slug — correct minimalism (nothing to choose). An app with a single (default) registry shows it as a pickable option alongside «— по умолчанию —»; slightly redundant but harmless (see review NB-4). No broken/empty-select state is ever shown."
+    },
+    "data_not_hardcode": {
+      "status": "pass",
+      "detail": "Options come from GET /api/registry-defs?application_id= (this tenant's real registries), fetched with authHeaders() (mode-aware — the FE-s46 bare-fetch-401 lesson is explicitly applied and commented). registryTargetOptions maps rows to { value: slug, label }, defensive against non-arrays / slug-less rows, never fabricates. Picker clears its value when the application changes (its registries differ)."
+    }
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "UX-NB-1",
+      "severity": "P3",
+      "text": "On re-bind of an existing (process, app) pair the modal opens blank and does not pre-fill the current target_registry_slug; leaving the picker at default silently clears a previously-set slug on save (server upsert overwrites). No UI warning. Follow-up: pre-fill from the existing binding or warn on clear. (Mirrors review NB-2.)"
+    }
+  ]
+}

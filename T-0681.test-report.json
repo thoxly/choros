@@ -1,0 +1,70 @@
+{
+  "task_id": "T-0681",
+  "role": "tester",
+  "verdict": "approved",
+  "environment": {
+    "pg_55432": "UP",
+    "database_url_for_db_tests": "postgres://choros_migrator:choros_dev_pw@localhost:55432/choros (had to be supplied explicitly; the bare `vitest run --dir ci/checks/db` invocation threw DATABASE_URL not set — a harness-env requirement, not a code defect)"
+  },
+  "gates": {
+    "tsc_noEmit": { "cmd": "npx tsc --noEmit", "exit": 0, "result": "PASS" },
+    "npm_build": { "cmd": "npm run build (tsc + seed tsconfig)", "exit": 0, "result": "PASS" },
+    "server_target_registry_test": {
+      "cmd": "npx vitest run --no-file-parallelism src/__tests__/process-catalog-target-registry.test.ts",
+      "exit": 0,
+      "result": "PASS 7/7 (AC-1 write, AC-2 400 REGISTRY_NOT_FOUND fail-closed, AC-3/AC-3b NULL default, AC-4 GET serialize, AC-5 positive + regression via resolveLiveRecordSchema)"
+    },
+    "server_neighbor_binding_forms_readers": {
+      "cmd": "vitest run binding-compat/binding-contract-catalog/binding-owner-bypass/binding-trigger.unit/process-catalog-view/process-defs.appbinding/process-defs.steptarget/step-applier/process-instance-resolver",
+      "exit": 0,
+      "result": "PASS 135/135 (9 files) — includes binding-owner-bypass authz regression"
+    },
+    "floor_boundary_gate": {
+      "cmd": "vitest run authoring-floor-classifier/floor-boundary/floor-boundary-wire",
+      "exit": 0,
+      "result": "PASS 144/144 (3 files) — the T-0520 floor-gate the write path integrates with"
+    },
+    "web_vitest_full": {
+      "cmd": "cd web && npx vitest run",
+      "exit": 0,
+      "result": "PASS 2524/2524 (94 files) — includes new process-catalog.test.js cases (buildBindingPayload target_registry_slug, registryTargetOptions, mapBindingError REGISTRY_NOT_FOUND)"
+    },
+    "anti_case_lock": { "cmd": "bash ci/checks/anti-case-lock.sh", "exit": 0, "result": "PASS (aggregate 16 = baseline 16, delegates clean)" },
+    "forms_schema_binding": { "cmd": "bash ci/checks/forms-schema-binding.sh", "exit": 0, "result": "PASS [FF-FORMS1]" },
+    "registry_defs_pdp_isolation": { "cmd": "bash ci/checks/registry-defs-pdp-isolation.sh", "exit": 0, "result": "PASS (all FF-RDP checks incl. genesis short-circuit)" },
+    "mutation_gateway_isolation": { "cmd": "bash ci/checks/mutation-gateway-isolation.sh", "exit": 0, "result": "PASS (FF-G1/G2/G6; frozen object-handle/grant-lattice unchanged)" },
+    "http_route_auth_coverage": { "cmd": "bash ci/checks/http-route-auth-coverage.sh", "exit": 0, "result": "PASS (FF-0328-1/2/3; no ungated x-dev-user; frozen surfaces unchanged)" },
+    "eslint_touched": { "cmd": "npx eslint src/http/process-catalog.ts src/http/assistant.ts", "exit": 0, "result": "PASS (0 errors; 6 pre-existing no-console warnings outside the diff hunks)" },
+    "db_binding_tests": {
+      "cmd": "DATABASE_URL=... npx vitest run --dir ci/checks/db --no-file-parallelism -t \"binding\"",
+      "exit": 0,
+      "result": "PASS 36/36 (6 files: form_binding, form_binding_layout, assistant-llm-binding, process-start-sandbox-gate, ...)"
+    },
+    "db_process_catalog": {
+      "cmd": "DATABASE_URL=... npx vitest run --dir ci/checks/db ci/checks/db/process-catalog.test.ts",
+      "exit": 0,
+      "result": "PASS 9/9"
+    }
+  },
+  "ac_verification": {
+    "AC-1": "PASS — valid slug → 201, column written; upsert updates (server test + captured insert param[8]).",
+    "AC-2": "PASS — unresolvable slug → 400 REGISTRY_NOT_FOUND, insert never runs (fail-closed).",
+    "AC-3": "PASS — omitted/null/empty → 201, column NULL (backward-compatible).",
+    "AC-4": "PASS — GET serializes target_registry_slug.",
+    "AC-5": "PASS — recorded non-default slug drives resolveLiveRecordSchema to a real schema (Floor-1, no false 409); NULL regression returns null (old trap reproduced).",
+    "AC-6": "PASS — anti-case-lock green; no case literals in added code."
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "T-NB-1",
+      "severity": "P3",
+      "text": "No live-PG db test exercises the actual target_registry_slug write path (registryExistsUnderApp RLS-scoped SELECT + column upsert); coverage is fake-pool only. grep target_registry_slug in ci/checks/db = 0. Consider a db-level AC-1/AC-2 test. (Mirrors review NB-3.)"
+    },
+    {
+      "id": "T-NB-2",
+      "severity": "P4",
+      "text": "ci/checks/db tests require DATABASE_URL to be exported (choros_migrator @ :55432); the bare `vitest run --dir ci/checks/db` fails with 'DATABASE_URL not set'. Env/harness precondition, not a code issue — noted so the reviewer/CI supplies it."
+    }
+  ]
+}
