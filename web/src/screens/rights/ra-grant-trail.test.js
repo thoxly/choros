@@ -599,6 +599,73 @@ describe('T-0652 · grant-trail CSV export (rowsToCsv / csvEscape)', () => {
   it('rowsToCsv: starts with a UTF-8 BOM so Excel reads Cyrillic correctly', () => {
     expect(rowsToCsv([]).charCodeAt(0)).toBe(0xFEFF);
   });
+
+  // -------------------------------------------------------------------------
+  // F-1 (live-proof on the deployed stand, T-0652 follow-up): the CSV export
+  // must match what ActorChip already shows ON SCREEN (T-0648/T-0685) — an
+  // UNRESOLVED machine actor (batch resolver miss → name === id === raw UUID)
+  // is demoted to the honest generic type label, never the bare UUID. Before
+  // this fix, `nameOf` returned `v.name` unconditionally, re-leaking the exact
+  // machine-UUID the on-screen demotion closes — into the exported FILE.
+  // -------------------------------------------------------------------------
+  it('rowsToCsv: unresolved machine-UUID subject ("Кому") is demoted to a type label, not the raw UUID', () => {
+    const RAW_ID = 'a1b2c3d4-0000-4000-8000-000000000002';
+    const row = apiRowToDisplay({
+      id: 'g4', occurred_at: 0, type: 'grant.create',
+      actor: 'e-owner', subject: RAW_ID, subjectResolved: undefined,
+      op: 'invoke', res: 'x', scope: '—', confirmed: [],
+    });
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).not.toContain(RAW_ID);
+    expect(dataLine).toContain('Сервис'); // coerceActorField's honest fallback kind
+  });
+
+  it('rowsToCsv: unresolved machine-UUID actor ("Кто выдал") is demoted to a type label, not the raw UUID', () => {
+    const RAW_ID = 'a1b2c3d4-0000-4000-8000-000000000001';
+    const row = apiRowToDisplay({
+      id: 'g5', occurred_at: 0, type: 'grant.create',
+      actor: RAW_ID, actorResolved: undefined, subject: 'role-x',
+      op: 'invoke', res: 'x', scope: '—', confirmed: [],
+    });
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).not.toContain(RAW_ID);
+    expect(dataLine).toContain('Сервис');
+  });
+
+  it('rowsToCsv: an "agent:" machine key is demoted to "Агент" (not the raw key)', () => {
+    const row = {
+      ts: 't', id: 'g6', action: 'grant',
+      actor: { type: 'agent', name: 'agent:юрист-прекчек-42' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: 'R', op: 'o', res: 'r', scope: 's', proposed: 'agent', confirmed: [],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).not.toContain('agent:юрист-прекчек-42');
+    expect(dataLine).toContain('Агент');
+  });
+
+  it('rowsToCsv: a resolved HUMAN name is unaffected (not demoted)', () => {
+    const row = {
+      ts: 't', id: 'g7', action: 'grant',
+      actor: { type: 'human', name: 'Ларина' },
+      subject: { type: 'human', name: 'Иванов' },
+      role: 'R', op: 'o', res: 'r', scope: 's', proposed: 'human', confirmed: ['Ларина'],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).toContain('Ларина');
+    expect(dataLine).toContain('Иванов');
+  });
+
+  it('rowsToCsv: a human-legible SLUG (not a UUID) stays primary — mirrors ActorChip (no false positive)', () => {
+    const row = {
+      ts: 't', id: 'g8', action: 'grant',
+      actor: { type: 'service', name: 'policy-sync' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: 'R', op: 'o', res: 'r', scope: 's', proposed: 'human', confirmed: [],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).toContain('policy-sync');
+  });
 });
 
 // ---------------------------------------------------------------------------
