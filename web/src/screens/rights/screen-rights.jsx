@@ -346,10 +346,23 @@ function WhoCanDoWhat({ role, canManage, dictionaries, onChanged }) {
 // Main screen
 // ---------------------------------------------------------------------------
 
-function RightsScreen({ initialRole }) {
+// T-0655 (§6.3 identity hub): roles held by a given subject (employee) — used to
+// focus /rights when opened from an executor card. A role is "held" iff any of its
+// assignments carries this employee_id (or, dev-fallback, the matching slug).
+function rolesHeldBySubject(roles, subject) {
+  if (!Array.isArray(roles) || !subject) return [];
+  const id = subject.id;
+  return roles.filter((r) =>
+    (r.assignments || []).some((a) => a.employee_id === id || a.employee_slug === id),
+  );
+}
+
+function RightsScreen({ initialRole, initialSubject }) {
   const [state, setState] = useState(null); // TenantStateResponse | null
   const [error, setError] = useState(null);
   const [sel, setSel] = useState(initialRole || null);
+  // T-0655: subject context banner is dismissible so it doesn't pin the view.
+  const [subjectContext, setSubjectContext] = useState(initialSubject || null);
   const [dictionaries, setDictionaries] = useState(null);
   const [employees, setEmployees] = useState([]);
   // T-0652 (§6.5): формы управления правами больше не живут простынёй под фолдом
@@ -406,11 +419,18 @@ function RightsScreen({ initialRole }) {
 
   useEffect(() => {
     if (roles) {
+      // T-0655: when opened with a subject context, land on the FIRST role that
+      // subject actually holds (so «Права и доступ» from a person's card shows
+      // that person's roles), falling back to the first role if they hold none.
+      if (subjectContext) {
+        const held = rolesHeldBySubject(roles, subjectContext);
+        if (held.length > 0) { setSel(held[0].id); return; }
+      }
       if (!sel || !roles.find(r => r.id === sel)) {
         setSel(roles[0]?.id ?? null);
       }
     }
-  }, [roles]);
+  }, [roles, subjectContext]);
 
   // Render: error → loading → empty → content
   if (error) {
@@ -481,6 +501,39 @@ function RightsScreen({ initialRole }) {
 
       {/* Правая часть — детали роли */}
       <div className="chs-rights__main">
+        {/* T-0655 (§6.3 identity hub): контекст-баннер исполнителя, если /rights
+            открыт с карточки человека/агента. Показывает, чьи права смотрим, и
+            честно сообщает, если у исполнителя ролей ещё нет. Закрывается. */}
+        {subjectContext && (
+          <div
+            className="chs-subject-context"
+            role="status"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)',
+              padding: 'var(--chs-space-3) var(--chs-space-4)',
+              marginBottom: 'var(--chs-space-4)',
+              background: 'var(--chs-color-surface-sunken, var(--chs-color-surface))',
+              border: '1px solid var(--chs-color-border)',
+              borderRadius: 'var(--chs-radius-3)',
+              fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text)',
+            }}
+          >
+            <span style={{ color: 'var(--chs-color-text-muted)' }}>Права исполнителя:</span>
+            <ExecutorBadge type={subjectContext.kind || 'human'} name={subjectContext.name || subjectContext.id} />
+            {rolesHeldBySubject(roles, subjectContext).length === 0 && (
+              <span style={{ color: 'var(--chs-color-text-muted)' }}>
+                — ролей пока нет; ниже общий список ролей тенанта.
+              </span>
+            )}
+            <Button
+              variant="ghost" size="sm"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setSubjectContext(null)}
+            >
+              Все роли
+            </Button>
+          </div>
+        )}
         <div className="chs-roledetail">
           {/* Заголовок роли */}
           <div className="chs-roledetail__head">

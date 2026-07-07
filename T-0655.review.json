@@ -1,0 +1,21 @@
+{
+  "task_id": "T-0655",
+  "role": "reviewer (authz-skeptic)",
+  "verdict": "approved",
+  "summary": "Move-API (PATCH departments/positions/employees) reuses the existing org-write authz seam verbatim on ALL THREE routes; cross-tenant writes fail closed at BOTH the app layer (authorizeOrgWrite 403) AND the DB layer (composite FK carries tenant_id); cycle-guard catches deep-descendant + self-parent before UPDATE; audit is appended in the same tx (ROLLBACK-atomic). No P0/P1 authz holes found.",
+  "checks": {
+    "authz_chain_all_three_routes": "PASS — PATCH /api/departments/:id (L850), /api/positions/:id (L953), /api/employees/:id (L1046) each call authorizeOrgWrite -> loadAdminContext -> assertOrgObjectAuthority(mgmt_object:<kind>,\"update\"). All 14 registered routes use withAuth (14/14).",
+    "cross_tenant_id_fail_closed": "PASS — every SELECT/UPDATE is scoped WHERE tenant_id=$1 AND id=$2 under SET LOCAL choros.tenant_id (RLS GUC). A foreign entity id -> rowCount 0 -> 404. A foreign parent/dept/position TARGET fails the COMPOSITE FK (tenant_id, X) REFERENCES table(tenant_id, id) [migrations 014/015/016] -> 23503 -> 409 FK_IN_USE. tenant_id is part of every FK, so a cross-tenant reference can never be written even if RLS were bypassed. FORCE ROW LEVEL SECURITY on all three tables.",
+    "extra_field_write": "PASS — patches extract ONLY the contract fields (dept: parent_id/display_name; pos: department_id/title; emp: position_id/display_name). role_id / grant fields in the body are never read, so they are silently ignored (not written). No mass-assignment.",
+    "cycle_guard": "PASS — wouldCreateCycle walks UP from newParent via the tenant parent-map; catches self-parent (newParentId===movingId) and transitive descendant; visited-set bounds a pre-existing corrupt cycle. Checked BEFORE UPDATE inside the tx. Live DB probe AC-cycle confirms 400 CYCLE + zero audit events on the rejected move.",
+    "audit_same_tx": "PASS — appendAuditEvent runs on the caller's open withTenantTx client (never opens its own BEGIN); a throw from the audit write propagates out of fn -> ROLLBACK undoes both the UPDATE and the audit head advance atomically (audit-writer.ts enqueueInTx contract). Authz-failure path appends zero events (asserted in unit tests, all 7 scenarios).",
+    "t0662_gate_neighbor": "N/A on this branch — src/db/actor-authority-gate.ts and ci/checks/actor-authority-deactivation-gate.sh do NOT exist (branch forked from dev BEFORE T-0662 merge). Move-API correctly parasites on loadAdminContext, which already carries the T-0658 `deactivated_at IS NULL` fail-closed predicate; NO new/bespoke actor-lookup was introduced (grep confirms no new resolver). Post-merge sync of the gate check will pass unchanged.",
+    "rolesHeldBySubject_collision": "NON-BLOCKING — matcher a.employee_id===id || a.employee_slug===id. From /agents id=UUID (matches employee_id); from /org id=slug (matches employee_slug). A theoretical agent-slug==human-slug collision would only mis-focus the DISPLAY-ONLY context banner / initial role tab; it is never an authz decision (rights CRUD is server-gated, unchanged). Cosmetic.",
+    "anti_case": "PASS — org-move.ts and org-move-dnd.js are entirely generic (ids/topology only, no dept/position/person literals); anti-case-lock.sh clean (aggregate 16, baseline 16)."
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    "rolesHeldBySubject slug/uuid dual-match could mis-focus the /rights context banner on a (theoretical) agent-slug == human-slug collision. Display-only, no security impact. Could key strictly on kind if it ever matters.",
+    "PATCH positions/employees do not pre-validate that the target department/position belongs to the tenant before the UPDATE — they rely on the composite FK to reject cross-tenant/nonexistent targets with 409. This is correct and fail-closed, but the 409 FK_IN_USE message ('target ... not in tenant') is slightly less precise than a 404 would be for a genuinely nonexistent id. Acceptable."
+  ]
+}

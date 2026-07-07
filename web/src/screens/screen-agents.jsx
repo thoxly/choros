@@ -21,18 +21,19 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, MonoId, Modal, StatusChip, EmptyState, LoadingState, ErrorState, Tooltip, Field, Select } from '../components/components.jsx';
+import { Button, MonoId, Modal, StatusChip, Badge, EmptyState, LoadingState, ErrorState, Tooltip, Field, Select } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../app-shell/active-tenant.js';
 import {
   validateHire, buildHirePayload,
   validateBind, buildBindPayload,
-  mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
+  mapAgentError, agentStatusBadge, positionOptions, displayAgentName, agentTypeLabel,
   connectionOptions, buildLlmConnectionPayload, mapLlmConnectionError,
   outcomeMeta, formatActivityTime, activityContext, mapActivityError,
   mapAgentInstructionError, mapAgentInstructionPromoteError,
 } from './agents-form.js';
+import { mapOrgError } from './org-crud.js';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
 
@@ -419,13 +420,18 @@ function AgentInstructionEditor({ agentId }) {
    значение показано; при выборе → PUT /api/agents/:id/llm-connection. Подключения
    приходят из GET /api/llm-connections (родительский экран). Без мёртвых кнопок.
    --------------------------------------------------------------------------- */
-function AgentRow({ agent, onBind, connections, connectionsAvailable, onConnectionSaved, onGoToConnections }) {
+function AgentRow({ agent, onBind, onAssignPosition, onOpenRights, connections, connectionsAvailable, onConnectionSaved, onGoToConnections }) {
   const name = displayAgentName(agent.display_name);
-  // Org-place line: workforce agents sit on a position; system/assistant agents
-  // live in the registry WITHOUT an org-place (migration 093 / T-0473).
+  // T-0655 (§6.4/§1C): collapse repeated degradations into ONE status badge.
+  // Org-place line stays for the CONTEXT (where the agent sits), but the
+  // "должность не назначена"/"НУЖНА LLM" walls become a single badge + actions.
+  const badge = agentStatusBadge(agent);
+  // Org-place CONTEXT line: workforce agents sit on a position; system/assistant
+  // agents live in the registry WITHOUT an org-place (migration 093 / T-0473) —
+  // that is architectural, so it reads honestly, not as a defect.
   const orgPlace = agent.has_org_place
-    ? `${agent.position || 'должность не назначена'}${agent.department ? ` · ${agent.department}` : ''}`
-    : 'вне оргструктуры';
+    ? (agent.position ? `${agent.position}${agent.department ? ` · ${agent.department}` : ''}` : '—')
+    : 'вне оргструктуры (системный/ассистент)';
 
   // Current binding (controlled): null/'' = «не задано (по умолчанию)».
   const [connId, setConnId] = useState(agent.llm_connection_id || '');
@@ -486,17 +492,33 @@ function AgentRow({ agent, onBind, connections, connectionsAvailable, onConnecti
             {` · ${orgPlace}`}
           </div>
         </div>
+        {/* T-0655 (§6.4/§1C): ОДИН статус-бейдж вместо стены повторяющихся
+            деградаций. «готов», либо пробелы («нет должности · нет LLM») с
+            действиями ПРЯМО НА МЕСТЕ (по одному на каждый пробел). */}
         <div style={{ textAlign: 'right', fontSize: 'var(--chs-text-xs)' }}>
-          <Tooltip label={agent.llm_bound ? 'Секрет-хэндл привязан' : 'LLM не привязана'}>
-            <StatusChip status={agent.llm_bound ? 'done' : 'waiting'} label={statusLabel(agent.status)} />
+          <Tooltip label={badge.tone === 'ok' ? 'Агент готов к работе' : `Не готов: ${badge.label}`}>
+            <Badge tone={badge.tone === 'ok' ? 'success' : 'warning'}>
+              {badge.tone === 'ok' ? '✓ готов' : `⚠ ${badge.label}`}
+            </Badge>
           </Tooltip>
           <div style={{ color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-3)' }}>
             {agent.llm_provider ? agent.llm_provider : 'провайдер не задан'}
             {agent.llm_model ? ` · ${agent.llm_model}` : ''}
           </div>
         </div>
+        {/* On-the-spot actions per issue. «Назначить должность» only for a
+            workforce agent missing a position (system/assistant agents don't
+            get it — off-org is architectural, not a gap). */}
+        {badge.issues.some((i) => i.key === 'position') && (
+          <Button variant="secondary" size="sm" onClick={() => onAssignPosition(agent)} title="Поставить агента на должность в оргструктуре">
+            Назначить должность
+          </Button>
+        )}
         <Button variant="secondary" size="sm" onClick={() => onBind(agent)} title="Привязать LLM к агенту">
           Привязать LLM
+        </Button>
+        <Button variant="ghost" size="sm" onClick={() => onOpenRights && onOpenRights(agent)} title="Роли и права агента">
+          Права агента
         </Button>
         <Button
           variant="ghost" size="sm"
@@ -775,15 +797,82 @@ function BindModal({ agent, onClose, onDone }) {
 }
 
 /* ---------------------------------------------------------------------------
+   Модал: назначить должность (T-0655 §4) — ставит агента на должность через
+   move-API PATCH /api/employees/:id { position_id }. Только для workforce-агента
+   (agent.id == employee_id). Положения берутся из tenant-state (как в hire).
+   --------------------------------------------------------------------------- */
+function AssignPositionModal({ agent, positions, onClose, onDone }) {
+  const [posId, setPosId] = useState('');
+  const [submitErr, setSubmitErr] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSubmitErr(null);
+    if (!posId) { setSubmitErr('Выберите должность.'); return; }
+    setSubmitting(true);
+    try {
+      // agent.id is the employee_id for a workforce agent — the move-API key.
+      const res = await fetch(`/api/employees/${agent.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ tenant_id: getActiveTenantId(), position_id: posId }),
+      });
+      if (res.ok) { onDone(); return; }
+      let parsed = null;
+      try { parsed = await res.json(); } catch { /* non-JSON */ }
+      setSubmitErr(mapOrgError(res.status, parsed, 'назначение должности').message);
+    } catch {
+      setSubmitErr('Сетевая ошибка — не удалось назначить должность.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal open title={`Назначить должность · ${displayAgentName(agent.display_name)}`} onClose={onClose} size="sm">
+      <form onSubmit={submit}>
+        <p style={{ margin: '0 0 var(--chs-space-7) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
+          Агент берёт задачи с должности в оргструктуре. Выберите должность, на которую его поставить.
+        </p>
+        <div style={fieldGap}>
+          <Select
+            label="Должность"
+            value={posId}
+            onChange={(e) => setPosId(e.target.value)}
+            hint={positions.length === 0
+              ? 'Должности не загружены (нужны права владельца тенанта). Создайте должность в «Оргструктуре».'
+              : undefined}
+            autoFocus
+          >
+            <option value="">— выберите должность —</option>
+            {positions.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </Select>
+        </div>
+        {submitErr && <div style={bannerErrStyle}>{submitErr}</div>}
+        <div style={{ display: 'flex', gap: 'var(--chs-space-5)', justifyContent: 'flex-end', marginTop: 'var(--chs-space-7)' }}>
+          <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
+          <Button type="submit" variant="primary" size="sm" disabled={submitting} loading={submitting}>
+            {submitting ? 'Назначаю…' : 'Назначить'}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------------------------
    Экран
    --------------------------------------------------------------------------- */
-export default function AgentsScreen() {
+export default function AgentsScreen({ onOpenRightsForSubject }) {
   const navigate = useNavigate();
   const [agents, setAgents] = useState(null); // null=loading
   const [error, setError] = useState(null);
   const [positions, setPositions] = useState([]);
   const [hireOpen, setHireOpen] = useState(false);
   const [bindAgent, setBindAgent] = useState(null);
+  // T-0655 (§4): «Назначить должность» modal target (workforce agent) or null.
+  const [assignAgent, setAssignAgent] = useState(null);
   // T-0498: named LLM connection profiles for the per-agent selector.
   const [connections, setConnections] = useState([]);
   // false when GET /api/llm-connections is 403 (no configure right) — the selector
@@ -880,6 +969,15 @@ export default function AgentsScreen() {
               key={a.id}
               agent={a}
               onBind={setBindAgent}
+              onAssignPosition={setAssignAgent}
+              onOpenRights={(agent) => {
+                // T-0655 (§4→§6.3): «Права агента» → identity hub with agent context.
+                if (onOpenRightsForSubject) {
+                  onOpenRightsForSubject({ id: agent.id, name: displayAgentName(agent.display_name), kind: 'agent' });
+                } else {
+                  navigate('/rights');
+                }
+              }}
               connections={connections}
               connectionsAvailable={connectionsAvailable}
               onConnectionSaved={loadAgents}
@@ -901,6 +999,14 @@ export default function AgentsScreen() {
           agent={bindAgent}
           onClose={() => setBindAgent(null)}
           onDone={() => { setBindAgent(null); loadAgents(); }}
+        />
+      )}
+      {assignAgent && (
+        <AssignPositionModal
+          agent={assignAgent}
+          positions={positions}
+          onClose={() => setAssignAgent(null)}
+          onDone={() => { setAssignAgent(null); loadAgents(); loadPositions(); }}
         />
       )}
     </div>

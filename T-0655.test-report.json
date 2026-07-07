@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0655",
+  "role": "tester",
+  "verdict": "approved",
+  "summary": "All required gates green. Web suite 2602 (matches claim, above 2586 baseline). Server move-API unit tests 26/26. LIVE Postgres move-API probe 3/3 (real UPDATE + audit-chain through choros_app RLS path). tsc + build clean.",
+  "results": {
+    "tsc_noEmit": "PASS (exit 0, no output)",
+    "npm_run_build": "PASS (tsc + seed tsconfig, exit 0)",
+    "web_vitest_full": "PASS — 97 files, 2602 tests passed (claimed 2602; baseline 2586). +16 over baseline.",
+    "server_move_unit": "PASS — org-move.test.ts (16) + seed-write.move-api.authz.test.ts (10) = 26/26. Covers owner move/rename + audit capture, cross-tenant 403 (no audit), empty patch 400, cycle 400 CYCLE (deep + self, no audit), 404 missing, non-owner-no-grant 403 (no audit).",
+    "db_probe_live_pg": "PASS — ci/checks/db/org-move-api.db.test.ts 3/3 on live PG :55432 via choros_app (NOBYPASSRLS, FORCE RLS): AC-emp (position moved + 1 employee.moved audit), AC-dept (rename in place, id preserved, 1 department.moved audit), AC-cycle (400 CYCLE, no audit event). Confirms the .moved audit types are accepted by the canonical writer (no vocab gap).",
+    "http_route_auth_coverage": "PASS (FF-0328-1/2/3 clean; frozen surfaces byte-unchanged)",
+    "seed_write_api_auth_gate": "PASS (FF-6)",
+    "ux_g7_no_fake_buttons": "PASS (0 new fake buttons, informational)",
+    "anti_uuid_actor_render": "PASS (0 bare raw-id renders)",
+    "anti_case_lock": "PASS (delegates clean; denylist aggregate 16 within baseline 16)",
+    "ux_g5_jargon_denylist": "PASS (informational; no new visible jargon from this task)"
+  },
+  "gates_rerun": {
+    "tsc": "pass",
+    "build": "pass",
+    "web_vitest": "2602 pass",
+    "server_move_vitest": "26 pass",
+    "db_probe": "3 pass (live PG)",
+    "http-route-auth-coverage.sh": "pass",
+    "seed/write-api-auth-gate.sh": "pass",
+    "ux/ux-g7-no-fake-buttons.sh": "pass",
+    "ux/anti-uuid-actor-render.sh": "pass",
+    "anti-case-lock.sh": "pass",
+    "ux/ux-g5-jargon-denylist.sh": "pass"
+  },
+  "blocking_findings": [],
+  "non_blocking": []
+}
