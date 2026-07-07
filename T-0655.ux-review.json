@@ -1,0 +1,20 @@
+{
+  "task_id": "T-0655",
+  "role": "design-steward (OBLIK)",
+  "verdict": "approved",
+  "summary": "DnD has a first-class, keyboard-reachable fallback (native details/summary menu with role=menu/menuitem, Esc-closable); drop targets are visibly outlined; agent status badges use human Russian language; identity-hub facet links only ever target real routes (no dead buttons); all styling via theme tokens.",
+  "checks": {
+    "dnd_keyboard_fallback": "PASS — NodeMenu is a native <details>/<summary> (focusable, Esc-closable, SR-announced) exposing «Переместить в…» (opens MoveEmployeeModal position picker) and «Переименовать» (RenameNodeModal) for every node that DnD can act on. The move is fully achievable WITHOUT drag. Modals are kit Modal (focus-trap, Esc). MoveEmployeeModal offers «— без должности —» to detach.",
+    "drop_target_visible": "PASS — a position row hovered as a drop target gets chs-trow--dragover + a 2px accent outline (isDragOver). dragEmp/dragOverPos state drives it; cleared on drop/dragend.",
+    "canWrite_gating": "PASS — draggable, dropTarget, and menuActions are all gated on canWrite; a read-only viewer sees no drag handles, no menu, no drop affordance.",
+    "agent_badge_language": "PASS — degradation wall collapsed to ONE Badge: «✓ готов» (success) or «⚠ нет должности · нет LLM» (warning), with on-the-spot actions per gap. System/assistant agents read «вне оргструктуры (системный/ассистент)» — honest architecture, NOT a defect, and get NO false «Назначить должность» CTA (issue pushed only when has_org_place && !position).",
+    "bridges_not_dead_links": "PASS — identity-hub facets («Роли и права →», «Учётка →», «Открыть в Агентах →») navigate only to existing routes (/rights subject-focused, /users, /agents). Agent «Открыть в Агентах» link shown only for person.type==='agent'. «Права и доступ» now carries subject context (was context-free onOpenRights(undefined)). /rights subject banner is dismissible («Все роли») and honestly states «ролей пока нет» when the subject holds none.",
+    "tokens": "PASS — all inline styles use var(--chs-...) tokens (colors, spacing, radius, shadow, text sizes); Badge tones map to chs-badge--success/--warning classes. No hardcoded hex/px palette.",
+    "gates": "ux-g7-no-fake-buttons PASS (0 new fake buttons); anti-uuid-actor-render PASS (0 bare raw-id renders under web/src/screens); ux-g5-jargon-denylist PASS (informational, no new visible jargon from this task — MonoId person.id stays SECONDARY behind the name)."
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    "The «⋯» NodeMenu and the «×» delete affordance both sit on the row; on a very narrow viewport they could crowd the label. Not observed as broken; consider testing at mobile width in a future pass.",
+    "MoveEmployeeModal position options are labelled «dept · title» from tenant-state; if tenant-state failed to load the picker is empty (the agent-side AssignPositionModal shows an explicit hint for that; the org-side modal does not surface an equivalent empty-hint). Minor."
+  ]
+}

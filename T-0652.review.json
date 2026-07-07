@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0652",
+  "role": "reviewer",
+  "verdict": "approved",
+  "commit_reviewed": "43df0fa1 (fix-forward on e6ee4455)",
+  "diff_base": "dev...task/T-0652",
+  "summary": "Re-verify of the builder's fix-forward (43df0fa1). The one blocker (REV-P1 CSV formula injection) is properly closed: csvEscape now runs neutralizeFormula BEFORE RFC4180 quoting — a cell whose first char is = + - @ TAB or CR gets a leading apostrophe and is force-quoted. Probed adversarially against 14 vectors (HYPERLINK, DDE via ;, +cmd, @, leading tab/CR, leading space, nbsp, fullwidth-homoglyph =, already-apostrophe, second-line-of-multiline formula) — ALL held inert. REV-N1 (guard on filtered set) and UX-N1 (dead modifier) also correctly resolved. Verdict flips to approved.",
+  "reverify_attacks": [
+    {"attack": "plain =HYPERLINK(...) role name", "vector": "=", "result": "held", "emitted": "\"'=HYPERLINK(...)\" — apostrophe-prefixed + quoted"},
+    {"attack": "DDE payload using ; as separator (=cmd|..;=danger)", "vector": "leading =", "result": "held", "note": "still starts with =, caught by ^[=+\\-@..] → neutralized"},
+    {"attack": "+cmd|/c calc DDE in display name", "vector": "+", "result": "held"},
+    {"attack": "@SUM(...) ", "vector": "@", "result": "held"},
+    {"attack": "leading TAB then =1+1", "vector": "\\t", "result": "held", "note": "TAB is in the char class"},
+    {"attack": "leading CR then =1+1", "vector": "\\r", "result": "held", "note": "CR is in the char class"},
+    {"attack": "leading space before = ( =1+1)", "vector": "space", "result": "held", "note": "not a spreadsheet formula vector to begin with — leading space defangs in Excel/LibreOffice; emitted literal, inert"},
+    {"attack": "nbsp before =", "vector": "U+00A0", "result": "held", "note": "first char is not an ASCII formula operator; no spreadsheet treats nbsp-leading as formula"},
+    {"attack": "fullwidth homoglyph U+FF1D before 1+1", "vector": "homoglyph", "result": "held", "note": "not an ASCII operator; spreadsheets do not evaluate it as a formula, so nothing to neutralize"},
+    {"attack": "value already starting with apostrophe ('=cmd)", "vector": "'", "result": "held", "note": "first char is ' not = → not re-prefixed; cell text is literal, inert"},
+    {"attack": "formula on the SECOND line of a multiline cell (line1\\n=danger)", "vector": "embedded newline", "result": "held", "note": "cell does not START with a formula char → not evaluated; csvEscape quotes it correctly (newline inside quotes, one field — quoting NOT broken)"}
+  ],
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "REV-N2-LEGIT-DATA-APOSTROPHE-TRADEOFF",
+      "severity": "info (accepted)",
+      "finding": "A legitimate value that happens to start with + or - (phone '+79991234567', negative number '-5') is now apostrophe-prefixed. This is the STANDARD OWASP formula-injection tradeoff and is acceptable. It is honestly captured in the tests (csvEscape('-2+3') asserts \"'-2+3\"; csvEscape('+cmd|/c calc') asserts \"'+cmd|/c calc\") — the prefixing of +/- leading values is asserted in plain sight, not hidden. The grant-trail CSV has no phone/number column, so real-world false-positive impact here is essentially nil."
+    },
+    {
+      "id": "REV-N3-CONSISTENCY-CONFIRMED",
+      "severity": "info",
+      "finding": "REV-N1 resolved: export guard is now rows.length===0 and export serialises rowsToCsv(rows) — the SAME filtered set. displayRows is read ONLY to pick the honest empty-state wording (нет записей vs нет совпадений фильтра), a correct secondary use, not the guard. Two distinct honest empty states."
+    }
+  ]
+}

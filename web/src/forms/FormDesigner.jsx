@@ -60,6 +60,11 @@ import { announceMove, announceCut, announcePaste, cloneForClipboard } from './c
 import { containerIsDropTarget } from './canvas-path.js';
 import './form-designer.css';
 
+// T-0669: shared copy for both the picker's empty-state hint (process chosen,
+// no app bound yet — normal authoring step) and the save-time defense-in-depth
+// block (same fact, but blocking an action). One string, no drift risk.
+const PROCESS_NOT_BOUND_HINT = 'Этот процесс не привязан ни к одному приложению — привяжите его на экране «Процессы».';
+
 // ---------------------------------------------------------------------------
 // Path / drag helpers
 // ---------------------------------------------------------------------------
@@ -561,6 +566,15 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [selectedProcessKey, setSelectedProcessKey] = useState('');
   const [stepKey, setStepKey] = useState('');
+  // T-0669: process↔application bindings (GET /api/process-app-bindings, reused
+  // from T-0681/screen-processes.jsx) — the SAME table classifyLayoutSave's
+  // resolveLiveRecordSchema resolves against on save. `null` = not loaded yet
+  // (fetch failed or still in flight); an empty array is an authoritative
+  // "genuinely no bindings" answer (graceful-empty, not an error). Without this,
+  // the "Приложение" picker below offered EVERY application in the tenant,
+  // including ones with no process_app_binding row for the chosen process — the
+  // pair authored cleanly and only failed on Save with an opaque 409 (T-0669).
+  const [processAppBindings, setProcessAppBindings] = useState(null);
   const [bpmnUserTasks, setBpmnUserTasks] = useState([]); // best-effort suggestions
   // T-0665 (F3): whether an existing form_binding.layout was loaded for the
   // current (selectedProcessKey, stepKey) pair — drives whether the
@@ -622,12 +636,18 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   }, [initialFields]);
 
   // T-0665 (F1): load the process catalog for the process picker — the SAME
-  // real tenant data FormBuilder.jsx already uses (/api/process-catalog),
-  // filtered to PUBLISHED definitions only (a draft's BPMN can still change
-  // or lose the step being bound, and classifyLayoutSave requires a real
-  // process_app_binding anyway — offering a draft would be a false promise).
-  // Anti-case (D-064): the picker's contents are DATA (this tenant's real
-  // definitions), never a hardcoded slug list.
+  // real tenant data FormBuilder.jsx already uses (/api/process-catalog).
+  // T-0671: a bindable process is one that is REALLY executable — either a
+  // modeler definition someone deliberately PUBLISHED (`status==='published'`,
+  // a draft's BPMN can still change or lose the step being bound — false
+  // promise), OR a `source==='engine'` definition (deployed straight to
+  // Flowable, e.g. the canonical telLinear — buildCatalogDefinitions only
+  // ever adds an `engine` row when a REAL instance was observed, so it is
+  // live by construction and has NO `process_definition` row to carry a
+  // 'published' status at all; excluding it hid every engine-deployed
+  // process from the binding picker). Anti-case (D-064): the picker's
+  // contents are DATA (this tenant's real definitions) filtered by the
+  // GENERIC source/status predicate, never a hardcoded slug list.
   const loadProcessCatalog = useCallback(() => {
     if (initialFields) return; // embedding/test mode — no network (mirrors applications effect)
     setLoadingCatalog(true);
@@ -639,7 +659,9 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
         return r.json();
       })
       .then((data) => {
-        const defs = (data.definitions || []).filter((d) => d.status === 'published');
+        const defs = (data.definitions || []).filter(
+          (d) => d.source === 'engine' || d.status === 'published',
+        );
         setProcessCatalog(defs);
       })
       .catch((err) => {
@@ -650,6 +672,26 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   }, [initialFields]);
 
   useEffect(() => { loadProcessCatalog(); }, [loadProcessCatalog]);
+
+  // T-0669: load this tenant's real process↔application bindings (T-0681's
+  // GET /api/process-app-bindings — reused, not reinvented) so the "Приложение"
+  // picker below can be filtered to only the applications actually bound to the
+  // chosen process. `403`/graceful-empty → `[]` (a real "nothing bound yet"
+  // answer, not a failure). A genuine fetch failure leaves `processAppBindings`
+  // at `null` — the picker then falls back to the unfiltered pre-T-0669 list
+  // (fail-open on the UI hint only; the server's classifyLayoutSave gate is the
+  // real fail-closed judge and is unchanged, ADR-T0665 §5).
+  useEffect(() => {
+    if (initialFields) return; // embedding/test mode — no network (mirrors applications effect)
+    fetch('/api/process-app-bindings', { headers: authHeaders() })
+      .then((r) => {
+        if (r.status === 403) return { bindings: [] };
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data) => setProcessAppBindings(data.bindings || []))
+      .catch(() => setProcessAppBindings(null));
+  }, [initialFields]);
 
   // T-0665 (F1): best-effort userTask id/name suggestions for the chosen
   // process, parsed from its real bpmnXml (fetchProcessDef — the same call
@@ -732,6 +774,34 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
     savedDocRef.current = freshDoc;
     setSelectedKeys(new Set());
   }, [selectedDefId, registryDefs, selectedAppId]);
+
+  // T-0669: application ids validly bound to the SELECTED process, per the
+  // real process_app_binding table (T-0681's GET /api/process-app-bindings) —
+  // the SAME resolution classifyLayoutSave's resolveLiveRecordSchema runs on
+  // save (process_key → application_id, src/db/live-form-schema.ts). `null`
+  // = "no process picked yet" OR "bindings not loaded" — both mean "do not
+  // filter" (the picker falls back to the unfiltered pre-T-0669 behavior).
+  const boundAppIdsForProcess = useMemo(() => {
+    if (!selectedProcessKey || !processAppBindings) return null;
+    const ids = new Set(
+      processAppBindings
+        .filter((b) => b && b.process_key === selectedProcessKey && typeof b.application_id === 'string')
+        .map((b) => b.application_id),
+    );
+    return ids;
+  }, [selectedProcessKey, processAppBindings]);
+
+  // T-0669: once bindings are known for the chosen process, an already-picked
+  // application that is NOT among them is a stale/incompatible selection (the
+  // process changed under it, or it was picked before bindings loaded) — clear
+  // it rather than silently letting the author save toward a guaranteed 409.
+  useEffect(() => {
+    if (!boundAppIdsForProcess) return;
+    if (selectedAppId && !boundAppIdsForProcess.has(selectedAppId)) {
+      setSelectedAppId('');
+      setSelectedDefId('');
+    }
+  }, [boundAppIdsForProcess, selectedAppId]);
 
   const rootChildren = useMemo(() => (doc ? childrenOf(doc.root) : []), [doc]);
 
@@ -1024,10 +1094,12 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
         {/* T-0665 (F1): process+step binding picker — WITHOUT this, saving always
             fell back to the hardcoded process_key='record' (no such process on
             any tenant) → 409 every time (LIVE_PROOF T-0656 P0). The process
-            list comes from /api/process-catalog (this tenant's real published
-            definitions, D-064 anti-case) — the step stays free text (mirrors
-            FormBuilder.jsx's existing pattern), with real userTask id/name
-            suggestions parsed best-effort from the chosen process's BPMN. */}
+            list comes from /api/process-catalog (this tenant's real
+            executable definitions — published modeler defs OR live
+            source==='engine' defs, T-0671, D-064 anti-case) — the step stays
+            free text (mirrors FormBuilder.jsx's existing pattern), with real
+            userTask id/name suggestions parsed best-effort from the chosen
+            process's BPMN. */}
         {!initialFields && (
           <section style={{ marginBottom: 'var(--chs-space-4)', paddingBottom: 'var(--chs-space-4)', borderBottom: '1px solid var(--chs-color-border)' }}>
             <h4 style={{ marginTop: 0 }}>Привязка</h4>
@@ -1059,7 +1131,7 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
             )}
             {!loadingCatalog && !catalogError && processCatalog && processCatalog.length === 0 && (
               <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-                Нет опубликованных процессов в этом тенанте.
+                Нет опубликованных или запущенных процессов в этом тенанте.
               </span>
             )}
 
@@ -1113,12 +1185,30 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
 
         {!initialFields && (
           <>
-            <label className="chs-label">Приложение</label>
-            <Select
-              value={selectedAppId}
-              onChange={(e) => { setSelectedAppId(e.target.value); setSelectedDefId(''); }}
-              options={[{ value: '', label: '— выберите —' }, ...(applications || []).map((a) => ({ value: a.id, label: a.display_name || a.slug || a.id }))]}
-            />
+            {/* T-0669: filter to applications actually bound to the chosen process
+                (boundAppIdsForProcess, derived from GET /api/process-app-bindings —
+                the SAME table the server's save-time gate resolves against). Without
+                a process picked, or before bindings load, the list is unfiltered
+                (pre-T-0669 behavior) — nothing to compare against yet. */}
+            {selectedProcessKey && boundAppIdsForProcess && boundAppIdsForProcess.size === 0 ? (
+              <p role="status" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
+                {PROCESS_NOT_BOUND_HINT}
+              </p>
+            ) : (
+              <>
+                <label className="chs-label">Приложение</label>
+                <Select
+                  value={selectedAppId}
+                  onChange={(e) => { setSelectedAppId(e.target.value); setSelectedDefId(''); }}
+                  options={[
+                    { value: '', label: '— выберите —' },
+                    ...(applications || [])
+                      .filter((a) => !boundAppIdsForProcess || boundAppIdsForProcess.has(a.id))
+                      .map((a) => ({ value: a.id, label: a.display_name || a.slug || a.id })),
+                  ]}
+                />
+              </>
+            )}
             {registryDefs && (
               <>
                 <label className="chs-label" style={{ marginTop: 'var(--chs-space-3)' }}>Набор полей</label>
@@ -1262,9 +1352,22 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                 Выберите процесс и шаг выше, чтобы сохранить форму.
               </p>
             )}
+            {/* T-0669: defense-in-depth — even with the picker filtered (above),
+                a race (bindings not loaded yet when the process was picked) could
+                still leave an unbound process selected. Block save with the SAME
+                honest text rather than let it hit the server's opaque 409. */}
+            {selectedProcessKey && boundAppIdsForProcess && boundAppIdsForProcess.size === 0 && (
+              <p role="alert" style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
+                {PROCESS_NOT_BOUND_HINT}
+              </p>
+            )}
             <Button
               variant="primary"
-              disabled={!validation.ok || saveState.status === 'saving' || !(doc?.step || (selectedProcessKey && stepKey.trim()))}
+              disabled={
+                !validation.ok || saveState.status === 'saving'
+                || !(doc?.step || (selectedProcessKey && stepKey.trim()))
+                || Boolean(selectedProcessKey && boundAppIdsForProcess && boundAppIdsForProcess.size === 0)
+              }
               loading={saveState.status === 'saving'}
               onClick={() => persistLayout(
                 doc,

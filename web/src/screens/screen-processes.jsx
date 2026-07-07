@@ -17,7 +17,6 @@ import { authHeaders } from '../app-shell/dev-auth.js';
 import {
   validateBindingForm,
   buildBindingPayload,
-  serializeFieldMapping,
   definitionSourceLabel,
   definitionStatusLabel,
   applicationOptions,
@@ -26,6 +25,9 @@ import {
   bindingProcessLabel,
   triggerTypeLabel,
   mapBindingError,
+  registryTargetOptions,
+  findExistingBinding,
+  prefillFieldsFromBinding,
   TRIGGER_TYPES,
   TRIGGER_TYPE_LABELS,
 } from './process-catalog.js';
@@ -97,6 +99,7 @@ function ProcessCatalogSection() {
         onBound={handleBound}
         definitions={defs}
         applications={apps}
+        existingBindings={bindings}
       />
 
       <div style={{
@@ -279,7 +282,7 @@ function ProcessCatalogSection() {
  * All new fields carry OBLIK kit classes + token-pure colours.
  * POSTs /api/process-app-bindings (upsert). authHeaders() on the call.
  */
-function BindProcessModal({ open, onClose, onBound, definitions, applications }) {
+function BindProcessModal({ open, onClose, onBound, definitions, applications, existingBindings }) {
   const [processKey, setProcessKey] = useState('');
   const [applicationId, setApplicationId] = useState('');
   const [formKey, setFormKey] = useState('');
@@ -287,12 +290,73 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
   const [triggerType, setTriggerType] = useState('launcher');
   const [startFormKey, setStartFormKey] = useState('');
   const [fieldMappingRaw, setFieldMappingRaw] = useState('');
+  // T-0681 (migration 119): per-binding target registry override. '' = default slug.
+  const [targetRegistrySlug, setTargetRegistrySlug] = useState('');
+  const [registryDefs, setRegistryDefs] = useState([]); // this app's real registries
   const [submitting, setSubmitting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitError, setSubmitError] = useState(null);
 
   const defOpts = definitionOptions(definitions);
   const appOpts = applicationOptions(applications);
+  const regOpts = registryTargetOptions(registryDefs);
+
+  // T-0669 (NB-2 fix, T-0681 judge non-blocking finding): the (process_key,
+  // application_id) pair upserts on ON CONFLICT — re-binding a pair that already
+  // has a saved target_registry_slug/trigger_type/etc. while this form sits at its
+  // fresh-open defaults SILENTLY CLEARS those columns back to NULL/'launcher' on
+  // submit. Resolve the existing row for the currently-picked pair (if any, via the
+  // pure findExistingBinding helper — unit-tested in process-catalog.test.js) so the
+  // effects below can pre-fill instead of blind-reset.
+  const existingBinding = findExistingBinding(existingBindings, processKey, applicationId);
+
+  // T-0681: load the picked application's real registries so the target-registry
+  // picker offers DATA (this tenant's registries), never a hardcoded slug list. Uses
+  // authHeaders() (mode-aware) — a bare fetch would 401 and silently degrade.
+  // T-0669: pre-fills targetRegistrySlug from an existing binding for THIS pair once
+  // its registries are loaded (so the value corresponds to a real option in the
+  // reloaded regOpts) — a fresh pair (no existingBinding) still resets to '' (default),
+  // unchanged from before.
+  useEffect(() => {
+    if (!applicationId) { setRegistryDefs([]); setTargetRegistrySlug(''); return; }
+    let cancelled = false;
+    setTargetRegistrySlug(prefillFieldsFromBinding(existingBinding).targetRegistrySlug);
+    fetch(`/api/registry-defs?application_id=${encodeURIComponent(applicationId)}`, { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : { registry_defs: [] }))
+      .then((data) => {
+        if (cancelled) return;
+        setRegistryDefs(data.registry_defs || []);
+        setTargetRegistrySlug(prefillFieldsFromBinding(existingBinding).targetRegistrySlug);
+      })
+      .catch(() => { if (!cancelled) setRegistryDefs([]); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applicationId, existingBinding?.target_registry_slug]);
+
+  // T-0669 (NB-2 fix): pre-fill the REST of the upsert fields (trigger_type,
+  // start_form_key/form_key, field_mapping) from an existing binding for the
+  // currently-picked pair — same reasoning as targetRegistrySlug above: without
+  // this, re-binding an already-configured pair through this form silently
+  // resets trigger_type to 'launcher' and clears start_form_key/field_mapping.
+  // A pair with no existing binding (existingBinding === null) is unaffected —
+  // fields stay at whatever the author already typed (fresh-bind path, unchanged).
+  //
+  // Keyed on `existingBinding?.id` (a stable string), NOT the `existingBinding`
+  // object itself: findExistingBinding() runs a fresh `.find()` every render, so
+  // the object reference changes every render even when the underlying row does
+  // not — depending on the object would re-run this effect (and stomp the
+  // author's in-progress edits back to the binding's saved values) on every
+  // keystroke in ANY of this modal's fields, not just when the picked pair
+  // actually changes.
+  useEffect(() => {
+    if (!existingBinding) return;
+    const prefill = prefillFieldsFromBinding(existingBinding);
+    setFormKey(prefill.formKey);
+    setTriggerType(prefill.triggerType);
+    setStartFormKey(prefill.startFormKey);
+    setFieldMappingRaw(prefill.fieldMappingRaw);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [existingBinding?.id]);
 
   const reset = useCallback(() => {
     setProcessKey('');
@@ -301,6 +365,8 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
     setTriggerType('launcher');
     setStartFormKey('');
     setFieldMappingRaw('');
+    setTargetRegistrySlug('');
+    setRegistryDefs([]);
     setFieldErrors({});
     setSubmitError(null);
   }, []);
@@ -318,6 +384,7 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
       trigger_type: triggerType,
       start_form_key: startFormKey,
       field_mapping_raw: fieldMappingRaw,
+      target_registry_slug: targetRegistrySlug,
     };
     const { valid, errors } = validateBindingForm(form);
     setFieldErrors(errors);
@@ -346,7 +413,7 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
     } finally {
       setSubmitting(false);
     }
-  }, [processKey, applicationId, formKey, triggerType, startFormKey, fieldMappingRaw, reset, onBound]);
+  }, [processKey, applicationId, formKey, triggerType, startFormKey, fieldMappingRaw, targetRegistrySlug, reset, onBound]);
 
   return (
     <Modal
@@ -399,6 +466,36 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
             <span className="chs-hint chs-hint--invalid">{fieldErrors.application_id}</span>
           )}
         </div>
+
+        {/* T-0681: target registry picker (migration 119). Only meaningful once an
+            application is picked (its registries drive the options). '' = default —
+            the process's step result lands in the app's default step-result registry.
+            Picking a NON-default registry is exactly what unblocks saving a form for
+            that registry (server floor-gate resolves its live schema, no false 409). */}
+        {applicationId && regOpts.length > 0 && (
+          <div className="chs-field">
+            <label className="chs-label" htmlFor="bind-target-registry">
+              Реестр результата (необязательно)
+            </label>
+            <select
+              id="bind-target-registry"
+              className={`chs-input ${fieldErrors.target_registry_slug ? 'chs-input--invalid' : ''}`}
+              value={targetRegistrySlug}
+              onChange={(e) => setTargetRegistrySlug(e.target.value)}
+              aria-invalid={fieldErrors.target_registry_slug ? true : undefined}
+            >
+              <option value="">— по умолчанию —</option>
+              {regOpts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            {fieldErrors.target_registry_slug ? (
+              <span className="chs-hint chs-hint--invalid">{fieldErrors.target_registry_slug}</span>
+            ) : (
+              <span className="chs-hint" style={{ color: 'var(--chs-color-text-muted)' }}>
+                Куда попадает результат шага процесса. По умолчанию — реестр приложения по умолчанию.
+              </span>
+            )}
+          </div>
+        )}
 
         {/* T-0351 E16: Trigger type selector */}
         <div className="chs-field">

@@ -7,7 +7,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   ActorChip, MonoId, Mono, OpChip, Button, KitIcon, LoadingState, ErrorState,
   DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
-  isMachineActorLabel,
+  isMachineActorLabel, EXEC_META,
 } from '../../components/components.jsx';
 import { TRAIL as TRAIL_SEED, ProvenanceTag } from './ra-data.jsx';
 import { formatDate } from '../../lib/format.js';
@@ -211,6 +211,94 @@ function fetchGrantTrail(queryString, fetchImpl) {
   return doFetch(url, { headers: authHeaders() });
 }
 
+// ---------------------------------------------------------------------------
+// T-0652 (§6.2): CSV-экспорт журнала. Кнопка «Экспорт» была мертва (без
+// onClick, ra-grant-trail.jsx:327). Данные УЖЕ загружены через fetchGrantTrail
+// (несёт authHeaders() — не голый fetch), так что экспорт — чисто клиентская
+// сериализация уже отрендеренных строк. Никакого нового эндпойнта не нужно.
+// ---------------------------------------------------------------------------
+
+const CSV_HEADER = [
+  'Время (UTC+3)', 'ID', 'Действие', 'Кто выдал', 'Кому', 'Роль · грант',
+  'Операция', 'Ресурс', 'Охват', 'Происхождение', 'Подтвердил',
+];
+
+/** REV-P1-CSV-FORMULA-INJECTION: поле, чьё первое отображаемое значение
+ *  начинается с = + - @ (а также TAB/CR), Excel/LibreOffice/Sheets трактуют
+ *  как формулу — роль/имя вида '=HYPERLINK(...)' исполнится при открытии
+ *  экспорта. RFC4180-кавычки НЕ нейтрализуют формулу (кавычки её не глушат).
+ *  OWASP-митигация: префиксуем ведущим апострофом ДО RFC4180-шага и форсируем
+ *  кавычки на такой ячейке, чтобы апостроф не потерялся при импорте обратно. */
+function neutralizeFormula(s) {
+  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+}
+
+/** RFC4180-экранирование одного поля: кавычки удваиваются, поле с
+ *  запятой/кавычкой/переводом строки берётся в кавычки. Перед этим —
+ *  нейтрализация formula-injection (см. neutralizeFormula). */
+function csvEscape(value) {
+  const raw = value === null || value === undefined ? '' : String(value);
+  const s = neutralizeFormula(raw);
+  if (s !== raw || /[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+/**
+ * nameOf — actor/subject {type,name} → CSV cell text.
+ *
+ * F-1 (live-proof on the deployed stand): this used to return `v.name`
+ * unconditionally, so an UNRESOLVED machine actor (the batch resolver's
+ * honest fallback hands us name === id === a raw UUID, per ActorChip's own
+ * doc comment above) leaked the bare UUID into the exported file — even
+ * though the ON-SCREEN ActorChip (components.jsx, T-0685) already demotes
+ * that exact case to the generic type label ("Сервис"/"Агент"/"Человек")
+ * and hides the id in a tooltip. Mirror ActorChip's demotion here with the
+ * SAME predicate (isMachineActorLabel) and the SAME label source
+ * (EXEC_META) so "CSV rows match what's on screen" holds for the «Кому» /
+ * «Кто выдал» columns too. A human-legible slug ("policy-sync") is NOT a
+ * machine key (isMachineActorLabel returns false) and stays as-is —
+ * unchanged from before.
+ */
+function nameOf(v) {
+  if (!v || typeof v !== 'object') return v ?? '';
+  const name = v.name ?? '';
+  if (isMachineActorLabel(String(name))) {
+    return (EXEC_META[v.type] || EXEC_META.service).label;
+  }
+  return name;
+}
+
+/** displayRows (выход apiRowToDisplay) → CSV-текст. actor/subject — объекты
+ *  {type,name}; всё остальное уже примитивы. Каждое поле проходит csvEscape. */
+function rowsToCsv(displayRows) {
+  const actionLabel = (a) => (ACTION_META[a] ? ACTION_META[a].label : a);
+  const lines = [CSV_HEADER.map(csvEscape).join(',')];
+  for (const r of displayRows) {
+    lines.push([
+      r.ts, r.id, actionLabel(r.action),
+      nameOf(r.actor), nameOf(r.subject),
+      r.role, r.op, String(r.res ?? '').replace(/^mcp:\/\//, ''),
+      r.scope, r.proposed,
+      Array.isArray(r.confirmed) ? r.confirmed.join('; ') : (r.confirmed ?? ''),
+    ].map(csvEscape).join(','));
+  }
+  // \r\n — RFC4180; BOM ﻿, чтобы Excel распознал UTF-8 (кириллица).
+  return '﻿' + lines.join('\r\n') + '\r\n';
+}
+
+/** Скачать CSV программным кликом (a[download]). Отделено для тестируемости. */
+function downloadCsv(csvText, filename) {
+  const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 /**
  * GrantTrailRow — ONE trail row, extracted as a PURE (hook-free) component so
  * the node test tier (web/vitest.config.js, no jsdom) can render it and walk
@@ -323,8 +411,30 @@ function GrantTrailScreen() {
         <button type="button" className={`chs-trail__crit ${critOnly ? "chs-trail__crit--on" : ""}`} onClick={() => setCritOnly((v) => !v)}>
           <span className="chs-trail__critdot" />только критичные
         </button>
-        <span className="chs-trail__append"><span className="chs-trail__appenddot" />append-only</span>
-        <Button variant="secondary" size="sm">Экспорт</Button>
+        <span className="chs-trail__append"><span className="chs-trail__appenddot" />журнал неизменяем</span>
+        {/* T-0652 (§6.2): раньше кнопка была без onClick (мертва). Теперь —
+            клиентский CSV из уже загруженных строк. Нечего экспортировать →
+            честный disabled с ВИДИМОЙ причиной (не фейк-кнопка, §6.1).
+            REV-N1: экспортируются ОТФИЛЬТРОВАННЫЕ строки (rows), поэтому
+            гард тоже смотрит на rows — иначе при нулевом матче фильтра
+            кнопка была активна и выгружала CSV из одного заголовка. */}
+        {rows.length === 0 ? (
+          <span className="chs-trail__stub">
+            <Button
+              variant="secondary"
+              size="sm"
+              aria-disabled="true"
+              className="chs-btn--stub"
+              title={displayRows.length === 0 ? "Нет записей для экспорта" : "Фильтр не даёт совпадений — нечего экспортировать"}
+              onClick={(e) => e.preventDefault()}
+            >Экспорт</Button>
+            <span className="chs-trail__stubhint">{displayRows.length === 0 ? "нет записей" : "нет совпадений фильтра"}</span>
+          </span>
+        ) : (
+          <Button variant="secondary" size="sm" onClick={() => downloadCsv(rowsToCsv(rows), 'grant-trail.csv')}>
+            Экспорт CSV
+          </Button>
+        )}
       </div>
 
       {/* T-0530: loading / error states */}
@@ -381,5 +491,5 @@ function GrantTrailScreen() {
 // that a SEED-shape row triggered live — see ra-grant-trail.test.js);
 // `fetchGrantTrail` lets the test assert the request carries the auth header
 // (the P0 that made the screen always fall to seed — re-verify fix-forward №3).
-export { apiRowToDisplay, GrantTrailRow, fetchGrantTrail };
+export { apiRowToDisplay, GrantTrailRow, fetchGrantTrail, rowsToCsv, csvEscape };
 export default GrantTrailScreen;

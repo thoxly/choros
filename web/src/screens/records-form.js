@@ -1177,6 +1177,21 @@ export const RELATION_CELL_ASYNC = Symbol("relation_cell_async");
  */
 export const FILE_CELL_ASYNC = Symbol("file_cell_async");
 
+/**
+ * T-0673: sentinel for a person-type cell whose value (an employee id/slug)
+ * needs a display-name resolve. Previously formatCellValue returned the raw
+ * person value AS-IS (a caller-responsibility comment, unlike relation/file
+ * which already had an async-cell contract) — the list/detail screens had no
+ * signal to render a resolved name and always showed the bare slug (e.g.
+ * "e-larina"). Mirrors RELATION_CELL_ASYNC/FILE_CELL_ASYNC's pattern exactly:
+ * formatCellValue cannot fetch, so it signals the caller to render an async
+ * cell component (batch-resolved via the SAME fetchEmployees()/GET /api/org
+ * source PersonPicker and screen-record-detail.jsx's created_by already use —
+ * T-0648's ActorChip primitive renders the resolved name, never a second
+ * resolver) instead of ever surfacing the raw id as the primary text.
+ */
+export const PERSON_CELL_ASYNC = Symbol("person_cell_async");
+
 export function formatCellValue(value, type) {
   if (value === null || value === undefined) return "—";
   if (type === "boolean" || typeof value === "boolean") {
@@ -1267,17 +1282,15 @@ export function formatCellValue(value, type) {
     return value.join(", ");
   }
 
-  // T-0512: person value is an employee id string. The caller may pass the employee
-  // name as `value` (pre-resolved by the list cell renderer), or the raw id as fallback.
-  // formatCellValue itself cannot resolve the id async — it returns the raw id when
-  // given one, similar to how relation returns RELATION_CELL_ASYNC for async resolution.
-  // However, the person value is a plain string id (not a UUID needing a separate lookup
-  // endpoint that returns structured data) — we return it as-is (could be name or id).
-  // The display component in the list/card should pre-resolve the id to a name via the
-  // employees list from GET /api/org and pass the name in `value` if possible; otherwise
-  // the id is shown as fallback. null/empty → "—".
+  // T-0512/T-0673: person value is an employee id/slug string. Resolving it to a
+  // display name needs the batch employee list (GET /api/org via fetchEmployees()
+  // — the SAME source PersonPicker and screen-record-detail.jsx's created_by
+  // resolver already use), which formatCellValue cannot fetch synchronously.
+  // Mirrors RELATION_CELL_ASYNC/FILE_CELL_ASYNC: return the sentinel so the
+  // caller renders an async/batch-resolved cell (ActorChip, T-0648) instead of
+  // the raw id. null/empty → "—".
   if (type === "person") {
-    if (typeof value === "string" && value.length > 0) return value;
+    if (typeof value === "string" && value.length > 0) return PERSON_CELL_ASYNC;
     return "—";
   }
 

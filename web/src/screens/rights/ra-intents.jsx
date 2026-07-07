@@ -100,11 +100,15 @@ async function postIntent(path, body) {
   }
 }
 
-function ResultBanner({ result }) {
+function ResultBanner({ result, tier }) {
   if (!result || result === 'loading') return null;
   if (result.ok) {
     return (
-      <div className="chs-intent__result chs-intent__result--ok" style={{ color: 'var(--chs-color-success, green)', marginTop: 'var(--chs-space-3)', fontSize: 'var(--chs-text-sm)' }}>
+      <div
+        className="chs-intent__result chs-intent__result--ok"
+        style={{ color: 'var(--chs-color-success, green)', marginTop: 'var(--chs-space-3)', fontSize: 'var(--chs-text-sm)' }}
+        {...(tier != null ? { 'data-tier': String(tier) } : {})}
+      >
         <KitIcon name="success" /> {result.message || 'Готово'}
         {result.data && <pre className="chs-intent__json" style={{ marginTop: 'var(--chs-space-2)' }}>{JSON.stringify(result.data, null, 2)}</pre>}
       </div>
@@ -230,13 +234,64 @@ function FireForm({ dir }) {
 }
 
 /* ---- Подмена: X замещает Y до даты (делегированное подмножество) ---- */
-function SubstituteForm({ dir }) {
+/**
+ * Обязательность полей (T-0639): все 5 полей ниже требуются сервером
+ * (POST /api/rights/intents/substitute 400 VALIDATION без любого из них) —
+ * кнопка была молча disabled без объяснения, какое поле не хватает (чаще
+ * всего пропускали «Орг-узел (отдел)», у него нет своей формы/пресета).
+ * missingSubstituteFields — чистая функция (тестируема без DOM), список
+ * человеко-читаемых названий недостающих полей в порядке формы.
+ */
+export function missingSubstituteFields({ absentId, substituteId, roleId, until, orgNodeId }) {
+  const missing = [];
+  if (!absentId) missing.push('Отсутствует');
+  if (!substituteId) missing.push('Замещает');
+  if (!roleId) missing.push('Роль');
+  if (!orgNodeId) missing.push('Орг-узел (отдел)');
+  if (!until) missing.push('До (дата/время)');
+  return missing;
+}
+
+/**
+ * Честный пост-сабмит фидбек (T-0639, спека docs/specs/T-0588-substitution-escalation.spec.md
+ * §1.3/FR-6): сервер уже различает режим срабатывания в ответе — `tier: 1`
+ * (роль покрыта другим держателем — правило создано, но НЕ меняет ничего
+ * прямо сейчас: маршрутизация переключится на заместителя только если
+ * текущий держатель станет недоступен) vs `tier: 2` (единственный держатель —
+ * временный грант выпущен немедленно, заместитель сразу видит задачи роли).
+ * До этой правки UI показывал одно и то же «Подмена объявлена» в обоих
+ * случаях — вводило в заблуждение при tier 1. Жаргон «Tier-N» не выводится
+ * пользователю (только в data-tier для тестов/дебага) — только человеческие
+ * формулировки режима.
+ */
+export function substituteResultMessage(data) {
+  const tier = data?.tier;
+  if (tier === 1) {
+    return 'Правило подмены создано. Роль сейчас покрыта другим держателем — '
+      + 'подмена вступит в силу автоматически, если этот держатель станет '
+      + 'недоступен (уйдёт или будет деактивирован). Прямо сейчас у '
+      + 'заместителя ничего не меняется.';
+  }
+  if (tier === 2) {
+    return 'Подмена объявлена и активна: заместитель получил временный доступ '
+      + 'и увидит задачи этой роли в своём инбоксе.';
+  }
+  // Оборонительный fallback — если бек когда-то не пришлёт tier (контракт не
+  // должен ломаться), не терять сигнал полностью: прежнее различение по
+  // наличию временного гранта.
+  return `Подмена объявлена${data?.ttl_grant_id ? ' (с временным грантом)' : ''}`;
+}
+
+export function SubstituteForm({ dir }) {
   const [absentId, setAbsentId] = useState('');
   const [substituteId, setSubstituteId] = useState('');
   const [roleId, setRoleId] = useState('');
   const [until, setUntil] = useState('');
   const [orgNodeId, setOrgNodeId] = useState('');
   const [result, setResult] = useState(null);
+
+  const missing = missingSubstituteFields({ absentId, substituteId, roleId, until, orgNodeId });
+  const canSubmit = missing.length === 0;
 
   const submit = async () => {
     setResult('loading');
@@ -248,36 +303,43 @@ function SubstituteForm({ dir }) {
       valid_until: validUntil,
       org_scope: { kind: 'node', hierarchy: 'org', nodeId: orgNodeId, nodeLevel: 'department' },
     });
-    setResult(r.ok ? { ...r, message: `Подмена объявлена${r.data.ttl_grant_id ? ' (с временным грантом)' : ''}` } : r);
+    setResult(r.ok ? { ...r, message: substituteResultMessage(r.data), tier: r.data?.tier } : r);
   };
   return (
     <section className="chs-section2 chs-intent">
       <SectionHead title="Подмена" aux="X покрывает Y до даты · делегированное подмножество (⊆ замещаемого)" />
+      <p className="chs-section2__note">Поля, отмеченные «*», обязательны для заполнения.</p>
       <div className="chs-intent__grid">
-        <OrgPicker label="Отсутствует" value={absentId} onChange={setAbsentId}
+        <OrgPicker label="Отсутствует *" value={absentId} onChange={setAbsentId}
           options={dir.employees} dirError={dir.error} placeholder="— кого замещают —"
           fallbackPlaceholder="UUID отсутствующего" />
-        <OrgPicker label="Замещает" value={substituteId} onChange={setSubstituteId}
+        <OrgPicker label="Замещает *" value={substituteId} onChange={setSubstituteId}
           options={dir.employees} dirError={dir.error} placeholder="— кто замещает —"
           fallbackPlaceholder="UUID замещающего" />
-        <OrgPicker label="Роль" value={roleId} onChange={setRoleId}
+        <OrgPicker label="Роль *" value={roleId} onChange={setRoleId}
           options={dir.roles} dirError={dir.error} placeholder="— роль подмены —"
           fallbackPlaceholder="UUID роли" />
-        <OrgPicker label="Орг-узел (отдел)" value={orgNodeId} onChange={setOrgNodeId}
+        <OrgPicker label="Орг-узел (отдел) *" value={orgNodeId} onChange={setOrgNodeId}
           options={dir.departments} dirError={dir.error} placeholder="— отдел (орг-охват) —"
-          fallbackPlaceholder="UUID отдела" />
-        <Field label="До (дата/время)" type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} />
+          fallbackPlaceholder="UUID отдела"
+          hint="Обязательно: без орг-охвата подмену объявить нельзя." />
+        <Field label="До (дата/время) *" type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} />
       </div>
       <p className="chs-section2__note">
         Права замещающего строго ограничены подмножеством прав замещаемой роли — расширение прав невозможно и отклоняется сервером.
         Если замещение покрывается пулом, временный грант не выпускается; иначе выпускается ограниченный временный грант.
       </p>
       <div className="chs-intent__bar">
-        <Button variant="primary" size="sm" loading={result === 'loading'} disabled={result === 'loading' || !absentId || !substituteId || !roleId || !until || !orgNodeId} onClick={submit}>
+        <Button variant="primary" size="sm" loading={result === 'loading'} disabled={result === 'loading' || !canSubmit} onClick={submit}>
           Объявить подмену
         </Button>
       </div>
-      <ResultBanner result={result} />
+      {!canSubmit && result !== 'loading' && (
+        <p className="chs-hint" role="status" aria-live="polite">
+          Заполните обязательные поля: {missing.join(', ')}.
+        </p>
+      )}
+      <ResultBanner result={result} tier={result?.tier} />
     </section>
   );
 }

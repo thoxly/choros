@@ -1,0 +1,16 @@
+{
+  "task_id": "T-0671",
+  "verdict": "approved",
+  "commit": "85d88c894daa6392e400f9fae73dd0f2bbf13371",
+  "summary": "Predicate change (d.source==='engine' || d.status==='published') in FormDesigner.jsx's process picker is correct and structurally verified against server-side code, not just the diff's claims. buildCatalogDefinitions dedups engine rows by process_key in a Map keyed off real instance projections, so there is no version-dup or stale/suspended-engine-row risk — an engine key can only ever appear once, with status hardcoded to 'deployed'. POST /api/process-app-bindings has no FK from process_key to process_definition (migration 075, deliberate 'logical reference' design, T-0017 lesson) — only a non-empty-string check — so binding an engine process_key succeeds; T-0681's registry-slug validation is orthogonal (validates target_registry_slug against registry_def, not process_key against process_definition). T-0669's boundAppIdsForProcess filters purely by string process_key match against process_app_binding rows, confirmed to have zero source-conditioned branching (also mechanically asserted by AC-4's regex check). Anti-case: both telLinear mentions are in comment lines (// prefixed) inside FormDesigner.jsx and FormDesigner.test.jsx; anti-case-lock.sh Phase 2 confirms telLinear code-only count stayed at baseline (1, unchanged) — comment-only additions are correctly excluded by the established comment-strip methodology, consistent with prior anti-case gates in this codebase.",
+  "checks": {
+    "predicate_correctness": "verified: source==='engine' rows are structurally unique per process_key (Map-keyed in buildCatalogDefinitions), status is unconditionally 'deployed', no suspended/version-dup state exists at this layer",
+    "binding_save_path": "verified: process_app_binding.process_key has no FK constraint (migration 075 comment explicitly documents this as intentional, T-0017 lesson); POST /api/process-app-bindings only validates non-empty string + application_id existence — an engine process_key saves without any special-casing",
+    "t0669_regression": "verified: boundAppIdsForProcess (FormDesigner.jsx ~line 784) keys only on b.process_key === selectedProcessKey, no source-dependent branch; confirmed both by direct read and by AC-4's regex assertion (not source==='engine' anywhere near the memo)",
+    "buildCatalogDefinitions_status_claim": "verified true: engine branch (process-catalog-view.ts line ~144-151) unconditionally sets status:'deployed'",
+    "anti_case": "verified: both telLinear occurrences are comment-only (// prefix), anti-case-lock.sh Phase 2 shows telLinear count unchanged at baseline=1"
+  },
+  "non_blocking_notes": [
+    "Engine-sourced processes with no modeler row display their raw process_key as the picker label (fallbackDefinitionName returns the key itself, per T-0616 anti-case discipline) — this is intentional per D-064 and not a defect, but worth knowing: a human picking 'telLinear' from a dropdown sees a machine key, not a friendly name. Out of scope for T-0671 (spec §3 explicitly defers naming to future work)."
+  ]
+}

@@ -59,7 +59,12 @@ function AccountRow({ account, onToggleActive, busy, canWrite }) {
           </span>
         </div>
         <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-2)' }}>
-          <MonoId>{account.login}</MonoId>
+          {/* T-0652 (§6.4): учётки до миграции 126 (KC-backed, login=NULL) раньше
+              светили сырой KC-UUID как «логин». Сервер теперь отдаёт login=null +
+              login_missing → показываем честную метку, а НЕ UUID. */}
+          {account.login_missing || !account.login
+            ? <span style={{ fontStyle: 'italic' }}>логин не задан</span>
+            : <MonoId>{account.login}</MonoId>}
           {` · ${orgPlace}`}
         </div>
       </div>

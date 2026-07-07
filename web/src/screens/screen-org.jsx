@@ -10,6 +10,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   ExecutorBadge, ExecGlyph, MonoId, Mono, Button, Field, Select, Modal, ConfirmDialog,
   EmptyState, LoadingState, ErrorState, KitIcon,
@@ -25,6 +26,9 @@ import {
   buildDepartmentPayload, buildPositionPayload, buildEmployeePayload, buildRolePayload, buildAssignmentPayload,
   mapOrgError, indexBySlug, EMPLOYEE_KINDS,
 } from './org-crud.js';
+import {
+  computeEmployeeDrop, computeMoveEmployeeToPosition, buildRenamePayload, MOVE_ENDPOINT,
+} from './org-move-dnd.js';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
 // Org writes are scoped to the caller's OWN tenant; the server's authorizeOrgWrite
@@ -306,13 +310,87 @@ function makeCrudConfig(kind, state, actorId) {
   return null;
 }
 
-function TreeRow({ depth, type, kind, label, count, vacancy, open, selected, onToggle, onSelect, hasChildren, onDelete }) {
+/**
+ * NodeMenu — T-0655 (§6.4): the accessible, keyboard-reachable «⋯» menu on a tree
+ * node. This is the DnD FALLBACK (доступность обязательна): every move/rename
+ * available via drag is ALSO available here as a button. Built on native
+ * <details>/<summary> — zero-dep, focusable, Esc-closable, screen-reader-announced.
+ * `actions` = [{ label, onClick }]; empty → not rendered.
+ */
+function NodeMenu({ actions }) {
+  if (!actions || actions.length === 0) return null;
+  return (
+    <details
+      className="chs-trow__menu"
+      style={{ marginLeft: 'auto', position: 'relative' }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <summary
+        aria-label="Действия с узлом"
+        title="Действия"
+        style={{
+          listStyle: 'none', cursor: 'pointer', padding: '0 var(--chs-space-2)',
+          color: 'var(--chs-color-text-faint)', display: 'inline-flex', alignItems: 'center',
+        }}
+      >
+        <KitIcon name="more-horizontal" size={14} />
+      </summary>
+      <div
+        role="menu"
+        style={{
+          position: 'absolute', right: 0, top: '100%', zIndex: 20, minWidth: '18ch',
+          background: 'var(--chs-color-surface)', border: '1px solid var(--chs-color-border)',
+          borderRadius: 'var(--chs-radius-2)', boxShadow: 'var(--chs-shadow-2, 0 4px 12px rgba(0,0,0,.12))',
+          padding: 'var(--chs-space-1)', display: 'flex', flexDirection: 'column',
+        }}
+      >
+        {actions.map((a) => (
+          <button
+            key={a.label}
+            type="button"
+            role="menuitem"
+            className="chs-trow__menuitem"
+            style={{
+              textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer',
+              padding: 'var(--chs-space-2) var(--chs-space-3)', font: 'inherit',
+              fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text)', borderRadius: 'var(--chs-radius-1)',
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              // Close the <details> after choosing.
+              const d = e.currentTarget.closest('details');
+              if (d) d.open = false;
+              a.onClick();
+            }}
+          >
+            {a.label}
+          </button>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function TreeRow({
+  depth, type, kind, label, count, vacancy, open, selected, onToggle, onSelect, hasChildren, onDelete,
+  // T-0655 (§6.4) DnD + menu wiring (all optional — absent = affordance off).
+  draggable, onDragStart, onDragEnd, dropTarget, isDragOver, onDragOverRow, onDragLeaveRow, onDropRow, menuActions,
+}) {
   return (
     <button
-      className={`chs-trow chs-trow--${kind}`}
-      style={{ paddingLeft: `calc(${depth} * var(--chs-space-7) + var(--chs-space-3))` }}
+      className={`chs-trow chs-trow--${kind}${isDragOver ? ' chs-trow--dragover' : ''}`}
+      style={{
+        paddingLeft: `calc(${depth} * var(--chs-space-7) + var(--chs-space-3))`,
+        ...(isDragOver ? { outline: '2px solid var(--chs-color-accent, var(--chs-color-border))', outlineOffset: '-2px' } : null),
+      }}
       aria-selected={selected ? "true" : undefined}
       onClick={onSelect}
+      draggable={draggable || undefined}
+      onDragStart={draggable ? onDragStart : undefined}
+      onDragEnd={draggable ? onDragEnd : undefined}
+      onDragOver={dropTarget ? onDragOverRow : undefined}
+      onDragLeave={dropTarget ? onDragLeaveRow : undefined}
+      onDrop={dropTarget ? onDropRow : undefined}
     >
       <span
         className={`chs-trow__twist ${open ? "chs-trow__twist--open" : ""} ${hasChildren ? "" : "chs-trow__twist--leaf"}`}
@@ -325,6 +403,7 @@ function TreeRow({ depth, type, kind, label, count, vacancy, open, selected, onT
       <span className="chs-trow__label">{label}</span>
       {vacancy ? <span className="chs-trow__vac">вакансия</span> : null}
       {count != null && <span className="chs-trow__count">{count}</span>}
+      <NodeMenu actions={menuActions} />
       {onDelete && (
         <span
           role="button"
@@ -332,7 +411,7 @@ function TreeRow({ depth, type, kind, label, count, vacancy, open, selected, onT
           className="chs-trow__del"
           title="Удалить"
           aria-label="Удалить"
-          style={{ marginLeft: 'auto', padding: '0 var(--chs-space-2)', color: 'var(--chs-color-text-faint)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}
+          style={{ padding: '0 var(--chs-space-2)', color: 'var(--chs-color-text-faint)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); onDelete(); } }}
         ><KitIcon name="close" size={14} /></span>
@@ -341,9 +420,14 @@ function TreeRow({ depth, type, kind, label, count, vacancy, open, selected, onT
   );
 }
 
-function OrgTree({ org, selectedId, onSelect, canWrite, idMaps, onCreate, onDelete }) {
+function OrgTree({ org, selectedId, onSelect, canWrite, idMaps, onCreate, onDelete, onDropEmployee, onMoveTo, onRename }) {
   const [open, setOpen] = useState(() => ({ fin: true, "fin-appr": true, cs: true, "cs-l1": true, plat: false }));
   const toggle = (id) => setOpen((o) => ({ ...o, [id]: !o[id] }));
+
+  // T-0655 (§6.4) DnD drag state: the employee slug being dragged + the position
+  // slug currently hovered as a drop target (for the visual outline).
+  const [dragEmp, setDragEmp] = useState(null); // { slug, fromPositionSlug } | null
+  const [dragOverPos, setDragOverPos] = useState(null); // position slug | null
 
   // The tree (GET /api/org) keys entities by slug. Delete needs the UUID — resolve
   // it from tenant-state idMaps (slug→uuid). If a slug isn't in the map (e.g. tenant-state
@@ -359,7 +443,10 @@ function OrgTree({ org, selectedId, onSelect, canWrite, idMaps, onCreate, onDele
     rows.push(
       <TreeRow key={dept.id} depth={0} kind="dept" label={dept.name} count={headcount}
         open={open[dept.id]} hasChildren onToggle={() => toggle(dept.id)} onSelect={() => toggle(dept.id)}
-        onDelete={canWrite && dUuid ? () => onDelete('department', dUuid, dept.name) : undefined} />
+        onDelete={canWrite && dUuid ? () => onDelete('department', dUuid, dept.name) : undefined}
+        menuActions={canWrite && dUuid ? [
+          { label: 'Переименовать', onClick: () => onRename('department', dUuid, dept.name) },
+        ] : undefined} />
     );
     if (!open[dept.id]) return;
     dept.positions.forEach((pos) => {
@@ -367,7 +454,22 @@ function OrgTree({ org, selectedId, onSelect, canWrite, idMaps, onCreate, onDele
       rows.push(
         <TreeRow key={pos.id} depth={1} kind="pos" label={pos.title} count={pos.people.length} vacancy={pos.vacancy}
           open={open[pos.id]} hasChildren onToggle={() => toggle(pos.id)} onSelect={() => toggle(pos.id)}
-          onDelete={canWrite && pUuid ? () => onDelete('position', pUuid, pos.title) : undefined} />
+          onDelete={canWrite && pUuid ? () => onDelete('position', pUuid, pos.title) : undefined}
+          menuActions={canWrite && pUuid ? [
+            { label: 'Переименовать', onClick: () => onRename('position', pUuid, pos.title) },
+          ] : undefined}
+          // A position row is a DROP TARGET for a dragged employee.
+          dropTarget={canWrite}
+          isDragOver={dragOverPos === pos.id}
+          onDragOverRow={dragEmp ? (e) => { e.preventDefault(); setDragOverPos(pos.id); } : undefined}
+          onDragLeaveRow={() => setDragOverPos((c) => (c === pos.id ? null : c))}
+          onDropRow={(e) => {
+            e.preventDefault();
+            const emp = dragEmp;
+            setDragOverPos(null);
+            setDragEmp(null);
+            if (emp) onDropEmployee(emp.slug, emp.fromPositionSlug, pos.id);
+          }} />
       );
       if (!open[pos.id]) return;
       pos.people.forEach((person) => {
@@ -376,7 +478,15 @@ function OrgTree({ org, selectedId, onSelect, canWrite, idMaps, onCreate, onDele
           <TreeRow key={person.id} depth={2} kind="emp" type={person.type} label={person.name}
             selected={selectedId === person.id} hasChildren={false}
             onSelect={() => onSelect(person.id)}
-            onDelete={canWrite && eUuid ? () => onDelete('employee', eUuid, person.name) : undefined} />
+            onDelete={canWrite && eUuid ? () => onDelete('employee', eUuid, person.name) : undefined}
+            // An employee row is DRAGGABLE (canWrite + resolvable uuid).
+            draggable={canWrite && Boolean(eUuid)}
+            onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; setDragEmp({ slug: person.id, fromPositionSlug: pos.id }); }}
+            onDragEnd={() => { setDragEmp(null); setDragOverPos(null); }}
+            menuActions={canWrite && eUuid ? [
+              { label: 'Переместить в…', onClick: () => onMoveTo(eUuid, person.name, pos.id) },
+              { label: 'Переименовать', onClick: () => onRename('employee', eUuid, person.name) },
+            ] : undefined} />
         );
       });
     });
@@ -394,6 +504,9 @@ function OrgTree({ org, selectedId, onSelect, canWrite, idMaps, onCreate, onDele
           <Button variant="secondary" size="sm" onClick={() => onCreate('employee')}>+ Сотрудник</Button>
           <Button variant="secondary" size="sm" onClick={() => onCreate('role')}>+ Роль</Button>
           <Button variant="secondary" size="sm" onClick={() => onCreate('assignment')}>Назначить роль</Button>
+          <span style={{ flexBasis: '100%', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+            Перетащите сотрудника на должность, чтобы переместить (или «⋯ → Переместить в…» на строке).
+          </span>
         </div>
       ) : (
         <div style={{ padding: 'var(--chs-space-3) var(--chs-space-4)', borderBottom: '1px solid var(--chs-color-border)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
@@ -514,7 +627,18 @@ function ExplainPanel({ subjectSlug }) {
  * absent rather than fabricating placeholder values (D2 honest-empty / UX-G6).
  * The explain-PDP panel (T-0223 · I-3) is always included and calls a live endpoint.
  */
-function ExecutorDetail({ person, position, dept, onOpenRights }) {
+function ExecutorDetail({ person, position, dept, onOpenRights, onOpenRightsForSubject, onNavigate }) {
+  // T-0655 (§6.3 identity hub): «Права и доступ» carries the executor CONTEXT
+  // (subject employee) so /rights lands focused on THIS person's roles — instead
+  // of the former context-free onOpenRights(undefined). Fallback to the old
+  // context-free open only if the subject-aware handler was not supplied.
+  const openRights = () => {
+    if (onOpenRightsForSubject) {
+      onOpenRightsForSubject({ id: person.id, name: person.name, kind: person.type });
+    } else if (onOpenRights) {
+      onOpenRights(undefined);
+    }
+  };
   return (
     <div className="chs-org__detail">
       <div className="chs-detail">
@@ -534,13 +658,27 @@ function ExecutorDetail({ person, position, dept, onOpenRights }) {
             </div>
           </div>
           <div className="chs-detail__headactions">
-            <Button variant="secondary" size="sm" onClick={() => onOpenRights && onOpenRights(undefined)}
+            <Button variant="secondary" size="sm" onClick={openRights}
               glyph={<Icon name="rights" className="chs-btn__glyph" />}>Права и доступ</Button>
           </div>
         </div>
-        <p style={{ padding: 'var(--chs-space-4)', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
-          Подробная карточка (модель, бюджет, автономия) не подключена к API — детальные данные исполнителя
-          являются следующим слоем. Назначить роль и управлять оргструктурой можно слева.
+        {/* T-0655 (§6.3): грани исполнителя — мосты к островам единой модели
+            employee (учётка /users, права /rights, для агента — /agents). Раньше
+            эти экраны были островами без единого перехода. Только реальные
+            маршруты — без мёртвых кнопок. */}
+        <div className="chs-idhub-facets" style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--chs-space-2)', padding: '0 var(--chs-space-4) var(--chs-space-2)' }}>
+          <Button variant="ghost" size="sm" onClick={openRights}>Роли и права →</Button>
+          {onNavigate && (
+            <Button variant="ghost" size="sm" onClick={() => onNavigate('/users')}>Учётка →</Button>
+          )}
+          {onNavigate && person.type === 'agent' && (
+            <Button variant="ghost" size="sm" onClick={() => onNavigate('/agents')}>Открыть в «Агентах» →</Button>
+          )}
+        </div>
+        <p style={{ padding: 'var(--chs-space-3) var(--chs-space-4)', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
+          {person.type === 'agent'
+            ? 'Оргместо, LLM/инструкция и активность агента настраиваются в «Агентах»; роли и права — по ссылке выше.'
+            : 'Оргместо — слева в дереве; учётка (логин/статус) — в «Пользователях»; роли и права — по ссылке выше.'}
         </p>
         <ExplainPanel subjectSlug={person.id} />
       </div>
@@ -548,7 +686,77 @@ function ExecutorDetail({ person, position, dept, onOpenRights }) {
   );
 }
 
-function OrgScreen({ onOpenRights }) {
+/**
+ * MoveEmployeeModal — T-0655 (§6.4) the accessible «Переместить в…» fallback: pick
+ * a target position (or «— без должности —» = снять с должности) and PATCH the
+ * employee. Options are the tenant-state positions (labelled dept · title). This
+ * is keyboard-reachable, so the move is available WITHOUT drag-and-drop.
+ */
+function MoveEmployeeModal({ open, subject, state, busy, onClose, onConfirm }) {
+  const [posId, setPosId] = useState('');
+  useEffect(() => { if (open) setPosId(''); }, [open, subject]);
+  if (!open || !subject) return null;
+  const deptName = (id) => (state?.departments || []).find((d) => d.id === id)?.display_name || '';
+  const options = (state?.positions || []).map((p) => ({
+    value: p.id, label: `${deptName(p.department_id)} · ${p.title || p.slug}`.replace(/^ · /, ''),
+  }));
+  return (
+    <Modal open={open} onClose={onClose} title={`Переместить · ${subject.label}`} size="sm">
+      <div className="chs-org__modalform">
+        <div className="chs-org__modalfield">
+          <Select
+            label="Новая должность"
+            value={posId}
+            onChange={(e) => setPosId(e.target.value)}
+            hint="выберите должность или «без должности», чтобы снять"
+          >
+            <option value="">— без должности —</option>
+            {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </Select>
+        </div>
+        <div className="chs-org__modalbar">
+          <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
+          <Button type="button" variant="primary" size="sm" disabled={busy}
+            onClick={() => onConfirm(subject.employeeId, posId || null)}>
+            {busy ? 'Перемещение…' : 'Переместить'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * RenameNodeModal — T-0655 (§6.4) «Переименовать» for a dept/position/employee.
+ * Single field; the payload field name is entity-specific (buildRenamePayload).
+ */
+function RenameNodeModal({ open, target, busy, onClose, onConfirm }) {
+  const [name, setName] = useState('');
+  useEffect(() => { if (open && target) setName(target.label || ''); }, [open, target]);
+  if (!open || !target) return null;
+  const trimmed = (name || '').trim();
+  return (
+    <Modal open={open} onClose={onClose} title="Переименовать" size="sm">
+      <form
+        className="chs-org__modalform"
+        onSubmit={(e) => { e.preventDefault(); if (trimmed) onConfirm(target.kind, target.uuid, trimmed); }}
+      >
+        <div className="chs-org__modalfield">
+          <Field label="Название" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+        </div>
+        <div className="chs-org__modalbar">
+          <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
+          <Button type="submit" variant="primary" size="sm" disabled={busy || !trimmed}>
+            {busy ? 'Сохранение…' : 'Сохранить'}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function OrgScreen({ onOpenRights, onOpenRightsForSubject }) {
+  const navigate = useNavigate();
   const [selected, setSelected] = useState(null);
   const [departments, setDepartments] = useState(null);
   const [error, setError] = useState(null);
@@ -560,6 +768,11 @@ function OrgScreen({ onOpenRights }) {
   // pendingDelete: { kind, uuid, label } while the kit ConfirmDialog is open, or null.
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  // T-0655 (§6.4) move/rename modals: { employeeId, label, fromPositionSlug } while
+  // «Переместить в…» is open; { kind, uuid, label } while «Переименовать» is open.
+  const [pendingMove, setPendingMove] = useState(null);
+  const [pendingRename, setPendingRename] = useState(null);
+  const [moving, setMoving] = useState(false);
   const { push, dismiss } = useToastContext();
 
   const actorId = (getDevUser() || {}).id || '';
@@ -650,6 +863,50 @@ function OrgScreen({ onOpenRights }) {
     }
   }, [pendingDelete, reload, selected, push]);
 
+  // T-0655 (§6.4): fire ONE move-API PATCH against /api/{path}/:uuid and reload
+  // the tree from server truth (mirrors the sidebar's post-write refresh — simple
+  // over clever). Returns true on success. Honest error surfacing via mapOrgError.
+  const patchMove = useCallback(async (path, uuid, body, entityLabel) => {
+    setMoving(true);
+    try {
+      const res = await fetch(`/api/${path}/${uuid}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ tenant_id: getActiveTenantId(), ...body }),
+      });
+      if (res.ok) { reload(); return true; }
+      let parsed = null;
+      try { parsed = await res.json(); } catch { /* ignore */ }
+      push({ tone: 'error', message: mapOrgError(res.status, parsed, entityLabel).message });
+      return false;
+    } catch (e) {
+      push({ tone: 'error', message: String(e?.message || e) });
+      return false;
+    } finally {
+      setMoving(false);
+    }
+  }, [reload, push]);
+
+  // DnD drop: an employee (slug) was dropped onto a position (slug). Resolve the
+  // uuids via idMaps and PATCH /api/employees/:id { position_id }.
+  const handleDropEmployee = useCallback((employeeSlug, fromPositionSlug, toPositionSlug) => {
+    const plan = computeEmployeeDrop({ employeeSlug, fromPositionSlug, toPositionSlug, idMaps });
+    if (!plan) return; // no-op / unresolvable
+    patchMove('employees', plan.employeeId, plan.body, ENTITY_LABEL.employee).then((ok) => {
+      if (ok) push({ tone: 'success', message: 'Сотрудник перемещён' });
+    });
+  }, [idMaps, patchMove, push]);
+
+  // «Переместить в…» menu → open the target-position picker modal.
+  const handleMoveTo = useCallback((employeeId, label, fromPositionSlug) => {
+    setPendingMove({ employeeId, label, fromPositionSlug });
+  }, []);
+
+  // «Переименовать» menu → open the rename modal for dept/pos/emp.
+  const handleRename = useCallback((kind, uuid, label) => {
+    setPendingRename({ kind, uuid, label });
+  }, []);
+
   // Resolve selected person from the live org tree (GET /api/org).
   // The tree keys people by slug (person.id = slug). We find the person
   // and their position/department context so ExecutorDetail can show real metadata.
@@ -690,6 +947,33 @@ function OrgScreen({ onOpenRights }) {
         onConfirm={confirmDelete}
         onClose={() => { if (!deleting) setPendingDelete(null); }}
       />
+      {/* T-0655 (§6.4): «Переместить в…» и «Переименовать» — доступный fallback DnD. */}
+      <MoveEmployeeModal
+        open={pendingMove !== null}
+        subject={pendingMove}
+        state={state}
+        busy={moving}
+        onClose={() => { if (!moving) setPendingMove(null); }}
+        onConfirm={(employeeId, toPositionId) => {
+          const { body } = computeMoveEmployeeToPosition(employeeId, toPositionId);
+          patchMove('employees', employeeId, body, ENTITY_LABEL.employee).then((ok) => {
+            if (ok) { push({ tone: 'success', message: 'Сотрудник перемещён' }); setPendingMove(null); }
+          });
+        }}
+      />
+      <RenameNodeModal
+        open={pendingRename !== null}
+        target={pendingRename}
+        busy={moving}
+        onClose={() => { if (!moving) setPendingRename(null); }}
+        onConfirm={(kind, uuid, newName) => {
+          const body = buildRenamePayload(kind, newName);
+          if (Object.keys(body).length === 0) { setPendingRename(null); return; }
+          patchMove(MOVE_ENDPOINT[kind], uuid, body, ENTITY_LABEL[kind]).then((ok) => {
+            if (ok) { push({ tone: 'success', message: 'Переименовано' }); setPendingRename(null); }
+          });
+        }}
+      />
       {/* ToastViewport монтируется глобально в ToastProvider (toast-context.jsx) — локальный удалён (T-0528) */}
       {error ? (
         <ErrorState message={`Ошибка загрузки оргструктуры: ${error}`} onRetry={reload} />
@@ -705,11 +989,14 @@ function OrgScreen({ onOpenRights }) {
             idMaps={idMaps}
             onCreate={(kind) => setModalKind(kind)}
             onDelete={requestDelete}
+            onDropEmployee={handleDropEmployee}
+            onMoveTo={handleMoveTo}
+            onRename={handleRename}
           />
           {selectedPerson
-            ? <ExecutorDetail person={selectedPerson} position={selectedPosition} dept={selectedDept} onOpenRights={onOpenRights} />
+            ? <ExecutorDetail person={selectedPerson} position={selectedPosition} dept={selectedDept} onOpenRights={onOpenRights} onOpenRightsForSubject={onOpenRightsForSubject} onNavigate={navigate} />
             : selected
-              ? <ExecutorDetail person={{ id: selected, name: selected, type: 'human' }} position={null} dept={null} onOpenRights={onOpenRights} />
+              ? <ExecutorDetail person={{ id: selected, name: selected, type: 'human' }} position={null} dept={null} onOpenRights={onOpenRights} onOpenRightsForSubject={onOpenRightsForSubject} onNavigate={navigate} />
               : (
                 <div className="chs-org__detail">
                   {departments.length === 0 ? (

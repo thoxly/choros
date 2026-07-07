@@ -39,8 +39,15 @@ vi.mock('../../app-shell/dev-auth.js', () => ({
   devHeaders: () => ({ Authorization: 'Bearer test-token-123' }),
 }));
 
-import { apiRowToDisplay, GrantTrailRow, fetchGrantTrail } from './ra-grant-trail.jsx';
+import { apiRowToDisplay, GrantTrailRow, fetchGrantTrail, rowsToCsv, csvEscape } from './ra-grant-trail.jsx';
 import { TRAIL as TRAIL_SEED } from './ra-data.jsx';
+
+// REV-N1 fix-forward source-presence check (see describe block near EOF):
+// module-level await, matching the pattern in screen-rights.test.jsx.
+const fs = await import('fs');
+const path = await import('path');
+const screenSrcPath = path.default.resolve(new URL(import.meta.url).pathname, '../ra-grant-trail.jsx');
+const screenSrc = fs.default.readFileSync(screenSrcPath, 'utf-8');
 
 // ---------------------------------------------------------------------------
 // Tree-walk helpers (mirror web/src/forms/field-renderer.test.jsx) — render a
@@ -516,3 +523,261 @@ describe('T-0648 re-verify №3 · fetchGrantTrail sends the auth header (P0: 40
     expect(Object.keys(lastCall.init.headers).length).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0652 (§6.2): CSV export of the grant trail. The «Экспорт» button was DEAD
+// (no onClick). It now serialises the ALREADY-LOADED display rows to CSV — no
+// new endpoint, no bare fetch (data came via fetchGrantTrail, which carries
+// authHeaders()). These tests exercise the pure serialiser + RFC4180 escaping.
+// ---------------------------------------------------------------------------
+
+describe('T-0652 · grant-trail CSV export (rowsToCsv / csvEscape)', () => {
+  it('csvEscape: leaves a plain field untouched', () => {
+    expect(csvEscape('abc')).toBe('abc');
+    expect(csvEscape('')).toBe('');
+    expect(csvEscape(null)).toBe('');
+    expect(csvEscape(undefined)).toBe('');
+  });
+
+  it('csvEscape: quotes a field with a COMMA and wraps it in double quotes (RFC4180)', () => {
+    expect(csvEscape('a,b')).toBe('"a,b"');
+  });
+
+  it('csvEscape: DOUBLES an inner double-quote and wraps the field', () => {
+    // RFC4180: `he said "hi"` → `"he said ""hi"""`
+    expect(csvEscape('he said "hi"')).toBe('"he said ""hi"""');
+  });
+
+  it('csvEscape: quotes a field containing a newline (would otherwise break a row)', () => {
+    expect(csvEscape('line1\nline2')).toBe('"line1\nline2"');
+  });
+
+  it('rowsToCsv: emits a header row + one data row per display row', () => {
+    const rows = [apiRowToDisplay({
+      id: 'g1', occurred_at: 0, type: 'grant.create',
+      actor: 'e-owner', subject: 'role-x', op: 'invoke', res: 'mcp://payments.initiate',
+      scope: '—', confirmed: ['Иванов'],
+    })];
+    const csv = rowsToCsv(rows);
+    const lines = csv.replace(/^﻿/, '').trim().split('\r\n');
+    expect(lines.length).toBe(2); // header + 1 data row
+    // header carries the human-readable column names
+    expect(lines[0]).toContain('Кто выдал');
+    expect(lines[0]).toContain('Кому');
+    // res is stripped of the mcp:// prefix (mirrors the on-screen rendering)
+    expect(lines[1]).toContain('payments.initiate');
+    expect(lines[1]).not.toContain('mcp://');
+  });
+
+  it('rowsToCsv: escapes a name that contains a comma so the column count is preserved', () => {
+    // A display row whose subject NAME carries a comma must not split into extra
+    // columns — the comma-bearing field is quoted.
+    const row = {
+      ts: '2026-01-01', id: 'g2', action: 'grant',
+      actor: { type: 'human', name: 'Соколов, М.' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: 'Роль', op: 'invoke', res: 'x', scope: '—', proposed: 'human', confirmed: [],
+    };
+    const csv = rowsToCsv([row]);
+    const dataLine = csv.replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).toContain('"Соколов, М."');
+  });
+
+  it('rowsToCsv: actor/subject rendered by NAME (not the {type,name} object)', () => {
+    const row = {
+      ts: 't', id: 'g3', action: 'revoke',
+      actor: { type: 'service', name: 'policy-sync' },
+      subject: { type: 'agent', name: 'Юрист-прекчек' },
+      role: 'R', op: 'o', res: 'r', scope: 's', proposed: 'agent', confirmed: ['подтверждено'],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).toContain('policy-sync');
+    expect(dataLine).toContain('Юрист-прекчек');
+    expect(dataLine).not.toContain('[object Object]');
+  });
+
+  it('rowsToCsv: starts with a UTF-8 BOM so Excel reads Cyrillic correctly', () => {
+    expect(rowsToCsv([]).charCodeAt(0)).toBe(0xFEFF);
+  });
+
+  // -------------------------------------------------------------------------
+  // F-1 (live-proof on the deployed stand, T-0652 follow-up): the CSV export
+  // must match what ActorChip already shows ON SCREEN (T-0648/T-0685) — an
+  // UNRESOLVED machine actor (batch resolver miss → name === id === raw UUID)
+  // is demoted to the honest generic type label, never the bare UUID. Before
+  // this fix, `nameOf` returned `v.name` unconditionally, re-leaking the exact
+  // machine-UUID the on-screen demotion closes — into the exported FILE.
+  // -------------------------------------------------------------------------
+  it('rowsToCsv: unresolved machine-UUID subject ("Кому") is demoted to a type label, not the raw UUID', () => {
+    const RAW_ID = 'a1b2c3d4-0000-4000-8000-000000000002';
+    const row = apiRowToDisplay({
+      id: 'g4', occurred_at: 0, type: 'grant.create',
+      actor: 'e-owner', subject: RAW_ID, subjectResolved: undefined,
+      op: 'invoke', res: 'x', scope: '—', confirmed: [],
+    });
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).not.toContain(RAW_ID);
+    expect(dataLine).toContain('Сервис'); // coerceActorField's honest fallback kind
+  });
+
+  it('rowsToCsv: unresolved machine-UUID actor ("Кто выдал") is demoted to a type label, not the raw UUID', () => {
+    const RAW_ID = 'a1b2c3d4-0000-4000-8000-000000000001';
+    const row = apiRowToDisplay({
+      id: 'g5', occurred_at: 0, type: 'grant.create',
+      actor: RAW_ID, actorResolved: undefined, subject: 'role-x',
+      op: 'invoke', res: 'x', scope: '—', confirmed: [],
+    });
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).not.toContain(RAW_ID);
+    expect(dataLine).toContain('Сервис');
+  });
+
+  it('rowsToCsv: an "agent:" machine key is demoted to "Агент" (not the raw key)', () => {
+    const row = {
+      ts: 't', id: 'g6', action: 'grant',
+      actor: { type: 'agent', name: 'agent:юрист-прекчек-42' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: 'R', op: 'o', res: 'r', scope: 's', proposed: 'agent', confirmed: [],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).not.toContain('agent:юрист-прекчек-42');
+    expect(dataLine).toContain('Агент');
+  });
+
+  it('rowsToCsv: a resolved HUMAN name is unaffected (not demoted)', () => {
+    const row = {
+      ts: 't', id: 'g7', action: 'grant',
+      actor: { type: 'human', name: 'Ларина' },
+      subject: { type: 'human', name: 'Иванов' },
+      role: 'R', op: 'o', res: 'r', scope: 's', proposed: 'human', confirmed: ['Ларина'],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).toContain('Ларина');
+    expect(dataLine).toContain('Иванов');
+  });
+
+  it('rowsToCsv: a human-legible SLUG (not a UUID) stays primary — mirrors ActorChip (no false positive)', () => {
+    const row = {
+      ts: 't', id: 'g8', action: 'grant',
+      actor: { type: 'service', name: 'policy-sync' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: 'R', op: 'o', res: 'r', scope: 's', proposed: 'human', confirmed: [],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).toContain('policy-sync');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REV-P1-CSV-FORMULA-INJECTION (fix-forward): RFC4180 quoting alone does NOT
+// stop a cell whose value begins with = + - @ (or leading TAB/CR) from being
+// evaluated as a formula when the CSV is opened in Excel/LibreOffice/Sheets.
+// Role names and resolved display names are user/admin-authored and flow
+// un-guarded into cell starts — csvEscape must prefix a leading apostrophe
+// (OWASP mitigation) BEFORE RFC4180-quoting, and force-quote such a cell.
+// ---------------------------------------------------------------------------
+describe('T-0652 fix-forward · CSV formula-injection neutralization (csvEscape / rowsToCsv)', () => {
+  it('csvEscape: a value starting with "=" is prefixed with an apostrophe and quoted', () => {
+    expect(csvEscape('=HYPERLINK("http://evil","click")')).toBe('"\'=HYPERLINK(""http://evil"",""click"")"');
+  });
+
+  it('csvEscape: values starting with + - @ are each neutralized', () => {
+    expect(csvEscape('+cmd|/c calc')).toBe('"\'+cmd|/c calc"');
+    expect(csvEscape('-2+3')).toBe('"\'-2+3"');
+    expect(csvEscape('@SUM(A1:A2)')).toBe('"\'@SUM(A1:A2)"');
+  });
+
+  it('csvEscape: a leading TAB or CR is also neutralized', () => {
+    expect(csvEscape('\t=1+1')).toBe('"\'\t=1+1"');
+    expect(csvEscape('\rmalicious')).toBe('"\'\rmalicious"');
+  });
+
+  it('csvEscape: a formula char NOT in leading position is left alone (no false positive)', () => {
+    expect(csvEscape('a=b+c')).toBe('a=b+c');
+    expect(csvEscape('Иванов (=менеджер)')).toBe('Иванов (=менеджер)');
+  });
+
+  it('csvEscape: plain values and RFC4180 cases are unaffected by the new guard', () => {
+    expect(csvEscape('abc')).toBe('abc');
+    expect(csvEscape('a,b')).toBe('"a,b"');
+    expect(csvEscape('he said "hi"')).toBe('"he said ""hi"""');
+  });
+
+  it('rowsToCsv: a ROLE name beginning with "=HYPERLINK(...)" is neutralized in the emitted CSV', () => {
+    const row = {
+      ts: '2026-01-01', id: 'g10', action: 'grant',
+      actor: { type: 'human', name: 'Иванов' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: '=HYPERLINK("http://evil.example","click me")',
+      op: 'invoke', res: 'x', scope: '—', proposed: 'human', confirmed: [],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    // Not raw-executable: the field must not start with a bare "=" — it is
+    // quoted and apostrophe-prefixed.
+    expect(dataLine).not.toMatch(/(^|,)=HYPERLINK/);
+    expect(dataLine).toContain("'=HYPERLINK(\"\"http://evil.example\"\",\"\"click me\"\")");
+  });
+
+  it('rowsToCsv: a display NAME beginning with "+cmd|" (DDE injection) is neutralized', () => {
+    const row = {
+      ts: '2026-01-01', id: 'g11', action: 'revoke',
+      actor: { type: 'human', name: '+cmd|\' /C calc\'!A1' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: 'Роль', op: 'invoke', res: 'x', scope: '—', proposed: 'human', confirmed: [],
+    };
+    const dataLine = rowsToCsv([row]).replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).not.toMatch(/(^|,)\+cmd\|/);
+    expect(dataLine).toContain("'+cmd|");
+  });
+
+  // ---- existing RFC4180 behaviour must remain green alongside the new guard ----
+  it('rowsToCsv: still escapes a name that contains a comma (RFC4180 unaffected)', () => {
+    const row = {
+      ts: '2026-01-01', id: 'g2', action: 'grant',
+      actor: { type: 'human', name: 'Соколов, М.' },
+      subject: { type: 'human', name: 'Ларина' },
+      role: 'Роль', op: 'invoke', res: 'x', scope: '—', proposed: 'human', confirmed: [],
+    };
+    const csv = rowsToCsv([row]);
+    const dataLine = csv.replace(/^﻿/, '').trim().split('\r\n')[1];
+    expect(dataLine).toContain('"Соколов, М."');
+  });
+
+  it('rowsToCsv: still starts with a UTF-8 BOM', () => {
+    expect(rowsToCsv([]).charCodeAt(0)).toBe(0xFEFF);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REV-N1-EXPORT-USES-FILTERED-ROWS-BUT-GUARD-ON-ALL (fix-forward): the export
+// button serialises the FILTERED set (`rows`), but the disabled guard used to
+// test `displayRows.length===0` (ALL loaded rows). A filter that matches zero
+// rows left the button active and exported a header-only CSV while the UI
+// still showed "нет записей" (a lie — displayRows was non-empty). Source-
+// presence check (project convention — see screen-rights.test.jsx): the
+// screen component isn't render-tested at this node tier (no jsdom), so the
+// guard's wiring is asserted structurally against the actual source text.
+// ---------------------------------------------------------------------------
+describe('T-0652 fix-forward · export guard follows the FILTERED row set (REV-N1)', () => {
+  it('the export disabled-guard tests rows.length (filtered), not displayRows.length (all)', () => {
+    // The stub/disabled BRANCH SWITCH (the ternary that decides stub-vs-live
+    // button) must be keyed off the filtered set that is actually handed to
+    // downloadCsv/rowsToCsv — not the unfiltered displayRows. (displayRows
+    // is still legitimately read INSIDE the stub branch, to pick the honest
+    // empty-state wording — that's a separate, narrower check below.)
+    expect(screenSrc).toMatch(/\{rows\.length === 0 \? \(\s*<span className="chs-trail__stub">/);
+    expect(screenSrc).not.toMatch(/\{displayRows\.length === 0 \? \(\s*<span className="chs-trail__stub">/);
+  });
+
+  it('the live export button still serialises the filtered `rows`, not `displayRows`', () => {
+    expect(screenSrc).toMatch(/downloadCsv\(rowsToCsv\(rows\), 'grant-trail\.csv'\)/);
+  });
+
+  it('the empty-state reason distinguishes "no rows at all" from "filter matched nothing" (honest cause)', () => {
+    // Two distinct human-readable reasons must exist, gated on whether
+    // displayRows (unfiltered) is itself empty.
+    expect(screenSrc).toMatch(/displayRows\.length === 0 \? .Нет записей для экспорта./);
+    expect(screenSrc).toMatch(/Фильтр не даёт совпадений/);
+  });
+});
+

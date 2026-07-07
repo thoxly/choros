@@ -749,6 +749,12 @@ export async function executeApprovedOpAsDraft(
         const fieldMapping  = typeof args["fieldMapping"] === "string"
           ? (() => { try { return JSON.parse(args["fieldMapping"] as string); } catch { return {}; } })()
           : {};
+        // T-0681 (migration 119): optional per-binding target registry override. Empty
+        // → null (default step-result slug, backward-compatible). Validated below.
+        const targetRegistrySlugRaw = typeof args["targetRegistrySlug"] === "string"
+          ? args["targetRegistrySlug"].trim()
+          : "";
+        const targetRegistrySlug = targetRegistrySlugRaw.length > 0 ? targetRegistrySlugRaw : null;
 
         if (!processKey || !applicationId) {
           return `author_binding: missing processKey or applicationId`;
@@ -772,20 +778,35 @@ export async function executeApprovedOpAsDraft(
             return `author_binding: слаг «${appResolved.slug}» неоднозначен в этом пространстве. Уточните: укажите raw UUID нужного приложения (applicationId).`;
           }
           const resolvedAppId = appResolved.id;
+          // T-0681: fail-closed on an unresolvable target registry (same guard as
+          // POST /api/process-app-bindings) — a non-empty slug must name a real
+          // registry_def under this application, else the binding silently 409s later.
+          if (targetRegistrySlug !== null) {
+            const regRes = await client.query<{ one: number }>(
+              `SELECT 1 AS one FROM choros.registry_def
+                WHERE tenant_id = $1 AND application_id = $2 AND slug = $3 LIMIT 1`,
+              [tenantId, resolvedAppId, targetRegistrySlug],
+            );
+            if (regRes.rows.length === 0) {
+              await client.query("ROLLBACK");
+              return `author_binding: реестр «${targetRegistrySlug}» не найден в приложении этого пространства`;
+            }
+          }
           await client.query(
             `INSERT INTO choros.process_app_binding
                (tenant_id, id, process_key, application_id, form_key,
-                trigger_type, start_form_key, field_mapping,
+                trigger_type, start_form_key, field_mapping, target_registry_slug,
                 created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $9)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $10)
              ON CONFLICT (tenant_id, process_key, application_id)
              DO UPDATE SET
-               trigger_type   = EXCLUDED.trigger_type,
-               start_form_key = EXCLUDED.start_form_key,
-               field_mapping  = EXCLUDED.field_mapping,
-               updated_at     = EXCLUDED.updated_at`,
+               trigger_type         = EXCLUDED.trigger_type,
+               start_form_key       = EXCLUDED.start_form_key,
+               field_mapping        = EXCLUDED.field_mapping,
+               target_registry_slug = EXCLUDED.target_registry_slug,
+               updated_at           = EXCLUDED.updated_at`,
             [tenantId, randomUUID(), processKey, resolvedAppId, startFormKey,
-             triggerType, startFormKey, JSON.stringify(fieldMapping), nowMs],
+             triggerType, startFormKey, JSON.stringify(fieldMapping), targetRegistrySlug, nowMs],
           );
           await client.query("COMMIT");
         } catch (err) {

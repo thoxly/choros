@@ -1,0 +1,27 @@
+{
+  "task_id": "T-0639",
+  "reviewer": "independent-judge",
+  "role": "reviewer",
+  "verdict": "approved",
+  "summary": "Аддитивная фронт-правка SubstituteForm: (1) missingSubstituteFields точно совпадает с реальной серверной валидацией registerSubstitute (5 обязательных полей: absent/substitute/role/valid_until/org_scope); (2) tier-ветвление корректно — сервер на успехе (201) ВСЕГДА возвращает tier=1|2 (tier2 ? 2 : 1, никогда undefined), fallback против этого бэка не срабатывает и потому не врёт; ошибки (400/403/422) идут в !ok-ветку postIntent и tier там не нужен. Контракт сервера не тронут, единственный потребитель ответа — SubstituteForm. Анти-кейс чист.",
+  "findings": [
+    {
+      "severity": "nit",
+      "what": "role=\"status\" уже подразумевает aria-live=\"polite\"; указание обоих избыточно (безвредно).",
+      "where": "web/src/screens/rights/ra-intents.jsx:338",
+      "why": "Дублирование ARIA-семантики; не влияет на поведение, чистка косметическая."
+    },
+    {
+      "severity": "nit",
+      "what": "substituteResultMessage(data) при data=null/не-объекте опирается на optional chaining (data?.tier, data?.ttl_grant_id) — безопасно, но fallback-ветка возвращает 'Подмена объявлена' даже когда данных нет вовсе; для этого сервера недостижимо (tier всегда есть), тревоги нет.",
+      "where": "web/src/screens/rights/ra-intents.jsx:267-283",
+      "why": "Оборонительный код честен: против реального бэка fallback мёртв, никакой лжи пользователю не возникает."
+    }
+  ],
+  "checked": {
+    "validation_alignment": "missingSubstituteFields = серверные required (absent_employee_id, substitute_employee_id, role_id, valid_until, org_scope). valid_from опционален на сервере и в SubstituteForm отсутствует — расхождения нет.",
+    "tier_all_branches": "Успех 201: tier=tier2?2:1 всегда 1|2. Ошибки бросают HttpError → фронт-ветка !r.ok, tier не читается. tier=undefined/неизвестный от ЭТОГО бэка недостижим; fallback оборонительный и не врёт.",
+    "other_consumers": "Единственный потребитель ответа /api/rights/intents/substitute — SubstituteForm. Ничего не сломано.",
+    "anti_case": "git diff dev...HEAD не вносит D-064 denylist-литералов; anti-case-lock.sh PASS."
+  }
+}

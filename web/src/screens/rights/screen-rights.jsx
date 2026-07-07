@@ -19,7 +19,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { ExecutorBadge, Button, OpChip, DerivedChip, LoadingState, ErrorState, EmptyState } from '../../components/components.jsx';
+import { ExecutorBadge, Button, OpChip, DerivedChip, LoadingState, ErrorState, EmptyState, Modal } from '../../components/components.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
 import { useNavigate } from 'react-router-dom';
@@ -346,12 +346,29 @@ function WhoCanDoWhat({ role, canManage, dictionaries, onChanged }) {
 // Main screen
 // ---------------------------------------------------------------------------
 
-function RightsScreen({ initialRole }) {
+// T-0655 (§6.3 identity hub): roles held by a given subject (employee) — used to
+// focus /rights when opened from an executor card. A role is "held" iff any of its
+// assignments carries this employee_id (or, dev-fallback, the matching slug).
+function rolesHeldBySubject(roles, subject) {
+  if (!Array.isArray(roles) || !subject) return [];
+  const id = subject.id;
+  return roles.filter((r) =>
+    (r.assignments || []).some((a) => a.employee_id === id || a.employee_slug === id),
+  );
+}
+
+function RightsScreen({ initialRole, initialSubject }) {
   const [state, setState] = useState(null); // TenantStateResponse | null
   const [error, setError] = useState(null);
   const [sel, setSel] = useState(initialRole || null);
+  // T-0655: subject context banner is dismissible so it doesn't pin the view.
+  const [subjectContext, setSubjectContext] = useState(initialSubject || null);
   const [dictionaries, setDictionaries] = useState(null);
   const [employees, setEmployees] = useState([]);
+  // T-0652 (§6.5): формы управления правами больше не живут простынёй под фолдом
+  // карточки роли — они поднимаются кнопками в шапку и открываются в дровере.
+  // drawer ∈ null | 'assign' | 'grant'.
+  const [drawer, setDrawer] = useState(null);
   // UX_REVIEW F-4: пока справочники грузятся, формы показывают LoadingState —
   // «ещё грузится» отличимо от «справочник пуст/недоступен».
   const [sourcesLoading, setSourcesLoading] = useState(false);
@@ -402,11 +419,18 @@ function RightsScreen({ initialRole }) {
 
   useEffect(() => {
     if (roles) {
+      // T-0655: when opened with a subject context, land on the FIRST role that
+      // subject actually holds (so «Права и доступ» from a person's card shows
+      // that person's roles), falling back to the first role if they hold none.
+      if (subjectContext) {
+        const held = rolesHeldBySubject(roles, subjectContext);
+        if (held.length > 0) { setSel(held[0].id); return; }
+      }
       if (!sel || !roles.find(r => r.id === sel)) {
         setSel(roles[0]?.id ?? null);
       }
     }
-  }, [roles]);
+  }, [roles, subjectContext]);
 
   // Render: error → loading → empty → content
   if (error) {
@@ -477,6 +501,39 @@ function RightsScreen({ initialRole }) {
 
       {/* Правая часть — детали роли */}
       <div className="chs-rights__main">
+        {/* T-0655 (§6.3 identity hub): контекст-баннер исполнителя, если /rights
+            открыт с карточки человека/агента. Показывает, чьи права смотрим, и
+            честно сообщает, если у исполнителя ролей ещё нет. Закрывается. */}
+        {subjectContext && (
+          <div
+            className="chs-subject-context"
+            role="status"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)',
+              padding: 'var(--chs-space-3) var(--chs-space-4)',
+              marginBottom: 'var(--chs-space-4)',
+              background: 'var(--chs-color-surface-sunken, var(--chs-color-surface))',
+              border: '1px solid var(--chs-color-border)',
+              borderRadius: 'var(--chs-radius-3)',
+              fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text)',
+            }}
+          >
+            <span style={{ color: 'var(--chs-color-text-muted)' }}>Права исполнителя:</span>
+            <ExecutorBadge type={subjectContext.kind || 'human'} name={subjectContext.name || subjectContext.id} />
+            {rolesHeldBySubject(roles, subjectContext).length === 0 && (
+              <span style={{ color: 'var(--chs-color-text-muted)' }}>
+                — ролей пока нет; ниже общий список ролей тенанта.
+              </span>
+            )}
+            <Button
+              variant="ghost" size="sm"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setSubjectContext(null)}
+            >
+              Все роли
+            </Button>
+          </div>
+        )}
         <div className="chs-roledetail">
           {/* Заголовок роли */}
           <div className="chs-roledetail__head">
@@ -487,9 +544,19 @@ function RightsScreen({ initialRole }) {
               </div>
             </div>
             <div className="chs-roledetail__actions">
-              <span className="chs-readmode"><span className="chs-readmode__dot" />{canManage ? 'управление' : 'только чтение'}</span>
-              {!canManage && (
-                <Button variant="secondary" size="sm" disabled title="Запрос изменения роли — доступно только владельцу/админу">Запросить изменение</Button>
+              {/* T-0652 (§6.5): действия управления — кнопками в шапке карточки
+                  (открывают формы в дровере), а не простынёй под фолдом. Для
+                  читателя (canManage=false) — ВИДИМЫЙ бейдж «только просмотр». */}
+              {canManage ? (
+                <>
+                  <Button variant="primary" size="sm" onClick={() => setDrawer('assign')}>Назначить роль</Button>
+                  <Button variant="secondary" size="sm" onClick={() => setDrawer('grant')}>Дать право</Button>
+                </>
+              ) : (
+                <>
+                  <span className="chs-readmode chs-readmode--ro"><span className="chs-readmode__dot" />только просмотр</span>
+                  <Button variant="secondary" size="sm" disabled title="Запрос изменения роли — доступно только владельцу/админу">Запросить изменение</Button>
+                </>
               )}
             </div>
           </div>
@@ -516,35 +583,41 @@ function RightsScreen({ initialRole }) {
             </div>
           </section>
 
-          {/* Формы выдачи — FR-2/FR-3/FR-7: монтируются ТОЛЬКО при canManage.
-              При canManage===false компонент отсутствует в DOM (не disabled). */}
+          {/* T-0652 (§6.5): формы выдачи — FR-2/FR-3/FR-7 — теперь В ДРОВЕРЕ,
+              открываются кнопками из шапки карточки (не простынёй под фолдом).
+              Инвариант безопасности сохранён: Modal с формой монтируется ТОЛЬКО
+              при canManage — для читателя дровера нет в DOM вовсе (не disabled). */}
           {canManage && (
-            <section className="chs-section2">
-              <div className="chs-section2__head">
-                <h3 className="chs-section2__title">Назначить роль сотруднику</h3>
-              </div>
+            <Modal
+              open={drawer === 'assign'}
+              onClose={() => setDrawer(null)}
+              title="Назначить роль сотруднику"
+              size="md"
+            >
               <AssignRoleForm
                 roles={roles}
                 employees={employees}
                 dictionaries={dictionaries}
                 sourcesLoading={sourcesLoading}
-                onDone={load}
+                onDone={() => { load(); setDrawer(null); }}
               />
-            </section>
+            </Modal>
           )}
 
           {canManage && (
-            <section className="chs-section2">
-              <div className="chs-section2__head">
-                <h3 className="chs-section2__title">Дать роли право</h3>
-              </div>
+            <Modal
+              open={drawer === 'grant'}
+              onClose={() => setDrawer(null)}
+              title="Дать роли право"
+              size="md"
+            >
               <GrantRightForm
                 roles={roles}
                 dictionaries={dictionaries}
                 sourcesLoading={sourcesLoading}
-                onDone={load}
+                onDone={() => { load(); setDrawer(null); }}
               />
-            </section>
+            </Modal>
           )}
 
           {/* UX_REVIEW F-5: подсказка-путь к инбоксу подтверждений видна и

@@ -149,6 +149,10 @@ interface ProcessAppBindingRow {
   trigger_type: string;
   start_form_key: string | null;
   field_mapping: Record<string, string> | null;
+  // T-0575 (migration 119): per-(process, app) target registry override — the
+  // registry_def.slug this process's step result lands in AND whose record_schema
+  // the authoring floor-gate (T-0520) validates the form against. NULL = default slug.
+  target_registry_slug: string | null;
   created_at: string | number;
   updated_at: string | number;
   // application display columns (LEFT JOIN — present iff the app still exists in tenant).
@@ -167,6 +171,8 @@ export interface ProcessAppBinding {
   trigger_type: TriggerType;
   start_form_key: string | null;
   field_mapping: Record<string, string>;
+  // T-0575 (migration 119): per-binding target registry override (null = default).
+  target_registry_slug: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -185,6 +191,12 @@ function serializeBinding(row: ProcessAppBindingRow): ProcessAppBinding {
       row.field_mapping !== null && typeof row.field_mapping === "object"
         ? (row.field_mapping as Record<string, string>)
         : {},
+    // T-0575 (migration 119): surface the per-binding target registry so the UI can
+    // display it and pre-fill the picker on re-bind. NULL stays null (default slug).
+    target_registry_slug:
+      typeof row.target_registry_slug === "string" && row.target_registry_slug.trim() !== ""
+        ? row.target_registry_slug
+        : null,
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
   };
@@ -223,6 +235,7 @@ async function listBindingRows(
             COALESCE(b.trigger_type, 'launcher')  AS trigger_type,
             b.start_form_key,
             COALESCE(b.field_mapping, '{}')::jsonb AS field_mapping,
+            b.target_registry_slug,
             b.created_at, b.updated_at,
             a.slug         AS app_slug,
             a.display_name AS app_display_name
@@ -248,6 +261,30 @@ async function applicationExists(
       WHERE tenant_id = $1 AND id = $2
       LIMIT 1`,
     [tenantId, applicationId],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * T-0681: True iff a registry_def with this slug exists UNDER this application in the
+ * caller's tenant (RLS-scoped). Guards target_registry_slug so a binding can never
+ * name a registry that does not exist — that would only fail-closed later (the
+ * authoring floor-gate would resolve a null live schema → 409 WRONG_FLOOR), which is
+ * exactly the silent trap this task removes. Slug comes from the request body; the
+ * lookup is tenant+application scoped (never a raw literal).
+ */
+async function registryExistsUnderApp(
+  client: pg.PoolClient,
+  tenantId: string,
+  applicationId: string,
+  registrySlug: string,
+): Promise<boolean> {
+  const { rows } = await client.query<{ one: number }>(
+    `SELECT 1 AS one
+       FROM choros.registry_def
+      WHERE tenant_id = $1 AND application_id = $2 AND slug = $3
+      LIMIT 1`,
+    [tenantId, applicationId, registrySlug],
   );
   return rows.length > 0;
 }
@@ -392,6 +429,22 @@ export function registerProcessCatalogRoutes(
         fieldMapping = fm as Record<string, string>;
       }
 
+      // T-0575 (migration 119): optional per-binding target registry override. NULL/empty
+      // = use the default step-result slug (backward-compatible; every pre-119 row is NULL).
+      // A non-empty value is validated below (inside the tenant tx) against registry_def.
+      let targetRegistrySlug: string | null = null;
+      if (
+        "target_registry_slug" in body &&
+        body["target_registry_slug"] !== null &&
+        body["target_registry_slug"] !== undefined
+      ) {
+        if (typeof body["target_registry_slug"] !== "string") {
+          throw new HttpError(400, "VALIDATION", "target_registry_slug must be a string or null");
+        }
+        const trs = body["target_registry_slug"].trim();
+        targetRegistrySlug = trs.length > 0 ? trs : null;
+      }
+
       const tenantId = await resolveActorTenant(actor);
       const nowMs = Date.now();
 
@@ -403,21 +456,43 @@ export function registerProcessCatalogRoutes(
           throw new HttpError(404, "NOT_FOUND", "application not found in this tenant");
         }
 
+        // T-0681: fail-closed on an unresolvable target registry. A non-empty
+        // target_registry_slug MUST name a real registry_def under THIS application in
+        // THIS tenant — otherwise the binding would silently point at nothing and every
+        // form save would later 409 WRONG_FLOOR (the trap T-0678/T-0680 hit). 400 here.
+        if (targetRegistrySlug !== null) {
+          const regOk = await registryExistsUnderApp(
+            client,
+            tenantId,
+            applicationId,
+            targetRegistrySlug,
+          );
+          if (!regOk) {
+            throw new HttpError(
+              400,
+              "REGISTRY_NOT_FOUND",
+              "target_registry_slug does not name a registry in this application",
+            );
+          }
+        }
+
         // Upsert on the natural key (tenant_id, process_key, application_id).
         // T-0351: also upsert the 3 runtime trigger columns.
+        // T-0681: also upsert target_registry_slug (migration 119).
         const { rows } = await client.query<{ id: string }>(
           `INSERT INTO choros.process_app_binding
              (tenant_id, id, process_key, application_id, form_key,
-              trigger_type, start_form_key, field_mapping,
+              trigger_type, start_form_key, field_mapping, target_registry_slug,
               created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $9)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $10)
            ON CONFLICT (tenant_id, process_key, application_id)
            DO UPDATE SET
-             form_key       = EXCLUDED.form_key,
-             trigger_type   = EXCLUDED.trigger_type,
-             start_form_key = EXCLUDED.start_form_key,
-             field_mapping  = EXCLUDED.field_mapping,
-             updated_at     = EXCLUDED.updated_at
+             form_key             = EXCLUDED.form_key,
+             trigger_type         = EXCLUDED.trigger_type,
+             start_form_key       = EXCLUDED.start_form_key,
+             field_mapping        = EXCLUDED.field_mapping,
+             target_registry_slug = EXCLUDED.target_registry_slug,
+             updated_at           = EXCLUDED.updated_at
            RETURNING id`,
           [
             tenantId,
@@ -428,6 +503,7 @@ export function registerProcessCatalogRoutes(
             triggerType,
             startFormKey,
             JSON.stringify(fieldMapping),
+            targetRegistrySlug,
             nowMs,
           ],
         );
@@ -445,6 +521,7 @@ export function registerProcessCatalogRoutes(
           trigger_type: triggerType,
           start_form_key: startFormKey,
           field_mapping: fieldMapping,
+          target_registry_slug: targetRegistrySlug,
         }),
       );
     }),
