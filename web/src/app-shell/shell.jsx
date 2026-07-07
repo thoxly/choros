@@ -1007,6 +1007,10 @@ function AccountMenu({ user, theme, setTheme, onLogout, onNavigate, orgLabel }) 
 function AppShell() {
   const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "light");
   const [rightsFocus, setRightsFocus] = useState(null);
+  // T-0655 (§6.3 identity hub): when «Права и доступ» is opened FROM an executor
+  // card (/org, /agents), we carry the subject employee so /rights lands focused
+  // on THAT person's roles — instead of the former context-free onOpenRights(undefined).
+  const [rightsSubject, setRightsSubject] = useState(null); // { id, name, kind } | null
   const [paletteOpen, setPaletteOpen] = useState(false); // T-0307: ⌘K command palette
   // Auth bootstrap (T-0258): authReady gates the first render until we know the
   // mode; authConfig holds it; currentUser is the active identity (dev-user in
@@ -1281,6 +1285,14 @@ function AppShell() {
   const setTheme = (t) => setThemeState(t);
   const openRights = (roleId) => {
     setRightsFocus(roleId || null);
+    setRightsSubject(null);
+    navigate('/rights');
+  };
+  // T-0655 (§6.3): open /rights WITH an executor context — the bridge between the
+  // /org|/agents islands and the access island. `subject` = { id, name, kind }.
+  const openRightsForSubject = (subject) => {
+    setRightsFocus(null);
+    setRightsSubject(subject || null);
     navigate('/rights');
   };
 
@@ -1704,19 +1716,19 @@ function AppShell() {
             {/* T-0295: record detail view (read-only) */}
             <Route path="/apps/:appId/records/:id" element={<RecordDetailScreen />} />
             <Route path="/inbox" element={<InboxScreen />} />
-            <Route path="/org" element={<OrgScreen onOpenRights={openRights} />} />
+            <Route path="/org" element={<OrgScreen onOpenRights={openRights} onOpenRightsForSubject={openRightsForSubject} />} />
             <Route path="/processes" element={<ProcessesScreen />} />
             {/* T-0556: read-only process-instance detail. Single-segment param —
                 distinct from the 2-segment /processes/:id/edit and
                 /processes/:processKey/branch-rules below (no route collision). */}
             <Route path="/processes/:instanceId" element={<ProcessInstanceScreen />} />
             {/* T-0271: agents list + hire + LLM secret-handle bind */}
-            <Route path="/agents" element={<AgentsScreen />} />
+            <Route path="/agents" element={<AgentsScreen onOpenRightsForSubject={openRightsForSubject} />} />
             {/* T-0583: user accounts (human logins) — create/list/deactivate */}
             <Route path="/users" element={<UsersScreen />} />
             <Route path="/notifications" element={<NotificationsScreen />} />
             <Route path="/audit" element={<AuditScreen />} />
-            <Route path="/rights" element={<RightsScreen initialRole={rightsFocus} />} />
+            <Route path="/rights" element={<RightsScreen initialRole={rightsFocus} initialSubject={rightsSubject} />} />
             <Route path="/rights/intents" element={<IntentsScreen />} />
             <Route path="/rights/editor" element={<RoleEditorScreen />} />
             <Route path="/rights/criticality" element={<CriticalityScreen />} />

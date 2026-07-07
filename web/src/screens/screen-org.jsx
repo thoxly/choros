@@ -10,6 +10,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   ExecutorBadge, ExecGlyph, MonoId, Mono, Button, Field, Select, Modal, ConfirmDialog,
   EmptyState, LoadingState, ErrorState, KitIcon,
@@ -514,7 +515,18 @@ function ExplainPanel({ subjectSlug }) {
  * absent rather than fabricating placeholder values (D2 honest-empty / UX-G6).
  * The explain-PDP panel (T-0223 · I-3) is always included and calls a live endpoint.
  */
-function ExecutorDetail({ person, position, dept, onOpenRights }) {
+function ExecutorDetail({ person, position, dept, onOpenRights, onOpenRightsForSubject, onNavigate }) {
+  // T-0655 (§6.3 identity hub): «Права и доступ» carries the executor CONTEXT
+  // (subject employee) so /rights lands focused on THIS person's roles — instead
+  // of the former context-free onOpenRights(undefined). Fallback to the old
+  // context-free open only if the subject-aware handler was not supplied.
+  const openRights = () => {
+    if (onOpenRightsForSubject) {
+      onOpenRightsForSubject({ id: person.id, name: person.name, kind: person.type });
+    } else if (onOpenRights) {
+      onOpenRights(undefined);
+    }
+  };
   return (
     <div className="chs-org__detail">
       <div className="chs-detail">
@@ -534,13 +546,27 @@ function ExecutorDetail({ person, position, dept, onOpenRights }) {
             </div>
           </div>
           <div className="chs-detail__headactions">
-            <Button variant="secondary" size="sm" onClick={() => onOpenRights && onOpenRights(undefined)}
+            <Button variant="secondary" size="sm" onClick={openRights}
               glyph={<Icon name="rights" className="chs-btn__glyph" />}>Права и доступ</Button>
           </div>
         </div>
-        <p style={{ padding: 'var(--chs-space-4)', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
-          Подробная карточка (модель, бюджет, автономия) не подключена к API — детальные данные исполнителя
-          являются следующим слоем. Назначить роль и управлять оргструктурой можно слева.
+        {/* T-0655 (§6.3): грани исполнителя — мосты к островам единой модели
+            employee (учётка /users, права /rights, для агента — /agents). Раньше
+            эти экраны были островами без единого перехода. Только реальные
+            маршруты — без мёртвых кнопок. */}
+        <div className="chs-idhub-facets" style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--chs-space-2)', padding: '0 var(--chs-space-4) var(--chs-space-2)' }}>
+          <Button variant="ghost" size="sm" onClick={openRights}>Роли и права →</Button>
+          {onNavigate && (
+            <Button variant="ghost" size="sm" onClick={() => onNavigate('/users')}>Учётка →</Button>
+          )}
+          {onNavigate && person.type === 'agent' && (
+            <Button variant="ghost" size="sm" onClick={() => onNavigate('/agents')}>Открыть в «Агентах» →</Button>
+          )}
+        </div>
+        <p style={{ padding: 'var(--chs-space-3) var(--chs-space-4)', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
+          {person.type === 'agent'
+            ? 'Оргместо, LLM/инструкция и активность агента настраиваются в «Агентах»; роли и права — по ссылке выше.'
+            : 'Оргместо — слева в дереве; учётка (логин/статус) — в «Пользователях»; роли и права — по ссылке выше.'}
         </p>
         <ExplainPanel subjectSlug={person.id} />
       </div>
@@ -548,7 +574,8 @@ function ExecutorDetail({ person, position, dept, onOpenRights }) {
   );
 }
 
-function OrgScreen({ onOpenRights }) {
+function OrgScreen({ onOpenRights, onOpenRightsForSubject }) {
+  const navigate = useNavigate();
   const [selected, setSelected] = useState(null);
   const [departments, setDepartments] = useState(null);
   const [error, setError] = useState(null);
@@ -707,9 +734,9 @@ function OrgScreen({ onOpenRights }) {
             onDelete={requestDelete}
           />
           {selectedPerson
-            ? <ExecutorDetail person={selectedPerson} position={selectedPosition} dept={selectedDept} onOpenRights={onOpenRights} />
+            ? <ExecutorDetail person={selectedPerson} position={selectedPosition} dept={selectedDept} onOpenRights={onOpenRights} onOpenRightsForSubject={onOpenRightsForSubject} onNavigate={navigate} />
             : selected
-              ? <ExecutorDetail person={{ id: selected, name: selected, type: 'human' }} position={null} dept={null} onOpenRights={onOpenRights} />
+              ? <ExecutorDetail person={{ id: selected, name: selected, type: 'human' }} position={null} dept={null} onOpenRights={onOpenRights} onOpenRightsForSubject={onOpenRightsForSubject} onNavigate={navigate} />
               : (
                 <div className="chs-org__detail">
                   {departments.length === 0 ? (
