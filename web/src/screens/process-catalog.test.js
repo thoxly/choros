@@ -25,6 +25,7 @@ import {
   bindingProcessLabel,
   triggerTypeLabel,
   mapBindingError,
+  registryTargetOptions,
   TRIGGER_TYPES,
 } from './process-catalog.js';
 
@@ -124,6 +125,40 @@ describe('buildBindingPayload — T-0351 E16 extended contract', () => {
   it('produces empty field_mapping for empty field_mapping_raw', () => {
     const body = buildBindingPayload({ process_key: 'p', application_id: APP_UUID });
     expect(body.field_mapping).toEqual({});
+  });
+
+  // T-0681 (migration 119): target_registry_slug in the payload.
+  it('includes a non-empty target_registry_slug (trimmed)', () => {
+    const body = buildBindingPayload({
+      process_key: 'p', application_id: APP_UUID, target_registry_slug: '  results-registry  ',
+    });
+    expect(body.target_registry_slug).toBe('results-registry');
+  });
+
+  it('sends target_registry_slug=null when omitted or empty (default-slug path)', () => {
+    expect(buildBindingPayload({ process_key: 'p', application_id: APP_UUID }).target_registry_slug).toBeNull();
+    expect(
+      buildBindingPayload({ process_key: 'p', application_id: APP_UUID, target_registry_slug: '   ' }).target_registry_slug,
+    ).toBeNull();
+  });
+});
+
+// T-0681: registryTargetOptions — options are DATA (this app's real registries).
+describe('registryTargetOptions', () => {
+  it('maps registry rows to { value: slug, label }', () => {
+    const opts = registryTargetOptions([
+      { slug: 'results-registry', display_name: 'Результаты' },
+      { slug: 'plain-slug' },
+    ]);
+    expect(opts).toEqual([
+      { value: 'results-registry', label: 'Результаты (results-registry)' },
+      { value: 'plain-slug', label: 'plain-slug' },
+    ]);
+  });
+
+  it('is defensive against non-arrays and rows without a slug', () => {
+    expect(registryTargetOptions(null)).toEqual([]);
+    expect(registryTargetOptions([{ display_name: 'no slug' }, {}])).toEqual([]);
   });
 });
 
@@ -230,6 +265,15 @@ describe('mapBindingError', () => {
   it('maps 400 to the server validation message when present', () => {
     const m = mapBindingError(400, { error: { message: 'process_key must be a non-empty string' } });
     expect(m.message).toBe('process_key must be a non-empty string');
+  });
+
+  // T-0681: an unresolvable target registry anchors on the registry field.
+  it('maps 400 REGISTRY_NOT_FOUND to the target_registry_slug field', () => {
+    const m = mapBindingError(400, {
+      error: { code: 'REGISTRY_NOT_FOUND', message: 'target_registry_slug does not name a registry in this application' },
+    });
+    expect(m.field).toBe('target_registry_slug');
+    expect(m.message).toMatch(/registry/i);
   });
 
   it('falls back generically for unexpected status', () => {
