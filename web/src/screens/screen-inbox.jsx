@@ -1067,7 +1067,11 @@ function InboxScreen() {
   }, [tab, exec, sortSla, statusFilter, processFilter, groupByProcess]);
 
   // T-0653: debounce the text search (q) so keystrokes don't hammer the server.
+  // Skip the initial mount run — the [tab,...] effect above already issues the
+  // first load; without this guard the empty-q mount would double-fetch.
+  const qDidMount = React.useRef(false);
   useEffect(() => {
+    if (!qDidMount.current) { qDidMount.current = true; return undefined; }
     const h = setTimeout(() => {
       setPage(1);
       setTotalPages(1);
