@@ -38,6 +38,7 @@ import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthMode, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth, isGenesisOwnerForTenant } from "../db/org.js";
+import { ACTOR_ACTIVE_SQL } from "../db/actor-authority-gate.js";
 import {
   validateBindingFields,
   type BindingField,
@@ -164,9 +165,16 @@ export async function extractActorSlug(
 // by capability-grants-dao.ts — NOT a new employee-lookup. It is post-T-0658:
 // its inner slug→employee subquery carries `AND deactivated_at IS NULL`
 // (src/db/org.ts:721-748), so a DEACTIVATED owner with a still-live KC token
-// loses this bypass exactly like every other owner-gated mgmt path — no new
-// deactivation surface, no sixth authority path (ADR-T0666 §3 rejects an
-// ad-hoc inline employee-lookup for this reason).
+// loses this bypass exactly like every other owner-gated mgmt path.
+//
+// T-0662 (round-2): the process_designer role_assignment lookup BELOW is itself
+// an actor-authority resolution (slug → role membership → 403) and was an
+// UN-GATED deactivation surface — a deactivated non-owner still holding the
+// process_designer role could pass it. It now carries `e.${ACTOR_ACTIVE_SQL}`
+// and this function is registered in
+// ci/checks/actor-authority-deactivation-gate.sh AUTHORITY_RESOLVERS. (The
+// earlier claim of "no new deactivation surface" covered only the owner
+// short-circuit and overlooked this inline lookup — corrected here.)
 // ---------------------------------------------------------------------------
 
 // Exported for reuse by floor1-editor.ts (T-0073 review R-1) and
@@ -192,6 +200,11 @@ export async function checkRole(
     // Join through employee to resolve slug → UUID so the check works correctly.
     // Without the join, passing a slug directly against a UUID column returns 0
     // rows and silently yields a spurious 403 for all actors.
+    // T-0662 — this is an ACTOR-AUTHORITY resolver (process_designer
+    // role-membership decision → 403). It MUST carry the deactivation predicate
+    // (${ACTOR_ACTIVE_SQL}) so a deactivated employee who still holds a
+    // process_designer role_assignment with a still-live token cannot pass this
+    // gate. Surfaced by the round-2 scan JOIN-window widening; class T-0658.
     const { rows } = await client.query<{ cnt: number }>(
       `SELECT count(*)::int AS cnt
          FROM choros.role_assignment ra
@@ -199,7 +212,8 @@ export async function checkRole(
          JOIN choros.employee e ON e.tenant_id = ra.tenant_id AND e.id = ra.employee_id
         WHERE ra.tenant_id = $1
           AND e.slug = $2
-          AND r.slug = 'process_designer'`,
+          AND r.slug = 'process_designer'
+          AND e.${ACTOR_ACTIVE_SQL}`,
       [tenantId, actorSlug],
     );
     if (!rows[0] || rows[0].cnt === 0) {

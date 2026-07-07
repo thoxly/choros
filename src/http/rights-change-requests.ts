@@ -57,6 +57,7 @@ import {
   resolveActorSlugFromAuth,
   isGenesisOwnerForTenant,
 } from "../db/org.js";
+import { ACTOR_ACTIVE_SQL } from "../db/actor-authority-gate.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
@@ -159,7 +160,23 @@ async function extractActorFromReq(
 }
 
 // ---------------------------------------------------------------------------
-// DC-3: guard — reject if the approver is an agent (not human)
+// DC-3 + deactivation gate: this is the ACTOR-AUTHORITY resolver on BOTH the
+// approve and reject dual-control routes — it resolves the acting slug → its
+// employee row and is the ONLY employee lookup before the write. It therefore
+// carries TWO controls, fail-closed 403 on either:
+//   (1) DC-3      — reject AGENT approvers (kind != 'human').
+//   (2) T-0662    — reject DEACTIVATED humans (${ACTOR_ACTIVE_SQL}). A fired
+//                   employee with a still-live KC token (T-0658 token-TTL
+//                   window) or a dev-header must NOT be able to deliver the
+//                   SECOND dual-control signature (confirmed2_by) — that would
+//                   activate a grant/role_assignment — nor reject/hard-delete a
+//                   pending change. The predicate is inside the WHERE so a
+//                   deactivated actor yields ZERO rows → 403 (indistinguishable
+//                   from "not found", no oracle). This is registered in
+//                   ci/checks/actor-authority-deactivation-gate.sh
+//                   AUTHORITY_RESOLVERS (7th authority path, class T-0658).
+// Sole callers are the approve/reject authority routes; there is NO display
+// consumer, so gating here cannot break a name-render or re-activation path.
 // ---------------------------------------------------------------------------
 
 async function assertApproverIsHuman(
@@ -169,7 +186,7 @@ async function assertApproverIsHuman(
 ): Promise<void> {
   const { rows } = await pool.query<{ kind: string }>(
     `SELECT kind FROM choros.employee
-      WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+      WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
     [tenantId, actorSlug],
   );
   if (rows.length === 0) {

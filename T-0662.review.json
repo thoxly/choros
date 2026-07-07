@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0662",
+  "role": "independent judge (reviewer + security-skeptic)",
+  "round": 3,
+  "verdict": "approved",
+  "commit_reviewed": "25764e83 (on top of da3376d4, d593f4d4)",
+  "base": "dev",
+  "summary": "Round-3 final re-verify. My round-2 P1 (deactivated human could deliver the 2nd dual-control signature / reject on POST /api/rights/change-requests/:id/{approve,reject}) is genuinely FIXED: assertApproverIsHuman now carries AND ACTOR_ACTIVE_SQL in its WHERE (fail-closed 403, no oracle), moved allowlist -> AUTHORITY_RESOLVERS, and a live-PG regression (rights-change-requests-deactivated-approver.db.test.ts, 4/4) drives the REAL routes proving deactivated approve/reject on both grant and role_assignment = 403 with confirmed2_by staying NULL, while an ACTIVE distinct human still gets 200 (INV-3 no over-block). Agent path unaffected (predicate is a no-op for agents -> row still returned -> DC-3 kind-check fires AGENT_NOT_ALLOWED, correct code, verified by reasoning + unchanged kind check). My 3 round-2 scan bypasses (window-8 / alias / JOIN) are CLOSED and I re-broke them RED against the LIVE gate in a faithful fakeroot. The builder's own re-inventory surfaced and fixed an 8th live authority path — binding.ts:checkRole (process_designer membership -> 403) now carries e.ACTOR_ACTIVE_SQL (correct alias) + registered; three genuinely-non-authority lookups (getHoldersForRole, getRoleAssignmentOrgScopesForEmployee, grant-propose PROPOSAL_AGENT) added to the allowlist with sound reasons. Manual full scan of all 42 slug-lookups in src/db+src/http (coordinator ask г): every employee-table actor lookup sits inside a FROM|JOIN choros.employee window and maps to a registered/allowlisted function — NO false negatives in the current tree; the non-employee ones (registry_def/role/tenant/application) are correctly out of scope. Gate live + self-test green on BSD awk (macOS) AND mawk 1.3.4 (postgres:16). All requested gates pass. Residual: the accounting scan is still a HEURISTIC — three implausible-styling bypasses remain (slug 26+ lines past FROM; backtick string-concat; a `;` inside a string literal before the slug) — but none exist in the tree, all require a deliberately-odd query that ALSO forgets the predicate, and the real control is the runtime predicate (proven by db tests). Non-blocking P3. Nothing blocks merge.",
+  "coordinator_checks": {
+    "a_agent_path_ordering": "OK — the predicate does not give an active agent a spurious 403 before the kind-check. Agents have deactivated_at permanently NULL (migration 125 is human-only; agent_card has no deactivation column — actor-authority-gate.ts header), so an agent's employee row is still RETURNED by the predicate-carrying SELECT, then rows[0].kind !== 'human' throws AGENT_NOT_ALLOWED. A deactivated HUMAN yields zero rows -> 403 FORBIDDEN (indistinguishable from not-found, no oracle). No agent-deactivation scenario exists.",
+    "b_checkRole_alias_and_active_pass": "OK — the predicate is written e.${ACTOR_ACTIVE_SQL} = e.deactivated_at IS NULL, correctly qualified to the joined employee alias e (role_assignment ra / role r / employee e; deactivated_at exists only on employee, so no ambiguity). A legitimate ACTIVE process_designer has e.deactivated_at NULL -> counted -> passes (no over-block). binding unit tests (binding-owner-bypass 4, binding-get-layout 4, floor1-editor 69) all green; tsc clean.",
+    "c_gates_and_bypasses": "gate live RC=0 (FF-0662-1 7/7, FF-0662-2 clean), self-test RC=0 (now embeds judge attacks a/b + bypasses d/e/f + N-1), both re-run green on Linux mawk. My 3 round-2 bypasses replayed against the live gate: all RC=1 (caught). db regress 4/4. dual-control-isolation / anti-case-lock / single-resolver / grant-resolver-isolation / frozen-checks-immutable all PASS.",
+    "d_manual_out_of_window_scan": "Done. Enumerated all 42 slug-lookups. Employee-table actor lookups (grants-dao 259/445/456/576, org 222/323/538/740/793/816, report-page 274, rights-intents 1203, rights-change-requests 189, binding 214, sod-dao 396, substitution-dao 204/292, rights-sod 274, rights-overview 211, assistant 1290/1783, solution-bundles 113, pdp-explain 120, grant-propose 365) are ALL within a FROM|JOIN choros.employee window and ALL registered or allowlisted (org.ts:323 confirmed inside resolveActorTenant, allowlisted). The rest resolve registry_def / role / tenant / application (not employee) and are correctly uncounted. No un-gated authority lookup hides past the window in the current tree."
+  },
+  "round2_findings_disposition": {
+    "R2-P1-1 (assertApproverIsHuman un-gated — deactivated 2nd dual-control signer)": "FIXED + verified by live-PG regression (approve/reject × grant/assignment 403, confirmed2_by NULL; active 200). Moved to AUTHORITY_RESOLVERS.",
+    "R2-P2-1 (scan shape evadable: window-8 / alias / JOIN)": "FIXED for the 3 concrete cases (window 8->25 + early-close, FROM|JOIN, any <alias>.slug=$); re-broke RED by me. Residual heuristic gaps remain -> downgraded to R3-P3-1 non-blocking.",
+    "R2-P3-1 (mention-counting predicate)": "ACCEPTED — documented as a known limit in the gate header (deliberate-evasion class, review-visible).",
+    "R2-P3-2 (ForSubstitute reason imprecise)": "FIXED — allowlist reason now names the real control (SUBST_SELECT e_sub.deactivated_at IS NULL + inbox actor gates)."
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "R3-P3-1",
+      "title": "Accounting scan remains a heuristic — three implausible-styling bypasses persist (no live instance)",
+      "severity": "P3",
+      "where": "ci/checks/actor-authority-deactivation-gate.sh count_lookups_in_file :299-314 (EMP_WINDOW=25; early-close on any backtick or ';' on a line :310).",
+      "evidence": "Empirically, each keeps the live gate GREEN with an un-gated authority lookup: (g) slug=$ placed 26+ lines after FROM choros.employee (beyond window=25); (h) a backtick string-concatenation between FROM and the slug (early-close on backtick); (i) a semicolon INSIDE a string literal (e.g. e.note = 'x;y') on a line before the slug (early-close treats any ';' as a statement terminator). None occur in the current tree (verified by the full manual scan); each needs a deliberately-unusual query that ALSO omits the predicate.",
+      "impact": "Inherent limit of a grep/awk static scan — substantially narrower than round 2 (which missed plain alias/JOIN/9-line styles). The security guarantee is delivered by the RUNTIME predicates in the 7 registered resolvers (proven by db regression), with the scan as anti-forgetting defense-in-depth. Realistic forgetting (a plainly-written new authority lookup) is caught. ADR already frames the scan as a heuristic.",
+      "suggest": "Optional hardening, not required for merge: only treat ';' as a terminator when it is the last non-space char on the line (ignore in-string semicolons); raise/remove EMP_WINDOW and instead bound by the closing backtick of the same template literal; add g/h/i as self-test probes to prevent silent regression of these edges."
+    },
+    {
+      "id": "R3-P3-2",
+      "title": "Live-PG regression has no explicit agent-approver case",
+      "severity": "P3",
+      "where": "ci/checks/db/rights-change-requests-deactivated-approver.db.test.ts (AC-1..AC-4).",
+      "evidence": "AC-4 positive-controls an ACTIVE human (200). No case asserts an ACTIVE agent still gets AGENT_NOT_ALLOWED with the predicate present. Reasoning confirms it holds (agents deactivated_at NULL -> row returned -> kind check), and DC-3 is unchanged, so not a defect — just an untested corner.",
+      "suggest": "Optional: add an active-agent-approver -> 403 AGENT_NOT_ALLOWED case to lock the ordering invariant."
+    }
+  ],
+  "refutation_attempts_round3": [
+    {"attack": "replay R2 bypass d: slug=$ ~10 lines after FROM (within widened 25)", "result": "held", "note": "live gate RC=1"},
+    {"attack": "replay R2 bypass e: alias emp.slug=$ / employee.slug=$", "result": "held", "note": "RC=1 — shape now matches any <alias>.slug"},
+    {"attack": "replay R2 bypass f: JOIN choros.employee e ON ... e.slug=$", "result": "held", "note": "RC=1 — window opens on FROM|JOIN"},
+    {"attack": "slug=$ 26+ lines after FROM (beyond window=25)", "result": "broke", "note": "R3-P3-1, implausible 26-line WHERE, no live instance"},
+    {"attack": "backtick string-concat between FROM and slug (early-close on backtick)", "result": "broke", "note": "R3-P3-1, SQL-concat smell, no live instance"},
+    {"attack": "semicolon inside a string literal before slug (early-close on ';')", "result": "broke", "note": "R3-P3-1, most plausible edge, no live instance"},
+    {"attack": "assertApproverIsHuman predicate breaks active-agent code (403 before kind-check)", "result": "held", "note": "agents deactivated_at NULL -> row returned -> AGENT_NOT_ALLOWED preserved"},
+    {"attack": "checkRole predicate wrong alias / over-blocks active process_designer", "result": "held", "note": "e.deactivated_at correctly aliased; active passes; binding tests green"},
+    {"attack": "false-negative in current tree — un-gated employee authority lookup outside the window", "result": "held", "note": "manual scan of all 42 lookups: every employee-actor lookup accounted; non-employee correctly out of scope"},
+    {"attack": "awk-flavor divergence (BSD vs mawk) on the more complex alias regex", "result": "held", "note": "live + self-test green on both macOS BSD awk and postgres:16 mawk 1.3.4"}
+  ],
+  "gates_rerun_round3": {
+    "actor-authority-deactivation-gate.sh": "PASS (FF-0662-1 7/7, FF-0662-2 clean)",
+    "actor-authority-deactivation-gate.sh --self-test": "PASS (judge attacks a/b + bypasses d/e/f + positive control + N-1)",
+    "gate on Linux mawk (postgres:16), live + self-test": "PASS both",
+    "db rights-change-requests-deactivated-approver": "4/4 PASS (AC-1..AC-4)",
+    "tsc --noEmit": "PASS",
+    "vitest actor-authority-gate + binding-owner-bypass + binding-get-layout + floor1-editor": "82+... PASS (all)",
+    "dual-control-isolation.sh": "PASS",
+    "anti-case-lock.sh": "PASS (16==16)",
+    "single-resolver.sh": "PASS",
+    "grant-resolver-isolation.sh": "PASS",
+    "frozen-checks-immutable.sh": "PASS"
+  }
+}
