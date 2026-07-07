@@ -202,6 +202,38 @@ export function statusLabel(status) {
 }
 
 /**
+ * agentStatusBadge — T-0655 (§6.4/§1C): collapse an agent's repeated degradations
+ * ("должность не назначена" + "нет LLM", once per card ×N) into ONE status badge
+ * descriptor. Returns { tone, label, issues } where:
+ *   - issues[] is the ordered list of gaps that block the agent from working, each
+ *     { key, label, action } — the .jsx renders one on-the-spot action per issue.
+ *   - tone/label: 'ok'+'готов' when nothing blocks; 'warn'+the joined gaps otherwise.
+ *
+ * A system/assistant agent (has_org_place=false) legitimately has NO org-place —
+ * that is architectural (migration 093), NOT a degradation — so it does NOT get an
+ * "assign position" issue; it is labelled honestly as вне оргструктуры without a CTA.
+ *
+ * @param {{ has_org_place?: boolean, agent_type?: string, llm_bound?: boolean, position?: string|null }} agent
+ * @returns {{ tone: 'ok'|'warn', label: string, issues: Array<{key:string,label:string,action:string}> }}
+ */
+export function agentStatusBadge(agent) {
+  const issues = [];
+  const isWorkforce = Boolean(agent && agent.has_org_place);
+  // Only a workforce agent (org-attached) can be "not on a position"; a system/
+  // assistant agent is off-org by design and is not flagged.
+  if (isWorkforce && !agent.position) {
+    issues.push({ key: 'position', label: 'нет должности', action: 'Назначить должность' });
+  }
+  if (!agent || !agent.llm_bound) {
+    issues.push({ key: 'llm', label: 'нет LLM', action: 'Привязать LLM' });
+  }
+  if (issues.length === 0) {
+    return { tone: 'ok', label: 'готов', issues: [] };
+  }
+  return { tone: 'warn', label: issues.map((i) => i.label).join(' · '), issues };
+}
+
+/**
  * Human label for the agent function taxonomy (migration 093 / T-0473).
  *   workforce → исполнитель задач в оргструктуре (имеет оргместо)
  *   system    → действует над платформой (конфигуратор, доки, внедрение)
