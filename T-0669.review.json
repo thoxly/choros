@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0669",
+  "role": "reviewer",
+  "verdict": "approved",
+  "commit": "aea51d4b",
+  "summary": "Пикер приложений в FormDesigner сужается к парам из process_app_binding через реюз GET /api/process-app-bindings (T-0681) — ТОТ ЖЕ источник, которым save-путь резолвит application_id (resolveLiveRecordSchema, src/db/live-form-schema.ts: SELECT application_id FROM choros.process_app_binding WHERE process_key). Один источник правды, не два. NB-2 префилл корректен. Логика фильтра выведена из данных, без хардкода пар.",
+  "checks": {
+    "single_source_of_truth": {
+      "status": "pass",
+      "detail": "resolveLiveRecordSchema (live-form-schema.ts, шаг 1) резолвит application_id из process_app_binding WHERE process_key = $2. Клиентский фильтр boundAppIdsForProcess строится из /api/process-app-bindings.bindings[].application_id для того же process_key. Та же таблица, тот же ключ — фильтр не может предложить пару, которую сервер отвергнет как WRONG_FLOOR (кроме гонки загрузки, покрытой defense-in-depth §3.2)."
+    },
+    "race_loading": {
+      "status": "pass",
+      "detail": "processAppBindings=null пока грузится → boundAppIdsForProcess=null → фильтр НЕ применяется (полный список, pre-T-0669). Подсказка «не привязан» показывается ТОЛЬКО когда boundAppIdsForProcess && size===0 (требует загруженного не-null массива) → мигания ложной подсказки ДО загрузки НЕТ. Честно."
+    },
+    "fetch_error_fail_open": {
+      "status": "pass",
+      "detail": ".catch(() => setProcessAppBindings(null)) на 500/сети → остаётся null → fail-OPEN (полный список, поведение как до задачи; серверный classifyLayoutSave остаётся fail-closed судьёй, ADR §5 не ослаблен). Это честнее fail-closed (не рисует ложную подсказку при сетевом сбое). Соответствует спеке §3."
+    },
+    "nb2_prefill_changed_registry": {
+      "status": "pass",
+      "detail": "Сценарий «ре-привязка со СМЕНОЙ реестра»: эффект-префилл (screen-processes.jsx:320) зависит от [applicationId, existingBinding?.target_registry_slug]. Смена реестра в пикере меняет только targetRegistrySlug-state — deps эффекта не меняются → эффект НЕ перезапускается → новое значение пользователя НЕ затирается и уходит на сервер. Проверено по коду. Стейл-риск (родитель рефетчит existingBindings в разгар редактирования) практически недостижим: onBound→loadCatalog вызывает reset() на 201, форма очищается."
+    },
+    "nb2_field_mapping_roundtrip": {
+      "status": "pass",
+      "detail": "serializeFieldMapping({amount:'summa'}) → 'amount=summa' → parseFieldMapping → {amount:'summa'}. Тип/формат сохранён (unit-тест round-trip через buildBindingPayload подтверждает target_registry_slug='custom-registry' НЕ null, field_mapping={amount:'summa'}). null-safe: prefillFieldsFromBinding(null) даёт те же дефолты, что форма несёт при открытии."
+    },
+    "auth_helper": {
+      "status": "pass",
+      "detail": "Новый fetch('/api/process-app-bindings', { headers: authHeaders() }) — authHeaders уже импортирован (FormDesigner.jsx:39), зеркалит соседние /api/applications и /api/process-catalog. Голого fetch без auth нет."
+    },
+    "anti_case": {
+      "status": "pass",
+      "detail": "Фильтр выведен из ответа сервера, никаких литеральных id/slug. Тест guard: not.toMatch(/application_id === 'uuid'/). anti-case-lock: aggregate 16/16 (steady)."
+    },
+    "stale_selection_reset": {
+      "status": "pass",
+      "detail": "Эффект (FormDesigner.jsx) сбрасывает selectedAppId/selectedDefId если выбранное приложение не входит в boundAppIdsForProcess после загрузки — не оставляет невидимый несогласованный выбор в стейте (AC-1/§3.1)."
+    }
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "NB-R1",
+      "severity": "P3",
+      "title": "403 → [] (fail-closed) несогласован с 500/сеть → null (fail-open)",
+      "detail": "В эффекте загрузки: r.status===403 возвращает { bindings: [] } (пустой = fail-CLOSED, показывает подсказку «не привязан» + блокирует save), тогда как прочие не-ok/сеть → null (fail-OPEN). Для эндпоинта GET /api/process-app-bindings (withAuth + RLS, без per-role RBAC) 403 практически недостижим — авторизационный сбой даёт 401. Ветка безвредна на практике, но семантически: реальный 403 нарисовал бы ложное «процесс не привязан». Согласовать обе ветки под fail-open (null) было бы чище.",
+      "location": "web/src/forms/FormDesigner.jsx:673-681"
+    },
+    {
+      "id": "NB-R2",
+      "severity": "P3",
+      "title": "Стейл-замыкание existingBinding в registry-эффекте (теоретическое)",
+      "detail": "Эффект targetRegistrySlug (screen-processes.jsx:320) захватывает existingBinding в замыкании, но перезапускается по existingBinding?.target_registry_slug. Если бы existingBindings-проп менялся в разгар редактирования БЕЗ сабмита из этой модалки, значение пользователя могло бы быть перезатёрто. В текущем графе данных недостижимо (единственный рефетч — onBound после 201, который делает reset()). Отметка на будущее, если модалка получит live-обновления.",
+      "location": "web/src/screens/screen-processes.jsx:320-334"
+    }
+  ]
+}
