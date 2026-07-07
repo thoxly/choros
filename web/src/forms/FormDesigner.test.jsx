@@ -91,8 +91,37 @@ describe('FormDesigner — process/step binding picker (T-0665 F1)', () => {
     expect(FORM_DESIGNER_SRC).toContain('/api/process-catalog');
   });
 
-  it('the process picker filters to PUBLISHED definitions only (drafts are not offered)', () => {
-    expect(FORM_DESIGNER_SRC).toContain("d.status === 'published'");
+  it('the process picker filters to PUBLISHED or live source==="engine" definitions (drafts are not offered, T-0671)', () => {
+    // T-0671: source==='engine' processes (deployed straight to Flowable —
+    // e.g. the canonical telLinear, which has NO process_definition row and
+    // so can never carry status==='published') must be offered alongside
+    // deliberately-published modeler definitions. A modeler draft
+    // (source==='modeler', status==='draft') stays excluded.
+    expect(FORM_DESIGNER_SRC).toContain("d.source === 'engine' || d.status === 'published'");
+  });
+
+  describe('T-0671 — engine-source processes are bindable (AC-1/AC-2/AC-3)', () => {
+    // The picker's filter predicate lives inline in a fetch .then() callback,
+    // not exported as a standalone function — mirrored here byte-for-byte
+    // (same convention this file already uses for the fullscreen/UX-1
+    // predicates) so this test reddens if the predicate in FormDesigner.jsx
+    // ever drifts from what is asserted above.
+    const bindable = (d) => d.source === 'engine' || d.status === 'published';
+
+    it('AC-1: an engine-sourced process (no process_definition row, status "deployed") is offered', () => {
+      const engineDef = { process_key: 'genericEngineProc', name: 'genericEngineProc', source: 'engine', status: 'deployed', version: null, instance_count: 25 };
+      expect(bindable(engineDef)).toBe(true);
+    });
+
+    it('AC-2: a modeler draft (source "modeler", status "draft") is still NOT offered', () => {
+      const draftDef = { process_key: 'draftProc', name: 'Draft Proc', source: 'modeler', status: 'draft', version: 1, instance_count: 0 };
+      expect(bindable(draftDef)).toBe(false);
+    });
+
+    it('AC-3: a published modeler definition is still offered (no regression)', () => {
+      const publishedDef = { process_key: 'publishedProc', name: 'Published Proc', source: 'modeler', status: 'published', version: 3, instance_count: 2 };
+      expect(bindable(publishedDef)).toBe(true);
+    });
   });
 
   it('renders a free-text "Шаг процесса" field (not a fixed dropdown of invented steps)', () => {
@@ -224,6 +253,23 @@ describe('FormDesigner — application picker synced with process_app_binding (T
     // a bindings fetch that never resolves in this tier.
     const html = renderToStaticMarkup(<FormDesigner initialDocument={DOC} initialFields={FIELDS} />);
     expect(html).toContain('chs-form-designer');
+  });
+
+  it('AC-4 (T-0671): the app-binding filter (boundAppIdsForProcess) keys on process_key alone — an engine-sourced process gets the SAME filtering as a modeler process, no special-cased bypass', () => {
+    // boundAppIdsForProcess is derived purely from selectedProcessKey (a
+    // string) matched against processAppBindings[].process_key — it never
+    // reads processCatalog/d.source at all, so an engine-sourced process
+    // selected in the picker is filtered through process_app_binding
+    // exactly like any modeler process. Assert there is no source-conditioned
+    // branch around the binding filter (e.g. no `source === 'engine'` guard
+    // anywhere near boundAppIdsForProcess) that would give engine processes a
+    // different (bypassed) path.
+    const memoIdx = FORM_DESIGNER_SRC.indexOf('const boundAppIdsForProcess = useMemo(');
+    expect(memoIdx).toBeGreaterThan(-1);
+    const memoBlock = FORM_DESIGNER_SRC.slice(memoIdx, memoIdx + 500);
+    expect(memoBlock).toContain('processAppBindings');
+    expect(memoBlock).toContain('b.process_key === selectedProcessKey');
+    expect(memoBlock).not.toMatch(/source\s*===\s*['"]engine['"]/);
   });
 });
 

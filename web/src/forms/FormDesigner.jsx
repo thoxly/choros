@@ -636,12 +636,18 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   }, [initialFields]);
 
   // T-0665 (F1): load the process catalog for the process picker — the SAME
-  // real tenant data FormBuilder.jsx already uses (/api/process-catalog),
-  // filtered to PUBLISHED definitions only (a draft's BPMN can still change
-  // or lose the step being bound, and classifyLayoutSave requires a real
-  // process_app_binding anyway — offering a draft would be a false promise).
-  // Anti-case (D-064): the picker's contents are DATA (this tenant's real
-  // definitions), never a hardcoded slug list.
+  // real tenant data FormBuilder.jsx already uses (/api/process-catalog).
+  // T-0671: a bindable process is one that is REALLY executable — either a
+  // modeler definition someone deliberately PUBLISHED (`status==='published'`,
+  // a draft's BPMN can still change or lose the step being bound — false
+  // promise), OR a `source==='engine'` definition (deployed straight to
+  // Flowable, e.g. the canonical telLinear — buildCatalogDefinitions only
+  // ever adds an `engine` row when a REAL instance was observed, so it is
+  // live by construction and has NO `process_definition` row to carry a
+  // 'published' status at all; excluding it hid every engine-deployed
+  // process from the binding picker). Anti-case (D-064): the picker's
+  // contents are DATA (this tenant's real definitions) filtered by the
+  // GENERIC source/status predicate, never a hardcoded slug list.
   const loadProcessCatalog = useCallback(() => {
     if (initialFields) return; // embedding/test mode — no network (mirrors applications effect)
     setLoadingCatalog(true);
@@ -653,7 +659,9 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
         return r.json();
       })
       .then((data) => {
-        const defs = (data.definitions || []).filter((d) => d.status === 'published');
+        const defs = (data.definitions || []).filter(
+          (d) => d.source === 'engine' || d.status === 'published',
+        );
         setProcessCatalog(defs);
       })
       .catch((err) => {
@@ -1086,10 +1094,12 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
         {/* T-0665 (F1): process+step binding picker — WITHOUT this, saving always
             fell back to the hardcoded process_key='record' (no such process on
             any tenant) → 409 every time (LIVE_PROOF T-0656 P0). The process
-            list comes from /api/process-catalog (this tenant's real published
-            definitions, D-064 anti-case) — the step stays free text (mirrors
-            FormBuilder.jsx's existing pattern), with real userTask id/name
-            suggestions parsed best-effort from the chosen process's BPMN. */}
+            list comes from /api/process-catalog (this tenant's real
+            executable definitions — published modeler defs OR live
+            source==='engine' defs, T-0671, D-064 anti-case) — the step stays
+            free text (mirrors FormBuilder.jsx's existing pattern), with real
+            userTask id/name suggestions parsed best-effort from the chosen
+            process's BPMN. */}
         {!initialFields && (
           <section style={{ marginBottom: 'var(--chs-space-4)', paddingBottom: 'var(--chs-space-4)', borderBottom: '1px solid var(--chs-color-border)' }}>
             <h4 style={{ marginTop: 0 }}>Привязка</h4>
@@ -1121,7 +1131,7 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
             )}
             {!loadingCatalog && !catalogError && processCatalog && processCatalog.length === 0 && (
               <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-                Нет опубликованных процессов в этом тенанте.
+                Нет опубликованных или запущенных процессов в этом тенанте.
               </span>
             )}
 

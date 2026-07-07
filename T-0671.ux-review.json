@@ -1,0 +1,9 @@
+{
+  "task_id": "T-0671",
+  "verdict": "approved",
+  "summary": "The empty-state copy was updated honestly to match the widened predicate: 'Нет опубликованных или запущенных процессов в этом тенанте' ('No published or running processes in this tenant') accurately reflects both branches of the new filter (published modeler defs OR live engine defs) — no stale copy left over from the pre-T-0671 published-only state. Human, plain language, consistent tone with the rest of the section (matches existing loading/error copy style). No new UI surface, dialog, or error state was introduced, so no additional review surface.",
+  "findings": [],
+  "non_blocking_notes": [
+    "Raw process_key display for unnamed engine processes (e.g. a human seeing 'telLinear' in the picker instead of a friendly label) is a pre-existing product-level gap (fallbackDefinitionName, T-0616), not introduced or worsened by T-0671, and explicitly out of scope per the spec. Flagging only for future backlog awareness, not blocking."
+  ]
+}
