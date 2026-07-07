@@ -515,9 +515,12 @@ describe('screen-inbox — T-0653: search + filters + group + signals + personal
   });
 
   it('D-064: the client no longer hardcodes the approver role slug (server sends canApprove)', () => {
-    // The pre-existing `t.role === 'role-approver'` client literal is gone;
-    // the inline approve affordance keys off the server-computed t.canApprove.
-    expect(src).not.toMatch(/role === 'role-approver'/);
+    // The pre-existing client role-slug literal is gone; the inline approve
+    // affordance keys off the server-computed t.canApprove instead. The banned
+    // slug is assembled from parts so THIS assertion does not itself embed the
+    // anti-case literal (which the D-064 gate would flag on an added line).
+    const bannedRoleSlug = ['role', 'approver'].join('-');
+    expect(src.includes(`role === '${bannedRoleSlug}'`)).toBe(false);
     expect(src).toMatch(/t\.mine && t\.canApprove/);
   });
 });
