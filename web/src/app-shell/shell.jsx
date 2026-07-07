@@ -622,37 +622,44 @@ function Topbar({ screen, pathname }) {
       </Button>
     ) : screen === "org" ? (
       // T-0484: this topbar button was INERT — make it honest.
-      // T-0529: replaced Tooltip-on-disabled (AT can't reach disabled) with
-      // aria-disabled + visible helper span (В2 pattern).
-      <>
+      // T-0652 (§6.1 «нет фейковых кнопок»): раньше подсказка жила ТОЛЬКО в
+      // chs-sr-only — зрячий видел «рабочую» кнопку, которая молча ничего не
+      // делает. Теперь причина ВИДИМА рядом с кнопкой (chs-topbar__hint), а
+      // сама кнопка несёт disabled-стиль. Правило закреплено гейтом
+      // ci/checks/ux/ux-g7-no-fake-buttons.sh.
+      <span className="chs-topbar__stub">
         <Button
           variant="secondary"
           size="sm"
           aria-disabled="true"
           aria-describedby="topbar-org-hint"
+          className="chs-btn--stub"
           onClick={(e) => e.preventDefault()}
           glyph={<Icon name="plus" className="chs-btn__glyph" />}
         >
           Исполнитель
         </Button>
-        <span id="topbar-org-hint" className="chs-sr-only">
-          Добавить исполнителя можно в панели оргструктуры слева. Доступно владельцу тенанта.
+        <span id="topbar-org-hint" className="chs-topbar__hint">
+          Добавить в панели оргструктуры слева
         </span>
-      </>
+      </span>
     ) : screen === "audit" ? (
       // T-0138: download current instance audit log
       // T-0528: errors surfaced via toast; T-0530: busy-state anti-double-submit
       <Button variant="secondary" size="sm" loading={exporting} disabled={exporting} onClick={handleExportLog}>Экспорт лога</Button>
     ) : (screen === "rights" || screen === "reference") ? (
       // T-0484 / T-0538: «Доступ» и «Справочники» — нет export endpoint, честный disabled.
-      // T-0529: replaced Tooltip-on-disabled with aria-disabled + sr-only reason (В2 pattern).
-      <>
+      // T-0652 (§6.1): причина теперь ВИДИМА (не chs-sr-only) — зрячий больше не
+      // видит «рабочую» кнопку-обманку. Экспорт САМОГО ЖУРНАЛА прав живёт внутри
+      // /rights/trail (клиентский CSV, T-0652 §6.2); эта топбарная заглушка — про
+      // экспорт всей матрицы прав, эндпойнта под неё пока нет.
+      <span className="chs-topbar__stub">
         <Button variant="secondary" size="sm" aria-disabled="true" aria-describedby="topbar-rights-export-hint"
-          onClick={(e) => e.preventDefault()}>
+          className="chs-btn--stub" onClick={(e) => e.preventDefault()}>
           Экспорт прав
         </Button>
-        <span id="topbar-rights-export-hint" className="chs-sr-only">Экспорт прав пока недоступен — функция в разработке.</span>
-      </>
+        <span id="topbar-rights-export-hint" className="chs-topbar__hint">В разработке</span>
+      </span>
     ) : null;
   return (
     <header className="chs-topbar">
