@@ -29,6 +29,7 @@ import {
   formatCellValue,
   RELATION_CELL_ASYNC,
   FILE_CELL_ASYNC,
+  PERSON_CELL_ASYNC,
   deriveRecordLabel,
   mapRecordError,
   extractFieldErrors,
@@ -2308,10 +2309,20 @@ describe('T-0512: serializeRecordData person', () => {
   });
 });
 
-describe('T-0512: formatCellValue person', () => {
-  it('returns the employee name/id string when given a non-empty value', () => {
-    expect(formatCellValue('e-orlov', 'person')).toBe('e-orlov');
-    expect(formatCellValue('К. Орлов', 'person')).toBe('К. Орлов');
+describe('T-0512/T-0673: formatCellValue person', () => {
+  // T-0673 FIX: person used to return the raw value AS-IS (a "caller
+  // responsibility" the list/detail screens never actually implemented —
+  // the exact bug this task fixes: a bare employee slug rendered in the
+  // list/detail instead of a resolved name). It now mirrors relation/file
+  // and returns the PERSON_CELL_ASYNC sentinel so the caller renders a
+  // batch-resolved display-name cell instead.
+  it('returns PERSON_CELL_ASYNC for a non-empty value (never the raw id/slug directly)', () => {
+    expect(formatCellValue('emp-slug-1', 'person')).toBe(PERSON_CELL_ASYNC);
+    expect(formatCellValue('К. Орлов', 'person')).toBe(PERSON_CELL_ASYNC);
+  });
+
+  it('PERSON_CELL_ASYNC is a stable symbol identity (not recreated each call)', () => {
+    expect(formatCellValue('emp-slug-1', 'person')).toBe(formatCellValue('emp-slug-2', 'person'));
   });
 
   it('returns "—" for null', () => {

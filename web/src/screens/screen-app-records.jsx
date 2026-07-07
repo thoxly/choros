@@ -50,6 +50,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   Button, Mono, Drawer, EmptyState, ErrorState, LoadingState, KitIcon, Select, ConfirmDialog,
+  ActorChip,
 } from '../components/components.jsx';
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js';
@@ -70,6 +71,7 @@ import {
   formatCellValue,
   RELATION_CELL_ASYNC,
   FILE_CELL_ASYNC,
+  PERSON_CELL_ASYNC,
   deriveRecordLabel,
   mapRecordError,
   extractFieldErrors,
@@ -91,7 +93,7 @@ import { readSelectEnum, isFieldRequired } from './kanban-board.js';
 // structural contracts (relation/collection/rollup) dispatch to their dedicated
 // editors below — keyed off the SAME binding-contract catalog via
 // resolveFieldContract, NOT a parallel `inputKind` string chain (spec §2).
-import { FieldControl } from '../forms/field-renderer.jsx';
+import { FieldControl, fetchEmployees } from '../forms/field-renderer.jsx';
 import { resolveFieldContract } from '../forms/field-contract.js';
 
 // ---------------------------------------------------------------------------
@@ -464,6 +466,44 @@ function FileCell({ versionId, recordId }) {
         </span>
       )}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// T-0673: PersonCell — table/detail cell that resolves a person-type field's
+// value (an employee id/slug) to a human-readable name via ActorChip.
+//
+// formatCellValue returns PERSON_CELL_ASYNC for a non-empty person value. The
+// list/detail render this component instead of a plain <td>/<span> string
+// (never a raw slug like "e-larina" as the primary text, mirroring
+// RelationCell/FileCell's async-cell contract for relation/file types).
+//
+// UNLIKE RelationCell/FileCell, resolution needs NO per-cell fetch: `employees`
+// is a single Map<id, {id,name,deactivated}> BATCH-loaded ONCE per screen (one
+// GET /api/org via fetchEmployees(), the SAME source PersonPicker and
+// screen-record-detail.jsx's created_by resolver already use — T-0648's
+// generic org/employee data layer) and passed down by the caller. This keeps
+// a page of N records at ONE request total, never N+1.
+//
+// Honest fallback (D2): an id absent from the map (deleted/never-synced
+// employee) renders the RAW SLUG via ActorChip's own `resolved:false`
+// contract — never blank, never a fabricated name.
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {string} personId  the employee id/slug stored as the field value.
+ * @param {Map<string, {id:string,name:string,deactivated?:boolean}>} employees
+ *   batch-resolved employee map (id/slug → display shape), loaded once by the caller.
+ */
+export function PersonCell({ personId, employees }) {
+  const hit = employees instanceof Map ? employees.get(personId) : null;
+  return (
+    <ActorChip
+      type="human"
+      name={hit ? hit.name : personId}
+      id={personId}
+      deactivated={Boolean(hit && hit.deactivated)}
+    />
   );
 }
 
@@ -1226,6 +1266,27 @@ function AppRecordsScreen() {
   }, [schemaColumns, activeView, defaultViewConfig]);
   const recordList = records || [];
 
+  // T-0673: batch-resolve person-typed columns to display names — ONE
+  // GET /api/org for the whole page (fetchEmployees(), the SAME source
+  // PersonPicker/screen-record-detail.jsx's created_by already use), never a
+  // per-row/per-cell fetch. Gated on hasPersonColumn so a набор полей with no
+  // person field never pays this request (mirrors authorNames' non-fatal
+  // degrade in screen-record-detail.jsx — a failed load just leaves the map
+  // empty and PersonCell falls back to the raw id).
+  const hasPersonColumn = useMemo(() => columns.some((c) => c.type === 'person'), [columns]);
+  const [employeesById, setEmployeesById] = useState(() => new Map());
+  useEffect(() => {
+    if (!hasPersonColumn) return undefined;
+    let cancelled = false;
+    fetchEmployees()
+      .then((list) => {
+        if (cancelled) return;
+        setEmployeesById(new Map(list.map((e) => [e.id, e])));
+      })
+      .catch(() => { /* degrade to raw id — non-fatal, mirrors authorNames */ });
+    return () => { cancelled = true; };
+  }, [hasPersonColumn]);
+
   // T-0582 (kanban view): derive the board's inputs from the active kanban
   // config. isKanban gates the display-mode branch below (screen-app-records
   // does not change what/how records are FETCHED — GET /api/records?view_id=
@@ -1500,6 +1561,15 @@ function AppRecordsScreen() {
                           return (
                             <td key={c.key}>
                               <FileCell versionId={String(data[c.key])} recordId={rec.id} />
+                            </td>
+                          );
+                        }
+                        // T-0673: person cells resolve via the batch-loaded employeesById
+                        // map — use PersonCell (never a raw slug like "e-larina").
+                        if (rendered === PERSON_CELL_ASYNC) {
+                          return (
+                            <td key={c.key}>
+                              <PersonCell personId={String(data[c.key])} employees={employeesById} />
                             </td>
                           );
                         }
