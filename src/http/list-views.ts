@@ -49,7 +49,13 @@ import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import { resolveActorPrivilege, type ActorPrivilege } from "../db/sandbox-gate-dao.js";
-import { validateViewConfig, defaultViewConfig, type ListViewConfig } from "../core/view-config.js";
+import {
+  validateViewConfig,
+  defaultViewConfig,
+  validateViewSourceConfig,
+  defaultInboxViewConfig,
+  type ListViewConfig,
+} from "../core/view-config.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -60,6 +66,14 @@ const UUID_RE =
 
 const VIEW_NAME_MAX = 128;
 const DEFAULT_VIEW_TYPE = "list";
+
+// T-0653: view-primitive source discriminator. 'records' = today's T-0581
+// registry_def-bound view; 'inbox'/'processes' = non-registry_def source views.
+const DEFAULT_VIEW_SOURCE = "records";
+const NON_RECORDS_SOURCES = new Set(["inbox", "processes"]);
+function isKnownSource(s: string): boolean {
+  return s === "records" || NON_RECORDS_SOURCES.has(s);
+}
 
 function assertUuidShape(value: string, label: string): void {
   if (!UUID_RE.test(value)) {
@@ -143,8 +157,11 @@ async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string
 
 interface ListViewRow {
   id: string;
-  registry_def_id: string;
-  application_id: string;
+  registry_def_id: string | null;
+  application_id: string | null;
+  // T-0653: source discriminator + per-user owner (NULL = common tenant view).
+  source: string;
+  owner_actor: string | null;
   type: string;
   name: string;
   is_default: boolean;
@@ -158,6 +175,11 @@ function serializeView(row: ListViewRow): Record<string, unknown> {
     id: row.id,
     registry_def_id: row.registry_def_id,
     application_id: row.application_id,
+    source: row.source,
+    // owner_actor is surfaced so the client can badge a personal («мой») view;
+    // it is only ever the caller's own slug or null (never a foreign actor —
+    // foreign personal views are scoped out of every read).
+    owner_actor: row.owner_actor,
     type: row.type,
     name: row.name,
     is_default: row.is_default,
@@ -168,7 +190,7 @@ function serializeView(row: ListViewRow): Record<string, unknown> {
 }
 
 const VIEW_SELECT_COLS =
-  "id, registry_def_id, application_id, type, name, is_default, config, created_at, updated_at";
+  "id, registry_def_id, application_id, source, owner_actor, type, name, is_default, config, created_at, updated_at";
 
 // ---------------------------------------------------------------------------
 // Governing registry_def lookup (record_schema for config validation)
@@ -202,29 +224,67 @@ async function loadRegistryDef(
 // Services
 // ---------------------------------------------------------------------------
 
+// T-0653: personal-view visibility predicate. A read only ever returns COMMON
+// views (owner_actor IS NULL) + the CALLER'S OWN personal views. A foreign
+// actor's personal view is invisible (RLS keeps tenant isolation; this keeps
+// personal isolation WITHIN a tenant). `$N` is the actor bind-param index.
+function ownerVisibilityClause(actorParamIdx: number): string {
+  return `(owner_actor IS NULL OR owner_actor = $${actorParamIdx})`;
+}
+
 async function listViews(
   pool: pg.Pool,
   tenantId: string,
   registryDefId: string,
+  actor: string,
 ): Promise<{ views: ListViewRow[]; defaultView: ListViewConfig }> {
   return withTenantTx(pool, tenantId, async (client) => {
     const reg = await loadRegistryDef(client, tenantId, registryDefId);
+    // records-source views for this registry_def: common + caller's own personal.
     const res = await client.query<ListViewRow>(
       `SELECT ${VIEW_SELECT_COLS}
          FROM choros.list_view
-        WHERE tenant_id = $1 AND registry_def_id = $2
+        WHERE tenant_id = $1 AND registry_def_id = $2 AND source = 'records'
+          AND ${ownerVisibilityClause(3)}
         ORDER BY name ASC`,
-      [tenantId, registryDefId],
+      [tenantId, registryDefId, actor],
     );
     return { views: res.rows, defaultView: defaultViewConfig(reg.record_schema) };
   });
 }
 
-async function getView(pool: pg.Pool, tenantId: string, id: string): Promise<ListViewRow | null> {
+// T-0653: list non-records-source views (inbox/processes) — no registry_def.
+async function listSourceViews(
+  pool: pg.Pool,
+  tenantId: string,
+  source: string,
+  actor: string,
+): Promise<ListViewRow[]> {
   return withTenantTx(pool, tenantId, async (client) => {
     const res = await client.query<ListViewRow>(
-      `SELECT ${VIEW_SELECT_COLS} FROM choros.list_view WHERE tenant_id = $1 AND id = $2`,
-      [tenantId, id],
+      `SELECT ${VIEW_SELECT_COLS}
+         FROM choros.list_view
+        WHERE tenant_id = $1 AND source = $2 AND ${ownerVisibilityClause(3)}
+        ORDER BY name ASC`,
+      [tenantId, source, actor],
+    );
+    return res.rows;
+  });
+}
+
+// getView scopes by owner-visibility: a foreign personal view resolves to null
+// (404), indistinguishable from not-found (mirrors RLS foreign-tenant 404).
+async function getView(
+  pool: pg.Pool,
+  tenantId: string,
+  id: string,
+  actor: string,
+): Promise<ListViewRow | null> {
+  return withTenantTx(pool, tenantId, async (client) => {
+    const res = await client.query<ListViewRow>(
+      `SELECT ${VIEW_SELECT_COLS} FROM choros.list_view
+        WHERE tenant_id = $1 AND id = $2 AND ${ownerVisibilityClause(3)}`,
+      [tenantId, id, actor],
     );
     return res.rows[0] ?? null;
   });
@@ -238,52 +298,80 @@ type CreateOutcome =
 async function createView(args: {
   pool: pg.Pool;
   tenantId: string;
-  registryDefId: string;
+  source: string;
+  registryDefId: string | null;
   applicationId: string | null;
   type: string;
   name: string;
   config: unknown;
   isDefault: boolean;
   actor: string;
+  // T-0653: owner of a PERSONAL view (the caller's own slug) or null (common
+  // tenant view). Resolved from the caller identity, NEVER from the body.
+  ownerActor: string | null;
   nowMs: number;
 }): Promise<CreateOutcome> {
-  const { pool, tenantId, registryDefId, applicationId, type, name, config, isDefault, actor, nowMs } = args;
+  const { pool, tenantId, source, registryDefId, applicationId, type, name, config, isDefault, actor, ownerActor, nowMs } = args;
   const id = randomUUID();
   return withTenantTx(pool, tenantId, async (client) => {
-    const reg = await loadRegistryDef(client, tenantId, registryDefId);
-    if (applicationId !== null && applicationId !== reg.application_id) {
-      throw new HttpError(
-        400,
-        "VALIDATION",
-        "application_id does not match the registry_def's owning application",
-      );
-    }
-    const resolvedAppId = applicationId ?? reg.application_id;
+    let resolvedRegistryDefId: string | null = null;
+    let resolvedAppId: string | null = null;
 
-    const verdict = validateViewConfig(type, config, reg.record_schema);
-    if (!verdict.valid) {
-      return { kind: "invalid", errors: verdict.errors };
+    if (source === "records") {
+      // records-source: registry_def_id REQUIRED; config validated against the
+      // governing record_schema (T-0581 semantics, unchanged).
+      if (registryDefId === null) {
+        throw new HttpError(400, "VALIDATION", "registry_def_id is required for a records view");
+      }
+      const reg = await loadRegistryDef(client, tenantId, registryDefId);
+      if (applicationId !== null && applicationId !== reg.application_id) {
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          "application_id does not match the registry_def's owning application",
+        );
+      }
+      resolvedRegistryDefId = registryDefId;
+      resolvedAppId = applicationId ?? reg.application_id;
+
+      const verdict = validateViewConfig(type, config, reg.record_schema);
+      if (!verdict.valid) {
+        return { kind: "invalid", errors: verdict.errors };
+      }
+    } else {
+      // inbox/processes-source: NO registry_def; config validated against the
+      // static column catalog by SOURCE (validateViewSourceConfig dispatcher).
+      const verdict = validateViewSourceConfig(source, config);
+      if (!verdict.valid) {
+        return { kind: "invalid", errors: verdict.errors };
+      }
     }
 
     // Clearing a prior default happens INSIDE the same tx as the insert so the
-    // partial-unique-index invariant (≤1 default per registry_def, AC-10) never
-    // observes two defaults even transiently.
+    // scoped partial-unique-index invariant (≤1 default per
+    // tenant+source+registry_def+owner, migration 130) never observes two
+    // defaults even transiently. The clear is SCOPED to the same (source,
+    // registry_def, owner) group so setting a personal default does not touch
+    // the common default, and vice-versa.
     if (isDefault) {
       await client.query(
-        `UPDATE choros.list_view SET is_default = false, updated_at = $3
-          WHERE tenant_id = $1 AND registry_def_id = $2 AND is_default`,
-        [tenantId, registryDefId, nowMs],
+        `UPDATE choros.list_view SET is_default = false, updated_at = $2
+          WHERE tenant_id = $1 AND is_default
+            AND source = $3
+            AND registry_def_id IS NOT DISTINCT FROM $4
+            AND owner_actor IS NOT DISTINCT FROM $5`,
+        [tenantId, nowMs, source, resolvedRegistryDefId, ownerActor],
       );
     }
 
     try {
       const res = await client.query<ListViewRow>(
         `INSERT INTO choros.list_view
-           (tenant_id, id, registry_def_id, application_id, type, name, is_default,
-            config, created_at, updated_at, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $9, $10)
+           (tenant_id, id, registry_def_id, application_id, source, owner_actor,
+            type, name, is_default, config, created_at, updated_at, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $11, $12)
          RETURNING ${VIEW_SELECT_COLS}`,
-        [tenantId, id, registryDefId, resolvedAppId, type, name, isDefault, JSON.stringify(config), nowMs, actor],
+        [tenantId, id, resolvedRegistryDefId, resolvedAppId, source, ownerActor, type, name, isDefault, JSON.stringify(config), nowMs, actor],
       );
       return { kind: "created", row: res.rows[0]! };
     } catch (err) {
@@ -305,14 +393,17 @@ async function patchView(args: {
   pool: pg.Pool;
   tenantId: string;
   id: string;
+  actor: string;
   patch: { name?: string; config?: unknown; is_default?: boolean };
   nowMs: number;
 }): Promise<PatchOutcome> {
-  const { pool, tenantId, id, patch, nowMs } = args;
+  const { pool, tenantId, id, actor, patch, nowMs } = args;
   return withTenantTx(pool, tenantId, async (client) => {
+    // Owner-scoped SELECT: a foreign actor's personal view is invisible → 404.
     const cur = await client.query<ListViewRow>(
-      `SELECT ${VIEW_SELECT_COLS} FROM choros.list_view WHERE tenant_id = $1 AND id = $2`,
-      [tenantId, id],
+      `SELECT ${VIEW_SELECT_COLS} FROM choros.list_view
+        WHERE tenant_id = $1 AND id = $2 AND ${ownerVisibilityClause(3)}`,
+      [tenantId, id, actor],
     );
     if (cur.rows.length === 0) {
       return { kind: "not_found" };
@@ -320,18 +411,34 @@ async function patchView(args: {
     const existing = cur.rows[0]!;
 
     if (patch.config !== undefined) {
-      const reg = await loadRegistryDef(client, tenantId, existing.registry_def_id);
-      const verdict = validateViewConfig(existing.type, patch.config, reg.record_schema);
-      if (!verdict.valid) {
-        return { kind: "invalid", errors: verdict.errors };
+      // Source-aware validation: records-view against its record_schema,
+      // inbox/processes-view against the static column catalog.
+      if (existing.source === "records") {
+        if (existing.registry_def_id === null) {
+          return { kind: "invalid", errors: ["records view is missing its registry_def"] };
+        }
+        const reg = await loadRegistryDef(client, tenantId, existing.registry_def_id);
+        const verdict = validateViewConfig(existing.type, patch.config, reg.record_schema);
+        if (!verdict.valid) {
+          return { kind: "invalid", errors: verdict.errors };
+        }
+      } else {
+        const verdict = validateViewSourceConfig(existing.source, patch.config);
+        if (!verdict.valid) {
+          return { kind: "invalid", errors: verdict.errors };
+        }
       }
     }
 
     if (patch.is_default === true) {
+      // Clear the prior default in the SAME (source, registry_def, owner) group.
       await client.query(
-        `UPDATE choros.list_view SET is_default = false, updated_at = $3
-          WHERE tenant_id = $1 AND registry_def_id = $2 AND is_default AND id <> $4`,
-        [tenantId, existing.registry_def_id, nowMs, id],
+        `UPDATE choros.list_view SET is_default = false, updated_at = $2
+          WHERE tenant_id = $1 AND is_default AND id <> $3
+            AND source = $4
+            AND registry_def_id IS NOT DISTINCT FROM $5
+            AND owner_actor IS NOT DISTINCT FROM $6`,
+        [tenantId, nowMs, id, existing.source, existing.registry_def_id, existing.owner_actor],
       );
     }
 
@@ -373,11 +480,13 @@ async function patchView(args: {
   });
 }
 
-async function deleteView(pool: pg.Pool, tenantId: string, id: string): Promise<boolean> {
+async function deleteView(pool: pg.Pool, tenantId: string, id: string, actor: string): Promise<boolean> {
   return withTenantTx(pool, tenantId, async (client) => {
+    // Owner-scoped: a foreign actor's personal view is not deletable → 404.
     const res = await client.query(
-      `DELETE FROM choros.list_view WHERE tenant_id = $1 AND id = $2`,
-      [tenantId, id],
+      `DELETE FROM choros.list_view
+        WHERE tenant_id = $1 AND id = $2 AND ${ownerVisibilityClause(3)}`,
+      [tenantId, id, actor],
     );
     return (res.rowCount ?? 0) > 0;
   });
@@ -410,7 +519,11 @@ export function registerListViewRoutes(
     return new HttpError(400, "VIEW_CONFIG_INVALID", errors.join("; "));
   }
 
-  // GET /api/list-views?registry_def_id=<uuid>[&application_id=<uuid>]
+  // GET /api/list-views?registry_def_id=<uuid>[&application_id=<uuid>]   (records)
+  //     OR ?source=inbox|processes                                        (T-0653)
+  //
+  // Returns COMMON tenant views + the CALLER'S OWN personal views (a foreign
+  // actor's personal view is never listed — owner-scoped over RLS).
   router.register("GET", "/api/list-views", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = await extractActor(req, pool);
     const tenantId = await resolveActorTenant(actor);
@@ -418,6 +531,25 @@ export function registerListViewRoutes(
     const rawUrl = req.url ?? "";
     const qIdx = rawUrl.indexOf("?");
     const searchParams = new URLSearchParams(qIdx >= 0 ? rawUrl.slice(qIdx + 1) : "");
+
+    // T-0653: ?source= selects a non-records view source (inbox/processes).
+    // Absent source ⇒ 'records' (backward-compatible: registry_def_id path).
+    const sourceRaw = searchParams.get("source");
+    if (sourceRaw !== null && sourceRaw !== "records") {
+      if (!NON_RECORDS_SOURCES.has(sourceRaw)) {
+        throw new HttpError(400, "VIEW_SOURCE_INVALID", `unknown view source '${sourceRaw}'`);
+      }
+      const views = await listSourceViews(pool, tenantId, sourceRaw, actor);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        views: views.map(serializeView),
+        default_view: defaultInboxViewConfig(),
+      }));
+      return;
+    }
+
+    // records-source path (T-0581, unchanged contract).
     const registryDefId = searchParams.get("registry_def_id");
     if (registryDefId === null || !UUID_RE.test(registryDefId)) {
       throw new HttpError(400, "VALIDATION", "registry_def_id query param must be a valid UUID");
@@ -427,7 +559,7 @@ export function registerListViewRoutes(
       throw new HttpError(400, "VALIDATION", "application_id query param must be a valid UUID");
     }
 
-    const { views, defaultView } = await listViews(pool, tenantId, registryDefId);
+    const { views, defaultView } = await listViews(pool, tenantId, registryDefId, actor);
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
@@ -435,11 +567,18 @@ export function registerListViewRoutes(
   }));
 
   // POST /api/list-views
+  //   body { registry_def_id?, application_id?, source?, type?, name, config,
+  //          is_default?, personal? }
+  //
+  // T-0653: source defaults to 'records' (T-0581). `personal:true` creates a
+  // PERSONAL view owned by the caller (owner_actor = caller slug, resolved from
+  // identity NOT the body). A personal view needs NO configurator privilege
+  // (like a user_pref — it affects only the writer's own view); a COMMON view
+  // keeps the configurator gate (FR-10, T-0581).
   router.register("POST", "/api/list-views", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = await extractActor(req, pool);
     const tenantId = await resolveActorTenant(actor);
     const nowMs = Date.now();
-    await assertConfiguratorPrivilege(actor, tenantId, nowMs);
 
     const rawBody = await readJsonBody(req);
     if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
@@ -447,17 +586,44 @@ export function registerListViewRoutes(
     }
     const body = rawBody as Record<string, unknown>;
 
-    const registryDefId = body["registry_def_id"];
-    if (typeof registryDefId !== "string" || !UUID_RE.test(registryDefId)) {
-      throw new HttpError(400, "VALIDATION", "registry_def_id must be a valid UUID");
+    const source = typeof body["source"] === "string" && body["source"].length > 0
+      ? body["source"]
+      : DEFAULT_VIEW_SOURCE;
+    if (!isKnownSource(source)) {
+      throw new HttpError(400, "VIEW_SOURCE_INVALID", `unknown view source '${source}'`);
+    }
+
+    // registry_def_id: REQUIRED for records, ignored for others.
+    let registryDefId: string | null = null;
+    if (source === "records") {
+      const rid = body["registry_def_id"];
+      if (typeof rid !== "string" || !UUID_RE.test(rid)) {
+        throw new HttpError(400, "VALIDATION", "registry_def_id must be a valid UUID");
+      }
+      registryDefId = rid;
     }
 
     let applicationId: string | null = null;
-    if (body["application_id"] !== undefined && body["application_id"] !== null) {
+    if (source === "records" && body["application_id"] !== undefined && body["application_id"] !== null) {
       if (typeof body["application_id"] !== "string" || !UUID_RE.test(body["application_id"])) {
         throw new HttpError(400, "VALIDATION", "application_id must be a valid UUID");
       }
       applicationId = body["application_id"];
+    }
+
+    // personal flag → owner_actor = caller (never from body). Absent/false ⇒ common.
+    let personal = false;
+    if (body["personal"] !== undefined) {
+      if (typeof body["personal"] !== "boolean") {
+        throw new HttpError(400, "VALIDATION", "personal must be a boolean");
+      }
+      personal = body["personal"];
+    }
+    const ownerActor: string | null = personal ? actor : null;
+
+    // Common views require the configurator privilege; personal views do not.
+    if (!personal) {
+      await assertConfiguratorPrivilege(actor, tenantId, nowMs);
     }
 
     const type = typeof body["type"] === "string" && body["type"].length > 0 ? body["type"] : DEFAULT_VIEW_TYPE;
@@ -487,6 +653,7 @@ export function registerListViewRoutes(
     const outcome = await createView({
       pool,
       tenantId,
+      source,
       registryDefId,
       applicationId,
       type,
@@ -494,6 +661,7 @@ export function registerListViewRoutes(
       config,
       isDefault,
       actor,
+      ownerActor,
       nowMs,
     });
 
@@ -517,7 +685,7 @@ export function registerListViewRoutes(
 
       const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
-      const row = await getView(pool, tenantId, id);
+      const row = await getView(pool, tenantId, id, actor);
       if (row === null) {
         throw new HttpError(404, "NOT_FOUND", "view not found");
       }
@@ -539,7 +707,17 @@ export function registerListViewRoutes(
       const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
       const nowMs = Date.now();
-      await assertConfiguratorPrivilege(actor, tenantId, nowMs);
+
+      // T-0653: resolve the target's owner FIRST (owner-scoped). A personal view
+      // owned by the caller needs no configurator privilege; a common view does.
+      const target = await getView(pool, tenantId, id, actor);
+      if (target === null) {
+        throw new HttpError(404, "NOT_FOUND", "view not found");
+      }
+      const isPersonal = target.owner_actor === actor;
+      if (!isPersonal) {
+        await assertConfiguratorPrivilege(actor, tenantId, nowMs);
+      }
 
       const rawBody = await readJsonBody(req);
       if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
@@ -569,7 +747,7 @@ export function registerListViewRoutes(
         patch.is_default = body["is_default"];
       }
 
-      const outcome = await patchView({ pool, tenantId, id, patch, nowMs });
+      const outcome = await patchView({ pool, tenantId, id, actor, patch, nowMs });
       if (outcome.kind === "not_found") {
         throw new HttpError(404, "NOT_FOUND", "view not found");
       }
@@ -595,9 +773,18 @@ export function registerListViewRoutes(
       const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
       const nowMs = Date.now();
-      await assertConfiguratorPrivilege(actor, tenantId, nowMs);
 
-      const deleted = await deleteView(pool, tenantId, id);
+      // T-0653: a personal view owned by the caller needs no configurator
+      // privilege; a common view does. Resolve the owner first (owner-scoped).
+      const target = await getView(pool, tenantId, id, actor);
+      if (target === null) {
+        throw new HttpError(404, "NOT_FOUND", "view not found");
+      }
+      if (target.owner_actor !== actor) {
+        await assertConfiguratorPrivilege(actor, tenantId, nowMs);
+      }
+
+      const deleted = await deleteView(pool, tenantId, id, actor);
       if (!deleted) {
         throw new HttpError(404, "NOT_FOUND", "view not found");
       }

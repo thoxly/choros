@@ -584,3 +584,115 @@ export function defaultViewConfig(recordSchema: unknown): ListViewConfig {
     sort: [{ field_key: PSEUDO_COLUMN_CREATED_AT, dir: "desc" }],
   };
 }
+
+// ===========================================================================
+// T-0653 (W5-UX/§4) — VIEW-ПРИМИТИВ: source-дискриминатор + не-records виды.
+//
+// T-0581 обобщён: `list_view` теперь несёт `source` (records|inbox|processes).
+// records-виды валидируются validateViewConfig(type,…) ПРОТИВ registry_def
+// record_schema (выше — без изменений). inbox/processes-виды не имеют
+// registry_def — их config валидируется ПРОТИВ СТАТИЧЕСКОГО каталога колонок
+// (не тенант-данные, а платформенные поля инбокса), диспетчером по SOURCE.
+//
+// Открытость source (как открытость type): validateViewSourceConfig —
+// switch/map по source с default-ветвью; новый источник = новая ветка БЕЗ
+// DDL-миграции. АНТИ-КЕЙС: имена колонок — ПЛАТФОРМЕННЫЕ (name/process/executor/
+// sla/deadline/status), не персона/домен-константы.
+// ===========================================================================
+
+/** Каталог колонок инбокс-вида (стабильные ключи; density — свойство вида). */
+export const INBOX_VIEW_COLUMNS = [
+  "name",
+  "process",
+  "executor",
+  "sla",
+  "deadline",
+  "action",
+] as const;
+export type InboxViewColumnKey = (typeof INBOX_VIEW_COLUMNS)[number];
+
+const INBOX_VIEW_DENSITIES = ["compact", "comfortable"] as const;
+export type ViewDensity = (typeof INBOX_VIEW_DENSITIES)[number];
+
+/**
+ * SourceViewConfig — config-форма НЕ-records вида (inbox/processes). Легче
+ * records-config: видимость/порядок колонок из СТАТИЧЕСКОГО каталога + плотность.
+ * (Серверные q=/фильтры инбокса едут ОТДЕЛЬНЫМИ query-параметрами GET /api/inbox,
+ * а не через config — config это «мой сохранённый вид: что показывать и как
+ * плотно», реюз user-prefs-семантики T-0651.)
+ */
+export interface SourceViewConfig {
+  readonly columns: { readonly key: string; readonly visible: boolean }[];
+  readonly density: ViewDensity;
+}
+
+/**
+ * validateViewSourceConfig — ДИСПЕТЧЕР по `source` (зеркало validateViewConfig
+ * по `type`). records-виды сюда НЕ попадают (их валидирует validateViewConfig
+ * против registry_def). Неизвестный source отвергается (не молчаливый fallback).
+ */
+export function validateViewSourceConfig(
+  source: string,
+  config: unknown,
+): ValidateViewConfigResult {
+  switch (source) {
+    case "inbox":
+      return validateSourceViewConfigAgainstCatalog(config, INBOX_VIEW_COLUMNS as readonly string[]);
+    case "processes":
+      // Минимальный контракт (скоуп-граница брифа): processes-вид принимает тот
+      // же лёгкий config-shape, что и inbox (колонки+плотность), валидируется
+      // против инбокс-каталога как плейсхолдер до собственного грида процессов.
+      return validateSourceViewConfigAgainstCatalog(config, INBOX_VIEW_COLUMNS as readonly string[]);
+    default:
+      return { valid: false, errors: [`unknown view source '${source}'`] };
+  }
+}
+
+function validateSourceViewConfigAgainstCatalog(
+  config: unknown,
+  catalog: readonly string[],
+): ValidateViewConfigResult {
+  const errors: string[] = [];
+  if (!isPlainObject(config)) {
+    return { valid: false, errors: ["config must be a JSON object"] };
+  }
+  const known = new Set<string>(catalog);
+
+  const columnsRaw = config["columns"];
+  if (columnsRaw !== undefined) {
+    if (!Array.isArray(columnsRaw)) {
+      errors.push("columns must be an array");
+    } else {
+      columnsRaw.forEach((col, i) => {
+        if (!isPlainObject(col)) {
+          errors.push(`columns[${i}] must be an object`);
+          return;
+        }
+        const key = col["key"];
+        if (typeof key !== "string" || key.length === 0) {
+          errors.push(`columns[${i}].key must be a non-empty string`);
+        } else if (!known.has(key)) {
+          errors.push(`columns[${i}].key '${key}' is not a known column of this view source`);
+        }
+        if (typeof col["visible"] !== "boolean") {
+          errors.push(`columns[${i}].visible must be a boolean`);
+        }
+      });
+    }
+  }
+
+  const density = config["density"];
+  if (density !== undefined && !(INBOX_VIEW_DENSITIES as readonly string[]).includes(density as string)) {
+    errors.push(`density must be one of ${INBOX_VIEW_DENSITIES.join(" | ")}`);
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/** Синтетический дефолт инбокс-вида (все колонки видимы, comfortable). */
+export function defaultInboxViewConfig(): SourceViewConfig {
+  return {
+    columns: INBOX_VIEW_COLUMNS.map((key) => ({ key, visible: true })),
+    density: "comfortable",
+  };
+}

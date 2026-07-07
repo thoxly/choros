@@ -20,6 +20,9 @@ import {
   isServerSortable,
   resolveFieldTypes,
   enumValuesForSelectField,
+  validateViewSourceConfig,
+  defaultInboxViewConfig,
+  INBOX_VIEW_COLUMNS,
 } from "../view-config.js";
 
 const RECORD_SCHEMA = {
@@ -444,5 +447,67 @@ describe("NF-2/AC-9: defaultViewConfig is byte-equivalent to today's autogen lis
   it("empty schema still yields the created_at pseudo-column default", () => {
     const cfg = defaultViewConfig({});
     expect(cfg.columns).toEqual([{ field_key: "created_at", visible: true }]);
+  });
+});
+
+// ===========================================================================
+// T-0653 (W5-UX/§4) — validateViewSourceConfig: source dispatcher for the
+// non-records view sources (inbox/processes). Static column catalog, not a
+// registry_def record_schema.
+// ===========================================================================
+
+describe("T-0653: validateViewSourceConfig is a DISPATCHER by source", () => {
+  it("accepts a valid inbox config (known columns + density)", () => {
+    const r = validateViewSourceConfig("inbox", {
+      columns: [{ key: "name", visible: true }, { key: "sla", visible: false }],
+      density: "compact",
+    });
+    expect(r.valid).toBe(true);
+    expect(r.errors).toEqual([]);
+  });
+
+  it("rejects an unknown source (no silent fallback to inbox/list)", () => {
+    const r = validateViewSourceConfig("widgets", { columns: [], density: "compact" });
+    expect(r.valid).toBe(false);
+    expect(r.errors[0]).toMatch(/unknown view source/i);
+  });
+
+  it("rejects an inbox column key not in the static catalog", () => {
+    const r = validateViewSourceConfig("inbox", {
+      columns: [{ key: "not_a_real_column", visible: true }],
+      density: "comfortable",
+    });
+    expect(r.valid).toBe(false);
+    expect(r.errors.some((e) => /not a known column/i.test(e))).toBe(true);
+  });
+
+  it("rejects a non-boolean visible", () => {
+    const r = validateViewSourceConfig("inbox", {
+      columns: [{ key: "name", visible: "yes" }],
+      density: "comfortable",
+    });
+    expect(r.valid).toBe(false);
+    expect(r.errors.some((e) => /visible must be a boolean/i.test(e))).toBe(true);
+  });
+
+  it("rejects an unknown density", () => {
+    const r = validateViewSourceConfig("inbox", { columns: [], density: "cozy" });
+    expect(r.valid).toBe(false);
+    expect(r.errors.some((e) => /density/i.test(e))).toBe(true);
+  });
+
+  it("processes source accepts the same lightweight shape (minimal contract)", () => {
+    const r = validateViewSourceConfig("processes", {
+      columns: [{ key: "process", visible: true }],
+      density: "comfortable",
+    });
+    expect(r.valid).toBe(true);
+  });
+
+  it("defaultInboxViewConfig lists every catalog column, all visible, comfortable", () => {
+    const d = defaultInboxViewConfig();
+    expect(d.columns.map((c) => c.key)).toEqual([...INBOX_VIEW_COLUMNS]);
+    expect(d.columns.every((c) => c.visible)).toBe(true);
+    expect(d.density).toBe("comfortable");
   });
 });
