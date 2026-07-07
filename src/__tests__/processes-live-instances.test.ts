@@ -414,6 +414,124 @@ describe("T-0614 [деТЭЛ] · /api/processes name/progress/execs are honestly
 });
 
 // ---------------------------------------------------------------------------
+// T-0708 [E16 §6, capstone T-0691] — GET /api/processes?record=<id> filters the
+// tenant-scoped list to instances started from / bound to that record (the
+// record→instance REVERSE link on the record-detail card). The filter is applied
+// AFTER the tenant-scoped projection fold, so it can never widen visibility.
+// ---------------------------------------------------------------------------
+
+/** A started-instance row carrying a record_id in its payload (on_create origin). */
+function startedRowForRecord(inst: string, recordId: string): Record<string, unknown> {
+  const row = startedRow(inst);
+  row["payload"] = { ...(row["payload"] as object), record_id: recordId };
+  return row;
+}
+
+describe("T-0708 · GET /api/processes?record=<id> reverse link (запись→инстансы)", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+  const REC_A = "aaaaaaaa-0000-0000-0000-000000000001";
+  const REC_B = "bbbbbbbb-0000-0000-0000-000000000002";
+
+  afterAll(() => {
+    if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = prevDbUrl;
+  });
+
+  async function withHarness(
+    deps: StartInstanceDeps,
+    fn: (baseUrl: string) => Promise<void>,
+  ): Promise<void> {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0708";
+    const harness = buildServer(deps);
+    await new Promise<void>((resolve) => harness.server.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      await fn(harness.baseUrl());
+    } finally {
+      await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    }
+  }
+
+  it("returns ONLY the instances whose recordId matches the filter", async () => {
+    // Three instances: two bound to REC_A, one to REC_B. ?record=REC_A ⇒ exactly the two.
+    const deps = makeDeps([
+      startedRowForRecord("inst-a-1", REC_A),
+      startedRowForRecord("inst-a-2", REC_A),
+      startedRowForRecord("inst-b-1", REC_B),
+    ]);
+    await withHarness(deps, async (baseUrl) => {
+      const { status, json } = await httpReq(
+        "GET",
+        `${baseUrl}/api/processes?record=${encodeURIComponent(REC_A)}`,
+        { "x-dev-user": ACTOR },
+      );
+      expect(status).toBe(200);
+      const data = json as { instances: Array<Record<string, unknown>> };
+      const ids = data.instances.map((i) => i.id).sort();
+      expect(ids).toEqual(["inst-a-1", "inst-a-2"]);
+      // The REC_B instance must NOT leak into a REC_A query.
+      expect(data.instances.every((i) => i.id !== "inst-b-1")).toBe(true);
+      // Every returned instance carries the queried recordId (wire contract intact).
+      expect(data.instances.every((i) => i.recordId === REC_A)).toBe(true);
+    });
+  });
+
+  it("drops instances that carry NO recordId (never fabricated into a record binding)", async () => {
+    const deps = makeDeps([
+      startedRowForRecord("inst-a-1", REC_A),
+      startedRow("inst-no-record"), // no record_id in payload
+    ]);
+    await withHarness(deps, async (baseUrl) => {
+      const { json } = await httpReq(
+        "GET",
+        `${baseUrl}/api/processes?record=${encodeURIComponent(REC_A)}`,
+        { "x-dev-user": ACTOR },
+      );
+      const data = json as { instances: Array<Record<string, unknown>> };
+      expect(data.instances.map((i) => i.id)).toEqual(["inst-a-1"]);
+    });
+  });
+
+  it("a record with NO related instances yields honest-empty (section hidden on the card)", async () => {
+    const deps = makeDeps([startedRowForRecord("inst-a-1", REC_A)]);
+    await withHarness(deps, async (baseUrl) => {
+      const { status, json } = await httpReq(
+        "GET",
+        `${baseUrl}/api/processes?record=${encodeURIComponent("cccccccc-0000-0000-0000-000000000009")}`,
+        { "x-dev-user": ACTOR },
+      );
+      expect(status).toBe(200);
+      expect((json as { instances: unknown[] }).instances).toEqual([]);
+    });
+  });
+
+  it("WITHOUT the record param the list is byte-unchanged (full tenant list)", async () => {
+    // Regression: the pre-T-0708 behaviour (no filter ⇒ every tenant instance).
+    const deps = makeDeps([
+      startedRowForRecord("inst-a-1", REC_A),
+      startedRow("inst-no-record"),
+    ]);
+    await withHarness(deps, async (baseUrl) => {
+      const { json } = await httpReq("GET", `${baseUrl}/api/processes`, { "x-dev-user": ACTOR });
+      const data = json as { instances: Array<Record<string, unknown>> };
+      const ids = data.instances.map((i) => i.id).sort();
+      expect(ids).toEqual(["inst-a-1", "inst-no-record"]);
+    });
+  });
+
+  it("a blank record param (?record=) is treated as NO filter (full list)", async () => {
+    const deps = makeDeps([
+      startedRowForRecord("inst-a-1", REC_A),
+      startedRow("inst-no-record"),
+    ]);
+    await withHarness(deps, async (baseUrl) => {
+      const { json } = await httpReq("GET", `${baseUrl}/api/processes?record=`, { "x-dev-user": ACTOR });
+      const data = json as { instances: Array<Record<string, unknown>> };
+      expect(data.instances.map((i) => i.id).sort()).toEqual(["inst-a-1", "inst-no-record"]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // No-DB fallback — the seed list + detail still work without DATABASE_URL.
 // ---------------------------------------------------------------------------
 
@@ -451,6 +569,17 @@ describe("T-0564 · /api/processes no-DB fallback (seed preserved)", () => {
     );
     expect(status).toBe(200);
     expect((json as Record<string, unknown>).id).toBe("INS-7731");
+  });
+
+  it("T-0708: GET /api/processes?record=<id> is honest-empty in no-DB mode (seed carries no recordId)", async () => {
+    // The seed/pack fixtures have no record_id, so a record-scoped query is
+    // legitimately empty — we do not fabricate a fixture→record binding.
+    const { status, json } = await httpReq(
+      "GET",
+      `${harness.baseUrl()}/api/processes?record=aaaaaaaa-0000-0000-0000-000000000001`,
+    );
+    expect(status).toBe(200);
+    expect((json as { instances: unknown[] }).instances).toEqual([]);
   });
 
   it("GET /api/processes/:id 404s an unknown seed id", async () => {
