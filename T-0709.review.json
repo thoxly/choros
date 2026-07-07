@@ -1,0 +1,52 @@
+{
+  "task_id": "T-0709",
+  "reviewer": "independent-judge",
+  "verdict": "approved",
+  "review_round": 2,
+  "reverify_commit": "f3a7f017",
+  "p0_closed": true,
+  "p1_closed": true,
+  "p2_closed": true,
+  "summary": "Round-2 re-verify of f3a7f017: both round-1 blockers CLOSED. P0 (catalog↔instance-detail divergence): the live-node resolver was extracted to the pure core (src/core/process-catalog-view.ts:420 resolveLiveNodesByInstance) and is now the SINGLE source called by BOTH the catalog (process-catalog.ts:357) AND the list+detail routes (processes.ts:419). /api/processes/:id now serializes projectionToInstance(overlaid) (processes.ts:616) instead of the frozen (match) — node/nodes reflect the live token, not the snapshot; the old duplicate resolver was removed from process-catalog.ts. Catalog + list + detail = one live source, divergence structurally impossible. P1 (arbitrary tasks[0] on AND-split): pickPrimaryLiveNode sorts by intrinsic key (taskDefinitionKey→id→name), never response order; >1 active ⇒ ambiguous:true + full concurrentSteps per the AMBIGUOUS_ACTIVE_TASK precedent (surface-not-refuse for a display overlay). P2: shared LIVE_OVERLAY_DEADLINE_MS=2000 wall-clock budget caps the fan-out; a slow-but-alive engine degrades to snapshot. processes.ts stays pg-free (FF-7-3 PASS live). All specified gates green; +17 tests all load-bearing (order-independence proven forward-vs-reversed, deadline proven against a real 60s hang, single-source proven catalog==detail from one task set).",
+  "round1_findings_status": [
+    {
+      "id": "T-0709-R-P0-1",
+      "severity": "P0",
+      "status": "CLOSED",
+      "resolution": "One resolveLiveNodesByInstance def in core (process-catalog-view.ts:420); two call sites (process-catalog.ts:357, processes.ts:419) — verified by grep. List route overlays before mapping (processes.ts:533); detail route overlays the matched projection and serializes projectionToInstance(overlaid) at line 616 (was projectionToInstance(match)). No frozen node/nodes path remains. overlayLiveSteps also overlays concurrentSteps (→ detail nodes) only for projections carrying the field, keeping the catalog path byte-identical. Single-source invariant pinned by the 'catalog ↔ detail derive the SAME live node from ONE source' test."
+    },
+    {
+      "id": "T-0709-R-P1-1",
+      "severity": "P1",
+      "status": "CLOSED",
+      "resolution": "pickPrimaryLiveNode (process-catalog-view.ts:344) sorts a copy by (taskDefinitionKey, id, name) — total stable function of the data, not Flowable response order. >1 active ⇒ ambiguous:true + all branches in concurrentSteps. Determinism proven non-tautologically: forward and reversed array orderings of the same AND-split yield byte-identical output; tie tests prove id-then-name fallback."
+    },
+    {
+      "id": "T-0709-R-P2-1",
+      "severity": "P2",
+      "status": "CLOSED",
+      "resolution": "Shared wall-clock deadline (LIVE_OVERLAY_DEADLINE_MS=2000) passed by both callers; per-instance calls race the remaining budget, a loser keeps its snapshot (atomic per instance — no torn node). Proven against a real 60s-hang stub capped to ~30ms; already-elapsed budget skips the call with zero added latency."
+    }
+  ],
+  "adversarial_probes": {
+    "a_single_source": "PASS — one core resolver, both surfaces call it; old duplicate removed; :id serializes overlaid not frozen match.",
+    "b_primary_determinism": "PASS — intrinsic-key sort; forward==reversed test proves order-independence; ties stable.",
+    "c_degrade_both_honest": "PASS — engine down/error/no-task/deadline → snapshot on BOTH, 200 not 500; per-instance atomic; total outage → empty map → all snapshots.",
+    "d_pg_free_isolation": "PASS — start-route-isolation FF-7-3 green; processes.ts imports only core/*, no pg (only comment mentions).",
+    "e_tenant_scope": "PASS — inst ids from tenant-scoped listInstanceProjections; detail overlays only the single tenant-matched projection; no cross-tenant surface added."
+  },
+  "non_blocking": [
+    {
+      "id": "T-0709-R-N-2",
+      "severity": "non-blocking",
+      "title": "LIVE_OVERLAY_DEADLINE_MS declared twice (process-catalog.ts export + processes.ts local const)",
+      "detail": "Intentional and documented (processes.ts:38): importing the value from process-catalog.ts would pull pg into the display-plane module and trip FF-7-3. Minor drift risk. Follow-up: hoist the constant into the pure core so both import ONE pg-free value."
+    },
+    {
+      "id": "T-0709-R-N-1",
+      "severity": "non-blocking",
+      "title": "Engine-down vs no-active-task indistinguishable in logs (carried from round 1)",
+      "detail": "resolveLiveNodesByInstance omits the key identically for !result.ok, a throw, and a deadline-loss. Honest to the user, opaque to operators. Optional debug counter on !result.ok would make a real outage observable."
+    }
+  ]
+}

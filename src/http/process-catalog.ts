@@ -48,7 +48,10 @@ import {
 import {
   buildCatalogDefinitions,
   serializeInstance,
+  overlayLiveSteps,
+  resolveLiveNodesByInstance,
   type CatalogDefinition,
+  type CatalogEnginePort,
   type CatalogInstance,
   type ProcessDefRow,
 } from "../core/process-catalog-view.js";
@@ -73,6 +76,14 @@ export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
 export interface ProcessCatalogDeps {
   pool: pg.Pool;
   resolveActorTenant: ActorTenantResolver;
+  /**
+   * T-0709 [E16/P1]: OPTIONAL live engine. When present, each non-done instance's
+   * displayed step/role is overlaid with the engine's REAL active user-task (the same
+   * live source /api/processes/:inst reads) so the catalog no longer shows the NEXT
+   * step's label as the CURRENT one. Absent (or unreachable per-instance) ⇒ honest
+   * degrade to the audit-snapshot projection — never worse than the pre-T-0709 catalog.
+   */
+  flowable?: CatalogEnginePort;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,12 +304,22 @@ async function registryExistsUnderApp(
 // Route registration
 // ---------------------------------------------------------------------------
 
+/**
+ * T-0709-R-P2-1 (judge): shared per-request wall-clock budget for the best-effort
+ * live-node overlay. A uniformly-slow-but-alive engine could otherwise stall the read
+ * for tens of seconds (up to ~30s per instance × the 200-instance page). This caps the
+ * WHOLE overlay: past it, the read degrades to the audit snapshot (never worse). Kept
+ * short — the overlay is a display nicety, not load-bearing. Reused by the detail plane
+ * (processes.ts) via the SAME resolveLiveNodesByInstance so both surfaces bound identically.
+ */
+export const LIVE_OVERLAY_DEADLINE_MS = 2_000;
+
 export function registerProcessCatalogRoutes(
   router: Router,
   deps?: ProcessCatalogDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant } = deps;
+  const { pool, resolveActorTenant, flowable } = deps;
 
   // -------------------------------------------------------------------------
   // GET /api/process-catalog — REAL definitions + REAL instances + bindings.
@@ -321,8 +342,29 @@ export function registerProcessCatalogRoutes(
       // WHERE tenant_id guard, audit-backed). Real instances only — never seed/mock.
       const projections: InstanceProjection[] = await listInstanceProjections(pool, tenantId);
 
+      // T-0709 [E16/P1]: overlay each non-done instance's LIVE active user-task
+      // (step/role) from the engine — the SAME source /api/processes/:inst reads — so
+      // the catalog shows the node the token is REALLY on, not the NEXT step's label
+      // that the start-time process.started snapshot may have frozen in (the родитель
+      // T-0349 divergence). Best-effort: no flowable, or a per-instance engine miss,
+      // leaves that projection on its honest audit snapshot (overlayLiveSteps no-ops).
+      let displayProjections: InstanceProjection[] = projections;
+      if (flowable) {
+        const runningInstIds = projections
+          .filter((p) => p.status !== "done")
+          .map((p) => p.inst);
+        if (runningInstIds.length > 0) {
+          const liveByInst = await resolveLiveNodesByInstance(flowable, runningInstIds, {
+            deadlineMs: LIVE_OVERLAY_DEADLINE_MS,
+          });
+          displayProjections = overlayLiveSteps(projections, liveByInst);
+        }
+      }
+
+      // Definitions count instances by key — unaffected by the step/role overlay, so
+      // build them from the original projections (both arrays share the same instances).
       const definitions: CatalogDefinition[] = buildCatalogDefinitions(defRows, projections);
-      const instances: CatalogInstance[] = projections.map(serializeInstance);
+      const instances: CatalogInstance[] = displayProjections.map(serializeInstance);
       const bindings = bindingRows.map(serializeBinding);
 
       res.statusCode = 200;

@@ -1076,3 +1076,166 @@ describe("T-0648 LIVE_PROOF §2 · sequenceFlow transitions are filtered from st
     expect(task?.completedByType).toBe("human");
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0709-R-P0-1 (judge) — the DETAIL plane (GET /api/processes[/:id]) now overlays the
+// LIVE engine active node, so node/nodes match the catalog (single source of truth).
+//
+// The bug the review found: /api/processes/:id derived node/nodes purely from the
+// process.started SNAPSHOT (projectionToInstance ← listInstanceProjections), while the
+// catalog (T-0709) already read the live engine — the two surfaces disagreed. These
+// tests prove: (1) a running instance whose snapshot froze step X is reported on the
+// LIVE step Y; (2) honest degrade to the snapshot when the engine misses; (3) an
+// AND-split surfaces ALL live branches in `nodes` (P1 ambiguity handled deterministically);
+// (4) catalog and detail derive the SAME step for the SAME instance (no divergence).
+//
+// NEUTRAL step labels — the divergence is "snapshot ≠ live", no D-064 case string.
+// ---------------------------------------------------------------------------
+
+const DETAIL_SNAP_STEP = "step-frozen"; // what the process.started snapshot froze in.
+const DETAIL_LIVE_STEP = "step-live";   // where the engine token really is.
+const DETAIL_LIVE_ROLE = "role-live";
+
+/** A started-instance row whose snapshot step is the FROZEN (wrong) step. */
+function frozenStartedRow(inst: string): Record<string, unknown> {
+  return {
+    id: "audit-evt-detail",
+    actor: ACTOR,
+    payload: {
+      inst,
+      proc_key: LIVE_PROC,
+      task_role: "role-frozen",
+      task_step: DETAIL_SNAP_STEP,
+      inbox_task_id: "audit-evt-detail",
+    },
+    occurred_at: Date.parse("2026-07-05T10:00:00Z"),
+  };
+}
+
+/**
+ * A FlowableClient stub exposing getActiveUserTasks (the live source the overlay reads)
+ * plus the T-0609 history methods (so the detail branch's history fetch degrades cleanly).
+ */
+function makeLiveEngineStub(
+  activeByInst: Record<
+    string,
+    { name: string; candidateGroups: string[]; taskDefinitionKey?: string; id?: string }[] | "error"
+  >,
+): StartInstanceDeps["flowable"] {
+  return {
+    getActiveUserTasks: async (inst: string) => {
+      const entry = activeByInst[inst];
+      if (entry === undefined) return { ok: true as const, tasks: [] };
+      if (entry === "error") return { ok: false as const, code: "ENGINE_DOWN" };
+      return { ok: true as const, tasks: entry };
+    },
+    // History methods degrade to honest-empty (not the focus of these tests).
+    getHistoricVariableInstances: async () => ({ ok: false as const, code: "UNKNOWN" as const }),
+    getHistoricActivityInstances: async () => ({ ok: false as const, code: "UNKNOWN" as const }),
+  } as unknown as StartInstanceDeps["flowable"];
+}
+
+describe("T-0709 · GET /api/processes/:id overlays the LIVE active node (detail ↔ catalog single source)", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+
+  afterAll(() => {
+    if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+    else process.env["DATABASE_URL"] = prevDbUrl;
+  });
+
+  async function withHarness(
+    deps: StartInstanceDeps,
+    fn: (baseUrl: string) => Promise<void>,
+  ): Promise<void> {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0709-detail";
+    const harness = buildServer(deps);
+    await new Promise<void>((resolve) => harness.server.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      await fn(harness.baseUrl());
+    } finally {
+      await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    }
+  }
+
+  it("AC-D1: a running instance frozen on step X is reported on the LIVE step Y (node overlaid)", async () => {
+    const deps = makeDepsWithFlowable(
+      [frozenStartedRow(LIVE_INST)],
+      makeLiveEngineStub({
+        [LIVE_INST]: [{ name: DETAIL_LIVE_STEP, candidateGroups: [DETAIL_LIVE_ROLE], taskDefinitionKey: "k1", id: "t1" }],
+      }),
+    );
+    await withHarness(deps, async (baseUrl) => {
+      const { status, json } = await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, { "x-dev-user": ACTOR });
+      expect(status).toBe(200);
+      const data = json as Record<string, unknown>;
+      // The fix: node/nodes reflect the LIVE engine node, NOT the frozen snapshot.
+      expect(data.node).toBe(DETAIL_LIVE_STEP);
+      expect(data.nodes).toEqual([DETAIL_LIVE_STEP]);
+      expect(data.node).not.toBe(DETAIL_SNAP_STEP);
+    });
+  });
+
+  it("AC-D2: engine unreachable for the instance → detail degrades to the snapshot (never worse)", async () => {
+    const deps = makeDepsWithFlowable(
+      [frozenStartedRow(LIVE_INST)],
+      makeLiveEngineStub({ [LIVE_INST]: "error" }),
+    );
+    await withHarness(deps, async (baseUrl) => {
+      const { json } = await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, { "x-dev-user": ACTOR });
+      const data = json as Record<string, unknown>;
+      expect(data.node).toBe(DETAIL_SNAP_STEP); // honest degrade to the frozen snapshot.
+    });
+  });
+
+  it("AC-D3 (P1): an AND-split surfaces ALL live branches in `nodes`, primary deterministic", async () => {
+    const deps = makeDepsWithFlowable(
+      [frozenStartedRow(LIVE_INST)],
+      makeLiveEngineStub({
+        [LIVE_INST]: [
+          { name: "Ветка Б", candidateGroups: ["role-b"], taskDefinitionKey: "task-b", id: "t-2" },
+          { name: "Ветка А", candidateGroups: ["role-a"], taskDefinitionKey: "task-a", id: "t-1" },
+        ],
+      }),
+    );
+    await withHarness(deps, async (baseUrl) => {
+      const { json } = await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, { "x-dev-user": ACTOR });
+      const data = json as Record<string, unknown>;
+      // Both concurrent branches surface in `nodes`, deterministically ordered by defKey
+      // (task-a before task-b) — NOT the response-array order (which had Б first).
+      expect(data.nodes).toEqual(["Ветка А", "Ветка Б"]);
+      expect(data.node).toBe("Ветка А"); // primary = deterministic first, not array[0].
+    });
+  });
+
+  it("AC-D4: detail (:id) and list (/api/processes) agree on the live node for the SAME instance", async () => {
+    const deps = makeDepsWithFlowable(
+      [frozenStartedRow(LIVE_INST)],
+      makeLiveEngineStub({
+        [LIVE_INST]: [{ name: DETAIL_LIVE_STEP, candidateGroups: [DETAIL_LIVE_ROLE], taskDefinitionKey: "k1", id: "t1" }],
+      }),
+    );
+    await withHarness(deps, async (baseUrl) => {
+      const list = (await httpReq("GET", `${baseUrl}/api/processes`, { "x-dev-user": ACTOR })).json as {
+        instances: Array<Record<string, unknown>>;
+      };
+      const detail = (await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, { "x-dev-user": ACTOR }))
+        .json as Record<string, unknown>;
+      const listItem = list.instances.find((i) => i.id === LIVE_INST);
+      // Single source of truth: both surfaces show the SAME live node — no divergence.
+      expect(listItem?.node).toBe(DETAIL_LIVE_STEP);
+      expect(detail.node).toBe(DETAIL_LIVE_STEP);
+      expect(listItem?.node).toBe(detail.node);
+    });
+  });
+
+  it("AC-D5: a bare flowable stub (no getActiveUserTasks) leaves node/nodes on the snapshot", async () => {
+    // Regression: the many existing tests pass a bare {} flowable — the overlay must not throw.
+    const deps = makeDeps([frozenStartedRow(LIVE_INST)]);
+    await withHarness(deps, async (baseUrl) => {
+      const { status, json } = await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, { "x-dev-user": ACTOR });
+      expect(status).toBe(200);
+      const data = json as Record<string, unknown>;
+      expect(data.node).toBe(DETAIL_SNAP_STEP); // no engine method → snapshot, no crash.
+    });
+  });
+});

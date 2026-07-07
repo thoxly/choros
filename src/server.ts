@@ -751,6 +751,10 @@ function buildRouter(
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
+      // T-0709 [E16/P1]: pass the shared FlowableClient so the catalog overlays each
+      // running instance's LIVE active step/role (the source /api/processes/:inst
+      // reads) instead of the start-time snapshot. Optional — absent ⇒ honest degrade.
+      flowable: flowableClient ?? undefined,
     });
   }
 
