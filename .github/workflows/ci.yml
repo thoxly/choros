@@ -30,9 +30,33 @@ on:
 # would gain from staying unlocked, but that saves little (the port jobs are the
 # long pole either way) versus the risk of a future compose-using job forgetting
 # to add the lock. One global lock is simplest and cannot bit-rot.
+#
+# T-0704 (follow-up to T-0703): `cancel-in-progress: false` only protects an
+# IN-PROGRESS run — it does NOT protect a PENDING (queued-but-not-started) one.
+# GitHub's documented default for a concurrency group is `queue: single`: "any
+# existing pending job or workflow in the same concurrency group will be
+# cancelled and the new queued job or workflow will take its place" — this
+# applies REGARDLESS of cancel-in-progress. Observed live: PR #15 is a standing
+# "dev → main" promotion PR (head=dev, base=main) that GitHub auto-synchronizes
+# on every push to dev, spawning a `pull_request` run for the SAME commit as the
+# `push` run. When the push run (carrying `deploy-dev`, which needs [ci, db, kc,
+# stack, flowable] and so is usually still queued behind those) was still
+# pending, the companion pull_request run for the next dev push replaced it as
+# the group's pending slot → the push run was cancelled (run 28888618226,
+# "cancelled" 5s) before `deploy-dev` ever ran → the merge landed without
+# auto-deploy. `queue: max` opts OUT of single-pending-slot replacement: up to
+# 100 runs may sit PENDING in the group simultaneously (still serialized one at
+# a time by cancel-in-progress:false — no MORE parallelism, just no eviction),
+# so a later run can no longer evict an earlier one out of the queue. GitHub's
+# `queue` property is binary — `single` (default, the buggy behavior above) or
+# `max` (up to 100 pending; no custom-number syntax exists) — so `max` is the
+# only opt-out available. 100 is GitHub's fixed ceiling, not unlimited, and this
+# repo's realistic push volume (a handful of pushes within one CI wall-clock
+# duration) is nowhere near it.
 concurrency:
   group: choros-ci-shared-ports
   cancel-in-progress: false
+  queue: max
 
 # Pin a collation-capable UTF-8 locale for ALL jobs. ubuntu-latest's default
 # locale is C.UTF-8, whose collation table REJECTS multibyte range expressions:
