@@ -104,7 +104,7 @@ END
 $$;
 
 -- Lookup index: «виды этого источника, видимые актору» (GET /api/list-views
--- ?source=inbox — общие + личные вызывающего). Дополняет существующий
+-- ?source=processes — общие + личные вызывающего). Дополняет существующий
 -- list_view_registry_def_id_idx (records-путь).
 DO $$
 BEGIN
@@ -115,6 +115,84 @@ BEGIN
   ) THEN
     CREATE INDEX list_view_source_owner_idx
       ON choros.list_view (tenant_id, source, owner_actor);
+  END IF;
+END
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Уникальность ИМЕНИ вида переосмыслена под source + owner_actor
+-- (fix-forward defect #9).
+--
+-- Миграция 123 несла ТАБЛИЧНЫЙ constraint UNIQUE (tenant_id, registry_def_id,
+-- name) — до личных видов. Он ломает две вещи после 130:
+--   1. Два РАЗНЫХ актора не могут назвать свои ЛИЧНЫЕ виды одинаково: второй
+--      ловит 23505 → 409 на имени, которого он даже не видит (owner-скоуп чтения
+--      прячет чужой личный вид, а constraint — нет). Имя личного вида приватно
+--      владельцу, значит и его уникальность должна скоупиться владельцем.
+--   2. registry_def_id теперь NULLABLE (не-records виды). Старый constraint при
+--      NULL registry_def_id вообще не срабатывает (NULLs различны) — два
+--      одноимённых processes-вида одного владельца прошли бы дублями.
+--
+-- Заменяем на партиал-НЕзависимый УНИКАЛЬНЫЙ ИНДЕКС по
+--   (tenant_id, source, COALESCE(registry_def_id, zero-uuid),
+--    COALESCE(owner_actor,''), name).
+-- COALESCE убирает NULL-«не-равно-самому-себе»: одноимённый дубль ВНУТРИ одного
+-- (источник, набор полей, владелец) ловится (→ 409), а разные владельцы / разные
+-- источники / общий-vs-личный сосуществуют. Совпадает по форме с
+-- list_view_one_default_scoped выше (тот же zero-uuid-сентинель).
+--
+-- Constraint 123 назван Postgres автоматически: list_view_tenant_id_registry_def_id_name_key.
+-- DROP по имени под guard (идемпотентно; если 123 накатывалась под другим именем —
+-- ищем по определению столбцов через pg_constraint как запасной путь).
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  conrec record;
+BEGIN
+  -- Основной путь: точное имя автоконстрейнта 123.
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'list_view_tenant_id_registry_def_id_name_key'
+      AND conrelid = 'choros.list_view'::regclass
+  ) THEN
+    ALTER TABLE choros.list_view
+      DROP CONSTRAINT list_view_tenant_id_registry_def_id_name_key;
+  ELSE
+    -- Запасной путь: найти UNIQUE-constraint из ровно 3 столбцов
+    -- (tenant_id, registry_def_id, name) под любым именем и снять его.
+    FOR conrec IN
+      SELECT c.conname
+        FROM pg_constraint c
+       WHERE c.conrelid = 'choros.list_view'::regclass
+         AND c.contype = 'u'
+         AND (
+           SELECT array_agg(a.attname ORDER BY a.attname)
+             FROM unnest(c.conkey) AS k(attnum)
+             JOIN pg_attribute a
+               ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+         ) = ARRAY['name','registry_def_id','tenant_id']
+    LOOP
+      EXECUTE format('ALTER TABLE choros.list_view DROP CONSTRAINT %I', conrec.conname);
+    END LOOP;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'choros' AND tablename = 'list_view'
+      AND indexname = 'list_view_name_scoped_uniq'
+  ) THEN
+    CREATE UNIQUE INDEX list_view_name_scoped_uniq
+      ON choros.list_view (
+        tenant_id,
+        source,
+        COALESCE(registry_def_id, '00000000-0000-0000-0000-000000000000'::uuid),
+        COALESCE(owner_actor, ''),
+        name
+      );
   END IF;
 END
 $$;
