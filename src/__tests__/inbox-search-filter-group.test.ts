@@ -70,7 +70,7 @@ describe("T-0653 matchesInboxFilters", () => {
   const item = mk({
     id: "t1",
     name: "Проверить реквизиты счёта №4471",
-    step: "Согласование счёта · Проверка",
+    step: "Проверка реквизитов · узел Контроль",
     inst: "INS-7731",
     processName: "Канонический линейный ТЭЛ",
     procKey: "kanon-tel",

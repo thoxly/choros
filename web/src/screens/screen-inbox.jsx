@@ -17,7 +17,12 @@ import { useNavigate } from 'react-router-dom';
 import {
   Button, MonoId, Mono, ExecutorBadge, ActorChip, ProcessRef, RecordRef, StepRef, StatusChip,
   Drawer, EmptyState, LoadingState, ErrorState, KitIcon,
+  Badge, Field, Popover,
 } from '../components/components.jsx';
+// T-0653 (W5-UX/§4): personal inbox view (columns + density) persists via the
+// generic user_pref store (T-0651, migration 129) — the SAME primitive the
+// sidebar collapse uses, a different key. Honest-degrade (never throws).
+import { getAllUserPrefs, setUserPref } from '../app-shell/user-prefs-api.js';
 // T-0687: deriveStepLabel — the SAME pure step-humanization the drawer's StepRef
 // uses, applied to the list row's step subtitle so a raw BPMN node id
 // ("legal_precheck") never surfaces as bare text in the main task list either.
@@ -329,6 +334,83 @@ const TABS = [
   { id: "esc", label: "Эскалации" },
 ];
 
+// ---------------------------------------------------------------------------
+// T-0653 (W5-UX/§4) — «настроить под себя»: personal inbox view.
+//
+// The columns/density a user chooses are stored per-actor via the user_pref
+// store (T-0651) under this key. Honest-degrade: no persisted pref ⇒ every
+// column visible, comfortable density (the current behaviour). The "action"
+// column is NOT user-hideable (it carries «Взять»/«Согласовать» — hiding it
+// would strand a task with no way to act on it).
+// ---------------------------------------------------------------------------
+const INBOX_VIEW_PREF_KEY = 'inbox.view';
+
+// Toggleable columns (order matches the table header). `action` is intentionally
+// absent — it is always shown (see above).
+const INBOX_COLUMNS = [
+  { key: 'name', label: 'Задача' },
+  { key: 'process', label: 'Процесс' },
+  { key: 'executor', label: 'Исполнитель' },
+  { key: 'sla', label: 'SLA' },
+  { key: 'deadline', label: 'Дедлайн' },
+];
+
+function defaultInboxView() {
+  const columns = {};
+  for (const c of INBOX_COLUMNS) columns[c.key] = true;
+  return { columns, density: 'comfortable' };
+}
+
+/** Merge a persisted pref (possibly partial/garbage) onto the default, safely. */
+function normalizeInboxView(raw) {
+  const base = defaultInboxView();
+  if (!raw || typeof raw !== 'object') return base;
+  const columns = { ...base.columns };
+  if (raw.columns && typeof raw.columns === 'object') {
+    for (const c of INBOX_COLUMNS) {
+      if (typeof raw.columns[c.key] === 'boolean') columns[c.key] = raw.columns[c.key];
+    }
+  }
+  const density = raw.density === 'compact' ? 'compact' : 'comfortable';
+  return { columns, density };
+}
+
+// ---------------------------------------------------------------------------
+// T-0653 — agent signals (столп 4): fields already on the wire that the UI
+// used to drop on the floor. Rendered as inline badges under the task name so
+// the operator sees WHY a task landed on them / WHAT it is waiting for.
+//   doubt_reason       (T-0221) — the agent declined to act autonomously
+//   routed_to_fallback (T-0380) — the addressed role has no holder → routed to you
+//   messageCatch       (T-0459) — instance parked on a message-catch, awaiting a signal
+// Pure presentational, kit tokens only, no hardcoded color.
+// ---------------------------------------------------------------------------
+function AgentSignals({ item }) {
+  const signals = [];
+  if (item.doubt_reason) {
+    signals.push(
+      <Badge key="doubt" tone="warning" title={item.doubt_reason}>
+        <KitIcon name="alert" /> Агент сомневается: {item.doubt_reason}
+      </Badge>,
+    );
+  }
+  if (item.routed_to_fallback === 'role_unfilled') {
+    signals.push(
+      <Badge key="fallback" tone="info" title="Роль задачи не заполнена — направлено вам">
+        <KitIcon name="info" /> Роль не заполнена — вам
+      </Badge>,
+    );
+  }
+  if (item.messageCatch) {
+    signals.push(
+      <Badge key="msg" tone="neutral" title={item.messageName ? `Ожидает сообщение: ${item.messageName}` : 'Ожидает сообщения'}>
+        <Icon name="bell" /> Ожидает сообщения{item.messageName ? `: ${item.messageName}` : ''}
+      </Badge>,
+    );
+  }
+  if (signals.length === 0) return null;
+  return <span className="chs-task__signals">{signals}</span>;
+}
+
 const MARKER_COLOR = {
   running: "var(--chs-color-info)", done: "var(--chs-color-success)",
   failed: "var(--chs-color-danger)", waiting: "var(--chs-color-warning)", paused: "var(--chs-color-text-faint)",
@@ -524,7 +606,7 @@ function actionErrorMessage(code) {
   );
 }
 
-function TaskDetailPanel({ taskId, onClose, onActionDone }) {
+function TaskDetailPanel({ taskId, onClose, onActionDone, onFilterByInstance }) {
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState(null); // { item, projection }
   const [fetchError, setFetchError] = useState(null);
@@ -780,6 +862,18 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
                   <Mono style={S.muted}>{detail.projection.procKey}</Mono>
                 </span>
               </div>
+              {/* T-0653 (UX-study §4): «Связанные задачи» should FILTER the inbox
+                  by THIS instance, not open the general inbox. This link sets the
+                  inbox's process filter to the instance and closes the drawer. */}
+              {onFilterByInstance && detail.projection.inst && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onFilterByInstance(detail.projection.inst)}
+                >
+                  <KitIcon name="search" /> Задачи этого процесса
+                </Button>
+              )}
             </section>
           )}
 
@@ -812,6 +906,16 @@ function InboxScreen() {
   const [tab, setTab] = useState("all");
   const [exec, setExec] = useState(null); // executor-type filter: agent|human|service|null
   const [sortSla, setSortSla] = useState(false); // sort by SLA headroom ascending
+  // T-0653 (UX-study §4): server-side search + filters + group + personal view.
+  const [q, setQ] = useState("");                 // текстовый поиск (server q=)
+  const [statusFilter, setStatusFilter] = useState(null); // running|waiting|failed|done|paused
+  const [processFilter, setProcessFilter] = useState(null); // фильтр по процессу/инстансу
+  const [groupByProcess, setGroupByProcess] = useState(false); // группировка по процессу
+  const [groups, setGroups] = useState(null);     // свёртки [{key,label,count,...}]
+  const [collapsedGroups, setCollapsedGroups] = useState(() => ({})); // key → true
+  // Личный вид (колонки+плотность), персистится через user_pref (T-0651).
+  const [view, setView] = useState(() => defaultInboxView());
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [taken, setTaken] = useState(() => ({}));
   const [items, setItems] = useState(null);
   const [counts, setCounts] = useState({ all: 0, mine: 0, pool: 0, esc: 0 });
@@ -831,26 +935,35 @@ function InboxScreen() {
   const [totalPages, setTotalPages] = useState(1);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  // T-0093: tabs/filters/sort are applied SERVER-SIDE. The query mirrors the API:
-  // ?tab=...&exec=...&sort=sla. The server returns the filtered `items` plus full
-  // per-tab `counts` (computed from the tenant-scoped base, not the filtered view).
-  // T-0401: also passes ?page=N; response now includes page/totalPages/total.
+  // T-0093/T-0653: tab/exec/sort + q/status/group are applied SERVER-SIDE. The
+  // query mirrors the API. The server returns filtered `items`, full per-tab
+  // `counts`, and (when group=process) `groups` свёртки.
+  // T-0401: also passes ?page=N; response includes page/totalPages/total.
+  const buildQuery = (pageN) => {
+    const qs = new URLSearchParams();
+    if (tab && tab !== "all") qs.set("tab", tab);
+    if (exec) qs.set("exec", exec);
+    if (sortSla) qs.set("sort", "sla");
+    const trimmedQ = q.trim();
+    if (trimmedQ) qs.set("q", trimmedQ);
+    if (statusFilter) qs.set("status", statusFilter);
+    if (processFilter) qs.set("process", processFilter);
+    if (groupByProcess) qs.set("group", "process");
+    qs.set("page", String(pageN));
+    return qs;
+  };
+
   const load = async () => {
     setError(null);
     try {
-      const qs = new URLSearchParams();
-      if (tab && tab !== "all") qs.set("tab", tab);
-      if (exec) qs.set("exec", exec);
-      if (sortSla) qs.set("sort", "sla");
-      // Page 1 on initial/refresh load.
-      qs.set("page", "1");
       // T-0608 (пункт е): fetchWithAuthRetry self-heals a mid-session-expired
       // token (silent refresh + one retry) instead of surfacing a dead "HTTP
       // 401" whose «Повторить» would just resend the same expired token.
-      const res = await fetchWithAuthRetry(`/api/inbox?${qs.toString()}`);
+      const res = await fetchWithAuthRetry(`/api/inbox?${buildQuery(1).toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setItems(data.items);
+      setGroups(Array.isArray(data.groups) ? data.groups : null);
       setPage(data.page ?? 1);
       setTotalPages(data.totalPages ?? 1);
       if (data.counts) setCounts(data.counts);
@@ -865,12 +978,7 @@ function InboxScreen() {
     const nextPage = page + 1;
     setLoadingMore(true);
     try {
-      const qs = new URLSearchParams();
-      if (tab && tab !== "all") qs.set("tab", tab);
-      if (exec) qs.set("exec", exec);
-      if (sortSla) qs.set("sort", "sla");
-      qs.set("page", String(nextPage));
-      const res = await fetchWithAuthRetry(`/api/inbox?${qs.toString()}`);
+      const res = await fetchWithAuthRetry(`/api/inbox?${buildQuery(nextPage).toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setItems((prev) => [...(prev || []), ...(data.items || [])]);
@@ -949,17 +1057,172 @@ function InboxScreen() {
     }
   };
 
-  // Re-fetch whenever the tab/filter/sort changes — semantics live on the server.
+  // Re-fetch whenever tab/exec/sort/status/group changes — semantics on server.
   // T-0401: also reset pagination so load-more starts fresh from page 1.
   useEffect(() => {
     setPage(1);
     setTotalPages(1);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, exec, sortSla]);
+  }, [tab, exec, sortSla, statusFilter, processFilter, groupByProcess]);
+
+  // T-0653: debounce the text search (q) so keystrokes don't hammer the server.
+  useEffect(() => {
+    const h = setTimeout(() => {
+      setPage(1);
+      setTotalPages(1);
+      load();
+    }, 250);
+    return () => clearTimeout(h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+
+  // T-0653: load the personal inbox view (columns + density) once on mount.
+  // Honest-degrade — a missing/failed pref leaves the default view intact.
+  useEffect(() => {
+    let cancelled = false;
+    getAllUserPrefs().then((prefs) => {
+      if (cancelled) return;
+      if (prefs && prefs[INBOX_VIEW_PREF_KEY]) {
+        setView(normalizeInboxView(prefs[INBOX_VIEW_PREF_KEY]));
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  // T-0653: persist + apply a personal-view change (fire-and-forget PUT).
+  const updateView = (next) => {
+    setView(next);
+    setUserPref(INBOX_VIEW_PREF_KEY, next);
+  };
+  const toggleColumn = (key) => {
+    updateView({ ...view, columns: { ...view.columns, [key]: !view.columns[key] } });
+  };
+  const setDensity = (density) => updateView({ ...view, density });
 
   // Server already applied tab/filter/sort; render the returned rows as-is.
   const rows = items || [];
+
+  const col = (key) => view.columns[key] !== false; // column visible?
+
+  // T-0653: render ONE task row. Extracted so the flat table and the grouped
+  // tables share identical row markup (no drift). The WHOLE row opens the detail
+  // (AC-5.1) — nested interactive controls stopPropagation so a «Взять» click
+  // does not also open the drawer.
+  const renderTaskRow = (t) => {
+    const claimedByServer = !!t.claimedBy;
+    const isTaken = claimedByServer || !!taken[t.id];
+    const inPool = t.pool && !isTaken;
+    const takenName = t.execName || t.claimedBy || "—";
+    const takenType = t.execType || "human";
+    const whenLabel = takenWhen(t.claimedAt);
+    const openDetail = () => setSelectedTaskId(t.id);
+    const stop = (e) => e.stopPropagation();
+    return (
+      <tr
+        key={t.id}
+        data-taken={isTaken ? "true" : undefined}
+        className="chs-itable__row--click"
+        role="button"
+        tabIndex={0}
+        aria-label={`Открыть задачу: ${t.name}`}
+        onClick={openDetail}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(); }
+        }}
+      >
+        {col('name') && (
+          <td>
+            <div className="chs-task">
+              <span className="chs-task__marker" style={{ background: MARKER_COLOR[t.status] }} />
+              <span className="chs-task__txt">
+                {/* T-0687: name carries RECORD context (RecordRef) so identical
+                    task names are distinguishable. RecordRef is a link → stop
+                    the click from also opening the drawer. */}
+                <span className="chs-task__name">
+                  {t.name}
+                  {t.recordId && (
+                    <span className="chs-task__record" onClick={stop}>
+                      {' — '}
+                      <RecordRef recordId={t.recordId} headers={authHeaders()} />
+                    </span>
+                  )}
+                </span>
+                <span className="chs-task__step">{deriveStepLabel(t.step).label}</span>
+                {/* T-0653: agent signals (doubt/fallback/messageCatch) — фактически
+                    едут по wire, но UI их выбрасывал (столп 4). */}
+                <AgentSignals item={t} />
+              </span>
+            </div>
+          </td>
+        )}
+        {col('process') && (
+          <td onClick={stop}>
+            <ProcessRef
+              processName={t.processName}
+              inst={t.inst}
+              recordId={t.recordId}
+              stepFallback={t.name || t.step}
+              headers={authHeaders()}
+            />
+          </td>
+        )}
+        {col('executor') && (
+          <td>
+            {inPool ? (
+              <span className="chs-pool"><span className="chs-pool__glyph" /> в пуле</span>
+            ) : isTaken ? (
+              <ActorChip type={takenType} name={takenName} id={t.claimedBy} deactivated={t.execDeactivated} />
+            ) : (
+              <ActorChip type={t.execType} name={t.execName} id={t.claimedBy} deactivated={t.execDeactivated} />
+            )}
+          </td>
+        )}
+        {col('sla') && <td><SLACell sla={t.sla} deadline={t.deadline} /></td>}
+        {col('deadline') && (
+          <td><Mono style={{ color: "var(--chs-color-text-muted)", fontSize: "var(--chs-text-sm)" }}>{t.due}</Mono></td>
+        )}
+        <td className="chs-r" onClick={stop}>
+          {inPool ? (
+            <Button variant="secondary" size="sm" disabled={!!claiming[t.id]} onClick={() => claimTask(t.id)}>
+              {claiming[t.id] ? '…' : 'Взять'}
+            </Button>
+          ) : isTaken && t.mine && t.canApprove ? (
+            <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+              <Button variant="ghost" size="sm" onClick={openDetail}>Открыть</Button>
+              <Button variant="primary" size="sm" disabled={!!approving[t.id]} onClick={() => approveTask(t.id)}>
+                {approving[t.id] ? '…' : 'Согласовать'}
+              </Button>
+            </div>
+          ) : isTaken ? (
+            <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', alignItems: 'center' }}>
+              <span className="chs-taken-tag" title={whenLabel ? `Взято ${takenName}, ${whenLabel}` : undefined}>
+                <Icon name="check" /> взято{t.mine ? " (мной)" : ""}{whenLabel ? ` · ${whenLabel}` : ""}
+              </span>
+              <Button variant="ghost" size="sm" onClick={openDetail}>Открыть</Button>
+            </div>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={openDetail}>Открыть</Button>
+          )}
+        </td>
+      </tr>
+    );
+  };
+
+  // T-0653: table header cells honoring column visibility + density class.
+  const tableHead = (
+    <thead>
+      <tr>
+        {col('name') && <th>Задача</th>}
+        {col('process') && <th>Процесс</th>}
+        {col('executor') && <th>Исполнитель</th>}
+        {col('sla') && <th>SLA</th>}
+        {col('deadline') && <th>Дедлайн</th>}
+        <th className="chs-r">Действие</th>
+      </tr>
+    </thead>
+  );
+  const tableClass = `chs-itable${view.density === 'compact' ? ' chs-itable--compact' : ''}`;
 
   return (
     <>
@@ -968,6 +1231,14 @@ function InboxScreen() {
       taskId={selectedTaskId}
       onClose={() => setSelectedTaskId(null)}
       onActionDone={() => { load(); setSelectedTaskId(null); }}
+      onFilterByInstance={(inst) => {
+        // T-0653: «Задачи этого процесса» — filter the inbox to this instance
+        // (process filter matches inst) instead of opening the general list.
+        setSelectedTaskId(null);
+        setQ("");
+        setStatusFilter(null);
+        setProcessFilter(inst);
+      }}
     />
     <div className="chs-inbox">
       <div className="chs-inbox__bar">
@@ -995,6 +1266,59 @@ function InboxScreen() {
           ))}
         </div>
         <div className="chs-inbox__spacer" />
+        {/* T-0653 (UX-study §4): server-side text search — «текстового поиска
+            нет ни в UI, ни в API». Debounced; clears via the × affordance. */}
+        <div className="chs-inbox__search">
+          <Icon name="search" />
+          <input
+            type="search"
+            className="chs-inbox__search-input"
+            placeholder="Поиск по задачам…"
+            aria-label="Поиск по задачам"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          {q && (
+            <button
+              type="button"
+              className="chs-inbox__search-clear"
+              aria-label="Очистить поиск"
+              onClick={() => setQ("")}
+            >
+              <KitIcon name="close" />
+            </button>
+          )}
+        </div>
+        {/* T-0653: active process/instance filter chip (from «Задачи этого
+            процесса» in the detail drawer) — visible + clearable. */}
+        {processFilter && (
+          <button
+            type="button"
+            className="chs-inbox__filter"
+            aria-pressed="true"
+            title={`Фильтр по процессу: ${processFilter}`}
+            onClick={() => setProcessFilter(null)}
+          >
+            <Icon name="process" /> Процесс <KitIcon name="close" />
+          </button>
+        )}
+        {/* T-0653: status filter (was absent). Reuses kit <select> shape. */}
+        <div className="chs-inbox__statusfilter">
+          <label htmlFor="inbox-status" className="chs-sr-only">Статус</label>
+          <select
+            id="inbox-status"
+            className="chs-input chs-select chs-inbox__statusfilter-select"
+            value={statusFilter ?? ""}
+            onChange={(e) => setStatusFilter(e.target.value || null)}
+          >
+            <option value="">Любой статус</option>
+            <option value="running">Выполняется</option>
+            <option value="waiting">Ожидает</option>
+            <option value="failed">Ошибка</option>
+            <option value="done">Завершено</option>
+            <option value="paused">Приостановлено</option>
+          </select>
+        </div>
         <button
           className="chs-inbox__filter"
           aria-pressed={exec ? "true" : undefined}
@@ -1009,6 +1333,68 @@ function InboxScreen() {
         >
           SLA <KitIcon name="arrow-up" />
         </button>
+        {/* T-0653: group-by-process toggle (свёртки со счётчиками). */}
+        <button
+          className="chs-inbox__filter"
+          aria-pressed={groupByProcess ? "true" : undefined}
+          onClick={() => setGroupByProcess((g) => !g)}
+        >
+          <Icon name="process" /> По процессу
+        </button>
+        {/* T-0653: «настроить под себя» — personal columns + density popover. */}
+        <Popover
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          placement="bottom"
+          align="end"
+          trigger={
+            <button
+              className="chs-inbox__filter"
+              aria-haspopup="dialog"
+              aria-expanded={settingsOpen}
+              onClick={() => setSettingsOpen((o) => !o)}
+            >
+              <Icon name="dots" /> Настроить
+            </button>
+          }
+        >
+          <div className="chs-inbox__settings" role="group" aria-label="Настройка вида инбокса">
+            <div className="chs-inbox__settings-title">Колонки</div>
+            {INBOX_COLUMNS.map((c) => (
+              <label key={c.key} className="chs-inbox__settings-row">
+                <input
+                  type="checkbox"
+                  checked={view.columns[c.key] !== false}
+                  onChange={() => toggleColumn(c.key)}
+                />
+                {c.label}
+              </label>
+            ))}
+            <div className="chs-inbox__settings-title">Плотность</div>
+            <div className="chs-inbox__settings-density" role="radiogroup" aria-label="Плотность строк">
+              <button
+                type="button"
+                className="chs-inbox__density-opt"
+                role="radio"
+                aria-checked={view.density === 'comfortable'}
+                aria-pressed={view.density === 'comfortable'}
+                onClick={() => setDensity('comfortable')}
+              >
+                Обычная
+              </button>
+              <button
+                type="button"
+                className="chs-inbox__density-opt"
+                role="radio"
+                aria-checked={view.density === 'compact'}
+                aria-pressed={view.density === 'compact'}
+                onClick={() => setDensity('compact')}
+              >
+                Плотная
+              </button>
+            </div>
+          </div>
+        </Popover>
       </div>
 
       {/* T-0529: tabpanel wraps the content area for proper Tabs WAI-ARIA pattern */}
@@ -1052,117 +1438,42 @@ function InboxScreen() {
             />
           )
         ) : (
-          <table className="chs-itable">
-            <colgroup>
-              <col style={{ width: "auto" }} />
-              <col style={{ width: "108px" }} />
-              <col style={{ width: "176px" }} />
-              <col style={{ width: "132px" }} />
-              <col style={{ width: "108px" }} />
-              <col style={{ width: "132px" }} />
-            </colgroup>
-            <thead>
-              <tr>
-                <th>Задача</th>
-                <th>Процесс</th>
-                <th>Исполнитель</th>
-                <th>SLA</th>
-                <th>Дедлайн</th>
-                <th className="chs-r">Действие</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((t) => {
-                // Taken-state is server-truth: a claimed item comes back with claimedBy set
-                // (pool cleared). The local `taken[t.id]` flag only bridges the brief optimistic
-                // window before load() re-syncs, so the «взято» state never flickers back.
-                const claimedByServer = !!t.claimedBy;
-                const isTaken = claimedByServer || !!taken[t.id];
-                const inPool = t.pool && !isTaken;
-                // Who took it (server display name) + when — the «взято кем, когда».
-                // T-0648: execName/execType now come pre-resolved from the backend
-                // (batchResolveActors, src/http/inbox.ts) — no more hardcoded "human".
-                const takenName = t.execName || t.claimedBy || "—";
-                const takenType = t.execType || "human";
-                const whenLabel = takenWhen(t.claimedAt);
+          groupByProcess && groups ? (
+            // T-0653: grouped-by-process view — свёртки со счётчиками (AC-3.1).
+            // Each group is a collapsible section over its own table body so a
+            // hundred tasks are navigable by process, not one flat wall.
+            <div className="chs-inbox__groups">
+              {groups.map((g) => {
+                const groupRows = rows.filter((t) => (t.procKey ?? t.inst ?? "—") === g.key);
+                const collapsed = !!collapsedGroups[g.key];
                 return (
-                  <tr key={t.id} data-taken={isTaken ? "true" : undefined}>
-                    <td>
-                      <div className="chs-task">
-                        <span className="chs-task__marker" style={{ background: MARKER_COLOR[t.status] }} />
-                        <span className="chs-task__txt">
-                          {/* T-0687 (capstone T-0647-A): the name carries RECORD
-                              context so the 8× identical «Проверить: агенту…» /
-                              «Подача заявки» rows are distinguishable — the source
-                              record's TITLE + link (reuses RecordRef, T-0648)
-                              renders right after the name when the task belongs to
-                              a record. The step subtitle is humanized (deriveStepLabel)
-                              so a raw BPMN node id never shows as bare text. */}
-                          <span className="chs-task__name">
-                            {t.name}
-                            {t.recordId && (
-                              <span className="chs-task__record">
-                                {' — '}
-                                <RecordRef recordId={t.recordId} headers={authHeaders()} />
-                              </span>
-                            )}
-                          </span>
-                          <span className="chs-task__step">{deriveStepLabel(t.step).label}</span>
-                        </span>
-                      </div>
-                    </td>
-                    {/* T-0683 (D-064, wave-5): «ПРОЦЕСС» column shows a HUMAN
-                        process name (+ source record title) as primary — the raw
-                        instance-UUID is demoted, never the primary key on the
-                        operator's main screen (capstone T-0647 defect). */}
-                    <td>
-                      <ProcessRef
-                        processName={t.processName}
-                        inst={t.inst}
-                        recordId={t.recordId}
-                        stepFallback={t.name || t.step}
-                        headers={authHeaders()}
-                      />
-                    </td>
-                    <td>
-                      {inPool ? (
-                        <span className="chs-pool"><span className="chs-pool__glyph" /> в пуле</span>
-                      ) : isTaken ? (
-                        <ActorChip type={takenType} name={takenName} id={t.claimedBy} deactivated={t.execDeactivated} />
-                      ) : (
-                        <ActorChip type={t.execType} name={t.execName} id={t.claimedBy} deactivated={t.execDeactivated} />
-                      )}
-                    </td>
-                    <td><SLACell sla={t.sla} deadline={t.deadline} /></td>
-                    <td><Mono style={{ color: "var(--chs-color-text-muted)", fontSize: "var(--chs-text-sm)" }}>{t.due}</Mono></td>
-                    <td className="chs-r">
-                      {inPool ? (
-                        <Button variant="secondary" size="sm" disabled={!!claiming[t.id]} onClick={() => claimTask(t.id)}>
-                          {claiming[t.id] ? '…' : 'Взять'}
-                        </Button>
-                      ) : isTaken && t.mine && t.role === 'role-approver' ? (
-                        <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
-                          <Button variant="ghost" size="sm" onClick={() => setSelectedTaskId(t.id)}>Открыть</Button>
-                          <Button variant="primary" size="sm" disabled={!!approving[t.id]} onClick={() => approveTask(t.id)}>
-                            {approving[t.id] ? '…' : 'Согласовать'}
-                          </Button>
-                        </div>
-                      ) : isTaken ? (
-                        <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', alignItems: 'center' }}>
-                          <span className="chs-taken-tag" title={whenLabel ? `Взято ${takenName}, ${whenLabel}` : undefined}>
-                            <Icon name="check" /> взято{t.mine ? " (мной)" : ""}{whenLabel ? ` · ${whenLabel}` : ""}
-                          </span>
-                          <Button variant="ghost" size="sm" onClick={() => setSelectedTaskId(t.id)}>Открыть</Button>
-                        </div>
-                      ) : (
-                        <Button variant="ghost" size="sm" onClick={() => setSelectedTaskId(t.id)}>Открыть</Button>
-                      )}
-                    </td>
-                  </tr>
+                  <section key={g.key} className="chs-inbox__group">
+                    <button
+                      type="button"
+                      className="chs-inbox__group-head"
+                      aria-expanded={!collapsed}
+                      onClick={() => setCollapsedGroups((s) => ({ ...s, [g.key]: !collapsed }))}
+                    >
+                      <KitIcon name={collapsed ? "chevron-down" : "chevron-up"} />
+                      <span className="chs-inbox__group-label">{g.label}</span>
+                      <span className="chs-tab__count">{g.count}</span>
+                    </button>
+                    {!collapsed && (
+                      <table className={tableClass}>
+                        {tableHead}
+                        <tbody>{groupRows.map(renderTaskRow)}</tbody>
+                      </table>
+                    )}
+                  </section>
                 );
               })}
-            </tbody>
-          </table>
+            </div>
+          ) : (
+            <table className={tableClass}>
+              {tableHead}
+              <tbody>{rows.map(renderTaskRow)}</tbody>
+            </table>
+          )
         )}
         {/* T-0401: load-more control — shown only when there are more pages. */}
         {items !== null && items.length > 0 && page < totalPages && (

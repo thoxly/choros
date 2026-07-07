@@ -58,6 +58,7 @@ import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import { makePgAuditWriter } from "../db/audit-writer.js";
 import {
   APPROVE_TASK_NAME,
+  APPROVER_ROLE,
   appendTaskApproved,
   findWaitingInstanceTask,
   listInstanceInboxTasks,
@@ -164,6 +165,16 @@ type InboxItem = {
    * specific human. "Из пула" claim eligibility is computed from this, not from execName.
    */
   role: string;
+  /**
+   * T-0653: server-computed «this is an approval task» flag — true when the
+   * task's role is the tenant's configured approver role (APPROVER_ROLE, env-
+   * configurable, single source of truth in process-projection.ts). Lets the
+   * inbox show the inline «Согласовать» quick-action WITHOUT hardcoding the
+   * role slug in the client (D-064: the case-role literal stays server-side).
+   * Additive optional — absent ⇒ no inline approve affordance (the server still
+   * enforces eligibility on POST /api/inbox/:id/action regardless).
+   */
+  canApprove?: boolean;
   /** Task is an escalation (drives the «Эскалации» tab without step string-matching). */
   escalated?: boolean;
   execType?: ExecKind;
@@ -930,6 +941,8 @@ async function findInboxItems(
         ...(row.procKey !== undefined ? { procKey: row.procKey } : {}),
         ...(row.recordId !== undefined ? { recordId: row.recordId } : {}),
         role: row.role,
+        // T-0653: approval-task flag (server-side role check; no client literal).
+        ...(row.role === APPROVER_ROLE ? { canApprove: true } : {}),
         execType: "human",
         pool: true,
         sla: { min: slaMin, left: slaMin },
