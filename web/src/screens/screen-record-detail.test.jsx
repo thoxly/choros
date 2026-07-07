@@ -299,3 +299,63 @@ describe('screen-record-detail — honest 404 for a draft-tier app (T-0627)', ()
     expect(block).toContain(':');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0673: PersonFieldValue — the record detail's person-type field showed the
+// raw employee slug instead of a resolved human name, unlike relation/file
+// which already have an async-resolve value component. Renders through
+// ActorChip (T-0648 primitive, reused verbatim — no second resolver) against
+// `authorNames`, the SAME batch slug→name Map the screen already loads ONCE
+// (the org-employee fetch, T-0608) to resolve record.created_by — no new
+// fetch, no per-field resolution.
+//
+// PersonFieldValue has no hooks/state — pure function of (personId,
+// authorNames) — exercised directly, mirroring this file's other pure-
+// component tests.
+// ---------------------------------------------------------------------------
+
+import { PersonFieldValue } from './screen-record-detail.jsx';
+
+describe('PersonFieldValue (T-0673)', () => {
+  it('resolves a known employee id to their display name via ActorChip', () => {
+    const authorNames = new Map([['emp-slug-1', 'К. Орлов']]);
+    const el = PersonFieldValue({ personId: 'emp-slug-1', authorNames });
+    expect(el.type.name).toBe('ActorChip');
+    expect(el.props.name).toBe('К. Орлов');
+    expect(el.props.id).toBe('emp-slug-1');
+    expect(el.props.type).toBe('human');
+  });
+
+  it('honest fallback: an id absent from authorNames renders the RAW slug (never blank, never invented)', () => {
+    const authorNames = new Map();
+    const el = PersonFieldValue({ personId: 'emp-slug-2', authorNames });
+    expect(el.props.name).toBe('emp-slug-2');
+    expect(el.props.id).toBe('emp-slug-2');
+  });
+
+  it('tolerates a non-Map authorNames prop (e.g. still-loading initial state) without throwing', () => {
+    expect(() => PersonFieldValue({ personId: 'emp-slug-1', authorNames: undefined })).not.toThrow();
+    const el = PersonFieldValue({ personId: 'emp-slug-1', authorNames: undefined });
+    expect(el.props.name).toBe('emp-slug-1');
+  });
+});
+
+describe('screen-record-detail — PersonFieldValue wiring (T-0673)', () => {
+  it('formatCellValue PERSON_CELL_ASYNC dispatches to PersonFieldValue (mirrors RelationFieldValue/FileFieldValue)', () => {
+    expect(src).toContain('PERSON_CELL_ASYNC');
+    expect(src).toMatch(/isAsyncPerson = isPerson && hasValue &&\s*\n\s*formatCellValue\(val, f\.type\) === PERSON_CELL_ASYNC;/);
+    expect(src).toContain('<PersonFieldValue');
+    expect(src).toContain('personId={String(val)}');
+    expect(src).toContain('authorNames={authorNames}');
+  });
+
+  it('reuses the SAME authorNames map already loaded for record.created_by — no second fetch for person fields', () => {
+    // authorNames is declared ONCE (useState) and populated by the SAME
+    // fetchEmployees() effect that already resolves created_by (T-0608) —
+    // person fields must NOT trigger a second GET /api/org.
+    const stateMatches = src.match(/const \[authorNames, setAuthorNames\] = useState/g) || [];
+    expect(stateMatches.length).toBe(1);
+    const fetchMatches = src.match(/fetchEmployees\(\)/g) || [];
+    expect(fetchMatches.length).toBe(1);
+  });
+});

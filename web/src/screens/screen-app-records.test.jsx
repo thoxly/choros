@@ -247,3 +247,71 @@ describe('screen-app-records — no duplicate «Создано» column (T-0649)
     expect(src).toMatch(/!columns\.some\(\(c\) => c\.type === 'created_at'\) && \(/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0673: PersonCell — the record list's person-type cell showed the raw
+// employee slug instead of a resolved human name, unlike relation/file which
+// already have an async-resolve cell. PersonCell closes that gap by
+// rendering through ActorChip (the T-0648 primitive reused verbatim, same as
+// audit/inbox/grant-trail) against a BATCH-loaded employees map (one
+// GET /api/org per page via fetchEmployees(), never a per-cell fetch — no N+1).
+//
+// PersonCell has no hooks/state (unlike RelationCell/FileCell) — it is a
+// pure function of (personId, employees), so — mirroring DraftSandboxBanner's
+// existing direct-call test pattern — it is exercised directly rather than
+// via source-text assertions.
+// ---------------------------------------------------------------------------
+
+import { PersonCell } from './screen-app-records.jsx';
+
+describe('PersonCell (T-0673)', () => {
+  it('resolves a known employee id to their display name via ActorChip', () => {
+    const employees = new Map([['emp-slug-1', { id: 'emp-slug-1', name: 'К. Орлов' }]]);
+    const el = PersonCell({ personId: 'emp-slug-1', employees });
+    expect(el.type.name).toBe('ActorChip');
+    expect(el.props.name).toBe('К. Орлов');
+    expect(el.props.id).toBe('emp-slug-1');
+    expect(el.props.type).toBe('human');
+  });
+
+  it('honest fallback: an id absent from the batch map renders the RAW slug (never blank, never invented)', () => {
+    const employees = new Map(); // e.g. deleted employee / not yet loaded
+    const el = PersonCell({ personId: 'emp-slug-2', employees });
+    expect(el.props.name).toBe('emp-slug-2');
+    expect(el.props.id).toBe('emp-slug-2');
+  });
+
+  it('tolerates a non-Map employees prop (e.g. still-loading initial state) without throwing', () => {
+    expect(() => PersonCell({ personId: 'emp-slug-1', employees: undefined })).not.toThrow();
+    const el = PersonCell({ personId: 'emp-slug-1', employees: undefined });
+    expect(el.props.name).toBe('emp-slug-1');
+  });
+
+  it('threads deactivated through when the batch entry carries it', () => {
+    const employees = new Map([['emp-slug-1', { id: 'emp-slug-1', name: 'К. Орлов', deactivated: true }]]);
+    const el = PersonCell({ personId: 'emp-slug-1', employees });
+    expect(el.props.deactivated).toBe(true);
+  });
+});
+
+describe('screen-app-records — PersonCell wiring (T-0673)', () => {
+  it('formatCellValue PERSON_CELL_ASYNC dispatches to PersonCell (mirrors RELATION_CELL_ASYNC/FILE_CELL_ASYNC)', () => {
+    expect(src).toContain('  PERSON_CELL_ASYNC,');
+    expect(src).toMatch(/if \(rendered === PERSON_CELL_ASYNC\) \{/);
+    expect(src).toContain('<PersonCell personId={String(data[c.key])} employees={employeesById} />');
+  });
+
+  it('batch-loads employees via fetchEmployees() ONCE per page — gated on hasPersonColumn, not per-row/per-cell', () => {
+    expect(src).toContain("import { FieldControl, fetchEmployees } from '../forms/field-renderer.jsx'");
+    expect(src).toMatch(/const hasPersonColumn = useMemo\(\(\) => columns\.some\(\(c\) => c\.type === 'person'\), \[columns\]\);/);
+    expect(src).toMatch(/if \(!hasPersonColumn\) return undefined;/);
+    expect(src).toContain('fetchEmployees()');
+  });
+
+  it('a failed employees fetch degrades non-fatally (list still renders, PersonCell falls back to raw id)', () => {
+    const idx = src.indexOf('const [employeesById, setEmployeesById] = useState');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 500);
+    expect(block).toMatch(/\.catch\(/);
+  });
+});

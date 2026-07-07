@@ -21,12 +21,12 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDialog } from '../components/components.jsx';
+import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDialog, ActorChip } from '../components/components.jsx';
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js';
 import { formatDate, formatError, formatJsonReadable, formatPersonName } from '../lib/format.js';
 import { fetchFileBlob, downloadFile } from '../lib/authed-file.js';
-import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, FILE_CELL_ASYNC, deriveRecordLabel, computeComputedFieldValue } from './records-form.js';
+import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, FILE_CELL_ASYNC, PERSON_CELL_ASYNC, deriveRecordLabel, computeComputedFieldValue } from './records-form.js';
 // T-0608 (пункт г): resolve record.created_by (an employee SLUG — for a
 // Keycloak-registered human, slug === the KC user UUID) to a display name.
 import { fetchEmployees } from '../forms/field-renderer.jsx';
@@ -606,6 +606,28 @@ function FileFieldValue({ versionId, recordId }) {
 }
 
 // ---------------------------------------------------------------------------
+// T-0673: PersonFieldValue — resolves a person-type field's value (an
+// employee id/slug) to a human-readable name via ActorChip.
+//
+// formatCellValue returns PERSON_CELL_ASYNC for a non-empty person value.
+// NO per-field fetch here: `authorNames` is the SAME slug→name Map the
+// screen already batch-loads once (via the org-employee fetch below, T-0608)
+// to resolve record.created_by — reused as-is rather than a second resolver/fetch.
+//
+// Honest fallback (D2): an id absent from the map renders the RAW SLUG via
+// ActorChip's own resolved:false contract — never blank, never invented.
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {string} personId  the employee id/slug stored as the field value.
+ * @param {Map<string, string>} authorNames  batch-resolved id → display-name map.
+ */
+export function PersonFieldValue({ personId, authorNames }) {
+  const name = authorNames instanceof Map ? authorNames.get(personId) : undefined;
+  return <ActorChip type="human" name={name || personId} id={personId} />;
+}
+
+// ---------------------------------------------------------------------------
 // RecordDetailScreen
 // ---------------------------------------------------------------------------
 
@@ -906,6 +928,11 @@ function RecordDetailScreen() {
                     const isFile = f.type === 'file';
                     const isAsyncFile = isFile && hasValue &&
                       formatCellValue(val, f.type) === FILE_CELL_ASYNC;
+                    // T-0673: person fields render a resolved ActorChip name, not the
+                    // raw employee id/slug — batch-resolved via authorNames (below).
+                    const isPerson = f.type === 'person';
+                    const isAsyncPerson = isPerson && hasValue &&
+                      formatCellValue(val, f.type) === PERSON_CELL_ASYNC;
                     return (
                       <div key={f.key} style={fieldRowStyle}>
                         <span style={labelStyle}>{f.label}</span>
@@ -927,7 +954,14 @@ function RecordDetailScreen() {
                                     recordId={record.id}
                                   />
                                 )
-                                : formatCellValue(val, f.type)}
+                                : isAsyncPerson
+                                  ? (
+                                    <PersonFieldValue
+                                      personId={String(val)}
+                                      authorNames={authorNames}
+                                    />
+                                  )
+                                  : formatCellValue(val, f.type)}
                         </span>
                       </div>
                     );
