@@ -145,6 +145,14 @@ type InboxItem = {
    */
   processName?: string;
   /**
+   * T-0653 (W5-UX/§4): the process-definition KEY of this task's instance —
+   * carried so the server can filter/group by process exactly (a stable machine
+   * key), independent of the human processName. Additive optional — absent on
+   * seed fixtures and defer/agent rows with no process definition. NEVER rendered
+   * as a primary identifier (anti-uuid); used only as a filter/group axis.
+   */
+  procKey?: string;
+  /**
    * T-0683: originating business record id (present when the process was started
    * by an on_create trigger). The client's RecordRef lazily resolves this to the
    * record's TITLE — the human disambiguator between two instances of the same
@@ -918,6 +926,8 @@ async function findInboxItems(
         // instance-UUID. processName is always present on an instance task (the
         // projection guarantees a fallback name); recordId only when on_create-started.
         processName: row.processName,
+        // T-0653: carry procKey as a stable filter/group axis (never rendered primary).
+        ...(row.procKey !== undefined ? { procKey: row.procKey } : {}),
         ...(row.recordId !== undefined ? { recordId: row.recordId } : {}),
         role: row.role,
         execType: "human",
@@ -1073,6 +1083,114 @@ function parseExec(raw: string | null): ExecKind | null {
 function parseQuery(url: string | undefined): URLSearchParams {
   const q = (url ?? "").indexOf("?");
   return new URLSearchParams(q >= 0 ? (url as string).slice(q + 1) : "");
+}
+
+// ---------------------------------------------------------------------------
+// T-0653 (W5-UX/§4) — server-side inbox search / filters / grouping.
+//
+// UX-study §4: «parseQuery знает только tab/exec/sort/page» — нет поиска,
+// фильтров по процессу/статусу/дедлайну, нет группировки. Эти фильтры
+// применяются к УЖЕ материализованному InboxItem[] (findInboxItems), т.е. IN-
+// MEMORY по строкам, а НЕ через SQL — поэтому НЕТ SQL-инъекции для q= (нет SQL-
+// пути для инбокс-поиска вовсе; сравнение — String.includes на резолвнутых
+// полях). Фильтры применяются ДО пагинации (сервер фильтрует, не клиент).
+// ---------------------------------------------------------------------------
+
+const INBOX_STATUSES = new Set(["running", "waiting", "failed", "done", "paused"]);
+
+export interface InboxFilters {
+  q: string | null;
+  process: string | null;
+  status: string | null;
+  deadlineFrom: number | null;
+  deadlineTo: number | null;
+}
+
+/** Parse the T-0653 inbox filter params (all optional, additive to tab/exec/sort). */
+export function parseInboxFilters(query: URLSearchParams): InboxFilters {
+  const rawStatus = query.get("status");
+  const status = rawStatus !== null && INBOX_STATUSES.has(rawStatus) ? rawStatus : null;
+  const numOrNull = (v: string | null): number | null => {
+    if (v === null || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  return {
+    q: (query.get("q") ?? "").trim() || null,
+    process: (query.get("process") ?? "").trim() || null,
+    status,
+    deadlineFrom: numOrNull(query.get("deadline_from")),
+    deadlineTo: numOrNull(query.get("deadline_to")),
+  };
+}
+
+/**
+ * matchesInboxFilters — pure predicate: does an item pass the T-0653 filters?
+ *  - q: case-insensitive substring over name / step / processName / inst / procKey
+ *  - process: case-insensitive substring over procKey / processName / inst
+ *  - status: exact status match
+ *  - deadline_from/to: item.deadline (epoch-ms) within [from, to] (either bound optional)
+ * Items WITHOUT a deadline are excluded ONLY when a deadline bound is active.
+ */
+export function matchesInboxFilters(item: InboxItem, f: InboxFilters): boolean {
+  if (f.q) {
+    const needle = f.q.toLowerCase();
+    const hay = [item.name, item.step, item.processName, item.inst, item.procKey]
+      .filter((s): s is string => typeof s === "string")
+      .join("   ")
+      .toLowerCase();
+    if (!hay.includes(needle)) return false;
+  }
+  if (f.process) {
+    const needle = f.process.toLowerCase();
+    const hay = [item.procKey, item.processName, item.inst]
+      .filter((s): s is string => typeof s === "string")
+      .join("   ")
+      .toLowerCase();
+    if (!hay.includes(needle)) return false;
+  }
+  if (f.status && item.status !== f.status) return false;
+  if (f.deadlineFrom !== null || f.deadlineTo !== null) {
+    if (typeof item.deadline !== "number") return false;
+    if (f.deadlineFrom !== null && item.deadline < f.deadlineFrom) return false;
+    if (f.deadlineTo !== null && item.deadline > f.deadlineTo) return false;
+  }
+  return true;
+}
+
+export interface InboxGroup {
+  key: string;
+  label: string;
+  count: number;
+  procKey?: string;
+  inst?: string;
+}
+
+/**
+ * groupInboxByProcess — свёртки по процессу (UX-study §4: «группировка по
+ * процессу со свёртками»). Ключ группы — стабильный: procKey ?? inst ?? "—".
+ * Ярлык — человекочитаемый processName ?? inst ?? «Без процесса». Каунт — от
+ * ПЕРЕДАННОГО (уже отфильтрованного) набора. Порядок групп — по убыванию каунта,
+ * затем по ярлыку (детерминизм).
+ */
+export function groupInboxByProcess(items: InboxItem[]): InboxGroup[] {
+  const byKey = new Map<string, InboxGroup>();
+  for (const item of items) {
+    const key = item.procKey ?? item.inst ?? "—";
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      byKey.set(key, {
+        key,
+        label: item.processName ?? item.inst ?? "Без процесса",
+        count: 1,
+        ...(item.procKey !== undefined ? { procKey: item.procKey } : {}),
+        ...(item.inst !== undefined ? { inst: item.inst } : {}),
+      });
+    }
+  }
+  return [...byKey.values()].sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label, "ru"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1281,10 +1399,25 @@ export function registerInboxRoutes(
     if (execFilter) {
       filtered = filtered.filter((i) => i.execType === execFilter);
     }
+
+    // T-0653 (UX-study §4): server-side search (q=) + filters (process/status/
+    // deadline range), applied to the materialized item list BEFORE pagination.
+    // Purely in-memory over resolved fields — no SQL path for q (no injection
+    // surface). Combines (AND) with tab/exec above; counts stay from the base.
+    const inboxFilters = parseInboxFilters(query);
+    filtered = filtered.filter((i) => matchesInboxFilters(i, inboxFilters));
+
     if (sort === "sla") {
       // Ascending SLA headroom — most-urgent (incl. overdue, negative `left`) first.
       filtered = [...filtered].sort((a, b) => a.sla.left - b.sla.left);
     }
+
+    // T-0653: group-by-process summaries (with counts) over the FILTERED set —
+    // computed before pagination so the свёртки reflect the whole result, not
+    // just the current page. Only when explicitly requested (?group=process);
+    // absent ⇒ response shape unchanged (backward compatible).
+    const groupMode = query.get("group");
+    const groups = groupMode === "process" ? groupInboxByProcess(filtered) : null;
 
     // T-0401 [D7-3]: paginate the filtered result set.
     const { limit, page } = parsePaginationParams(query);
@@ -1300,6 +1433,9 @@ export function registerInboxRoutes(
       totalPages: paged.totalPages,
       total: paged.total,
       limit: paged.limit,
+      // T-0653: filtered total (may differ from counts[tab] when q/filters active)
+      // + optional group summaries. Additive — absent 'groups' preserves shape.
+      ...(groups !== null ? { groups } : {}),
     }));
   }));
 
