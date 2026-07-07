@@ -19,7 +19,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { ExecutorBadge, Button, OpChip, DerivedChip, LoadingState, ErrorState, EmptyState } from '../../components/components.jsx';
+import { ExecutorBadge, Button, OpChip, DerivedChip, LoadingState, ErrorState, EmptyState, Modal } from '../../components/components.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
 import { useNavigate } from 'react-router-dom';
@@ -352,6 +352,10 @@ function RightsScreen({ initialRole }) {
   const [sel, setSel] = useState(initialRole || null);
   const [dictionaries, setDictionaries] = useState(null);
   const [employees, setEmployees] = useState([]);
+  // T-0652 (§6.5): формы управления правами больше не живут простынёй под фолдом
+  // карточки роли — они поднимаются кнопками в шапку и открываются в дровере.
+  // drawer ∈ null | 'assign' | 'grant'.
+  const [drawer, setDrawer] = useState(null);
   // UX_REVIEW F-4: пока справочники грузятся, формы показывают LoadingState —
   // «ещё грузится» отличимо от «справочник пуст/недоступен».
   const [sourcesLoading, setSourcesLoading] = useState(false);
@@ -487,9 +491,19 @@ function RightsScreen({ initialRole }) {
               </div>
             </div>
             <div className="chs-roledetail__actions">
-              <span className="chs-readmode"><span className="chs-readmode__dot" />{canManage ? 'управление' : 'только чтение'}</span>
-              {!canManage && (
-                <Button variant="secondary" size="sm" disabled title="Запрос изменения роли — доступно только владельцу/админу">Запросить изменение</Button>
+              {/* T-0652 (§6.5): действия управления — кнопками в шапке карточки
+                  (открывают формы в дровере), а не простынёй под фолдом. Для
+                  читателя (canManage=false) — ВИДИМЫЙ бейдж «только просмотр». */}
+              {canManage ? (
+                <>
+                  <Button variant="primary" size="sm" onClick={() => setDrawer('assign')}>Назначить роль</Button>
+                  <Button variant="secondary" size="sm" onClick={() => setDrawer('grant')}>Дать право</Button>
+                </>
+              ) : (
+                <>
+                  <span className="chs-readmode chs-readmode--ro"><span className="chs-readmode__dot" />только просмотр</span>
+                  <Button variant="secondary" size="sm" disabled title="Запрос изменения роли — доступно только владельцу/админу">Запросить изменение</Button>
+                </>
               )}
             </div>
           </div>
@@ -516,35 +530,41 @@ function RightsScreen({ initialRole }) {
             </div>
           </section>
 
-          {/* Формы выдачи — FR-2/FR-3/FR-7: монтируются ТОЛЬКО при canManage.
-              При canManage===false компонент отсутствует в DOM (не disabled). */}
+          {/* T-0652 (§6.5): формы выдачи — FR-2/FR-3/FR-7 — теперь В ДРОВЕРЕ,
+              открываются кнопками из шапки карточки (не простынёй под фолдом).
+              Инвариант безопасности сохранён: Modal с формой монтируется ТОЛЬКО
+              при canManage — для читателя дровера нет в DOM вовсе (не disabled). */}
           {canManage && (
-            <section className="chs-section2">
-              <div className="chs-section2__head">
-                <h3 className="chs-section2__title">Назначить роль сотруднику</h3>
-              </div>
+            <Modal
+              open={drawer === 'assign'}
+              onClose={() => setDrawer(null)}
+              title="Назначить роль сотруднику"
+              size="md"
+            >
               <AssignRoleForm
                 roles={roles}
                 employees={employees}
                 dictionaries={dictionaries}
                 sourcesLoading={sourcesLoading}
-                onDone={load}
+                onDone={() => { load(); setDrawer(null); }}
               />
-            </section>
+            </Modal>
           )}
 
           {canManage && (
-            <section className="chs-section2">
-              <div className="chs-section2__head">
-                <h3 className="chs-section2__title">Дать роли право</h3>
-              </div>
+            <Modal
+              open={drawer === 'grant'}
+              onClose={() => setDrawer(null)}
+              title="Дать роли право"
+              size="md"
+            >
               <GrantRightForm
                 roles={roles}
                 dictionaries={dictionaries}
                 sourcesLoading={sourcesLoading}
-                onDone={load}
+                onDone={() => { load(); setDrawer(null); }}
               />
-            </section>
+            </Modal>
           )}
 
           {/* UX_REVIEW F-5: подсказка-путь к инбоксу подтверждений видна и

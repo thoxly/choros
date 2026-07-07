@@ -136,6 +136,58 @@ function isConflict(err: unknown): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// T-0652 (§6.4 «backfill login»): map an employee DB row to the account list
+// shape, choosing an HONEST `login` that never leaks a raw KC-UUID.
+//
+// Pre-migration-126 accounts have login=NULL. For a KC-backed human `slug` is
+// the KC user UUID (identity-resolution invariant) — the old `login ?? slug`
+// fallback surfaced that UUID as the account's "login" (the /users leak §6
+// flagged). We fix it at the READ boundary (a pure-SQL migration can't reach
+// Keycloak; a live-KC backfill would break CI):
+//   • login present                 → use it (owner typed it, post-126).
+//   • login NULL, slug NOT UUID      → use slug (dev-silo seed humans like
+//                                      `e-kravtsova` have no KC login at all —
+//                                      slug IS their only real label).
+//   • login NULL, slug IS a KC UUID  → login=null + login_missing=true. The UI
+//                                      shows «логин не задан», NEVER the UUID.
+// Exported so the mapping is unit-testable without a live DB.
+// ---------------------------------------------------------------------------
+
+export interface AccountRow {
+  id: string;
+  slug: string | null;
+  login: string | null;
+  display_name: string;
+  position_title: string | null;
+  department_name: string | null;
+  deactivated_at: string | null;
+}
+
+export interface AccountView {
+  employee_id: string;
+  login: string | null;
+  login_missing: boolean;
+  display_name: string;
+  position: string;
+  department: string;
+  active: boolean;
+}
+
+export function mapAccountRow(row: AccountRow): AccountView {
+  const slugIsUuid = row.slug !== null && UUID_RE.test(row.slug);
+  const login = row.login ?? (slugIsUuid ? null : row.slug);
+  return {
+    employee_id: row.id,
+    login,
+    login_missing: login === null,
+    display_name: row.display_name,
+    position: row.position_title ?? "",
+    department: row.department_name ?? "",
+    active: row.deactivated_at === null,
+  };
+}
+
 /** KC port errors carry .code (LOGIN_TAKEN / EMAIL_TAKEN / EMAIL_INVALID / AUTH_UNAVAILABLE) — see admin-port.ts. */
 function kcErrCode(err: unknown): string | undefined {
   if (err && typeof err === "object" && "code" in err) {
@@ -491,22 +543,12 @@ export function registerUserMgmtRoutes(
       client.release();
     }
 
-    // T-0625 fix: `slug` is the KC user UUID (identity-resolution invariant,
-    // NOT human-readable — see the INSERT comment above). The list must show
-    // the human-readable login the owner typed, which lives in the new
-    // `login` column. Rows created before migration 126 (dev-silo seed
-    // humans, or any account created before this fix shipped) have
-    // login=NULL — for those ONLY, fall back to `slug` (their sole label;
-    // the seed's slugs like `e-kravtsova` are already human-readable, not
-    // KC UUIDs, since seed humans have no KC login at all).
-    const accounts = rows.map((row) => ({
-      employee_id: row.id,
-      login: row.login ?? row.slug,
-      display_name: row.display_name,
-      position: row.position_title ?? "",
-      department: row.department_name ?? "",
-      active: row.deactivated_at === null,
-    }));
+    // T-0652 (§6.4 «backfill login»): map each row to the account view via the
+    // pure, unit-tested mapAccountRow — it chooses an HONEST login that never
+    // leaks a raw KC-UUID (login present → login; login NULL + human-readable
+    // slug → slug; login NULL + UUID slug → null + login_missing=true, so the
+    // UI shows «логин не задан», never the UUID). See mapAccountRow above.
+    const accounts = rows.map(mapAccountRow);
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");

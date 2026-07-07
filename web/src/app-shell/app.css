@@ -238,6 +238,13 @@
 .chs-crumbs__sep { color: var(--chs-color-border-strong); }
 .chs-topbar__right { display: flex; align-items: center; gap: var(--chs-space-5); flex: none; }
 
+/* T-0652 (§6.1 «нет фейковых кнопок»): заглушка-топбар — disabled-кнопка с
+   ВИДИМОЙ причиной рядом (не chs-sr-only). Причина видна зрячему, кнопка явно
+   неактивна — контрол честный: не работает и это заметно. */
+.chs-topbar__stub { display: inline-flex; align-items: center; gap: var(--chs-space-3); }
+.chs-topbar__hint { font-size: var(--chs-text-xs); color: var(--chs-color-text-muted); white-space: nowrap; }
+.chs-btn--stub[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+
 .chs-theme-toggle { display: flex; border: 1px solid var(--chs-color-border-strong); border-radius: var(--chs-radius-2); overflow: hidden; }
 .chs-theme-toggle button {
   border: none; background: transparent; cursor: pointer;

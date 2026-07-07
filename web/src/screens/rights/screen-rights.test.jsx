@@ -411,3 +411,42 @@ describe('T-0609 F-1 — GrantRightForm emits resource-hierarchy scope for real 
     expect(formsSrc).toMatch(/\(isRealResource \|\| scope\)/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0652 (§6.5): формы управления подняты кнопками в шапку карточки (дровер),
+// бейдж «только просмотр» для читателя. Инвариант безопасности сохранён —
+// формы монтируются ТОЛЬКО при canManage (в дровере), не disabled.
+// ---------------------------------------------------------------------------
+
+describe('T-0652 · role-card actions in the header (§6.5)', () => {
+  it('header carries action buttons «Назначить роль» / «Дать право» under canManage', () => {
+    // The role-detail actions block (from the opening class to «Кто что может»).
+    const actionsBlock = screenSrc.match(/chs-roledetail__actions[\s\S]{0,2200}WhoCanDoWhat role=/)?.[0] || '';
+    expect(actionsBlock).toContain('Назначить роль');
+    expect(actionsBlock).toContain('Дать право');
+    expect(actionsBlock).toMatch(/setDrawer\('assign'\)/);
+    expect(actionsBlock).toMatch(/setDrawer\('grant'\)/);
+  });
+
+  it('reader (canManage=false) sees a VISIBLE «только просмотр» badge in the header', () => {
+    const actionsBlock = screenSrc.match(/chs-roledetail__actions[\s\S]{0,2200}WhoCanDoWhat role=/)?.[0] || '';
+    expect(actionsBlock).toContain('только просмотр');
+    // it is a plain visible span, not chs-sr-only
+    expect(actionsBlock).not.toMatch(/только просмотр[\s\S]{0,40}chs-sr-only/);
+  });
+
+  it('forms are wrapped in a Modal drawer, still gated on canManage (mounted only then)', () => {
+    // The AssignRoleForm/GrantRightForm are inside a Modal that only renders under canManage.
+    expect(screenSrc).toMatch(/canManage && \(\s*<Modal[\s\S]{0,300}AssignRoleForm/);
+    expect(screenSrc).toMatch(/canManage && \(\s*<Modal[\s\S]{0,300}GrantRightForm/);
+    expect(screenSrc).toContain("drawer === 'assign'");
+    expect(screenSrc).toContain("drawer === 'grant'");
+  });
+
+  it('the forms are NO LONGER open sections rendered below the fold', () => {
+    // The old below-the-fold section headers must be gone from the always-on flow.
+    expect(screenSrc).not.toMatch(/chs-section2__title">Назначить роль сотруднику/);
+    expect(screenSrc).not.toMatch(/chs-section2__title">Дать роли право/);
+  });
+});
+

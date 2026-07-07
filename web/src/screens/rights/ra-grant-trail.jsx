@@ -211,6 +211,58 @@ function fetchGrantTrail(queryString, fetchImpl) {
   return doFetch(url, { headers: authHeaders() });
 }
 
+// ---------------------------------------------------------------------------
+// T-0652 (§6.2): CSV-экспорт журнала. Кнопка «Экспорт» была мертва (без
+// onClick, ra-grant-trail.jsx:327). Данные УЖЕ загружены через fetchGrantTrail
+// (несёт authHeaders() — не голый fetch), так что экспорт — чисто клиентская
+// сериализация уже отрендеренных строк. Никакого нового эндпойнта не нужно.
+// ---------------------------------------------------------------------------
+
+const CSV_HEADER = [
+  'Время (UTC+3)', 'ID', 'Действие', 'Кто выдал', 'Кому', 'Роль · грант',
+  'Операция', 'Ресурс', 'Охват', 'Происхождение', 'Подтвердил',
+];
+
+/** RFC4180-экранирование одного поля: кавычки удваиваются, поле с
+ *  запятой/кавычкой/переводом строки берётся в кавычки. */
+function csvEscape(value) {
+  const s = value === null || value === undefined ? '' : String(value);
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+/** displayRows (выход apiRowToDisplay) → CSV-текст. actor/subject — объекты
+ *  {type,name}; всё остальное уже примитивы. Каждое поле проходит csvEscape. */
+function rowsToCsv(displayRows) {
+  const actionLabel = (a) => (ACTION_META[a] ? ACTION_META[a].label : a);
+  const nameOf = (v) => (v && typeof v === 'object' ? (v.name ?? '') : (v ?? ''));
+  const lines = [CSV_HEADER.map(csvEscape).join(',')];
+  for (const r of displayRows) {
+    lines.push([
+      r.ts, r.id, actionLabel(r.action),
+      nameOf(r.actor), nameOf(r.subject),
+      r.role, r.op, String(r.res ?? '').replace(/^mcp:\/\//, ''),
+      r.scope, r.proposed,
+      Array.isArray(r.confirmed) ? r.confirmed.join('; ') : (r.confirmed ?? ''),
+    ].map(csvEscape).join(','));
+  }
+  // \r\n — RFC4180; BOM ﻿, чтобы Excel распознал UTF-8 (кириллица).
+  return '﻿' + lines.join('\r\n') + '\r\n';
+}
+
+/** Скачать CSV программным кликом (a[download]). Отделено для тестируемости. */
+function downloadCsv(csvText, filename) {
+  const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 /**
  * GrantTrailRow — ONE trail row, extracted as a PURE (hook-free) component so
  * the node test tier (web/vitest.config.js, no jsdom) can render it and walk
@@ -323,8 +375,20 @@ function GrantTrailScreen() {
         <button type="button" className={`chs-trail__crit ${critOnly ? "chs-trail__crit--on" : ""}`} onClick={() => setCritOnly((v) => !v)}>
           <span className="chs-trail__critdot" />только критичные
         </button>
-        <span className="chs-trail__append"><span className="chs-trail__appenddot" />append-only</span>
-        <Button variant="secondary" size="sm">Экспорт</Button>
+        <span className="chs-trail__append"><span className="chs-trail__appenddot" />журнал неизменяем</span>
+        {/* T-0652 (§6.2): раньше кнопка была без onClick (мертва). Теперь —
+            клиентский CSV из уже загруженных строк. Нечего экспортировать →
+            честный disabled с ВИДИМОЙ причиной (не фейк-кнопка, §6.1). */}
+        {displayRows.length === 0 ? (
+          <span className="chs-trail__stub">
+            <Button variant="secondary" size="sm" aria-disabled="true" className="chs-btn--stub" title="Нет записей для экспорта" onClick={(e) => e.preventDefault()}>Экспорт</Button>
+            <span className="chs-trail__stubhint">нет записей</span>
+          </span>
+        ) : (
+          <Button variant="secondary" size="sm" onClick={() => downloadCsv(rowsToCsv(rows), 'grant-trail.csv')}>
+            Экспорт CSV
+          </Button>
+        )}
       </div>
 
       {/* T-0530: loading / error states */}
@@ -381,5 +445,5 @@ function GrantTrailScreen() {
 // that a SEED-shape row triggered live — see ra-grant-trail.test.js);
 // `fetchGrantTrail` lets the test assert the request carries the auth header
 // (the P0 that made the screen always fall to seed — re-verify fix-forward №3).
-export { apiRowToDisplay, GrantTrailRow, fetchGrantTrail };
+export { apiRowToDisplay, GrantTrailRow, fetchGrantTrail, rowsToCsv, csvEscape };
 export default GrantTrailScreen;
