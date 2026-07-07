@@ -183,11 +183,38 @@ describe('FormDesigner — application picker synced with process_app_binding (T
     expect(hint).not.toMatch(/process_app_binding|WRONG_FLOOR|409|application_id/);
   });
 
-  it('the same hint text blocks the save button (defense-in-depth against a bindings-load race)', () => {
-    const hintCount = (FORM_DESIGNER_SRC.match(/Этот процесс не привязан ни к одному приложению — привяжите его на экране «Процессы»\./g) || []).length;
+  it('the hint text is defined once (constant) and referenced twice — picker + save-block', () => {
+    // T-0669 fix-forward (design-steward UX-1/UX-NB1): the literal string now
+    // lives in a single PROCESS_NOT_BOUND_HINT constant, not duplicated ×2.
+    const literalCount = (FORM_DESIGNER_SRC.match(/Этот процесс не привязан ни к одному приложению — привяжите его на экране «Процессы»\./g) || []).length;
+    expect(literalCount).toBe(1);
+    const usageCount = (FORM_DESIGNER_SRC.match(/\{PROCESS_NOT_BOUND_HINT\}/g) || []).length;
     // appears twice: once beside the app picker (§3.1), once beside the save button (§3.2).
-    expect(hintCount).toBe(2);
+    expect(usageCount).toBe(2);
     expect(FORM_DESIGNER_SRC).toContain('Boolean(selectedProcessKey && boundAppIdsForProcess && boundAppIdsForProcess.size === 0)');
+  });
+
+  it('the picker-version empty state is styled as information, not an error (AC-2/§3.1 — design-steward UX-1)', () => {
+    // The picker's empty state (process chosen, nothing bound yet) is a normal
+    // authoring step, not a failure — must use the file's muted/status
+    // convention (same as "Выберите блок…", "Нет полей."), not danger/alert.
+    const pickerBlock = FORM_DESIGNER_SRC.slice(
+      FORM_DESIGNER_SRC.indexOf('boundAppIdsForProcess.size === 0 ? ('),
+      FORM_DESIGNER_SRC.indexOf('boundAppIdsForProcess.size === 0 ? (') + 300,
+    );
+    expect(pickerBlock).toContain('role="status"');
+    expect(pickerBlock).toContain('chs-color-text-muted');
+    expect(pickerBlock).not.toContain('role="alert"');
+    expect(pickerBlock).not.toContain('chs-color-danger');
+  });
+
+  it('the save-button-block version stays danger/alert (real blocker on an action, defense-in-depth)', () => {
+    const saveBlock = FORM_DESIGNER_SRC.slice(
+      FORM_DESIGNER_SRC.indexOf('boundAppIdsForProcess.size === 0 && ('),
+      FORM_DESIGNER_SRC.indexOf('boundAppIdsForProcess.size === 0 && (') + 300,
+    );
+    expect(saveBlock).toContain('role="alert"');
+    expect(saveBlock).toContain('chs-color-danger');
   });
 
   it('an unbound-process document does not need bindings to render (embedding path, static-markup)', () => {

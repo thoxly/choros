@@ -60,6 +60,11 @@ import { announceMove, announceCut, announcePaste, cloneForClipboard } from './c
 import { containerIsDropTarget } from './canvas-path.js';
 import './form-designer.css';
 
+// T-0669: shared copy for both the picker's empty-state hint (process chosen,
+// no app bound yet — normal authoring step) and the save-time defense-in-depth
+// block (same fact, but blocking an action). One string, no drift risk.
+const PROCESS_NOT_BOUND_HINT = 'Этот процесс не привязан ни к одному приложению — привяжите его на экране «Процессы».';
+
 // ---------------------------------------------------------------------------
 // Path / drag helpers
 // ---------------------------------------------------------------------------
@@ -1176,8 +1181,8 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                 a process picked, or before bindings load, the list is unfiltered
                 (pre-T-0669 behavior) — nothing to compare against yet. */}
             {selectedProcessKey && boundAppIdsForProcess && boundAppIdsForProcess.size === 0 ? (
-              <p role="alert" style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
-                Этот процесс не привязан ни к одному приложению — привяжите его на экране «Процессы».
+              <p role="status" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
+                {PROCESS_NOT_BOUND_HINT}
               </p>
             ) : (
               <>
@@ -1343,7 +1348,7 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                 honest text rather than let it hit the server's opaque 409. */}
             {selectedProcessKey && boundAppIdsForProcess && boundAppIdsForProcess.size === 0 && (
               <p role="alert" style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
-                Этот процесс не привязан ни к одному приложению — привяжите его на экране «Процессы».
+                {PROCESS_NOT_BOUND_HINT}
               </p>
             )}
             <Button
