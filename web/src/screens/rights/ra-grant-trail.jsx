@@ -7,7 +7,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   ActorChip, MonoId, Mono, OpChip, Button, KitIcon, LoadingState, ErrorState,
   DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
-  isMachineActorLabel,
+  isMachineActorLabel, EXEC_META,
 } from '../../components/components.jsx';
 import { TRAIL as TRAIL_SEED, ProvenanceTag } from './ra-data.jsx';
 import { formatDate } from '../../lib/format.js';
@@ -243,11 +243,35 @@ function csvEscape(value) {
   return s;
 }
 
+/**
+ * nameOf — actor/subject {type,name} → CSV cell text.
+ *
+ * F-1 (live-proof on the deployed stand): this used to return `v.name`
+ * unconditionally, so an UNRESOLVED machine actor (the batch resolver's
+ * honest fallback hands us name === id === a raw UUID, per ActorChip's own
+ * doc comment above) leaked the bare UUID into the exported file — even
+ * though the ON-SCREEN ActorChip (components.jsx, T-0685) already demotes
+ * that exact case to the generic type label ("Сервис"/"Агент"/"Человек")
+ * and hides the id in a tooltip. Mirror ActorChip's demotion here with the
+ * SAME predicate (isMachineActorLabel) and the SAME label source
+ * (EXEC_META) so "CSV rows match what's on screen" holds for the «Кому» /
+ * «Кто выдал» columns too. A human-legible slug ("policy-sync") is NOT a
+ * machine key (isMachineActorLabel returns false) and stays as-is —
+ * unchanged from before.
+ */
+function nameOf(v) {
+  if (!v || typeof v !== 'object') return v ?? '';
+  const name = v.name ?? '';
+  if (isMachineActorLabel(String(name))) {
+    return (EXEC_META[v.type] || EXEC_META.service).label;
+  }
+  return name;
+}
+
 /** displayRows (выход apiRowToDisplay) → CSV-текст. actor/subject — объекты
  *  {type,name}; всё остальное уже примитивы. Каждое поле проходит csvEscape. */
 function rowsToCsv(displayRows) {
   const actionLabel = (a) => (ACTION_META[a] ? ACTION_META[a].label : a);
-  const nameOf = (v) => (v && typeof v === 'object' ? (v.name ?? '') : (v ?? ''));
   const lines = [CSV_HEADER.map(csvEscape).join(',')];
   for (const r of displayRows) {
     lines.push([
