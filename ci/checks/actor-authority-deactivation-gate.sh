@@ -19,11 +19,23 @@
 #              somewhere in its body. Strip the predicate from any → FAIL. A second
 #              un-gated actor slug-lookup INSIDE a registered resolver (more
 #              slug-lookups than predicate markers) → FAIL.
+#              KNOWN LIMIT (R2-P3-1, accepted): the predicate coverage counts marker
+#              MENTIONS on non-comment lines, not query BINDINGS — a resolver with N
+#              actor slug-lookups must show >= N predicate markers, but the gate does
+#              not prove each marker sits inside the SAME SQL literal as its lookup.
+#              A deliberate DEAD reference (e.g. `const deadRef = ACTOR_ACTIVE_SQL;`)
+#              next to an un-gated 2nd lookup would satisfy the count. This is an
+#              inherent grep-gate limit and requires review-VISIBLE dead code inside
+#              one of the registered security functions (evasion, not forgetting); the
+#              FF-0662-2 accounting scan is the forgetting-net. Not closed here to keep
+#              the gate a single-language text check (matching "marker in the same
+#              backtick-literal as the lookup" is brittle across multi-line SQL).
 #  FF-0662-2 — ACCOUNTING SCAN (the real anti-recurrence teeth). It GLOBS every
 #              src/db/*.ts and src/http/*.ts (like http-route-auth-coverage.sh globs
 #              src/http/*.ts) and, per file, compares:
-#                total   = every employee actor `slug = $` / `e.slug = $` lookup
-#                          (comment-stripped, inside a `FROM choros.employee` window)
+#                total   = every employee actor `slug = $` / `<alias>.slug = $` lookup
+#                          (comment-stripped, inside a `FROM|JOIN choros.employee`
+#                          window; see SLUG_LOOKUP_SHAPE + count_lookups_in_file)
 #                accounted = the SAME lookups that fall inside the body of a
 #                          registered resolver OR an ALLOWLISTED function for that file.
 #              total > accounted ⇒ an employee actor slug-lookup exists that is
@@ -34,10 +46,11 @@
 #              new employee actor-lookup, realising ADR FC-3 / INV-2.
 #
 # WHAT IS **NOT** GATED (ADR T-0658 §3.4 / T-0662 §1.1): display / identity-mapping,
-# tenant-mapping, SoD constraints (fail-OPEN if gated), agent-budget reads, and
-# read-only projections. These are real employee slug-lookups but they are NOT
-# authority decisions that a deactivated actor could ride; each is on the ALLOWLIST
-# below with a per-entry reason (a one-time inventory of the live authority surface).
+# tenant-mapping, SoD constraints (fail-OPEN if gated), agent-budget reads, role-
+# filtered holder lists, substitution TARGET reads, and read-only projections. These
+# are real employee slug-lookups but they are NOT authority decisions that a
+# deactivated actor could ride; each is on the ALLOWLIST below with a per-entry reason
+# (a one-time inventory of the live authority surface).
 # Write-target existence by id (`WHERE e.id = $`) is a DIFFERENT shape and never
 # matched by this gate at all (it inspects the `slug = $` actor shape only).
 #
@@ -48,9 +61,12 @@
 # predicate → coverage predicate is false; (2) ACTOR_ACTIVE_SQL / literal → covered;
 # (3) the JUDGE ATTACKS as accounting-scan negatives — a NEW function with a bespoke
 # lookup in an existing authority file AND a bespoke lookup in a NEW file must both
-# read as UN-ACCOUNTED (total > accounted); (4) a registered-but-RENAMED/missing
-# function reaches the graceful FAIL branch (N-1). A broken gate turns its own
-# self-test red.
+# read as UN-ACCOUNTED (total > accounted); (3b) the ROUND-2 JUDGE BYPASSES as
+# negatives — the three shapes that kept the round-1 gate green (a `slug=$` 9+ lines
+# after FROM, an alias-qualified `emp.slug`/`employee.slug`, and a JOIN choros.employee
+# … e.slug=$) must ALL now read as UN-ACCOUNTED after the window/alias/JOIN widening;
+# (4) a registered-but-RENAMED/missing function reaches the graceful FAIL branch
+# (N-1). A broken gate turns its own self-test red.
 #
 # Exit 0 on clean, non-zero on any violation.
 set -euo pipefail
@@ -72,6 +88,8 @@ AUTHORITY_RESOLVERS=(
   "src/db/org.ts:loadAdminContext"
   "src/http/report-page-render.ts:defaultCheckReadGrant"
   "src/http/rights-intents.ts:registerSelfAbsence"
+  "src/http/rights-change-requests.ts:assertApproverIsHuman"
+  "src/http/binding.ts:checkRole"
 )
 
 # ---------------------------------------------------------------------------
@@ -103,16 +121,22 @@ AUTHORITY_RESOLVERS=(
 #   sod-dao.ts:effectiveAssignmentsOf       — SoD is a RESTRICTION; subtracting a
 #                                             deactivated actor's assignments = "no
 #                                             violation" = fail-OPEN. Must NOT be gated.
-#  KIND CHECK (human vs agent — orthogonal to deactivation):
-#   rights-change-requests.ts:assertApproverIsHuman — rejects AGENT approvers
-#                                             (dual-control). A deactivated HUMAN is
-#                                             still human; this guard is not the
-#                                             deactivation control (that lives on the
-#                                             grant/approve path it precedes).
 #  SUBSTITUTION READS (resolve target employee for substitution-rule reads):
 #   substitution-dao.ts:getActiveSubstitutionsForEmployee   — reads rules for an
-#                                             absent employee; not an authorizing lookup.
-#   substitution-dao.ts:getActiveSubstitutionsForSubstitute — symmetric.
+#                                             ABSENT employee (the target), not the
+#                                             authorizing actor; not an authorizing lookup.
+#   substitution-dao.ts:getActiveSubstitutionsForSubstitute — feeds the Tier-2
+#                                             claim/approve authorization
+#                                             (resolveTier2SubstitutionClaim,
+#                                             inbox.ts). Deactivation IS enforced,
+#                                             but NOT here: SUBST_SELECT
+#                                             (substitution-dao.ts:179, T-0588
+#                                             BLOCK-2) carries `e_sub.deactivated_at
+#                                             IS NULL` so a deactivated substitute
+#                                             yields ZERO rules, and inbox actor
+#                                             gates run before any side-effect. This
+#                                             lookup is the substitute-slug resolver
+#                                             ahead of that in-query filter.
 #  AGENT / NOTIFICATION (agents have no deactivated_at; display-only):
 #   assistant.ts:fetchBudget                — agent budget read (agent slug; no
 #                                             deactivation mechanism on agents).
@@ -120,6 +144,27 @@ AUTHORITY_RESOLVERS=(
 #                                             notification body and skip self-notify.
 #   solution-bundles.ts:resolveActorType    — resolves actor human/agent TYPE for
 #                                             display/branching (getAuthContext-first).
+#  ROLE-FILTERED / TARGET-EMPLOYEE READS (surfaced by the round-2 JOIN/window
+#  widening — R2-P2-1; each is a `.slug = $` inside a FROM|JOIN choros.employee
+#  window but is NOT an authorizing ACTOR lookup):
+#   grants-dao.ts:getHoldersForRole         — lists the SLUGS holding a given role
+#                                             (`r.slug = $2` is the ROLE filter; the
+#                                             matched `e.slug` is SELECT OUTPUT, not an
+#                                             actor filter). Read-only holder listing;
+#                                             already carries `e.deactivated_at IS NULL`
+#                                             so it excludes deactivated holders anyway.
+#   grants-dao.ts:getRoleAssignmentOrgScopesForEmployee — resolves the ABSENT/target
+#                                             employee's org-scope for a Tier-2
+#                                             substitution CONTAINMENT check (T-0588
+#                                             BLOCK-1). `e.slug = $2` is the SUBSTITUTED-
+#                                             FOR employee, not the authorizing actor;
+#                                             symmetric with getActiveSubstitutionsFor-
+#                                             Employee. `r.slug = $3` is the role filter.
+#   grant-propose.ts:registerGrantProposeRoute — resolves the fixed BYO PROPOSAL_AGENT
+#                                             slug (agent_card JOIN employee) to get its
+#                                             llm_endpoint. Resolves an AGENT (agents
+#                                             have no deactivated_at); config lookup, not
+#                                             an allow/deny on a human actor.
 #  DOWNSTREAM-GUARDED authority projection (ADR §1.2 / §4.2):
 #   grants-dao.ts:getRoleSlugsForActor      — role-slug PROJECTION. Its sole consumer
 #                                             inbox.ts holds its own deactivation gate
@@ -137,13 +182,15 @@ ALLOWLIST=(
   "src/http/rights-overview.ts:resolveCallerEmployeeId"
   "src/http/rights-sod.ts:checkSodForSubject"
   "src/db/sod-dao.ts:effectiveAssignmentsOf"
-  "src/http/rights-change-requests.ts:assertApproverIsHuman"
   "src/db/substitution-dao.ts:getActiveSubstitutionsForEmployee"
   "src/db/substitution-dao.ts:getActiveSubstitutionsForSubstitute"
   "src/http/assistant.ts:fetchBudget"
   "src/http/assistant.ts:captureConfigRequest"
   "src/http/solution-bundles.ts:resolveActorType"
   "src/db/grants-dao.ts:getRoleSlugsForActor"
+  "src/db/grants-dao.ts:getHoldersForRole"
+  "src/db/grants-dao.ts:getRoleAssignmentOrgScopesForEmployee"
+  "src/http/grant-propose.ts:registerGrantProposeRoute"
 )
 
 # The dirs the accounting scan globs (mirrors http-route-auth-coverage's HTTP_DIR glob).
@@ -152,15 +199,27 @@ SCAN_DIRS=("src/db" "src/http")
 # The deactivation-predicate markers (literal OR named). Either satisfies coverage.
 PREDICATE_MARKERS='deactivated_at IS NULL|ACTOR_ACTIVE_SQL'
 
-# The employee-actor slug-lookup shape: bare `slug = $N` (unqualified) OR `e.slug = $N`
-# (the employee alias). Deliberately NOT `r.slug`/`t.slug` (role/tenant) and NOT
-# `e.id = $` (write-target). Used to COUNT lookups inside a `FROM choros.employee`
-# window and inside function bodies.
-SLUG_LOOKUP_SHAPE='(^|[^A-Za-z0-9_.])slug[[:space:]]*=[[:space:]]*\$[0-9]|[^A-Za-z0-9_]e\.slug[[:space:]]*=[[:space:]]*\$[0-9]'
+# The employee-actor slug-lookup shape: bare `slug = $N` (unqualified) OR ANY
+# alias-qualified `<ident>.slug = $N` (e.slug, emp.slug, employee.slug, …).
+# Round-2 (R2-P2-1): the earlier shape matched only bare/`e.slug`, so an honest
+# author writing `emp.slug = $` / `employee.slug = $` slipped past the scan. Inside
+# the `FROM|JOIN choros.employee` window (below) an alias-qualified `.slug = $` is
+# an employee-actor lookup regardless of the alias letter; a rare role/tenant alias
+# inside that window is triaged into the allowlist ONCE, explicitly. Still NOT
+# `e.id = $` (write-target — different shape, never matched).
+# NB: inside func_body (no window) the bare-`slug = $` arm still catches unqualified
+# lookups; the alias arm needs the employee-window context to be meaningful, which
+# count_lookups_in_file supplies. count_lookups_in_text keeps the same shape so a
+# resolver body that qualifies its slug (`e.slug`/`emp.slug`) is still counted.
+SLUG_LOOKUP_SHAPE='(^|[^A-Za-z0-9_.])slug[[:space:]]*=[[:space:]]*\$[0-9]|[^A-Za-z0-9_][A-Za-z_][A-Za-z0-9_]*\.slug[[:space:]]*=[[:space:]]*\$[0-9]'
 
-# EMP_WINDOW: how many lines after a `FROM choros.employee` a `slug = $` may sit and
-# still count as that SELECT's actor lookup (multi-line SQL).
-EMP_WINDOW=8
+# EMP_WINDOW: how many lines after a `FROM|JOIN choros.employee` a `.slug = $` may
+# sit and still count as that SELECT's actor lookup (multi-line SQL). Round-2
+# (R2-P2-1): raised 8 → 25 so a `slug = $` at the end of a long WHERE list (past a
+# multi-line JOIN / column list) is not invisible. count_lookups_in_file ALSO closes
+# the window early on the SQL statement terminator (closing backtick / `;`) so the
+# window never bleeds into an unrelated later statement in the same file.
+EMP_WINDOW=25
 
 # ---------------------------------------------------------------------------
 # entries_for_file <file-rel> — echo the "file:function" registry+allowlist entries
@@ -225,8 +284,15 @@ count_lookups_in_text() {
 }
 
 # Count employee actor slug-lookups in a whole FILE, restricted to lines that sit
-# within an EMP_WINDOW-line window after a `FROM choros.employee` (so a `slug = $`
-# on a tenant/role/application table is not miscounted). Comment lines ignored.
+# within an EMP_WINDOW-line window opened by a `FROM|JOIN choros.employee` (so a
+# `slug = $` on a tenant/role/application table is not miscounted). The window is
+# also CLOSED early on the SQL statement terminator — the closing backtick that ends
+# the template-literal query, or a `;` — so it never bleeds into a later, unrelated
+# statement in the same file. Comment lines ignored.
+# Round-2 (R2-P2-1): (a) JOIN choros.employee opens the window too, not only FROM
+# (a `JOIN choros.employee e ON … e.slug = $` no longer hides); (b) EMP_WINDOW=25
+# (long WHERE lists); (c) early close on backtick/`;` bounds the widened window to
+# the current statement.
 # NB: awk EMITS the in-window non-comment lines and `grep -cE` counts the shape —
 # BSD awk mangles a `\$` in a *dynamic* regex (`line ~ shape`), so the shape match
 # MUST run through grep, not awk's `~`.
@@ -234,8 +300,15 @@ count_lookups_in_file() {
   awk -v EMP_WINDOW="${EMP_WINDOW}" '
     { line=$0 }
     line ~ /^[[:space:]]*(\/\/|\*|\/\*)/ { next }               # comment — skip
-    line ~ /FROM[[:space:]]+choros\.employee/ { emp=EMP_WINDOW }
-    emp>0 { print; emp-- }
+    line ~ /(FROM|JOIN)[[:space:]]+choros\.employee/ { emp=EMP_WINDOW; print; next }
+    emp>0 {
+      print
+      emp--
+      # Close the window at the statement terminator so it does not bleed into a
+      # later unrelated statement: a closing backtick (end of the SQL template
+      # literal) or a bare `;`. The employee line itself never closes the window.
+      if (line ~ /`/ || line ~ /;/) emp=0
+    }
   ' "$1" \
     | { grep -cE "${SLUG_LOOKUP_SHAPE}" || true; }
 }
@@ -402,6 +475,92 @@ EOF
     echo "SELF-TEST FAIL: accounting false-positive — a lone accounted display fn read as un-gated (total=${total_c} acc=${acc_c})"; exit 2
   fi
 
+  # ===================================================================
+  # (4d/e/f) ROUND-2 JUDGE BYPASSES as NEGATIVES — the three shapes that kept the
+  #     ROUND-1 gate GREEN (R2-P2-1: window-overflow, alias-qualifier, JOIN-shape)
+  #     must now read as UN-ACCOUNTED (total > accounted) after the widening. Each
+  #     is a NEW file with ONE bespoke un-gated authority lookup whose function is
+  #     NOT registered/allowlisted → total (1) must exceed accounted (0).
+  # ===================================================================
+
+  # (4d) WINDOW-OVERFLOW: a `slug = $` sitting 9+ lines after FROM choros.employee
+  #      (a long WHERE list). Round-1 EMP_WINDOW=8 hid it; EMP_WINDOW=25 catches it.
+  cat > "${FR}/src/http/overflow.ts" <<'EOF'
+export async function isOverflowAllowed(pool, tenantId, actorSlug) {
+  const { rows } = await pool.query(
+    `SELECT id
+       FROM choros.employee
+      WHERE tenant_id = $1
+        AND col_a IS NOT NULL
+        AND col_b IS NOT NULL
+        AND col_c IS NOT NULL
+        AND col_d IS NOT NULL
+        AND col_e IS NOT NULL
+        AND col_f IS NOT NULL
+        AND slug = $2
+      LIMIT 1`,
+    [tenantId, actorSlug],
+  );
+  return rows.length > 0;
+}
+EOF
+  total_d="$(count_lookups_in_file "${FR}/src/http/overflow.ts")"
+  acc_d="$(accounted_for_file_in "${FR}" "src/http/overflow.ts")"
+  if [[ "${total_d}" -le "${acc_d}" ]]; then
+    echo "SELF-TEST FAIL: R2 BYPASS (d) window-overflow — slug=\$ 9+ lines after FROM NOT caught"
+    echo "                (overflow.ts total=${total_d} accounted=${acc_d}); EMP_WINDOW too small"; exit 2
+  fi
+
+  # (4e) ALIAS-QUALIFIER: `emp.slug = $` / `employee.slug = $` (an alias other than
+  #      `e`). Round-1 shape matched only bare/`e.slug`; the widened shape matches
+  #      any `<ident>.slug = $` inside the employee window.
+  cat > "${FR}/src/db/alias.ts" <<'EOF'
+export async function isAliasAllowed(pool, tenantId, actorSlug) {
+  const { rows } = await pool.query(
+    `SELECT emp.id FROM choros.employee emp
+      WHERE emp.tenant_id = $1 AND emp.slug = $2 LIMIT 1`,
+    [tenantId, actorSlug],
+  );
+  return rows.length > 0;
+}
+export async function isAliasAllowed2(pool, tenantId, actorSlug) {
+  const { rows } = await pool.query(
+    `SELECT employee.id FROM choros.employee employee
+      WHERE employee.tenant_id = $1 AND employee.slug = $2 LIMIT 1`,
+    [tenantId, actorSlug],
+  );
+  return rows.length > 0;
+}
+EOF
+  total_e="$(count_lookups_in_file "${FR}/src/db/alias.ts")"
+  acc_e="$(accounted_for_file_in "${FR}" "src/db/alias.ts")"
+  if [[ "${total_e}" -le "${acc_e}" ]]; then
+    echo "SELF-TEST FAIL: R2 BYPASS (e) alias-qualifier — emp.slug/employee.slug NOT caught"
+    echo "                (alias.ts total=${total_e} accounted=${acc_e}); shape too narrow"; exit 2
+  fi
+
+  # (4f) JOIN-SHAPE: `JOIN choros.employee e ON … e.slug = $` with FROM on ANOTHER
+  #      table. Round-1 window opened only on `FROM choros.employee`; the widened
+  #      trigger opens on `(FROM|JOIN) choros.employee`.
+  cat > "${FR}/src/http/joinshape.ts" <<'EOF'
+export async function isJoinAllowed(pool, tenantId, actorSlug) {
+  const { rows } = await pool.query(
+    `SELECT ra.id
+       FROM choros.role_assignment ra
+       JOIN choros.employee e ON e.tenant_id = ra.tenant_id AND e.id = ra.employee_id
+      WHERE ra.tenant_id = $1 AND e.slug = $2 LIMIT 1`,
+    [tenantId, actorSlug],
+  );
+  return rows.length > 0;
+}
+EOF
+  total_f="$(count_lookups_in_file "${FR}/src/http/joinshape.ts")"
+  acc_f="$(accounted_for_file_in "${FR}" "src/http/joinshape.ts")"
+  if [[ "${total_f}" -le "${acc_f}" ]]; then
+    echo "SELF-TEST FAIL: R2 BYPASS (f) JOIN-shape — JOIN choros.employee … e.slug=\$ NOT caught"
+    echo "                (joinshape.ts total=${total_f} accounted=${acc_f}); window opens only on FROM"; exit 2
+  fi
+
   # (5) N-1: a REGISTERED-but-missing/renamed function reaches the graceful FAIL
   #     branch. func_body on a nonexistent function returns EMPTY (not an error), so
   #     the caller's `[[ -z body ]]` diagnostic fires. Assert empty body + clean rc.
@@ -423,7 +582,8 @@ EOF
   fi
 
   echo "SELF-TEST PASS: actor-authority-deactivation-gate — coverage + accounting-scan"
-  echo "                (incl. judge attacks a/b, positive control, N-1 missing-fn) all detect."
+  echo "                (judge attacks a/b, positive control, R2 bypasses d/e/f"
+  echo "                 [window/alias/JOIN], N-1 missing-fn) all detect."
   exit 0
 fi
 

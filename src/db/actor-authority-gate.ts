@@ -31,6 +31,11 @@
  *     B2 loadAdminContext               src/db/org.ts             (admin ctx + mgmt_object:* delegation)
  *     C  defaultCheckReadGrant          src/http/report-page-render.ts (report-page read-authz)
  *     D  registerSelfAbsence            src/http/rights-intents.ts (self-absence actor + Tier-2 mint)
+ *     E  assertApproverIsHuman          src/http/rights-change-requests.ts (T-0662 round-2: 7th path —
+ *                                        dual-control approve/reject; a deactivated human must not
+ *                                        deliver the 2nd signature confirmed2_by, nor reject/delete)
+ *     F  checkRole                      src/http/binding.ts       (T-0662 round-2: process_designer
+ *                                        role-membership authz; surfaced by the JOIN-window scan widening)
  *
  * WHAT IS **NOT** AN AUTHORITY RESOLVER (this predicate MUST NOT be added — see
  * ADR-T0658 §3.4 / T-0662 ADR §1.1):
