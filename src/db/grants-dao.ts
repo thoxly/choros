@@ -43,6 +43,9 @@ import type { Grant, ScopeElement } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 import type { GrantSource } from "../core/grant-resolver.js";
 import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
+// T-0662: single NAMED deactivation predicate for authority actor-resolution.
+// getGrantsForSubject (below) is authority resolver A — it carries ACTOR_ACTIVE_SQL.
+import { ACTOR_ACTIVE_SQL } from "./actor-authority-gate.js";
 
 // ---------------------------------------------------------------------------
 // UUID shape guard (mirrors org.ts — defence-in-depth, T-0116 R-3)
@@ -247,9 +250,13 @@ export async function getGrantsForSubject(
     // practice, so this unconditional predicate is a permanent no-op for
     // agents (never filters a legitimate agent) while fail-closing the human
     // deactivation gap — no `kind` branch needed for correctness.
+    // T-0662: `deactivated_at IS NULL` sourced from the single named marker
+    // ACTOR_ACTIVE_SQL (src/db/actor-authority-gate.ts). Behaviour is byte-
+    // identical to the T-0658 literal; the name is the anti-recurrence seam the
+    // fitness gate anchors on.
     const { rows: empRows } = await client.query<{ id: string }>(
       `SELECT id FROM choros.employee
-        WHERE tenant_id = $1 AND slug = $2 AND deactivated_at IS NULL LIMIT 1`,
+        WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
       [tenantId, actorSlug],
     );
     if (empRows.length === 0) {
