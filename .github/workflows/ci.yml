@@ -5,6 +5,35 @@ on:
     branches: [main, dev]
   pull_request:
 
+# T-0703: the runner is self-hosted and every job below runs on the SAME host.
+# A `push` to dev and a `pull_request` run for that same commit (e.g. the dev→main
+# promotion PR) can both start at once. Most jobs (db, flowable, stack, kc,
+# deploy-acceptance) bind FIXED host ports (5432/55432/8180/9000/8082/3000) via
+# `services:` or `docker compose up`, not ephemeral ones — two concurrent runs
+# collide with "failed to bind host port ... address already in use" (observed
+# run 28886164542, job flowable, port 55432). This is a runner-capacity race, not
+# a code failure, so the fix is to SERIALIZE whole workflow runs on this shared
+# host rather than let them execute in parallel.
+#
+# A single GLOBAL group (fixed string, not `${{ github.ref }}`) is required
+# because the race is BETWEEN a push run and a pull_request run of the same
+# commit — those have different `github.ref` values (`refs/heads/dev` vs
+# `refs/pull/N/merge`), so a ref-scoped key would never see them as the same
+# group and would not serialize them. `cancel-in-progress: false` so a queued
+# run waits its turn instead of cancelling an in-flight deploy — a cancelled
+# `deploy-dev` mid-`deploy-dev.sh` would be worse than a queued one waiting.
+#
+# Applied at WORKFLOW level (not per-job): 5 of the 7 jobs (db, flowable, stack,
+# kc, deploy-acceptance) bind fixed ports and each would need the same lock
+# individually, and `deploy-dev` already depends on 4 of those via `needs` so it
+# is serialized transitively regardless. Only `ci` (tsc/eslint/unit, no ports)
+# would gain from staying unlocked, but that saves little (the port jobs are the
+# long pole either way) versus the risk of a future compose-using job forgetting
+# to add the lock. One global lock is simplest and cannot bit-rot.
+concurrency:
+  group: choros-ci-shared-ports
+  cancel-in-progress: false
+
 # Pin a collation-capable UTF-8 locale for ALL jobs. ubuntu-latest's default
 # locale is C.UTF-8, whose collation table REJECTS multibyte range expressions:
 # GNU grep raises "Invalid collation character" (exit 2) on Cyrillic ranges like
