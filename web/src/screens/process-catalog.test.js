@@ -26,6 +26,8 @@ import {
   triggerTypeLabel,
   mapBindingError,
   registryTargetOptions,
+  findExistingBinding,
+  prefillFieldsFromBinding,
   TRIGGER_TYPES,
 } from './process-catalog.js';
 
@@ -384,5 +386,104 @@ describe('bindingProcessLabel — human process name primary, slug demoted', () 
   it('is defensive against missing definitions / fields', () => {
     expect(bindingProcessLabel({ process_key: 'k' }, undefined).hasName).toBe(false);
     expect(bindingProcessLabel({}, defs).name).toBe('—');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0669 (NB-2 fix, T-0681 judge non-blocking finding): findExistingBinding /
+// prefillFieldsFromBinding. POST /api/process-app-bindings upserts on
+// (process_key, application_id) with ON CONFLICT DO UPDATE SET ... = EXCLUDED —
+// re-submitting the bind form for an ALREADY-BOUND pair while it still sits at
+// fresh-open defaults silently clears target_registry_slug/trigger_type/etc.
+// back to NULL/'launcher'. These two helpers let BindProcessModal detect the
+// existing row and pre-fill instead of blind-reset.
+// ---------------------------------------------------------------------------
+describe('findExistingBinding — resolve an existing row for a (process, app) pair', () => {
+  const bindings = [
+    { id: 'b1', process_key: 'purchaseApproval', application_id: APP_UUID, target_registry_slug: 'custom-registry' },
+    { id: 'b2', process_key: 'otherProcess', application_id: 'a0000000-0000-0000-0000-000000000077' },
+  ];
+
+  it('finds the row matching BOTH process_key and application_id', () => {
+    const found = findExistingBinding(bindings, 'purchaseApproval', APP_UUID);
+    expect(found).not.toBeNull();
+    expect(found.id).toBe('b1');
+  });
+
+  it('returns null when the pair has no existing binding (fresh bind)', () => {
+    expect(findExistingBinding(bindings, 'purchaseApproval', 'a0000000-0000-0000-0000-000000000077')).toBeNull();
+    expect(findExistingBinding(bindings, 'brandNewProcess', APP_UUID)).toBeNull();
+  });
+
+  it('returns null when either key is empty (nothing picked yet)', () => {
+    expect(findExistingBinding(bindings, '', APP_UUID)).toBeNull();
+    expect(findExistingBinding(bindings, 'purchaseApproval', '')).toBeNull();
+    expect(findExistingBinding(bindings, '', '')).toBeNull();
+  });
+
+  it('is defensive against a missing/non-array bindings list', () => {
+    expect(findExistingBinding(undefined, 'purchaseApproval', APP_UUID)).toBeNull();
+    expect(findExistingBinding(null, 'purchaseApproval', APP_UUID)).toBeNull();
+  });
+});
+
+describe('prefillFieldsFromBinding — pure projection for the bind-form pre-fill', () => {
+  it('projects every upserted column from an existing binding row', () => {
+    const binding = {
+      form_key: 'purchase-form',
+      trigger_type: 'record_action',
+      start_form_key: 'purchase-create',
+      field_mapping: { amount: 'summa' },
+      target_registry_slug: 'custom-registry',
+    };
+    expect(prefillFieldsFromBinding(binding)).toEqual({
+      formKey: 'purchase-form',
+      triggerType: 'record_action',
+      startFormKey: 'purchase-create',
+      fieldMappingRaw: 'amount=summa',
+      targetRegistrySlug: 'custom-registry',
+    });
+  });
+
+  it('a re-submit of the pre-filled values round-trips through buildBindingPayload unchanged (the NB-2 no-op guarantee)', () => {
+    const binding = {
+      process_key: 'purchaseApproval',
+      application_id: APP_UUID,
+      form_key: 'purchase-form',
+      trigger_type: 'record_action',
+      start_form_key: 'purchase-create',
+      field_mapping: { amount: 'summa' },
+      target_registry_slug: 'custom-registry',
+    };
+    const prefill = prefillFieldsFromBinding(binding);
+    const payload = buildBindingPayload({
+      process_key: binding.process_key,
+      application_id: binding.application_id,
+      form_key: prefill.formKey,
+      trigger_type: prefill.triggerType,
+      start_form_key: prefill.startFormKey,
+      field_mapping_raw: prefill.fieldMappingRaw,
+      target_registry_slug: prefill.targetRegistrySlug,
+    });
+    expect(payload.target_registry_slug).toBe('custom-registry'); // NOT null — the NB-2 bug would send null here
+    expect(payload.trigger_type).toBe('record_action');
+    expect(payload.start_form_key).toBe('purchase-create');
+    expect(payload.field_mapping).toEqual({ amount: 'summa' });
+  });
+
+  it('is null-safe: no existing binding (fresh pair) yields the same defaults the form already starts at', () => {
+    expect(prefillFieldsFromBinding(null)).toEqual({
+      formKey: '',
+      triggerType: 'launcher',
+      startFormKey: '',
+      fieldMappingRaw: '',
+      targetRegistrySlug: '',
+    });
+    expect(prefillFieldsFromBinding(undefined)).toEqual(prefillFieldsFromBinding(null));
+  });
+
+  it('a NULL target_registry_slug (default, never set) pre-fills to the empty-string "default" option, not the literal "null"', () => {
+    const binding = { process_key: 'p', application_id: APP_UUID, target_registry_slug: null };
+    expect(prefillFieldsFromBinding(binding).targetRegistrySlug).toBe('');
   });
 });

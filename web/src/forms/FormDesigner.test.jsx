@@ -144,6 +144,62 @@ describe('FormDesigner — process/step binding picker (T-0665 F1)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// T-0669: the "Приложение" picker must not offer a process+application pair
+// that has no process_app_binding row — authoring such a pair used to pass
+// cleanly (drag/drop/fields/preview all worked) and only fail on Save with an
+// opaque "Не удалось сохранить." (the server's classifyLayoutSave 409
+// WRONG_FLOOR, src/http/binding.ts, resolves application_id ITSELF from
+// process_app_binding — independent of whatever the picker had selected).
+// Fix reuses T-0681's GET /api/process-app-bindings (same endpoint
+// BindProcessModal / screen-processes.jsx already calls) to filter the
+// application picker to the SAME table the server's save-time gate consults.
+//
+// This tier has no jsdom/act (see file header) so the network-driven filter
+// itself cannot be exercised end-to-end here — these are source-presence
+// checks (same convention as the F1 describe block above) for the wiring,
+// plus the two purely-synchronous invariants: static-markup source contains
+// no gate-bypassing shortcut, and the hint text carries no jargon (G5).
+// ---------------------------------------------------------------------------
+describe('FormDesigner — application picker synced with process_app_binding (T-0669)', () => {
+  it('loads the real process↔application bindings (T-0681 endpoint, reused not reinvented)', () => {
+    expect(FORM_DESIGNER_SRC).toContain("fetch('/api/process-app-bindings'");
+    expect(FORM_DESIGNER_SRC).toContain('setProcessAppBindings');
+  });
+
+  it('filters the application picker to applications bound to the SELECTED process, from real data (not a hardcoded list)', () => {
+    expect(FORM_DESIGNER_SRC).toContain('boundAppIdsForProcess');
+    expect(FORM_DESIGNER_SRC).toContain('.filter((a) => !boundAppIdsForProcess || boundAppIdsForProcess.has(a.id))');
+    // derived from the bindings response, never a literal id/slug.
+    expect(FORM_DESIGNER_SRC).not.toMatch(/application_id\s*===\s*['"][0-9a-fA-F-]{8,}['"]/);
+  });
+
+  it('shows an honest, jargon-free hint when the chosen process has NO bound application', () => {
+    const idx = FORM_DESIGNER_SRC.indexOf('Этот процесс не привязан ни к одному приложению');
+    expect(idx).toBeGreaterThan(-1);
+    const hint = FORM_DESIGNER_SRC.slice(idx, idx + 120);
+    expect(hint).toContain('привяжите его на экране «Процессы»');
+    // G5 (ux-g5-jargon-denylist): no technical/internal terms in the visible hint.
+    expect(hint).not.toMatch(/process_app_binding|WRONG_FLOOR|409|application_id/);
+  });
+
+  it('the same hint text blocks the save button (defense-in-depth against a bindings-load race)', () => {
+    const hintCount = (FORM_DESIGNER_SRC.match(/Этот процесс не привязан ни к одному приложению — привяжите его на экране «Процессы»\./g) || []).length;
+    // appears twice: once beside the app picker (§3.1), once beside the save button (§3.2).
+    expect(hintCount).toBe(2);
+    expect(FORM_DESIGNER_SRC).toContain('Boolean(selectedProcessKey && boundAppIdsForProcess && boundAppIdsForProcess.size === 0)');
+  });
+
+  it('an unbound-process document does not need bindings to render (embedding path, static-markup)', () => {
+    // initialFields short-circuits the /api/process-app-bindings fetch (same
+    // pattern as /api/applications and /api/process-catalog above) — the
+    // embedding/test mode must still render synchronously without hanging on
+    // a bindings fetch that never resolves in this tier.
+    const html = renderToStaticMarkup(<FormDesigner initialDocument={DOC} initialFields={FIELDS} />);
+    expect(html).toContain('chs-form-designer');
+  });
+});
+
 describe('FormDesigner — fullscreen invariant (UX-2)', () => {
   it('the fullscreen modifier is on the OUTER workspace wrapper, not the canvas alone', () => {
     // Structural guarantee: the class that fullscreen toggles is chs-form-designer

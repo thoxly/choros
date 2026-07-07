@@ -164,6 +164,55 @@ export function registryTargetOptions(rows) {
     }));
 }
 
+/**
+ * T-0669 (NB-2 fix, T-0681 judge non-blocking finding): find the existing
+ * process_app_binding row (if any) for a (processKey, applicationId) pair, from
+ * an already-loaded bindings list (GET /api/process-catalog's `bindings[]` or
+ * GET /api/process-app-bindings's `bindings[]` — same row shape).
+ *
+ * WHY THIS EXISTS: POST /api/process-app-bindings upserts on
+ * (tenant_id, process_key, application_id) with `ON CONFLICT DO UPDATE SET
+ * target_registry_slug = EXCLUDED.target_registry_slug` (and the same for
+ * trigger_type/start_form_key/field_mapping/form_key) — re-submitting the
+ * bind form for an ALREADY-BOUND pair while the form still sits at its
+ * fresh-open defaults silently overwrites those columns back to
+ * NULL/'launcher'/{}. The modal calls this to detect "this pair already has a
+ * saved binding" and pre-fill from it instead (see prefillFieldsFromBinding).
+ *
+ * @param {Array<{process_key?,application_id?}>} bindings
+ * @param {string} processKey
+ * @param {string} applicationId
+ * @returns {object|null} the matching binding row, or null when no pair matches
+ *   (either field empty, or genuinely no existing binding — a fresh bind).
+ */
+export function findExistingBinding(bindings, processKey, applicationId) {
+  const pk = str(processKey).trim();
+  const appId = str(applicationId).trim();
+  if (!pk || !appId || !Array.isArray(bindings)) return null;
+  return bindings.find((b) => b && b.process_key === pk && b.application_id === appId) || null;
+}
+
+/**
+ * T-0669 (NB-2 fix): derive the bind-form field values to pre-fill from an
+ * existing binding row (as returned by findExistingBinding). Pure projection —
+ * mirrors exactly the columns POST /api/process-app-bindings upserts, so
+ * re-submitting an unchanged pre-filled form is a true no-op on the server.
+ * Null-safe: a null/undefined `binding` (no existing row — fresh bind) yields
+ * the same defaults the form already starts at ('' / 'launcher' / '').
+ * @param {object|null} binding  a row from findExistingBinding, or null
+ * @returns {{formKey:string, triggerType:string, startFormKey:string,
+ *            fieldMappingRaw:string, targetRegistrySlug:string}}
+ */
+export function prefillFieldsFromBinding(binding) {
+  return {
+    formKey: str(binding?.form_key),
+    triggerType: str(binding?.trigger_type) || 'launcher',
+    startFormKey: str(binding?.start_form_key),
+    fieldMappingRaw: serializeFieldMapping(binding?.field_mapping),
+    targetRegistrySlug: str(binding?.target_registry_slug),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Display mapping — pure, used by the screen for honest rendering.
 // ---------------------------------------------------------------------------
