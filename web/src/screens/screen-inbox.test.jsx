@@ -524,3 +524,37 @@ describe('screen-inbox — T-0653: search + filters + group + signals + personal
     expect(src).toMatch(/t\.mine && t\.canApprove/);
   });
 });
+
+describe('screen-inbox — T-0653 fix-forward (review defects)', () => {
+  it('defect #11: load() uses a monotonic sequence token to drop stale responses', () => {
+    // A request token guards against out-of-order responses (debounce vs filter
+    // change): only the latest response commits.
+    expect(src).toMatch(/loadSeq\s*=\s*React\.useRef\(0\)/);
+    expect(src).toMatch(/const seq = \+\+loadSeq\.current/);
+    // Both the success and error commits are gated on the token being current.
+    expect((src.match(/if \(seq !== loadSeq\.current\) return/g) || []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('defect #1: grouped mode surfaces an honest truncation notice from groupTruncated', () => {
+    expect(src).toMatch(/setGroupTruncated/);
+    expect(src).toMatch(/data\.groupTruncated \? \(data\.groupRowCap \?\? true\) : null/);
+    expect(src).toMatch(/chs-inbox__group-notice/);
+    expect(src).toMatch(/Показаны первые/);
+  });
+
+  it('defect #2: «Показать ещё» is never rendered in grouped mode', () => {
+    expect(src).toMatch(/!groupByProcess && page < totalPages/);
+  });
+
+  it('defect #7: collapsedGroups is pruned to live group keys when groups change', () => {
+    // An effect keyed on [groups] drops stale collapsed keys.
+    expect(src).toMatch(/const live = new Set\(groups\.map\(\(g\) => g\.key\)\)/);
+    expect(src).toMatch(/setCollapsedGroups\(\(prev\) =>/);
+  });
+
+  it('defect #12: the dead Field import is removed', () => {
+    // Field was imported but never used. It must be gone from the kit import.
+    expect(src).not.toMatch(/\bBadge, Field, Popover\b/);
+    expect(src).toMatch(/\bBadge, Popover\b/);
+  });
+});

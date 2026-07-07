@@ -17,7 +17,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Button, MonoId, Mono, ExecutorBadge, ActorChip, ProcessRef, RecordRef, StepRef, StatusChip,
   Drawer, EmptyState, LoadingState, ErrorState, KitIcon,
-  Badge, Field, Popover,
+  Badge, Popover,
 } from '../components/components.jsx';
 // T-0653 (W5-UX/§4): personal inbox view (columns + density) persists via the
 // generic user_pref store (T-0651, migration 129) — the SAME primitive the
@@ -934,6 +934,19 @@ function InboxScreen() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [loadingMore, setLoadingMore] = useState(false);
+  // T-0653 (fix-forward defect #1/б): grouped mode returns the whole filtered set
+  // capped server-side; this flag surfaces the honest «показаны первые N» notice.
+  const [groupTruncated, setGroupTruncated] = useState(null); // null | number (cap)
+
+  // T-0653 (fix-forward defect #11 — closes #6 systemically): monotonic request
+  // token. Two in-flight loads can race (the q-debounce effect + a tab/filter
+  // change effect fire near-simultaneously); without this, whichever RESPONSE
+  // lands last wins regardless of which is current. Each load() captures a fresh
+  // token and only commits its result if it is still the latest — a stale
+  // response is dropped, not rendered. This also makes a duplicated initial
+  // fetch harmless: the second response simply supersedes the first, no flicker
+  // of stale data.
+  const loadSeq = React.useRef(0);
 
   // T-0093/T-0653: tab/exec/sort + q/status/group are applied SERVER-SIDE. The
   // query mirrors the API. The server returns filtered `items`, full per-tab
@@ -954,6 +967,9 @@ function InboxScreen() {
   };
 
   const load = async () => {
+    // T-0653 (fix-forward defect #11): claim the next request token up-front and
+    // ignore this response if a newer load() started before it resolved.
+    const seq = ++loadSeq.current;
     setError(null);
     try {
       // T-0608 (пункт е): fetchWithAuthRetry self-heals a mid-session-expired
@@ -962,30 +978,42 @@ function InboxScreen() {
       const res = await fetchWithAuthRetry(`/api/inbox?${buildQuery(1).toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (seq !== loadSeq.current) return; // superseded by a newer load — drop.
       setItems(data.items);
       setGroups(Array.isArray(data.groups) ? data.groups : null);
+      setGroupTruncated(data.groupTruncated ? (data.groupRowCap ?? true) : null);
       setPage(data.page ?? 1);
       setTotalPages(data.totalPages ?? 1);
       if (data.counts) setCounts(data.counts);
     } catch (e) {
+      if (seq !== loadSeq.current) return; // stale error — a newer load is authoritative.
       setError(e.message);
     }
   };
 
-  // T-0401: fetch the next page and append to the existing list.
+  // T-0401: fetch the next page and append to the existing list. FLAT mode only —
+  // grouped mode returns the whole (capped) set in one response, so «Показать
+  // ещё» is never shown there (defect #2: appending page-2 rows without also
+  // updating groups silently dropped the new process's rows from the grouped view).
   const loadMore = async () => {
     if (loadingMore) return;
+    // Bind load-more to the CURRENT token: if a fresh full load() begins while
+    // this append is in flight, discard the appended page (it would land on a
+    // now-stale base list). load-more never advances the token itself.
+    const seq = loadSeq.current;
     const nextPage = page + 1;
     setLoadingMore(true);
     try {
       const res = await fetchWithAuthRetry(`/api/inbox?${buildQuery(nextPage).toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (seq !== loadSeq.current) return; // a full reload superseded this append.
       setItems((prev) => [...(prev || []), ...(data.items || [])]);
       setPage(data.page ?? nextPage);
       setTotalPages(data.totalPages ?? totalPages);
       // counts remain from the initial full-set response — don't overwrite.
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setError(e.message);
     } finally {
       setLoadingMore(false);
@@ -1068,7 +1096,11 @@ function InboxScreen() {
 
   // T-0653: debounce the text search (q) so keystrokes don't hammer the server.
   // Skip the initial mount run — the [tab,...] effect above already issues the
-  // first load; without this guard the empty-q mount would double-fetch.
+  // first load; without this guard the empty-q mount would fire a redundant
+  // second request. The loadSeq token (defect #11) is the systemic backstop:
+  // even if two loads ever race, only the latest response is committed, so a
+  // stray double-fetch can never render stale data — this guard is now purely a
+  // network-efficiency optimization, not a correctness dependency.
   const qDidMount = React.useRef(false);
   useEffect(() => {
     if (!qDidMount.current) { qDidMount.current = true; return undefined; }
@@ -1093,6 +1125,26 @@ function InboxScreen() {
     });
     return () => { cancelled = true; };
   }, []);
+
+  // T-0653 (fix-forward defect #7): prune stale collapsed-group keys whenever the
+  // set of groups changes (filter/tab/search shifts the process set). Without
+  // this, collapsedGroups accumulates keys for processes no longer present —
+  // harmless to render but an unbounded stale map, and a process key that
+  // reappears after a filter round-trip would wrongly restore its old collapsed
+  // state. Keep ONLY keys that still correspond to a live group.
+  useEffect(() => {
+    if (!Array.isArray(groups)) return;
+    const live = new Set(groups.map((g) => g.key));
+    setCollapsedGroups((prev) => {
+      const next = {};
+      let changed = false;
+      for (const k of Object.keys(prev)) {
+        if (live.has(k)) next[k] = prev[k];
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [groups]);
 
   // T-0653: persist + apply a personal-view change (fire-and-forget PUT).
   const updateView = (next) => {
@@ -1446,7 +1498,15 @@ function InboxScreen() {
             // T-0653: grouped-by-process view — свёртки со счётчиками (AC-3.1).
             // Each group is a collapsible section over its own table body so a
             // hundred tasks are navigable by process, not one flat wall.
+            // fix-forward defect #1/б: in grouped mode the server returns the
+            // WHOLE (capped) filtered set, so g.count and the rendered group body
+            // always agree — no page-partial mismatch, no «Показать ещё».
             <div className="chs-inbox__groups">
+              {groupTruncated && (
+                <div role="status" className="chs-inbox__group-notice">
+                  <KitIcon name="info" /> Показаны первые {typeof groupTruncated === 'number' ? groupTruncated : ''} задач — уточните поиск или фильтр, чтобы увидеть остальные.
+                </div>
+              )}
               {groups.map((g) => {
                 const groupRows = rows.filter((t) => (t.procKey ?? t.inst ?? "—") === g.key);
                 const collapsed = !!collapsedGroups[g.key];
@@ -1479,8 +1539,12 @@ function InboxScreen() {
             </table>
           )
         )}
-        {/* T-0401: load-more control — shown only when there are more pages. */}
-        {items !== null && items.length > 0 && page < totalPages && (
+        {/* T-0401: load-more control — shown only when there are more pages.
+            fix-forward defect #2: never in grouped mode (the whole capped set is
+            already loaded; appending a page there would desync group bodies from
+            their counts). The server also reports totalPages:1 in grouped mode,
+            but gate explicitly on !groupByProcess for clarity. */}
+        {items !== null && items.length > 0 && !groupByProcess && page < totalPages && (
           <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--chs-space-5)' }}>
             <Button
               variant="secondary"
