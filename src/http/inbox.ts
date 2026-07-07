@@ -1179,7 +1179,7 @@ export function matchesInboxFilters(item: InboxItem, f: InboxFilters): boolean {
     const needle = f.q.toLowerCase();
     const hay = [item.name, item.step, item.processName, item.inst, item.procKey]
       .filter((s): s is string => typeof s === "string")
-      .join("   ")
+      .join(" · ")
       .toLowerCase();
     if (!hay.includes(needle)) return false;
   }
@@ -1187,7 +1187,7 @@ export function matchesInboxFilters(item: InboxItem, f: InboxFilters): boolean {
     const needle = f.process.toLowerCase();
     const hay = [item.procKey, item.processName, item.inst]
       .filter((s): s is string => typeof s === "string")
-      .join("   ")
+      .join(" · ")
       .toLowerCase();
     if (!hay.includes(needle)) return false;
   }
