@@ -240,6 +240,87 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.
 
 `.env.prod` находится в `.gitignore` — никогда не коммитить (RL-3).
 
+### Фикстурные dev-креды на persistent-стенде (T-0695)
+
+**Проблема:** `dev-pw-<username>` из `config/keycloak/realm-choros.json` работают
+только при СВЕЖЕМ импорте realm (первый `docker compose up`, пустой том Keycloak).
+На PERSISTENT dev-стенде `scripts/kc-dev-setup.sh` реконсилит realm идемпотентно —
+но для `users` это **create-if-not-exists** (намеренно: сохраняет
+само-зарегистрированных юзеров, добавленных после первого импорта). Если юзер уже
+существует в KC-томе стенда, повторное применение realm-JSON НЕ восстанавливает
+его пароль — скрипт просто печатает `[SKIP]`. Итог: пароли фикстурных юзеров на
+живом стенде дрейфуют от `dev-pw-*` независимо, и раньше каждая LIVE_PROOF-сессия
+сбрасывала их по-своему через KC admin REST на одноразовый ad-hoc пароль (не
+задокументированный централизованно) — см. находку `docs/live-proof/T-0639.md` P1.
+
+**Решение:** `scripts/kc-reset-fixture-passwords.sh` — идемпотентный скрипт,
+переустанавливающий пароли ТОЛЬКО не-владельческих фикстурных юзеров на
+**детерминированное** значение (не зависящее от даты/задачи/сессии).
+
+#### Схема паролей
+
+Формула: `LiveProof-Fixture-<username>!` (чистая функция username → пароль).
+
+| Юзер | Детерминированный пароль |
+|---|---|
+| `e-kravtsova` | `LiveProof-Fixture-e-kravtsova!` |
+| `e-mironov` | `LiveProof-Fixture-e-mironov!` |
+| `e-larina` | `LiveProof-Fixture-e-larina!` |
+| `e-orlov` | `LiveProof-Fixture-e-orlov!` |
+| `e-savina` | `LiveProof-Fixture-e-savina!` |
+| `e-petrov` | `LiveProof-Fixture-e-petrov!` |
+| `e-belov` | `LiveProof-Fixture-e-belov!` |
+| `e-configurator` | `LiveProof-Fixture-e-configurator!` |
+
+При каждом сбросе скрипт ТАКЖЕ переустанавливает `attributes.actor_type="human"`
+**скаляром** (не массивом `["human"]`) — фикс дрейфа из T-0638: realm-reimport
+стирает этот single-valued profile-атрибут, и его нужно восстанавливать той же
+формой, иначе actor-резолвер на сервере не распознаёт юзера как человека.
+
+#### ЧЁРНЫЙ список (владельческие креды — этот скрипт их НИКОГДА не трогает)
+
+Правило памяти `founder-cred-lockout`: приёмки/скрипты не сбрасывают владельческие
+креды фаундера. Owner skip-list жёстко закодирован в скрипте (не читается из
+внешнего файла/аргумента):
+
+| Юзер | Почему владелец |
+|---|---|
+| `e-owner` | genesis-owner тенанта Dev Silo, создан вручную в T-0583 (`isGenesisOwner: true`) |
+| `t0586-admin` | genesis-owner, создан в приёмке T-0583/2026-07-04 (`isGenesisOwner: true`, подтверждено `/api/me/nav-capabilities`) — **НЕ рядовой тест-юзер**, несмотря на то что выглядит как один |
+| `pgv@axonteam.ru` | реальный логин фаундера-владельца стенда |
+
+Если владельческий доступ утерян — это отдельная эскалация к фаундеру (не через
+этот скрипт); см. память `choros-founder-cred-lockout-2026-07-06` (кандидат:
+«Сбросить пароль» на `/users` + SMTP).
+
+#### Как запустить
+
+```bash
+# Локально (docker-compose, дефолты уже верны):
+bash scripts/kc-reset-fixture-passwords.sh
+
+# Против реального persistent-стенда — переопределить KC_URL/admin-креды:
+KC_URL="https://<tailscale-host>:8443" \
+KC_ADMIN="choros_kc_admin" \
+KC_ADMIN_PW="<реальный admin-пароль стенда>" \
+  bash scripts/kc-reset-fixture-passwords.sh
+
+# Офлайн self-test (без KC, без сети) — доказывает guard/детерминизм:
+bash scripts/kc-reset-fixture-passwords.sh --self-test
+```
+
+Скрипт идемпотентен (повторный запуск безопасен — тот же результат) и в конце
+печатает таблицу «юзер → пароль». **Proof-агенты должны брать креды из этой
+таблицы выше, а не из археологии по `docs/live-proof/*`.** Если таблица в этом
+файле когда-нибудь разойдётся с фактическим выводом скрипта — вывод скрипта
+авторитетен (эта таблица — просто удобный человекочитаемый снимок детерминированной
+формулы, не отдельный источник правды).
+
+Скрипт НЕ создаёт новых пользователей — если юзера нет в KC на стенде вообще,
+сначала нужно применить realm через `scripts/kc-dev-setup.sh`.
+
+---
+
 ### Как добавить пользователя или агентский клиент
 
 Все изменения realm — только через `config/keycloak/realm-choros.json` (декларативно):
