@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0662",
+  "role": "independent tester",
+  "round": 3,
+  "verdict": "approved",
+  "commit_reviewed": "25764e83 (on top of da3376d4, d593f4d4)",
+  "env": {
+    "macos_awk": "BSD awk 20200816",
+    "linux_awk": "mawk 1.3.4 (postgres:16 container, worktree mounted ro)",
+    "pg": "localhost:55432 (docker choros-postgres-1) — UP; DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros"
+  },
+  "gates_rerun": {
+    "actor-authority-deactivation-gate.sh (macOS/BSD awk)": {"rc": 0, "result": "PASS — FF-0662-1 7/7, FF-0662-2 accounting clean"},
+    "actor-authority-deactivation-gate.sh --self-test (macOS)": {"rc": 0, "result": "PASS — attacks a/b + bypasses d/e/f + positive control + N-1"},
+    "gate live + --self-test (Linux mawk, postgres:16)": {"rc": 0, "result": "PASS both"},
+    "db rights-change-requests-deactivated-approver.db.test.ts": {"passed": 4, "failed": 0, "cases": "AC-1 deact approve grant->403 confirmed2_by NULL; AC-2 deact approve assignment->403; AC-3 deact reject grant->403 row survives; AC-4 active approve->200 confirmed2_by SET"},
+    "tsc --noEmit": {"rc": 0, "result": "PASS"},
+    "vitest actor-authority-gate + binding-owner-bypass + binding-get-layout + floor1-editor": {"passed": 82, "failed": 0},
+    "dual-control-isolation.sh": {"rc": 0, "result": "PASS"},
+    "anti-case-lock.sh": {"rc": 0, "result": "PASS (16==16)"},
+    "single-resolver.sh": {"rc": 0, "result": "PASS"},
+    "grant-resolver-isolation.sh": {"rc": 0, "result": "PASS"},
+    "frozen-checks-immutable.sh": {"rc": 0, "result": "PASS"}
+  },
+  "adversarial_refutation": {
+    "replay_bypass_d_window": {"method": "src/http/winatk.ts, slug=$ ~10 lines after FROM (within widened 25)", "gate_rc": 1, "result": "HELD"},
+    "replay_bypass_e_alias": {"method": "src/http/aliasatk.ts, emp.slug=$", "gate_rc": 1, "result": "HELD"},
+    "replay_bypass_f_join": {"method": "src/http/joinatk.ts, JOIN choros.employee e ON ... e.slug=$", "gate_rc": 1, "result": "HELD"},
+    "far_window": {"method": "slug=$ 30+ lines after FROM (beyond window=25)", "gate_rc": 0, "result": "BROKE — R3-P3-1, implausible, no live instance"},
+    "backtick_concat": {"method": "backtick string-concat between FROM and slug", "gate_rc": 0, "result": "BROKE — R3-P3-1, no live instance"},
+    "semicolon_in_string": {"method": "';' inside a string literal before slug forces early-close", "gate_rc": 0, "result": "BROKE — R3-P3-1, most plausible edge, no live instance"},
+    "agent_path_ordering": {"method": "reason about predicate vs kind-check for active agent", "result": "HELD — agent deactivated_at NULL -> row returned -> AGENT_NOT_ALLOWED preserved"},
+    "checkRole_alias_overblock": {"method": "verify e.deactivated_at alias + active process_designer passes", "result": "HELD — correct alias, binding tests green"},
+    "current_tree_false_negative_scan": {"method": "manual enumerate all 42 slug-lookups, classify table + accounting", "result": "HELD — every employee-actor lookup within window + accounted; non-employee correctly out of scope; org.ts:323 confirmed inside resolveActorTenant (allowlist)"},
+    "awk_flavor_divergence": {"method": "run gate+self-test on BSD awk and mawk 1.3.4", "result": "HELD — green on both"}
+  },
+  "conclusion": "APPROVED. The round-2 P1 dual-control hole is closed and proven closed by a live-Postgres regression driving the real approve/reject routes (deactivated -> 403, confirmed2_by unchanged; active -> 200). The scan-shape fixes hold — all three of my round-2 bypasses now turn the live gate RED, verified by me on both awk flavors. A proactively-found 8th path (binding.ts:checkRole, process_designer) is gated with the correctly-aliased predicate and registered. A full manual scan finds no un-gated employee-authority lookup escaping the window in the current tree. Residual findings are non-blocking P3: the accounting scan is a heuristic with three implausible-styling bypasses (26+ line window, backtick-concat, in-string semicolon) that have no instance in the tree and are backstopped by the runtime predicates + db tests; and the regression lacks an explicit active-agent case (behavior confirmed by reasoning). No blockers remain — ready to merge."
+}

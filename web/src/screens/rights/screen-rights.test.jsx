@@ -411,3 +411,68 @@ describe('T-0609 F-1 — GrantRightForm emits resource-hierarchy scope for real 
     expect(formsSrc).toMatch(/\(isRealResource \|\| scope\)/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0652 (§6.5): формы управления подняты кнопками в шапку карточки (дровер),
+// бейдж «только просмотр» для читателя. Инвариант безопасности сохранён —
+// формы монтируются ТОЛЬКО при canManage (в дровере), не disabled.
+// ---------------------------------------------------------------------------
+
+describe('T-0652 · role-card actions in the header (§6.5)', () => {
+  it('header carries action buttons «Назначить роль» / «Дать право» under canManage', () => {
+    // The role-detail actions block (from the opening class to «Кто что может»).
+    const actionsBlock = screenSrc.match(/chs-roledetail__actions[\s\S]{0,2200}WhoCanDoWhat role=/)?.[0] || '';
+    expect(actionsBlock).toContain('Назначить роль');
+    expect(actionsBlock).toContain('Дать право');
+    expect(actionsBlock).toMatch(/setDrawer\('assign'\)/);
+    expect(actionsBlock).toMatch(/setDrawer\('grant'\)/);
+  });
+
+  it('reader (canManage=false) sees a VISIBLE «только просмотр» badge in the header', () => {
+    const actionsBlock = screenSrc.match(/chs-roledetail__actions[\s\S]{0,2200}WhoCanDoWhat role=/)?.[0] || '';
+    expect(actionsBlock).toContain('только просмотр');
+    // it is a plain visible span, not chs-sr-only
+    expect(actionsBlock).not.toMatch(/только просмотр[\s\S]{0,40}chs-sr-only/);
+  });
+
+  it('forms are wrapped in a Modal drawer, still gated on canManage (mounted only then)', () => {
+    // The AssignRoleForm/GrantRightForm are inside a Modal that only renders under canManage.
+    expect(screenSrc).toMatch(/canManage && \(\s*<Modal[\s\S]{0,300}AssignRoleForm/);
+    expect(screenSrc).toMatch(/canManage && \(\s*<Modal[\s\S]{0,300}GrantRightForm/);
+    expect(screenSrc).toContain("drawer === 'assign'");
+    expect(screenSrc).toContain("drawer === 'grant'");
+  });
+
+  it('the forms are NO LONGER open sections rendered below the fold', () => {
+    // The old below-the-fold section headers must be gone from the always-on flow.
+    expect(screenSrc).not.toMatch(/chs-section2__title">Назначить роль сотруднику/);
+    expect(screenSrc).not.toMatch(/chs-section2__title">Дать роли право/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UX-N1 fix-forward: chs-readmode--ro was applied on the read-only badge
+// (screen-rights.jsx:504) but never DEFINED anywhere — a dead modifier class,
+// so the badge was visually indistinguishable from the plain .chs-readmode
+// base. Fixed by defining the modifier in rights-admin.css with a visually
+// distinct info-tinted pill (matches the .chs-actchip--narrow convention in
+// the same file). This asserts the class used in markup is actually styled.
+// ---------------------------------------------------------------------------
+describe('UX-N1 fix-forward · «только просмотр» badge modifier is a real (non-dead) class', () => {
+  const rightsAdminCssPath = path.default.resolve(new URL(import.meta.url).pathname, '../rights-admin.css');
+  const rightsAdminCss = fs.default.readFileSync(rightsAdminCssPath, 'utf-8');
+
+  it('screen-rights.jsx applies chs-readmode--ro on the read-only badge', () => {
+    expect(screenSrc).toContain('chs-readmode chs-readmode--ro');
+  });
+
+  it('chs-readmode--ro is DEFINED in rights-admin.css (not a dead modifier)', () => {
+    expect(rightsAdminCss).toMatch(/\.chs-readmode--ro\s*\{/);
+  });
+
+  it('the modifier is visually distinct from the plain .chs-readmode base (uses an accent token, not just muted text)', () => {
+    const rule = rightsAdminCss.match(/\.chs-readmode--ro\s*\{[^}]*\}/)?.[0] || '';
+    expect(rule).toMatch(/--chs-color-info(-soft)?/);
+  });
+});
+

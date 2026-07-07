@@ -12,6 +12,10 @@ import pg from "pg";
 import type { Grant, ScopeElement } from "../core/grant-lattice.js";
 import type { AdminContext } from "../core/scoped-admin.js";
 import { HttpError } from "../http/router.js";
+// T-0662: single NAMED deactivation predicate. isGenesisOwnerForTenant and
+// loadAdminContext (below) are authority resolvers B1/B2 — they carry
+// ACTOR_ACTIVE_SQL in their inner actor slug→employee subqueries.
+import { ACTOR_ACTIVE_SQL } from "./actor-authority-gate.js";
 
 const { Pool } = pg;
 
@@ -734,7 +738,7 @@ export async function isGenesisOwnerForTenant(
           AND ra.employee_id = (
                 SELECT id FROM choros.employee
                  WHERE tenant_id = $1 AND slug = $2
-                   AND deactivated_at IS NULL LIMIT 1
+                   AND ${ACTOR_ACTIVE_SQL} LIMIT 1
               )
           AND r.slug = 'tenant-owner'
           AND ra.confirmed_by IS NOT NULL
@@ -787,7 +791,7 @@ export async function loadAdminContext(
           AND ra.employee_id = (
                 SELECT id FROM choros.employee
                  WHERE tenant_id = $1 AND slug = $2
-                   AND deactivated_at IS NULL LIMIT 1
+                   AND ${ACTOR_ACTIVE_SQL} LIMIT 1
               )
           AND r.slug = 'tenant-owner'
           AND ra.confirmed_by IS NOT NULL
@@ -810,7 +814,7 @@ export async function loadAdminContext(
           AND ra.employee_id = (
                 SELECT id FROM choros.employee
                  WHERE tenant_id = $1 AND slug = $2
-                   AND deactivated_at IS NULL LIMIT 1
+                   AND ${ACTOR_ACTIVE_SQL} LIMIT 1
               )
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)

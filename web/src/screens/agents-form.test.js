@@ -17,7 +17,7 @@ import {
   SLUG_RE,
   validateHire, buildHirePayload,
   classifyHandle, handleRejectMessage, validateBind, buildBindPayload,
-  mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
+  mapAgentError, statusLabel, agentStatusBadge, positionOptions, displayAgentName, agentTypeLabel,
   connectionOptions, buildLlmConnectionPayload, mapLlmConnectionError,
   outcomeMeta, formatActivityTime, activityContext, mapActivityError,
   mapAgentInstructionError, mapAgentInstructionPromoteError,
@@ -153,6 +153,39 @@ describe('statusLabel', () => {
   it('labels configured vs needs_llm', () => {
     expect(statusLabel('configured')).toMatch(/привязана/i);
     expect(statusLabel('needs_llm')).toMatch(/Нужна/i);
+  });
+});
+
+describe('agentStatusBadge — T-0655: collapse degradations into one badge', () => {
+  it('ready workforce agent (position + LLM) → ok, no issues', () => {
+    const b = agentStatusBadge({ has_org_place: true, position: 'Ведущий', llm_bound: true });
+    expect(b.tone).toBe('ok');
+    expect(b.issues).toEqual([]);
+  });
+
+  it('workforce agent with no position AND no LLM → warn, both issues + actions', () => {
+    const b = agentStatusBadge({ has_org_place: true, position: null, llm_bound: false });
+    expect(b.tone).toBe('warn');
+    expect(b.issues.map((i) => i.key)).toEqual(['position', 'llm']);
+    expect(b.issues.map((i) => i.action)).toEqual(['Назначить должность', 'Привязать LLM']);
+    expect(b.label).toBe('нет должности · нет LLM');
+  });
+
+  it('workforce agent with position but no LLM → only the LLM issue', () => {
+    const b = agentStatusBadge({ has_org_place: true, position: 'Спец', llm_bound: false });
+    expect(b.issues.map((i) => i.key)).toEqual(['llm']);
+  });
+
+  it('system/assistant agent (off-org by design) is NOT flagged for a missing position', () => {
+    // has_org_place=false → off-org is architectural, not a gap. With LLM bound → ok.
+    const b = agentStatusBadge({ has_org_place: false, position: null, llm_bound: true });
+    expect(b.tone).toBe('ok');
+    expect(b.issues.map((i) => i.key)).not.toContain('position');
+  });
+
+  it('off-org agent still flags a missing LLM (that IS a real gap)', () => {
+    const b = agentStatusBadge({ has_org_place: false, position: null, llm_bound: false });
+    expect(b.issues.map((i) => i.key)).toEqual(['llm']);
   });
 });
 

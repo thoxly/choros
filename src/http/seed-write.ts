@@ -48,6 +48,17 @@ import type { Grant } from "../core/grant-lattice.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { insertWithUniqueSlugRetry } from "../core/slug-generator.js";
+import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
+import {
+  wouldCreateCycle,
+  isEmptyPatch,
+  buildDeptMoveDiff,
+  buildPositionMoveDiff,
+  buildEmployeeMoveDiff,
+  type DeptMovePatch,
+  type PositionMovePatch,
+  type EmployeeMovePatch,
+} from "../core/org-move.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -790,6 +801,335 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(created));
+  }));
+
+  // ===========================================================================
+  // T-0655 [W5-UX / ux-study §6.4 + §1C] — MOVE-API: PATCH department/position/
+  // employee (reparent + rename). Additive to the existing create+delete surface.
+  //
+  // THE GAP (screen-org.jsx:40-45, "There is NO update/PATCH route for any org
+  // entity — create + delete only"): reorganisation meant delete+recreate, which
+  // severs the entity id (and thus its history / role-assignments / audit lineage).
+  // These PATCH routes reparent IN PLACE, preserving the id.
+  //
+  // AUTHZ (reused, not invented — same seam every write route above uses):
+  //   authorizeOrgWrite (cross-tenant guard: own-tenant OR bootstrap forest-owner)
+  //   → loadAdminContext against the resolved authority tenant
+  //   → assertOrgObjectAuthority(mgmt_object:<kind>, "update", …) — owner OR a
+  //     covering delegable mgmt_object:<kind>/update grant. (loadAdminContext
+  //     carries the T-0658 `deactivated_at IS NULL` fail-closed actor predicate,
+  //     so a deactivated caller cannot move org structure — no new actor resolver.)
+  //
+  // AUDIT: each move appends ONE `<kind>.moved` event through the canonical
+  // appendAuditEvent sink INSIDE the same tenant tx (a ROLLBACK undoes the UPDATE
+  // and the audit entry atomically), recording the real before/after diff.
+  // ===========================================================================
+
+  // Load the tenant's department parent-map (id → parent_id|null) on the caller's
+  // OPEN tenant tx (RLS GUC already set). Used only by the department reparent
+  // cycle guard — reads identical topology to the grant-lattice ancestry oracle.
+  const loadDeptParentMap = async (
+    client: pg.PoolClient,
+    tenantId: string,
+  ): Promise<Map<string, string | null>> => {
+    const { rows } = await client.query<{ id: string; parent_id: string | null }>(
+      `SELECT id, parent_id FROM choros.department WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const m = new Map<string, string | null>();
+    for (const r of rows) m.set(r.id, r.parent_id);
+    return m;
+  };
+
+  // -------------------------------------------------------------------------
+  // PATCH /api/departments/:id — reparent (parent_id) and/or rename (display_name)
+  // body: { tenant_id: uuid, parent_id?: uuid|null, display_name?: string }
+  // 200: { id }  400: empty/invalid/CYCLE  403: cross-tenant/not-authorized
+  // 404: department not in tenant  409: FK (parent not in tenant)
+  // -------------------------------------------------------------------------
+  router.register("PATCH", "/api/departments/:id", withAuth(async (req, res, params) => {
+    const body = await readJsonBody(req);
+    const b = body as Record<string, unknown>;
+    const tenant_id = b["tenant_id"];
+    if (typeof tenant_id !== "string") {
+      throw new HttpError(400, "VALIDATION", "tenant_id is required");
+    }
+    assertUuidShape(tenant_id, "tenant_id");
+
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:department", "update", tenant_id, actorId, nowMs(),
+      "owner or mgmt_object:department grant required to move/rename departments",
+      oracle,
+    );
+
+    const deptId = params["id"] as string;
+    assertUuidShape(deptId, "id");
+
+    // Build the validated patch (only provided fields).
+    const patch: DeptMovePatch = {};
+    if ("parent_id" in b) {
+      const p = b["parent_id"];
+      if (p === null) patch.parent_id = null;
+      else { assertUuidShape(p as string, "parent_id"); patch.parent_id = p as string; }
+    }
+    if ("display_name" in b) {
+      const dn = b["display_name"];
+      if (typeof dn !== "string" || dn.length === 0) {
+        throw new HttpError(400, "VALIDATION", "display_name must be a non-empty string");
+      }
+      patch.display_name = dn;
+    }
+    if (isEmptyPatch(patch)) {
+      throw new HttpError(400, "VALIDATION", "nothing to update (provide parent_id and/or display_name)");
+    }
+
+    try {
+      await withTenantTx(pool, tenant_id, async (client) => {
+        // Fetch the current row (before-image + existence check) FOR UPDATE.
+        const cur = await client.query<{ parent_id: string | null; display_name: string }>(
+          `SELECT parent_id, display_name FROM choros.department WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+          [tenant_id, deptId],
+        );
+        if (cur.rowCount === 0) {
+          throw new HttpError(404, "NOT_FOUND", `department ${deptId} not found`);
+        }
+        const before = cur.rows[0];
+
+        // Cycle guard (application-layer, per 014_department.sql §1.1): a
+        // department may not become a descendant of itself.
+        if ("parent_id" in patch) {
+          const parentMap = await loadDeptParentMap(client, tenant_id);
+          if (wouldCreateCycle(parentMap, deptId, patch.parent_id ?? null)) {
+            throw new HttpError(400, "CYCLE", "cannot move a department under itself or its own subtree");
+          }
+        }
+
+        // Build the UPDATE from the touched columns.
+        const sets: string[] = [];
+        const vals: unknown[] = [tenant_id, deptId];
+        if ("parent_id" in patch) { vals.push(patch.parent_id ?? null); sets.push(`parent_id = $${vals.length}`); }
+        if (patch.display_name !== undefined) { vals.push(patch.display_name); sets.push(`display_name = $${vals.length}`); }
+        vals.push(nowMs()); sets.push(`updated_at = $${vals.length}`);
+        await client.query(
+          `UPDATE choros.department SET ${sets.join(", ")} WHERE tenant_id = $1 AND id = $2`,
+          vals,
+        );
+
+        const writer = makePgAuditWriter();
+        await writer.appendAuditEvent(client as unknown as PgClientLike, {
+          id: randomUUID(),
+          type: "department.moved",
+          actor: actorId,
+          subject: deptId,
+          scope: { resource: "department", department_id: deptId },
+          via: "org-move-api",
+          proposed_by: null,
+          confirmed_by: actorId,
+          payload: buildDeptMoveDiff(before, patch),
+          occurred_at: nowMs(),
+        });
+      });
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      if (isFkViolation(err)) {
+        throw new HttpError(409, "FK_IN_USE", `department ${deptId} move rejected: referenced parent not in tenant (constraint: ${fkConstraintName(err)})`);
+      }
+      throw err;
+    }
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: deptId }));
+  }));
+
+  // -------------------------------------------------------------------------
+  // PATCH /api/positions/:id — move to another department (department_id) and/or
+  // rename (title).
+  // body: { tenant_id: uuid, department_id?: uuid, title?: string }
+  // -------------------------------------------------------------------------
+  router.register("PATCH", "/api/positions/:id", withAuth(async (req, res, params) => {
+    const body = await readJsonBody(req);
+    const b = body as Record<string, unknown>;
+    const tenant_id = b["tenant_id"];
+    if (typeof tenant_id !== "string") {
+      throw new HttpError(400, "VALIDATION", "tenant_id is required");
+    }
+    assertUuidShape(tenant_id, "tenant_id");
+
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:position", "update", tenant_id, actorId, nowMs(),
+      "owner or mgmt_object:position grant required to move/rename positions",
+      oracle,
+    );
+
+    const posId = params["id"] as string;
+    assertUuidShape(posId, "id");
+
+    const patch: PositionMovePatch = {};
+    if ("department_id" in b) {
+      const d = b["department_id"];
+      // A position always belongs to a department (NOT NULL FK) — null is invalid.
+      assertUuidShape(d as string, "department_id");
+      patch.department_id = d as string;
+    }
+    if ("title" in b) {
+      const t = b["title"];
+      if (typeof t !== "string" || t.length === 0) {
+        throw new HttpError(400, "VALIDATION", "title must be a non-empty string");
+      }
+      patch.title = t;
+    }
+    if (isEmptyPatch(patch)) {
+      throw new HttpError(400, "VALIDATION", "nothing to update (provide department_id and/or title)");
+    }
+
+    try {
+      await withTenantTx(pool, tenant_id, async (client) => {
+        const cur = await client.query<{ department_id: string; title: string }>(
+          `SELECT department_id, title FROM choros.position WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+          [tenant_id, posId],
+        );
+        if (cur.rowCount === 0) {
+          throw new HttpError(404, "NOT_FOUND", `position ${posId} not found`);
+        }
+        const before = cur.rows[0];
+
+        const sets: string[] = [];
+        const vals: unknown[] = [tenant_id, posId];
+        if (patch.department_id !== undefined) { vals.push(patch.department_id); sets.push(`department_id = $${vals.length}`); }
+        if (patch.title !== undefined) { vals.push(patch.title); sets.push(`title = $${vals.length}`); }
+        vals.push(nowMs()); sets.push(`updated_at = $${vals.length}`);
+        await client.query(
+          `UPDATE choros.position SET ${sets.join(", ")} WHERE tenant_id = $1 AND id = $2`,
+          vals,
+        );
+
+        const writer = makePgAuditWriter();
+        await writer.appendAuditEvent(client as unknown as PgClientLike, {
+          id: randomUUID(),
+          type: "position.moved",
+          actor: actorId,
+          subject: posId,
+          scope: { resource: "position", position_id: posId },
+          via: "org-move-api",
+          proposed_by: null,
+          confirmed_by: actorId,
+          payload: buildPositionMoveDiff(before, patch),
+          occurred_at: nowMs(),
+        });
+      });
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      if (isFkViolation(err)) {
+        throw new HttpError(409, "FK_IN_USE", `position ${posId} move rejected: target department not in tenant (constraint: ${fkConstraintName(err)})`);
+      }
+      throw err;
+    }
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: posId }));
+  }));
+
+  // -------------------------------------------------------------------------
+  // PATCH /api/employees/:id — move to another position (position_id; null = снять
+  // с должности) and/or rename (display_name). This is the endpoint the org-tree
+  // DnD (T-0655 §3) and the /agents "Назначить должность" action (§4) both drive.
+  // body: { tenant_id: uuid, position_id?: uuid|null, display_name?: string }
+  // -------------------------------------------------------------------------
+  router.register("PATCH", "/api/employees/:id", withAuth(async (req, res, params) => {
+    const body = await readJsonBody(req);
+    const b = body as Record<string, unknown>;
+    const tenant_id = b["tenant_id"];
+    if (typeof tenant_id !== "string") {
+      throw new HttpError(400, "VALIDATION", "tenant_id is required");
+    }
+    assertUuidShape(tenant_id, "tenant_id");
+
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
+    // T-0469 boundary note: this is UPDATE (move/rename), NOT delete — so it goes
+    // through assertOrgObjectAuthority (owner OR delegable update grant), exactly
+    // like create. Employee DELETION stays isGenesisOwner-only (DELETE route below).
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:employee", "update", tenant_id, actorId, nowMs(),
+      "owner or mgmt_object:employee grant required to move/rename employees",
+      oracle,
+    );
+
+    const empId = params["id"] as string;
+    assertUuidShape(empId, "id");
+
+    const patch: EmployeeMovePatch = {};
+    if ("position_id" in b) {
+      const p = b["position_id"];
+      if (p === null) patch.position_id = null; // снять с должности
+      else { assertUuidShape(p as string, "position_id"); patch.position_id = p as string; }
+    }
+    if ("display_name" in b) {
+      const dn = b["display_name"];
+      if (typeof dn !== "string" || dn.length === 0) {
+        throw new HttpError(400, "VALIDATION", "display_name must be a non-empty string");
+      }
+      patch.display_name = dn;
+    }
+    if (isEmptyPatch(patch)) {
+      throw new HttpError(400, "VALIDATION", "nothing to update (provide position_id and/or display_name)");
+    }
+
+    try {
+      await withTenantTx(pool, tenant_id, async (client) => {
+        const cur = await client.query<{ position_id: string | null; display_name: string }>(
+          `SELECT position_id, display_name FROM choros.employee WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+          [tenant_id, empId],
+        );
+        if (cur.rowCount === 0) {
+          throw new HttpError(404, "NOT_FOUND", `employee ${empId} not found`);
+        }
+        const before = cur.rows[0];
+
+        const sets: string[] = [];
+        const vals: unknown[] = [tenant_id, empId];
+        if ("position_id" in patch) { vals.push(patch.position_id ?? null); sets.push(`position_id = $${vals.length}`); }
+        if (patch.display_name !== undefined) { vals.push(patch.display_name); sets.push(`display_name = $${vals.length}`); }
+        vals.push(nowMs()); sets.push(`updated_at = $${vals.length}`);
+        await client.query(
+          `UPDATE choros.employee SET ${sets.join(", ")} WHERE tenant_id = $1 AND id = $2`,
+          vals,
+        );
+
+        const writer = makePgAuditWriter();
+        await writer.appendAuditEvent(client as unknown as PgClientLike, {
+          id: randomUUID(),
+          type: "employee.moved",
+          actor: actorId,
+          subject: empId,
+          scope: { resource: "employee", employee_id: empId },
+          via: "org-move-api",
+          proposed_by: null,
+          confirmed_by: actorId,
+          payload: buildEmployeeMoveDiff(before, patch),
+          occurred_at: nowMs(),
+        });
+      });
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      if (isFkViolation(err)) {
+        throw new HttpError(409, "FK_IN_USE", `employee ${empId} move rejected: target position not in tenant (constraint: ${fkConstraintName(err)})`);
+      }
+      throw err;
+    }
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: empId }));
   }));
 
   // -------------------------------------------------------------------------

@@ -55,6 +55,9 @@ import { eligibleForTier2 } from "../core/substitution.js";
 import { combineCriticality } from "../core/role-criticality.js";
 import { validateAdminDelegation } from "../core/scoped-admin.js";
 import { loadAdminContext } from "../db/org.js";
+// T-0662: single NAMED deactivation predicate. registerSelfAbsence (below) is
+// authority resolver D — its actor slug→employee resolve carries ACTOR_ACTIVE_SQL.
+import { ACTOR_ACTIVE_SQL } from "../db/actor-authority-gate.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import {
   encodeGrantAuditEvent,
@@ -1195,8 +1198,9 @@ function registerSelfAbsence(
         await client.query("BEGIN");
         await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
         await client.query("SET LOCAL search_path TO choros");
+        // T-0662: `deactivated_at IS NULL` via the single named marker ACTOR_ACTIVE_SQL.
         const { rows } = await client.query<{ id: string }>(
-          `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 AND deactivated_at IS NULL LIMIT 1`,
+          `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
           [tenantId, actorId],
         );
         await client.query("COMMIT");

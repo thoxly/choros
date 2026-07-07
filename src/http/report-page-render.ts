@@ -53,6 +53,9 @@ import pg from "pg";
 import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
+// T-0662: single NAMED deactivation predicate. defaultCheckReadGrant (below,
+// non-owner branch) is authority resolver C — it carries ACTOR_ACTIVE_SQL.
+import { ACTOR_ACTIVE_SQL } from "../db/actor-authority-gate.js";
 import {
   isNarrowerOrEqual,
   type Grant,
@@ -266,8 +269,9 @@ async function defaultCheckReadGrant(
     // loadAdminContext above) is already gated by the org.ts T-0658 fix; this
     // closes the delegated-reader branch too so no parallel path resolves a
     // deactivated subject to page-read authority.
+    // T-0662: `deactivated_at IS NULL` via the single named marker ACTOR_ACTIVE_SQL.
     const { rows: empRows } = await client.query<{ id: string }>(
-      `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 AND deactivated_at IS NULL LIMIT 1`,
+      `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
       [tenantId, actorId],
     );
     if (empRows.length === 0) {

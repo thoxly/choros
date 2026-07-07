@@ -25,6 +25,9 @@ import {
   bindingProcessLabel,
   triggerTypeLabel,
   mapBindingError,
+  registryTargetOptions,
+  findExistingBinding,
+  prefillFieldsFromBinding,
   TRIGGER_TYPES,
 } from './process-catalog.js';
 
@@ -124,6 +127,40 @@ describe('buildBindingPayload — T-0351 E16 extended contract', () => {
   it('produces empty field_mapping for empty field_mapping_raw', () => {
     const body = buildBindingPayload({ process_key: 'p', application_id: APP_UUID });
     expect(body.field_mapping).toEqual({});
+  });
+
+  // T-0681 (migration 119): target_registry_slug in the payload.
+  it('includes a non-empty target_registry_slug (trimmed)', () => {
+    const body = buildBindingPayload({
+      process_key: 'p', application_id: APP_UUID, target_registry_slug: '  results-registry  ',
+    });
+    expect(body.target_registry_slug).toBe('results-registry');
+  });
+
+  it('sends target_registry_slug=null when omitted or empty (default-slug path)', () => {
+    expect(buildBindingPayload({ process_key: 'p', application_id: APP_UUID }).target_registry_slug).toBeNull();
+    expect(
+      buildBindingPayload({ process_key: 'p', application_id: APP_UUID, target_registry_slug: '   ' }).target_registry_slug,
+    ).toBeNull();
+  });
+});
+
+// T-0681: registryTargetOptions — options are DATA (this app's real registries).
+describe('registryTargetOptions', () => {
+  it('maps registry rows to { value: slug, label }', () => {
+    const opts = registryTargetOptions([
+      { slug: 'results-registry', display_name: 'Результаты' },
+      { slug: 'plain-slug' },
+    ]);
+    expect(opts).toEqual([
+      { value: 'results-registry', label: 'Результаты (results-registry)' },
+      { value: 'plain-slug', label: 'plain-slug' },
+    ]);
+  });
+
+  it('is defensive against non-arrays and rows without a slug', () => {
+    expect(registryTargetOptions(null)).toEqual([]);
+    expect(registryTargetOptions([{ display_name: 'no slug' }, {}])).toEqual([]);
   });
 });
 
@@ -230,6 +267,15 @@ describe('mapBindingError', () => {
   it('maps 400 to the server validation message when present', () => {
     const m = mapBindingError(400, { error: { message: 'process_key must be a non-empty string' } });
     expect(m.message).toBe('process_key must be a non-empty string');
+  });
+
+  // T-0681: an unresolvable target registry anchors on the registry field.
+  it('maps 400 REGISTRY_NOT_FOUND to the target_registry_slug field', () => {
+    const m = mapBindingError(400, {
+      error: { code: 'REGISTRY_NOT_FOUND', message: 'target_registry_slug does not name a registry in this application' },
+    });
+    expect(m.field).toBe('target_registry_slug');
+    expect(m.message).toMatch(/registry/i);
   });
 
   it('falls back generically for unexpected status', () => {
@@ -340,5 +386,104 @@ describe('bindingProcessLabel — human process name primary, slug demoted', () 
   it('is defensive against missing definitions / fields', () => {
     expect(bindingProcessLabel({ process_key: 'k' }, undefined).hasName).toBe(false);
     expect(bindingProcessLabel({}, defs).name).toBe('—');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0669 (NB-2 fix, T-0681 judge non-blocking finding): findExistingBinding /
+// prefillFieldsFromBinding. POST /api/process-app-bindings upserts on
+// (process_key, application_id) with ON CONFLICT DO UPDATE SET ... = EXCLUDED —
+// re-submitting the bind form for an ALREADY-BOUND pair while it still sits at
+// fresh-open defaults silently clears target_registry_slug/trigger_type/etc.
+// back to NULL/'launcher'. These two helpers let BindProcessModal detect the
+// existing row and pre-fill instead of blind-reset.
+// ---------------------------------------------------------------------------
+describe('findExistingBinding — resolve an existing row for a (process, app) pair', () => {
+  const bindings = [
+    { id: 'b1', process_key: 'purchaseApproval', application_id: APP_UUID, target_registry_slug: 'custom-registry' },
+    { id: 'b2', process_key: 'otherProcess', application_id: 'a0000000-0000-0000-0000-000000000077' },
+  ];
+
+  it('finds the row matching BOTH process_key and application_id', () => {
+    const found = findExistingBinding(bindings, 'purchaseApproval', APP_UUID);
+    expect(found).not.toBeNull();
+    expect(found.id).toBe('b1');
+  });
+
+  it('returns null when the pair has no existing binding (fresh bind)', () => {
+    expect(findExistingBinding(bindings, 'purchaseApproval', 'a0000000-0000-0000-0000-000000000077')).toBeNull();
+    expect(findExistingBinding(bindings, 'brandNewProcess', APP_UUID)).toBeNull();
+  });
+
+  it('returns null when either key is empty (nothing picked yet)', () => {
+    expect(findExistingBinding(bindings, '', APP_UUID)).toBeNull();
+    expect(findExistingBinding(bindings, 'purchaseApproval', '')).toBeNull();
+    expect(findExistingBinding(bindings, '', '')).toBeNull();
+  });
+
+  it('is defensive against a missing/non-array bindings list', () => {
+    expect(findExistingBinding(undefined, 'purchaseApproval', APP_UUID)).toBeNull();
+    expect(findExistingBinding(null, 'purchaseApproval', APP_UUID)).toBeNull();
+  });
+});
+
+describe('prefillFieldsFromBinding — pure projection for the bind-form pre-fill', () => {
+  it('projects every upserted column from an existing binding row', () => {
+    const binding = {
+      form_key: 'purchase-form',
+      trigger_type: 'record_action',
+      start_form_key: 'purchase-create',
+      field_mapping: { amount: 'summa' },
+      target_registry_slug: 'custom-registry',
+    };
+    expect(prefillFieldsFromBinding(binding)).toEqual({
+      formKey: 'purchase-form',
+      triggerType: 'record_action',
+      startFormKey: 'purchase-create',
+      fieldMappingRaw: 'amount=summa',
+      targetRegistrySlug: 'custom-registry',
+    });
+  });
+
+  it('a re-submit of the pre-filled values round-trips through buildBindingPayload unchanged (the NB-2 no-op guarantee)', () => {
+    const binding = {
+      process_key: 'purchaseApproval',
+      application_id: APP_UUID,
+      form_key: 'purchase-form',
+      trigger_type: 'record_action',
+      start_form_key: 'purchase-create',
+      field_mapping: { amount: 'summa' },
+      target_registry_slug: 'custom-registry',
+    };
+    const prefill = prefillFieldsFromBinding(binding);
+    const payload = buildBindingPayload({
+      process_key: binding.process_key,
+      application_id: binding.application_id,
+      form_key: prefill.formKey,
+      trigger_type: prefill.triggerType,
+      start_form_key: prefill.startFormKey,
+      field_mapping_raw: prefill.fieldMappingRaw,
+      target_registry_slug: prefill.targetRegistrySlug,
+    });
+    expect(payload.target_registry_slug).toBe('custom-registry'); // NOT null — the NB-2 bug would send null here
+    expect(payload.trigger_type).toBe('record_action');
+    expect(payload.start_form_key).toBe('purchase-create');
+    expect(payload.field_mapping).toEqual({ amount: 'summa' });
+  });
+
+  it('is null-safe: no existing binding (fresh pair) yields the same defaults the form already starts at', () => {
+    expect(prefillFieldsFromBinding(null)).toEqual({
+      formKey: '',
+      triggerType: 'launcher',
+      startFormKey: '',
+      fieldMappingRaw: '',
+      targetRegistrySlug: '',
+    });
+    expect(prefillFieldsFromBinding(undefined)).toEqual(prefillFieldsFromBinding(null));
+  });
+
+  it('a NULL target_registry_slug (default, never set) pre-fills to the empty-string "default" option, not the literal "null"', () => {
+    const binding = { process_key: 'p', application_id: APP_UUID, target_registry_slug: null };
+    expect(prefillFieldsFromBinding(binding).targetRegistrySlug).toBe('');
   });
 });
