@@ -588,11 +588,24 @@ export function defaultViewConfig(recordSchema: unknown): ListViewConfig {
 // ===========================================================================
 // T-0653 (W5-UX/§4) — VIEW-ПРИМИТИВ: source-дискриминатор + не-records виды.
 //
-// T-0581 обобщён: `list_view` теперь несёт `source` (records|inbox|processes).
-// records-виды валидируются validateViewConfig(type,…) ПРОТИВ registry_def
-// record_schema (выше — без изменений). inbox/processes-виды не имеют
-// registry_def — их config валидируется ПРОТИВ СТАТИЧЕСКОГО каталога колонок
-// (не тенант-данные, а платформенные поля инбокса), диспетчером по SOURCE.
+// T-0581 обобщён: `list_view` теперь несёт `source`. records-виды валидируются
+// validateViewConfig(type,…) ПРОТИВ registry_def record_schema (выше — без
+// изменений). НЕ-records-виды не имеют registry_def — их config валидируется
+// ПРОТИВ СТАТИЧЕСКОГО каталога колонок (платформенные поля, не тенант-данные),
+// диспетчером по SOURCE.
+//
+// ЖИВЫЕ ИСТОЧНИКИ (fix-forward ревью T-0653, defect #5, вариант «б»):
+//   'records'   — ЖИВЬЁМ (screen-app-records → /api/list-views, T-0581).
+//   'processes' — ЗАЯВЛЕН с минимальной реализацией (скоуп-граница брифа: без
+//                 собственного read-пути, UI-грид процессов НЕ в объёме). Держит
+//                 открытость source-дискриминатора как контракт.
+// 'inbox' НЕ является source-видом. Личный вид инбокса (колонки+плотность)
+// живёт в user_pref (T-0651, ключ 'inbox.view', spec §7/AC-7.1) — это тот же
+// per-user стор, что и сворачивание сайдбара. Ревью нашло, что серверный
+// inbox-dispatch (INBOX_VIEW_COLUMNS/validateViewSourceConfig(source='inbox')/
+// defaultInboxViewConfig) был МЁРТВ — экран его никогда не вызывал. Мёртвый
+// параллельный путь с валидацией, ничего не защищающей, ВЫРЕЗАН: держим ОДИН
+// честный стор личного инбокс-вида (user_pref), а не два несцеплённых.
 //
 // Открытость source (как открытость type): validateViewSourceConfig —
 // switch/map по source с default-ветвью; новый источник = новая ветка БЕЗ
@@ -600,26 +613,28 @@ export function defaultViewConfig(recordSchema: unknown): ListViewConfig {
 // sla/deadline/status), не персона/домен-константы.
 // ===========================================================================
 
-/** Каталог колонок инбокс-вида (стабильные ключи; density — свойство вида). */
-export const INBOX_VIEW_COLUMNS = [
+/**
+ * Каталог колонок processes-вида (стабильные ключи; density — свойство вида).
+ * Минимальный контракт (скоуп-граница брифа): плейсхолдер до собственного грида
+ * процессов. Ключи — ПЛАТФОРМЕННЫЕ поля списка инстансов, не тенант-данные.
+ */
+export const PROCESSES_VIEW_COLUMNS = [
   "name",
   "process",
-  "executor",
-  "sla",
-  "deadline",
-  "action",
+  "status",
+  "started",
+  "actor",
 ] as const;
-export type InboxViewColumnKey = (typeof INBOX_VIEW_COLUMNS)[number];
+export type ProcessesViewColumnKey = (typeof PROCESSES_VIEW_COLUMNS)[number];
 
-const INBOX_VIEW_DENSITIES = ["compact", "comfortable"] as const;
-export type ViewDensity = (typeof INBOX_VIEW_DENSITIES)[number];
+const SOURCE_VIEW_DENSITIES = ["compact", "comfortable"] as const;
+export type ViewDensity = (typeof SOURCE_VIEW_DENSITIES)[number];
 
 /**
- * SourceViewConfig — config-форма НЕ-records вида (inbox/processes). Легче
- * records-config: видимость/порядок колонок из СТАТИЧЕСКОГО каталога + плотность.
- * (Серверные q=/фильтры инбокса едут ОТДЕЛЬНЫМИ query-параметрами GET /api/inbox,
- * а не через config — config это «мой сохранённый вид: что показывать и как
- * плотно», реюз user-prefs-семантики T-0651.)
+ * SourceViewConfig — config-форма НЕ-records вида. Легче records-config:
+ * видимость/порядок колонок из СТАТИЧЕСКОГО каталога + плотность.
+ * (config это «мой сохранённый вид: что показывать и как плотно», реюз
+ * user-prefs-семантики T-0651.)
  */
 export interface SourceViewConfig {
   readonly columns: { readonly key: string; readonly visible: boolean }[];
@@ -630,19 +645,18 @@ export interface SourceViewConfig {
  * validateViewSourceConfig — ДИСПЕТЧЕР по `source` (зеркало validateViewConfig
  * по `type`). records-виды сюда НЕ попадают (их валидирует validateViewConfig
  * против registry_def). Неизвестный source отвергается (не молчаливый fallback).
+ * 'inbox' сюда НЕ приходит — личный инбокс-вид живёт в user_pref (см. заголовок).
  */
 export function validateViewSourceConfig(
   source: string,
   config: unknown,
 ): ValidateViewConfigResult {
   switch (source) {
-    case "inbox":
-      return validateSourceViewConfigAgainstCatalog(config, INBOX_VIEW_COLUMNS as readonly string[]);
     case "processes":
-      // Минимальный контракт (скоуп-граница брифа): processes-вид принимает тот
-      // же лёгкий config-shape, что и inbox (колонки+плотность), валидируется
-      // против инбокс-каталога как плейсхолдер до собственного грида процессов.
-      return validateSourceViewConfigAgainstCatalog(config, INBOX_VIEW_COLUMNS as readonly string[]);
+      // Минимальный контракт (скоуп-граница брифа): processes-вид принимает
+      // лёгкий config-shape (колонки+плотность), валидируется против
+      // processes-каталога как плейсхолдер до собственного грида процессов.
+      return validateSourceViewConfigAgainstCatalog(config, PROCESSES_VIEW_COLUMNS as readonly string[]);
     default:
       return { valid: false, errors: [`unknown view source '${source}'`] };
   }
@@ -682,17 +696,17 @@ function validateSourceViewConfigAgainstCatalog(
   }
 
   const density = config["density"];
-  if (density !== undefined && !(INBOX_VIEW_DENSITIES as readonly string[]).includes(density as string)) {
-    errors.push(`density must be one of ${INBOX_VIEW_DENSITIES.join(" | ")}`);
+  if (density !== undefined && !(SOURCE_VIEW_DENSITIES as readonly string[]).includes(density as string)) {
+    errors.push(`density must be one of ${SOURCE_VIEW_DENSITIES.join(" | ")}`);
   }
 
   return { valid: errors.length === 0, errors };
 }
 
-/** Синтетический дефолт инбокс-вида (все колонки видимы, comfortable). */
-export function defaultInboxViewConfig(): SourceViewConfig {
+/** Синтетический дефолт processes-вида (все колонки видимы, comfortable). */
+export function defaultProcessesViewConfig(): SourceViewConfig {
   return {
-    columns: INBOX_VIEW_COLUMNS.map((key) => ({ key, visible: true })),
+    columns: PROCESSES_VIEW_COLUMNS.map((key) => ({ key, visible: true })),
     density: "comfortable",
   };
 }

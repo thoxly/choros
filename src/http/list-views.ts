@@ -53,7 +53,7 @@ import {
   validateViewConfig,
   defaultViewConfig,
   validateViewSourceConfig,
-  defaultInboxViewConfig,
+  defaultProcessesViewConfig,
   type ListViewConfig,
 } from "../core/view-config.js";
 
@@ -68,9 +68,14 @@ const VIEW_NAME_MAX = 128;
 const DEFAULT_VIEW_TYPE = "list";
 
 // T-0653: view-primitive source discriminator. 'records' = today's T-0581
-// registry_def-bound view; 'inbox'/'processes' = non-registry_def source views.
+// registry_def-bound view (LIVE). 'processes' = non-registry_def source view,
+// DECLARED with a minimal contract (no own read-path — brief scope boundary).
+// NOTE (fix-forward defect #5, вариант «б»): 'inbox' is NOT a source-view. The
+// personal inbox view (columns + density) lives in user_pref ('inbox.view',
+// T-0651) — the same per-user store the sidebar uses. The dead server-side
+// inbox-dispatch was removed rather than kept as a parallel unused path.
 const DEFAULT_VIEW_SOURCE = "records";
-const NON_RECORDS_SOURCES = new Set(["inbox", "processes"]);
+const NON_RECORDS_SOURCES = new Set(["processes"]);
 function isKnownSource(s: string): boolean {
   return s === "records" || NON_RECORDS_SOURCES.has(s);
 }
@@ -253,7 +258,7 @@ async function listViews(
   });
 }
 
-// T-0653: list non-records-source views (inbox/processes) — no registry_def.
+// T-0653: list non-records-source views (processes) — no registry_def.
 async function listSourceViews(
   pool: pg.Pool,
   tenantId: string,
@@ -339,8 +344,8 @@ async function createView(args: {
         return { kind: "invalid", errors: verdict.errors };
       }
     } else {
-      // inbox/processes-source: NO registry_def; config validated against the
-      // static column catalog by SOURCE (validateViewSourceConfig dispatcher).
+      // non-records-source (processes): NO registry_def; config validated against
+      // the static column catalog by SOURCE (validateViewSourceConfig dispatcher).
       const verdict = validateViewSourceConfig(source, config);
       if (!verdict.valid) {
         return { kind: "invalid", errors: verdict.errors };
@@ -412,7 +417,7 @@ async function patchView(args: {
 
     if (patch.config !== undefined) {
       // Source-aware validation: records-view against its record_schema,
-      // inbox/processes-view against the static column catalog.
+      // processes-view against the static column catalog.
       if (existing.source === "records") {
         if (existing.registry_def_id === null) {
           return { kind: "invalid", errors: ["records view is missing its registry_def"] };
@@ -520,7 +525,7 @@ export function registerListViewRoutes(
   }
 
   // GET /api/list-views?registry_def_id=<uuid>[&application_id=<uuid>]   (records)
-  //     OR ?source=inbox|processes                                        (T-0653)
+  //     OR ?source=processes                                              (T-0653)
   //
   // Returns COMMON tenant views + the CALLER'S OWN personal views (a foreign
   // actor's personal view is never listed — owner-scoped over RLS).
@@ -532,7 +537,7 @@ export function registerListViewRoutes(
     const qIdx = rawUrl.indexOf("?");
     const searchParams = new URLSearchParams(qIdx >= 0 ? rawUrl.slice(qIdx + 1) : "");
 
-    // T-0653: ?source= selects a non-records view source (inbox/processes).
+    // T-0653: ?source= selects a non-records view source (processes).
     // Absent source ⇒ 'records' (backward-compatible: registry_def_id path).
     const sourceRaw = searchParams.get("source");
     if (sourceRaw !== null && sourceRaw !== "records") {
@@ -544,7 +549,7 @@ export function registerListViewRoutes(
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({
         views: views.map(serializeView),
-        default_view: defaultInboxViewConfig(),
+        default_view: defaultProcessesViewConfig(),
       }));
       return;
     }
