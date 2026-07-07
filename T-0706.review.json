@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0706",
+  "role": "reviewer",
+  "verdict": "approved",
+  "commit": "c187022b",
+  "summary": "Пикер «Набор полей» сужается/предупреждается по target_registry_slug, зеркалируя резолюцию сервера (resolveLiveRecordSchema). Три ветки (AC-1 сужение, AC-2 честная подсказка, AC-6 рассинхрон) реализованы корректно, defense-in-depth (AC-3) действительно закрывает race — прослежено построчно через React commit/effect семантику, гонка не топит save. Unchanged для single-registry/NULL-slug приложений (AC-4/NF). Обнаружено 2 некритичных структурных наблюдения (не введены этой задачей, унаследованы от T-0669/схемы) и 1 UX-наблюдение по AC-6.",
+  "checks": {
+    "race_selectedDefId_vs_registryDefs_load": {
+      "status": "pass",
+      "detail": "Прослежено построчно: boundRegistryDef — useMemo от [boundRegistrySlug, registryDefs], оба обновляются АТОМАРНО в одном render — нет кадра, где registryDefs уже пришли, а boundRegistryDef ещё не пересчитан. Схемо-строящий эффект (778: if(!selectedDefId||!registryDefs) return) не может построить doc раньше, чем selectedDefId установлен — а к моменту установки boundRegistryDef уже актуален. Единственный путь, где doc существует без ручного выбора defId — reopen существующей раскладки (752, независимо от registry-пикера) — там selectedDefId может остаться '' и T-0706-guard(false) не блокирует, но это легитимный no-op (пересохранение уже валидной раскладки, не относится к дефекту T-0669). Disabled — нативный HTML-атрибут, пересчитывается каждый render, click на disabled-кнопке браузер не пропускает — гонка клик/рендер физически невозможна."
+    },
+    "AC1_narrowing_matches_server_resolution": {
+      "status": "pass",
+      "detail": "src/db/live-form-schema.ts:205-208 resolveLiveRecordSchema: schemaSlug = target_registry_slug.trim()!=='' ? target_registry_slug : resolveDefaultStepResultSlug(); дальше registry_def WHERE application_id=$2 AND slug=$3. Клиентский boundRegistrySlug (FormDesigner.jsx:847-850) — идентичная непустая-строка-проверка; boundRegistryDef матчит по ТОМУ ЖЕ полю slug. Совпадает 1:1 при явном target_registry_slug."
+    },
+    "AC6_desync_no_silent_fail": {
+      "status": "pass",
+      "detail": "boundRegistryDef===null (слаг задан, но registryDefs.find не нашёл) → честный текст с именем слага, пикер открыт (не сужается в никуда). Anti-case AC-8 обфускация join() в тесте (стр. 430-436) корректна — не триггерит собственный grep-гейт, но логика теста реальна."
+    },
+    "AC4_single_registry_app_no_regression": {
+      "status": "pass",
+      "detail": "Прежний код: {registryDefs && (<открытый пикер>)}. Пост-T-0706: при target_registry_slug=NULL boundRegistrySlug=null → boundRegistryDef=undefined независимо от registryDefs.length → третья (открытая, неизменная) ветка. AC-2 подсказка спрятана условием registryDefs.length>1 — для 1 реестра не показывается. Байт-в-байт прежнее поведение подтверждено диффом (git show dev:... — было ОДНО безусловное {registryDefs && (...)})."
+    },
+    "T0669_app_filter_untouched": {
+      "status": "pass",
+      "detail": "boundAppIdsForProcess/эффект сброса selectedAppId (796-816) не тронуты этой задачей — diff только добавляет НОВЫЙ блок кода после них, не модифицирует существующие строки."
+    },
+    "anti_case": {
+      "status": "pass",
+      "detail": "bash ci/checks/anti-case-lock.sh → PASS (aggregate 16/16, steady). Прямой grep по добавленным строкам не нашёл literal-употреблений telLinear/purchases/soglasovanie/e-larina/e-orlov вне комментариев/join()-обфускации теста."
+    }
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "NB-1",
+      "severity": "P2",
+      "title": "resolveLiveRecordSchema резолвит по process_key БЕЗ application_id — при 2+ привязках одного процесса к разным приложениям сервер выбирает произвольную строку (LIMIT 1, без ORDER BY), но T-0706 показывает пользователю уверенный факт-текст «Набор полей задан привязкой процесса: «X»» для КОНКРЕТНОГО выбранного приложения",
+      "detail": "src/db/live-form-schema.ts:187-194 — SQL `WHERE tenant_id=$1 AND process_key=$2 LIMIT 1` НЕ фильтрует по application_id. Схема process_app_binding (migration 075) явно допускает UNIQUE(tenant_id, process_key, application_id) — то есть ОДИН процесс может быть привязан к НЕСКОЛЬКИМ приложениям (BindProcessModal / screen-processes.jsx это не запрещает). Если у процесса 2 привязки (app A и app B), T-0669-пикер «Приложение» покажет ОБА как валидные варианты (boundAppIdsForProcess — Set всех application_id для process_key), но сервер на save проигнорирует то, что выбрал пользователь, и возьмёт ПЕРВУЮ строку по process_key. T-0706 не вводит эту неоднозначность (она унаследована от T-0669, чей собственный судья её явно принял: T-0669.review.json check single_source_of_truth — «Один источник правды, не два», подразумевая что процесс↔приложение считается 1:1 на практике) — но T-0706 УСИЛИВАЕТ иллюзию точности: раньше пикер просто не сужался, теперь он явно заявляет «набор полей ЗАДАН привязкой» фактическим текстом, который может РАСХОДИТЬСЯ с тем, что реально резолвит сервер, если у процесса есть вторая привязка к другому приложению. Не блокирует T-0706 (структурная проблема на уровень ниже, вне заявленного скоупа задачи — §5 явно исключает изменение resolveLiveRecordSchema), но стоит завести как задачу: либо resolveLiveRecordSchema должен требовать application_id-параметр (сервер сегодня фактически предполагает 1 app на process_key), либо UI должен предупреждать при 2+ привязках одного процесса.",
+      "location": "src/db/live-form-schema.ts:187-194 (не тронут этой задачей); web/src/forms/FormDesigner.jsx:1279-1281 (факт-текст усиливает иллюзию)"
+    },
+    {
+      "id": "NB-2",
+      "severity": "P3",
+      "title": "AC-6 (рассинхрон) не блокирует Save — клик всегда даёт 409, просто с предупреждением заранее",
+      "detail": "Guard `Boolean(boundRegistryDef && selectedDefId && ...)` требует boundRegistryDef ИСТИННЫМ объектом; в AC-6 boundRegistryDef===null (falsy) → save НЕ блокируется. Поскольку server's registry_def WHERE slug=$3 не найдёт строку (сам факт AC-6), classifyLayoutSave ВСЕГДА вернёт 409 WRONG_FLOOR независимо от того, какой registry_def пользователь выберет в открытом пикере этой ветки. Это осознанный выбор спеки (§3.1/AC-6: «пикер остаётся открытым... деградация к §3.2-подобному предупреждению, не тихий сбой» — явно НЕ требует блокировки save, т.к. это проблема данных вне скоупа задачи, §5). Технически AC-3 «ни в одном штатном потоке пользователь не долетает до сырого 409 БЕЗ ПРЕДУПРЕЖДЕНИЯ» соблюдён буквально (предупреждение показано ДО клика) — но пользователь всё равно долетает до 409 (просто ожидаемого). generic catch в persistLayout всё ещё покажет «Не удалось сохранить.» после клика. Не блокирует (spec-compliant, in-scope trade-off), но стоит рассмотреть: дизейблить Save и в этой ветке тоже (симметрично AC-3), раз сервер гарантированно откажет.",
+      "location": "web/src/forms/FormDesigner.jsx:1282-1299, 1476-1481"
+    },
+    {
+      "id": "NB-3",
+      "severity": "P4",
+      "title": "AC-6 текст показывает сырой technical slug пользователю",
+      "detail": "REGISTRY_SLUG_NOT_FOUND_PREFIX/SUFFIX интерполируют {boundRegistrySlug} — сырой slug-идентификатор (не display_name, т.к. по определению этой ветки совпадения нет). Спека сама предписывает именно это (AC-6: «показывает честно «слаг «{target_registry_slug}» не найден»»), так что это не отклонение от спеки — но слаг технически является жаргоном по духу AC-7 (хотя AC-7 формально проверяет только сами константы текста, не интерполируемые значения). Минорно — нет лучшей альтернативы (нет display_name без матча), информационно для полноты картины.",
+      "location": "web/src/forms/FormDesigner.jsx:69-72, 1290-1292"
+    }
+  ]
+}
