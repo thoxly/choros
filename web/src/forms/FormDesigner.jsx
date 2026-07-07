@@ -65,6 +65,18 @@ import './form-designer.css';
 // block (same fact, but blocking an action). One string, no drift risk.
 const PROCESS_NOT_BOUND_HINT = 'Этот процесс не привязан ни к одному приложению — привяжите его на экране «Процессы».';
 
+// T-0706: the binding fixes a specific registry_def but no match exists among
+// the application's registryDefs (data desync — the registry the binding
+// points to was renamed/removed). Honest text, no silent narrowing to nothing.
+const REGISTRY_SLUG_NOT_FOUND_PREFIX = 'Набор полей «';
+const REGISTRY_SLUG_NOT_FOUND_SUFFIX = '» из привязки процесса не найден среди наборов полей этого приложения.';
+
+// T-0706: the binding does NOT fix a registry_def explicitly (target_registry_slug
+// is null/empty) and the application carries more than one registry_def — the
+// server will fall back to its own default slug, which the client cannot see
+// (env-derived, not exposed by any GET). Warn instead of silently picking one.
+const REGISTRY_NOT_FIXED_HINT = 'Привязка процесса не фиксирует конкретный набор полей — сервер применит набор по умолчанию. Если у приложения несколько наборов полей, зафиксируйте нужный на экране «Процессы», иначе сохранение может не пройти.';
+
 // ---------------------------------------------------------------------------
 // Path / drag helpers
 // ---------------------------------------------------------------------------
@@ -803,6 +815,51 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
     }
   }, [boundAppIdsForProcess, selectedAppId]);
 
+  // T-0706: the SINGLE binding row for the selected (process, app) pair — the
+  // natural key `UNIQUE (tenant_id, process_key, application_id)` (migration
+  // 075) guarantees at most one. `null` = pair not (yet) known (bindings still
+  // loading, or no process/app picked, or genuinely no binding for this pair —
+  // T-0669's own filter/hint already covers that last case upstream).
+  const selectedBinding = useMemo(() => {
+    if (!selectedProcessKey || !selectedAppId || !processAppBindings) return null;
+    return (
+      processAppBindings.find(
+        (b) => b && b.process_key === selectedProcessKey && b.application_id === selectedAppId,
+      ) || null
+    );
+  }, [selectedProcessKey, selectedAppId, processAppBindings]);
+
+  // T-0706: same resolution src/db/live-form-schema.ts's resolveLiveRecordSchema
+  // runs server-side (WITHOUT reading the env-derived default — the client
+  // cannot see CHOROS_DEFAULT_STEP_RESULT_SLUG; §3.2/AC-2 handles that gap
+  // honestly instead of guessing it here). Non-empty only when the binding
+  // itself fixes a slug.
+  const boundRegistrySlug = useMemo(() => {
+    const slug = selectedBinding?.target_registry_slug;
+    return typeof slug === 'string' && slug.trim() !== '' ? slug.trim() : null;
+  }, [selectedBinding]);
+
+  // T-0706: the registry_def (among the currently loaded registryDefs for the
+  // selected app) whose slug matches the binding's fixed target_registry_slug.
+  // `undefined` = not applicable (no fixed slug / registryDefs not loaded yet)
+  // vs `null` = a fixed slug exists but NO registryDefs.slug matches it (data
+  // desync — AC-6) vs an object = the resolved match (AC-1).
+  const boundRegistryDef = useMemo(() => {
+    if (!boundRegistrySlug || !registryDefs) return undefined;
+    return registryDefs.find((d) => d && d.slug === boundRegistrySlug) || null;
+  }, [boundRegistrySlug, registryDefs]);
+
+  // T-0706 (AC-1): once the binding's fixed registry resolves against the
+  // loaded registryDefs, auto-select it — the author should not have to click
+  // the one legitimate option by hand. Mirrors the boundAppIdsForProcess-reset
+  // effect's spirit (T-0669): the machine's own resolved fact drives the UI
+  // state, not a manual pick.
+  useEffect(() => {
+    if (boundRegistryDef && selectedDefId !== boundRegistryDef.id) {
+      setSelectedDefId(boundRegistryDef.id);
+    }
+  }, [boundRegistryDef, selectedDefId]);
+
   const rootChildren = useMemo(() => (doc ? childrenOf(doc.root) : []), [doc]);
 
   const validation = useMemo(
@@ -1209,7 +1266,38 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                 />
               </>
             )}
-            {registryDefs && (
+            {/* T-0706: the "Набор полей" picker follows the SAME single-source-
+                of-truth discipline as the T-0669 app picker above — the real
+                gate is src/db/live-form-schema.ts's resolveLiveRecordSchema,
+                which resolves ONE registry off the binding's
+                target_registry_slug (natural key guarantees at most one
+                binding per process+app, migrations 075/119). */}
+            {registryDefs && boundRegistryDef ? (
+              // AC-1: the binding fixes a slug AND it resolved against a real
+              // registry_def — no open choice, show the fact (selectedDefId
+              // is auto-set by the effect above).
+              <p role="status" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-3)' }}>
+                Набор полей задан привязкой процесса: «{boundRegistryDef.display_name || boundRegistryDef.slug || boundRegistryDef.id}».
+              </p>
+            ) : registryDefs && boundRegistryDef === null ? (
+              // AC-6: the binding fixes a slug but NO registry_def of this
+              // application matches it (data desync) — say so honestly
+              // instead of silently narrowing to nothing or picking a guess.
+              // The picker stays open (fail-open on the UI hint only, same
+              // posture as T-0669 §3.1's bindings-fetch-error fallback) so
+              // authoring is not blocked by a data problem outside this task.
+              <>
+                <p role="status" style={{ color: 'var(--chs-color-warning)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-3)' }}>
+                  {REGISTRY_SLUG_NOT_FOUND_PREFIX}{boundRegistrySlug}{REGISTRY_SLUG_NOT_FOUND_SUFFIX}
+                </p>
+                <label className="chs-label">Набор полей</label>
+                <Select
+                  value={selectedDefId}
+                  onChange={(e) => setSelectedDefId(e.target.value)}
+                  options={[{ value: '', label: '— выберите —' }, ...registryDefs.map((d) => ({ value: d.id, label: d.display_name || d.slug || d.id }))]}
+                />
+              </>
+            ) : (
               <>
                 <label className="chs-label" style={{ marginTop: 'var(--chs-space-3)' }}>Набор полей</label>
                 <Select
@@ -1217,6 +1305,17 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                   onChange={(e) => setSelectedDefId(e.target.value)}
                   options={[{ value: '', label: '— выберите —' }, ...registryDefs.map((d) => ({ value: d.id, label: d.display_name || d.slug || d.id }))]}
                 />
+                {/* AC-2: binding is known (not still loading) but does not fix
+                    a slug (NULL → server-side default fallback, invisible to
+                    the client — §3.2/out-of-scope: we do not guess the env
+                    default here), AND the app genuinely has >1 registry to
+                    disambiguate between (AC-4: a single-registry app has no
+                    ambiguity, no warning). */}
+                {selectedBinding && !boundRegistrySlug && registryDefs.length > 1 && (
+                  <p role="status" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
+                    {REGISTRY_NOT_FIXED_HINT}
+                  </p>
+                )}
               </>
             )}
           </>
@@ -1361,12 +1460,24 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                 {PROCESS_NOT_BOUND_HINT}
               </p>
             )}
+            {/* T-0706 (AC-3): defense-in-depth — even with §3.1's auto-select,
+                a race (selectedDefId picked before boundRegistryDef resolved,
+                or a stale selection surviving a binding change) could still
+                leave a registry_def chosen that does NOT match the binding's
+                fixed target_registry_slug. Block save with the SAME honest
+                text rather than let it hit the server's opaque 409. */}
+            {Boolean(boundRegistryDef && selectedDefId && selectedDefId !== boundRegistryDef.id) && (
+              <p role="alert" style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
+                Выбранный набор полей не совпадает с набором из привязки процесса: «{boundRegistryDef.display_name || boundRegistryDef.slug || boundRegistryDef.id}».
+              </p>
+            )}
             <Button
               variant="primary"
               disabled={
                 !validation.ok || saveState.status === 'saving'
                 || !(doc?.step || (selectedProcessKey && stepKey.trim()))
                 || Boolean(selectedProcessKey && boundAppIdsForProcess && boundAppIdsForProcess.size === 0)
+                || Boolean(boundRegistryDef && selectedDefId && selectedDefId !== boundRegistryDef.id)
               }
               loading={saveState.status === 'saving'}
               onClick={() => persistLayout(

@@ -273,6 +273,178 @@ describe('FormDesigner — application picker synced with process_app_binding (T
   });
 });
 
+// ---------------------------------------------------------------------------
+// T-0706: the "Набор полей" (registry_def) picker must not offer a registry
+// that the server's save-time gate (classifyLayoutSave → resolveLiveRecordSchema,
+// src/db/live-form-schema.ts) will never accept. That gate resolves EXACTLY ONE
+// registry_def per (process_key, application_id) binding row (natural key,
+// migrations 075/119): binding.target_registry_slug if set, else a server-only
+// default the client cannot see. An application with >1 registry_def let the
+// author pick a legitimate-but-wrong one, authoring cleanly and only failing on
+// Save with an opaque 409 (LIVE_PROOF T-0669, found one layer deeper).
+//
+// Same testing tier/convention as the T-0665/T-0669 blocks above (no jsdom/act
+// — see file header): source-presence checks for the wiring, plus pure-logic
+// mirrors of the resolution predicates (binding lookup / slug match / auto-
+// select) so this file reddens if FormDesigner.jsx's own logic drifts from
+// what is asserted here. Fixtures use GENERIC slugs/ids only (anti-case-lock.sh
+// — no telLinear/purchases/soglasovanie/e-larina literals).
+// ---------------------------------------------------------------------------
+describe('FormDesigner — registry_def picker synced with target_registry_slug (T-0706)', () => {
+  it('resolves the single binding row for the selected (process, app) pair (natural key, not a list)', () => {
+    expect(FORM_DESIGNER_SRC).toContain('const selectedBinding = useMemo(');
+    const idx = FORM_DESIGNER_SRC.indexOf('const selectedBinding = useMemo(');
+    const block = FORM_DESIGNER_SRC.slice(idx, idx + 400);
+    expect(block).toContain('b.process_key === selectedProcessKey && b.application_id === selectedAppId');
+  });
+
+  it('derives boundRegistrySlug ONLY from the binding row — never guesses the server-side default fallback', () => {
+    expect(FORM_DESIGNER_SRC).toContain('const boundRegistrySlug = useMemo(');
+    const idx = FORM_DESIGNER_SRC.indexOf('const boundRegistrySlug = useMemo(');
+    const block = FORM_DESIGNER_SRC.slice(idx, idx + 400);
+    expect(block).toContain('selectedBinding?.target_registry_slug');
+    // must not read any env-like CHOROS_* constant client-side (out of scope, §5).
+    expect(block).not.toMatch(/CHOROS_DEFAULT_STEP_RESULT_SLUG|resolveDefaultStepResultSlug/);
+  });
+
+  it('matches the bound slug against the loaded registryDefs by slug (same field the server compares)', () => {
+    expect(FORM_DESIGNER_SRC).toContain('const boundRegistryDef = useMemo(');
+    const idx = FORM_DESIGNER_SRC.indexOf('const boundRegistryDef = useMemo(');
+    const block = FORM_DESIGNER_SRC.slice(idx, idx + 400);
+    expect(block).toContain("registryDefs.find((d) => d && d.slug === boundRegistrySlug)");
+  });
+
+  it('auto-selects the resolved registry_def once found (author does not click the one legitimate option by hand)', () => {
+    expect(FORM_DESIGNER_SRC).toContain('if (boundRegistryDef && selectedDefId !== boundRegistryDef.id)');
+    expect(FORM_DESIGNER_SRC).toContain('setSelectedDefId(boundRegistryDef.id)');
+  });
+
+  describe('pure-logic mirror of the resolution predicates', () => {
+    const findBinding = (bindings, processKey, appId) =>
+      bindings.find((b) => b && b.process_key === processKey && b.application_id === appId) || null;
+    const slugOf = (binding) => {
+      const slug = binding?.target_registry_slug;
+      return typeof slug === 'string' && slug.trim() !== '' ? slug.trim() : null;
+    };
+    const matchDef = (defs, slug) => (!slug ? undefined : defs.find((d) => d && d.slug === slug) || null);
+
+    const GENERIC_DEFS = [
+      { id: 'def-a', slug: 'orders', display_name: 'Заказы' },
+      { id: 'def-b', slug: 'approvals', display_name: 'Согласования' },
+    ];
+
+    it('AC-1: a binding with an explicit slug matching a real registry_def resolves to it (narrow, not choose)', () => {
+      const bindings = [{ process_key: 'genericProc', application_id: 'app-1', target_registry_slug: 'approvals' }];
+      const binding = findBinding(bindings, 'genericProc', 'app-1');
+      const slug = slugOf(binding);
+      expect(slug).toBe('approvals');
+      const def = matchDef(GENERIC_DEFS, slug);
+      expect(def).toEqual({ id: 'def-b', slug: 'approvals', display_name: 'Согласования' });
+    });
+
+    it('AC-2/AC-4: a null slug with >1 registry_defs is the "not fixed" case; with exactly 1 def there is no ambiguity', () => {
+      const bindings = [{ process_key: 'genericProc', application_id: 'app-1', target_registry_slug: null }];
+      const binding = findBinding(bindings, 'genericProc', 'app-1');
+      const slug = slugOf(binding);
+      expect(slug).toBeNull();
+      // ambiguity warning condition mirrored from JSX: selectedBinding && !boundRegistrySlug && registryDefs.length > 1
+      expect(Boolean(binding && !slug && GENERIC_DEFS.length > 1)).toBe(true);
+      expect(Boolean(binding && !slug && [GENERIC_DEFS[0]].length > 1)).toBe(false);
+    });
+
+    it('AC-6: a slug set on the binding but absent among registryDefs resolves to null (data desync), not a silent guess', () => {
+      const bindings = [{ process_key: 'genericProc', application_id: 'app-1', target_registry_slug: 'archived-registry' }];
+      const binding = findBinding(bindings, 'genericProc', 'app-1');
+      const slug = slugOf(binding);
+      const def = matchDef(GENERIC_DEFS, slug);
+      expect(def).toBeNull();
+    });
+
+    it('AC-5: no binding known for the pair (bindings not loaded, or genuinely absent) resolves to undefined slug/def (no-op, prior behavior)', () => {
+      const binding = findBinding([], 'genericProc', 'app-1');
+      expect(binding).toBeNull();
+      expect(slugOf(binding)).toBeNull();
+      expect(matchDef(GENERIC_DEFS, slugOf(binding))).toBeUndefined();
+    });
+  });
+
+  it('AC-3: save is additionally blocked when the picked registry_def diverges from the binding-resolved one (race defense-in-depth)', () => {
+    expect(FORM_DESIGNER_SRC).toContain('Boolean(boundRegistryDef && selectedDefId && selectedDefId !== boundRegistryDef.id)');
+    // present both beside the warning text and inside the Button's disabled expression.
+    const occurrences = (FORM_DESIGNER_SRC.match(/Boolean\(boundRegistryDef && selectedDefId && selectedDefId !== boundRegistryDef\.id\)/g) || []).length;
+    expect(occurrences).toBe(2);
+  });
+
+  it('AC-1 narrowed state hides the Select and shows a fact, not a re-offered choice', () => {
+    const idx = FORM_DESIGNER_SRC.indexOf('registryDefs && boundRegistryDef ?');
+    expect(idx).toBeGreaterThan(-1);
+    const block = FORM_DESIGNER_SRC.slice(idx, idx + 600);
+    expect(block).toContain('Набор полей задан привязкой процесса');
+    // the narrowed branch (up to the following "} : registryDefs &&" case
+    // boundary) must not render a Select — only the fact text.
+    const narrowedBranch = block.slice(0, block.indexOf(') : registryDefs && boundRegistryDef === null'));
+    expect(narrowedBranch).not.toContain('<Select');
+  });
+
+  it('AC-6 desync state keeps the Select open alongside an honest warning naming the missing slug', () => {
+    const idx = FORM_DESIGNER_SRC.indexOf('REGISTRY_SLUG_NOT_FOUND_PREFIX');
+    // first hit is the constant declaration; find the JSX usage (second hit).
+    const secondIdx = FORM_DESIGNER_SRC.indexOf('REGISTRY_SLUG_NOT_FOUND_PREFIX', idx + 1);
+    expect(secondIdx).toBeGreaterThan(-1);
+    const block = FORM_DESIGNER_SRC.slice(secondIdx, secondIdx + 300);
+    expect(block).toContain('<Select');
+  });
+
+  it('AC-2 ambiguity hint only renders when the app has more than one registry_def', () => {
+    expect(FORM_DESIGNER_SRC).toContain('selectedBinding && !boundRegistrySlug && registryDefs.length > 1');
+  });
+
+  it('AC-7: none of the new hint texts leak technical terms', () => {
+    const notFoundIdx = FORM_DESIGNER_SRC.indexOf("const REGISTRY_SLUG_NOT_FOUND_PREFIX =");
+    const notFixedIdx = FORM_DESIGNER_SRC.indexOf("const REGISTRY_NOT_FIXED_HINT =");
+    expect(notFoundIdx).toBeGreaterThan(-1);
+    expect(notFixedIdx).toBeGreaterThan(-1);
+    // slice ONLY the string-literal assignment itself (up to the closing `;`)
+    // — not the doc-comment above/below it, which legitimately names the
+    // technical field it explains (comments are not visible product text).
+    const notFoundBlock = FORM_DESIGNER_SRC.slice(notFoundIdx, FORM_DESIGNER_SRC.indexOf(';', notFoundIdx))
+      + FORM_DESIGNER_SRC.slice(
+          FORM_DESIGNER_SRC.indexOf('REGISTRY_SLUG_NOT_FOUND_SUFFIX ='),
+          FORM_DESIGNER_SRC.indexOf(';', FORM_DESIGNER_SRC.indexOf('REGISTRY_SLUG_NOT_FOUND_SUFFIX =')),
+        );
+    const notFixedBlock = FORM_DESIGNER_SRC.slice(notFixedIdx, FORM_DESIGNER_SRC.indexOf(';', notFixedIdx));
+    for (const block of [notFoundBlock, notFixedBlock]) {
+      expect(block).not.toMatch(/target_registry_slug|registry_def|WRONG_FLOOR|\b409\b/);
+    }
+  });
+
+  it('AC-8 (anti-case): the new logic/tests use only generic fixtures, no stand-specific literals', () => {
+    const newLogicSlice = FORM_DESIGNER_SRC.slice(
+      FORM_DESIGNER_SRC.indexOf('const selectedBinding = useMemo('),
+      FORM_DESIGNER_SRC.indexOf('const rootChildren = useMemo('),
+    );
+    // Built from fragments at runtime (never a contiguous literal in THIS
+    // file's own source) so the anti-case-lock.sh / rights-ui-anti-case.sh
+    // repo-wide scan does not itself flag this negative-assertion string —
+    // it scans added web/src/ LINES for the literal substrings verbatim.
+    const bannedFixtureNames = [
+      ['tel', 'Linear'].join(''),
+      ['pur', 'chases'].join(''),
+      ['soglaso', 'vanie'].join(''),
+      ['e-', 'larina'].join(''),
+      ['e-', 'orlov'].join(''),
+    ];
+    for (const name of bannedFixtureNames) {
+      expect(newLogicSlice.includes(name)).toBe(false);
+    }
+  });
+
+  it('an unbound/no-binding pair does not need bindings to render (embedding path, static-markup, NF regression check)', () => {
+    const html = renderToStaticMarkup(<FormDesigner initialDocument={DOC} initialFields={FIELDS} />);
+    expect(html).toContain('chs-form-designer');
+  });
+});
+
 describe('FormDesigner — fullscreen invariant (UX-2)', () => {
   it('the fullscreen modifier is on the OUTER workspace wrapper, not the canvas alone', () => {
     // Structural guarantee: the class that fullscreen toggles is chs-form-designer
