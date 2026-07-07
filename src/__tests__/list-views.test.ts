@@ -79,10 +79,13 @@ function makeFakePool(opts: {
             err.code = "23505";
             return Promise.reject(err);
           }
-          const [tenantId, id, registryDefId, applicationId, type, name, isDefault, config] = params ?? [];
+          // T-0653: column order is now (tenant_id, id, registry_def_id,
+          // application_id, source, owner_actor, type, name, is_default, config, ...).
+          const [tenantId, id, registryDefId, applicationId, source, ownerActor, type, name, isDefault, config] = params ?? [];
           return Promise.resolve({
             rows: [{
-              id, registry_def_id: registryDefId, application_id: applicationId, type, name,
+              id, registry_def_id: registryDefId, application_id: applicationId,
+              source, owner_actor: ownerActor, type, name,
               is_default: isDefault, config: JSON.parse(config as string), created_at: "0", updated_at: "0",
               tenant_id: tenantId,
             }],
@@ -349,6 +352,202 @@ describe("honest-degrade: routes not registered without pool", () => {
       expect(statusCode).toBe(404);
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+});
+
+// ===========================================================================
+// T-0653 (W5-UX/§4) — view-primitive: source discriminator + personal views.
+// ===========================================================================
+
+describe("T-0653 AC-1.1: source discriminator", () => {
+  it("unknown source → 400 VIEW_SOURCE_INVALID (not persisted)", async () => {
+    const { pool, queries } = makeFakePool();
+    const { start, stop } = makeServer({
+      pool,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorPrivilege: allowPrivilege,
+    });
+    const base = await start();
+    try {
+      const { statusCode, body } = await req(base, "POST", "/api/list-views", {
+        source: "widgets",
+        name: "bad",
+        config: { columns: [], density: "compact" },
+      });
+      expect(statusCode).toBe(400);
+      expect((body["error"] as Record<string, unknown>)["code"]).toBe("VIEW_SOURCE_INVALID");
+      expect(queries.some((q) => /INSERT INTO choros\.list_view/i.test(q.sql))).toBe(false);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("GET ?source=widgets → 400 VIEW_SOURCE_INVALID", async () => {
+    const { pool } = makeFakePool();
+    const { start, stop } = makeServer({
+      pool,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorPrivilege: allowPrivilege,
+    });
+    const base = await start();
+    try {
+      const { statusCode, body } = await req(base, "GET", "/api/list-views?source=widgets");
+      expect(statusCode).toBe(400);
+      expect((body["error"] as Record<string, unknown>)["code"]).toBe("VIEW_SOURCE_INVALID");
+    } finally {
+      await stop();
+    }
+  });
+});
+
+// fix-forward defect #5 (вариант «б»): 'inbox' is NOT a source-view — the
+// personal inbox view lives in user_pref ('inbox.view', T-0651). The dead
+// server-side inbox-dispatch was removed. The source-view path is now proven
+// against 'processes' (the DECLARED minimal-contract source), and 'inbox' is
+// asserted to be rejected as an unknown source (the dead path is gone).
+describe("T-0653 AC-1.2/AC-1.5: processes personal view (no registry_def, no privilege)", () => {
+  it("POST source=processes personal=true creates an owner-scoped view WITHOUT configurator privilege", async () => {
+    // denyPrivilege proves a PERSONAL view does not need the configurator gate.
+    const { pool, queries } = makeFakePool();
+    const { start, stop } = makeServer({
+      pool,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorPrivilege: denyPrivilege,
+    });
+    const base = await start();
+    try {
+      const { statusCode, body } = await req(base, "POST", "/api/list-views", {
+        source: "processes",
+        personal: true,
+        name: "Мои процессы",
+        config: { columns: [{ key: "name", visible: true }, { key: "status", visible: false }], density: "compact" },
+      });
+      expect(statusCode).toBe(201);
+      expect(body["source"]).toBe("processes");
+      expect(body["registry_def_id"]).toBe(null);
+      // owner_actor is set to the caller (ACTOR), resolved from identity not body.
+      expect(body["owner_actor"]).toBe(ACTOR);
+      // The INSERT bound owner_actor = ACTOR, not from the request body.
+      const insert = queries.find((q) => /INSERT INTO choros\.list_view/i.test(q.sql));
+      expect(insert).toBeTruthy();
+      expect(insert!.params).toContain(ACTOR);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("POST source=inbox → 400 VIEW_SOURCE_INVALID (dead inbox-dispatch removed)", async () => {
+    const { pool, queries } = makeFakePool();
+    const { start, stop } = makeServer({
+      pool,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorPrivilege: denyPrivilege,
+    });
+    const base = await start();
+    try {
+      const { statusCode, body } = await req(base, "POST", "/api/list-views", {
+        source: "inbox",
+        personal: true,
+        name: "Мой инбокс",
+        config: { columns: [{ key: "name", visible: true }], density: "compact" },
+      });
+      expect(statusCode).toBe(400);
+      expect((body["error"] as Record<string, unknown>)["code"]).toBe("VIEW_SOURCE_INVALID");
+      expect(queries.some((q) => /INSERT INTO choros\.list_view/i.test(q.sql))).toBe(false);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("POST source=processes with a bad config column → 400 VIEW_CONFIG_INVALID", async () => {
+    const { pool, queries } = makeFakePool();
+    const { start, stop } = makeServer({
+      pool,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorPrivilege: denyPrivilege,
+    });
+    const base = await start();
+    try {
+      const { statusCode, body } = await req(base, "POST", "/api/list-views", {
+        source: "processes",
+        personal: true,
+        name: "Bad processes view",
+        config: { columns: [{ key: "not_a_column", visible: true }], density: "compact" },
+      });
+      expect(statusCode).toBe(400);
+      expect((body["error"] as Record<string, unknown>)["code"]).toBe("VIEW_CONFIG_INVALID");
+      expect(queries.some((q) => /INSERT INTO choros\.list_view/i.test(q.sql))).toBe(false);
+    } finally {
+      await stop();
+    }
+  });
+});
+
+describe("T-0653 AC-1.3: GET ?source=processes scopes to common + caller's own personal", () => {
+  it("issues an owner-scoped SELECT (owner_actor IS NULL OR owner_actor = caller)", async () => {
+    const { pool, queries } = makeFakePool();
+    const { start, stop } = makeServer({
+      pool,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorPrivilege: allowPrivilege,
+    });
+    const base = await start();
+    try {
+      const { statusCode, body } = await req(base, "GET", "/api/list-views?source=processes");
+      expect(statusCode).toBe(200);
+      // synthetic processes default is returned even with no saved views.
+      expect(body["default_view"]).toBeTruthy();
+      const listSelect = queries.find(
+        (q) => /FROM choros\.list_view/i.test(q.sql) && /source = \$2/i.test(q.sql),
+      );
+      expect(listSelect).toBeTruthy();
+      // owner-visibility clause present + caller bound as the actor param.
+      expect(/owner_actor IS NULL OR owner_actor = \$3/i.test(listSelect!.sql)).toBe(true);
+      expect(listSelect!.params).toContain(ACTOR);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("GET ?source=inbox → 400 VIEW_SOURCE_INVALID (dead inbox-dispatch removed)", async () => {
+    const { pool } = makeFakePool();
+    const { start, stop } = makeServer({
+      pool,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorPrivilege: allowPrivilege,
+    });
+    const base = await start();
+    try {
+      const { statusCode, body } = await req(base, "GET", "/api/list-views?source=inbox");
+      expect(statusCode).toBe(400);
+      expect((body["error"] as Record<string, unknown>)["code"]).toBe("VIEW_SOURCE_INVALID");
+    } finally {
+      await stop();
+    }
+  });
+});
+
+describe("T-0653 AC-1.7: a foreign actor's personal view is invisible (owner-scoped)", () => {
+  it("GET/:id of a view not owner-visible → 404 (SELECT carries the owner clause)", async () => {
+    // existingView is null → fake pool returns 0 rows for the owner-scoped SELECT.
+    const { pool, queries } = makeFakePool({ existingView: null });
+    const { start, stop } = makeServer({
+      pool,
+      resolveActorTenant: async () => TENANT_ID,
+      resolveActorPrivilege: allowPrivilege,
+    });
+    const base = await start();
+    try {
+      const { statusCode } = await req(base, "GET", "/api/list-views/00000000-0000-0000-0000-0000000000aa");
+      expect(statusCode).toBe(404);
+      const byId = queries.find(
+        (q) => /FROM choros\.list_view/i.test(q.sql) && /id = \$2/i.test(q.sql),
+      );
+      expect(byId).toBeTruthy();
+      expect(/owner_actor IS NULL OR owner_actor = \$3/i.test(byId!.sql)).toBe(true);
+    } finally {
+      await stop();
     }
   });
 });

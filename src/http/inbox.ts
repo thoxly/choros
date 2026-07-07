@@ -58,6 +58,7 @@ import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import { makePgAuditWriter } from "../db/audit-writer.js";
 import {
   APPROVE_TASK_NAME,
+  resolveDefaultApproverRole,
   appendTaskApproved,
   findWaitingInstanceTask,
   listInstanceInboxTasks,
@@ -145,6 +146,14 @@ type InboxItem = {
    */
   processName?: string;
   /**
+   * T-0653 (W5-UX/§4): the process-definition KEY of this task's instance —
+   * carried so the server can filter/group by process exactly (a stable machine
+   * key), independent of the human processName. Additive optional — absent on
+   * seed fixtures and defer/agent rows with no process definition. NEVER rendered
+   * as a primary identifier (anti-uuid); used only as a filter/group axis.
+   */
+  procKey?: string;
+  /**
    * T-0683: originating business record id (present when the process was started
    * by an on_create trigger). The client's RecordRef lazily resolves this to the
    * record's TITLE — the human disambiguator between two instances of the same
@@ -156,6 +165,16 @@ type InboxItem = {
    * specific human. "Из пула" claim eligibility is computed from this, not from execName.
    */
   role: string;
+  /**
+   * T-0653: server-computed «this is an approval task» flag — true when the
+   * task's role is the tenant's configured approver role (APPROVER_ROLE, env-
+   * configurable, single source of truth in process-projection.ts). Lets the
+   * inbox show the inline «Согласовать» quick-action WITHOUT hardcoding the
+   * role slug in the client (D-064: the case-role literal stays server-side).
+   * Additive optional — absent ⇒ no inline approve affordance (the server still
+   * enforces eligibility on POST /api/inbox/:id/action regardless).
+   */
+  canApprove?: boolean;
   /** Task is an escalation (drives the «Эскалации» tab without step string-matching). */
   escalated?: boolean;
   execType?: ExecKind;
@@ -708,6 +727,14 @@ async function findInboxItems(
 ): Promise<InboxItem[]> {
   const tenantId = await resolveTenant(devUserId);
 
+  // T-0653 (fix-forward defect #10): the `canApprove` flag must compare the
+  // task's role against the ENV-CONFIGURABLE default approver role
+  // (resolveDefaultApproverRole → CHOROS_DEFAULT_APPROVER_ROLE), matching the
+  // InboxItem.canApprove doc-comment promise — NOT the raw APPROVER_ROLE
+  // literal. Resolved once per read and reused on BOTH the instance path and
+  // the defer path (fix-forward defect #4) so the two cannot drift.
+  const approverRole = resolveDefaultApproverRole();
+
   // T-0336: load claim-state from audit_event when DB available and no pre-loaded map.
   // Degrade gracefully (read projection, not write path): any error → empty map.
   let claimStateMap = claimMap ?? new Map<string, ClaimState>();
@@ -830,6 +857,12 @@ async function findInboxItems(
         step: row.step,
         inst: row.inst,
         role: row.role,
+        // T-0653 (fix-forward defect #4): a claimed defer task addressed to the
+        // approver role must keep the inline «Согласовать» affordance — the
+        // client now gates the quick-action on t.canApprove (was t.role===...),
+        // so without this the claimed role-approver defer row lost its button.
+        // Same env-configurable role check as the instance path (defect #10).
+        ...(row.role === approverRole ? { canApprove: true } : {}),
         execType: "agent",
         execName: row.execName,
         pool: true,
@@ -918,8 +951,13 @@ async function findInboxItems(
         // instance-UUID. processName is always present on an instance task (the
         // projection guarantees a fallback name); recordId only when on_create-started.
         processName: row.processName,
+        // T-0653: carry procKey as a stable filter/group axis (never rendered primary).
+        ...(row.procKey !== undefined ? { procKey: row.procKey } : {}),
         ...(row.recordId !== undefined ? { recordId: row.recordId } : {}),
         role: row.role,
+        // T-0653: approval-task flag (server-side role check; no client literal).
+        // Compares against the env-configurable resolved approver role (defect #10).
+        ...(row.role === approverRole ? { canApprove: true } : {}),
         execType: "human",
         pool: true,
         sla: { min: slaMin, left: slaMin },
@@ -1073,6 +1111,128 @@ function parseExec(raw: string | null): ExecKind | null {
 function parseQuery(url: string | undefined): URLSearchParams {
   const q = (url ?? "").indexOf("?");
   return new URLSearchParams(q >= 0 ? (url as string).slice(q + 1) : "");
+}
+
+// ---------------------------------------------------------------------------
+// T-0653 (W5-UX/§4) — server-side inbox search / filters / grouping.
+//
+// UX-study §4: «parseQuery знает только tab/exec/sort/page» — нет поиска,
+// фильтров по процессу/статусу/дедлайну, нет группировки. Эти фильтры
+// применяются к УЖЕ материализованному InboxItem[] (findInboxItems), т.е. IN-
+// MEMORY по строкам, а НЕ через SQL — поэтому НЕТ SQL-инъекции для q= (нет SQL-
+// пути для инбокс-поиска вовсе; сравнение — String.includes на резолвнутых
+// полях). Фильтры применяются ДО пагинации (сервер фильтрует, не клиент).
+// ---------------------------------------------------------------------------
+
+const INBOX_STATUSES = new Set(["running", "waiting", "failed", "done", "paused"]);
+
+/**
+ * T-0653 (fix-forward defect #1): hard cap on the number of rows returned in
+ * GROUPED mode (?group=process). In grouped mode the server returns the ENTIRE
+ * filtered set (not a page) so that each group's rendered body and its count
+ * badge always agree — page-paginated bodies under server-computed group counts
+ * produced a group badge of «12» over an empty tbody until every page loaded.
+ * The cap bounds the worst case (a tenant with thousands of open tasks); when
+ * hit, the response carries groupTruncated:true so the client can show an
+ * honest «показаны первые N — уточните фильтр» notice instead of silently
+ * dropping rows. 500 comfortably covers a human's real working set while
+ * bounding the payload.
+ */
+const INBOX_GROUP_ROW_CAP = 500;
+
+export interface InboxFilters {
+  q: string | null;
+  process: string | null;
+  status: string | null;
+  deadlineFrom: number | null;
+  deadlineTo: number | null;
+}
+
+/** Parse the T-0653 inbox filter params (all optional, additive to tab/exec/sort). */
+export function parseInboxFilters(query: URLSearchParams): InboxFilters {
+  const rawStatus = query.get("status");
+  const status = rawStatus !== null && INBOX_STATUSES.has(rawStatus) ? rawStatus : null;
+  const numOrNull = (v: string | null): number | null => {
+    if (v === null || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  return {
+    q: (query.get("q") ?? "").trim() || null,
+    process: (query.get("process") ?? "").trim() || null,
+    status,
+    deadlineFrom: numOrNull(query.get("deadline_from")),
+    deadlineTo: numOrNull(query.get("deadline_to")),
+  };
+}
+
+/**
+ * matchesInboxFilters — pure predicate: does an item pass the T-0653 filters?
+ *  - q: case-insensitive substring over name / step / processName / inst / procKey
+ *  - process: case-insensitive substring over procKey / processName / inst
+ *  - status: exact status match
+ *  - deadline_from/to: item.deadline (epoch-ms) within [from, to] (either bound optional)
+ * Items WITHOUT a deadline are excluded ONLY when a deadline bound is active.
+ */
+export function matchesInboxFilters(item: InboxItem, f: InboxFilters): boolean {
+  if (f.q) {
+    const needle = f.q.toLowerCase();
+    const hay = [item.name, item.step, item.processName, item.inst, item.procKey]
+      .filter((s): s is string => typeof s === "string")
+      .join("   ")
+      .toLowerCase();
+    if (!hay.includes(needle)) return false;
+  }
+  if (f.process) {
+    const needle = f.process.toLowerCase();
+    const hay = [item.procKey, item.processName, item.inst]
+      .filter((s): s is string => typeof s === "string")
+      .join("   ")
+      .toLowerCase();
+    if (!hay.includes(needle)) return false;
+  }
+  if (f.status && item.status !== f.status) return false;
+  if (f.deadlineFrom !== null || f.deadlineTo !== null) {
+    if (typeof item.deadline !== "number") return false;
+    if (f.deadlineFrom !== null && item.deadline < f.deadlineFrom) return false;
+    if (f.deadlineTo !== null && item.deadline > f.deadlineTo) return false;
+  }
+  return true;
+}
+
+export interface InboxGroup {
+  key: string;
+  label: string;
+  count: number;
+  procKey?: string;
+  inst?: string;
+}
+
+/**
+ * groupInboxByProcess — свёртки по процессу (UX-study §4: «группировка по
+ * процессу со свёртками»). Ключ группы — стабильный: procKey ?? inst ?? "—".
+ * Ярлык — человекочитаемый processName ?? inst ?? «Без процесса». Каунт — от
+ * ПЕРЕДАННОГО (уже отфильтрованного) набора. Порядок групп — по убыванию каунта,
+ * затем по ярлыку (детерминизм).
+ */
+export function groupInboxByProcess(items: InboxItem[]): InboxGroup[] {
+  const byKey = new Map<string, InboxGroup>();
+  for (const item of items) {
+    const key = item.procKey ?? item.inst ?? "—";
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      byKey.set(key, {
+        key,
+        label: item.processName ?? item.inst ?? "Без процесса",
+        count: 1,
+        ...(item.procKey !== undefined ? { procKey: item.procKey } : {}),
+        ...(item.inst !== undefined ? { inst: item.inst } : {}),
+      });
+    }
+  }
+  return [...byKey.values()].sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label, "ru"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,29 +1424,80 @@ export function registerInboxRoutes(
     const inboxTenantId = await resolveTenant(actor);
     const myRoles = await resolveRolesForActor(actor, inboxTenantId);
 
-    // Per-tab counts from the tenant-scoped base (so the UI badge totals are server-truth).
-    const counts: Record<TabId, number> = {
-      all: base.length,
-      mine: base.filter((i) => inTab(i, "mine", actor, myRoles)).length,
-      pool: base.filter((i) => inTab(i, "pool", actor, myRoles)).length,
-      esc: base.filter((i) => inTab(i, "esc", actor, myRoles)).length,
-    };
-
     const query = parseQuery(req.url);
     const tab = parseTab(query.get("tab"));
     const execFilter = parseExec(query.get("exec"));
     const sort = query.get("sort");
 
-    let filtered = base.filter((i) => inTab(i, tab, actor, myRoles));
+    // T-0653 (fix-forward defect #3): the per-tab badge counts must respect the
+    // ACTIVE q/filters/exec so a badge of «42» never sits over 3 visible rows.
+    // We first narrow the base by the cross-tab filters (exec + q/process/status/
+    // deadline), THEN compute each tab's count over THAT narrowed set. This makes
+    // the active tab's badge equal its visible total, and each other tab's badge
+    // an honest "how many match the current search would land in that tab".
+    // (Tenant scoping + role-addressing still fully apply — inTab is unchanged.)
+    const inboxFilters = parseInboxFilters(query);
+    let filteredBase = base;
     if (execFilter) {
-      filtered = filtered.filter((i) => i.execType === execFilter);
+      filteredBase = filteredBase.filter((i) => i.execType === execFilter);
     }
+    filteredBase = filteredBase.filter((i) => matchesInboxFilters(i, inboxFilters));
+
+    // Per-tab counts over the filtered base (badge ↔ visible list agree).
+    const counts: Record<TabId, number> = {
+      all: filteredBase.filter((i) => inTab(i, "all", actor, myRoles)).length,
+      mine: filteredBase.filter((i) => inTab(i, "mine", actor, myRoles)).length,
+      pool: filteredBase.filter((i) => inTab(i, "pool", actor, myRoles)).length,
+      esc: filteredBase.filter((i) => inTab(i, "esc", actor, myRoles)).length,
+    };
+
+    // The active tab's rows = filtered base narrowed to the selected tab.
+    let filtered = filteredBase.filter((i) => inTab(i, tab, actor, myRoles));
+
     if (sort === "sla") {
       // Ascending SLA headroom — most-urgent (incl. overdue, negative `left`) first.
       filtered = [...filtered].sort((a, b) => a.sla.left - b.sla.left);
     }
 
-    // T-0401 [D7-3]: paginate the filtered result set.
+    // T-0653: group-by-process summaries (with counts) over the FILTERED set.
+    // Only when explicitly requested (?group=process); absent ⇒ response shape
+    // unchanged (backward compatible).
+    const groupMode = query.get("group");
+
+    if (groupMode === "process") {
+      // T-0653 (fix-forward defect #1, вариант «б»): GROUPED mode returns the
+      // ENTIRE filtered set (capped), NOT a page. The group counts and the group
+      // bodies are then computed from the SAME rows, so a group badge never sits
+      // over a partially-loaded/empty tbody (the flaw: server counted groups over
+      // the full filtered set but the client rendered bodies from paginated rows).
+      // This also removes «Показать ещё» in grouped mode client-side (defect #2):
+      // there is no next page to append — the whole set is already here.
+      const total = filtered.length;
+      const capped = filtered.slice(0, INBOX_GROUP_ROW_CAP);
+      const groups = groupInboxByProcess(capped);
+      const groupTruncated = total > capped.length;
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        items: capped,
+        counts,
+        tab,
+        // Grouped mode is single-page by construction — report it honestly so the
+        // client's load-more (page < totalPages) never shows in grouped mode.
+        page: 1,
+        totalPages: 1,
+        total,
+        limit: capped.length,
+        groups,
+        // Honest signal: the filtered set exceeded the grouped-mode row cap, so
+        // some rows (and possibly whole groups) are not shown — refine the filter.
+        ...(groupTruncated ? { groupTruncated: true, groupRowCap: INBOX_GROUP_ROW_CAP } : {}),
+      }));
+      return;
+    }
+
+    // T-0401 [D7-3]: FLAT mode paginates the filtered result set (unchanged).
     const { limit, page } = parsePaginationParams(query);
     const paged = paginateInMemory(filtered, page, limit);
 

@@ -1,0 +1,28 @@
+{
+  "task_id": "T-0653",
+  "role": "design-steward / UX reviewer",
+  "verdict": "approved",
+  "scope": "web/src/screens/screen-inbox.jsx (+641/-... ), web/src/app-shell/app.css (+86)",
+  "summary": "Server-backed inbox search/filter/group + personal view, with honest counts and truncation notices. Fix-forward closed the UX-facing correctness defects (badge<->list agreement, stale-response flicker, phantom load-more in grouped mode). No new UUID renders, no jargon, kit-tokens only.",
+
+  "checks": {
+    "badge_vs_list_honesty": "PASS — per-tab counts computed over the filtered base; grouped-mode group badges sum exactly to the rendered rows (server returns whole capped set, not a page). A badge of N never sits over a smaller/empty list.",
+    "truncation_notice_honest": "PASS — grouped mode over the 500-row cap renders «Показаны первые N задач — уточните поиск или фильтр…» from groupTruncated/groupRowCap rather than silently dropping rows.",
+    "no_phantom_loadmore": "PASS — «Показать ещё» gated on !groupByProcess; in grouped mode the whole set is already present.",
+    "stale_response_flicker": "PASS — monotonic loadSeq token drops out-of-order responses; the list no longer flickers to stale data when q-debounce and a tab switch race.",
+    "collapsed_group_state": "PASS — collapsedGroups pruned to live group keys on filter/tab change; a reappearing process no longer restores a wrong collapsed state.",
+    "whole_row_clickable_keyboard": "PASS (AC-5.1) — nested controls stopPropagation; row keyboard-operable (test present).",
+    "anti_uuid": "PASS — ci/checks/ux/anti-uuid-actor-render.sh exit 0; list row/drawer render ProcessRef/RecordRef/StepRef, never bare machine keys (procKey carried only as a filter/group axis, never rendered primary).",
+    "no_jargon_no_hardcode": "PASS — app.css +86 lines passed ux-g6 hardcode gate (within the fitness bundle); D-064 anti-case gate clean (no persona/role literals added).",
+    "personal_view_persist": "PASS (AC-7) — columns+density persist via user_pref store; personal view needs no configurator privilege."
+  },
+
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "UX-NB-1",
+      "severity": "P3",
+      "finding": "The grouped-mode truncation notice copy is only reachable above 500 filtered rows; not visually exercised in tests. Acceptable — copy is plain Russian, token-styled, and the info icon is from the kit."
+    }
+  ]
+}
