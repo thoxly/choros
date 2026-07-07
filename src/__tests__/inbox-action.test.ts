@@ -294,6 +294,49 @@ describe("inbox approve action (T-0282)", () => {
     const tasks = await listInstanceInboxTasks(makeFakePool(db), TENANT_ID);
     expect(tasks.find((t) => t.id === taskId)).toBeUndefined();
   });
+
+  // T-0688 (stale-drawer, capstone T-0647 minor finding #1): a task can stop
+  // being "waiting" between the moment the detail drawer loaded it and the
+  // moment the human clicks «Выполнить шаг» — most commonly the T-0522
+  // engine-drive reconcile-on-read net (every GET /api/inbox self-heals a
+  // missed post-approve drive), or a duplicate click/second tab. Before this
+  // fix, findWaitingInstanceTask returning null in EITHER case (genuinely
+  // unknown taskId OR already-completed taskId) fell straight through to the
+  // same generic 404 NOT_FOUND — which the client renders as "Эта задача уже
+  // недоступна", even though the step in fact completed successfully. The
+  // fix checks the projection track for a `done` row correlated to this exact
+  // taskId before giving up; a match returns the ordinary 200 success shape
+  // (idempotent), not an error.
+  it("200 + status:done (idempotent) when the task was ALREADY approved by the time this action runs", async () => {
+    db = new FakeDb();
+    const taskId = await seedStartedTask(db);
+    await start(makeDeps(db));
+
+    // First approve — genuinely completes the step.
+    const first = await httpReq("POST", `${base}/api/inbox/${taskId}/action`, { "x-dev-user": APPROVER }, { action: "approve" });
+    expect(first.status).toBe(200);
+
+    // Second approve on the SAME taskId — findWaitingInstanceTask now returns
+    // null (the task is no longer waiting), but the projection shows it done.
+    // Must be an honest 200 success echo, NOT the generic 404 "уже недоступна".
+    const second = await httpReq("POST", `${base}/api/inbox/${taskId}/action`, { "x-dev-user": APPROVER }, { action: "approve" });
+    expect(second.status).toBe(200);
+    const body = second.json as Record<string, unknown>;
+    expect(body["status"]).toBe("done");
+    expect(body["instanceId"]).toBe("flw-unit-1");
+    expect(body["action"]).toBe("approve");
+    expect(body["engine"]).toBe("already");
+  });
+
+  it("404 NOT_FOUND (genuine) for a taskId that was never a real task at all — the already-done check must not mask this", async () => {
+    db = new FakeDb();
+    await seedStartedTask(db); // seeds an unrelated task — proves no accidental cross-match
+    await start(makeDeps(db));
+    const r = await httpReq("POST", `${base}/api/inbox/totally-unknown-id/action`, { "x-dev-user": APPROVER }, { action: "approve" });
+    expect(r.status).toBe(404);
+    const err = (r.json as Record<string, unknown>)["error"] as Record<string, unknown>;
+    expect(err["code"]).toBe("NOT_FOUND");
+  });
 });
 
 // ---------------------------------------------------------------------------

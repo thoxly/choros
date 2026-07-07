@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0688",
+  "verdict": "approved",
+  "gates_rerun": {
+    "tsc_noEmit": { "result": "pass", "detail": "npx tsc --noEmit — no output, exit clean" },
+    "npm_run_build": { "result": "pass", "detail": "tsc + seed/tsconfig.json build — no errors" },
+    "web_vitest_full": { "result": "pass", "detail": "cd web && npx vitest run — 97 test files, 2654 tests passed, matching the claimed count exactly. Duration ~7.6s." },
+    "server_inbox_vitest_no_file_parallelism": {
+      "result": "pass",
+      "detail": "npx vitest run --no-file-parallelism against all 17 src/__tests__/inbox-*.ts files (inbox-action, inbox-claim.e2e, inbox-defer-resolve, inbox-detail, inbox-engine-drive, inbox-form-submit-validation, inbox-form-submit.adversarial, inbox-form-values, inbox-message-wait-live, inbox-outcome, inbox-pagination, inbox-process-ref, inbox-search-filter-group, inbox-step-target-unresolved, inbox-tabs.e2e, inbox-zero-role, inbox.e2e) — 179 tests passed, 0 failed."
+    },
+    "anti_case_lock": { "result": "pass", "detail": "bash ci/checks/anti-case-lock.sh — Phase 1 (read-pdp/rights-ui/detel-literal-baseline) all PASS; Phase 2 full D-064 denylist aggregate 15 (baseline 16, erodes-or-steady) PASS." },
+    "ux_g5_jargon_denylist": { "result": "pass (informational)", "detail": "bash ci/checks/ux/ux-g5-jargon-denylist.sh — 68 findings, exit 0 informational-only gate (not yet --required), unrelated to this diff's files." }
+  },
+  "new_test_coverage_verified": [
+    {
+      "test": "inbox-action.test.ts: '200 + status:done (idempotent) when the task was ALREADY approved by the time this action runs'",
+      "verification": "Read in full + confirmed it drives the REAL handler via a fake-pg pool (not mocked route logic): seedStartedTask writes a genuine process.started audit event via appendProcessStarted; first POST /action genuinely completes the step through the real approve code path; second POST on the same taskId is the one that exercises the new branch (confirmed no earlier short-circuit exists in the handler between body validation and findWaitingInstanceTask by reading inbox.ts:1877-1936 line by line). Assertions check status/instanceId/action/engine fields all match the new response shape."
+    },
+    {
+      "test": "inbox-action.test.ts: '404 NOT_FOUND (genuine) for a taskId that was never a real task at all — the already-done check must not mask this'",
+      "verification": "Confirmed this test seeds an UNRELATED task that is left WAITING (not approved/done) alongside the queried nonexistent taskId, which is the correct adversarial setup to rule out an accidental cross-match on inboxTaskId/status inside the new doneProjections.find(...) — a weaker test that seeded no other task at all would not have caught a bug where the new check matched the wrong row. Ran it live; it passes (404/NOT_FOUND)."
+    }
+  ],
+  "additional_manual_verification": [
+    {
+      "method": "Live browser (Chrome via CDP) against a static harness built from the ACTUAL production web/src/design/tokens.css, web/src/components/components.css, web/src/app-shell/app.css (copied verbatim, not reproduced) plus synthetic markup matching screen-inbox.jsx's real rendered class structure (chs-task/chs-task__txt, chs-processref/chs-processref__name, chs-actorchip/chs-exec, chs-r) as confirmed by reading components.jsx's ActorChip/ExecutorBadge/ProcessRef render functions.",
+      "findings": "Confirmed measured before/after effect of the CSS fix (overflow 2385px->1280px scrollWidth reduction at 1280px viewport), confirmed the flat-vs-grouped DOM nesting difference (table is a direct child of .chs-inbox__scroll only in flat mode) makes the '>' combinator scoping correct by construction, confirmed grouped mode's own T-0653 rules (table-layout:fixed, chs-r 140px) remain untouched when the new flat-only rules are present."
+    }
+  ],
+  "coverage_summary": {
+    "ac1_idempotent_200": "covered, verified passing",
+    "ac2_genuine_404_regression": "covered, verified passing",
+    "ac3_flat_columns_within_viewport": "covered by CSS static analysis + live browser measurement (no automated test exists for this — CSS-only fix, consistent with the rest of this file's prior column-cap work at T-0653 which also had no test, only live/Playwright verification per the spec)",
+    "ac4_no_duplication_2_and_4": "covered — confirmed via git log dev that T-0653/T-0652 commits predate this branch and implement the claimed functionality; diff stat confirms neither area's files are touched"
+  },
+  "blocking_findings": []
+}
