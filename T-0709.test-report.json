@@ -1,58 +1,28 @@
 {
   "task_id": "T-0709",
-  "verdict": "changes_requested",
-  "note": "All specified gates PASS mechanically. Test verdict is qualified 'changes_requested' (not a clean 'approved') because the passing test suite does NOT cover the P0 finding in the paired review (the false claim that /api/processes/:inst reads live engine state) — that is a cross-route consistency property no test in scope exercises, since process-instance-resolver.test.ts / processes-live-instances.test.ts do not assert catalog-vs-detail agreement post-T-0709. All commands below were run exactly as specified from the worktree root /Users/shoxy/Code/choros-wt/T-0709.",
+  "verdict": "approved",
+  "review_round": 2,
+  "reverify_commit": "f3a7f017",
+  "note": "Round-2 re-verify of f3a7f017. Both round-1 blockers (P0 instance-detail frozen on snapshot; P1 non-deterministic tasks[0] on AND-split) are CLOSED, and the coverage gap the round-1 test-report flagged (no test asserted catalog↔detail consistency) is now filled by the new 'catalog ↔ detail derive the SAME live node from ONE source' test plus the single-source code refactor. All specified commands run from /Users/shoxy/Code/choros-wt/T-0709 and PASS.",
   "gates": [
-    {
-      "cmd": "npx tsc --noEmit",
-      "result": "PASS",
-      "detail": "Zero output, exit clean."
-    },
-    {
-      "cmd": "npm run build",
-      "result": "PASS",
-      "detail": "tsc (root) + tsc --project seed/tsconfig.json both completed with no errors."
-    },
-    {
-      "cmd": "npx vitest run --no-file-parallelism src/__tests__/process-catalog-view.test.ts src/__tests__/process-catalog-live-step.test.ts src/__tests__/process-instance-resolver.test.ts src/__tests__/processes-live-instances.test.ts",
-      "result": "PASS",
-      "detail": "4 test files, 58 tests, all passed. process-catalog-view.test.ts: 18 (includes new pickPrimaryLiveNode/overlayLiveSteps suites). process-catalog-live-step.test.ts: 4 (AC-1..AC-4 at the HTTP boundary). process-instance-resolver.test.ts: 12 (pre-existing, unaffected). processes-live-instances.test.ts: 24 (pre-existing, unaffected — NOTE: this file did not gain new assertions for T-0709's overlay despite being in scope; it still tests processes.ts's existing snapshot-based node/nodes derivation, unchanged by this diff, which corroborates the review's P0 finding that /api/processes/:inst was not touched by this fix)."
-    },
-    {
-      "cmd": "bash ci/checks/anti-case-lock.sh",
-      "result": "PASS",
-      "detail": "Phase 1 (delegate point-gates: read-pdp-anti-case, rights-ui-anti-case, detel-literal-baseline) all PASS; aggregate literal count 4 < baseline 7 (strictly decreased). Phase 2 (full D-064 §5 denylist, repo-wide): aggregate 15 < baseline 16, all individual literals within baseline. No regression from this diff."
-    },
-    {
-      "cmd": "bash ci/checks/flowable-bridge-contract.sh",
-      "result": "PASS",
-      "detail": "FF-G3-1 (assertVariableValue) and FF-G3-2 (resolveFor for record mutations) both PASS — this diff does not touch record-mutation bridge paths, contract undisturbed."
-    },
-    {
-      "cmd": "bash ci/checks/detel-base-task-from-engine.sh",
-      "result": "PASS",
-      "detail": "FF-1: both appendProcessStarted call sites (process-start.ts, records.ts) still thread approverRole/step/taskName AND read the live engine — pre-existing invariant, unaffected by T-0709 (which touches a different route, process-catalog.ts, not the appendProcessStarted call sites)."
-    },
-    {
-      "cmd": "bash ci/checks/read-pdp-anti-case.sh",
-      "result": "PASS",
-      "detail": "No D-064 anti-case literals added under src/ in the diff (base=7e58693616fe7c2af62bfab40d1f2a3339c8f421)."
-    }
+    { "cmd": "npx tsc --noEmit", "result": "PASS", "detail": "Exit 0, no errors." },
+    { "cmd": "npm run build", "result": "PASS", "detail": "Root tsc + seed tsconfig both clean, exit 0." },
+    { "cmd": "npx vitest run --no-file-parallelism src/__tests__/process-catalog-view.test.ts src/__tests__/processes-live-instances.test.ts", "result": "PASS", "detail": "process-catalog-view.test.ts 30 tests (was 18; +12: determinism forward-vs-reversed, tie-break, ambiguous flag, concurrentSteps overlay, resolveLiveNodesByInstance fan-out + deadline, single-source catalog==detail). processes-live-instances.test.ts 29 tests (was 24; +5 detail-plane live-overlay). Also re-ran process-catalog-live-step.test.ts (4) + process-instance-resolver.test.ts (12) → total 75/75 pass." },
+    { "cmd": "bash ci/checks/flowable-bridge-contract.sh", "result": "PASS", "detail": "FF-G3-1 assertVariableValue + FF-G3-2 resolveFor both PASS." },
+    { "cmd": "bash ci/checks/start-route-isolation.sh", "result": "PASS", "detail": "FF-7-1/7-2/7-3 all PASS — critically FF-7-3: processes.ts display plane pg-free and never calls the engine directly, despite the new core import (engine reached only via injected client)." },
+    { "cmd": "bash ci/checks/anti-case-lock.sh", "result": "PASS", "detail": "Phase 1 delegates clean; aggregate literal count 15 < baseline 16 (erodes, never grows). Exit 0." },
+    { "cmd": "bash ci/checks/detel-base-task-from-engine.sh", "result": "PASS", "detail": "FF-1: both appendProcessStarted call sites still thread role/step/taskName AND read the live engine. Unaffected by this diff." }
   ],
-  "coverage_assessment": {
-    "active_node_overlay": "COVERED — process-catalog-live-step.test.ts AC-1 (HTTP boundary) + process-catalog-view.test.ts 'ACCEPTANCE (родитель T-0349)' (pure logic) both assert the live step/role replaces the snapshot for a running instance.",
-    "degrade_engine_down": "COVERED — AC-3 (per-instance getActiveUserTasks returns {ok:false}) asserts unchanged snapshot; process-catalog-view.test.ts also covers 'no live entry' and 'empty live step/role does not blank out snapshot' at the pure-function level.",
-    "degrade_no_flowable_dep": "COVERED — AC-2 (flowable omitted from deps entirely).",
-    "degrade_done_instance": "COVERED — AC-4 asserts engine consulted ONLY for non-done instances; process-catalog-view.test.ts 'a done instance is never overlaid (kept byte-unchanged)' asserts same-reference identity.",
-    "degrade_empty_active_tasks_running_instance": "PARTIALLY COVERED — pickPrimaryLiveNode([]) → null is unit-tested (process-catalog-view.test.ts:151-153), and process-catalog-live-step.test.ts's makeEngine defaults an unseeded instance to {tasks:[]} implicitly (not an explicit named test case for 'running instance, token on gateway/service-task, zero active user-tasks'). Recommend an explicit named AC for this specific scenario (token genuinely between user-tasks on a running instance) to make the intent traceable, though the underlying code path is exercised.",
-    "multi_task_and_split": "COVERED at the pure-function level only — process-catalog-view.test.ts 'AND-split (multiple active tasks) → primary is first, concurrentSteps deduped' tests pickPrimaryLiveNode's tasks[0]+dedup behavior directly. NOT covered: no test asserts anything about ORDERING GUARANTEES from the actual Flowable REST response (impossible to test at this level since it's an external contract) — this is exactly the gap underlying review finding T-0709-R-P1-1. No HTTP-boundary test in process-catalog-live-step.test.ts exercises a multi-task instance end-to-end.",
-    "consistency_with_instance_detail": "NOT COVERED AND NOT COVERABLE BY THE SPECIFIED SUITE — no test in the 4 files run asserts that GET /api/process-catalog and GET /api/processes/:inst return the same step/role for the same instance post-fix. This is the gap that let the P0 review finding (instance-detail was never wired to live engine) go undetected by the test suite; process-instance-resolver.test.ts and processes-live-instances.test.ts test processes.ts in isolation and were not updated to assert cross-route consistency."
+  "coverage_now_covered": {
+    "consistency_catalog_vs_detail": "COVERED (was the round-1 gap) — 'catalog ↔ detail derive the SAME live node from ONE source' asserts both planes compute the identical primary step from one task set; the code refactor makes it structural (one shared resolveLiveNodesByInstance).",
+    "primary_determinism_and_split": "COVERED — 'primary chosen by taskDefinitionKey order, NOT the response-array order' passes forward AND reversed array order, asserts byte-identical; tie tests prove id-then-name.",
+    "deadline_budget": "COVERED — shared deadline capped a real 60s hang to ~30ms; already-elapsed budget skips the call (zero latency, engine not called).",
+    "degrade_both_surfaces": "COVERED — engine error / no-task / throw / deadline all leave the instance on its snapshot; detail-plane overlay best-effort with the same honest degrade."
   },
   "additional_checks_performed": [
-    "git diff dev...task/T-0709 -- web/ confirmed 0 lines (wire-shape/frontend claim verified directly, not just asserted).",
-    "Read src/http/processes.ts:517-565 directly to verify GET /api/processes/:id's node/nodes source — confirmed it is NOT derived from getHistoricActivityInstances (contradicts spec claim, see review P0 finding).",
-    "Read src/core/flowable-client.ts getActiveUserTasks (1104-1149) and getHistoricActivityInstances (~1238-1260) to compare REST query construction — confirmed only the latter has a documented sort= parameter.",
-    "Confirmed listInstanceProjections tenant scoping (process-projection.ts readEvents, WHERE tenant_id) — no cross-tenant leak path for the instance ids fed into the new engine calls.",
-    "Traced AMBIGUOUS_ACTIVE_TASK precedent in process-projection.ts (lines 1690-1726) as the codebase's own established handling of >1 active user-task, contrasted with pickPrimaryLiveNode's silent tasks[0] pick."
+    "grep confirmed exactly ONE resolveLiveNodesByInstance definition (core:420), called from process-catalog.ts:357 and processes.ts:419.",
+    "Read processes.ts:583-626 — line 616 serializes projectionToInstance(overlaid), not (match); no frozen node/nodes path remains.",
+    "git show f3a7f017 -- web/ and git diff dev...task/T-0709 -- web/ both 0 lines — no frontend change/regression.",
+    "Verified processes.ts has no pg/src-db import (only comment mentions); FF-7-3 gate confirms live."
   ]
 }
