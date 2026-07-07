@@ -259,6 +259,50 @@ describe("ADR §4: ?view_id= resolves the saved config and applies it", () => {
       await stop();
     }
   });
+
+  // T-0653 (fix-forward defect #8, SECURITY): the view_id lookup must be
+  // owner-scoped so actor B cannot apply actor A's PERSONAL view config.
+  it("defect #8: view_id lookup is owner-scoped (owner clause + actor bound)", async () => {
+    const rows = [makeRow(1)];
+    const { pool, queries } = makeFakePool({
+      rows,
+      viewRow: {
+        registry_def_id: REG_DEF_ID,
+        type: "list",
+        config: { filters: [], sort: [] },
+      },
+    });
+    const { start, stop } = makeServer({ pool, resolveActorTenant: async () => TENANT_ID });
+    const base = await start();
+    try {
+      const { statusCode } = await get(base, `/api/records?application_id=${APP_ID}&view_id=${VIEW_ID}`);
+      expect(statusCode).toBe(200);
+      const viewLookup = queries.find(
+        (q) => /SELECT registry_def_id, type, config FROM choros\.list_view/i.test(q.sql),
+      );
+      expect(viewLookup).toBeTruthy();
+      // Owner-visibility clause present so a foreign personal view → 0 rows → 404.
+      expect(/owner_actor IS NULL OR owner_actor = \$3/i.test(viewLookup!.sql)).toBe(true);
+      // The caller identity (ACTOR) is bound as the owner param, not the body.
+      expect(viewLookup!.params).toContain(ACTOR);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("defect #8: a foreign actor's personal view_id → 404 (owner-scoped SELECT returns 0 rows)", async () => {
+    // viewRow:null models the owner-scoped SELECT filtering out a view the
+    // caller does not own — indistinguishable from not-found (no oracle).
+    const { pool } = makeFakePool({ rows: [], viewRow: null });
+    const { start, stop } = makeServer({ pool, resolveActorTenant: async () => TENANT_ID });
+    const base = await start();
+    try {
+      const { statusCode } = await get(base, `/api/records?view_id=${VIEW_ID}`);
+      expect(statusCode).toBe(404);
+    } finally {
+      await stop();
+    }
+  });
 });
 
 describe("AC-6: READ-PDP still runs AFTER the view-filtered page (FR-7)", () => {

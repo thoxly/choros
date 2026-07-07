@@ -20,6 +20,9 @@ import {
   isServerSortable,
   resolveFieldTypes,
   enumValuesForSelectField,
+  validateViewSourceConfig,
+  defaultProcessesViewConfig,
+  PROCESSES_VIEW_COLUMNS,
 } from "../view-config.js";
 
 const RECORD_SCHEMA = {
@@ -444,5 +447,71 @@ describe("NF-2/AC-9: defaultViewConfig is byte-equivalent to today's autogen lis
   it("empty schema still yields the created_at pseudo-column default", () => {
     const cfg = defaultViewConfig({});
     expect(cfg.columns).toEqual([{ field_key: "created_at", visible: true }]);
+  });
+});
+
+// ===========================================================================
+// T-0653 (W5-UX/§4) — validateViewSourceConfig: source dispatcher for the
+// non-records view source (processes). Static column catalog, not a
+// registry_def record_schema.
+//
+// fix-forward defect #5 (вариант «б»): 'inbox' is NOT a source-view — the
+// personal inbox view lives in user_pref ('inbox.view', T-0651). The dead
+// server-side inbox-dispatch was removed. These tests prove the dispatcher
+// still exists for 'processes' (open-source contract) AND that 'inbox' is now
+// treated as an unknown source (the dead path is gone, not silently kept).
+// ===========================================================================
+
+describe("T-0653: validateViewSourceConfig is a DISPATCHER by source", () => {
+  it("accepts a valid processes config (known columns + density)", () => {
+    const r = validateViewSourceConfig("processes", {
+      columns: [{ key: "name", visible: true }, { key: "status", visible: false }],
+      density: "compact",
+    });
+    expect(r.valid).toBe(true);
+    expect(r.errors).toEqual([]);
+  });
+
+  it("rejects an unknown source (no silent fallback to list)", () => {
+    const r = validateViewSourceConfig("widgets", { columns: [], density: "compact" });
+    expect(r.valid).toBe(false);
+    expect(r.errors[0]).toMatch(/unknown view source/i);
+  });
+
+  it("treats 'inbox' as an UNKNOWN source (dead dispatch removed — lives in user_pref)", () => {
+    const r = validateViewSourceConfig("inbox", { columns: [], density: "compact" });
+    expect(r.valid).toBe(false);
+    expect(r.errors[0]).toMatch(/unknown view source/i);
+  });
+
+  it("rejects a processes column key not in the static catalog", () => {
+    const r = validateViewSourceConfig("processes", {
+      columns: [{ key: "not_a_real_column", visible: true }],
+      density: "comfortable",
+    });
+    expect(r.valid).toBe(false);
+    expect(r.errors.some((e) => /not a known column/i.test(e))).toBe(true);
+  });
+
+  it("rejects a non-boolean visible", () => {
+    const r = validateViewSourceConfig("processes", {
+      columns: [{ key: "name", visible: "yes" }],
+      density: "comfortable",
+    });
+    expect(r.valid).toBe(false);
+    expect(r.errors.some((e) => /visible must be a boolean/i.test(e))).toBe(true);
+  });
+
+  it("rejects an unknown density", () => {
+    const r = validateViewSourceConfig("processes", { columns: [], density: "cozy" });
+    expect(r.valid).toBe(false);
+    expect(r.errors.some((e) => /density/i.test(e))).toBe(true);
+  });
+
+  it("defaultProcessesViewConfig lists every catalog column, all visible, comfortable", () => {
+    const d = defaultProcessesViewConfig();
+    expect(d.columns.map((c) => c.key)).toEqual([...PROCESSES_VIEW_COLUMNS]);
+    expect(d.columns.every((c) => c.visible)).toBe(true);
+    expect(d.density).toBe("comfortable");
   });
 });

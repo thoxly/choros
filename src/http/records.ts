@@ -1808,6 +1808,7 @@ export function registerRecordRoutes(
    */
   async function resolveViewApplication(args: {
     tenantId: string;
+    actor: string;
     registryDefIdParam: string | null;
     viewId: string | null;
     inlineFilters: ViewFilter[] | null;
@@ -1815,7 +1816,7 @@ export function registerRecordRoutes(
     fvGrants: Grant[];
     fvPolicy: FieldVisibilityPolicy;
   }): Promise<ViewApplication | undefined> {
-    const { tenantId, registryDefIdParam, viewId, inlineFilters, inlineSort, fvGrants, fvPolicy } = args;
+    const { tenantId, actor, registryDefIdParam, viewId, inlineFilters, inlineSort, fvGrants, fvPolicy } = args;
     if (viewId === null && inlineFilters === null && inlineSort === null) {
       return undefined;
     }
@@ -1825,10 +1826,20 @@ export function registerRecordRoutes(
     let sort: ViewSort[] = inlineSort ?? [];
 
     if (viewId !== null) {
+      // T-0653 (fix-forward defect #8, SECURITY): owner-scope the view lookup —
+      // COMMON views (owner_actor IS NULL) + the CALLER'S OWN personal views
+      // only. Without the owner clause, actor B could pass actor A's PERSONAL
+      // view id and have A's filters/sort applied to B's own records list (a
+      // cross-user config leak). Mirrors list-views.ts ownerVisibilityClause:
+      // a foreign personal view RLS/owner-filters to 0 rows → 404, the same
+      // response as not-found (no existence oracle). The tenant RLS tx already
+      // isolates by tenant; this adds the per-user isolation WITHIN the tenant.
       const viewRow = await withTenantTx(pool, tenantId, async (client) => {
         const res = await client.query<{ registry_def_id: string; type: string; config: unknown }>(
-          `SELECT registry_def_id, type, config FROM choros.list_view WHERE tenant_id = $1 AND id = $2`,
-          [tenantId, viewId],
+          `SELECT registry_def_id, type, config FROM choros.list_view
+            WHERE tenant_id = $1 AND id = $2
+              AND (owner_actor IS NULL OR owner_actor = $3)`,
+          [tenantId, viewId, actor],
         );
         return res.rows[0] ?? null;
       });
@@ -1931,6 +1942,7 @@ export function registerRecordRoutes(
     // none were — the query below then behaves EXACTLY as pre-T-0581 (NF-2).
     const viewApplication = await resolveViewApplication({
       tenantId,
+      actor,
       registryDefIdParam: registryDefId,
       viewId,
       inlineFilters,

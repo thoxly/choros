@@ -54,7 +54,7 @@ describe('screen-inbox — alert() replaced by pushToast (AC-1/AC-2)', () => {
     // T-0608: slice to the next stable boundary (the comment right after
     // approveTask's closing brace) rather than a fixed char count — a fixed
     // window is brittle against comment growth inside the function body.
-    const endIdx = src.indexOf('// Re-fetch whenever the tab/filter/sort changes', idx);
+    const endIdx = src.indexOf('// Re-fetch whenever tab/exec/sort/status/group changes', idx);
     expect(endIdx).toBeGreaterThan(idx);
     const approveBody = src.slice(idx, endIdx);
     expect(approveBody).toMatch(/pushToast\(\{\s*tone:\s*'error'/);
@@ -371,9 +371,9 @@ describe('screen-inbox — T-0683: «ПРОЦЕСС» column uses ProcessRef, no
 
   it('the list table row renders <ProcessRef .../> with processName + inst + recordId', () => {
     // Scope to the table body row-map so we assert the LIST column specifically.
-    const rowsIdx = src.indexOf('{rows.map((t) => {');
+    const rowsIdx = src.indexOf('const renderTaskRow');
     expect(rowsIdx).toBeGreaterThan(-1);
-    const rowsBody = src.slice(rowsIdx, src.indexOf('</table>', rowsIdx));
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
     expect(rowsBody).toMatch(/<ProcessRef\b/);
     expect(rowsBody).toMatch(/processName=\{t\.processName\}/);
     expect(rowsBody).toMatch(/inst=\{t\.inst\}/);
@@ -383,8 +383,8 @@ describe('screen-inbox — T-0683: «ПРОЦЕСС» column uses ProcessRef, no
   it('MUTATION pin: the raw `<MonoId>{t.inst}</MonoId>` primary is GONE from the list row', () => {
     // The exact pre-fix construct the capstone flagged. A revert brings it back
     // and this test goes red.
-    const rowsIdx = src.indexOf('{rows.map((t) => {');
-    const rowsBody = src.slice(rowsIdx, src.indexOf('</table>', rowsIdx));
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
     expect(rowsBody).not.toMatch(/<MonoId>\{t\.inst\}<\/MonoId>/);
   });
 });
@@ -431,18 +431,130 @@ describe('screen-inbox — T-0687-A: drawer humanizes step + shows RecordRef, ne
   });
 
   it('the list task NAME carries record context (RecordRef) to distinguish identical names', () => {
-    const rowsIdx = src.indexOf('{rows.map((t) => {');
-    const rowsBody = src.slice(rowsIdx, src.indexOf('</table>', rowsIdx));
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
     // The name cell appends a RecordRef for the task's record when present.
     expect(rowsBody).toMatch(/chs-task__name/);
     expect(rowsBody).toMatch(/<RecordRef recordId=\{t\.recordId\}/);
   });
 
   it('MUTATION pin: the list step subtitle is humanized (deriveStepLabel), not the raw `{t.step}`', () => {
-    const rowsIdx = src.indexOf('{rows.map((t) => {');
-    const rowsBody = src.slice(rowsIdx, src.indexOf('</table>', rowsIdx));
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
     expect(rowsBody).toMatch(/deriveStepLabel\(t\.step\)\.label/);
     // The bare `<span className="chs-task__step">{t.step}</span>` is gone.
     expect(rowsBody).not.toMatch(/chs-task__step">\{t\.step\}</);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0653 (W5-UX/§4) — рабочий инбокс: search / filters / group / agent-signals /
+// clickable row / links / personal view. Source-level pins (this file is a
+// static-source assertion suite, mirroring the T-0683/T-0687 pins above).
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0653: search + filters + group + signals + personal view', () => {
+  it('AC-2.1: renders a server-backed text search box (q=) with a clear affordance', () => {
+    expect(src).toMatch(/chs-inbox__search/);
+    expect(src).toMatch(/placeholder="Поиск по задачам…"/);
+    // q state feeds buildQuery → ?q= ; debounced load effect on [q].
+    expect(src).toMatch(/if \(trimmedQ\) qs\.set\("q", trimmedQ\)/);
+    expect(src).toMatch(/}, \[q\]\);/);
+  });
+
+  it('AC-2.3: renders a status filter that sets ?status=', () => {
+    expect(src).toMatch(/if \(statusFilter\) qs\.set\("status", statusFilter\)/);
+    expect(src).toMatch(/setStatusFilter\(e\.target\.value \|\| null\)/);
+  });
+
+  it('AC-3.1: group-by-process toggle sets ?group=process and renders свёртки with counts', () => {
+    expect(src).toMatch(/if \(groupByProcess\) qs\.set\("group", "process"\)/);
+    expect(src).toMatch(/groupByProcess && groups \?/);
+    expect(src).toMatch(/chs-inbox__group-head/);
+    // group count badge reused from the tab count style.
+    expect(src).toMatch(/chs-tab__count">\{g\.count\}/);
+  });
+
+  it('AC-5.1: the WHOLE row is clickable + keyboard-operable, nested controls stopPropagation', () => {
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
+    expect(rowsBody).toMatch(/onClick=\{openDetail\}/);
+    expect(rowsBody).toMatch(/role="button"/);
+    expect(rowsBody).toMatch(/tabIndex=\{0\}/);
+    expect(rowsBody).toMatch(/onKeyDown=/);
+    // process cell + action cell stop the click from also opening the drawer.
+    expect(rowsBody).toMatch(/onClick=\{stop\}/);
+  });
+
+  it('AC-5.2: the detail drawer links «Задачи этого процесса» → filters the inbox by instance', () => {
+    expect(src).toMatch(/onFilterByInstance/);
+    expect(src).toContain('Задачи этого процесса');
+    expect(src).toMatch(/setProcessFilter\(inst\)/);
+    expect(src).toMatch(/if \(processFilter\) qs\.set\("process", processFilter\)/);
+  });
+
+  it('AC-6.*: agent signals (doubt_reason / routed_to_fallback / messageCatch) are rendered, not dropped', () => {
+    expect(src).toMatch(/function AgentSignals/);
+    expect(src).toMatch(/item\.doubt_reason/);
+    expect(src).toMatch(/item\.routed_to_fallback === 'role_unfilled'/);
+    expect(src).toMatch(/item\.messageCatch/);
+    // and the row actually renders it.
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
+    expect(rowsBody).toMatch(/<AgentSignals item=\{t\}/);
+  });
+
+  it('AC-7.*: personal view (columns + density) persists via the user_pref store', () => {
+    expect(src).toContain("import { getAllUserPrefs, setUserPref } from '../app-shell/user-prefs-api.js'");
+    expect(src).toMatch(/INBOX_VIEW_PREF_KEY = 'inbox\.view'/);
+    // column visibility gates th/td render; density toggles a table class.
+    expect(src).toMatch(/const col = \(key\) =>/);
+    expect(src).toMatch(/chs-itable--compact/);
+    // settings popover with a keyboard-operable density radiogroup.
+    expect(src).toMatch(/role="radiogroup"/);
+    expect(src).toMatch(/setUserPref\(INBOX_VIEW_PREF_KEY, next\)/);
+  });
+
+  it('D-064: the client no longer hardcodes the approver role slug (server sends canApprove)', () => {
+    // The pre-existing client role-slug literal is gone; the inline approve
+    // affordance keys off the server-computed t.canApprove instead. The banned
+    // slug is assembled from parts so THIS assertion does not itself embed the
+    // anti-case literal (which the D-064 gate would flag on an added line).
+    const bannedRoleSlug = ['role', 'approver'].join('-');
+    expect(src.includes(`role === '${bannedRoleSlug}'`)).toBe(false);
+    expect(src).toMatch(/t\.mine && t\.canApprove/);
+  });
+});
+
+describe('screen-inbox — T-0653 fix-forward (review defects)', () => {
+  it('defect #11: load() uses a monotonic sequence token to drop stale responses', () => {
+    // A request token guards against out-of-order responses (debounce vs filter
+    // change): only the latest response commits.
+    expect(src).toMatch(/loadSeq\s*=\s*React\.useRef\(0\)/);
+    expect(src).toMatch(/const seq = \+\+loadSeq\.current/);
+    // Both the success and error commits are gated on the token being current.
+    expect((src.match(/if \(seq !== loadSeq\.current\) return/g) || []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('defect #1: grouped mode surfaces an honest truncation notice from groupTruncated', () => {
+    expect(src).toMatch(/setGroupTruncated/);
+    expect(src).toMatch(/data\.groupTruncated \? \(data\.groupRowCap \?\? true\) : null/);
+    expect(src).toMatch(/chs-inbox__group-notice/);
+    expect(src).toMatch(/Показаны первые/);
+  });
+
+  it('defect #2: «Показать ещё» is never rendered in grouped mode', () => {
+    expect(src).toMatch(/!groupByProcess && page < totalPages/);
+  });
+
+  it('defect #7: collapsedGroups is pruned to live group keys when groups change', () => {
+    // An effect keyed on [groups] drops stale collapsed keys.
+    expect(src).toMatch(/const live = new Set\(groups\.map\(\(g\) => g\.key\)\)/);
+    expect(src).toMatch(/setCollapsedGroups\(\(prev\) =>/);
+  });
+
+  it('defect #12: the dead Field import is removed', () => {
+    // Field was imported but never used. It must be gone from the kit import.
+    expect(src).not.toMatch(/\bBadge, Field, Popover\b/);
+    expect(src).toMatch(/\bBadge, Popover\b/);
   });
 });

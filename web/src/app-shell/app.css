@@ -475,6 +475,92 @@
 .chs-taken-tag { font-size: var(--chs-text-xs); color: var(--chs-color-success); display: inline-flex; align-items: center; gap: var(--chs-space-3); }
 .chs-taken-tag svg { width: 12px; height: 12px; }
 
+/* ── T-0653 (W5-UX/§4): search + filters + group + personal-view toolbar ── */
+.chs-inbox__search {
+  display: inline-flex; align-items: center; gap: var(--chs-space-3); height: 26px;
+  padding: 0 var(--chs-space-4); min-width: 160px; max-width: 260px;
+  border: 1px solid var(--chs-color-border-strong); border-radius: var(--chs-radius-2);
+  background: var(--chs-color-bg); color: var(--chs-color-text-muted);
+}
+.chs-inbox__search svg { width: 12px; height: 12px; flex: none; }
+.chs-inbox__search-input {
+  flex: 1; min-width: 0; border: none; background: transparent; outline: none;
+  font-family: var(--chs-font-sans); font-size: var(--chs-text-sm); color: var(--chs-color-text);
+}
+.chs-inbox__search-input::placeholder { color: var(--chs-color-text-faint); }
+.chs-inbox__search-clear {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 16px; height: 16px; border: none; background: transparent; cursor: pointer;
+  color: var(--chs-color-text-faint); border-radius: var(--chs-radius-1);
+}
+.chs-inbox__search-clear:hover { color: var(--chs-color-text); background: var(--chs-color-hover); }
+.chs-inbox__statusfilter-select {
+  height: 26px; padding: 0 var(--chs-space-6) 0 var(--chs-space-4);
+  font-size: var(--chs-text-sm); background: var(--chs-color-bg);
+}
+.chs-inbox__settings { display: flex; flex-direction: column; gap: var(--chs-space-3); min-width: 190px; padding: var(--chs-space-3); }
+.chs-inbox__settings-title { font-size: var(--chs-text-2xs); text-transform: uppercase; letter-spacing: var(--chs-tracking-wide); color: var(--chs-color-text-faint); margin-top: var(--chs-space-3); }
+.chs-inbox__settings-row { display: flex; align-items: center; gap: var(--chs-space-4); font-size: var(--chs-text-sm); color: var(--chs-color-text); cursor: pointer; }
+.chs-inbox__settings-density { display: inline-flex; gap: var(--chs-space-3); }
+.chs-inbox__density-opt {
+  height: 24px; padding: 0 var(--chs-space-5); border: 1px solid var(--chs-color-border-strong);
+  border-radius: var(--chs-radius-2); background: transparent; color: var(--chs-color-text-muted);
+  font-size: var(--chs-text-sm); cursor: pointer;
+}
+.chs-inbox__density-opt[aria-checked="true"] { background: var(--chs-color-surface-raised); color: var(--chs-color-text); border-color: var(--chs-color-border-strong); font-weight: var(--chs-weight-medium); }
+
+/* ── T-0653: agent signals (doubt / fallback / messageCatch) under a task ── */
+.chs-task__signals { display: flex; flex-wrap: wrap; gap: var(--chs-space-3); margin-top: var(--chs-space-2); }
+.chs-task__signals .chs-badge { max-width: 100%; }
+
+/* ── T-0653: whole-row clickable (AC-5.1) ── */
+.chs-itable__row--click { cursor: pointer; }
+.chs-itable__row--click:focus-visible { outline: 2px solid var(--chs-color-focus, var(--chs-color-info)); outline-offset: -2px; }
+
+/* ── T-0653: group-by-process свёртки ── */
+.chs-inbox__groups { display: flex; flex-direction: column; gap: var(--chs-space-6); padding-bottom: var(--chs-space-6); }
+.chs-inbox__group-head {
+  display: flex; align-items: center; gap: var(--chs-space-4); width: 100%;
+  padding: var(--chs-space-4) var(--chs-space-6); border: none; background: var(--chs-color-surface);
+  border-bottom: 1px solid var(--chs-color-border); cursor: pointer; text-align: left;
+  font-size: var(--chs-text-sm); font-weight: var(--chs-weight-medium); color: var(--chs-color-text);
+  position: sticky; top: 0; z-index: 1;
+}
+.chs-inbox__group-head svg { width: 12px; height: 12px; flex: none; color: var(--chs-color-text-faint); }
+.chs-inbox__group-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── T-0653 (fix-forward defect #1): honest grouped-mode cap notice ── */
+.chs-inbox__group-notice {
+  display: flex; align-items: center; gap: var(--chs-space-3);
+  padding: var(--chs-space-4) var(--chs-space-6);
+  background: var(--chs-color-info-soft, var(--chs-color-surface));
+  border: 1px solid var(--chs-color-info, var(--chs-color-border));
+  border-radius: var(--chs-radius-3);
+  font-size: var(--chs-text-sm); color: var(--chs-color-text-muted);
+}
+.chs-inbox__group-notice svg { width: 14px; height: 14px; flex: none; color: var(--chs-color-info); }
+
+/* ── T-0653 (fix-forward defect #12): grouped mode renders each group as its OWN
+   <table>. With the default auto table-layout every group table sizes its
+   columns independently, so the same column jumps width from one group to the
+   next. Fixed layout (SCOPED to the inbox groups only — the shared kit
+   .chs-itable elsewhere is untouched) makes every group table derive its column
+   widths from the identical header row, so columns line up across groups. The
+   flat (single-table) view keeps auto layout — a lone table has nothing to
+   misalign against, and auto layout gives the «Задача» column its natural room.
+   Column visibility toggles still work: hidden columns are simply absent from
+   every group's header + body, so fixed layout re-derives consistently. */
+.chs-inbox__group .chs-itable { table-layout: fixed; }
+.chs-inbox__group .chs-itable td,
+.chs-inbox__group .chs-itable th { overflow: hidden; text-overflow: ellipsis; }
+/* Let the task column absorb slack; keep the action column snug + right-aligned. */
+.chs-inbox__group .chs-itable th.chs-r,
+.chs-inbox__group .chs-itable td.chs-r { width: 140px; white-space: nowrap; overflow: visible; }
+
+/* ── T-0653: compact density — tighter row padding ── */
+.chs-itable--compact tbody td { padding-top: var(--chs-space-3); padding-bottom: var(--chs-space-3); }
+.chs-itable--compact .chs-task__step { display: none; }
+
 /* ============================================================================
    ЭКРАН 3 — ТАЙМЛАЙН АУДИТА ИНСТАНСА (hero)
    ============================================================================ */

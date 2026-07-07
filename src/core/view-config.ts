@@ -584,3 +584,129 @@ export function defaultViewConfig(recordSchema: unknown): ListViewConfig {
     sort: [{ field_key: PSEUDO_COLUMN_CREATED_AT, dir: "desc" }],
   };
 }
+
+// ===========================================================================
+// T-0653 (W5-UX/§4) — VIEW-ПРИМИТИВ: source-дискриминатор + не-records виды.
+//
+// T-0581 обобщён: `list_view` теперь несёт `source`. records-виды валидируются
+// validateViewConfig(type,…) ПРОТИВ registry_def record_schema (выше — без
+// изменений). НЕ-records-виды не имеют registry_def — их config валидируется
+// ПРОТИВ СТАТИЧЕСКОГО каталога колонок (платформенные поля, не тенант-данные),
+// диспетчером по SOURCE.
+//
+// ЖИВЫЕ ИСТОЧНИКИ (fix-forward ревью T-0653, defect #5, вариант «б»):
+//   'records'   — ЖИВЬЁМ (screen-app-records → /api/list-views, T-0581).
+//   'processes' — ЗАЯВЛЕН с минимальной реализацией (скоуп-граница брифа: без
+//                 собственного read-пути, UI-грид процессов НЕ в объёме). Держит
+//                 открытость source-дискриминатора как контракт.
+// 'inbox' НЕ является source-видом. Личный вид инбокса (колонки+плотность)
+// живёт в user_pref (T-0651, ключ 'inbox.view', spec §7/AC-7.1) — это тот же
+// per-user стор, что и сворачивание сайдбара. Ревью нашло, что серверный
+// inbox-dispatch (INBOX_VIEW_COLUMNS/validateViewSourceConfig(source='inbox')/
+// defaultInboxViewConfig) был МЁРТВ — экран его никогда не вызывал. Мёртвый
+// параллельный путь с валидацией, ничего не защищающей, ВЫРЕЗАН: держим ОДИН
+// честный стор личного инбокс-вида (user_pref), а не два несцеплённых.
+//
+// Открытость source (как открытость type): validateViewSourceConfig —
+// switch/map по source с default-ветвью; новый источник = новая ветка БЕЗ
+// DDL-миграции. АНТИ-КЕЙС: имена колонок — ПЛАТФОРМЕННЫЕ (name/process/executor/
+// sla/deadline/status), не персона/домен-константы.
+// ===========================================================================
+
+/**
+ * Каталог колонок processes-вида (стабильные ключи; density — свойство вида).
+ * Минимальный контракт (скоуп-граница брифа): плейсхолдер до собственного грида
+ * процессов. Ключи — ПЛАТФОРМЕННЫЕ поля списка инстансов, не тенант-данные.
+ */
+export const PROCESSES_VIEW_COLUMNS = [
+  "name",
+  "process",
+  "status",
+  "started",
+  "actor",
+] as const;
+export type ProcessesViewColumnKey = (typeof PROCESSES_VIEW_COLUMNS)[number];
+
+const SOURCE_VIEW_DENSITIES = ["compact", "comfortable"] as const;
+export type ViewDensity = (typeof SOURCE_VIEW_DENSITIES)[number];
+
+/**
+ * SourceViewConfig — config-форма НЕ-records вида. Легче records-config:
+ * видимость/порядок колонок из СТАТИЧЕСКОГО каталога + плотность.
+ * (config это «мой сохранённый вид: что показывать и как плотно», реюз
+ * user-prefs-семантики T-0651.)
+ */
+export interface SourceViewConfig {
+  readonly columns: { readonly key: string; readonly visible: boolean }[];
+  readonly density: ViewDensity;
+}
+
+/**
+ * validateViewSourceConfig — ДИСПЕТЧЕР по `source` (зеркало validateViewConfig
+ * по `type`). records-виды сюда НЕ попадают (их валидирует validateViewConfig
+ * против registry_def). Неизвестный source отвергается (не молчаливый fallback).
+ * 'inbox' сюда НЕ приходит — личный инбокс-вид живёт в user_pref (см. заголовок).
+ */
+export function validateViewSourceConfig(
+  source: string,
+  config: unknown,
+): ValidateViewConfigResult {
+  switch (source) {
+    case "processes":
+      // Минимальный контракт (скоуп-граница брифа): processes-вид принимает
+      // лёгкий config-shape (колонки+плотность), валидируется против
+      // processes-каталога как плейсхолдер до собственного грида процессов.
+      return validateSourceViewConfigAgainstCatalog(config, PROCESSES_VIEW_COLUMNS as readonly string[]);
+    default:
+      return { valid: false, errors: [`unknown view source '${source}'`] };
+  }
+}
+
+function validateSourceViewConfigAgainstCatalog(
+  config: unknown,
+  catalog: readonly string[],
+): ValidateViewConfigResult {
+  const errors: string[] = [];
+  if (!isPlainObject(config)) {
+    return { valid: false, errors: ["config must be a JSON object"] };
+  }
+  const known = new Set<string>(catalog);
+
+  const columnsRaw = config["columns"];
+  if (columnsRaw !== undefined) {
+    if (!Array.isArray(columnsRaw)) {
+      errors.push("columns must be an array");
+    } else {
+      columnsRaw.forEach((col, i) => {
+        if (!isPlainObject(col)) {
+          errors.push(`columns[${i}] must be an object`);
+          return;
+        }
+        const key = col["key"];
+        if (typeof key !== "string" || key.length === 0) {
+          errors.push(`columns[${i}].key must be a non-empty string`);
+        } else if (!known.has(key)) {
+          errors.push(`columns[${i}].key '${key}' is not a known column of this view source`);
+        }
+        if (typeof col["visible"] !== "boolean") {
+          errors.push(`columns[${i}].visible must be a boolean`);
+        }
+      });
+    }
+  }
+
+  const density = config["density"];
+  if (density !== undefined && !(SOURCE_VIEW_DENSITIES as readonly string[]).includes(density as string)) {
+    errors.push(`density must be one of ${SOURCE_VIEW_DENSITIES.join(" | ")}`);
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/** Синтетический дефолт processes-вида (все колонки видимы, comfortable). */
+export function defaultProcessesViewConfig(): SourceViewConfig {
+  return {
+    columns: PROCESSES_VIEW_COLUMNS.map((key) => ({ key, visible: true })),
+    density: "comfortable",
+  };
+}

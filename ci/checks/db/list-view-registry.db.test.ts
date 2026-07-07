@@ -477,6 +477,49 @@ describe.skipIf(!hasDb)('T-0581 view-registry — LIVE Postgres proofs', () => {
     });
   });
 
+  // T-0653 (fix-forward defect #9): the name-uniqueness constraint is now
+  // SCOPED by (tenant, source, registry_def, owner_actor) — migration 130
+  // replaced the old table-level UNIQUE (tenant_id, registry_def_id, name) that
+  // ignored the owner. Two DIFFERENT actors may name their PERSONAL views the
+  // same (a name only they can see); a duplicate WITHIN one owner still 23505s.
+  it('defect #9: two owners can reuse the same personal-view name; same-owner dup → 23505', async () => {
+    await withClient(migratorUrl(), async (c) => {
+      const insertPersonal = (owner: string, name: string) =>
+        c.query(
+          `INSERT INTO choros.list_view
+             (tenant_id, id, registry_def_id, application_id, source, owner_actor,
+              type, name, is_default, config, created_at, updated_at, created_by)
+           VALUES ($1, $2, $3, $4, 'records', $5, 'list', $6, false, '{}'::jsonb, 0, 0, $5)`,
+          [TENANT_A, uuid(), regAId, appAId, owner, name],
+        );
+
+      // Actor A's personal view named "Мой вид" — succeeds.
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      await insertPersonal('a-owner-1', 'Мой вид');
+      await c.query('COMMIT');
+
+      // Actor B's personal view with the SAME name on the SAME registry_def —
+      // must ALSO succeed (owner is part of the uniqueness key now).
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      await expect(insertPersonal('a-owner-2', 'Мой вид')).resolves.toBeTruthy();
+      await c.query('COMMIT');
+
+      // A duplicate WITHIN owner a-owner-1 → 23505 (the scoped unique still bites).
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      await expect(insertPersonal('a-owner-1', 'Мой вид')).rejects.toMatchObject({ code: '23505' });
+      await c.query('ROLLBACK');
+
+      // Cleanup this test's rows so they don't pollute later scans.
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      await c.query(`DELETE FROM choros.list_view WHERE tenant_id = $1 AND owner_actor IN ('a-owner-1','a-owner-2')`, [TENANT_A]);
+      await c.query('COMMIT');
+    });
+  });
+
   // AC-13/NF-6 (tester-added, T-0581 TEST phase): the unit tests in
   // src/core/__tests__/view-query.test.ts already prove the PURE translator
   // never string-interpolates a hostile field_key/value into SQL — but that
