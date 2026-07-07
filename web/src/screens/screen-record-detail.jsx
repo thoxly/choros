@@ -21,9 +21,13 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDialog, ActorChip } from '../components/components.jsx';
+import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDialog, ActorChip, StatusChip, StepRef } from '../components/components.jsx';
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js';
+// T-0708 (E16 §6, capstone T-0691): reverse link запись→инстансы. Reuse the SAME
+// human-title / current-step derivations the process-instance card already uses —
+// no bespoke second copy of "which step is this instance on" (StepRef renders it).
+import { deriveInstanceTitle, currentNodes } from './process-instance.logic.js';
 import { formatDate, formatError, formatJsonReadable, formatPersonName } from '../lib/format.js';
 import { fetchFileBlob, downloadFile } from '../lib/authed-file.js';
 import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, FILE_CELL_ASYNC, PERSON_CELL_ASYNC, deriveRecordLabel, computeComputedFieldValue } from './records-form.js';
@@ -628,6 +632,109 @@ export function PersonFieldValue({ personId, authorNames }) {
 }
 
 // ---------------------------------------------------------------------------
+// T-0708 (E16 §6, capstone T-0691): RelatedProcessesPanel — the record→instance
+// REVERSE link. The process-instance card already shows «ЗАПИСЬ-ИСТОЧНИК» (its
+// recordId → this record, via RecordRef); this closes the pair so the record
+// card shows every instance started from / bound to this record.
+//
+// Source of truth: GET /api/processes?record=<id> — the SAME tenant-scoped
+// projection the /processes list consumes, filtered server-side to this record.
+// No process-catalog step resolver is touched (T-0709 owns that): the current
+// step comes from the instance projection's own `node`/`nodes` (Flowable fold),
+// rendered human via StepRef; status via StatusChip; the process name via the
+// SAME deriveInstanceTitle the instance card uses (never a bare machine key).
+//
+// Empty degrade mirrors CrossAppLinksPanel: a record with no related instances
+// (or a fetch error) renders NOTHING — no section chrome, no "процессов нет"
+// noise on cards where processes were never expected.
+// ---------------------------------------------------------------------------
+
+/** One related-instance row: human process title + current step + status + link. */
+function RelatedProcessRow({ instance }) {
+  const { title } = deriveInstanceTitle(instance);
+  const nodes = currentNodes(instance);
+  // A done instance has no waiting node — show the honest terminal note instead
+  // of an empty StepRef. currentNodes() returns [] for done; [step] otherwise.
+  const isDone = instance.status === 'done';
+  return (
+    <Link
+      to={`/processes/${encodeURIComponent(instance.id)}`}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--chs-space-2)',
+        padding: 'var(--chs-space-4) 0',
+        borderBottom: '1px solid var(--chs-color-border)',
+        textDecoration: 'none',
+        color: 'inherit',
+      }}
+      title={`Открыть процесс · ${instance.id}`}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--chs-space-3)' }}>
+        <span style={{ ...valueStyle, color: 'var(--chs-color-accent)', fontWeight: '500' }}>
+          {title}
+        </span>
+        <StatusChip status={instance.status} />
+      </div>
+      <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+        {isDone || nodes.length === 0
+          ? 'Процесс завершён'
+          : <StepRef step={nodes[0]} />}
+      </span>
+    </Link>
+  );
+}
+
+/**
+ * Fetches GET /api/processes?record=<recordId> once per card load and renders one
+ * row per related instance. Hidden entirely when there are none (or on error) —
+ * the reverse link is additive context, never a blocker for the native fields.
+ */
+function RelatedProcessesPanel({ recordId }) {
+  const [instances, setInstances] = useState(null); // null = not yet loaded
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!recordId) return undefined;
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/processes?record=${encodeURIComponent(recordId)}`, {
+      headers: devHeaders(),
+    })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) { setInstances([]); setLoading(false); return; }
+        const body = await res.json();
+        if (cancelled) return;
+        setInstances(Array.isArray(body.instances) ? body.instances : []);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) { setInstances([]); setLoading(false); }
+      });
+    return () => { cancelled = true; };
+  }, [recordId]);
+
+  // No section chrome while loading OR when there are no related instances /
+  // an error occurred — clean degrade (mirrors CrossAppLinksPanel).
+  if (loading) return null;
+  if (!instances || instances.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: 'var(--chs-space-5)' }} data-testid="related-processes">
+      <p style={{ ...labelStyle, marginBottom: 'var(--chs-space-3)' }}>
+        ПРОЦЕССЫ ПО ЭТОЙ ЗАПИСИ
+      </p>
+      <div>
+        {instances.map((inst) => (
+          <RelatedProcessRow key={inst.id} instance={inst} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // RecordDetailScreen
 // ---------------------------------------------------------------------------
 
@@ -973,6 +1080,11 @@ function RecordDetailScreen() {
                   Lazy: fetches GET /api/records/:id/links once per card load.
                   Hidden when record has no cross_app_ref definitions (empty degrade). */}
               <CrossAppLinksPanel recordId={record.id} />
+
+              {/* T-0708 (E16 §6, capstone T-0691): reverse link запись→инстансы —
+                  processes started from / bound to this record. Fetches
+                  GET /api/processes?record=:id; hidden when there are none. */}
+              <RelatedProcessesPanel recordId={record.id} />
             </div>
 
             {/* Metadata sidebar */}
