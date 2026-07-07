@@ -58,7 +58,7 @@ import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import { makePgAuditWriter } from "../db/audit-writer.js";
 import {
   APPROVE_TASK_NAME,
-  APPROVER_ROLE,
+  resolveDefaultApproverRole,
   appendTaskApproved,
   findWaitingInstanceTask,
   listInstanceInboxTasks,
@@ -727,6 +727,14 @@ async function findInboxItems(
 ): Promise<InboxItem[]> {
   const tenantId = await resolveTenant(devUserId);
 
+  // T-0653 (fix-forward defect #10): the `canApprove` flag must compare the
+  // task's role against the ENV-CONFIGURABLE default approver role
+  // (resolveDefaultApproverRole → CHOROS_DEFAULT_APPROVER_ROLE), matching the
+  // InboxItem.canApprove doc-comment promise — NOT the raw APPROVER_ROLE
+  // literal. Resolved once per read and reused on BOTH the instance path and
+  // the defer path (fix-forward defect #4) so the two cannot drift.
+  const approverRole = resolveDefaultApproverRole();
+
   // T-0336: load claim-state from audit_event when DB available and no pre-loaded map.
   // Degrade gracefully (read projection, not write path): any error → empty map.
   let claimStateMap = claimMap ?? new Map<string, ClaimState>();
@@ -849,6 +857,12 @@ async function findInboxItems(
         step: row.step,
         inst: row.inst,
         role: row.role,
+        // T-0653 (fix-forward defect #4): a claimed defer task addressed to the
+        // approver role must keep the inline «Согласовать» affordance — the
+        // client now gates the quick-action on t.canApprove (was t.role===...),
+        // so without this the claimed role-approver defer row lost its button.
+        // Same env-configurable role check as the instance path (defect #10).
+        ...(row.role === approverRole ? { canApprove: true } : {}),
         execType: "agent",
         execName: row.execName,
         pool: true,
@@ -942,7 +956,8 @@ async function findInboxItems(
         ...(row.recordId !== undefined ? { recordId: row.recordId } : {}),
         role: row.role,
         // T-0653: approval-task flag (server-side role check; no client literal).
-        ...(row.role === APPROVER_ROLE ? { canApprove: true } : {}),
+        // Compares against the env-configurable resolved approver role (defect #10).
+        ...(row.role === approverRole ? { canApprove: true } : {}),
         execType: "human",
         pool: true,
         sla: { min: slaMin, left: slaMin },
@@ -1110,6 +1125,20 @@ function parseQuery(url: string | undefined): URLSearchParams {
 // ---------------------------------------------------------------------------
 
 const INBOX_STATUSES = new Set(["running", "waiting", "failed", "done", "paused"]);
+
+/**
+ * T-0653 (fix-forward defect #1): hard cap on the number of rows returned in
+ * GROUPED mode (?group=process). In grouped mode the server returns the ENTIRE
+ * filtered set (not a page) so that each group's rendered body and its count
+ * badge always agree — page-paginated bodies under server-computed group counts
+ * produced a group badge of «12» over an empty tbody until every page loaded.
+ * The cap bounds the worst case (a tenant with thousands of open tasks); when
+ * hit, the response carries groupTruncated:true so the client can show an
+ * honest «показаны первые N — уточните фильтр» notice instead of silently
+ * dropping rows. 500 comfortably covers a human's real working set while
+ * bounding the payload.
+ */
+const INBOX_GROUP_ROW_CAP = 500;
 
 export interface InboxFilters {
   q: string | null;
@@ -1395,44 +1424,80 @@ export function registerInboxRoutes(
     const inboxTenantId = await resolveTenant(actor);
     const myRoles = await resolveRolesForActor(actor, inboxTenantId);
 
-    // Per-tab counts from the tenant-scoped base (so the UI badge totals are server-truth).
-    const counts: Record<TabId, number> = {
-      all: base.length,
-      mine: base.filter((i) => inTab(i, "mine", actor, myRoles)).length,
-      pool: base.filter((i) => inTab(i, "pool", actor, myRoles)).length,
-      esc: base.filter((i) => inTab(i, "esc", actor, myRoles)).length,
-    };
-
     const query = parseQuery(req.url);
     const tab = parseTab(query.get("tab"));
     const execFilter = parseExec(query.get("exec"));
     const sort = query.get("sort");
 
-    let filtered = base.filter((i) => inTab(i, tab, actor, myRoles));
-    if (execFilter) {
-      filtered = filtered.filter((i) => i.execType === execFilter);
-    }
-
-    // T-0653 (UX-study §4): server-side search (q=) + filters (process/status/
-    // deadline range), applied to the materialized item list BEFORE pagination.
-    // Purely in-memory over resolved fields — no SQL path for q (no injection
-    // surface). Combines (AND) with tab/exec above; counts stay from the base.
+    // T-0653 (fix-forward defect #3): the per-tab badge counts must respect the
+    // ACTIVE q/filters/exec so a badge of «42» never sits over 3 visible rows.
+    // We first narrow the base by the cross-tab filters (exec + q/process/status/
+    // deadline), THEN compute each tab's count over THAT narrowed set. This makes
+    // the active tab's badge equal its visible total, and each other tab's badge
+    // an honest "how many match the current search would land in that tab".
+    // (Tenant scoping + role-addressing still fully apply — inTab is unchanged.)
     const inboxFilters = parseInboxFilters(query);
-    filtered = filtered.filter((i) => matchesInboxFilters(i, inboxFilters));
+    let filteredBase = base;
+    if (execFilter) {
+      filteredBase = filteredBase.filter((i) => i.execType === execFilter);
+    }
+    filteredBase = filteredBase.filter((i) => matchesInboxFilters(i, inboxFilters));
+
+    // Per-tab counts over the filtered base (badge ↔ visible list agree).
+    const counts: Record<TabId, number> = {
+      all: filteredBase.filter((i) => inTab(i, "all", actor, myRoles)).length,
+      mine: filteredBase.filter((i) => inTab(i, "mine", actor, myRoles)).length,
+      pool: filteredBase.filter((i) => inTab(i, "pool", actor, myRoles)).length,
+      esc: filteredBase.filter((i) => inTab(i, "esc", actor, myRoles)).length,
+    };
+
+    // The active tab's rows = filtered base narrowed to the selected tab.
+    let filtered = filteredBase.filter((i) => inTab(i, tab, actor, myRoles));
 
     if (sort === "sla") {
       // Ascending SLA headroom — most-urgent (incl. overdue, negative `left`) first.
       filtered = [...filtered].sort((a, b) => a.sla.left - b.sla.left);
     }
 
-    // T-0653: group-by-process summaries (with counts) over the FILTERED set —
-    // computed before pagination so the свёртки reflect the whole result, not
-    // just the current page. Only when explicitly requested (?group=process);
-    // absent ⇒ response shape unchanged (backward compatible).
+    // T-0653: group-by-process summaries (with counts) over the FILTERED set.
+    // Only when explicitly requested (?group=process); absent ⇒ response shape
+    // unchanged (backward compatible).
     const groupMode = query.get("group");
-    const groups = groupMode === "process" ? groupInboxByProcess(filtered) : null;
 
-    // T-0401 [D7-3]: paginate the filtered result set.
+    if (groupMode === "process") {
+      // T-0653 (fix-forward defect #1, вариант «б»): GROUPED mode returns the
+      // ENTIRE filtered set (capped), NOT a page. The group counts and the group
+      // bodies are then computed from the SAME rows, so a group badge never sits
+      // over a partially-loaded/empty tbody (the flaw: server counted groups over
+      // the full filtered set but the client rendered bodies from paginated rows).
+      // This also removes «Показать ещё» in grouped mode client-side (defect #2):
+      // there is no next page to append — the whole set is already here.
+      const total = filtered.length;
+      const capped = filtered.slice(0, INBOX_GROUP_ROW_CAP);
+      const groups = groupInboxByProcess(capped);
+      const groupTruncated = total > capped.length;
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        items: capped,
+        counts,
+        tab,
+        // Grouped mode is single-page by construction — report it honestly so the
+        // client's load-more (page < totalPages) never shows in grouped mode.
+        page: 1,
+        totalPages: 1,
+        total,
+        limit: capped.length,
+        groups,
+        // Honest signal: the filtered set exceeded the grouped-mode row cap, so
+        // some rows (and possibly whole groups) are not shown — refine the filter.
+        ...(groupTruncated ? { groupTruncated: true, groupRowCap: INBOX_GROUP_ROW_CAP } : {}),
+      }));
+      return;
+    }
+
+    // T-0401 [D7-3]: FLAT mode paginates the filtered result set (unchanged).
     const { limit, page } = parsePaginationParams(query);
     const paged = paginateInMemory(filtered, page, limit);
 
@@ -1446,9 +1511,6 @@ export function registerInboxRoutes(
       totalPages: paged.totalPages,
       total: paged.total,
       limit: paged.limit,
-      // T-0653: filtered total (may differ from counts[tab] when q/filters active)
-      // + optional group summaries. Additive — absent 'groups' preserves shape.
-      ...(groups !== null ? { groups } : {}),
     }));
   }));
 

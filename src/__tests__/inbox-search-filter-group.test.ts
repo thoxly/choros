@@ -217,4 +217,55 @@ describe("T-0653 inbox query params (E2E, in-memory seed)", () => {
     const data = await get("/api/inbox");
     expect("groups" in data).toBe(false);
   });
+
+  // fix-forward defect #3: per-tab counts must respect the active q/filters so
+  // a badge never sits over a smaller visible list.
+  it("defect #3: counts respect the active q= filter (badge ↔ visible agree)", async () => {
+    const all = await get("/api/inbox");
+    const allCounts = all.counts as Record<string, number>;
+    const filtered = await get("/api/inbox?q=" + encodeURIComponent("счёт"));
+    const fCounts = filtered.counts as Record<string, number>;
+    const fItems = filtered.items as unknown[];
+    // The narrowed "all" count equals the number of visible rows on the all tab.
+    expect(fCounts.all).toBe(fItems.length);
+    // And it is strictly smaller than the unfiltered all count (the filter bit).
+    expect(fCounts.all).toBeLessThan(allCounts.all);
+  });
+
+  it("defect #3: status= filter shrinks the tab counts to the filtered set", async () => {
+    const data = await get("/api/inbox?status=failed");
+    const counts = data.counts as Record<string, number>;
+    const items = data.items as unknown[];
+    // Every visible row is 'failed'; the all-tab count == number of such rows.
+    expect(counts.all).toBe(items.length);
+    expect(counts.all).toBeGreaterThan(0);
+  });
+
+  // fix-forward defect #1 (вариант «б»): grouped mode returns the WHOLE filtered
+  // set (single page), so group counts and the returned items always agree.
+  it("defect #1: grouped mode is single-page (page/totalPages = 1) and items sum to group counts", async () => {
+    const data = await get("/api/inbox?group=process");
+    expect(data.page).toBe(1);
+    expect(data.totalPages).toBe(1);
+    const groups = data.groups as Array<Record<string, unknown>>;
+    const items = data.items as unknown[];
+    const groupSum = groups.reduce((s, g) => s + (g.count as number), 0);
+    // Group counts are computed from the SAME items array that is returned.
+    expect(groupSum).toBe(items.length);
+    // Well under the cap → no truncation flag on the modest seed.
+    expect("groupTruncated" in data).toBe(false);
+  });
+
+  it("defect #1: grouped mode + q= filter keeps counts honest over the filtered set", async () => {
+    const data = await get("/api/inbox?group=process&q=" + encodeURIComponent("счёт"));
+    const groups = data.groups as Array<Record<string, unknown>>;
+    const items = data.items as unknown[];
+    const groupSum = groups.reduce((s, g) => s + (g.count as number), 0);
+    expect(groupSum).toBe(items.length);
+    // Every returned row actually matches the filter (grouped set == filtered set).
+    for (const it of items as Array<Record<string, unknown>>) {
+      const hay = `${it.name} ${it.step} ${it.inst}`.toLowerCase();
+      expect(hay.includes("счёт")).toBe(true);
+    }
+  });
 });
