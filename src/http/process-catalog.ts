@@ -48,8 +48,11 @@ import {
 import {
   buildCatalogDefinitions,
   serializeInstance,
+  overlayLiveSteps,
+  pickPrimaryLiveNode,
   type CatalogDefinition,
   type CatalogInstance,
+  type LiveActiveNode,
   type ProcessDefRow,
 } from "../core/process-catalog-view.js";
 
@@ -69,10 +72,37 @@ function assertUuidShape(value: string, label: string): void {
 /** Resolve an actor slug/sub to a tenant UUID (same shape as the other route modules). */
 export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
 
+/**
+ * T-0709 [E16/P1]: the minimal engine port the catalog needs to read each running
+ * instance's LIVE active user-task set — a structural subset of FlowableClient's
+ * getActiveUserTasks (mirrors process-projection.ts's TimerReconcileEnginePort). Kept
+ * structural so this module stays decoupled from the concrete client type and the
+ * server can pass the shared FlowableClient unchanged.
+ */
+export interface CatalogEnginePort {
+  getActiveUserTasks(
+    instanceId: string,
+  ): Promise<
+    | {
+        ok: true;
+        tasks: readonly { readonly name: string; readonly candidateGroups: readonly string[] }[];
+      }
+    | { ok: false; code: string }
+  >;
+}
+
 /** Injected deps. When absent the routes are NOT registered (no-DB honest degrade). */
 export interface ProcessCatalogDeps {
   pool: pg.Pool;
   resolveActorTenant: ActorTenantResolver;
+  /**
+   * T-0709 [E16/P1]: OPTIONAL live engine. When present, each non-done instance's
+   * displayed step/role is overlaid with the engine's REAL active user-task (the same
+   * live source /api/processes/:inst reads) so the catalog no longer shows the NEXT
+   * step's label as the CURRENT one. Absent (or unreachable per-instance) ⇒ honest
+   * degrade to the audit-snapshot projection — never worse than the pre-T-0709 catalog.
+   */
+  flowable?: CatalogEnginePort;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,12 +323,41 @@ async function registryExistsUnderApp(
 // Route registration
 // ---------------------------------------------------------------------------
 
+/**
+ * T-0709 [E16/P1]: resolve the LIVE active-node facts for a batch of running
+ * instances, keyed by instance id, from the engine's active user-task set. Best-effort
+ * per instance: an engine error / no-active-task / empty result simply omits that key,
+ * leaving its projection on the audit snapshot (overlayLiveSteps returns it unchanged).
+ * Never throws — a total engine outage yields an empty map (the catalog degrades to the
+ * exact pre-T-0709 snapshot values, still a 200). Bounded fan-out (the projection page
+ * itself is already capped at 200 by listInstanceProjections).
+ */
+async function resolveLiveNodesByInstance(
+  flowable: CatalogEnginePort,
+  instanceIds: readonly string[],
+): Promise<Map<string, LiveActiveNode>> {
+  const byInst = new Map<string, LiveActiveNode>();
+  await Promise.all(
+    instanceIds.map(async (inst) => {
+      try {
+        const result = await flowable.getActiveUserTasks(inst);
+        if (!result.ok) return; // engine error for THIS instance → keep snapshot.
+        const node = pickPrimaryLiveNode(result.tasks);
+        if (node !== null) byInst.set(inst, node);
+      } catch {
+        // Best-effort: a per-instance engine failure must not fail the catalog read.
+      }
+    }),
+  );
+  return byInst;
+}
+
 export function registerProcessCatalogRoutes(
   router: Router,
   deps?: ProcessCatalogDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant } = deps;
+  const { pool, resolveActorTenant, flowable } = deps;
 
   // -------------------------------------------------------------------------
   // GET /api/process-catalog — REAL definitions + REAL instances + bindings.
@@ -321,8 +380,27 @@ export function registerProcessCatalogRoutes(
       // WHERE tenant_id guard, audit-backed). Real instances only — never seed/mock.
       const projections: InstanceProjection[] = await listInstanceProjections(pool, tenantId);
 
+      // T-0709 [E16/P1]: overlay each non-done instance's LIVE active user-task
+      // (step/role) from the engine — the SAME source /api/processes/:inst reads — so
+      // the catalog shows the node the token is REALLY on, not the NEXT step's label
+      // that the start-time process.started snapshot may have frozen in (the родитель
+      // T-0349 divergence). Best-effort: no flowable, or a per-instance engine miss,
+      // leaves that projection on its honest audit snapshot (overlayLiveSteps no-ops).
+      let displayProjections: InstanceProjection[] = projections;
+      if (flowable) {
+        const runningInstIds = projections
+          .filter((p) => p.status !== "done")
+          .map((p) => p.inst);
+        if (runningInstIds.length > 0) {
+          const liveByInst = await resolveLiveNodesByInstance(flowable, runningInstIds);
+          displayProjections = overlayLiveSteps(projections, liveByInst);
+        }
+      }
+
+      // Definitions count instances by key — unaffected by the step/role overlay, so
+      // build them from the original projections (both arrays share the same instances).
       const definitions: CatalogDefinition[] = buildCatalogDefinitions(defRows, projections);
-      const instances: CatalogInstance[] = projections.map(serializeInstance);
+      const instances: CatalogInstance[] = displayProjections.map(serializeInstance);
       const bindings = bindingRows.map(serializeBinding);
 
       res.statusCode = 200;

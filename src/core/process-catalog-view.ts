@@ -166,3 +166,114 @@ export function serializeInstance(p: ProjectionLike): CatalogInstance {
     started_at: p.startedAt,
   };
 }
+
+// ---------------------------------------------------------------------------
+// T-0709 [E16/P1]: live-engine step/role overlay — the fix for the catalog ↔
+// engine divergence.
+//
+// THE BUG (found live, родитель T-0349): the catalog's `step`/`role` per instance
+// come from listInstanceProjections, which folds the process.started audit event —
+// a SNAPSHOT recorded at start time (the resolved active user-task then, or the
+// config-primitive fallback when the engine read was empty). That snapshot is NOT
+// re-derived as the engine token advances (or when a skip-submit auto-complete
+// moved the token AFTER the snapshot was written). So a telLinear instance whose
+// token is really sitting on the initiator's «Подача заявки» (role-initiator) shows
+// «Согласование» (role-approver) on the «Процессы» screen — the NEXT step's label
+// leaking in as the CURRENT one. The instance-detail route (/api/processes/:inst)
+// reads the LIVE engine (getHistoricActivityInstances) and shows the truth, so the
+// two surfaces disagree.
+//
+// THE FIX (this pure helper + its http caller): overlay the LIVE engine's active
+// user-task onto each non-done projection's step/role BEFORE serialization, from the
+// SAME engine the instance-detail route reads. `step`/`role` then reflect the node
+// the token is actually on. PURE + no case-literals: the live label/role are DATA
+// supplied by the caller (read from Flowable), never hardcoded here. When the caller
+// supplies no live entry for an instance (engine unreachable, no active user-task,
+// or a done instance), the projection is returned UNCHANGED — honest degrade to the
+// snapshot, never worse than today.
+// ---------------------------------------------------------------------------
+
+/**
+ * The live active-node facts for ONE instance, as read from the engine's active
+ * user-task set (Flowable getActiveUserTasks → candidateGroups[0]/name). Structural
+ * subset supplied by the http layer; core never imports the engine client type.
+ */
+export interface LiveActiveNode {
+  /** Human-readable name of the node the token is currently on (task.name). */
+  readonly step: string;
+  /** Role the current active user-task is addressed to (candidateGroups[0]). */
+  readonly role: string;
+  /**
+   * Every currently-active user-task's step label (one per live token). For a linear
+   * instance this is a 1-element list equal to [step]; for an AND-split it holds each
+   * concurrent branch. Optional — callers that only resolve the primary node omit it.
+   */
+  readonly concurrentSteps?: readonly string[];
+}
+
+/**
+ * Overlay live-engine active-node facts onto a batch of projections. For each
+ * projection that is NOT done AND has a live entry in `liveByInst`, replace `step`
+ * and `role` with the live node's values (the engine truth). A done projection, or
+ * one with no live entry, is returned byte-unchanged (honest degrade to the audit
+ * snapshot). PURE — no I/O, no fabrication, key-order preserved.
+ *
+ * The overlay is intentionally display-only: it corrects the CURRENT-step label the
+ * catalog shows so it matches /api/processes/:inst; it does NOT rewrite the audit
+ * track (the projection's other honest fields — status, startedAt — are untouched).
+ *
+ * @param projections the folded projections (from listInstanceProjections).
+ * @param liveByInst  inst id → LiveActiveNode, for the instances whose live token the
+ *                    caller could resolve. Absent keys ⇒ that projection is unchanged.
+ */
+export function overlayLiveSteps<P extends ProjectionLike>(
+  projections: readonly P[],
+  liveByInst: ReadonlyMap<string, LiveActiveNode>,
+): P[] {
+  return projections.map((p) => {
+    if (p.status === "done") return p;
+    const live = liveByInst.get(p.inst);
+    if (live === undefined) return p;
+    // Only overlay non-empty live values — an empty label/role from the engine must
+    // never blank out the honest snapshot the projection already carries.
+    const nextStep = live.step.trim() !== "" ? live.step : p.step;
+    const nextRole = live.role.trim() !== "" ? live.role : p.role;
+    if (nextStep === p.step && nextRole === p.role) return p;
+    return { ...p, step: nextStep, role: nextRole };
+  });
+}
+
+/**
+ * Reduce a live active user-task set (Flowable getActiveUserTasks output) to the
+ * single LiveActiveNode the catalog displays as the CURRENT step. PURE.
+ *
+ * Selection: the FIRST active user-task (by the engine's own order) is the primary
+ * node; its `name` → step, `candidateGroups[0]` → role. All active tasks' names feed
+ * `concurrentSteps` (deduped, order-preserved) so an AND-split surfaces every branch.
+ * Returns null when there is no active user-task (the token is between nodes, on a
+ * non-user activity, or the instance ended) — the caller then leaves the projection
+ * on its snapshot.
+ *
+ * Case-literal free: every value is derived from the engine-supplied tasks; the
+ * ONLY fallback (empty candidateGroups → role "") is a neutral empty string, not a
+ * borrowed role name — overlayLiveSteps then keeps the snapshot role for that node.
+ */
+export function pickPrimaryLiveNode(
+  tasks: readonly {
+    readonly name: string;
+    readonly candidateGroups: readonly string[];
+  }[],
+): LiveActiveNode | null {
+  if (tasks.length === 0) return null;
+  const primary = tasks[0]!;
+  const concurrentSteps: string[] = [];
+  for (const t of tasks) {
+    const label = t.name.trim();
+    if (label !== "" && !concurrentSteps.includes(label)) concurrentSteps.push(label);
+  }
+  return {
+    step: primary.name,
+    role: primary.candidateGroups.length > 0 ? primary.candidateGroups[0]! : "",
+    ...(concurrentSteps.length > 0 ? { concurrentSteps } : {}),
+  };
+}

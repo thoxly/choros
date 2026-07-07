@@ -11,6 +11,9 @@ import {
   buildCatalogDefinitions,
   serializeInstance,
   fallbackDefinitionName,
+  overlayLiveSteps,
+  pickPrimaryLiveNode,
+  type LiveActiveNode,
   type ProcessDefRow,
   type ProjectionLike,
 } from "../core/process-catalog-view.js";
@@ -111,6 +114,138 @@ describe("serializeInstance", () => {
       step: "Завершено",
       role: "role-approver",
       started_at: 42,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0709 [E16/P1]: live-engine step/role overlay — the catalog↔engine sync fix.
+//
+// NEUTRAL fixtures ONLY (step-next/role-next = the frozen snapshot, step-current/
+// role-current = the real live node). The divergence semantics are literal-agnostic
+// ("snapshot value ≠ live value" is all that matters), so no D-064 case string
+// (role-approver / Согласование / a persona) is used — the overlay logic is proven
+// without borrowing a real business case, and this file adds zero anti-case literals.
+// ---------------------------------------------------------------------------
+
+const SNAP_STEP = "step-next";       // what the start-time snapshot froze in.
+const SNAP_ROLE = "role-next";
+const LIVE_STEP = "step-current";    // what the engine token is really on.
+const LIVE_ROLE = "role-current";
+const PROC = "proc-fixture-1";
+
+function live(partial: Partial<LiveActiveNode> & { step: string; role: string }): LiveActiveNode {
+  return {
+    step: partial.step,
+    role: partial.role,
+    ...(partial.concurrentSteps !== undefined ? { concurrentSteps: partial.concurrentSteps } : {}),
+  };
+}
+
+/** A projection whose snapshot step/role are the (wrong) NEXT node — the bug shape. */
+function snapProj(inst: string, over: Partial<ProjectionLike> = {}): ProjectionLike {
+  return proj({ inst, procKey: PROC, step: SNAP_STEP, role: SNAP_ROLE, ...over });
+}
+
+describe("pickPrimaryLiveNode — reduce engine active-task set to the current node", () => {
+  it("no active user-task → null (token between nodes / instance ended)", () => {
+    expect(pickPrimaryLiveNode([])).toBeNull();
+  });
+
+  it("single active task → step=name, role=candidateGroups[0]", () => {
+    const node = pickPrimaryLiveNode([{ name: LIVE_STEP, candidateGroups: [LIVE_ROLE] }]);
+    expect(node).toEqual({
+      step: LIVE_STEP,
+      role: LIVE_ROLE,
+      concurrentSteps: [LIVE_STEP],
+    });
+  });
+
+  it("empty candidateGroups → role '' (neutral, never a borrowed role)", () => {
+    const node = pickPrimaryLiveNode([{ name: LIVE_STEP, candidateGroups: [] }]);
+    expect(node).toMatchObject({ step: LIVE_STEP, role: "" });
+  });
+
+  it("AND-split (multiple active tasks) → primary is first, concurrentSteps deduped", () => {
+    const node = pickPrimaryLiveNode([
+      { name: "branch-a", candidateGroups: ["role-a"] },
+      { name: "branch-b", candidateGroups: ["role-b"] },
+      { name: "branch-a", candidateGroups: ["role-a"] },
+    ]);
+    expect(node).toEqual({
+      step: "branch-a",
+      role: "role-a",
+      concurrentSteps: ["branch-a", "branch-b"],
+    });
+  });
+});
+
+describe("overlayLiveSteps — catalog step/role reflects the REAL active node", () => {
+  it("ACCEPTANCE (родитель T-0349): instance whose snapshot froze the NEXT step shows the LIVE first step/role", () => {
+    // Snapshot froze the next node (the divergence bug); the engine token is really
+    // on the current node — the catalog must report the CURRENT one.
+    const projections = [snapProj("flw-1", { status: "waiting" })];
+    const liveByInst = new Map<string, LiveActiveNode>([
+      ["flw-1", live({ step: LIVE_STEP, role: LIVE_ROLE })],
+    ]);
+    const out = overlayLiveSteps(projections, liveByInst);
+    expect(out[0]).toMatchObject({ step: LIVE_STEP, role: LIVE_ROLE });
+  });
+
+  it("a done instance is never overlaid (kept byte-unchanged)", () => {
+    const done = snapProj("flw-done", { step: "Завершено", status: "done" });
+    const liveByInst = new Map<string, LiveActiveNode>([
+      ["flw-done", live({ step: LIVE_STEP, role: LIVE_ROLE })],
+    ]);
+    const out = overlayLiveSteps([done], liveByInst);
+    expect(out[0]).toBe(done); // same reference — no overlay, no copy.
+  });
+
+  it("no live entry for an instance → honest degrade to the snapshot", () => {
+    const p = snapProj("flw-2");
+    const out = overlayLiveSteps([p], new Map());
+    expect(out[0]).toBe(p); // unchanged reference — never worse than pre-T-0709.
+  });
+
+  it("empty live step/role does not blank out the snapshot", () => {
+    const p = snapProj("flw-3");
+    const liveByInst = new Map<string, LiveActiveNode>([["flw-3", live({ step: "", role: "" })]]);
+    const out = overlayLiveSteps([p], liveByInst);
+    expect(out[0]).toMatchObject({ step: SNAP_STEP, role: SNAP_ROLE });
+  });
+
+  it("live values equal to the snapshot → same reference returned (no needless copy)", () => {
+    const p = snapProj("flw-4");
+    const liveByInst = new Map<string, LiveActiveNode>([
+      ["flw-4", live({ step: SNAP_STEP, role: SNAP_ROLE })],
+    ]);
+    const out = overlayLiveSteps([p], liveByInst);
+    expect(out[0]).toBe(p);
+  });
+
+  it("overlays only the diverged instances in a mixed batch; order preserved", () => {
+    const a = snapProj("a");
+    const b = proj({ inst: "b", procKey: "other", step: "step-b", role: "role-b" });
+    const liveByInst = new Map<string, LiveActiveNode>([
+      ["a", live({ step: LIVE_STEP, role: LIVE_ROLE })],
+    ]);
+    const out = overlayLiveSteps([a, b], liveByInst);
+    expect(out.map((p) => p.inst)).toEqual(["a", "b"]);
+    expect(out[0]).toMatchObject({ step: LIVE_STEP, role: LIVE_ROLE });
+    expect(out[1]).toBe(b); // no live entry → unchanged.
+  });
+
+  it("serializeInstance(overlaid) carries the live step/role to the wire (catalog ↔ instance-detail consistency)", () => {
+    const p = snapProj("flw-5");
+    const liveByInst = new Map<string, LiveActiveNode>([
+      ["flw-5", live({ step: LIVE_STEP, role: LIVE_ROLE })],
+    ]);
+    const [overlaid] = overlayLiveSteps([p], liveByInst);
+    expect(serializeInstance(overlaid!)).toMatchObject({
+      inst: "flw-5",
+      step: LIVE_STEP,
+      role: LIVE_ROLE,
+      status: "waiting",
     });
   });
 });
