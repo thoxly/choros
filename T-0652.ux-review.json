@@ -1,0 +1,21 @@
+{
+  "task_id": "T-0652",
+  "role": "design-steward",
+  "verdict": "approved",
+  "commit_reviewed": "43df0fa1 (fix-forward on e6ee4455)",
+  "summary": "Re-verify. UX-N1 (dead .chs-readmode--ro modifier) is now resolved: the modifier is defined in rights-admin.css as an info-tinted pill using theme tokens (color:var(--chs-color-info); background:var(--chs-color-info-soft); token-based radius/spacing), matching the .chs-actchip--narrow / .chs-chip--running convention. Both tokens are real (used across components.css). Badge «только просмотр» is now visually distinct from the neutral .chs-readmode base and reads in both themes. Original approved UX verdict stands; the one non-blocker is cleared.",
+  "checks": [
+    {"item": "UX-N1 .chs-readmode--ro defined with tokens, theme-safe", "result": "PASS", "note": "rights-admin.css:552-563 — info pill via var(--chs-color-info)/var(--chs-color-info-soft), radius/padding from tokens. Dot recolored to info. No hardcoded hex. 3 new source-presence tests in screen-rights.test.jsx assert the class is applied AND defined AND uses an accent token (not a dead class)."},
+    {"item": "AC1.1 visible reason on topbar + grant-trail stubs, both themes", "result": "PASS", "note": "unchanged from prior review; still token-based (chs-topbar__hint / chs-trail__stubhint = --chs-color-text-muted)."},
+    {"item": "AC3.2 «только просмотр» plain language, discoverable", "result": "PASS"},
+    {"item": "Two honest empty-states for export (REV-N1 UX side)", "result": "PASS", "note": "«нет записей» when no rows at all vs «нет совпадений фильтра» when a filter matches nothing — the disabled stub now tells the truth about WHY it is empty (previously it said «нет записей» even when displayRows was non-empty). Good honest-cause UX."}
+  ],
+  "non_blocking": [
+    {
+      "id": "UX-N2-LOGIN-MISSING-INLINE-STYLE",
+      "severity": "info",
+      "file": "web/src/screens/screen-users.jsx",
+      "finding": "«логин не задан» still uses inline style fontStyle:italic rather than a token-backed class. Consistent with the surrounding inline-styled block; cosmetic, not a regression."
+    }
+  ]
+}
