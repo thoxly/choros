@@ -1,0 +1,31 @@
+{
+  "task_id": "T-0679",
+  "reviewer": "design-steward-oblik",
+  "verdict": "approved",
+  "checks": {
+    "human_russian_no_jargon": {
+      "verdict": "pass",
+      "notes": "Both admin and non-admin copy read as plain instructional Russian ('Ассистент собирает формы, настраивает приложения и отвечает на ваши вопросы...', 'Обратитесь к администратору вашей организации...'). No dev-jargon tokens (LLM_NOT_CONFIGURED, secret_handle, endpoint, app://, 503, T-ids) appear in the visible strings -- confirmed by source-regex test and by manual read of the JSX. Minor: the title 'Подключите свой LLM-ключ' and body use the term 'LLM-ключ'/'LLM-провайдер' -- 'LLM' itself is a recognizable-enough term in this product's own UI (already used elsewhere, e.g. nav-config.js label 'LLM-соединения', screen-llm-connections.jsx) and is NOT on the ux-g5-jargon-denylist token list, so this is consistent house style rather than a leak -- non-blocking."
+    },
+    "value_frame": {
+      "verdict": "pass",
+      "notes": "Copy explicitly states what the assistant does ('собирает формы, настраивает приложения и отвечает на ваши вопросы') before asking for the key -- frames the ask as unlocking value, not as fixing an error. Title 'Подключите свой LLM-ключ' is phrased as an invitation/imperative-instruction, not an error headline ('Ошибка', 'не настроено', etc. are absent)."
+    },
+    "theme_tokens": {
+      "verdict": "pass",
+      "notes": "Component uses only kit primitives (EmptyState, Button from components.jsx) and the existing .chs-asst__empty-pane class (background: var(--chs-color-bg), flex layout) -- no inline styles, no hex colors, no emoji (EmptyState rendered without an icon prop)."
+    },
+    "honest_non_admin_message": {
+      "verdict": "pass",
+      "notes": "Non-admin branch clearly explains WHY nothing works and WHAT will happen ('когда ключ подключат, ассистент начнёт отвечать') and points at the correct actor (org administrator) without exposing a button to a screen they cannot reach -- matches OBLIK honest-degrade pattern used elsewhere (T-0599 banner, T-0652 honest stub buttons)."
+    },
+    "not_an_error_look": {
+      "verdict": "pass",
+      "notes": "Reuses EmptyState (role=status, informational tone) rather than an error/alert component (no ErrorState, no Notice-danger variant). Sits in the same visual slot the empty 'Выберите разговор' pane used to occupy -- this is a substitution of one calm empty-state for another, not a new alarming surface."
+    }
+  },
+  "non_blocking_notes": [
+    "aria-label on the CTA button ('Перейти к подключению LLM-ключа') duplicates the visible button text ('Подключить ключ') with slightly different wording -- both are clear individually, but a screen-reader user hears the aria-label, not the visible label; consider aligning wording exactly in a future pass (not required, no accessibility failure).",
+    "EmptyState's role='status' is a static, not aria-live, region; since llmBound resolves asynchronously (starts as null/loading, panel only appears after resolution), a screen-reader user won't get an automatic announcement when the panel appears post-load. This matches the pre-existing T-0599 banner's own accessibility posture (no live-region either), so it is not a regression introduced by this task."
+  ]
+}

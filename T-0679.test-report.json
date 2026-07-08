@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0679",
+  "verdict": "pass",
+  "gates": {
+    "tsc_noEmit": { "exit_code": 0, "result": "pass", "notes": "npx tsc --noEmit -- clean, no output." },
+    "npm_run_build": { "exit_code": 0, "result": "pass", "notes": "tsc (root) + tsc --project seed/tsconfig.json -- both clean." },
+    "vitest_run": {
+      "exit_code": 0,
+      "result": "pass",
+      "test_files": 98,
+      "tests_total": 2673,
+      "tests_passed": 2673,
+      "tests_failed": 0,
+      "duration_s": 7.05,
+      "notes": "Full web/ vitest suite. Matches the claimed 2673 count exactly. Includes both touched test files: screen-assistant.byo-onboarding.test.js (new, 12 tests across AC-1..AC-5 groups) and screen-assistant.llm-banner.test.js (modified, 21 tests, regression-updated for the activeThread gating change) -- both green."
+    },
+    "anti_case_lock_sh": {
+      "exit_code": 0,
+      "result": "pass",
+      "notes": "Phase 1 (delegate point-gates): role-approver 2/baseline3, soglasovanie 1/baseline3, tel-approval 1/baseline1, aggregate 4/baseline7 -- strictly decreased, no individual literal regressed. Phase 2 (full D-064 denylist): aggregate 15/baseline16 -- within baseline, erodes-or-steady."
+    },
+    "ux_g5_jargon_denylist_sh": {
+      "exit_code": 0,
+      "result": "pass (informational mode)",
+      "notes": "68 findings repo-wide (all pre-existing T-id-in-comment / telLinear noise in unrelated files, per the gate's own documented comment-stripping convention) -- gate runs in informational mode (exit 0 regardless) until the --required flip (D-056, not yet flipped). No new violation introduced by this diff's added product text (verified manually: AssistantByoOnboarding's visible strings contain none of T-\\d{3,}, is_system, genesis-seed, telLinear, dogfood, анти-oracle, epoch date, or bare-UUID placeholder)."
+    },
+    "no_committed_secret_sh": { "exit_code": 0, "result": "pass" },
+    "secret_handle_isolation_sh": {
+      "exit_code": 0,
+      "result": "pass",
+      "notes": "All 8 sub-checks (FF-25-1 no IO imports, FF-25-2 no LLM SDK, FF-25-3 custody allow-set intact, FF-25-4 no handle in logs, FF-25-5 seed invariant, FF-25-6 frozen files byte-unchanged, FF-25-8 hire-path validator-gate) green. T-0679's diff does not touch any file in the custody surface."
+    }
+  },
+  "coverage_confirmed": {
+    "onboarding_panel_llmBound_false": "covered -- byo-onboarding.test.js AC-1 group asserts the component exists and is rendered in the showLlmBanner branch in place of NothingSelected.",
+    "admin_branch": "covered -- AC-2 group asserts navigate('/llm-connections') CTA + 'Подключить ключ' label present, gated on isAdmin derived from getNavCapabilities()/isGenesisOwner/zones.includes('admin').",
+    "non_admin_branch": "covered -- AC-3 group asserts the 'администратору вашей организации' copy and that action={isAdmin ? ... : undefined} (no dead button).",
+    "banner_over_open_thread": "covered -- llm-banner.test.js updated assertion requires showLlmBanner && activeThread && <AssistantLlmBanner/> (thin banner only shows above an already-open thread, not duplicated with the onboarding panel).",
+    "loading_honesty_regression": "covered -- AC-5 group re-asserts the exact showLlmBanner expression (!llmStatusLoading && llmBound === false) is unchanged, and that AssistantByoOnboarding appears exactly once in the source (always behind the gate, never unconditional)."
+  },
+  "gaps": [
+    "Tests are source-presence regex assertions over the raw .jsx file (project convention for this screen, no DOM-mount harness exists for screen-assistant.jsx) rather than a rendered-DOM/interaction test -- consistent with the existing T-0599 llm-banner test style, not a new gap introduced by this task.",
+    "No live-browser/live-Postgres proof was run in this review (explicitly out of scope per the spec's 'Не-цели' section -- live-proof AI-assembly is deferred to the orchestrator)."
+  ]
+}
