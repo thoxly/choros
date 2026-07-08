@@ -64,7 +64,11 @@ describe('T-0599 — AC-4/AC-5/AC-8: loading-honesty and banner gating', () => {
   });
 
   it('the banner render is gated on showLlmBanner, not on llmBound alone', () => {
-    expect(src).toMatch(/\{showLlmBanner\s*&&\s*<AssistantLlmBanner\s*\/>\}/);
+    // T-0679: the thin banner now renders above an OPEN thread; the no-thread
+    // case is covered by the BYO onboarding panel (AssistantByoOnboarding), so
+    // the banner is additionally gated on `activeThread`. Both stay behind
+    // showLlmBanner (the loading-honesty gate is unchanged).
+    expect(src).toMatch(/\{showLlmBanner\s*&&\s*activeThread\s*&&\s*<AssistantLlmBanner\s*\/>\}/);
   });
 });
 
