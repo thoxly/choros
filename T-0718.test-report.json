@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0718",
+  "verdict": "approved",
+  "summary": "tsc --noEmit чист, build чист, все 4 целевых vitest-сьюта зелёные (76/76 тестов), все 4 CI-гейта зелёные (anti-case-lock, flowable-bridge-contract, start-route-isolation, detel-base-task-from-engine). Новый тестовый файл inbox-detail-live-step.test.ts покрывает live-overlay + repro-closure + 4 варианта degrade (engine error / no active task / bare client / no client injected).",
+  "commands": [
+    {
+      "cmd": "npx tsc --noEmit",
+      "result": "pass",
+      "detail": "no output, exit 0"
+    },
+    {
+      "cmd": "npm run build",
+      "result": "pass",
+      "detail": "tsc + seed tsconfig build, no errors"
+    },
+    {
+      "cmd": "npx vitest run --no-file-parallelism src/__tests__/inbox-detail-live-step.test.ts src/__tests__/inbox-detail.test.ts src/__tests__/process-catalog-view.test.ts src/__tests__/processes-live-instances.test.ts",
+      "result": "pass",
+      "detail": "4 test files passed, 76 tests passed, 0 failed. inbox-detail-live-step.test.ts: 6/6. inbox-detail.test.ts: 5/5 (regression-free — pre-existing detail route tests unaffected). process-catalog-view.test.ts: 30/30 (core module untouched, confirmed by 0-line diff). processes-live-instances.test.ts: 35/35 (sibling read-surface unaffected)."
+    },
+    {
+      "cmd": "bash ci/checks/anti-case-lock.sh",
+      "result": "pass",
+      "detail": "Phase 1 (point gates) + Phase 2 (full D-064 §5 denylist): aggregate 15 (baseline 16), no individual literal regressed"
+    },
+    {
+      "cmd": "bash ci/checks/flowable-bridge-contract.sh",
+      "result": "pass",
+      "detail": "FF-G3-1/FF-G3-2: bridge files compliant (assertVariableValue + resolveFor present) — unrelated to this diff but confirms no incidental regression"
+    },
+    {
+      "cmd": "bash ci/checks/start-route-isolation.sh",
+      "result": "pass",
+      "detail": "FF-7-1/7-2/7-3 all pass — gate scope is process-start.ts + processes.ts only, confirmed by reading the script (START_MODULE/DISPLAY_MODULE hardcoded); inbox.ts correctly out of scope as spec claims"
+    },
+    {
+      "cmd": "bash ci/checks/detel-base-task-from-engine.sh",
+      "result": "pass",
+      "detail": "FF-1: process-start.ts + records.ts call sites unaffected by this diff"
+    }
+  ],
+  "coverage_assessment": {
+    "live_step_overlay": "covered — AC-1/AC-4 test asserts projection.step/role/concurrentSteps become the live engine values when a live active task exists",
+    "consistency_with_catalog_detail": "covered structurally — same core functions (resolveLiveNodesByInstance/overlayLiveSteps) reused unmodified (0-line core diff), no new consistency test needed since it's provably the same code path already tested in process-catalog-view.test.ts/processes-live-instances.test.ts",
+    "repro_closure": "covered — AC-2 test explicitly proves the phantom step WITHOUT the overlay (snapshot default), then proves the same instance WITH the overlay converges to the live step, not the phantom",
+    "degrade_paths": "covered — 4 distinct degrade scenarios tested: engine error (ok:false), empty active-task list, bare client (no getActiveUserTasks method), and no flowableClient injected at all; all assert 200 + projection present + step stays off the live value",
+    "defer_agent_rows_not_broken": "not directly exercised by a new test, but verified analytically (see review.json c_defer_agent_untouched) — defer/agent rows never populate `projection` in the first place (findWaitingInstanceTask/listInstanceProjections both keyed off real Flowable instance ids/inboxTaskId that defer rows don't have), so overlayInboxDetailLiveStep is structurally unreachable for them; pre-existing inbox-detail.test.ts (5/5 green) and the full inbox test surface provide regression coverage that defer/seed rows still 200",
+    "deadline_budget": "not re-tested at the inbox.ts wrapper level (thin pass-through of the same LIVE_OVERLAY_DEADLINE_MS constant into resolveLiveNodesByInstance), but the underlying deadline-race logic is already unit-tested at the core level in process-catalog-view.test.ts (T-0709-R-P2-1) — reasonable scoping, not a coverage gap given the wrapper adds no new logic around the deadline"
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "N2",
+      "severity": "P3",
+      "note": "Нет прямого HTTP-теста 'defer-задача → projection остаётся null/absent, оверлей не трогает её' — вывод сделан анализом кода (structural), не наблюдением через реальный inbox-detail-live-step тест на defer-фикстуре. Не блокирует (существующий inbox-detail.test.ts покрывает detail route в целом, defer-семантика вне изменённых строк), но будущий регресс в findWaitingInstanceTask/listInstanceProjections matching logic не поймается этим новым файлом."
+    }
+  ]
+}
