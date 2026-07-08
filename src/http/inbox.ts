@@ -71,6 +71,7 @@ import {
   ENGINE_TASK_NOT_FOUND,
   AMBIGUOUS_ACTIVE_TASK,
   ENGINE_DRIVE_TIMEOUT,
+  type InstanceProjection,
 } from "./process-projection.js";
 import {
   applyStepResult,
@@ -86,6 +87,11 @@ import {
   type ClaimState,
 } from "./claim-projection.js";
 import type { FlowableClient } from "../core/flowable-client.js";
+import {
+  overlayLiveSteps,
+  resolveLiveNodesByInstance,
+  type CatalogEnginePort,
+} from "../core/process-catalog-view.js";
 import { resolveActorPrivilege } from "../db/sandbox-gate-dao.js";
 
 // ---------------------------------------------------------------------------
@@ -276,6 +282,80 @@ function resolveEngineDriveDeadlineMs(): number {
   if (raw === undefined || raw === "") return DEFAULT_ENGINE_DRIVE_DEADLINE_MS;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ENGINE_DRIVE_DEADLINE_MS;
+}
+
+// ---------------------------------------------------------------------------
+// T-0718 [E16/P1, из re-proof T-0709]: live-engine step overlay for the INBOX
+// detail projection — the SAME snapshot↔engine divergence T-0709 closed on the
+// catalog + detail planes, in the THIRD read surface (GET /api/inbox/:id).
+//
+// THE BUG (found live, T-0709 LIVE_PROOF; родитель T-0349): GET /api/inbox/:id
+// returns { item, projection }. `projection` comes straight from
+// listInstanceProjections — the process.started audit SNAPSHOT, frozen at start
+// and never re-derived as the token advances. So the drawer shows the item's
+// LIVE step (item.step, from the waiting userTask) beside a PHANTOM projection
+// step (projection.step, the frozen/next-node snapshot) — e.g. item.step
+// 'Завершить проверку' vs projection.step 'Согласование' on the same instance.
+// T-0709's overlay reached the catalog (/api/process-catalog) and detail
+// (/api/processes[/:id]) planes but NOT this one; the inbox projection stayed
+// frozen while the other two went live — the exact divergence class T-0709
+// existed to kill, moved to the inbox side.
+//
+// THE FIX (reuse of the T-0709 core, no duplication): overlay this single
+// projection's step/role/concurrentSteps with the engine's REAL active
+// user-task set via the SAME resolveLiveNodesByInstance + overlayLiveSteps the
+// catalog and detail planes share (src/core/process-catalog-view.ts — the single
+// source of truth). overlayLiveSteps<P extends ProjectionLike> is generic and
+// preserves InstanceProjection's extra fields (concurrentSteps included), so the
+// inbox projection now reflects the token's real position, identically to the
+// other two surfaces — they cannot diverge.
+//
+// Honest degrade (identical to the catalog/detail overlay): no getActiveUserTasks
+// method on the injected client (bare test stubs), engine unreachable, no active
+// user-task, the shared deadline elapsing, or a done projection ⇒ the projection
+// is returned byte-identical on its audit snapshot — never worse than before,
+// never a 500. Display-only: status/startedAt/inboxTaskId are untouched (the
+// audit track is not rewritten). Reaches the engine ONLY through the injected
+// FlowableClient's read method — no bare fetch, no write path.
+// ---------------------------------------------------------------------------
+
+/**
+ * Same per-request live-overlay budget the catalog + detail planes use
+ * (processes.ts LIVE_OVERLAY_DEADLINE_MS). Re-declared as a plain number (kept in
+ * sync by intent — all three read surfaces bound the best-effort overlay
+ * identically; the shared LOGIC lives in the core resolveLiveNodesByInstance).
+ */
+const LIVE_OVERLAY_DEADLINE_MS = 2_000;
+
+/**
+ * Overlay the live active-node (step/role/concurrentSteps) onto ONE inbox-detail
+ * projection, reading the engine through the injected FlowableClient. Reuses the
+ * SAME core helpers (resolveLiveNodesByInstance + overlayLiveSteps) the catalog
+ * and detail planes use, so all three read surfaces agree on the current step.
+ *
+ * Best-effort + bounded by the shared deadline. When the client is absent / has
+ * no getActiveUserTasks method (older stubs), the projection is done, or the
+ * engine yields no live node, the projection is returned UNCHANGED — honest
+ * degrade to the audit snapshot (never worse than pre-T-0718, never a throw).
+ */
+async function overlayInboxDetailLiveStep(
+  flowable: FlowableClient | undefined,
+  projection: InstanceProjection,
+): Promise<InstanceProjection> {
+  if (projection.status === "done") return projection;
+  const port = flowable as unknown as Partial<CatalogEnginePort> | undefined;
+  if (!port || typeof port.getActiveUserTasks !== "function") return projection;
+  try {
+    const liveByInst = await resolveLiveNodesByInstance(
+      port as CatalogEnginePort,
+      [projection.inst],
+      { deadlineMs: LIVE_OVERLAY_DEADLINE_MS },
+    );
+    return overlayLiveSteps([projection], liveByInst)[0]!;
+  } catch {
+    // Best-effort: an engine miss must never fail the detail read (honest degrade).
+    return projection;
+  }
 }
 
 const INBOX_SEED: SeedItem[] = [
@@ -1621,6 +1701,17 @@ export function registerInboxRoutes(
           // a tenant with >1 completed process we return the right instance result, not
           // the first-done-wins arbitrary match (bug: p.status === "done" alone).
           projection = projections.find((p) => p.inboxTaskId === taskId);
+        }
+        // T-0718 [E16/P1, из re-proof T-0709]: overlay the LIVE engine step onto the
+        // (non-done) projection so projection.step/role/concurrentSteps reflect the
+        // node the token is REALLY on — not the frozen process.started snapshot that
+        // showed a phantom step (e.g. 'Согласование') beside the item's live step. Reuses
+        // the SAME core resolveLiveNodesByInstance + overlayLiveSteps the catalog and
+        // /api/processes detail planes use (single source of truth) — all three read
+        // surfaces now agree. Honest degrade to the snapshot when the engine is
+        // unreachable / has no active user-task / the client lacks the read method.
+        if (projection) {
+          projection = await overlayInboxDetailLiveStep(writeDeps.flowableClient, projection);
         }
       } catch {
         // Degrade gracefully — projection is optional, never fail the detail fetch.
