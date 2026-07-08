@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0679",
+  "reviewer": "adversarial-judge",
+  "verdict": "approved",
+  "strict_byo": {
+    "verified": true,
+    "evidence": [
+      "src/core/register.ts lines ~412-446: fresh tenant's agent_card INSERT for assistant-agent deliberately OMITS llm_endpoint/llm_model/llm_secret_handle/llm_connection_id from the column list (comment explicitly documents this is intentional NULL-by-omission, not a literal NULL, to stay out of the FF-25-3 custody allow-set). A freshly registered tenant genuinely has llm_connection_id IS NULL and llm_secret_handle IS NULL.",
+      "src/http/agents-list.ts listAgentsTx: llm_bound is computed as COALESCE(lc.secret_handle, ac.llm_secret_handle) IS NOT NULL, scoped by 'WHERE ac.tenant_id = current_setting(choros.tenant_id)' under FORCE RLS (withTenantTx). No path reads process.env or any operator/global key.",
+      "src/db/agent-provision.ts readConfiguredAgentLlmConfig / readPrimaryAgentLlmConfig / readAgentCardLlmConfigById: all resolve exclusively through agent_card LEFT JOIN llm_connection, both tenant-scoped. No env fallback constant anywhere in this file.",
+      "src/server.ts tenantSecretResolver (T-0413): explicitly REJECTS any env:// handle reaching the tenant path ('env:// handles are system-only and may not be used as tenant secret handles'), and the doc comment records that T-0600 already REMOVED the prior global DEEPSEEK_API_KEY env fallback from makeLlmPortFactory. The only non-secret env-derived values (DEEPSEEK_BASE_URL/DEEPSEEK_MODEL) are a base URL/model STRING default for the 'test connection' probe, never a key, and never applied on a tenant's behalf without their own secret handle.",
+      "Conclusion: no path exists by which a fresh tenant's assistant resolves to the operator's env-configured key. This is pre-existing plumbing (T-0413/T-0600), and T-0679 does not touch it -- it only reads the already-honest llm_bound flag via GET /api/agents (unchanged surface)."
+    ]
+  },
+  "llm_bound_honesty": {
+    "verified": true,
+    "notes": "useAssistantLlmStatus() in screen-assistant.jsx sets llmBound:null (not false) on network error, 404-missing-agent-row, or while loading; showLlmBanner = !llmStatusLoading && llmBound === false requires a PROVEN false. The onboarding panel therefore never fires on 'we could not tell' -- verified both by reading the hook and by the AC-5 regression test (screen-assistant.byo-onboarding.test.js) which asserts the exact showLlmBanner expression is unchanged."
+  },
+  "non_admin_branch": {
+    "verified": true,
+    "notes": "isAdmin is computed from getNavCapabilities() (isGenesisOwner || zones.includes('admin')) -- the SAME predicate that gates /llm-connections' visibility in the sidebar (nav-config.js projectZones/visibleZones: admin zone requires isGenesisOwner or a mgmt_object:* capability). action prop is `isAdmin ? <Button.../> : undefined` -- EmptyState only renders the action slot when truthy, so a non-admin genuinely gets no button, no dead door. Verified shell.jsx gates all <Routes> (including /assistant) behind authReady, which is only set true AFTER resolveNavCapabilities() resolves -- so getNavCapabilities() is guaranteed populated (or fail-closed null) by the time this component can mount; no race where a real admin sees the non-admin branch."
+  },
+  "secret_exposure": {
+    "verified": true,
+    "notes": "AssistantByoOnboarding renders only two static Russian copy strings and a navigation button; no secret/handle/key value is read, displayed, or logged anywhere in the component. No console/log calls added."
+  },
+  "anti_case": {
+    "verified": true,
+    "notes": "When llmBound===true, showLlmBanner is false, so the render falls through to the pre-existing NothingSelected component unchanged -- normal bound-tenant behavior is preserved. When a thread IS selected, the thin T-0599 banner still renders above ThreadView (now additionally gated on activeThread, verified via the updated llm-banner.test.js assertion), so the pre-existing degraded-send behavior (honest 503) is untouched."
+  },
+  "findings": [
+    {
+      "severity": "P3",
+      "kind": "cleanliness",
+      "text": "chs-asst__byo-onboarding CSS class is added to the wrapper div but has no corresponding rule in app.css -- it rides entirely on chs-asst__empty-pane's existing layout. Harmless (no visual regression, confirmed via the .chs-asst__empty-pane rule still applying), but the extra class is currently a no-op hook. Not blocking."
+    }
+  ]
+}
