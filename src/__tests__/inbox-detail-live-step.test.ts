@@ -152,13 +152,20 @@ async function httpReq(
 }
 
 const TENANT_ID = "11111111-1111-1111-1111-111111111111";
-// Neutral, non-persona actor slugs — the fake resolveActorTenant maps ANY actor to
-// TENANT_ID and the detail lookup is by taskId, not role-gated, so no seed persona is
-// needed (avoids the D-064 anti-case persona literals in added src/ lines).
-const DEV_USER = "e-test-approver";
+// T-0750: DETAIL is now role-gated (resolveRolesForActor — the SAME
+// ACTOR_ACTIVE-hardened resolver LIST uses, T-0738): the querying actor must
+// hold the role the task is ADDRESSED TO. seedInstanceTask below passes an
+// explicit approverRole ("fin-appr", a showcase-fixture role slug — not one
+// of the D-064-banned case literals like "role-approver"/"e-larina"), and
+// DEV_USER is the showcase persona already holding it (src/http/inbox.ts
+// USER_ROLES) — kept an existing fixture pairing rather than inventing a
+// new one. This suite is about the LIVE overlay (T-0718), not authority —
+// the role plumbing here exists solely to satisfy the new detail gate.
+const DEV_USER = "e-mironov";
 const PROC_ACTOR = "e-test-initiator";
 const INST_ID = "flw-inbox-live-1";
 const PROC_KEY = "telLinear";
+const TASK_ROLE = "fin-appr";
 
 // The LIVE active node the engine reports for INST_ID — deliberately DIFFERENT
 // from the process.started snapshot's default step ("Согласование", the phantom
@@ -209,6 +216,9 @@ async function seedInstanceTask(db: FakeDb): Promise<string> {
     procKey: PROC_KEY,
     actor: PROC_ACTOR,
     nowMs: Date.now(),
+    // T-0750: address the task to TASK_ROLE so DEV_USER (its holder) passes
+    // the new DETAIL role-gate. See the DEV_USER comment above.
+    approverRole: TASK_ROLE,
   });
   await client.query("COMMIT");
   client.release();

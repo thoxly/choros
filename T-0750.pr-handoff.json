@@ -1,0 +1,51 @@
+{
+  "task_id": "T-0750",
+  "status": "pr_open",
+  "branch": "task/T-0750",
+  "pr_url": "https://github.com/thoxly/choros/pull/66",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "ci_local_note": "build=true: `npm run build` (tsc + seed/tsconfig) clean, zero errors. lint=true: `npx eslint src/http/inbox.ts src/__tests__/inbox-detail-live-step.test.ts` clean (0 errors; 4 pre-existing no-console warnings at lines untouched by this diff, verified via `git diff 99b590c8 -- src/http/inbox.ts | grep -c console` = 0). types=true: covered by build (tsc --noEmit, full project, clean). tests=true: full `vitest run src/__tests__` (no DATABASE_URL) — 253 files / 4752 tests (4735 passed, 17 pre-existing skips), 0 failed; PLUS live-PG `ci/checks/db/T-0750-inbox-detail-authority.db.test.ts` (new, 8/8 AC) run against DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros, PLUS the full inbox-related live-PG tier re-run for regression (grants-dao-role-slug-deactivation.db.test.ts 7/7, T-0744-orphaned-role-owner-claim.db.test.ts 4/4, inbox_claim.test.ts 7/7, inbox_claim_substitution.db.test.ts 12/12, inbox-actor-resolve.db.test.ts 1/1, T-0710-inbox-instance-filter/escalation-order 4/4, inbox-sandbox-gate 4/4, inbox-defer-escalation 3/3, deferred-inbox 4/4, engine-drive-generic 3/3-skip-Flowable — all green, 0 failed). fitness=true reflects the SPECIFIC gates this task's brief named (same convention T-0740/T-0738 used, not the literal 300+-check `npm run fitness` megachain) — all listed in gates_run below, all PASS.",
+  "files_changed": [
+    "src/http/inbox.ts",
+    "src/__tests__/inbox-detail-live-step.test.ts",
+    "ci/checks/db/T-0750-inbox-detail-authority.db.test.ts",
+    "docs/tasks/T-0750.adr.md"
+  ],
+  "root_cause": "GET /api/inbox/:id (DETAIL) found its item via findInboxItems(actor) -- tenant-scoped only, zero authority-resolver reachable anywhere in the route's handler block (actor-active-route-coverage.sh FF-726-1, hand-confirmed by the T-0740 and T-0726 judges as the honest, last-remaining finding after T-0738 closed the SAME class on LIST tab=pool via resolveRolesForActor/getRoleSlugsForActor). Any tenant member -- addressed or not, active or not -- could read ANY task's full detail (item + projection) by id; a deactivated actor's still-live residual-window access-JWT (T-0702, ~300s) kept full read access with zero degradation.",
+  "resolver": "resolveRolesForActor (src/http/inbox.ts:428-439) -- the SAME resolver GET /api/inbox (LIST) already uses (T-0738), composes getRoleSlugsForActor (src/db/grants-dao.ts:431-494) which carries ${ACTOR_ACTIVE_SQL} on both the primary and T-0366-fallback lookups. No second authority path introduced.",
+  "visibility_policy": "An actor may open GET /api/inbox/:id iff (item.mine === true) OR (myRoles.includes(item.role), unconditional on item.pool -- role-addressing is an invariant of the task per InboxItem.role's own doc comment, whereas item.pool only decides claim-ELIGIBILITY, T-0365) OR (isGenesisOwnerForTenant(pool, tenantId, actor, now) -- tenant-owner bypass, the same deactivation-safe predicate already reused in this file for T-0744 orphan-claim). Refusal is honest 404 (byte-identical to the pre-existing 'task not found' 404), never 403 -- matches the GET /api/records/:id (T-0570) / GET /api/processes/:id (T-0721) precedent of not confirming a resource's existence to an unauthorized caller. A deactivated actor is refused in BOTH the role branch (getRoleSlugsForActor's ACTOR_ACTIVE_SQL, T-0738) and the owner branch (isGenesisOwnerForTenant's own independent deactivated_at IS NULL, T-0658) -- fail-closed on any DB error (never grants a bypass on failure).",
+  "gate_findings": {
+    "actor-active-route-coverage.sh": "1 -> 0 findings. Before: 'SUMMARY: 77 GET routes audited — 21 marker-covered, 55 whitelisted, 1 findings' (FINDING [FF-726-1]: inbox.ts:GET:/api/inbox/:id). After: 'SUMMARY: 77 GET routes audited — 22 marker-covered, 55 whitelisted, 0 findings'. Closed WITHOUT any ci/checks/*.sh edit -- resolveRolesForActor/getRoleSlugsForActor were already registered in ACTIVE_MARKERS by T-0740; the gate is a text-scan of the route's own handler block, so simply calling the already-marked resolver inside GET /api/inbox/:id's handler mechanically closes the finding. This was the LAST finding of the ACTOR_ACTIVE-coverage wave (T-0658/T-0662/T-0726/T-0736/T-0737/T-0738/T-0739/T-0740/T-0750)."
+  },
+  "deactivation_proof": "Live-PG AC-3 (ci/checks/db/T-0750-inbox-detail-authority.db.test.ts): an employee with an INTACT role_assignment on the task's addressed role, but employee.deactivated_at SET (the exact T-0702 residual-JWT-window shape -- role_assignment not separately revoked, only the account deactivated), requests GET /api/inbox/:id for that task and receives 404 (was 200 before this fix). AC-6b independently reconfirms the sibling LIST regression (T-0738's own deactivated-holder-sees-empty-pool-tab invariant) is unaffected by this DETAIL-only change.",
+  "deviations_from_adr": [],
+  "live_proof": "Task brief classifies this as substrate/security-P1 gate work (changes_product=0, no founder-facing LIVE_PROOF workflow required -- same classification T-0738/T-0740 used in this wave). No LIVE_PROOF run performed. In its place: a new live-PG integration suite (ci/checks/db/T-0750-inbox-detail-authority.db.test.ts, 8 AC) proves the fix end-to-end against a real Postgres (role-addressee 200, outsider 404, deactivated-addressee 404, owner-bypass 200, claimant-bypass 200, role-survives-others'-claim 200, LIST regression x2) -- see gate_findings/deactivation_proof above and docs/tasks/T-0750.adr.md §5.2.",
+  "friction_events": [
+    "read-pdp-anti-case.sh (FF-RP-7, T-0570) scopes ALL added lines under src/ -- including __tests__/*.test.ts, NOT just non-test source (unlike the OTHER anti-case delegate, detel-literal-baseline.sh, which explicitly excludes test files). First attempt used DEV_USER='e-larina' in a NEW test-file line (inbox-detail-live-step.test.ts) to satisfy the new role-gate -- tripped FF-RP-7 on a banned D-064 literal even though it was test-only code. Root cause of the ORIGINAL test author's odd-looking 'e-test-approver' neutral-slug choice (their own comment cited this exact constraint) -- re-discovered independently before reading that comment closely enough the first time. Fixed by reusing an EXISTING, non-banned showcase persona (e-mironov/fin-appr) already present in src/http/inbox.ts's USER_ROLES fixture, plus an explicit approverRole override on appendProcessStarted, instead of e-larina/role-approver."
+  ],
+  "durable_findings": [
+    "GET /api/inbox/:id was the LAST honest finding of actor-active-route-coverage.sh across the whole ACTOR_ACTIVE security wave (T-0658 through T-0750) -- the gate now reports 0 findings and is, per its own ADR-T0726 §5, a 'candidate for promotion to required' (currently informational). Worth a founder-facing follow-up: promote the gate from informational to a hard CI blocker now that its backlog is empty, so a future new GET route silently reintroducing this class fails CI immediately instead of accumulating as another honest-but-unenforced finding."
+  ],
+  "gates_run": {
+    "actor_active_route_coverage": "PASS -- findings 1 -> 0 (SUMMARY: 77 GET routes audited — 22 marker-covered, 55 whitelisted, 0 findings)",
+    "actor_active_route_coverage_self_test": "PASS",
+    "actor_authority_deactivation_gate": "PASS -- FF-0662-1/2 unchanged (file not touched, no new employee-slug lookup added)",
+    "actor_authority_deactivation_gate_self_test": "PASS",
+    "http_route_auth_coverage": "PASS",
+    "http_route_auth_coverage_self_test": "PASS",
+    "anti_case_lock": "PASS (after replacing e-larina/role-approver test literals with the existing e-mironov/fin-appr fixture pairing -- see friction_events)",
+    "anti_case_lock_self_test": "PASS",
+    "frozen_checks_immutable": "PASS -- zero ci/checks/*.sh files touched",
+    "build": "PASS (tsc + seed/tsconfig)",
+    "eslint_touched_files": "PASS (0 errors, 4 pre-existing unrelated warnings, verified untouched by this diff)",
+    "vitest_no_db": "PASS -- 4735/4752 (17 pre-existing skips), 251 files, 0 failed",
+    "vitest_db_live_pg_new_suite": "PASS -- 8/8 (T-0750-inbox-detail-authority.db.test.ts)",
+    "vitest_db_live_pg_regression_sweep": "PASS -- 0 failed across grants-dao-role-slug-deactivation (7), T-0744-orphaned-role-owner-claim (4), inbox_claim (7), inbox_claim_substitution (12), inbox-actor-resolve (1), T-0710-inbox-instance-filter (2), T-0710-inbox-escalation-order (2), inbox-sandbox-gate (4), inbox-defer-escalation (3), deferred-inbox (4), engine-drive-generic (3, Flowable-skip)"
+  }
+}
