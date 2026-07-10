@@ -821,6 +821,16 @@ async function readEvents(
   pool: pg.Pool,
   tenantId: string,
   limit: number,
+  // T-0710 [E16, capstone T-0691 P2]: optional instance-id SCOPE, pushed into the
+  // SQL WHERE clause of all four reads (every audit_event payload used here carries
+  // `inst`). This is a HONEST narrowing — not a post-fetch filter over the LIMIT-
+  // capped page: without it, a tenant with more than `limit` process.started rows
+  // could have a specific instance's rows fall entirely outside the oldest-`limit`
+  // window (ORDER BY occurred_at ASC LIMIT N), so an in-memory-only instance filter
+  // downstream would silently see NOTHING for that instance even though it is real.
+  // Scoping the WHERE clause itself means only THIS instance's (inherently few) rows
+  // are fetched, independent of how many other instances the tenant has.
+  instanceId?: string,
 ): Promise<{
   started: StartedRow[];
   endedInstanceIds: Set<string>;
@@ -828,14 +838,20 @@ async function readEvents(
   nextTaskRows: NextTaskRow[];
 }> {
   return withTenant(pool, tenantId, async (client) => {
+    const instScope = instanceId ? ` AND payload->>'inst' = $4` : "";
+    // $1 = type, $2 = tenantId, $3 = limit, $4 = instanceId (only when scoped) — the
+    // SAME bind order for every one of the four queries below.
+    const bind = (type: string): unknown[] =>
+      instanceId ? [type, tenantId, limit, instanceId] : [type, tenantId, limit];
+
     const startedRes = await client.query<StartedRow>(
       `SELECT id, actor, payload, occurred_at::float8 AS occurred_at
          FROM choros.audit_event
         WHERE type = $1
-          AND tenant_id = $2
+          AND tenant_id = $2${instScope}
         ORDER BY occurred_at ASC
         LIMIT $3`,
-      [PROCESS_STARTED_TYPE, tenantId, limit],
+      bind(PROCESS_STARTED_TYPE),
     );
 
     // T-0443: instance.ended → engine-gated done signal.
@@ -843,10 +859,10 @@ async function readEvents(
       `SELECT payload
          FROM choros.audit_event
         WHERE type = $1
-          AND tenant_id = $2
+          AND tenant_id = $2${instScope}
         ORDER BY occurred_at ASC
         LIMIT $3`,
-      [INSTANCE_ENDED_TYPE, tenantId, limit],
+      bind(INSTANCE_ENDED_TYPE),
     );
 
     // task.approved: kept for the listInstanceInboxTasks "hide base task after approve" logic.
@@ -854,10 +870,10 @@ async function readEvents(
       `SELECT payload
          FROM choros.audit_event
         WHERE type = $1
-          AND tenant_id = $2
+          AND tenant_id = $2${instScope}
         ORDER BY occurred_at ASC
         LIMIT $3`,
-      [TASK_APPROVED_TYPE, tenantId, limit],
+      bind(TASK_APPROVED_TYPE),
     );
 
     // T-0443: process.next_task → post-gateway waiting task surfaced to inbox.
@@ -865,10 +881,10 @@ async function readEvents(
       `SELECT id, payload, occurred_at::float8 AS occurred_at
          FROM choros.audit_event
         WHERE type = $1
-          AND tenant_id = $2
+          AND tenant_id = $2${instScope}
         ORDER BY occurred_at ASC
         LIMIT $3`,
-      [NEXT_TASK_TYPE, tenantId, limit],
+      bind(NEXT_TASK_TYPE),
     );
 
     const endedInstanceIds = new Set<string>();
@@ -1014,10 +1030,33 @@ export async function listInstanceProjections(
   // pending-map above, which tracks the NOT-yet-approved ones). Feeds stepsDone
   // below; replaces the hardcoded {done:2,total:3}/{done:3,total:3} literal.
   const approvedNextTaskCountByInst = new Map<string, number>();
+  // T-0710 [E16, capstone T-0691 P2]: instances that have AT LEAST ONE next_task
+  // row — approved OR pending. Mirrors the T-0608 rule already proven below in
+  // listInstanceInboxTasks ("instancesWithNextTask"): every next_task emit site
+  // (reconcileInstanceTimers / reconcileInstanceEngineDrive / deliverMessageEnvelope
+  // / surfaceMessageCatchWaits, and the ordinary post-gateway-approve path) only
+  // appends a row after confirming — via a LIVE engine.getActiveUserTasks call —
+  // that the engine already moved to a genuinely NEW active task. So a next_task
+  // row's mere EXISTENCE is itself proof the base step is no longer the engine's
+  // live task, independent of whether the base row's OWN task.approved audit event
+  // was ever recorded. Without this, a legacy/malformed audit trail (base row
+  // missing its task.approved — e.g. an older write path, or history pruning) makes
+  // listInstanceProjections show BOTH the stale base step and the real next step as
+  // if they were concurrent AND-split branches, when they are actually SEQUENTIAL
+  // (found live: instance-detail «Текущий шаг» listing two steps for one token).
+  const instancesWithAnyNextTask = new Set<string>();
+  // T-0710: the role of the FIRST pending next_task row per instance (its
+  // task_role) — lets the primary `role` field below follow the SAME supersession
+  // fix as `step` (both become concurrentSteps[0]'s facts), preserving the
+  // step===concurrentSteps[0] invariant the catalog/detail/inbox read planes all
+  // rely on (T-0709/T-0718 single-source-of-truth), instead of swapping the
+  // divergence from "detail vs catalog" to "concurrentSteps[0] vs step/role".
+  const firstPendingNextRoleByInst = new Map<string, string>();
   for (const ntRow of nextTaskRows) {
     const p = (ntRow.payload ?? {}) as Record<string, unknown>;
     const ntInst = p["inst"];
     if (typeof ntInst !== "string" || ntInst.length === 0) continue;
+    instancesWithAnyNextTask.add(ntInst);
     if (approvedTaskIds.has(ntRow.id)) {
       approvedNextTaskCountByInst.set(ntInst, (approvedNextTaskCountByInst.get(ntInst) ?? 0) + 1);
       continue;
@@ -1027,6 +1066,7 @@ export async function listInstanceProjections(
     const arr = concurrentNextStepsByInst.get(ntInst);
     if (arr === undefined) {
       concurrentNextStepsByInst.set(ntInst, [stepLabel]);
+      firstPendingNextRoleByInst.set(ntInst, strField(p, "task_role", APPROVER_ROLE));
     } else if (!arr.includes(stepLabel)) {
       arr.push(stepLabel);
     }
@@ -1069,33 +1109,63 @@ export async function listInstanceProjections(
     // T-0414 / T-0356: read originating record_id (present when started via on_create).
     const rawRecordId = payload["record_id"];
     const recordId = typeof rawRecordId === "string" && rawRecordId ? rawRecordId : undefined;
+    // T-0614 [деТЭЛ] / T-0710: baseApproved computed ONCE and reused below (was
+    // duplicated — one copy scoped inside the old `if (!done)` block, one for
+    // stepsDone — risking the two silently drifting apart).
+    const baseApproved = approvedTaskIds.has(row.id);
+    // T-0710 [E16, capstone T-0691 P2]: true when a next_task row exists for this
+    // instance (approved or pending) — proof (see instancesWithAnyNextTask above)
+    // that the base step is superseded even though its OWN task.approved was never
+    // recorded (a legacy/malformed audit row, the exact live-found symptom).
+    const baseSuperseded = instancesWithAnyNextTask.has(inst);
     // T-0456 [D8-R1]: assemble the concurrent waiting steps. The base process.started
-    // step is waiting until its own task.approved arrives (approvedTaskIds.has(row.id));
-    // pending next_task rows add the post-split concurrent branches. A done instance
-    // has no waiting steps.
+    // step is waiting until its own task.approved arrives (approvedTaskIds.has(row.id))
+    // AND it has not been superseded by a next_task row (T-0710); pending next_task
+    // rows add the post-split concurrent branches. A done instance has no waiting steps.
     const concurrentSteps: string[] = [];
     if (!done) {
-      const baseApproved = approvedTaskIds.has(row.id);
-      if (!baseApproved) concurrentSteps.push(step);
+      if (!baseApproved && !baseSuperseded) concurrentSteps.push(step);
       for (const ntStep of concurrentNextStepsByInst.get(inst) ?? []) {
         if (!concurrentSteps.includes(ntStep)) concurrentSteps.push(ntStep);
       }
       // Defensive: a waiting instance should always show at least its primary step.
       if (concurrentSteps.length === 0) concurrentSteps.push(step);
     }
+    // T-0710: the primary step/role follow concurrentSteps[0] — the array's own
+    // primary/first entry BY CONSTRUCTION (see the assembly above) — instead of
+    // unconditionally echoing the base row's raw task_step/task_role. Before this,
+    // `step`/`role` were the base's raw fields NO MATTER what concurrentSteps said,
+    // even in the ALREADY-correctly-audited case (baseApproved=true, a pending
+    // next_task row present, e.g. the 6M branch) — concurrentSteps rightly excluded
+    // the base there too, but the primary fields silently kept echoing it (a
+    // pre-existing gap this task's live-found symptom shares the root cause with).
+    // Any read surface that shows the SINGLE primary field (the inbox drawer's
+    // «Текущий шаг» — StepRef — and the /api/process-catalog admin list, neither of
+    // which carries a nodes/concurrentSteps array) would otherwise still show the
+    // stale/next-labelled base step while the detail page's nodes[] correctly moved
+    // on — reintroducing a T-0709-class divergence between read surfaces.
+    // `role` only swaps to the next-task's role when the primary actually moved off
+    // the base's own label (concurrentSteps[0] !== step); firstPendingNextRoleByInst
+    // has no entry when concurrentSteps[0] fell back to `step` itself (the defensive
+    // re-add below, when the base is superseded but no PENDING next_task remains) —
+    // the `?? role` degrade then keeps the base's own (still-accurate) role.
+    const primaryStep = !done && concurrentSteps.length > 0 ? concurrentSteps[0]! : step;
+    const primaryRole =
+      !done && concurrentSteps.length > 0 && concurrentSteps[0] !== step
+        ? (firstPendingNextRoleByInst.get(inst) ?? role)
+        : role;
     // T-0614 [деТЭЛ]: honest "known so far" step count — replaces the hardcoded
     // 3-node-ТЭЛ progress literal. stepsDone = base approve (if approved) + approved
     // next_task rows for this instance; stepsKnownTotal = stepsDone (done instance,
     // no further steps this projection can honestly claim) or stepsDone + the
     // CURRENTLY waiting concurrent steps (non-done instance).
-    const baseApproved = approvedTaskIds.has(row.id);
     const stepsDone = (baseApproved ? 1 : 0) + (approvedNextTaskCountByInst.get(inst) ?? 0);
     const stepsKnownTotal = done ? stepsDone : stepsDone + concurrentSteps.length;
     return {
       inst,
       procKey,
-      role,
-      step: done ? "Завершено" : step,
+      role: primaryRole,
+      step: done ? "Завершено" : primaryStep,
       status: done ? "done" : "waiting",
       startedAt: row.occurred_at,
       // row.id == process.started event id == inbox_task_id (self-referential back-link).
@@ -1146,10 +1216,23 @@ export async function listInstanceProjections(
 export async function listInstanceInboxTasks(
   pool: pg.Pool,
   tenantId: string,
-  opts?: { limit?: number },
+  opts?: {
+    limit?: number;
+    /**
+     * T-0710 [E16, capstone T-0691 P2]: scope the read to ONE instance's rows,
+     * pushed into readEvents's SQL WHERE clause (not a post-fetch filter) — see
+     * readEvents's doc comment for why this matters (LIMIT-window truncation).
+     */
+    instanceId?: string;
+  },
 ): Promise<InstanceInboxTask[]> {
   const limit = Math.min(opts?.limit ?? 200, 500);
-  const { started, endedInstanceIds, approvedTaskIds, nextTaskRows } = await readEvents(pool, tenantId, limit);
+  const { started, endedInstanceIds, approvedTaskIds, nextTaskRows } = await readEvents(
+    pool,
+    tenantId,
+    limit,
+    opts?.instanceId,
+  );
 
   // T-0608 (пункт б): instances that have AT LEAST ONE process.next_task row
   // (approved or not) — proof the engine already advanced past the base step.
