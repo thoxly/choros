@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0700",
+  "status": "pr_open",
+  "branch": "task/T-0700",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/assistant-configurator.ts",
+    "src/__tests__/assistant-configurator.test.ts",
+    "ci/checks/db/author-binding-target-registry.test.ts (NEW)",
+    "docs/specs/T-0700-configurator-target-registry-tool-param.spec.md (NEW)",
+    "docs/design/ADR-T0700-configurator-target-registry-tool-param.md (NEW)",
+    "T-0700.pr-handoff.json (NEW)"
+  ],
+  "summary": "Столп 5, инвариант «бот==человек» (эпик E-FORMS T-0479). Сервер (executeApprovedOpAsDraft, кейс author_binding, src/http/assistant.ts) с T-0681 принимает и валидирует args.targetRegistrySlug (fail-closed: слаг обязан называть реальный registry_def под привязываемым приложением), а человек в UI (screen-processes.jsx «Реестр результата») мог выбрать нестандартный реестр — но схема инструмента TOOL_AUTHOR_BINDING (src/core/assistant-configurator.ts) параметр НЕ объявляла, и function-calling LLM физически не могла его заполнить: асимметрия бот≠человек. Фикс: параметр добавлен в parameters.properties схемы инструмента — опциональный (НЕ в required), русскоязычное описание общими словами (когда использовать, что означает пустое значение, что сервер честно отклонит несуществующий реестр), без кейс-контента (D-064 §5). Протяжка в вызов author_binding не потребовала правок исполнения: processToolCall передаёт весь распарсенный объект аргументов в ApprovedOp.args целиком, а executeApprovedOpAsDraft (T-0681) уже читает args[\"targetRegistrySlug\"] — единственным недостающим звеном была декларация в схеме. Сопутствующая audit-правка: changelog-описание ApprovedOp называет нестандартный реестр, когда он указан (паритет с тем, что человек видит в своей форме). Паритет с UI доказан тестами: (a) core-юнит — схема объявляет параметр, tool-call С ним доносит значение до ApprovedOp.args verbatim, БЕЗ него — прежнее поведение; (b) живой Postgres — ApprovedOp формы конфигуратора через ТОТ ЖЕ исполнитель пишет process_app_binding.target_registry_slug (тот же столбец и той же валидацией, что человеческий POST /api/process-app-bindings из T-0681), несуществующий слаг честно отклоняется без записи, отсутствие параметра даёт NULL.",
+  "gates": {
+    "types": "tsc --noEmit — 0 ошибок",
+    "build": "npm run build (tsc + seed/tsconfig.json) — exit 0",
+    "lint": "eslint src — 0 ошибок, 44 pre-existing no-console warnings (ни одного в изменённых строках этой задачи; единственный warning в assistant-configurator.ts — строка 1246, T-0600, не наш дифф)",
+    "unit_targeted": "npx vitest run src/__tests__/assistant-configurator.test.ts — 42/42 (4 новых: AC-T700-1 схема объявляет targetRegistrySlug не-required; AC-T700-2 pass-through в ApprovedOp.args + changelog называет реестр; AC-T700-3 без параметра args без ключа и changelog без упоминания)",
+    "unit_assistant_suite": "7 assistant-файлов (configurator/owner/bundle-review/thread-ux/prompt/prompt-authz/intent-routing) — 96/96",
+    "db_targeted": "npm run fitness:db -- author-binding-target-registry (DATABASE_URL=:55432, T-0147 изолированная clone-БД) — 1/1 (AC-1 реальный слаг пишется; AC-2 несуществующий слаг → честная ошибка «не найден», строки нет; AC-3 без параметра → NULL). Полный fitness:db НЕ гонялся (по постановке — только свои db-тесты)",
+    "fitness": "npm run fitness (полная non-DB цепочка ~250+ чеков включая anti-case-lock, authoring-redlines-isolation, llm-port-injectable, agent-bridge-contract FF-15) — exit 0, 1469 PASS-строк; все FAIL-строки в логе — планированные bad-фикстуры внутри --self-test блоков чужих гейтов (каждая немедленно сопровождается SELF-TEST PASS; проверено выборочно: doc-coherence, docpage-writeful-tools, read-pdp-anti-case, read-pdp-frozen-core — все self-test)",
+    "anti_case_lock": "bash ci/checks/anti-case-lock.sh (и в составе fitness) — PASS: Phase 1 делегаты чисты (aggregate 4 < baseline 7), Phase 2 полный денилист aggregate 15 (baseline 16, не растёт) — ноль новых кейс-литералов"
+  },
+  "live_proof_plan": "Цель: ассистент ПО ТЕКСТУ привязывает процесс к УКАЗАННОМУ (нестандартному) реестру — то, что до T-0700 мог только человек через UI. Стенд: dev-стек (Tailscale 100.121.76.86:3000) — СЕЙЧАС OFFLINE, исполнение отложено до поднятия стенда; нужен тенант с живым LLM-ключом (BYO, T-0679 строгий BYO — env-ключ не наследуется). Шаги: (1) в тенанте с LLM-подключением подготовить приложение с ДВУМЯ реестрами (дефолтный + альтернативный — реальные данные тенанта, не кейс-литералы) и опубликованный процесс; (2) в чате ассистента (режим конфигуратора, актор с authoring_draft или владелец) текстом попросить: «привяжи процесс <key> к приложению <имя>, результат шага клади в реестр <имя альтернативного>»; (3) ожидание: LLM вызывает author_binding с targetRegistrySlug=<слаг альтернативного>, в ответе ассистента changelog-строка называет «реестр результата=«<слаг>»»; (4) проверить в UI (Процессы → привязка) и/или GET /api/process-app-bindings, что target_registry_slug записан альтернативным слагом; (5) негативная ветка: попросить привязать к несуществующему реестру — ассистент отдаёт честный отказ «реестр «…» не найден в приложении этого пространства», строка привязки НЕ создана; (6) контроль паритета: тот же выбор через человеческую форму (Реестр результата) даёт идентичную строку в БД. Артефакты: скрин диалога с changelog-строкой; скрин/JSON привязки с target_registry_slug; скрин честного отказа. NOT YET EXECUTED — стенд offline на момент сессии; вся серверная механика доказана live-PG тестом (ci/checks/db/author-binding-target-registry.test.ts), непрожитым остаётся только LLM-звено (модель реально заполняет параметр по тексту пользователя).",
+  "deviations_from_adr": [],
+  "friction_events": [
+    "npx tsc в свежем worktree без node_modules отдаёт левый пакет-заглушку ('This is not the tsc command you are looking for') — нужен npm ci ПЕРЕД первым tsc; сам npm ci с --maxsockets=3 прошёл за 2с",
+    "vitest.config.js исключает ci/checks/db/** из дефолтного прогона — таргетный db-тест гоняется ТОЛЬКО через npm run fitness:db -- <filename-filter> (vitest --dir ci/checks/db), прямой 'npx vitest run ci/checks/db/<file>' отдаёт 'No test files found'"
+  ]
+}
