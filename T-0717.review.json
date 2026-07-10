@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0717",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "reinterpretation_verdict": {
+    "human_name_from_bpmn_rejection_honest": true,
+    "rejection_a_dockerfile_no_config_verified": true,
+    "rejection_b_flowable_key_not_tenant_partitioned_verified": true,
+    "keydemoted_is": "demoted machine-jargon (raw process key, e.g. telLinear) — NOT an opaque actor-UUID; secondary/muted, never primary. Lesser-evil vs two indistinguishable «Процесс» rows; consistent with the already-blessed screen-process-instance.jsx convention.",
+    "keydemoted_resolves_original_complaint": true,
+    "note": "keyDemoted distinguishes DIFFERENT engine-only processes (different keys) on one record — the literal complaint. Two runs of the SAME key stay chip-identical (honest: distinguish instances via StepRef/StatusChip/link)."
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/screen-record-detail.jsx:691-696 (chip) + T-0717.pr-handoff.json live_proof_plan step 4",
+      "issue": "keyDemoted chip distinguishes DIFFERENT engine keys but NOT two instances of the SAME engine key (both telLinear render an identical chip). The founder complaint's plain reading is «несколько таких процессов … выглядели одинаково» (different processes) → resolved; but if the field case was 2 runs of one telLinear, the new chip does not add distinguishability there.",
+      "suggestion": "Non-blocking: instance-level distinguishing already works (StepRef/StatusChip/link → /processes/:id). Worth one line in the LIVE_PROOF that same-key instances rely on step/status, not the chip."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "docs/tasks/T-0717.adr.md:117 (O-1 follow-up)",
+      "issue": "The true human-layer target (столп 4 / E-UX-HUMAN) is the real BPMN name «Канонический линейный ТЭЛ», not the raw slug telLinear. That remains only prose in the ADR (O-1), gated behind giving Flowable native tenantId — no backlog task exists, so it can be forgotten.",
+      "suggestion": "File O-1 as an actual backlog task (tenant-scoped live engine-name resolve, depends on native Flowable tenantId on deploy/start). keyDemoted is the correct P3-proportionate fix; O-1 is the follow-through."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "T-0717.pr-handoff.json live_proof_plan.status = deferred",
+      "issue": "LIVE_PROOF deferred (stand offline at coding time). Change is purely presentational and mechanically substituted (mutation-proof reproduced 1 RED; full web suite green), but per D-064 the human-slice should still be lived on the dev stand.",
+      "suggestion": "Non-blocking for the code verdict — run the 6-step live_proof_plan on the stand at/before promotion (secondary chip appears next to «Процесс» for 2+ engine-only rows)."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1 named process: primary=name + demoted key chip", "covered": true },
+    { "ac": "AC-2 engine-only: primary stays generic «Процесс», key now visible → distinguishable", "covered": true },
+    { "ac": "AC-3 no procId → chip not rendered (keyDemoted null)", "covered": true },
+    { "ac": "AC-4 non-engine rows not regressed (existing tests green unchanged)", "covered": true },
+    { "ac": "AC-5 anti-case-lock: no new case-literal, baseline not raised", "covered": true }
+  ],
+  "gates_run_by_reviewer": {
+    "tsc_noEmit": "exit 0, 0 errors",
+    "vitest_targeted": "82/82 (screen-record-detail 40, process-instance.logic 30, screen-process-instance 12)",
+    "vitest_full_web": "98 files, 2684/2684 passed",
+    "anti-case-lock.sh": "PASS + --self-test PASS (aggregate 15 ≤ baseline 16; telLinear 1 == baseline 1)",
+    "detel-base-task-from-engine.sh": "PASS + --self-test PASS",
+    "ux/anti-uuid-actor-render.sh": "PASS + --self-test PASS (0 bare raw-identifier renders under web/src/screens)",
+    "mutation_proof": "reverted `const { title, keyDemoted }` → `const { title }`: EXACTLY 1 RED (new keyDemoted test, screen-record-detail.test.jsx:415), 39 pass. Restored via git checkout — working tree pristine.",
+    "diff_scope": "2 src (screen-record-detail.jsx + .test.jsx) + 3 docs (adr/spec/pr-handoff). No ci/checks touched (frozen-thaw clean). No server/migration.",
+    "justification_verified_live": "Dockerfile runtime stage copies ONLY dist/, package*.json, web/dist/, migrations/, ops/docker-entrypoint.sh — config/ NOT copied → local-BPMN read dead in prod (TRUE). flowable-client.ts deployBpmn/startInstance never send native Flowable tenantId → process_key globally namespaced → bare-key REST resolve risks cross-tenant name leak, exactly T-0616 §F-1 class (TRUE)."
+  },
+  "role_gap_evidence": []
+}

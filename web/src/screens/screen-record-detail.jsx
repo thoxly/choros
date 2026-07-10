@@ -671,7 +671,17 @@ export function PersonFieldValue({ personId, authorNames }) {
 
 /** One related-instance row: human process title + current step + status + link. */
 function RelatedProcessRow({ instance }) {
-  const { title } = deriveInstanceTitle(instance);
+  // T-0717 [P3 follow-up, T-0708 LIVE_PROOF]: keyDemoted was previously dropped
+  // here — a record with 2+ related ENGINE-ONLY instances (source=engine, no
+  // choros.process_definition row, e.g. telLinear deployed straight from
+  // config/flowable/processes/) all rendered the IDENTICAL honest generic
+  // «Процесс» with NOTHING to tell them apart. deriveInstanceTitle already
+  // computes a demoted secondary (the raw procId) for exactly this purpose —
+  // screen-process-instance.jsx's own title block already renders it (mono meta
+  // line under the h1). Same field, same visual convention, reused here — not a
+  // new resolver, not a new request (procId already rides the existing
+  // GET /api/processes?record=<id> payload).
+  const { title, keyDemoted } = deriveInstanceTitle(instance);
   const nodes = currentNodes(instance);
   // A done instance has no waiting node — show the honest terminal note instead
   // of an empty StepRef. currentNodes() returns [] for done; [step] otherwise.
@@ -691,8 +701,19 @@ function RelatedProcessRow({ instance }) {
       title={`Открыть процесс · ${instance.id}`}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--chs-space-3)' }}>
-        <span style={{ ...valueStyle, color: 'var(--chs-color-accent)', fontWeight: '500' }}>
-          {title}
+        <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)', minWidth: 0 }}>
+          <span style={{ ...valueStyle, color: 'var(--chs-color-accent)', fontWeight: '500' }}>
+            {title}
+          </span>
+          {/* T-0717: demoted key, same convention as screen-process-instance.jsx's
+              own mono meta line — never the primary label, always a visible
+              secondary so 2+ engine-only rows (identical «Процесс» title) stay
+              distinguishable. */}
+          {keyDemoted && (
+            <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+              {keyDemoted}
+            </Mono>
+          )}
         </span>
         <StatusChip status={instance.status} />
       </div>
