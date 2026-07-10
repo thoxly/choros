@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0720",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "B1",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "web/src/screens/rights/ra-intents.jsx:99-103 (selfAbsenceResultMessage, tier1 branch)",
+      "issue": "tier1-сообщение обещает «если все остальные держатели станут недоступны, замещение вступит в силу автоматически». Механизма нет: авто-эскалации tier1->tier2 / ре-минта гранта в системе нет (поиск по src/, executor-resolver шаг 5 SLA-escalation out-of-scope). При опустошении пула executor-resolver роутит задачу tier1-замещающему (DAO не фильтрует ttl_grant_id), но claim-гейт inbox.ts:1355 отсеивает tier1 (r.ttlGrantId !== null) — не-держатель-замещающий получает 403 NOT_ELIGIBLE и задача застревает (resolver уже вернул kind:substitution, на владельца не падает). Путь достижим: сервер (registerSelfAbsence) не проверяет, что замещающий держит роль; UI-пикер = все сотрудники (ra-intents.jsx:426). Обещание = ложь для нормального пути; исход хуже прежнего generic-сообщения. Регрессия честности tier-ветки — против самой цели задачи.",
+      "suggestion": "Смягчить текст до фактического поведения (только роутинг, без «вступит в силу», как в fallback-ветке и как было до T-0720); ЛИБО обусловить обещание тем, что замещающий держит роль; ЛИБО (отдельная серверная задача) закрыть разрыв: валидировать держание роли tier1-замещающим или минтить dormant standby-грант, активируемый при опустошении пула. Выбор фикса — за строителем; минимум: не заявлять авто-вступление в силу там, где сервер не авторизует не-держателя-замещающего."
+    },
+    {
+      "id": "N1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/screens/rights/ra-intents.jsx:105 (tier2, formatDate(valid_until))",
+      "issue": "formatDate в режиме по умолчанию даёт «1 авг 2026, 13:00» (короткое имя месяца + время), а не дд.мм.гггг, как предполагал хинт задачи. Человеко-читаемо; показ времени для конца окна отсутствия уместен.",
+      "suggestion": "Оставить как есть допустимо; при желании чисто-даты использовать formatShortDate."
+    },
+    {
+      "id": "N2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/db/substitution-dao.ts (SUBST_SELECT) + src/http/inbox.ts:636-676 (pre-existing, вне скоупа T-0720)",
+      "issue": "getActiveSubstitutionsByRole не фильтрует ttl_grant_id, поэтому даже ДО опустошения пула tier1-замещающий добавляется в эффективный пул роли и появляется кандидатом в инбоксе, но 403-ится на claim (не-держатель). Серверный квирк, не введён T-0720, но усиливает нечестность tier1-сообщения (B1).",
+      "suggestion": "Follow-up: в роутинге/инбоксе не показывать tier1-не-держателя-замещающего кандидатом, пока он не авторизован, или согласовать модель авторизации tier1-замещения."
+    },
+    {
+      "id": "N3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/screens/rights/ra-intents.jsx:419-421 (интро-нота формы, не тронута задачей)",
+      "issue": "Пред-существующая нота «Задачи ... будут автоматически перенаправлены замещающему, пока вы отсутствуете» — та же оптимистичность для tier1-не-держателя (мягче: про роутинг/«перенаправлены»).",
+      "suggestion": "Follow-up вместе с B1: согласовать интро-ноту с реальной семантикой tier1."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "R-3: SelfAbsenceForm пост-сабмит читает server tier и даёт tier-ветвлённый фидбек", "covered": true },
+    { "ac": "R-3 честность: tier1-сообщение не врёт про поведение сервера", "covered": false },
+    { "ac": "R-3 честность: tier2-сообщение (грант/инбокс/«не шире»/«до <дата>»)", "covered": true },
+    { "ac": "R-1: обе формы «не шире … попытка расширить будет отклонена»", "covered": true },
+    { "ac": "R-2: обе формы называют обоих исключаемых из пула (совпадает с SQL)", "covered": true },
+    { "ac": "Кросс-форм консистентность, нет «Tier-» в prose, fallback честно-generic", "covered": true },
+    { "ac": "Гейты: tsc 0 / vitest 37/37 / vite build 0 / rights-ui + ux-g5 PASS / сервер байт-не-менялся", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Проверено против сервера, не против handoff: registerSelfAbsence (rights-intents.ts:1284-1393) + s5/s6 (rights-intents.self-absence.authz.test.ts) — tier/ttl_grant_id/valid_until реально в ответе; frozen-write гейт PASS подтверждает сервер байт-не-менялся.",
+    "executor-resolver.ts (шаг 3 + шаг 5 out-of-scope), substitution-dao.ts (SUBST_SELECT без ttl_grant_id фильтра), inbox.ts:1343-1379/1856-1862 (claim-гейт tier2-only) — прочитаны для трассировки авто-активации tier1: механизма нет.",
+    "Гейты прогнаны в worktree живьём: tsc 0, vitest 37/37, vite build 0, rights-ui-no-new-write/anti-case/frozen-write PASS, ux-g5 PASS."
+  ]
+}
