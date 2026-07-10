@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0711",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/forms-document-ops.ts:84",
+      "issue": "Агентский шов принимает application_id опционально, но не обязывает. На процессе с 2+ привязками агент без пина получает детерминированный фолбэк (старейшая привязка) — возможно НЕ ту схему, которую он подразумевал. Человеческий путь (FormDesigner) шлёт selectedAppId всегда; асимметрия человек/бот.",
+      "suggestion": "Follow-up: агент-драйверы/ассистент, оперирующие мульти-привязочным процессом, должны резолвить и передавать application_id (как FormDesigner). Асимметрия допустима сейчас (фолбэк детерминирован, не случаен), но пометить кандидатом."
+    },
+    {
+      "id": "N-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/db/live-form-schema.ts:252",
+      "issue": "Tie-break `id ASC` при равных created_at (bigint millis; сиды/миграции пишут 0, batch-upsert в одну мс) даёт полный, детерминированный, но НЕ семантичный порядок — какая из двух равных привязок выигрывает, произвольно.",
+      "suggestion": "Приемлемо как legacy-фолбэк: реальный фикс — пин (человеческий путь всегда пинит). Документировано в ADR §2. Оставить."
+    },
+    {
+      "id": "N-3",
+      "severity": "nit",
+      "axis": 6,
+      "location": "src/db/live-form-schema.ts:251",
+      "issue": "Ветка `$3::uuid IS NULL OR application_id = $3` + ORDER BY, обрабатывающая NULL application_id, структурно недостижима: process_app_binding.application_id NOT NULL с миграции 075 (таблица там же создана; pre-075 версии не было). Подтверждено на живом PG (is_nullable=NO).",
+      "suggestion": "Информационно. Ветка защитная и fail-closed даже в гипотетике (isUuid(null)=false → null). Оставить как есть."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1 пин A→схема A, пин B→схема B (resolveLiveRecordSchema, live PG)", "covered": true },
+    { "ac": "AC-2 без пина → детерминированно старейшая (created_at ASC, id ASC), 5 повторов, обратный физ.порядок вставки", "covered": true },
+    { "ac": "AC-3 валидный-но-несуществующий/чужой applicationId → null, без подмены", "covered": true },
+    { "ac": "AC-4 classifyLayoutSave шлёт ОДИН applicationId в оба резолвера (field-keys + collection-subKeys)", "covered": true },
+    { "ac": "AC-5 HTTP: application_id=B+поле B→201; тот же layout app A→409 WRONG_FLOOR; малформенный→400; без пина→детерминированный 409", "covered": true },
+    { "ac": "UUID-guard на обоих роутах (binding + document-ops) → 400 не 500", "covered": true },
+    { "ac": "FormDesigner.persistLayout шлёт selectedAppId; пин == источник палитры (интеграция с T-0682 planSchemaRebuild)", "covered": true },
+    { "ac": "Обратная совместимость: single-binding и legacy-каналы (floor1-editor/FormBuilder) не тронуты, зелёные", "covered": true }
+  ],
+  "gates_run": {
+    "tsc": "exit 0",
+    "eslint_changed_src": "0 errors (live-form-schema.ts, binding.ts, forms-document-ops.ts)",
+    "web_formdesigner_test": "48/48 (43 T-0711 + 5 T-0682)",
+    "server_targeted": "311/311 across 16 files incl live-form-schema-application-id 7/7, forms-document-ops-wire 6/6, floor-boundary-wire 17/17, agent-auth-bypass.adversarial 96/96",
+    "db_live_pg": "T-0711-multi-app-binding-resolve 7/7 + form_binding_layout 8/8 = 15/15 (DATABASE_URL set — vacuous-skip trap avoided)",
+    "fitness_targeted": "anti-case-lock PASS (15<=16), forms-schema-binding PASS, named-binding-isolation PASS",
+    "ci_checks_frozen": "no foreign frozen-check touched (only own new db-test added)"
+  },
+  "integration_t0682": "clean — selectedAppId is the single state driving registry-defs fetch (palette fields), planSchemaRebuild(applicationId), and persistLayout pin; app-picker onChange resets selectedDefId so palette rebuilds from the new app before Save re-enables; no palette/pin desync path; both test files green on integrated tree (HEAD c1a4f679); test-count delta 43->48 is exactly T-0682's 5 additive planSchemaRebuild tests.",
+  "null_app_behavior": "structurally impossible (application_id NOT NULL since migration 075, confirmed on live PG); the IS NULL branch is defensive-only and fail-closed in all hypothetical cases.",
+  "role_gap_evidence": []
+}
