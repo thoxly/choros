@@ -144,6 +144,21 @@ $$;
 -- Constraint 123 назван Postgres автоматически: list_view_tenant_id_registry_def_id_name_key.
 -- DROP по имени под guard (идемпотентно; если 123 накатывалась под другим именем —
 -- ищем по определению столбцов через pg_constraint как запасной путь).
+--
+-- T-0707 (fix-forward, судья T-0653 NB-1): ЗАПАСНОЙ путь сравнивал
+-- array_agg(a.attname ORDER BY a.attname) — тип name[] (pg_attribute.attname
+-- есть системный тип `name`) — с ARRAY['name','registry_def_id','tenant_id'],
+-- который резолвится в text[]. Postgres не даёт неявного оператора
+-- `name[] = text[]` → `ERROR: operator does not exist: name[] = text[]`
+-- (репродуцировано вживую psql). На РЕАЛЬНОМ линейном графе (001..130 подряд)
+-- этот путь НЕДОСТИЖИМ — 123 всегда именует constraint канонично, поэтому
+-- ветка IF EXISTS выше всегда матчит первой (проверено на схеме с уже
+-- применённой 130: constraint list_view_tenant_id_registry_def_id_name_key
+-- отсутствует, list_view_name_scoped_uniq на месте — т.е. IF-путь сработал).
+-- Риск был чисто в СЫРОМ повторном применении файла на схеме с
+-- переименованным вручную constraint. `a.attname::text` внутри array_agg
+-- чинит сравнение типов без изменения семантики поиска. См.
+-- ci/checks/db/migration-130-fallback-name-cast.test.ts (регресс-проба).
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -166,7 +181,7 @@ BEGIN
        WHERE c.conrelid = 'choros.list_view'::regclass
          AND c.contype = 'u'
          AND (
-           SELECT array_agg(a.attname ORDER BY a.attname)
+           SELECT array_agg(a.attname::text ORDER BY a.attname)
              FROM unnest(c.conkey) AS k(attnum)
              JOIN pg_attribute a
                ON a.attrelid = c.conrelid AND a.attnum = k.attnum
