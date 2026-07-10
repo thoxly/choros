@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0710",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "gates_run_by_judge": {
+    "tsc_noEmit": "clean (exit 0)",
+    "db_tests_T0710": "3 files / 7 tests PASS (localhost:55432)",
+    "unit_inbox_escalation_order": "6/6 PASS",
+    "fitness": ["detel-base-task-from-engine PASS", "detel-literal-baseline PASS (aggregate 4<7)", "defer-no-new-table PASS", "anti-case-lock PASS", "start-route-isolation PASS"],
+    "judge_adversarial_probe": "AND-split (base+2 pending next_task) -> concurrentSteps=[B,C] no collapse; non-UUID/injection ?instance -> empty, no throw; 2/2 PASS",
+    "sibling_regression": "process-projection 7 + process-catalog 9 + deferred-inbox 4 + inbox-defer-escalation 3 + inbox-sandbox-gate 4 = 27/27 PASS"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/inbox.ts findInboxItems (listDeferredInboxTasks limit 100 DESC / listInstanceInboxTasks limit 200 ASC)",
+      "issue": "Fix 3 reorders only WITHIN the DB-limit window that findInboxItems fetches. A tenant with >200 waiting instance tasks has its NEWEST instance rows fall outside the ORDER BY occurred_at ASC LIMIT 200 window entirely, so they appear on NO page of the unscoped list regardless of the escalated-last partition. Pre-existing truncation, orthogonal to T-0710; mitigated for the scoped case by fix 2.",
+      "suggestion": "Follow-up: raise/paginate the source LIMIT or order instance reads DESC for the inbox; not required for this task."
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/process-projection.ts readEvents (instScope) / listDeferredInboxTasks",
+      "issue": "A malformed non-UUID ?instance= value is passed straight into the parameterized WHERE (no assertUuid on instanceId, only on tenantId) and yields a silent empty 200 rather than a 400. Injection is excluded (proven: parameterized $3/$4). Acceptable filter semantics but not validated.",
+      "suggestion": "Optional: soft-validate instance= and 400 on obviously malformed input, or leave as honest empty result."
+    },
+    {
+      "id": "F3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/http/process-projection.ts listInstanceProjections concurrentSteps defensive re-add (line ~1132)",
+      "issue": "Corner: base superseded (instancesWithAnyNextTask) but ALL next_task rows already approved and instance NOT yet ended -> concurrentNextSteps empty, base excluded, defensive push re-adds the STALE base `step`. concurrentSteps=[stale base]. Honest-degrade (no crash, no null), a rare transient before the next reconcile surfaces the real next task.",
+      "suggestion": "Acceptable. If desired, prefer showing the last approved next-step label over the base label in that window."
+    },
+    {
+      "id": "F4",
+      "severity": "nit",
+      "axis": 6,
+      "location": "T-0710.pr-handoff.json test-count phrasing",
+      "issue": "Handoff says '3 new live-PG теста + 1 unit'. Actually 3 db test FILES = 7 tests, plus 1 unit FILE = 6 tests. Minor phrasing.",
+      "suggestion": "Report file/test counts precisely."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Fix1: legacy base-missing-approve + next_task -> ONE active node (concurrentSteps=[NEXT], step/role follow [0])", "covered": true },
+    { "ac": "Fix1: genuine AND-split (2 pending next_task) NOT collapsed -> concurrentSteps=[B,C] (judge probe)", "covered": true },
+    { "ac": "Fix1: single-step & correctly-audited post-gateway regressions unchanged", "covered": true },
+    { "ac": "Fix2: ?instance= pushed into SQL WHERE (inst for process events, instance_id for defer), found outside LIMIT window", "covered": true },
+    { "ac": "Fix2: field mapping not swapped; injection-safe; malformed -> empty", "covered": true },
+    { "ac": "Fix3: stable partition non-escalated-first applied BEFORE pagination -> buried approver task surfaces on page 1", "covered": true },
+    { "ac": "Fix3: sort=sla untouched", "covered": true }
+  ]
+}
