@@ -1351,6 +1351,20 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'engine_process_name': {
+      // T-0732 (migration 131) — human-name overlay for engine-source processes.
+      // PK=(tenant_id, process_key), no cross-table FK (process_key is a soft ref
+      // to a Flowable-deployed definition). Standalone seed.
+      const id = uuid();
+      await c.query(
+        `INSERT INTO choros.engine_process_name
+           (tenant_id, process_key, name, created_at, updated_at)
+         VALUES ($1, $2, $3, 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, `ct-proc-${id.slice(0, 8)}`, `ct-name-${id.slice(0, 8)}`],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1716,6 +1730,7 @@ const SEEDED_TABLES = new Set<string>([
   'section',
   'list_view',
   'user_pref',
+  'engine_process_name',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
