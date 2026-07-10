@@ -12,12 +12,22 @@
  *
  * Route:
  *   POST /api/forms/document-ops
- *     body { processKey, stepKey, op: { kind, ...args } }
+ *     body { processKey, stepKey, op: { kind, ...args }, applicationId? }
  *       op.kind ∈ { insert, remove, reorder, update, move }  (closed vocabulary)
+ *       applicationId — OPTIONAL uuid (dual-cased `application_id` accepted too,
+ *         same convention as processKey/process_key). Pins WHICH process↔app
+ *         binding validates this save when the process is bound to 2+
+ *         applications (T-0711). A caller MAY omit it; on a process with
+ *         EXACTLY ONE binding, omitting it changes nothing (deterministic
+ *         resolution — T-0711). On a process bound to 2+ applications,
+ *         omitting it is a 422 AMBIGUOUS_APPLICATION (T-0725, see below) — the
+ *         seam asks rather than silently guessing the oldest binding.
  *     → 200 { layout, version }
- *     → 400 VALIDATION   (malformed op / unknown kind — fail-closed)
+ *     → 400 VALIDATION   (malformed op / unknown kind, or a malformed applicationId — fail-closed)
  *     → 404 NOT_FOUND    (no form_binding.layout for processKey+stepKey — nothing to patch)
  *     → 409 WRONG_FLOOR  (classifyFloorBoundary → Floor-2; SAME judge as /binding)
+ *     → 422 AMBIGUOUS_APPLICATION (T-0725: 2+ process_app_binding rows for processKey,
+ *          no applicationId given — the caller must pick one; body lists the candidates)
  *     → 401 / 403        (SAME extractActorSlug + checkRole as /api/forms/binding)
  *
  * DESIGN (ADR-T0656 §4.3):
@@ -28,6 +38,21 @@
  *    (src/core/form-document-ops.ts, parity-tested against the JS module).
  *  - the seam PATCHES an existing form (404 if none); creating a form from
  *    scratch is POST /api/forms/binding with a full layout (already exists).
+ *
+ * BOT == HUMAN PARITY ON APPLICATION SELECTION (T-0725, столп 5):
+ *   FormDesigner (the human canvas) ALWAYS threads its selected-application
+ *   picker value through persistLayout → application_id (structurally — the
+ *   picker state drives the field palette AND the save call, T-0711 review
+ *   §1(a)). An agent has no picker; it MAY pass applicationId, but a caller
+ *   that skips it on a process bound to a SINGLE application loses nothing
+ *   (deterministic resolution, T-0711). The asymmetry T-0711 review flagged
+ *   as non-blocking finding N-1 was the MULTI-binding case: skipping the pin
+ *   there used to resolve the T-0711 fallback (oldest binding) silently,
+ *   possibly against a schema the caller never intended — an agent could
+ *   validate/save against the WRONG application with no signal. This route
+ *   now runs an ambiguity pre-flight (listProcessAppBindingCandidates) before
+ *   the content gate: 2+ bindings + no pin → honest 422
+ *   AMBIGUOUS_APPLICATION naming every candidate, instead of a silent guess.
  */
 
 import type { IncomingMessage } from "node:http";
@@ -43,6 +68,7 @@ import {
   type BindingRoutesDeps,
 } from "./binding.js";
 import { applyDocumentOp } from "../core/form-document-op-apply.js";
+import { listProcessAppBindingCandidates } from "../db/live-form-schema.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,7 +112,9 @@ export function registerFormDocumentOpsRoute(
     // 2+ applications, and this seam runs the SAME classifyLayoutSave gate on
     // save. An agent driver that knows which binding it targets can name it
     // explicitly; absent, the gate falls back to a deterministic resolution
-    // (see live-form-schema.ts) rather than an arbitrary DB row.
+    // (see live-form-schema.ts) rather than an arbitrary DB row — UNLESS the
+    // process is genuinely ambiguous (2+ bindings), in which case the
+    // pre-flight below (T-0725) asks instead of guessing.
     const rawApplicationId = (
       typeof body["applicationId"] === "string" ? body["applicationId"] :
       typeof body["application_id"] === "string" ? body["application_id"] : ""
@@ -115,6 +143,29 @@ export function registerFormDocumentOpsRoute(
           "NOT_FOUND",
           `no form layout to patch for process "${processKey}" step "${stepKey}" — create it first via POST /api/forms/binding`,
         );
+      }
+
+      // T-0725 (N-1, review T-0711 §6): ambiguity pre-flight — ONLY when the
+      // caller skipped the pin. A process bound to a single application keeps
+      // the T-0711 fallback unchanged (candidates.length <= 1 → no-op here);
+      // a genuinely multi-bound process without a pin gets an honest,
+      // machine-readable "which application?" error instead of the seam
+      // silently validating/saving against whichever binding is oldest. Human
+      // saves (POST /api/forms/binding via FormDesigner) never hit this path
+      // — the picker always threads applicationId (T-0711 review §1(a)) — so
+      // this is additive for the agent seam only, no human-path regression.
+      if (!applicationId) {
+        const candidates = await listProcessAppBindingCandidates(client, tenantId, processKey);
+        if (candidates.length > 1) {
+          const optionsText = candidates
+            .map((c) => `${c.applicationDisplayName ?? c.applicationSlug ?? c.applicationId} (applicationId=${c.applicationId})`)
+            .join("; ");
+          throw new HttpError(
+            422,
+            "AMBIGUOUS_APPLICATION",
+            `Process "${processKey}" is bound to ${candidates.length} applications — pass applicationId to pick which schema this save targets (no pin means no guess). Candidates: ${optionsText}.`,
+          );
+        }
       }
 
       // Apply ONE op through the SAME pure ops the human canvas drives.

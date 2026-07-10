@@ -44,6 +44,15 @@
  *       genuinely has zero properties — that is an authoritative empty set).
  *     - NO registry_def / NO app binding    → null (unvalidatable → caller fails closed).
  *     - DB error                            → re-thrown (transient fault → reject).
+ *
+ * AMBIGUITY PRE-FLIGHT (T-0725, non-blocking finding N-1 of T-0711's review):
+ *   `listProcessAppBindingCandidates` (bottom of this file) is a SEPARATE,
+ *   caller-opt-in listing used by the document-ops agent seam to detect "2+
+ *   bindings, no pin" BEFORE calling classifyLayoutSave, and answer with an
+ *   honest "which application?" error instead of resolving the fallback
+ *   silently against a schema the caller never chose. It does NOT change the
+ *   fallback itself — floor1-editor/FormBuilder (no picker, T-0711 ADR §2)
+ *   keep the deterministic oldest-binding resolution unchanged.
  */
 
 import type pg from "pg";
@@ -285,4 +294,73 @@ export async function resolveLiveRecordSchema(
   }
 
   return schemaRow.record_schema ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// T-0725 (N-1, review T-0711 §6 / non-blocking finding N-1): list every
+// application a process is bound to — used by an UNPINNED-caller ambiguity
+// PRE-FLIGHT check, NOT by resolveLiveRecordSchema's own resolution (that
+// fallback stays exactly as T-0711 designed/documented it: floor1-editor's
+// `/edits` route and FormBuilder have no application picker at all and MUST
+// keep the deterministic oldest-binding fallback, per T-0711 ADR §2's
+// rejected-alternative rationale — changing the shared resolver would be an
+// unrelated regression for those channels).
+//
+// The document-ops agent seam (forms-document-ops.ts) is different: an agent
+// driver CAN send applicationId (T-0711 already threads it through), so for
+// THAT ONE caller, a genuinely ambiguous process (2+ bindings, no pin) is a
+// solvable problem, not a structural limitation — "ask, don't guess" applies
+// (same posture as relation-cascade.ts's ambiguous-name ASK and
+// assistant-configurator.ts's edit_jsonschema "ambiguous → ASK" comment).
+// ---------------------------------------------------------------------------
+
+/** One candidate application a process is bound to (oldest-first — same
+ *  ORDER BY as resolveLiveRecordSchema's fallback, so "first candidate" and
+ *  "what the silent fallback would have picked" are visibly the same row). */
+export interface ProcessAppBindingCandidate {
+  readonly applicationId: string;
+  readonly applicationSlug: string | null;
+  readonly applicationDisplayName: string | null;
+}
+
+/**
+ * List every `process_app_binding` row for (tenantId, processKey), joined to
+ * `choros.application` for a human-readable slug/display_name (so a caller
+ * can build an honest "which one?" message instead of a bare UUID list).
+ *
+ * Pure listing — no fail-closed null contract like resolveLiveRecordSchema:
+ * an empty array is a legitimate answer ("no bindings yet" / "one binding" —
+ * the caller decides what to do with the count, this just reports it).
+ *
+ * @returns candidates ordered exactly like resolveLiveRecordSchema's own
+ *          fallback (`created_at ASC, id ASC`) — empty when the process has
+ *          no binding at all (not this function's concern to fail-closed on).
+ */
+export async function listProcessAppBindingCandidates(
+  client: pg.PoolClient,
+  tenantId: string,
+  processKey: string,
+): Promise<ProcessAppBindingCandidate[]> {
+  if (!isUuid(tenantId)) {
+    return [];
+  }
+  const { rows } = await client.query<{
+    application_id: string;
+    slug: string | null;
+    display_name: string | null;
+  }>(
+    `SELECT pab.application_id AS application_id, a.slug AS slug, a.display_name AS display_name
+       FROM choros.process_app_binding pab
+       LEFT JOIN choros.application a
+              ON a.tenant_id = pab.tenant_id AND a.id = pab.application_id
+      WHERE pab.tenant_id = $1
+        AND pab.process_key = $2
+      ORDER BY pab.created_at ASC, pab.id ASC`,
+    [tenantId, processKey],
+  );
+  return rows.map((r) => ({
+    applicationId: r.application_id,
+    applicationSlug: r.slug,
+    applicationDisplayName: r.display_name,
+  }));
 }
