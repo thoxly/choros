@@ -13,7 +13,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Button, MonoId, Mono, ExecutorBadge, ActorChip, ProcessRef, RecordRef, StepRef, StatusChip,
   Drawer, EmptyState, LoadingState, ErrorState, KitIcon,
@@ -910,6 +910,11 @@ function InboxScreen() {
   const [q, setQ] = useState("");                 // текстовый поиск (server q=)
   const [statusFilter, setStatusFilter] = useState(null); // running|waiting|failed|done|paused
   const [processFilter, setProcessFilter] = useState(null); // фильтр по процессу/инстансу
+  // T-0735 [AC-D2]: instance scope seeded from the URL ?instance=<id> param — the
+  // process-instance detail's «Задачи этого процесса» link deep-links here. Reuses
+  // the server's precise ?instance= scope (T-0710). Clearable via the chip below.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [instanceScope, setInstanceScope] = useState(() => searchParams.get('instance') || null);
   const [groupByProcess, setGroupByProcess] = useState(false); // группировка по процессу
   const [groups, setGroups] = useState(null);     // свёртки [{key,label,count,...}]
   const [collapsedGroups, setCollapsedGroups] = useState(() => ({})); // key → true
@@ -961,6 +966,10 @@ function InboxScreen() {
     if (trimmedQ) qs.set("q", trimmedQ);
     if (statusFilter) qs.set("status", statusFilter);
     if (processFilter) qs.set("process", processFilter);
+    // T-0735 [AC-D2]: the precise per-instance scope (server ?instance=, T-0710) —
+    // seeded from the URL when the operator arrived via the detail's «Задачи этого
+    // процесса» deep-link.
+    if (instanceScope) qs.set("instance", instanceScope);
     if (groupByProcess) qs.set("group", "process");
     qs.set("page", String(pageN));
     return qs;
@@ -1092,7 +1101,15 @@ function InboxScreen() {
     setTotalPages(1);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, exec, sortSla, statusFilter, processFilter, groupByProcess]);
+  }, [tab, exec, sortSla, statusFilter, processFilter, groupByProcess, instanceScope]);
+
+  // T-0735 [AC-D2]: keep instanceScope in sync with the URL ?instance= param, so
+  // a deep-link into an already-mounted inbox (or a browser back/forward) re-seeds
+  // the scope. Clearing the chip removes the param → this effect nulls the scope.
+  useEffect(() => {
+    setInstanceScope(searchParams.get('instance') || null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // T-0653: debounce the text search (q) so keystrokes don't hammer the server.
   // Skip the initial mount run — the [tab,...] effect above already issues the
@@ -1356,6 +1373,25 @@ function InboxScreen() {
             onClick={() => setProcessFilter(null)}
           >
             <Icon name="process" /> Процесс <KitIcon name="close" />
+          </button>
+        )}
+        {/* T-0735 [AC-D2]: active instance-scope chip (from the process detail's
+            «Задачи этого процесса» deep-link, ?instance=<id>) — visible + clearable.
+            Clearing drops both the state and the URL param. */}
+        {instanceScope && (
+          <button
+            type="button"
+            className="chs-inbox__filter"
+            aria-pressed="true"
+            title="Показаны только задачи выбранного процесса"
+            onClick={() => {
+              setInstanceScope(null);
+              const next = new URLSearchParams(searchParams);
+              next.delete('instance');
+              setSearchParams(next, { replace: true });
+            }}
+          >
+            <Icon name="process" /> Задачи этого процесса <KitIcon name="close" />
           </button>
         )}
         {/* T-0653: status filter (was absent). Reuses kit <select> shape. */}

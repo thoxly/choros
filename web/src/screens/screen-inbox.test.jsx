@@ -166,7 +166,8 @@ describe('screen-inbox — T-0608 пункт е: 401 self-heal via fetchWithAuth
  */
 describe('screen-inbox — honest action-CTA on empty state (AC-9/AC-10/AC-11)', () => {
   it('imports useNavigate from react-router-dom', () => {
-    expect(src).toContain("import { useNavigate } from 'react-router-dom'");
+    // T-0735: useSearchParams added alongside useNavigate (AC-D2 URL-seeded scope).
+    expect(src).toContain("import { useNavigate, useSearchParams } from 'react-router-dom'");
   });
   it('InboxScreen invokes useNavigate()', () => {
     expect(src).toMatch(/const\s+navigate\s*=\s*useNavigate\(\)/);
@@ -556,5 +557,28 @@ describe('screen-inbox — T-0653 fix-forward (review defects)', () => {
     // Field was imported but never used. It must be gone from the kit import.
     expect(src).not.toMatch(/\bBadge, Field, Popover\b/);
     expect(src).toMatch(/\bBadge, Popover\b/);
+  });
+});
+
+describe('screen-inbox — instance-scope filter seeded from URL (T-0735 / AC-D2)', () => {
+  it('imports useSearchParams and seeds instanceScope from the ?instance= URL param', () => {
+    expect(src).toMatch(/import \{ useNavigate, useSearchParams \} from 'react-router-dom'/);
+    expect(src).toMatch(/useState\(\(\) => searchParams\.get\('instance'\) \|\| null\)/);
+  });
+
+  it('sends the precise server ?instance= scope (T-0710) in the inbox query', () => {
+    expect(src).toMatch(/if \(instanceScope\) qs\.set\("instance", instanceScope\)/);
+  });
+
+  it('reloads when the instance scope changes + stays in sync with the URL param', () => {
+    expect(src).toMatch(/\[tab, exec, sortSla, statusFilter, processFilter, groupByProcess, instanceScope\]/);
+    expect(src).toMatch(/setInstanceScope\(searchParams\.get\('instance'\) \|\| null\)/);
+  });
+
+  it('renders a clearable «Задачи этого процесса» chip that drops both state and URL param', () => {
+    expect(src).toMatch(/instanceScope &&/);
+    expect(src).toContain('Задачи этого процесса');
+    expect(src).toMatch(/next\.delete\('instance'\)/);
+    expect(src).toMatch(/setSearchParams\(next, \{ replace: true \}\)/);
   });
 });

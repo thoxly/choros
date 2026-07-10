@@ -333,10 +333,22 @@ function ProcessInstanceScreen() {
                 const { title, keyDemoted } = deriveInstanceTitle(instance);
                 return (
                   <>
+                    {/* T-0735 [AC-D3]: заголовок «Имя процесса · Запись-источник»
+                        ссылкой — RecordRef поднят из сайдбара в строку заголовка
+                        (резолвит title записи, ссылка), когда инстанс запущен из
+                        записи. Раньше запись жила только в сайдбаре. */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-4)', flexWrap: 'wrap', marginBottom: 'var(--chs-space-2)' }}>
                       <h1 style={{ margin: 0, fontSize: 'var(--chs-text-lg)', fontWeight: 'var(--chs-weight-semibold)' }}>
                         {title}
                       </h1>
+                      {hasSourceRecord(instance) && (
+                        <>
+                          <span aria-hidden="true" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-lg)' }}>·</span>
+                          <span style={{ fontSize: 'var(--chs-text-md)' }}>
+                            <RecordRef recordId={instance.recordId} headers={authHeaders()} />
+                          </span>
+                        </>
+                      )}
                       <StatusChip status={instance.status} />
                     </div>
                     <div style={{ marginBottom: 'var(--chs-space-6)', display: 'flex', gap: 'var(--chs-space-4)', flexWrap: 'wrap' }}>
@@ -394,17 +406,22 @@ function ProcessInstanceScreen() {
                 </>
               )}
 
-              {/* Related inbox tasks — link to /inbox (action stays there). */}
+              {/* Related inbox tasks — T-0735 [AC-D2]: link FILTERS the inbox to
+                  THIS instance via ?instance=<id> (the server ?instance= scope,
+                  T-0710; the inbox seeds its filter from the URL param + shows a
+                  clearable chip). Was a plain /inbox link that dropped the operator
+                  into the whole task list. Action (approve/complete) stays in the
+                  inbox — this screen is read-only (ADR T-0556 §3). */}
               <h2 style={sectionTitleStyle}>Связанные задачи</h2>
               <p style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', marginBottom: 'var(--chs-space-3)' }}>
                 Согласование и выполнение шагов этого процесса — в ваших задачах.
               </p>
               <Link
-                to="/inbox"
+                to={`/inbox?instance=${encodeURIComponent(instance.id)}`}
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', color: 'var(--chs-color-accent)', textDecoration: 'none', fontSize: 'var(--chs-text-sm)' }}
               >
                 <KitIcon name="inbox" size={14} />
-                Открыть «Мои задачи»
+                Задачи этого процесса
               </Link>
 
               {/* History / timeline. T-0609: when the backend reports
@@ -448,6 +465,20 @@ function ProcessInstanceScreen() {
                   {instance.started || '—'}
                 </Mono>
               </div>
+              {/* T-0735 [AC-D1]: «Кем запущен: <Имя> (<тип>)» — стартер именем
+                  (starterName/starterType/starterId, отданы частью A T-0654 через
+                  резолвер T-0648) через ActorChip: резолвит человеко-имя, id —
+                  вторично; при отсутствии имени падает на тип-лейбл (человек/агент/
+                  сервис), НИКОГДА не голый UUID. Рендерится лишь когда стартер
+                  известен (starterType или starterId есть). */}
+              {(instance.starterType || instance.starterId) && (
+                <div style={fieldRowStyle}>
+                  <span style={labelStyle}>Кем запущен</span>
+                  <span>
+                    <ActorChip type={instance.starterType || 'human'} name={instance.starterName} id={instance.starterId} />
+                  </span>
+                </div>
+              )}
               <div style={fieldRowStyle}>
                 <span style={labelStyle}>Длительность</span>
                 <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text)' }}>
