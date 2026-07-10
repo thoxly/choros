@@ -299,10 +299,23 @@ describe('R-1/R-2 wording polish — both static hints reworded, consistently (T
 });
 
 describe('selfAbsenceResultMessage — honest tier-aware feedback (T-0720, closes review R-3)', () => {
-  it('tier1 (role covered by another holder) → says the substitute got NO temporary access', () => {
+  it('tier1 (role covered by another holder) → says the substitute got NO temporary access, acts within THEIR OWN rights', () => {
     const msg = selfAbsenceResultMessage({ tier: 'tier1', rule_id: 'rule-1', ttl_grant_id: null, valid_until: 123 });
     expect(msg).toMatch(/не выпускался/);
+    expect(msg).toMatch(/в рамках его собственных прав/);
     expect(msg).not.toMatch(/выпущен ограниченный временный/);
+  });
+
+  it('B1 regression lock: tier1 message promises NO auto-escalation — the system has no tier1→tier2 re-mint mechanism', () => {
+    // Судейский блок T-0720 B1: первая редакция tier1-сообщения обещала
+    // «замещение вступит в силу автоматически», но механизма авто-эскалации
+    // при опустошении пула НЕТ (в tier1 ttl_grant_id остаётся NULL навсегда —
+    // серверный тест s5 в rights-intents.self-absence.authz.test.ts; claim-гейт
+    // inbox.ts даёт tier1-замещающему без собственной роли 403 NOT_ELIGIBLE).
+    // Лочим отсутствие этого обещания в tier1-тексте.
+    const msg = selfAbsenceResultMessage({ tier: 'tier1', rule_id: 'rule-1', ttl_grant_id: null, valid_until: 123 });
+    expect(msg).not.toMatch(/автоматически/);
+    expect(msg).not.toMatch(/вступит в силу/);
   });
 
   it('tier2 (sole holder → grant minted) → says the substitute got a scoped temporary access, "до <date>"', () => {
