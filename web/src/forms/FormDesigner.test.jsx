@@ -23,7 +23,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import FormDesigner from './FormDesigner.jsx';
+import FormDesigner, { planSchemaRebuild } from './FormDesigner.jsx';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FORM_DESIGNER_SRC = readFileSync(join(__dirname, 'FormDesigner.jsx'), 'utf-8');
@@ -520,6 +520,81 @@ describe('FormDesigner — registry_def picker survives registryDefs===null (P0 
     // rather than only living in a comment. See the describe-block header above
     // for the full rationale.
     expect(true).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0682 (P2 from live-proof T-0680): FormDesigner did not surface a
+// collection field in the palette on the FIRST registry-def selection when
+// an existing binding's layout had just been loaded (skipNextSchemaRebuildRef,
+// T-0665 F3) — the field only appeared after picking the SAME def a SECOND
+// time. Root cause: the schema-rebuild effect's skip flag gated BOTH
+// `parseRecordSchema`/`setFields` (the palette's source) AND the document
+// rebuild (history/savedDocRef) with the SAME guard, even though only the
+// latter needed protecting (T-0656 P0: don't overwrite a just-loaded saved
+// layout with a flat rebuild).
+//
+// planSchemaRebuild (exported, pure) is the fix's testable seam — this tier
+// has no jsdom/@testing-library (file header), so the effect itself cannot be
+// mounted/driven; these tests exercise the REAL production function the
+// effect now delegates to, not a hand-mirrored copy.
+// ---------------------------------------------------------------------------
+describe('FormDesigner — planSchemaRebuild (T-0682)', () => {
+  // Generic fixture — a plain field + a collection (table) field. No case
+  // literal (D-064 anti-case): "items"/"label" are structural placeholders,
+  // not a real tenant's business vocabulary.
+  const RECORD_SCHEMA_WITH_COLLECTION = {
+    type: 'object',
+    properties: {
+      title: { type: 'string', title: 'Title' },
+      items: {
+        type: 'array',
+        title: 'Items',
+        items: {
+          type: 'object',
+          properties: { label: { type: 'string', title: 'Label' } },
+        },
+      },
+    },
+    'x-field-order': ['title', 'items'],
+  };
+  const DEF = { id: 'def-generic', record_schema: RECORD_SCHEMA_WITH_COLLECTION };
+
+  it('AC-1: on skipDocRebuild=true (existing-binding first pass) the collection field is STILL surfaced in `fields` — proves the bug is fixed', () => {
+    const { fields } = planSchemaRebuild(DEF, { skipDocRebuild: true, applicationId: 'app-1', registryDefId: 'def-generic' });
+    const keys = fields.map((f) => f.key);
+    expect(keys).toContain('items');
+    const itemsField = fields.find((f) => f.key === 'items');
+    expect(itemsField.type).toBe('collection');
+  });
+
+  it('AC-2: on skipDocRebuild=true the document is NOT rebuilt (doc:null) — the loaded-layout invariant (T-0656 P0) survives the fix', () => {
+    const { doc } = planSchemaRebuild(DEF, { skipDocRebuild: true, applicationId: 'app-1', registryDefId: 'def-generic' });
+    expect(doc).toBeNull();
+  });
+
+  it('AC-3: on skipDocRebuild=false (no existing binding / normal path) fields AND a fresh document are both built — no regression', () => {
+    const { fields, doc } = planSchemaRebuild(DEF, { skipDocRebuild: false, applicationId: 'app-1', registryDefId: 'def-generic' });
+    expect(fields.map((f) => f.key)).toEqual(['title', 'items']);
+    expect(doc).not.toBeNull();
+    expect(doc.root).toBeTruthy();
+    expect(doc.source).toEqual({ applicationId: 'app-1', registryDefId: 'def-generic' });
+    // one child per field (flat rebuild) — same shape as the pre-T-0682 behavior.
+    expect(doc.root.children).toHaveLength(2);
+  });
+
+  it('defensive: an unresolved def (undefined/null) returns empty fields and no doc, never throws', () => {
+    expect(() => planSchemaRebuild(undefined, { skipDocRebuild: true })).not.toThrow();
+    expect(planSchemaRebuild(null, { skipDocRebuild: false })).toEqual({ fields: [], doc: null });
+  });
+
+  it('regression lock: the schema-rebuild effect is rewired onto the shared planSchemaRebuild function (structural — proves the effect itself changed, not just that an unused helper was added alongside the old bug)', () => {
+    expect(FORM_DESIGNER_SRC).toContain('const plan = planSchemaRebuild(def, { skipDocRebuild, applicationId: selectedAppId, registryDefId: selectedDefId });');
+    expect(FORM_DESIGNER_SRC).toContain('setFields(plan.fields);');
+    // The OLD buggy guard — an early `return` BEFORE `def` is even looked up,
+    // which used to skip parseRecordSchema/setFields together with the doc
+    // rebuild — must be gone from the effect.
+    expect(FORM_DESIGNER_SRC).not.toContain('if (skipNextSchemaRebuildRef.current) { skipNextSchemaRebuildRef.current = false; return; }');
   });
 });
 

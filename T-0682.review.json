@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0682",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/forms/FormDesigner.test.jsx",
+      "issue": "MOUNT-GAP: эффект сам не монтируется/не драйвится (в репо нет jsdom/@testing-library, node-env). Доказательство фикса держится на unit-тесте чистой planSchemaRebuild + structural source-string assert (regression-lock), а не на реальном прогоне useEffect с жизненным циклом skipNextSchemaRebuildRef.",
+      "suggestion": "Приемлемо и документировано в шапке файла. Полноценный mount-тест skip-флага возможен только после появления jsdom-тира — не блокирует."
+    },
+    {
+      "id": "N2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/forms/FormDesigner.jsx:808-821",
+      "issue": "Палитра И validation теперь берут поля из ЖИВОЙ схемы на первом проходе (раньше — из saved-binding data.fields). Если живая схема биндинга дрейфанула (поле удалено после сохранения), реопен покажет broken-key валидацию на первом paint (раньше — со второго клика). Видимое изменение поведения шире заявленной цели (surfacing collection).",
+      "suggestion": "Это честнее и совпадает с серверным resolveLiveRecordSchema — оставить как есть, но осознавать как побочный UX-эффект фикса. Не блокирует."
+    },
+    {
+      "id": "N3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/forms/FormDesigner.test.jsx (regression lock)",
+      "issue": "regression-lock тест сцеплен с точными строками исходника (ломок к реформату кода).",
+      "suggestion": "Осознанный компромисс — единственный способ доказать перепроволочку эффекта при MOUNT-GAP. Приемлемо."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1 (палитра получает collection с первого выбора — parseRecordSchema/setFields безусловны)", "covered": true },
+    { "ac": "AC-2 (skip взведён → документ history/savedDocRef/selectedKeys НЕ перестраивается, T-0656 P0)", "covered": true },
+    { "ac": "AC-3 (без биндинга — fields+doc строятся как раньше, нет регресса)", "covered": true },
+    { "ac": "Анти-кейс D-064 (нет кейс-литерала в web/src/, фикстуры generic)", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "T-0656 P0 сохранён: трассировка ВСЕХ useEffect FormDesigner — ни один не имеет fields в deps; безусловный setFields(plan.fields) не запускает каскад, перестраивающий документ. Документ перестраивается только в эффекте 808 при plan.doc!=null (skipDocRebuild=false). AC-2 unit подтверждает doc:null при skip=true.",
+    "Ordering-плюс: skip-флаг читается ПОСЛЕ 'if (!def) return' (812-813) — в гонке 'registryDefs пришли, def не найден' флаг не съедается преждевременно; усиливает T-0656, не ослабляет.",
+    "RED→GREEN воспроизведён живьём: подмена FormDesigner.jsx на git show dev → 5 failed | 41 passed (ровно T-0682-блок); файл восстановлен из HEAD, дерево чистое. Нетавтологичный.",
+    "Гейты прогнаны лично: FormDesigner 46/46; full web 2678/2678 (98 файлов); vite build зелёный; anti-case-lock aggregate 15 (baseline 16) PASS + rights-ui-anti-case (web/src scoped) PASS. Диф web/src/ = ровно 2 файла. Все числа строителя сошлись.",
+    "Тесты нетавтологичны: AC-1/2/3 гоняют РЕАЛЬНУЮ экспортированную planSchemaRebuild (не байт-зеркало); сигнатуры buildDefaultDocument(source,fields,opts)/parseRecordSchema(schema) вызваны корректно (AC-3 проверяет doc.source и root.children)."
+  ]
+}
