@@ -123,7 +123,24 @@ export async function fetchEmployees() {
           // matches "имя + должность" (UX study §2). Existing callers (e.g.
           // screen-record-detail.jsx's created_by resolver) only read .id/.name
           // and are unaffected by the extra field.
-          employees.push({ id: p.id, name: p.name || p.id, position: pos.title || '' });
+          //
+          // T-0698: carry `deactivated` additively too — this is the batch map
+          // screen-app-records.jsx's PersonCell reads (T-0673) to show a
+          // deactivated-executor marker on record cells, mirroring the signal
+          // ActorChip already renders elsewhere via T-0648's batchResolveActors.
+          // Before this fix GET /api/org's `people[]` carried no deactivation
+          // signal at all, so this line always dropped it — PersonCell's
+          // `deactivated` prop was permanently false in production regardless
+          // of the real employee.deactivated_at. Boolean(...) normalizes both
+          // the DB-backed shape (always a real boolean, see src/db/org.ts) and
+          // the dev-no-db ORG_SEED fallback shape (no `deactivated` key at all
+          // → undefined → false, the correct "active" default).
+          employees.push({
+            id: p.id,
+            name: p.name || p.id,
+            position: pos.title || '',
+            deactivated: Boolean(p.deactivated),
+          });
         }
       }
     }

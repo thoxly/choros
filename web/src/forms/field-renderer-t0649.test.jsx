@@ -211,14 +211,17 @@ describe('fetchEmployees — P1 /api/org 401 fix (T-0649)', () => {
     expect(seenHeaders['X-Dev-User']).toBe('e-owner');
   });
 
-  it('flattens human employees to {id, name, position}; drops agents', async () => {
+  it('flattens human employees to {id, name, position, deactivated}; drops agents', async () => {
     globalThis.fetch = async () => ({
       ok: true,
       status: 200,
       json: async () => ({
         // Generic synthetic fixtures — no case-specific persona/role literals
         // (D-064 anti-case discipline): a plain human + a plain agent, testing
-        // only the type:"human" filter and the {id,name,position} shape.
+        // only the type:"human" filter and the {id,name,position,deactivated}
+        // shape. This person carries no `deactivated` key at all (mirrors an
+        // active employee row, deactivated_at IS NULL) — the flattened shape
+        // must still carry an explicit `deactivated: false`, not `undefined`.
         departments: [{
           positions: [{
             title: 'Position A',
@@ -231,7 +234,38 @@ describe('fetchEmployees — P1 /api/org 401 fix (T-0649)', () => {
       }),
     });
     const list = await fetchEmployees();
-    expect(list).toEqual([{ id: 'emp-1', name: 'Human One', position: 'Position A' }]);
+    expect(list).toEqual([
+      { id: 'emp-1', name: 'Human One', position: 'Position A', deactivated: false },
+    ]);
+  });
+
+  // T-0698 (P2, T-0673's judge finding): GET /api/org's people[] now carries
+  // a `deactivated` boolean (src/db/org.ts listOrgTree, migration 125
+  // deactivated_at != null) — this is the FIRST of two links PersonCell's
+  // deactivated marker depends on (the second is this exact flatten step).
+  // Before this fix `employees.push({id, name, position})` silently dropped
+  // ANY `deactivated` field the API sent, so PersonCell's marker was always
+  // false in production even once the server started sending it.
+  it('T-0698: threads the `deactivated` boolean through from a real /api/org response shape', async () => {
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        departments: [{
+          positions: [{
+            title: 'Position A',
+            people: [
+              { id: 'emp-active', name: 'Active One', type: 'human', deactivated: false },
+              { id: 'emp-gone', name: 'Gone One', type: 'human', deactivated: true },
+            ],
+          }],
+        }],
+      }),
+    });
+    const list = await fetchEmployees();
+    const byId = new Map(list.map((e) => [e.id, e]));
+    expect(byId.get('emp-active').deactivated).toBe(false);
+    expect(byId.get('emp-gone').deactivated).toBe(true);
   });
 
   it('throws a formatted error on a non-ok response (so PersonPicker can show honest error + retry)', async () => {

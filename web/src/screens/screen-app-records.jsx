@@ -488,6 +488,20 @@ function FileCell({ versionId, recordId }) {
 // Honest fallback (D2): an id absent from the map (deleted/never-synced
 // employee) renders the RAW SLUG via ActorChip's own `resolved:false`
 // contract — never blank, never a fabricated name.
+//
+// T-0698 (P2, T-0673's judge finding): the `deactivated` prop below was
+// ALWAYS false in production before this fix — GET /api/org's `people[]`
+// carried no deactivation signal at all, so fetchEmployees()'s flattened
+// entries (and therefore this Map) never had a `deactivated` key regardless
+// of the real employee.deactivated_at (migration 125). The T-0673 unit test
+// covering this line hand-built its `employees` Map with `deactivated: true`
+// literally in the fixture, which exercised PersonCell's own prop-threading
+// correctly but never proved the REAL Map (built from the REAL /api/org
+// response) ever carries that key — false coverage. Fixed at the source:
+// src/db/org.ts's listOrgTree now selects deactivated_at and exposes it as a
+// boolean on OrgPerson, and fetchEmployees() (field-renderer.jsx) now copies
+// it into the flattened shape. See screen-app-records.test.jsx's
+// "real /api/org response shape" test for the honest end-to-end coverage.
 // ---------------------------------------------------------------------------
 
 /**

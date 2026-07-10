@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0698",
+  "status": "pr_open",
+  "branch": "task/T-0698",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/specs/T-0698-personcell-deactivated-thread.spec.md",
+    "docs/design/ADR-T0698-personcell-deactivated-thread.md",
+    "src/db/org.ts",
+    "web/src/forms/field-renderer.jsx",
+    "web/src/forms/field-renderer-t0649.test.jsx",
+    "web/src/screens/screen-app-records.jsx",
+    "web/src/screens/screen-app-records.test.jsx",
+    "ci/checks/db/org-tree-deactivated.db.test.ts",
+    "T-0698.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "summary_phases": {
+    "SPEC": "done — docs/specs/T-0698-personcell-deactivated-thread.spec.md",
+    "DESIGN": "done — docs/design/ADR-T0698-personcell-deactivated-thread.md (traces both breaks in the chain; decides boolean-only, never the raw deactivated_at timestamp, mirroring T-0648's ResolvedActor.deactivated precedent; explains why the old T-0673 test was kept, not deleted)",
+    "BUILD": "done — code fix (2 files) + tests (3 files, 1 new) + mutation-proof, all required gates green"
+  },
+  "where_the_thread_broke": "TWO independent breaks, both upstream of PersonCell (which was already correct): (1) src/db/org.ts::listOrgTree's empRows SQL never selected e.deactivated_at and the OrgPerson type carried no such field, so GET /api/org's people[] physically could not carry the signal; (2) web/src/forms/field-renderer.jsx::fetchEmployees()'s flatten step (`employees.push({id, name, position})`) explicitly listed only 3 fields, so even had the API started sending `deactivated` it would have been silently dropped a second time before reaching screen-app-records.jsx's employeesById Map. Fixing only one of the two would not have worked — verified by mutation-proof (git stash of src/db/org.ts alone made the new DB test fail red).",
+  "decision_boolean_vs_date": "Boolean `deactivated`, never the raw `deactivated_at` epoch-ms timestamp. Two reasons: (a) privacy/minimization — GET /api/org is broadly readable by ANY authenticated tenant member (plain withAuth, no mgmt_object:* gate; it powers PersonPicker for every record form), so exposing the EXACT deactivation timestamp to every coworker is more than the product case (\"see that the executor left\") needs; (b) consistency with the one existing precedent — src/db/actor-resolver.ts::batchResolveActors (T-0648), which already surfaces this exact signal to ActorChip on audit/inbox/grant-trail as `ResolvedActor.deactivated: row.deactivated_at != null`, a boolean. ActorChip's own prop contract is `deactivated: boolean`. Emitting a raw date here would have created a second, inconsistent contract for the same visual signal — the kind of parallel-resolver drift D-064/T-0658 already warn against.",
+  "why_old_test_was_false": "web/src/screens/screen-app-records.test.jsx's 'threads deactivated through when the batch entry carries it' (T-0673) built its `employees` Map BY HAND: `new Map([['emp-slug-1', {id, name, deactivated: true}]])`. That fixture is never produced by any real code path — it proves only that PersonCell forwards a `deactivated` key IF one is already on its map entry, never that the REAL map (built by screen-app-records.jsx from fetchEmployees()'s real /api/org response) ever HAS that key. Before this fix it never did (both breaks above), so the feature was fully inert in production behind an all-green test suite. Fix: kept the old test (it is a legitimate, narrow unit test of PersonCell's own prop-threading contract — deleting it loses real regression coverage on PersonCell itself) and added a comment above it naming the limitation, then added a new test right after it ('T-0698: real /api/org response shape through fetchEmployees()') that mocks globalThis.fetch with a realistic /api/org payload, calls the REAL fetchEmployees(), builds the Map with the SAME `new Map(list.map((e) => [e.id, e]))` expression screen-app-records.jsx itself uses, and only THEN calls PersonCell — this is the test that fails on pre-fix code. Also extended field-renderer-t0649.test.jsx's exact-shape `toEqual` test (which asserts the literal output object of fetchEmployees()) to include `deactivated: false`, and added a companion test proving both true/false flatten correctly from a synthetic /api/org shape.",
+  "gate_results": {
+    "npm_install_root": "188 packages, 0 errors (--maxsockets=3)",
+    "npm_install_web": "133 packages, 0 errors (--maxsockets=3)",
+    "tsc_noEmit_root": "0 errors",
+    "npm_run_build_root": "tsc + seed/tsconfig.json build — 0 errors",
+    "npm_run_build_web": "vite build — 546 modules, 0 errors (pre-existing >500kB chunk-size warning, unrelated)",
+    "eslint_changed_files": "0 errors — src/db/org.ts (server, no eslint config target), web/src/screens/screen-app-records.jsx, web/src/screens/screen-app-records.test.jsx, web/src/forms/field-renderer.jsx, web/src/forms/field-renderer-t0649.test.jsx",
+    "vitest_web_full": "2675 passed, 0 failed (98 files) — includes the 2 modified + 0 new web test files",
+    "vitest_server_full_nondb": "5803 passed, 10 skipped (306 files, 2 skipped, pre-existing unrelated skips) — 0 regressions from OrgPerson.deactivated? being added",
+    "vitest_db_targeted": "ci/checks/db/org-tree-deactivated.db.test.ts (NEW file, T-0698) — 3/3 passed against live PG :55432 (T-0147 template-clone isolation, choros_app NOBYPASSRLS role — production read role). Full `npm run fitness:db` (the ~1300-test full DB-tier suite) was intentionally NOT run — per this task's explicit scope instruction (targeted point-check only), not a gate gap: the change touches exactly one function (listOrgTree) and its one caller-chain, both covered by the targeted test plus the full non-DB suites above.",
+    "anti_case_lock": "PASS — Phase 1 delegate gates clean (read-pdp-anti-case, rights-ui-anti-case, detel-literal-baseline all pass), Phase 2 full D-064 denylist aggregate 15 (baseline 16, no growth — this diff added zero denylist literals)."
+  },
+  "mutation_proof": {
+    "method": "git stash push -- src/db/org.ts (reverting ONLY the DB-layer fix, keeping the new ci/checks/db/org-tree-deactivated.db.test.ts test file as-is), re-ran the new DB test against live PG, then git stash pop to restore the fix.",
+    "red_before_fix": "All 3 new DB tests failed on pre-fix listOrgTree: AC-active expected `false`, got `undefined`; AC-deactivated expected `true`, got `undefined`; AC-boolean expected `true`, got `undefined` — because empRows never selected deactivated_at at all, so OrgPerson.deactivated was structurally absent from every row regardless of the underlying employee.deactivated_at value.",
+    "green_after_fix": "git stash pop restored src/db/org.ts; all 3 tests passed immediately after, no other change needed."
+  },
+  "live_proof_plan": {
+    "verdict": "NOT YET RUN — stand offline at authoring time (per task instruction: describe the plan, do not execute against the stand from this worktree)",
+    "steps": [
+      "1. On the dev stand, ensure a test employee has been deactivated via PATCH /api/users/:employee_id (or the /users admin screen's deactivate action, T-0583) — deactivated_at is now set on that employee row.",
+      "2. Open (or create) a record in any app whose schema has a person-typed field, and set that field's value to the deactivated employee's id/slug.",
+      "3. Open the record LIST view (screen-app-records.jsx) as any authenticated tenant member (not necessarily the owner — GET /api/org has no mgmt_object:* gate) and locate the row's person-column cell.",
+      "4. Expected: the cell renders via PersonCell -> ActorChip with a visibly muted/dimmed executor badge, and hovering shows a tooltip ending in '· деактивирован' (ActorChip's existing T-0648 FIX-3 visual contract) — the SAME visual treatment already seen for the same employee in /audit, /inbox, and /rights/trail.",
+      "5. Open the record DETAIL view for the same record and confirm the same marker appears there too (PersonCell is shared between list and detail render paths in screen-app-records.jsx).",
+      "6. Negative check: an ACTIVE employee in the same person column shows the normal (non-muted) ActorChip with no '· деактивирован' suffix — confirms the marker is not always-on/always-off.",
+      "7. Network check (devtools): GET /api/org's JSON response for the tenant shows `\"deactivated\": true` on the deactivated employee's entry inside `departments[].positions[].people[]`, and no `deactivated_at`/raw timestamp field anywhere in the payload (boolean-only, per the privacy decision above)."
+    ]
+  },
+  "friction_events": []
+}
