@@ -1,0 +1,40 @@
+{
+  "task_id": "T-0728",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/screens/screen-record-detail.jsx:642 (PersonFieldValue) vs web/src/forms/field-renderer.jsx:207 (PersonCell)",
+      "issue": "PersonFieldValue (screen-record-detail.jsx) остаётся near-identical отдельной реализацией того же ActorChip-контракта, что PersonCell (разный только имя пропа: authorNames vs employees). Этот дифф не консолидирует их — уже задокументировано builder'ом в комментарии field-renderer.jsx и в pr-handoff (not_consolidated_out_of_scope) как явно вне охвата N2 (постановка T-0728 специфично про канбан).",
+      "suggestion": "Follow-up задача: слить PersonFieldValue в PersonCell (единый проп-контракт), закрыть anti-parallel-resolver долг для person-резолва целиком (сейчас 2 реализации одного факта вместо 1)."
+    },
+    {
+      "id": "N2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "T-0728.pr-handoff.json → live_proof_plan.verdict",
+      "issue": "live_proof_plan описан (8 шагов), но НЕ выполнен против реального стенда — 'стенд offline на момент авторства'. Для этой конкретной задачи не блокирую: точечная клиентская протяжка существующего механизма (не новый компонент/серверный путь), resolveCardFieldCell и PersonCell оба покрыты юнит-тестами против РЕАЛЬНЫХ formatCellValue/PERSON_CELL_ASYNC (не моков), ActorChip anti-UUID демоушен уже имеет 44 собственных теста в полном прогоне.",
+      "suggestion": "Прогнать 8-шаговый live_proof_plan из pr-handoff при следующем доступе к стенду (person-чип на реальной канбан-доске + деактивация + негативные кейсы + отсутствие второго GET /api/org) — страховка от расхождения сентинел-контракта с реальным API, не требование для этого approve."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1: person-поле с назначенным исполнителем показывает имя-чип, не «—» и не сырой id/UUID", "covered": true },
+    { "ac": "AC-2: деактивированный исполнитель несёт deactivated-сигнал идентично таблице (тот же PersonCell/ActorChip)", "covered": true },
+    { "ac": "AC-3: person-поле без значения → «—», не крашится, не «undefined»", "covered": true },
+    { "ac": "AC-4: person-значение отсутствующее в employeesById → честная деградация через ActorChip (raw slug демотирован isMachineActorLabel, не bare-child)", "covered": true },
+    { "ac": "AC-5: employeesById — тот же стейт, что таблица использует (не второй fetch) — доказано wiring-тестом + прочитано в screen-app-records.jsx:1459", "covered": true },
+    { "ac": "AC-6: tsc/targeted vitest/vite build зелёные; anti-uuid-actor-render+self-test, ux-g2-theme-pairing, anti-case-lock PASS", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Импорт-граф проверен построчно чтением всех import-заголовков (field-renderer.jsx, records-form.js, kanban-board.js, kanban-board.jsx, screen-app-records.jsx), не с доверием к commit message: field-renderer.jsx→records-form.js (только deriveRecordLabel), records-form.js не импортирует ничего из field-renderer.jsx/kanban-board.jsx/screen-app-records.jsx, kanban-board.js вообще без импортов — граф screen-app-records.jsx→kanban-board.jsx→field-renderer.jsx ациклический, обратного ребра нет.",
+    "grep -rl PersonCell по всему web/src — screen-record-detail.jsx упоминает PersonCell ТОЛЬКО в комментариях (не импортирует), значит перенос не задел ни одного продуктового потребителя кроме заявленных.",
+    "Прочитан ActorChip/isMachineActorLabel (components.jsx:135-228) — независимо подтверждено, что нерезолвленный personId-UUID демотируется из primary-текста (MACHINE_ID_RE/agent:-префикс → tooltip/mono-chip, primary=meta.label), а не просто заявлено хэндоффом.",
+    "resolveCardFieldCell live-прогнан против REAL formatCellValue/computeComputedFieldValue/PERSON_CELL_ASYNC (не мок) — подтверждено чтением kanban-card-field-cell.test.js: нет vi.mock, импорт напрямую из records-form.js.",
+    "Полный прогон vitest живьём в этом worktree: 99 файлов/2727 тестов зелёные (совпадает с заявленным числом, не переписано с доверием). tsc --noEmit 0 ошибок. vite build 0 ошибок, 546 модулей. anti-uuid-actor-render.sh + --self-test PASS. ux-g2-theme-pairing.sh PASS. anti-case-lock.sh PASS (Phase 1+2). Доп. гейты не заявленные явно в хэндоффе, но релевантные, тоже прогнаны: kanban-ux-gate.sh PASS, kanban-registry-no-fork.sh PASS.",
+    "eslint web/src --ext .jsx прогнан живьём: 107 находок репо-wide, но 0 в файлах, тронутых этим диффом (проверено grep по путям файлов в выводе eslint против списка изменённых файлов) — подтверждает claim 'eslint_web_touched_files: 0 errors, 0 warnings' из pr-handoff.",
+    "git diff 51a87de1..b95ce97a -- ci/checks/ — пусто, ни один frozen-чек не тронут (T-0146 пре-чек, reviewer.md §2.5)."
+  ]
+}
