@@ -1,39 +1,45 @@
 {
   "task_id": "T-0654",
-  "verdict": "changes_requested",
+  "verdict": "approved",
+  "reverify": true,
+  "reverify_of_commits": ["e9e5b29a", "7035ddf4"],
   "ci_seen": { "green": true },
   "findings": [
     {
       "id": "F1",
       "severity": "blocking",
       "axis": 4,
-      "location": "src/http/processes.ts — GET /api/processes LIST handler (DB branch)",
-      "issue": "Branch is based before T-0722 (already in dev) and rewrote the LIST block: it maps/paginates the tenant-scoped projections WITHOUT the filterProjectionsByReadVisibility PDP filter, and the new `total` counts the tenant-scoped (non-PDP-visible) set. git merge-tree into current dev = CONFLICT (content); a naive resolution favoring T-0654 drops the T-0722 PDP filter (enumeration/existence side-channel reopens) AND leaves `total` counting instances the reader cannot see — total leaks the tenant-wide instance count (the founder-flagged blocking 'total течёт enumeration').",
-      "suggestion": "Rebase onto current dev; insert `filterProjectionsByReadVisibility(pool, tenantId, projections, grants, ancestry, nowMs)` (dev/T-0722) BEFORE `.map(projectionToInstance)`/`selectProcessPage`, so `total` = |PDP-visible ∩ query-match| (post-PDP). Add a composition test: a reader with a narrow READ grant sees a SMALLER `total` than a full-visibility reader over the same tenant. selectProcessPage is pure and consumes whatever array it is handed, so this composes cleanly."
+      "resolved": true,
+      "location": "src/http/processes.ts:784-853 — GET /api/processes LIST handler (DB branch)",
+      "issue": "[RESOLVED at rebase+recompose e9e5b29a] LIST previously mapped/paginated the tenant-scoped set without the T-0722 PDP filter, and `total` counted the non-PDP set — enumeration/total leak.",
+      "suggestion": "Verified closed: filterProjectionsByReadVisibility (807-823) runs FIRST — before visibleProjections.map (826), selectProcessPage (827) and overlayDetailLiveSteps (837). total=selected.total (828) is over the PDP-visible set = |PDP-visible ∩ query-match|. Overlay input = visibleProjections.filter (836) so a hidden instance never reaches the engine. Proven live-PG: total(seer)-total(blind)===2, total===instances.length both sides."
     },
     {
       "id": "F2",
       "severity": "blocking",
       "axis": 4,
-      "location": "src/http/processes.ts — GET /api/processes/:id DETAIL handler (DB branch)",
-      "issue": "Branch added starter-name resolution to the DETAIL route on a pre-T-0721 base, so its DETAIL block lacks the T-0721 `if (detailVisible)` gate (isInstanceDetailVisible → isRecordReadable) now shipped in dev. Merge = CONFLICT; a naive resolution favoring T-0654 drops the gate, reopening the P1 leak of raw variables/history/completedBy* to any tenant member.",
-      "suggestion": "Keep T-0721's `if (detailVisible)` wrapper around the new starter fold — resolve the starter name only inside the allowed branch; denial falls through to the honest-404 the route already uses."
+      "resolved": true,
+      "location": "src/http/processes.ts:903-975 — GET /api/processes/:id DETAIL handler (DB branch)",
+      "issue": "[RESOLVED at rebase+recompose e9e5b29a] DETAIL previously lacked the T-0721 read-visibility gate around the added starter fold — raw variables/history/starter leak to any tenant member.",
+      "suggestion": "Verified closed: if(detailVisible) (929) wraps the ENTIRE serving block including fetchInstanceHistoryDetail + starter resolve (948-961) and the return (962); hidden instance (detailVisible=false) skips it all — no starter resolve, no variables/history/starterName — and falls to honest-404 (975). Proven live-PG (6 T-0721 tests incl. cross-tenant + honest-degrade)."
     },
     {
       "id": "F3",
       "severity": "nit",
       "axis": 4,
-      "location": "src/http/processes.ts — LIST, listInstanceProjections({limit:500}) + selectProcessPage",
-      "issue": "`total` is the filtered-set size WITHIN the ≤500 fold window (readEvents cap), not the true tenant total. For a tenant with >500 instances `total` under-reports. Pre-existing cap, not introduced by part A.",
+      "resolved": false,
+      "location": "src/http/processes.ts:792 — listInstanceProjections({limit:500}) then PDP-narrow",
+      "issue": "`total` is the PDP-visible ∩ query-match size WITHIN the ≤500 fold window (readEvents cap), not the true visible total. For a tenant with >500 instances `total` under-reports. Pre-existing cap, not introduced by part A. Non-blocking.",
       "suggestion": "Document `total` semantics as 'within the fold window', or follow-up with an honest COUNT in the projection."
     },
     {
       "id": "F4",
       "severity": "nit",
       "axis": 3,
-      "location": "src/__tests__/processes-list-query.test.ts / processes-live-instances.test.ts",
-      "issue": "No test pins the invariant 'PDP narrows BEFORE the query filter, total is post-PDP' — inherent to the branch base predating the PDP gates. Zero automated protection that the merge recompose is done correctly.",
-      "suggestion": "Fold into F1 — add the PDP×query composition test at recompose time."
+      "resolved": true,
+      "location": "ci/checks/db/processes-read-visibility.db.test.ts:768-841",
+      "issue": "[RESOLVED] No test previously pinned 'PDP narrows before the query filter, total is post-PDP'.",
+      "suggestion": "Verified closed: builder added the seer/blind composition test — real HTTP LIST through the actual handler with production-shaped resolveReadVisibility wired (basePostGate), real record-scoped grants. 14/14 pass."
     }
   ],
   "acceptance_coverage": [
@@ -45,18 +51,19 @@
     { "ac": "?mine binds the reading actor; no cross-actor enumeration; tenant-scope in all branches", "covered": true },
     { "ac": "limit capped, offset floored, offset-past-end empty (no 500), no query injection", "covered": true },
     { "ac": "Starter identity folded into the same single resolve batch as completedBy (1 call/request)", "covered": true },
-    { "ac": "Query filters compose with T-0722 PDP LIST filter (PDP narrows first, total post-PDP)", "covered": false },
-    { "ac": "DETAIL route preserves T-0721 read-visibility gate after the merge", "covered": false }
+    { "ac": "LIST: T-0722 PDP filter runs BEFORE the query pipeline; total is post-PDP (not tenant count)", "covered": true },
+    { "ac": "DETAIL: T-0721 read-visibility gate wraps the added starter fold; hidden instance → honest 404", "covered": true }
   ],
   "role_gap_evidence": [
-    "tsc --noEmit: 0 errors",
-    "eslint (4 changed files): 0 errors",
-    "vitest processes-list-query.test.ts: 20 passed",
-    "vitest processes.e2e.test.ts: 14 passed (incl. +7 new)",
-    "vitest processes-live-instances.test.ts (DATABASE_URL=...:55432): 35 passed",
-    "fitness PASS: start-route-isolation (+FF-7-3 pg-free), http-route-auth-coverage, anti-case-lock, read-pdp-anti-case, detel-literal-baseline (aggregate 4<7), demo/no-db-fallback",
-    "diff scope: server-only, 0 web files",
-    "git merge-tree dev HEAD: CONFLICT (content) in src/http/processes.ts — both LIST and DETAIL blocks; git will NOT auto-resolve",
-    "dev tip 018d2ac8 already contains both PDP gates (T-0721 detailVisible + T-0722 filterProjectionsByReadVisibility); T-0654 base a9d95206 predates both"
+    "RE-VERIFY ran live (not by handoff): tsc 0, eslint 0",
+    "vitest processes-list-query.test.ts: 20 passed; processes.e2e.test.ts: 14 passed",
+    "vitest processes-live-instances.test.ts (PG :55432): 35 passed — pagination/determinism intact over PDP-narrowed set",
+    "vitest ci/checks/db/processes-read-visibility.db.test.ts (fitness:db runner, PG :55432): 14/14 — incl. seer/blind total(seer)-total(blind)===2, total===instances.length both, status-composes-after-PDP",
+    "FF-INST-VIS gates + self-tests PASS: process-detail-read-gate, process-detail-single-resolver, process-list-tenant-scope-additive, process-list-display-plane-isolation",
+    "fitness PASS: start-route-isolation (+FF-7-3 pg-free), read-pdp-anti-case, http-route-auth-coverage",
+    "code read in full: LIST filterProjectionsByReadVisibility FIRST (processes.ts:807-823) before map/selectProcessPage/overlay; total over visibleProjections (828); overlay fed from visibleProjections (836)",
+    "code read in full: DETAIL if(detailVisible) (929) wraps entire serving block incl. starter fold (948-961), return inside (962), else -> honest 404 (975)",
+    "process-projection.ts auto-merge clean: T-0654 starterActorId (204,1388) + dev isInstanceDetailVisible (880) + filterProjectionsByReadVisibility (966) all present; net delta vs dev = +13 lines",
+    "diff scope: server-only + composition test, 0 web files; working tree clean"
   ]
 }
