@@ -666,6 +666,24 @@ function buildRouter(
     // registerRightsRoutes: the literal path /api/rights/tenant-state would
     // otherwise be swallowed by the GET /api/rights/:roleId catch-all.
     registerRightsOverviewRoutes(router, grantsPool);
+    // T-0609: GET /api/rights/resources — the tenant's REAL application/registry
+    // dictionary for the «Дать роли право» grant form's resource selector (live
+    // acceptance finding: only the demo DICT_RESOURCES seed was reachable there).
+    // Additive read-only endpoint; does NOT replace or touch
+    // registerDictionariesRoute (grants.ts, byte-frozen — ci/checks/
+    // rights-ui-frozen-write.sh).
+    // T-0705 fix: MUST also precede registerRightsRoutes — the literal path
+    // /api/rights/resources was being swallowed by the GET /api/rights/:roleId
+    // catch-all (findRole("resources") → 404 "role not found" on every call,
+    // silently degraded to [] by the client's fetchRealResources() catch, but
+    // spamming the browser console — live-proof T-0652 F-3). This block was
+    // previously registered AFTER registerRightsRoutes (line ~780 pre-fix);
+    // moved here alongside its siblings above for the same reason they document.
+    registerRightsResourcesRoute(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
   }
 
   // Register rights endpoints (includes GET /api/rights/:roleId catch-all).
@@ -790,20 +808,9 @@ function buildRouter(
     });
   }
 
-  // T-0609: GET /api/rights/resources — the tenant's REAL application/registry
-  // dictionary for the «Дать роли право» grant form's resource selector (live
-  // acceptance finding: only the demo DICT_RESOURCES seed was reachable there).
-  // Additive read-only endpoint; does NOT replace or touch
-  // registerDictionariesRoute (grants.ts, byte-frozen — ci/checks/
-  // rights-ui-frozen-write.sh). Absent when no DB (honest no-DB degrade, mirrors
-  // registerApplicationRoutes above).
-  if (grantsPool) {
-    registerRightsResourcesRoute(router, {
-      pool: grantsPool,
-      resolveActorTenant: (actorSlug: string) =>
-        resolveActorTenant(getOrgPool(), actorSlug),
-    });
-  }
+  // T-0609/T-0705: GET /api/rights/resources registration moved above (next to
+  // registerRightsOverviewRoutes) so it precedes registerRightsRoutes' GET
+  // /api/rights/:roleId catch-all — see the comment there.
 
   // T-0562 (PD-26 / ADR T-0561): «Опубликовать связанное решение по кнопке».
   //   GET  /api/applications/:id/publish-preview  — derive the connected set (1 hop:
