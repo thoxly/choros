@@ -1,0 +1,43 @@
+{
+  "task_id": "T-0722",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N1-list-cap-oldest-first",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/http/process-projection.ts (readEvents: ORDER BY occurred_at ASC LIMIT 200; listInstanceProjections)",
+      "issue": "Pre-existing (diff is 104/0 additive — cap untouched): the LIST projection fetches the OLDEST 200 process.started rows. A tenant with >200 instances loses visibility of NEWER processes for everyone — not an effect of the new filter. T-0722 does not worsen it (the filter only removes rows the actor was never entitled to see; no entitled, in-window instance is dropped), but the security fix makes the cap more visible (honest-empty instead of 200 leaked rows). No pagination/count field exists to desync (endpoint returns only instances[]; instances.length computed AFTER the filter).",
+      "suggestion": "Follow-up (out of scope, not blocking): newest-first ordering + explicit pagination / show-all for the LIST projection. Documented in ADR T-0722 §2.3(b)."
+    },
+    {
+      "id": "N2-record-less-unnarrowed",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/http/process-projection.ts filterProjectionsByReadVisibility (recordId === undefined branch)",
+      "issue": "Documented deferral (phase-1/2 scope, symmetric with DETAIL T-0721): record-less instances (explicit-launch /api/processes/start, no on_create record binding) are NOT narrowed — kept unconditionally. Legitimate, not a leak: record_id is written in the starter's tenant tx; null means no source-record binding ever existed (never a lost link to a foreign record), and the instance is already tenant-scoped by the projection fold.",
+      "suggestion": "Phase-3 (process-definition-scoped read grant) closes it; out of scope for T-0714 option (c) phases 1-2."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "LIST GET /api/processes narrowed by READ-visibility of each instance's source record (isRecordReadable, reused from T-0721/T-0570)", "covered": true },
+    { "ac": "Batched (not N+1): one loadRecordRowAncestryBatch SQL over DISTINCT recordIds, tenant-scoped (WHERE tenant_id=$1 AND id=ANY($2::uuid[]))", "covered": true },
+    { "ac": "Filter applied BEFORE overlayDetailLiveSteps (no live-engine call / metadata on dropped instances) — FF-INST-VIS-3c enforces source order", "covered": true },
+    { "ac": "No count/pagination desync: endpoint carries no total/cursor; instances.length computed after filter (mixed-visibility live-PG test)", "covered": true },
+    { "ac": "Record-less instances unnarrowed; malformed recordId pre-validated (UUID_RE) so one bad row cannot blank the batch; deleted/foreign → honest-deny", "covered": true },
+    { "ac": "Cross-tenant closed (live-PG: tenant-A wide reader never sees tenant-B instance in LIST)", "covered": true },
+    { "ac": "Production wiring live: server.ts injects resolveReadVisibility into shared registerProcessesRoutes deps — gate runs in prod, if-guard is honest-degrade for DB-less path only", "covered": true },
+    { "ac": "FF-INST-VIS-3 (display-plane isolation) + FF-INST-VIS-4 (tenant-scope additive) real+self-test PASS; wired into fitness chain", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "tsc --noEmit = 0",
+    "eslint (process-projection.ts, processes.ts, processes-read-visibility.test.ts) = 0",
+    "targeted unit processes-read-visibility.test.ts = 22/22 pass",
+    "live-PG ci/checks/db/processes-read-visibility.db.test.ts = 12/12 pass (real RLS, choros_app NOBYPASSRLS, cloned test DB)",
+    "FF-INST-VIS-3 real PASS + --self-test PASS",
+    "FF-INST-VIS-4 real PASS + --self-test PASS",
+    "anti-case-lock PASS, read-pdp-anti-case PASS, start-route-isolation PASS, http-route-auth-coverage PASS",
+    "diff numstat process-projection.ts = 104/0 (purely additive; readEvents/listInstanceProjections/ASC-200 cap untouched)"
+  ]
+}
