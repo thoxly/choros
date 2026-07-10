@@ -1,0 +1,32 @@
+{
+  "task_id": "T-0701",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/doc-regen.db.test.ts",
+      "issue": "Нет прямого юнит-теста на интра-batch дубль (ref_kind,ref_target) в одном вызове setDocRefs. Безопасность батчевого ON CONFLICT DO NOTHING на интра-statement конфликте доказана мной живым SQL (CASE A: INSERT VALUES дубль-строки → 1 строка, без ошибки), плюс F-2 покрывает кросс-statement путь (рефы уже в таблице). Прямого регресс-теста на интра-batch нет.",
+      "suggestion": "Follow-up: добавить db-тест, вызывающий setDocRefs с двумя рефами одинаковых (refKind,refTarget) разного id — ассертить {set: refs.length, deleted}, отсутствие ошибки и одну строку в doc_ref. Не blocking."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/db/doc-page-store.ts (setDocRefs)",
+      "issue": "Возврат set = refs.length переучитывает при дублях (не равен реально вставленным строкам). Это ПРЕД-СУЩЕСТВУЮЩЕЕ поведение (старый цикл делал безусловный set++), точно воспроизведено — НЕ регресс данной задачи. Отмечено информационно.",
+      "suggestion": "Если когда-либо потребуется точный счётчик вставленных — использовать RETURNING/rowCount по чанкам. Вне скоупа T-0701."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Семантика setDocRefs сохранена точно (колонки, значения, ON CONFLICT DO NOTHING, DELETE-до-INSERT, возврат {set:refs.length,deleted})", "covered": true },
+    { "ac": "N+1 write устранён — round-trip'ы на рефы 1844 → ~270 батчевых (CHUNK=500); tRefs 721→323 ms", "covered": true },
+    { "ac": "Интра-batch ON CONFLICT DO NOTHING безопасен на живом PG (не срабатывает ловушка 'cannot affect row a second time' — она специфична для DO UPDATE)", "covered": true },
+    { "ac": "Края: refs=[] (ранний return), 500/501 границы, лимит параметров 2002 ≤ 65535 — корректны", "covered": true },
+    { "ac": "doc-regen 17/17 + сиблинги doc-reconcile/doc-summary/doc-pipeline 46/46 зелёные (прогнано соло судьёй)", "covered": true },
+    { "ac": "Таймаут НЕ поднимался (тест-файл не изменён); tsc 0; eslint 0; анти-кейс гейт PASS; диф скоуплен в 1 src-файл", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
