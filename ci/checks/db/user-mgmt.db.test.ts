@@ -27,9 +27,21 @@
  *             owner) → 403 ADMIN_GATE_REJECTED on POST and PATCH.
  *   FF-583-10 (regression guard) — see hire-read-grant.db.test.ts (unchanged file,
  *             not duplicated here); this file does not touch that test.
+ *
+ * T-0727 (R-4/R-5, review of T-0702) additions — see docs/design/
+ * ADR-T0727-deactivation-hygiene.md:
+ *   FF-727-WARN-LOG   a failed revokeUserSessions is console.warn'd (operator-visible
+ *                      in real time), not only recorded as payload.kc_sessions_revoked.
+ *   FF-727-IDEMPOTENT a repeated PATCH {active} that already matches the current state
+ *                      is a no-op: no second deactivate/reactivate audit event, no
+ *                      redundant KC call, the ORIGINAL deactivated_at is preserved.
+ *   FF-727-RECOVERY   if the DB write never landed (the pre-existing T-0583 "KC-disabled
+ *                      + choros-active" gap this ADR documents), a repeat PATCH reads as
+ *                      a REAL transition (not a no-op) and completes it — KC calls are
+ *                      safely re-invoked (idempotent by construction, unchanged).
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import * as http from 'node:http';
 import pg from 'pg';
 import { migratorUrl, appUrl, withClient } from './_helpers.js';
@@ -553,6 +565,201 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
         [t.tenantId, employeeId],
       );
       expect(rows[0].deactivated_at).toBeNull(); // untouched
+      await c.query('COMMIT');
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0727 (R-4/R-5, review of T-0702) — operational hygiene of deactivation:
+  // a failed revoke must be operator-visible in logs (not only the audit
+  // payload), and a repeated PATCH must be idempotent (no duplicate audit
+  // event, no timestamp churn) while the KC-disabled+choros-active recovery
+  // path (pre-existing T-0583 gap) still completes on retry. See
+  // docs/design/ADR-T0727-deactivation-hygiene.md.
+  // ---------------------------------------------------------------------
+
+  it('T-0727 R-4: revokeUserSessions failing logs a warning (operator-visible, not only the audit payload)', async () => {
+    const t = await registerOne('t0727-revoke-fail-log');
+    kc.reset();
+    const login = `t0727-revoke-fail-log-${Date.now()}`;
+    const email = `t0727-revoke-fail-log-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Revoke Fail Log Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    kc.failOnRevokeSessions = true;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Capture the call list BEFORE mockRestore() — mockRestore() also clears
+    // mock.calls (same as mockReset()), so reading it after restore always
+    // reads back empty regardless of what was actually captured.
+    let capturedWarnCalls: unknown[][] = [];
+    let off: { status: number; json: any };
+    try {
+      off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+      capturedWarnCalls = warnSpy.mock.calls.map((args) => [...args]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(off.status, JSON.stringify(off.json)).toBe(200);
+
+    // R-4: the degraded revoke must be LOGGED — an operator tailing logs (not
+    // diffing the audit trail) must see it happened, tagged to this task and
+    // this employee.
+    const warnedAboutThisEmployee = capturedWarnCalls.some(
+      (args) => typeof args[0] === 'string' && args[0].includes('T-0727') && args[0].includes(employeeId),
+    );
+    expect(warnedAboutThisEmployee, JSON.stringify(capturedWarnCalls)).toBe(true);
+
+    // Still recorded on the audit event too (T-0702 behavior unchanged —
+    // R-4 ADDS log visibility, it does not replace the audit field).
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.deactivate');
+    expect(payload).toEqual({ kc_sessions_revoked: false });
+  });
+
+  it('T-0727 R-5: a repeated PATCH {active:false} on an already-inactive account is a no-op — audit not duplicated, KC not re-called, deactivated_at unchanged', async () => {
+    const t = await registerOne('t0727-idempotent-deactivate');
+    kc.reset();
+    const login = `t0727-idempotent-deactivate-${Date.now()}`;
+    const email = `t0727-idempotent-deactivate-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Idempotent Deactivate Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    const first = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(first.status, JSON.stringify(first.json)).toBe(200);
+    expect(kc.setEnabledCallCount).toBe(1);
+    expect(kc.revokeSessionsCallCount).toBe(1);
+
+    const deactivatedAtAfterFirst = await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      await c.query('COMMIT');
+      return rows[0].deactivated_at as string;
+    });
+    expect(deactivatedAtAfterFirst).not.toBeNull();
+
+    // Repeat — the account is ALREADY inactive; this must be a safe no-op
+    // ("already-inactive вход не падает" — the second call must not error).
+    const second = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(second.status, JSON.stringify(second.json)).toBe(200);
+    expect(second.json.active).toBe(false);
+
+    // No redundant KC round-trip for a no-op — counts unchanged.
+    expect(kc.setEnabledCallCount).toBe(1);
+    expect(kc.revokeSessionsCallCount).toBe(1);
+
+    // The ORIGINAL deactivated_at is preserved, not silently overwritten by
+    // the retry's own timestamp.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      expect(rows[0].deactivated_at).toBe(deactivatedAtAfterFirst);
+      await c.query('COMMIT');
+    });
+
+    // Exactly ONE deactivate audit row exists — the repeat did not duplicate it.
+    const auditRows = await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT payload FROM choros.audit_event
+          WHERE tenant_id = $1 AND subject = $2 AND type = 'user_account.deactivate'`,
+        [t.tenantId, employeeId],
+      );
+      await c.query('COMMIT');
+      return rows;
+    });
+    expect(auditRows.length, JSON.stringify(auditRows)).toBe(1);
+    expect(auditRows[0].payload).toEqual({ kc_sessions_revoked: true });
+  });
+
+  it('T-0727 R-5: a repeated PATCH {active:true} on an already-active account is a no-op — no reactivate audit, no KC call', async () => {
+    const t = await registerOne('t0727-idempotent-reactivate');
+    kc.reset();
+    const login = `t0727-idempotent-reactivate-${Date.now()}`;
+    const email = `t0727-idempotent-reactivate-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Idempotent Reactivate Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    // Freshly created — already active. PATCH {active:true} is a no-op from
+    // the very first call (symmetric with the deactivate no-op above).
+    const res = await patchUser(employeeId, { active: true }, t.ownerSlug);
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(res.json.active).toBe(true);
+    expect(kc.setEnabledCallCount).toBe(0);
+    expect(kc.revokeSessionsCallCount).toBe(0);
+
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.reactivate');
+    expect(payload).toBeUndefined();
+  });
+
+  it('T-0727 R-5 recovery path: if the DB write never landed (deactivated_at reset out of band, modeling the T-0583 KC-disabled+choros-active gap), a repeat PATCH completes it — KC calls are safely re-invoked', async () => {
+    const t = await registerOne('t0727-recovery');
+    kc.reset();
+    const login = `t0727-recovery-${Date.now()}`;
+    const email = `t0727-recovery-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Recovery Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    const first = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(first.status, JSON.stringify(first.json)).toBe(200);
+    expect(kc.setEnabledCallCount).toBe(1);
+    expect(kc.revokeSessionsCallCount).toBe(1);
+
+    // Model the pre-existing T-0583 gap this ADR documents: KC ended up
+    // disabled, but the DB transaction that should have recorded it never
+    // committed (crash / dropped connection between the KC calls and the
+    // tx). Force employee.deactivated_at back to NULL out-of-band.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      await c.query(
+        `UPDATE choros.employee SET deactivated_at = NULL WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      await c.query('COMMIT');
+    });
+
+    // The operator's recovery move: repeat the SAME PATCH. Because the DB
+    // still (honestly) reads "active", this is NOT short-circuited as a
+    // no-op — it re-runs the full flow, including a SECOND round of KC
+    // calls, which must complete without error (idempotent by construction).
+    const second = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(second.status, JSON.stringify(second.json)).toBe(200);
+    expect(second.json.active).toBe(false);
+    expect(kc.setEnabledCallCount).toBe(2);
+    expect(kc.revokeSessionsCallCount).toBe(2);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      expect(rows[0].deactivated_at).not.toBeNull();
       await c.query('COMMIT');
     });
   });

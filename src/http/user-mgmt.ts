@@ -22,6 +22,18 @@
  * payload.kc_sessions_revoked on the same user_account.deactivate audit
  * event, not treated as a hard gate.
  *
+ * T-0727 (ADR-T0727, R-4/R-5 from the T-0702 review) — two hygiene fixes on
+ * top of the T-0702 flow, both in the PATCH .../:employee_id handler:
+ *   (R-4) a failed revokeUserSessions now ALSO console.warn's (was ONLY the
+ *         audit payload before — an operator watching logs had no signal).
+ *   (R-5) a repeated PATCH whose `active` already matches the current state
+ *         is an idempotent no-op (no duplicate deactivate/reactivate audit
+ *         event, no timestamp churn, no redundant KC call) — see ADR-T0727
+ *         §3 for why the no-op check runs BEFORE the LAST-OWNER guard and
+ *         BEFORE any KC call, and §3.2 for the KC-disabled+choros-active
+ *         recovery path (repeat the same PATCH — it is NOT short-circuited
+ *         because the DB still honestly reads "active").
+ *
  * Routes (all under the existing org-write gate, T-0469):
  *   POST   /api/users               — create a KC-backed login + employee(kind='human')
  *   GET    /api/users/accounts      — list human accounts of the actor's tenant
@@ -599,10 +611,13 @@ export function registerUserMgmtRoutes(
     }
 
     // Resolve the employee under the actor's OWN tenant (RLS) — a different
-    // tenant's employee_id resolves to zero rows here → 404 (N3).
+    // tenant's employee_id resolves to zero rows here → 404 (N3). T-0727
+    // (R-5, review of T-0702): also read `deactivated_at` here so the
+    // IDEMPOTENT NO-OP short-circuit below can compare requested vs current
+    // state without a second round-trip.
     const found = await withTenantTx(pool, tenantId, async (client) => {
-      const { rows } = await client.query<{ slug: string; kind: string }>(
-        `SELECT slug, kind FROM choros.employee WHERE tenant_id = $1 AND id = $2`,
+      const { rows } = await client.query<{ slug: string; kind: string; deactivated_at: string | null }>(
+        `SELECT slug, kind, deactivated_at FROM choros.employee WHERE tenant_id = $1 AND id = $2`,
         [tenantId, employeeId],
       );
       return rows[0] ?? null;
@@ -611,6 +626,31 @@ export function registerUserMgmtRoutes(
       throw new HttpError(404, "NOT_FOUND", "user account not found in your tenant");
     }
     const kcUserId = found.slug;
+
+    // T-0727 (R-5, review of T-0702) — IDEMPOTENT NO-OP short-circuit. A
+    // repeat PATCH whose `active` already matches the CURRENT state (a
+    // client retry after a lost response, a double-click, or an automation
+    // re-applying a desired state) must be a safe no-op: it must NOT
+    // (a) re-run the LAST-OWNER guard against unrelated later role changes
+    //     that could turn an already-completed deactivation into a spurious
+    //     409 on retry,
+    // (b) call Keycloak a second time for no reason, or
+    // (c) write a SECOND user_account.deactivate/reactivate audit event —
+    //     that would silently overwrite the ORIGINAL deactivated_at
+    //     timestamp and pollute the audit trail with N events for one real
+    //     transition (docs/design/ADR-T0727-deactivation-hygiene.md §3).
+    // This does NOT short-circuit the recovery path named in that ADR
+    // (setUserEnabled succeeded, the DB tx that follows it then failed,
+    // leaving KC-disabled + choros-active/deactivated_at IS NULL): that
+    // state reads as a REAL transition here (current !== requested) and
+    // falls through to the full flow below, which completes it.
+    const alreadyInTargetState = (found.deactivated_at === null) === active;
+    if (alreadyInTargetState) {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ employee_id: employeeId, active }));
+      return;
+    }
 
     // T-0658 (round 3) — LAST-OWNER GUARD. The T-0658 deactivation gate in
     // org.ts (isGenesisOwnerForTenant / loadAdminContext) makes a deactivated
@@ -697,16 +737,56 @@ export function registerUserMgmtRoutes(
     if (active === false) {
       const { revoked } = await kc.revokeUserSessions(kcUserId);
       kcSessionsRevoked = revoked;
+      // T-0727 (R-4, review of T-0702): a failed revoke used to be visible
+      // ONLY as payload.kc_sessions_revoked:false on the audit event — an
+      // operator watching logs (not diffing the audit trail) had NO signal
+      // that KC was unreachable/degraded at the moment of deactivation.
+      // console.warn is this repo's existing convention for a non-fatal,
+      // best-effort degradation (no logger abstraction — see e.g.
+      // src/http/inbox.ts "[inbox T-0458] ... reconcile failed (non-fatal)",
+      // src/server/timer-firing-loop.ts "[timer-firing] ... (non-fatal)").
+      // This stays a WARN, not a hard failure: the deactivation itself must
+      // still succeed (best-effort per ADR-T0702 §2.2) — only visibility
+      // changes here, not behavior.
+      if (!revoked) {
+        console.warn(
+          `[user-mgmt T-0727] KC revokeUserSessions failed for employee ${employeeId} ` +
+            `(kcUserId=${kcUserId}) — session window-shrink degraded for this ` +
+            `deactivation (best-effort, ADR-T0702 §2.2); the PDP gate ` +
+            `(T-0658/T-0662 ACTOR_ACTIVE_SQL) remains the actual authorization ` +
+            `guarantee regardless of this outcome. Recorded as ` +
+            `payload.kc_sessions_revoked:false on the audit event too.`,
+        );
+      }
     }
 
     const ts = nowMs();
     await withTenantTx(pool, tenantId, async (client) => {
-      await client.query(
-        `UPDATE choros.employee
-            SET deactivated_at = $3, updated_at = $4
-          WHERE tenant_id = $1 AND id = $2`,
-        [tenantId, employeeId, active ? null : ts, ts],
+      // T-0727 (R-5) — the WHERE clause is guarded on the CURRENT state
+      // (mirrors the pre-check above, but re-asserted at write time so a
+      // narrow race — a concurrent PATCH landing between the read above and
+      // this transaction — is caught here too, not only by the early
+      // short-circuit). `RETURNING id` reports whether a real transition
+      // happened; zero rows means someone else already applied the SAME
+      // transition since the read above — the audit append below is then
+      // skipped rather than writing a second event for one real change.
+      const { rows: transitioned } = await client.query<{ id: string }>(
+        active
+          ? `UPDATE choros.employee
+                SET deactivated_at = NULL, updated_at = $3
+              WHERE tenant_id = $1 AND id = $2 AND deactivated_at IS NOT NULL
+              RETURNING id`
+          : `UPDATE choros.employee
+                SET deactivated_at = $3, updated_at = $3
+              WHERE tenant_id = $1 AND id = $2 AND deactivated_at IS NULL
+              RETURNING id`,
+        [tenantId, employeeId, ts],
       );
+      if (transitioned.length === 0) {
+        // Lost a narrow race against a concurrent identical PATCH — the
+        // state is already correct; do not write a second audit event.
+        return;
+      }
       await userMgmtAuditWriter.appendAuditEvent(client as unknown as PgClientLike, {
         id: randomUUID(),
         type: active ? "user_account.reactivate" : "user_account.deactivate",

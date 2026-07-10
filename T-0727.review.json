@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0727",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/ADR-T0727-deactivation-hygiene.md:§8 / src/http/user-mgmt.ts:763-804",
+      "issue": "Recovery = manual repeat of PATCH. If the final DB tx fails AGAIN on the retry (e.g. Postgres still down), the KC-disabled+choros-active drift persists and the operator must retry once more — an unbounded operator-driven loop, no background reconciler.",
+      "suggestion": "Acceptable as-is: it is operator-visible, matches ADR-T0702's own no-job-queue stance, and is explicitly declared out-of-scope in ADR §8 / spec §4б. No change required for this task; note only."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/user-mgmt.ts:773-789 (WHERE-guarded UPDATE + RETURNING) / ci/checks/db/user-mgmt.db.test.ts",
+      "issue": "The concurrent-PATCH race defence (§3.3: WHERE deactivated_at IS [NOT] NULL RETURNING id, skip audit on 0 rows) is correct by construction under READ COMMITTED MVCC but is not exercised by a live concurrency test — only the sequential no-op path is tested.",
+      "suggestion": "Acceptable: a true concurrent-PATCH test is inherently flaky and the MVCC guarantee (second UPDATE re-evaluates WHERE after the first commits → 0 rows → skip audit) is well-established. Left uncovered by design; no action required."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/http/user-mgmt.ts:752 (console.warn)",
+      "issue": "The R-4 warn now also emits to stderr inside the pre-existing FF-702-DEGRADE test (which deliberately fails revoke). Confirmed harmless — expected log noise for a genuinely degraded revoke, no assertion affected, gate still 36/36.",
+      "suggestion": "No change; this is the intended operator-visibility signal firing exactly when it should."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1 (R-4 warn log, operator-visible, tagged T-0727+employee_id, still 200, audit field unchanged)", "covered": true },
+    { "ac": "AC-2 (repeat PATCH active:false → no-op: 200, KC counts flat, deactivated_at preserved, exactly 1 deactivate audit)", "covered": true },
+    { "ac": "AC-3 (repeat PATCH active:true → no-op: 200, no KC, no reactivate audit)", "covered": true },
+    { "ac": "AC-4 (recovery path: deactivated_at reset out-of-band → NOT short-circuited → full re-run, KC counts=2, deactivated_at set)", "covered": true },
+    { "ac": "AC-5 (already-inactive input does not error)", "covered": true },
+    { "ac": "AC-6 (tsc 0, eslint 0 errors, 5 inherited fitness gates green)", "covered": true },
+    { "ac": "AC-7 (recovery documented in ADR §3.2)", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
