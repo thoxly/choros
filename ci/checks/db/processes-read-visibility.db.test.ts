@@ -184,6 +184,18 @@ function rootScope(): unknown {
   return { kind: 'node', hierarchy: 'resource', nodeLevel: 'application', nodeId: RESOURCE_ROOT_NODE_ID };
 }
 
+/**
+ * T-0722: scope = ONE specific record's own resource-node (self-match rule 1
+ * of makeResourceAncestryOracle — works regardless of the empty rowIndex the
+ * production wiring uses, since self-identity needs no ancestry-map lookup).
+ * Lets a test grant READ on exactly ONE record, not the whole tenant — used
+ * by the "mixed visibility" LIST test to prove the response excludes a
+ * SPECIFIC other record's instance while keeping the granted one.
+ */
+function recordScope(recordId: string): unknown {
+  return { kind: 'node', hierarchy: 'resource', nodeLevel: 'record', nodeId: recordId };
+}
+
 async function seedReadGrant(c: pg.Client, tenantId: string, roleId: string, scope: unknown): Promise<void> {
   await c.query('BEGIN');
   await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
@@ -269,6 +281,26 @@ function getInstanceDetail(
   });
 }
 
+/** T-0722: GET /api/processes (LIST) helper — mirrors getInstanceDetail. */
+function getInstanceList(
+  baseUrl: string,
+  actor: string,
+): Promise<{ statusCode: number; instances: Array<Record<string, unknown>> }> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`${baseUrl}/api/processes`);
+    const req = http.request(url, { method: 'GET', headers: { 'x-dev-user': actor } }, (res) => {
+      let raw = '';
+      res.on('data', (c: Buffer) => { raw += c.toString(); });
+      res.on('end', () => {
+        const body = JSON.parse(raw) as { instances?: Array<Record<string, unknown>> };
+        resolve({ statusCode: res.statusCode ?? 0, instances: body.instances ?? [] });
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Server fixtures — one server WITHOUT resolveReadVisibility (pre-gate,
 // honest-degrade) and one WITH it (post-gate, production-shaped resolver).
@@ -316,6 +348,11 @@ async function startServer(withGate: boolean): Promise<{ server: http.Server; ba
 let appAId = '';
 let regAId = '';
 let recordAId = '';
+// T-0722: a SECOND record in TENANT_A (same registry) — used by the LIST
+// "mixed visibility" test (a narrow, record-scoped grant on recordAId only
+// must exclude the recordAId2-bound instance from LIST while keeping the
+// recordAId-bound one).
+let recordAId2 = '';
 let appBId = '';
 let regBId = '';
 let recordBId = '';
@@ -340,6 +377,7 @@ beforeAll(
       appAId = await seedApp(c, TENANT_A, `piv-app-a-${uuid().slice(0, 8)}`);
       regAId = await seedRegDef(c, TENANT_A, appAId, `piv-reg-a-${uuid().slice(0, 8)}`);
       recordAId = await seedRecord(c, TENANT_A, regAId, 'source-record-a');
+      recordAId2 = await seedRecord(c, TENANT_A, regAId, 'source-record-a2');
 
       appBId = await seedApp(c, TENANT_B, `piv-app-b-${uuid().slice(0, 8)}`);
       regBId = await seedRegDef(c, TENANT_B, appBId, `piv-reg-b-${uuid().slice(0, 8)}`);
@@ -535,5 +573,172 @@ describe.skipIf(!hasDb)('T-0721: tenant isolation is not weakened by the DETAIL 
 
     const detail = await getInstanceDetail(basePostGate, instanceIdB, 'a-wide-reader-crosscheck');
     expect(detail.statusCode).toBe(404);
+  });
+});
+
+// =============================================================================
+// T-0722 (D-064, P2 из T-0714 — security/PDP) · GET /api/processes LIST
+// read-visibility filter — LIVE Postgres probe. Mirrors the DETAIL suite
+// above (T-0721) exactly, adapted for LIST semantics: a denied instance is
+// EXCLUDED from `instances[]` (honest-narrow) rather than 404ing on its own
+// dedicated route.
+//
+//   FF-INST-VIS list-a: an actor with ZERO covering READ grant on the source
+//     record does NOT see that instance in LIST (fail-closed), even though
+//     it is tenant-scoped-visible under the pre-T-0722 posture.
+//   FF-INST-VIS list-b: an actor WITH a covering READ grant sees it in LIST.
+//   Record-less fallback: an instance started WITHOUT a recordId stays in
+//     LIST for a zero-grant actor (phase-1/2 scope, symmetric to DETAIL).
+//   Mixed visibility / count correctness (T-0722 spec §4.1 (b)): an actor
+//     holding a NARROW grant scoped to exactly ONE record sees ONLY that
+//     record's instance in LIST — `instances.length` reflects the FILTERED
+//     set, not the tenant's full instance count.
+//   Tenant isolation (FF-INST-VIS-4): a tenant-A actor with a WIDE grant
+//     never sees a tenant-B instance in LIST.
+//   Honest-degrade (NF-2): the pre-gate server serves LIST unchanged
+//     (byte-identical to pre-T-0722) regardless of grants.
+// =============================================================================
+
+describe.skipIf(!hasDb)('T-0722 FF-INST-VIS list-a: actor without READ on the source record does not see it in LIST', () => {
+  it('the record-bound instance is ABSENT from instances[] (tenant-scoped, no covering grant)', async () => {
+    const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: 'telLinear',
+        actor: 'a-starter',
+        nowMs: Date.now(),
+        recordId: recordAId,
+      }),
+    );
+
+    const list = await getInstanceList(basePostGate, 'a-nogrant-list-actor');
+    expect(list.statusCode).toBe(200);
+    expect(list.instances.some((i) => i['id'] === instanceId)).toBe(false);
+  });
+});
+
+describe.skipIf(!hasDb)('T-0722 FF-INST-VIS list-b: actor WITH READ on the source record sees it in LIST', () => {
+  it('the record-bound instance IS present in instances[]', async () => {
+    const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: 'telLinear',
+        actor: 'a-starter',
+        nowMs: Date.now(),
+        recordId: recordAId,
+      }),
+    );
+
+    await withClient(migratorUrl(), async (c) => {
+      await seedDefaultOpenReader(c, TENANT_A, 'a-reader-list-actor');
+    });
+
+    const list = await getInstanceList(basePostGate, 'a-reader-list-actor');
+    expect(list.statusCode).toBe(200);
+    expect(list.instances.some((i) => i['id'] === instanceId)).toBe(true);
+  });
+});
+
+describe.skipIf(!hasDb)('T-0722: record-less instance stays in LIST for a zero-grant actor (phase-1/2 scope)', () => {
+  it('the record-less instance IS present in instances[] even with zero grants', async () => {
+    const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: 'telLinear',
+        actor: 'a-starter',
+        nowMs: Date.now(),
+        // no recordId — explicit-launch instance.
+      }),
+    );
+
+    const list = await getInstanceList(basePostGate, 'a-zero-grant-list-actor');
+    expect(list.statusCode).toBe(200);
+    expect(list.instances.some((i) => i['id'] === instanceId)).toBe(true);
+  });
+});
+
+describe.skipIf(!hasDb)('T-0722: mixed visibility — LIST count reflects ONLY the visible instances (spec §4.1 (b))', () => {
+  it('a narrow (single-record-scoped) grant sees ONLY that record\'s instance, not a sibling record\'s instance in the same tenant', async () => {
+    const instanceGranted = `flw-piv-${uuid().slice(0, 8)}`;
+    const instanceDenied = `flw-piv-${uuid().slice(0, 8)}`;
+
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId: instanceGranted,
+        procKey: 'telLinear',
+        actor: 'a-starter',
+        nowMs: Date.now(),
+        recordId: recordAId,
+      }),
+    );
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId: instanceDenied,
+        procKey: 'telLinear',
+        actor: 'a-starter',
+        nowMs: Date.now(),
+        recordId: recordAId2,
+      }),
+    );
+
+    // A grant scoped to recordAId ONLY (self-match rule, no RESOURCE_ROOT, no
+    // registry/application-level rule 3 needed — see recordScope() doc-comment).
+    await withClient(migratorUrl(), async (c) => {
+      const empId = await seedEmployee(c, TENANT_A, 'a-narrow-reader-actor');
+      const roleId = await seedRole(c, TENANT_A, `role-narrow-reader-${uuid().slice(0, 8)}`);
+      await seedAssignment(c, TENANT_A, empId, roleId);
+      await seedReadGrant(c, TENANT_A, roleId, recordScope(recordAId));
+    });
+
+    const list = await getInstanceList(basePostGate, 'a-narrow-reader-actor');
+    expect(list.statusCode).toBe(200);
+    const ids = list.instances.map((i) => i['id']);
+    expect(ids).toContain(instanceGranted);
+    expect(ids).not.toContain(instanceDenied);
+  });
+});
+
+describe.skipIf(!hasDb)('T-0722: tenant isolation is not weakened by the LIST read-visibility filter', () => {
+  it('a tenant-A actor (even a default-open reader) never sees a tenant-B instance in LIST', async () => {
+    const instanceIdB = `flw-piv-${uuid().slice(0, 8)}`;
+    await withTenantTx(TENANT_B, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId: instanceIdB,
+        procKey: 'telLinear',
+        actor: 'b-starter',
+        nowMs: Date.now(),
+        recordId: recordBId,
+      }),
+    );
+
+    await withClient(migratorUrl(), async (c) => {
+      await seedDefaultOpenReader(c, TENANT_A, 'a-wide-reader-list-crosscheck');
+    });
+
+    const list = await getInstanceList(basePostGate, 'a-wide-reader-list-crosscheck');
+    expect(list.statusCode).toBe(200);
+    expect(list.instances.some((i) => i['id'] === instanceIdB)).toBe(false);
+  });
+});
+
+describe.skipIf(!hasDb)('T-0722: honest-degrade when resolveReadVisibility is not wired — LIST unchanged', () => {
+  it('the pre-gate server serves the record-bound instance in LIST even for a zero-grant actor', async () => {
+    const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: 'telLinear',
+        actor: 'a-starter',
+        nowMs: Date.now(),
+        recordId: recordAId,
+      }),
+    );
+
+    const list = await getInstanceList(basePreGate, 'a-degrade-list-actor');
+    expect(list.statusCode).toBe(200);
+    expect(list.instances.some((i) => i['id'] === instanceId)).toBe(true);
   });
 });

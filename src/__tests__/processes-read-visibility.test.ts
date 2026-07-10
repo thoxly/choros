@@ -12,6 +12,14 @@
  * answers the recordId → {registryId, applicationId} ancestry SELECT
  * process-projection.ts's loadRecordRowAncestry issues.
  *
+ * T-0722 (D-064, P2 из T-0714 — security/PDP) EXTENDS this file: GET
+ * /api/processes LIST is now narrowed by the SAME predicate, BATCHED
+ * (filterProjectionsByReadVisibility) instead of DETAIL's per-instance
+ * isInstanceDetailVisible — see the "T-0722 · GET /api/processes LIST
+ * narrowed" describe block below. The fake pool's `FROM choros.record r`
+ * route already matches BOTH the single-row (DETAIL) and batched (LIST)
+ * ancestry SELECTs — no harness change needed.
+ *
  * Live-PG coverage (real RLS, real getGrantsForSubject/loadTenantOrgAncestry)
  * is in ci/checks/db/processes-read-visibility.db.test.ts (mirrors T-0570's
  * records-read-pdp.db.test.ts).
@@ -26,6 +34,8 @@ import {
   PROCESS_STARTED_TYPE,
   APPROVER_ROLE,
   isInstanceDetailVisible,
+  filterProjectionsByReadVisibility,
+  type InstanceProjection,
 } from "../http/process-projection.js";
 import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 import { RESOURCE_ROOT_NODE_ID } from "../core/read-visibility.js";
@@ -38,16 +48,16 @@ const RECORD_ID = "aaaaaaaa-1111-0000-0000-000000000001";
 const REGISTRY_ID = "reg-0001";
 const APPLICATION_ID = "app-0001";
 
-function startedRow(inst: string, recordId?: string): Record<string, unknown> {
+function startedRow(inst: string, recordId?: string, id = "audit-evt-1"): Record<string, unknown> {
   return {
-    id: "audit-evt-1",
+    id,
     actor: ACTOR,
     payload: {
       inst,
       proc_key: LIVE_PROC,
       task_role: APPROVER_ROLE,
       task_step: "detail-gate-test-step",
-      inbox_task_id: "audit-evt-1",
+      inbox_task_id: id,
       ...(recordId !== undefined ? { record_id: recordId } : {}),
     },
     occurred_at: Date.parse("2026-07-10T10:00:00Z"),
@@ -280,12 +290,28 @@ describe("T-0721 · GET /api/processes/:id gated by READ-visibility of the sourc
     }
   });
 
-  it("LIST (/api/processes) is UNAFFECTED — phase-1 scope is DETAIL only (T-0714 §5 phase 2 is a follow-up)", async () => {
-    process.env["DATABASE_URL"] = "postgres://fake/T-0721-list-unaffected";
+  // T-0722 [superseded]: this test used to assert LIST was UNAFFECTED by the
+  // DETAIL gate ("phase-1 scope is DETAIL only"). T-0722 (phase 2 of T-0714
+  // §5) closes that gap — see the "T-0722 · GET /api/processes LIST narrowed"
+  // describe block below for the current (narrowed) behaviour.
+});
+
+// ---------------------------------------------------------------------------
+// T-0722 (D-064, P2 из T-0714 — security/PDP) · GET /api/processes LIST
+// narrowed by the SAME READ-visibility predicate as DETAIL (T-0721). Reuses
+// the SAME fake-pool harness (the batched ancestry SELECT also matches the
+// `FROM choros.record r` route in makeFakePool).
+// ---------------------------------------------------------------------------
+
+describe("T-0722 · GET /api/processes LIST narrowed by READ-visibility of each instance's source record", () => {
+  const prevDbUrl = process.env["DATABASE_URL"];
+
+  it("actor WITHOUT any covering READ grant: the record-bound instance is DROPPED from LIST", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0722-list-deny";
     try {
       const deps = makeDeps({
         startedRows: [startedRow(LIVE_INST, RECORD_ID)],
-        resolveReadVisibility: makeResolver([]), // zero covering grants — would deny DETAIL
+        resolveReadVisibility: makeResolver([]), // zero covering grants
       });
       await withServer(deps, async (baseUrl) => {
         const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, {
@@ -293,7 +319,118 @@ describe("T-0721 · GET /api/processes/:id gated by READ-visibility of the sourc
         });
         expect(status).toBe(200);
         const data = json as { instances: Array<Record<string, unknown>> };
-        // The instance still appears on LIST despite being denied on DETAIL.
+        expect(data.instances.some((i) => i.id === LIVE_INST)).toBe(false);
+      });
+    } finally {
+      if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = prevDbUrl;
+    }
+  });
+
+  it("actor WITH a covering READ grant: the record-bound instance APPEARS on LIST", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0722-list-allow";
+    try {
+      const deps = makeDeps({
+        startedRows: [startedRow(LIVE_INST, RECORD_ID)],
+        resolveReadVisibility: makeResolver([wideReadGrant()]),
+      });
+      await withServer(deps, async (baseUrl) => {
+        const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, {
+          "x-dev-user": ACTOR,
+        });
+        expect(status).toBe(200);
+        const data = json as { instances: Array<Record<string, unknown>> };
+        expect(data.instances.some((i) => i.id === LIVE_INST)).toBe(true);
+      });
+    } finally {
+      if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = prevDbUrl;
+    }
+  });
+
+  it("mixed visibility: record-less instance stays, record-bound (denied) instance is dropped — count reflects ONLY the visible instance", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0722-list-mixed";
+    const RECORDLESS_INST = "eng-inst-rv-recordless";
+    try {
+      const deps = makeDeps({
+        startedRows: [
+          startedRow(LIVE_INST, RECORD_ID, "audit-evt-bound"),
+          startedRow(RECORDLESS_INST, undefined, "audit-evt-recordless"),
+        ],
+        resolveReadVisibility: makeResolver([]), // zero covering grants — denies the record-bound one
+      });
+      await withServer(deps, async (baseUrl) => {
+        const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, {
+          "x-dev-user": ACTOR,
+        });
+        expect(status).toBe(200);
+        const data = json as { instances: Array<Record<string, unknown>> };
+        // The response carries no separate total/count field — `instances` IS the
+        // authoritative visible set, computed AFTER the filter (T-0722 spec §4.1).
+        expect(data.instances.map((i) => i.id)).toEqual([RECORDLESS_INST]);
+      });
+    } finally {
+      if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = prevDbUrl;
+    }
+  });
+
+  it("the source record no longer resolves in-tenant (deleted) → dropped from LIST even with a wide grant", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0722-list-deleted";
+    try {
+      const deps = makeDeps({
+        startedRows: [startedRow(LIVE_INST, RECORD_ID)],
+        recordExists: false,
+        resolveReadVisibility: makeResolver([wideReadGrant()]),
+      });
+      await withServer(deps, async (baseUrl) => {
+        const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, {
+          "x-dev-user": ACTOR,
+        });
+        expect(status).toBe(200);
+        const data = json as { instances: Array<Record<string, unknown>> };
+        expect(data.instances.some((i) => i.id === LIVE_INST)).toBe(false);
+      });
+    } finally {
+      if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = prevDbUrl;
+    }
+  });
+
+  it("a record-less instance stays on LIST even for a zero-grant actor (phase-1/2 scope)", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0722-list-recordless";
+    try {
+      const deps = makeDeps({
+        startedRows: [startedRow(LIVE_INST)], // no record_id in payload
+        resolveReadVisibility: makeResolver([]), // zero covering grants
+      });
+      await withServer(deps, async (baseUrl) => {
+        const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, {
+          "x-dev-user": ACTOR,
+        });
+        expect(status).toBe(200);
+        const data = json as { instances: Array<Record<string, unknown>> };
+        expect(data.instances.some((i) => i.id === LIVE_INST)).toBe(true);
+      });
+    } finally {
+      if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = prevDbUrl;
+    }
+  });
+
+  it("honest-degrade: resolveReadVisibility absent → LIST unchanged (byte-identical pre-T-0722)", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0722-list-degrade";
+    try {
+      const deps = makeDeps({
+        startedRows: [startedRow(LIVE_INST, RECORD_ID)],
+        // no resolveReadVisibility — gate skipped entirely.
+      });
+      await withServer(deps, async (baseUrl) => {
+        const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, {
+          "x-dev-user": ACTOR,
+        });
+        expect(status).toBe(200);
+        const data = json as { instances: Array<Record<string, unknown>> };
         expect(data.instances.some((i) => i.id === LIVE_INST)).toBe(true);
       });
     } finally {
@@ -355,5 +492,147 @@ describe("T-0721 · isInstanceDetailVisible (process-projection.ts)", () => {
       Date.now(),
     );
     expect(visible).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// filterProjectionsByReadVisibility — direct unit coverage of the T-0722
+// batched LIST filter itself (process-projection.ts), independent of the
+// HTTP layer. Mirrors the isInstanceDetailVisible direct-unit block above.
+// ---------------------------------------------------------------------------
+
+function fakeProjection(overrides: Partial<InstanceProjection> & { inst: string }): InstanceProjection {
+  return {
+    procKey: LIVE_PROC,
+    role: APPROVER_ROLE,
+    step: "step",
+    status: "waiting",
+    startedAt: Date.now(),
+    inboxTaskId: `task-${overrides.inst}`,
+    concurrentSteps: [],
+    definitionName: "Test process",
+    stepsDone: 0,
+    stepsKnownTotal: 1,
+    starterActorKind: "human",
+    ...overrides,
+  };
+}
+
+describe("T-0722 · filterProjectionsByReadVisibility (process-projection.ts)", () => {
+  it("record-less projections are always kept, regardless of grants", async () => {
+    const projections = [fakeProjection({ inst: "inst-recordless" })];
+    const visible = await filterProjectionsByReadVisibility(
+      makeFakePool({ startedRows: [] }),
+      TENANT_ID,
+      projections,
+      [],
+      rootAncestry,
+      Date.now(),
+    );
+    expect(visible.map((p) => p.inst)).toEqual(["inst-recordless"]);
+  });
+
+  it("a covering grant keeps a record-bound projection", async () => {
+    const projections = [fakeProjection({ inst: "inst-a", recordId: RECORD_ID })];
+    const visible = await filterProjectionsByReadVisibility(
+      makeFakePool({ startedRows: [], recordExists: true }),
+      TENANT_ID,
+      projections,
+      [wideReadGrant()],
+      rootAncestry,
+      Date.now(),
+    );
+    expect(visible.map((p) => p.inst)).toEqual(["inst-a"]);
+  });
+
+  it("zero covering grants drops a record-bound projection", async () => {
+    const projections = [fakeProjection({ inst: "inst-a", recordId: RECORD_ID })];
+    const visible = await filterProjectionsByReadVisibility(
+      makeFakePool({ startedRows: [], recordExists: true }),
+      TENANT_ID,
+      projections,
+      [],
+      rootAncestry,
+      Date.now(),
+    );
+    expect(visible).toEqual([]);
+  });
+
+  it("a record that does not resolve in-tenant is dropped even with a wide grant", async () => {
+    const projections = [fakeProjection({ inst: "inst-a", recordId: RECORD_ID })];
+    const visible = await filterProjectionsByReadVisibility(
+      makeFakePool({ startedRows: [], recordExists: false }),
+      TENANT_ID,
+      projections,
+      [wideReadGrant()],
+      rootAncestry,
+      Date.now(),
+    );
+    expect(visible).toEqual([]);
+  });
+
+  it("a malformed (non-UUID) recordId is dropped WITHOUT touching the pool", async () => {
+    let queried = false;
+    const trackingPool = {
+      connect: async () => ({
+        query: async (text: string) => {
+          if (/^\s*SELECT/i.test(text) && /FROM\s+choros\.record\s+r/i.test(text)) queried = true;
+          return { rows: [] };
+        },
+        release: () => {},
+      }),
+    } as unknown as import("pg").Pool;
+    const projections = [fakeProjection({ inst: "inst-a", recordId: "not-a-uuid" })];
+    const visible = await filterProjectionsByReadVisibility(
+      trackingPool,
+      TENANT_ID,
+      projections,
+      [wideReadGrant()],
+      rootAncestry,
+      Date.now(),
+    );
+    expect(visible).toEqual([]);
+    expect(queried).toBe(false);
+  });
+
+  it("no record-bound projections at all → the batched ancestry query is skipped entirely", async () => {
+    let queried = false;
+    const trackingPool = {
+      connect: async () => ({
+        query: async (text: string) => {
+          if (/^\s*SELECT/i.test(text) && /FROM\s+choros\.record\s+r/i.test(text)) queried = true;
+          return { rows: [] };
+        },
+        release: () => {},
+      }),
+    } as unknown as import("pg").Pool;
+    const projections = [fakeProjection({ inst: "inst-recordless-1" }), fakeProjection({ inst: "inst-recordless-2" })];
+    const visible = await filterProjectionsByReadVisibility(
+      trackingPool,
+      TENANT_ID,
+      projections,
+      [],
+      rootAncestry,
+      Date.now(),
+    );
+    expect(visible.map((p) => p.inst)).toEqual(["inst-recordless-1", "inst-recordless-2"]);
+    expect(queried).toBe(false);
+  });
+
+  it("preserves input order across mixed record-bound and record-less projections", async () => {
+    const projections = [
+      fakeProjection({ inst: "inst-1", recordId: RECORD_ID }),
+      fakeProjection({ inst: "inst-2" }),
+      fakeProjection({ inst: "inst-3", recordId: RECORD_ID }),
+    ];
+    const visible = await filterProjectionsByReadVisibility(
+      makeFakePool({ startedRows: [], recordExists: true }),
+      TENANT_ID,
+      projections,
+      [wideReadGrant()],
+      rootAncestry,
+      Date.now(),
+    );
+    expect(visible.map((p) => p.inst)).toEqual(["inst-1", "inst-2", "inst-3"]);
   });
 });
