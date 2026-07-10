@@ -93,85 +93,55 @@ describe("Audit API E2E", () => {
   );
 
   // -------------------------------------------------------------------------
-  // GET /api/audit/:instanceId — the demo instance-trace surface (UNCHANGED).
+  // GET /api/audit/:instanceId — the demo instance-trace surface. T-0737:
+  // this route now requires the SAME owner-only gate as GET /api/audit
+  // (previously it had NO gate at all — not even an x-dev-user presence
+  // check — so any request, authenticated or not in dev mode, got the demo
+  // trace). Without a DB the gate itself is unavailable → 503, mirroring
+  // GET /api/audit's existing "no store, fail honest" behaviour. Exact-shape
+  // coverage for an AUTHORIZED reader, plus the 401/403 wiring regression
+  // this fix introduces, live in the deterministic stub-pool suite
+  // (audit-export-instance-authz.test.ts) — this e2e file only proves the
+  // envelope against a real server in both DB states.
   // -------------------------------------------------------------------------
 
-  it("GET /api/audit/INS-7731 returns 200 with the demo instance trace", async () => {
-    const result = await makeRequest("GET", "/api/audit/INS-7731");
+  it.skipIf(hasDb)(
+    "GET /api/audit/INS-7731 without a DB → 503 (gate needs a DB read; T-0737)",
+    async () => {
+      const result = await makeRequest("GET", "/api/audit/INS-7731");
+      expect(result.statusCode).toBe(503);
+      const data = JSON.parse(result.body) as { error?: { code?: string } };
+      expect(data.error?.code).toBe("AUDIT_UNAVAILABLE");
+    },
+  );
 
-    expect(result.statusCode).toBe(200);
-    const data = JSON.parse(result.body) as Record<string, unknown>;
-    const instance = data.instance as Record<string, unknown>;
-
-    expect(instance.id).toBe("INS-7731");
-    expect(data).toHaveProperty("trace");
-    expect(Array.isArray(data.trace)).toBe(true);
-  });
-
-  it("GET /api/audit/INS-7731 instance has required fields", async () => {
-    const result = await makeRequest("GET", "/api/audit/INS-7731");
-
-    expect(result.statusCode).toBe(200);
-    const data = JSON.parse(result.body) as Record<string, unknown>;
-    const instance = data.instance as Record<string, unknown>;
-
-    expect(instance.id).toBeDefined();
-    expect(instance.process).toBeDefined();
-    expect(instance.procId).toBeDefined();
-    expect(instance.status).toBeDefined();
-    expect(instance.started).toBeDefined();
-    expect(instance.elapsed).toBeDefined();
-    expect(instance.node).toBeDefined();
-    expect(Array.isArray(instance.execs)).toBe(true);
-    expect(Array.isArray(instance.budget)).toBe(true);
-  });
-
-  it("GET /api/audit/INS-7731 trace steps have node, name, events", async () => {
-    const result = await makeRequest("GET", "/api/audit/INS-7731");
-
-    expect(result.statusCode).toBe(200);
-    const data = JSON.parse(result.body) as Record<string, unknown>;
-    const trace = data.trace as Array<Record<string, unknown>>;
-
-    expect(trace.length).toBeGreaterThan(0);
-
-    for (const step of trace) {
-      expect(step.node).toBeDefined();
-      expect(step.name).toBeDefined();
-      expect(Array.isArray(step.events)).toBe(true);
-      expect((step.events as Array<unknown>).length).toBeGreaterThan(0);
-
-      for (const event of step.events as Array<Record<string, unknown>>) {
-        expect(event.ts).toBeDefined();
-        expect(event.type).toBeDefined();
-        expect(event.actor).toBeDefined();
-        expect(event.action).toBeDefined();
+  it.skipIf(!hasDb)(
+    "GET /api/audit/INS-7731 with a DB → 200 with the demo trace OR a fail-closed auth status",
+    async () => {
+      const result = await makeRequest("GET", "/api/audit/INS-7731");
+      expect([200, 401, 403]).toContain(result.statusCode);
+      if (result.statusCode === 200) {
+        const data = JSON.parse(result.body) as Record<string, unknown>;
+        const instance = data.instance as Record<string, unknown>;
+        expect(instance.id).toBe("INS-7731");
+        expect(Array.isArray(data.trace)).toBe(true);
       }
-    }
-  });
+    },
+  );
 
-  it("GET /api/audit/NOPE returns 404", async () => {
-    const result = await makeRequest("GET", "/api/audit/NOPE");
+  it.skipIf(hasDb)(
+    "GET /api/audit/NOPE without a DB → 503 (gate short-circuits before the 404 lookup)",
+    async () => {
+      const result = await makeRequest("GET", "/api/audit/NOPE");
+      expect(result.statusCode).toBe(503);
+    },
+  );
 
-    expect(result.statusCode).toBe(404);
-  });
-
-  it("Demo instance INS-7731 has running status and budget items", async () => {
-    const result = await makeRequest("GET", "/api/audit/INS-7731");
-
-    expect(result.statusCode).toBe(200);
-    const data = JSON.parse(result.body) as Record<string, unknown>;
-    const instance = data.instance as Record<string, unknown>;
-
-    expect(instance.status).toBe("running");
-    const budget = instance.budget as Array<Record<string, unknown>>;
-    expect(budget.length).toBeGreaterThanOrEqual(2);
-
-    for (const item of budget) {
-      expect(item.label).toBeDefined();
-      expect(item.used).toBeDefined();
-      expect(item.total).toBeDefined();
-      expect(item.unit).toBeDefined();
-    }
-  });
+  it.skipIf(!hasDb)(
+    "GET /api/audit/NOPE with a DB → 404 for an authorized reader OR a fail-closed auth status",
+    async () => {
+      const result = await makeRequest("GET", "/api/audit/NOPE");
+      expect([404, 401, 403]).toContain(result.statusCode);
+    },
+  );
 });
