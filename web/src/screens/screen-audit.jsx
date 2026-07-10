@@ -10,11 +10,11 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  ExecGlyph, ActorChip, MonoId, Mono, Button, Field, Select,
+  ExecGlyph, ActorChip, NodeRef, MonoId, Mono, Button, Field, Select,
   LoadingState, ErrorState, EmptyState,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
-import { execTypeOf, fmtTs, humanError, buildAuditUrl } from './screen-audit.logic.js';
+import { execTypeOf, fmtTs, humanError, buildAuditUrl, isOrgNodeMoveAction } from './screen-audit.logic.js';
 
 /**
  * T-0648 (D-064, UX-study §3): the actor used to render as a bare slug/UUID
@@ -33,11 +33,19 @@ import { execTypeOf, fmtTs, humanError, buildAuditUrl } from './screen-audit.log
  * `ev.target` falls back to the writer's `subject` column (always populated
  * since T-0655 — retroactive, no degradation of old rows). For
  * `employee.moved` specifically, the moved entity IS an employee — the
- * server resolves it through the SAME batch actor-resolver and attaches
- * `ev.targetDisplay`, so it renders as a full human-named ActorChip (not just
- * a raw id) — `department.moved`/`position.moved` have no name resolver yet,
- * so their target stays the existing MonoId technical-id chip (same fidelity
- * `record.create`'s target chip already has).
+ * server resolves it through the batch actor-resolver and attaches
+ * `ev.targetDisplay`, rendered as a full human-named ActorChip (not just a
+ * raw id).
+ *
+ * T-0733 (R-1 из ревью T-0712, столп 4 анти-UUID): `department.moved`/
+ * `position.moved` now ALSO get a resolved `ev.targetDisplay` — the server's
+ * node-resolver.ts batch-resolves the moved department/position through
+ * choros.department/choros.position (a department/position is NOT an actor,
+ * so it is not employee-shaped — a separate `{id, name, kind, resolved}`
+ * shape). `isOrgNodeMoveAction(ev.action)` picks NodeRef (org-tree node name)
+ * instead of ActorChip for these two types; everything else (target=null, or
+ * a resolver miss leaving targetDisplay=null) keeps the pre-existing MonoId
+ * technical-id fallback, same fidelity `record.create`'s target chip has.
  */
 // Named export (additive) — T-0712: no hooks inside this component (pure
 // props → JSX), so it is directly callable/unit-testable without a DOM or a
@@ -47,6 +55,7 @@ export function AuditEventRow({ ev }) {
   const type = execTypeOf(ev.action);
   const display = ev.actorDisplay;
   const targetDisplay = ev.targetDisplay;
+  const nodeMove = isOrgNodeMoveAction(ev.action);
   return (
     <div className="chs-ev">
       <div className="chs-ev__time">{fmtTs(ev.ts)}</div>
@@ -58,7 +67,11 @@ export function AuditEventRow({ ev }) {
           <ActorChip type={display?.type || type} name={display?.name || ev.actor} id={display?.id || ev.actor} deactivated={display?.deactivated} />
           <span>{ev.summary || ev.action}</span>
           {targetDisplay ? (
-            <ActorChip type={targetDisplay.type} name={targetDisplay.name} id={targetDisplay.id} deactivated={targetDisplay.deactivated} />
+            nodeMove ? (
+              <NodeRef kind={targetDisplay.kind} name={targetDisplay.name} id={targetDisplay.id} />
+            ) : (
+              <ActorChip type={targetDisplay.type} name={targetDisplay.name} id={targetDisplay.id} deactivated={targetDisplay.deactivated} />
+            )
           ) : (
             ev.target && <MonoId chip>{ev.target}</MonoId>
           )}

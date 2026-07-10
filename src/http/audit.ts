@@ -50,6 +50,14 @@
  *   GET /api/audit/export?instance=<id>  — download named instance as JSON.
  *   GET /api/audit/export                — download default instance (INS-7731).
  *   Authz: requireAuditRead() (T-0737) — genesis-owner only, same as /api/audit.
+ *
+ * T-0733 (R-1 из ревью T-0712, столп 4 анти-UUID): `department.moved`/
+ * `position.moved` targets used to stay a bare id (MonoId) — T-0712 explicitly
+ * punted the node-name resolver as a follow-up ("резолвер имён department/
+ * position не существует в кодовой базе"). This module now batch-resolves
+ * those ids too, through node-resolver.ts (the ORG-TREE-NODE sibling of
+ * actor-resolver.ts) — same O(1)-query-per-page discipline, folded into the
+ * SAME response pass as the T-0648 actor batch below.
  */
 import pg from "pg";
 import { HttpError, type Router } from "./router.js";
@@ -68,6 +76,7 @@ import {
   type AuditLogCursor,
 } from "../db/audit-read-dao.js";
 import { batchResolveActors, resolveActorDisplay, type ResolvedActor } from "../db/actor-resolver.js";
+import { batchResolveOrgNodes, resolveNodeDisplay, type ResolvedNode } from "../db/node-resolver.js";
 import {
   runDemoLegalPrecheck,
   demoApproveDenied,
@@ -635,8 +644,7 @@ async function handleGetAuditLog(
   // column for the three org-move `.moved` types). That id is resolvable through the
   // SAME employee table/batch query — folded into the SAME single round-trip rather
   // than a second query, so the "who got moved" chip is a real human name too, not
-  // just a bare id (department.moved/position.moved targets are NOT employee ids —
-  // left out of this batch; they stay a MonoId technical chip on the client).
+  // just a bare id.
   const distinctActors = new Set(page.items.map((item) => item.actor));
   for (const item of page.items) {
     if (item.action === "employee.moved" && item.target) distinctActors.add(item.target);
@@ -650,14 +658,41 @@ async function handleGetAuditLog(
     }
   }
 
-  const events = page.items.map((item) => ({
-    ...item,
-    actorDisplay: resolveActorDisplay(actorResolved, item.actor),
-    targetDisplay:
-      item.action === "employee.moved" && item.target
-        ? resolveActorDisplay(actorResolved, item.target)
-        : null,
-  }));
+  // T-0733 (R-1 из ревью T-0712): `department.moved`/`position.moved` targets are
+  // ORG-TREE NODES, not employees — resolved through the SEPARATE node-resolver.ts
+  // batch (department/position are different tables from employee, so they cannot
+  // share batchResolveActors' query). Same failure discipline as the actor batch
+  // above: a resolver error degrades to an empty map, never a 500.
+  const distinctDeptIds = new Set<string>();
+  const distinctPosIds = new Set<string>();
+  for (const item of page.items) {
+    if (item.action === "department.moved" && item.target) distinctDeptIds.add(item.target);
+    if (item.action === "position.moved" && item.target) distinctPosIds.add(item.target);
+  }
+  let nodeResolved: Map<string, ResolvedNode> = new Map();
+  if (distinctDeptIds.size > 0 || distinctPosIds.size > 0) {
+    try {
+      nodeResolved = await batchResolveOrgNodes(pool, tenantId, [...distinctDeptIds], [...distinctPosIds]);
+    } catch {
+      nodeResolved = new Map();
+    }
+  }
+
+  const events = page.items.map((item) => {
+    let targetDisplay: ResolvedActor | ResolvedNode | null = null;
+    if (item.action === "employee.moved" && item.target) {
+      targetDisplay = resolveActorDisplay(actorResolved, item.target);
+    } else if (item.action === "department.moved" && item.target) {
+      targetDisplay = resolveNodeDisplay(nodeResolved, item.target, "department");
+    } else if (item.action === "position.moved" && item.target) {
+      targetDisplay = resolveNodeDisplay(nodeResolved, item.target, "position");
+    }
+    return {
+      ...item,
+      actorDisplay: resolveActorDisplay(actorResolved, item.actor),
+      targetDisplay,
+    };
+  });
 
   res.statusCode = 200;
   res.setHeader("Content-Type", "application/json");

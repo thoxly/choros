@@ -345,6 +345,64 @@ function RecordRef({ recordId, appId, headers, fetchImpl }) {
 }
 
 /* ----------------------------------------------------------------------------
+   NodeRef — T-0733 (D-064, столп 4 анти-UUID; R-1 из ревью T-0712): org-tree
+   NODE (department/position) display primitive. `department.moved`/
+   `position.moved` (org-move-API, T-0655) audit rows carry the MOVED node as
+   their target — T-0712 already resolves `employee.moved`'s target through
+   ActorChip because the moved entity there IS an actor (choros.employee,
+   human/agent/service identity, EXEC_META glyph). A department/position is
+   NOT an actor — EXEC_META has no glyph for "org node", and forcing one
+   (e.g. the "service" square) would misrepresent a department as a system
+   actor. NodeRef is the sibling primitive for the other half of the org
+   tree: the server's node-resolver.ts (T-0733) batch-resolves
+   department.display_name / position.title (same O(1)-query discipline as
+   T-0648's batchResolveActors) and hands the row a `{id, name, kind,
+   resolved}` shape; NodeRef renders the resolved NAME primary, raw id
+   demoted to a tooltip only (mirrors ActorChip's default showId=false).
+
+   HONEST DEGRADATION (D2): department/position carry NO soft-delete column
+   (unlike employee.deactivated_at) — DELETE /api/departments/:id or
+   /api/positions/:id (AC-9, isGenesisOwner-only) is a HARD delete, so an
+   unresolved node id always means "no longer exists" (or, defensively, a
+   cross-tenant id the tenant-scoped resolver could never see). The server's
+   honest fallback sets `name = id` (mirrors resolveActorDisplay's exact
+   contract — an INTERNAL signal, never meant to reach the screen verbatim);
+   NodeRef demotes any UUID-shaped name the same way ActorChip already does
+   (isMachineActorLabel) and falls back to a kind label instead — the reader
+   always sees legible text, never a bare UUID and never the literal string
+   "undefined".
+
+   Props:
+     kind — "department" | "position" (drives the kind label + fallback text).
+     name — resolved display_name/title, or the server's honest id-fallback.
+     id   — raw node id (uuid) — tooltip only, never a visible primary/chip.
+   ---------------------------------------------------------------------------- */
+const NODE_KIND_META = {
+  department: { label: "Отдел", deletedLabel: "Отдел удалён" },
+  position: { label: "Должность", deletedLabel: "Должность удалена" },
+};
+
+function NodeRef({ kind, name, id }) {
+  const meta = NODE_KIND_META[kind] || { label: "Узел", deletedLabel: "Узел удалён" };
+  const safeId = asRenderableText(id);
+  const rawName = asRenderableText(name);
+  // Mirrors ActorChip's T-0685 demotion guard: an unresolved node's honest
+  // fallback carries name === id (a UUID) — never render that verbatim.
+  const nameIsMachineKey = isMachineActorLabel(rawName);
+  const resolvedName = rawName && !nameIsMachineKey ? rawName : null;
+  const displayName = resolvedName || meta.deletedLabel;
+  const tooltip = safeId ? `${meta.label} · ${safeId}` : meta.label;
+  return (
+    <span
+      className={`chs-noderef ${resolvedName ? "" : "chs-noderef--unresolved"}`}
+      title={tooltip}
+    >
+      {displayName}
+    </span>
+  );
+}
+
+/* ----------------------------------------------------------------------------
    ProcessRef — T-0683 (D-064, wave-5 human-layer; capstone T-0647 finding):
    the inbox «ПРОЦЕСС» column rendered the raw instance-UUID
    (`5ec293d1-77d7-11f1-…`) as the PRIMARY identifier on the operator's main
@@ -1346,7 +1404,7 @@ function DataTableCell({ children, numeric = false, right = false, center = fals
 }
 
 export {
-  ExecGlyph, ExecutorBadge, ActorChip, MonoId, Mono, RecordRef, ProcessRef, StepRef, StatusChip, Button, Field, Select,
+  ExecGlyph, ExecutorBadge, ActorChip, MonoId, Mono, RecordRef, NodeRef, ProcessRef, StepRef, StatusChip, Button, Field, Select,
   BudgetMeter, ReservationMeter, RoleAssignment, OpChip, DerivedChip,
   TaskRow, AuditEvent, EXEC_META, STATUS_META,
   KitIcon, Spinner,
