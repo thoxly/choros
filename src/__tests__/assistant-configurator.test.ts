@@ -18,6 +18,13 @@
  *  AC-T361-7: author_binding tool call → ApprovedOp with tier='draft'.
  *  AC-T361-8: handleConfigurator stub (no tool calls from LLM) → text reply, no blocked ops.
  *
+ *  AC-T700-1: author_binding tool schema declares targetRegistrySlug (bot can reach
+ *             a non-default registry, same as the human bind-form's picker — T-0681).
+ *  AC-T700-2: author_binding tool call WITH targetRegistrySlug → ApprovedOp.args carries
+ *             it verbatim (the HTTP executor's existing T-0681 validation reads this key).
+ *  AC-T700-3: author_binding tool call WITHOUT targetRegistrySlug → args has no such key
+ *             (unchanged default-registry behavior, no regression).
+ *
  * DB paths (process-defs POST, binding POST, registry-defs PUT execution) are the
  * assistant HTTP route's responsibility — not tested here (DB-untested by design).
  */
@@ -494,6 +501,79 @@ describe("AC-T363-2: benign add_field tool call lands in approvedOps with tier='
     const op = result.approvedOps[0]!;
     expect(op.kind).toBe("author_binding");
     expect(op.tier).toBe("draft");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0700 (E-FORMS, столп 5 «настройка через ИИ»): author_binding's targetRegistrySlug
+// parameter — the tool schema must declare it (else the LLM never knows it exists,
+// asymmetric with the human bind-form's registry picker, T-0681), and a tool call that
+// supplies it must reach ApprovedOp.args verbatim (the HTTP executor already reads
+// args["targetRegistrySlug"], T-0681) — omitting it must be a true no-op (default
+// registry, unchanged behavior).
+// ---------------------------------------------------------------------------
+
+describe("AC-T700-1: author_binding tool schema declares targetRegistrySlug [T-0700]", () => {
+  it("the configurator's first LLM call declares author_binding with a targetRegistrySlug property", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Какой процесс привязать?" });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("привяжи процесс к приложению", ctx);
+
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{
+      function?: { name?: string; parameters?: { properties?: Record<string, unknown> } };
+    }>;
+    const bindingTool = tools.find((t) => t.function?.name === "author_binding");
+    expect(bindingTool).toBeDefined();
+    const props = bindingTool!.function!.parameters!.properties!;
+    expect(props).toHaveProperty("targetRegistrySlug");
+    // targetRegistrySlug must stay OPTIONAL (default-registry path unchanged) —
+    // it must not be added to the required list.
+    const required = (bindingTool!.function as unknown as { parameters: { required: string[] } })
+      .parameters.required;
+    expect(required).not.toContain("targetRegistrySlug");
+  });
+});
+
+describe("AC-T700-2/3: author_binding tool call — targetRegistrySlug pass-through [T-0700]", () => {
+  it("WITH targetRegistrySlug → ApprovedOp.args carries it verbatim (paritet with the human bind-form)", async () => {
+    const llm = new ToolCallLlmPort("author_binding", {
+      processKey: "purchase-approval",
+      applicationId: "a0000000-0000-0000-0000-000000000001",
+      triggerType: "on_create",
+      targetRegistrySlug: "non-default-registry",
+      humanReadableReason: "Привязать процесс к нестандартному реестру результата",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("привяжи процесс к другому реестру", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("author_binding");
+    expect(op.tier).toBe("draft");
+    // The HTTP executor (T-0681, src/http/assistant.ts case "author_binding") reads
+    // exactly this key off op.args — this is the load-bearing pass-through assertion.
+    expect(op.args["targetRegistrySlug"]).toBe("non-default-registry");
+    // Audit transparency: the changelog description names the non-default registry
+    // (parity with the human UI, which shows the picked registry in its own form).
+    expect(op.description).toMatch(/non-default-registry/);
+  });
+
+  it("WITHOUT targetRegistrySlug → args carries no such key (unchanged default-registry behavior)", async () => {
+    const llm = new ToolCallLlmPort("author_binding", {
+      processKey: "purchase-approval",
+      applicationId: "a0000000-0000-0000-0000-000000000001",
+      triggerType: "on_create",
+      humanReadableReason: "Привязать процесс без явного реестра результата",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("привяжи процесс согласования", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.args["targetRegistrySlug"]).toBeUndefined();
+    expect(op.description).not.toMatch(/реестр результата/);
   });
 });
 
