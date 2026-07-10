@@ -427,10 +427,20 @@ corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
   T-0737/T-0738/T-0739 закрыли READ-поверхность роут-за-роутом (находки
   обнаруживал T-0726); T-0740 реконсилировал маркер-реестр `ACTIVE_MARKERS`
   (T-0726) с `AUTHORITY_RESOLVERS`/предикатом (T-0662) — см.
-  `docs/tasks/T-0740.adr.md`. **Остаточный known gap:** `GET /api/inbox/:id`
-  (T-0738 ADR §4) не вызывает authority-резолвер вовсе — tenant-open-by-
-  construction для ЛЮБОГО актора (не специфично для деактивации), отдельный
-  вопрос от этой семьи, не закрыт.
+  `docs/tasks/T-0740.adr.md`. T-0750 закрыл известный на тот момент остаточный
+  gap `GET /api/inbox/:id` (реюз `resolveRolesForActor`, honest-404) — «ФИНАЛ
+  ACTOR_ACTIVE-волны: findings 13→0» на момент мержа T-0750. **T-0751**
+  (post-merge, findings 0→1→0): T-0745 добавил `GET /api/rights/intents/
+  substitution-coverage` ПОСЛЕ того прогона без консультации ни с одним из
+  T-0662 резолверов (гейт информационный, не в `npm run fitness` — не
+  заблокировал мерж) — регистр вернул 8-й `AUTHORITY_RESOLVERS`
+  (`resolveActiveActorEmployeeId`, независимый от D, не рефакторинг
+  `registerSelfAbsence`), зеркалированный в `ACTIVE_MARKERS` Group 1 обеими
+  auto-additive frozen-thaw санкциями. Живой прогон снова 0 находок.
+  **Остаточный known gap: нет** на момент этой записи — но T-0745
+  продемонстрировал, что информационный статус гейта (§5 выше) допускает
+  дрейф между волнами; следующий новый GET-роут может открыть новую находку
+  до следующего ручного прогона.
 
 ---
 
@@ -448,7 +458,7 @@ corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
 | 7.3 | NO-KILLSWITCH | ✅ + self-test | — | — | PARTIAL | red-line, проверяется grep'ом |
 | 7.4 | EGRESS-POLICY | ✅ | — | — | PARTIAL | runtime-проверка политики egress |
 | 7.5 | FROZEN-CHECKS | ✅ + probe | — | hostile-probe | STRONG | держит конституцию; T-0155 вешает сюда каталог |
-| 7.7 | ACTOR-ACTIVE | ✅ registry+accounting | ✅ 7 live-PG | — | STRONG | route-coverage (T-0726) informational остаток (`GET /api/inbox/:id`, T-0738 ADR §4) — отдельный follow-up |
+| 7.7 | ACTOR-ACTIVE | ✅ registry+accounting | ✅ 7 live-PG | — | STRONG | route-coverage (T-0726) 0 находок на T-0751 (было 1: `GET /api/rights/intents/substitution-coverage`, T-0745 пост-волновой дрейф); гейт остаётся информационным — новый GET-роут может открыть новую находку до следующего ручного прогона |
 
 ---
 

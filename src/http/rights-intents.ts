@@ -967,7 +967,61 @@ function registerSubstitute(
 //   in-window role_assignment rows) — MINUS the absent/substitute exclusion
 //   (here we ask "does substitute hold it", not "does a THIRD party hold it"),
 //   so the warning agrees with what the write path will actually decide.
+//
+//   T-0751 [SECURITY, ACTOR_ACTIVE]: T-0745 gated this route on extractActor +
+//   resolveTenant ONLY — the SAME minimal bar as registerSelfAbsence's WRITE,
+//   but WITHOUT registerSelfAbsence's OWN `slug = $2 AND ${ACTOR_ACTIVE_SQL}`
+//   actor-resolve (T-0662 resolver D). extractActor/resolveActorSlugFromAuth
+//   are DISPLAY-ONLY identity mapping (T-0662 doctrine, actor-authority-
+//   gate.ts's "NOT AN AUTHORITY RESOLVER" list) — deliberately NOT deactivation
+//   -gated, so they alone are not a fail-closed floor. Consequence: a
+//   DEACTIVATED employee's still-live (~300s residual, offline-JWKS) JWT could
+//   query this route for ANY (role_id, substitute_employee_id) pair and get
+//   back a role-membership fact (provides_coverage boolean + holder_count) —
+//   exactly the T-0726 route-coverage bug class (actor-active-route-coverage.sh
+//   FINDING, findings 0→1). resolveActiveActorEmployeeId below closes this:
+//   the SAME `deactivated_at IS NULL` predicate registerSelfAbsence's own
+//   inline lookup carries, as an INDEPENDENT registered instance (not a
+//   refactor of registerSelfAbsence's body — that would disturb its own
+//   FF-0662-1 coverage accounting for no reason). Fail-closed: a deactivated
+//   caller resolves to null → 404, identical shape to registerSelfAbsence's
+//   own denial, before any role_assignment read runs.
 // ===========================================================================
+
+/**
+ * resolveActiveActorEmployeeId — T-0751. Registered T-0662 AUTHORITY_RESOLVERS
+ * entry (ci/checks/actor-authority-deactivation-gate.sh) and mirrored into
+ * ci/checks/actor-active-route-coverage.sh's ACTIVE_MARKERS Group 1. Resolves
+ * the AUTHENTICATED caller's own slug → employee UUID, filtered by
+ * ACTOR_ACTIVE_SQL (`deactivated_at IS NULL`); returns null (not throw) so the
+ * caller decides its own error shape. Independent of registerSelfAbsence's own
+ * inline lookup (same shape, deliberately NOT extracted into a shared helper —
+ * see the section comment above).
+ */
+async function resolveActiveActorEmployeeId(
+  pool: pg.Pool,
+  tenantId: string,
+  actorSlug: string,
+): Promise<string | null> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    // T-0662: `deactivated_at IS NULL` via the single named marker ACTOR_ACTIVE_SQL.
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
+      [tenantId, actorSlug],
+    );
+    await client.query("COMMIT");
+    return rows.length > 0 ? (rows[0]!.id) : null;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 function registerSubstitutionCoverage(
   router: Router,
@@ -978,6 +1032,14 @@ function registerSubstitutionCoverage(
     const actorId = await extractActor(req, pool);
     const tenantId = await resolveTenant(actorId, resolveActorTenant);
     const nowMs = Date.now();
+
+    // T-0751 [SECURITY]: fail-closed ACTOR_ACTIVE gate BEFORE any coverage read.
+    // A deactivated caller must not receive even a boolean/count role-membership
+    // fact via their residual live JWT — see the section comment above.
+    const activeEmployeeId = await resolveActiveActorEmployeeId(pool, tenantId, actorId);
+    if (activeEmployeeId === null) {
+      throw new HttpError(404, "NOT_FOUND", "actor employee record not found");
+    }
 
     const url = new URL(req.url ?? "/", "http://localhost");
     const roleId = url.searchParams.get("role_id");

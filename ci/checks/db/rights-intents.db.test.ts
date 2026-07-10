@@ -370,6 +370,108 @@ describe('T-0745: GET /api/rights/intents/substitution-coverage', () => {
 });
 
 // ---------------------------------------------------------------------------
+// T-0751 [SECURITY, ACTOR_ACTIVE] — GET /api/rights/intents/substitution-
+// coverage must fail-closed for a DEACTIVATED caller (ci/checks/actor-active-
+// route-coverage.sh FF-726-1 finding, findings 0→1→0). Before this fix the
+// route resolved the caller via extractActor/resolveTenant ONLY (display-only
+// identity mapping, T-0662 doctrine — deliberately NOT deactivation-gated). A
+// deactivated actor's still-live (~300s residual, offline-JWKS) JWT could
+// query ANY (role_id, substitute_employee_id) pair and receive a
+// role-membership oracle (provides_coverage boolean + holder_count) they have
+// no business holding once deactivated. resolveActiveActorEmployeeId
+// (rights-intents.ts) closes this the SAME way registerSelfAbsence's own
+// inline lookup does (T-0658 FIX-1 below): a deactivated caller resolves to
+// zero rows → 404, before the role_assignment holder-set read ever runs.
+// ---------------------------------------------------------------------------
+describe('T-0751: a DEACTIVATED actor cannot read substitution-coverage (ACTOR_ACTIVE oracle closed)', () => {
+  const stamp = Date.now();
+  const roleId = randomUUID();
+  const roleSlug = `r-t0751-coverage-${stamp}`;
+  let posId = '';
+  let holderId = '';
+
+  async function seedCaller(slug: string, deactivatedAt: number | null): Promise<string> {
+    return withClient(migratorUrl(), async (c) => {
+      await c.query(`SET search_path TO choros`);
+      const empId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.employee
+           (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at, deactivated_at)
+         VALUES ($1, $2, $3, 'human', $4, $4, 0, 0, $5)`,
+        [DEV_TENANT, empId, posId, slug, deactivatedAt],
+      );
+      createdEmployees.push(empId);
+      return empId;
+    });
+  }
+
+  beforeAll(async () => {
+    await withClient(migratorUrl(), async (c) => {
+      await c.query(`SET search_path TO choros`);
+      posId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.position (tenant_id, id, department_id, slug, title, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $4, 0, 0)`,
+        [DEV_TENANT, posId, DEPT_FIN, `p-t0751-coverage-${stamp}`],
+      );
+      await c.query(
+        `INSERT INTO choros.role (tenant_id, id, slug, display_name, description, created_at, updated_at)
+         VALUES ($1, $2, $3, $3, NULL, 0, 0)`,
+        [DEV_TENANT, roleId, roleSlug],
+      );
+      holderId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, $3, 'human', $4, $4, 0, 0)`,
+        [DEV_TENANT, holderId, posId, `e-t0751-holder-${stamp}`],
+      );
+      createdEmployees.push(holderId);
+      const raId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, NULL, NULL, 'seed', 'seed', NULL, 'seed', NULL, 0, 0)`,
+        [DEV_TENANT, raId, holderId, roleId, JSON.stringify(FIN_NODE)],
+      );
+      createdAssignments.push(raId);
+    });
+  });
+
+  it('positive control: an ACTIVE caller gets a real coverage answer (regression guard — T-0745 form not broken)', async () => {
+    const activeSlug = `e-t0751-active-${stamp}`;
+    await seedCaller(activeSlug, null);
+    const res = await apiGet(
+      `/api/rights/intents/substitution-coverage?role_id=${roleId}&substitute_employee_id=${holderId}`,
+      activeSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(res.json.provides_coverage).toBe(true);
+    expect(res.json.holder_count).toBe(1);
+  });
+
+  it('a DEACTIVATED caller → 404, no coverage/holder data leaked (mutation-red without the T-0751 gate)', async () => {
+    const deactSlug = `e-t0751-deact-${stamp}`;
+    await seedCaller(deactSlug, 500_000); // DEACTIVATED
+
+    const res = await apiGet(
+      `/api/rights/intents/substitution-coverage?role_id=${roleId}&substitute_employee_id=${holderId}`,
+      deactSlug, // authenticate AS the deactivated actor
+    );
+    // Fail-closed: the deactivated actor resolves to no ACTIVE employee row →
+    // 404. Without the T-0751 gate this same request would reach the
+    // holder-set read (the positive control above proves the route answers
+    // for an active caller with the SAME role/substitute pair) — mutation-
+    // verified: reverting the gate turns this 404 into a 200 carrying
+    // provides_coverage/holder_count.
+    expect(res.status, JSON.stringify(res.json)).toBe(404);
+    expect(res.json.provides_coverage).toBeUndefined();
+    expect(res.json.holder_count).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T-0658 (round 3) FIX-1 — self-absence must fail-closed for a DEACTIVATED
 // actor. self-absence is the ONLY authority-WRITING handler in rights-intents.ts
 // that does NOT route through loadAdminContext (hire/fire/substitute/urgent-

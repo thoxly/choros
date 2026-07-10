@@ -36,6 +36,11 @@
  *                                        deliver the 2nd signature confirmed2_by, nor reject/delete)
  *     F  checkRole                      src/http/binding.ts       (T-0662 round-2: process_designer
  *                                        role-membership authz; surfaced by the JOIN-window scan widening)
+ *     G  resolveActiveActorEmployeeId   src/http/rights-intents.ts (T-0751: GET /api/rights/intents/
+ *                                        substitution-coverage's caller-resolve — a deactivated actor
+ *                                        must not receive even a boolean/count role-membership fact via
+ *                                        their residual live JWT; INDEPENDENT of D's own inline lookup,
+ *                                        not a shared helper, so D's own FF-0662-1 accounting is untouched)
  *
  * WHAT IS **NOT** AN AUTHORITY RESOLVER (this predicate MUST NOT be added — see
  * ADR-T0658 §3.4 / T-0662 ADR §1.1):
