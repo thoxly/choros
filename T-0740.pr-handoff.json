@@ -1,0 +1,68 @@
+{
+  "task_id": "T-0740",
+  "status": "pr_open",
+  "branch": "task/T-0740",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "ci_local_note": "build=true: `npm run build` (tsc + seed/tsconfig) clean, zero errors. lint=true: `eslint src/http/inbox.ts` clean (0 errors; 4 pre-existing no-console warnings, unrelated to this diff, byte-unchanged lines). types=true: covered by build (tsc --noEmit, full project). tests=true: full `vitest run` (no DATABASE_URL) — 253 files / 4730 tests (4713 passed, 17 pre-existing skips), 0 failed; PLUS full live-PG `vitest run --dir ci/checks/db --no-file-parallelism` — 155 files / 1416 tests, 0 failed, incl. `grants-dao-role-slug-deactivation.db.test.ts` (7/7, the exact predicate this task's markers cite). fitness=true reflects the SPECIFIC gates this task's brief named + every gate touched by the diff (same convention T-0739/T-0738 used — the literal `npm run fitness` megachain (300+ checks, KC/Flowable-dependent) was attempted once and aborted on a PRE-EXISTING, UNRELATED failure: `ci/checks/entitlement-gates-vendor-only.sh` (T-0198, FF-T127-4) false-positives on the substring 'activation' inside 'deactivation' in a T-0727 comment in `src/http/user-mgmt.ts` (a file this task never touches; check script byte-identical to base; reproduced independently of any T-0740 change). Foreign frozen check (T-0198-owned), out of scope, not fixed here (coder.md §8b) — flagged as a durable friction finding, not a T-0740 regression. Gates actually run and green: `actor-active-route-coverage.sh` (live: 2->1 findings) + `--self-test`; `actor-authority-deactivation-gate.sh` (FF-0662-1/2, unchanged) + `--self-test`; `frozen-checks-immutable.sh` (green via the auto-additive sanction, verified independently by `auto-sanction-additive.sh --verify`); `auto-sanction-additive.sh` standalone + `--self-test`; `http-route-auth-coverage.sh` (inbox.ts routes still withAuth-wrapped); `anti-case-lock.sh` + `--self-test` (no new case-literals).",
+  "files_changed": [
+    "ci/checks/actor-active-route-coverage.sh",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "docs/design/T-0152-security-invariants-catalog.md",
+    "docs/tasks/T-0740.adr.md",
+    "src/http/inbox.ts"
+  ],
+  "root_cause": "T-0738 added `${ACTOR_ACTIVE_SQL}` to `getRoleSlugsForActor` (src/db/grants-dao.ts:470,484), closing the live deactivation hole on GET /api/inbox, but explicitly declined to touch ci/checks/actor-active-route-coverage.sh's ACTIVE_MARKERS (T-0726-owned frozen file, no sanction in hand) -- so the gate's text-scan kept reporting GET /api/inbox as a false-positive finding even though the real vulnerability was closed and live-PG-proven. T-0738 flagged the exact fix (auto-sanction-additive with Враг-attestation) as a named follow-up; that follow-up is this task.",
+  "findings_before_after": {
+    "actor-active-route-coverage.sh": "2 -> 1 (77 GET routes; 20->21 marker-covered, 55 whitelisted unchanged)",
+    "GET /api/inbox": "CLOSED -- resolveRolesForActor (inbox.ts:1540, inside the route's own handler block) added to ACTIVE_MARKERS Group-2; hand-verified: composes getRoleSlugsForActor (grants-dao.ts:431) which carries ${ACTOR_ACTIVE_SQL} on both the primary (grants-dao.ts:470) and T-0366-fallback (grants-dao.ts:484) lookups",
+    "GET /api/inbox/:id": "NOT closed, intentionally -- T-0738 ADR §4 already found this route calls findInboxItems(actor) (tenant-scoped, no role filter) and reaches NO authority resolver at all in its call graph; adding a marker here would be the exact evasion pattern (theatrical marker to turn the scan green without a real gate) that the task brief and T-0662's own self-test explicitly forbid. Left as an honest FF-726-1 FINDING; flagged as a separate follow-up (spawn_task, not this task's scope)."
+  },
+  "markers_added": [
+    {"marker": "resolveRolesForActor", "file": "src/http/inbox.ts:428-439", "verified": "module-scope helper predating the file's first .register(; composes getRoleSlugsForActor at inbox.ts:439 with no bypass; literally referenced at inbox.ts:1540 inside GET /api/inbox's own handler block"},
+    {"marker": "getRoleSlugsForActor", "file": "src/db/grants-dao.ts:431-494", "verified": "carries ${ACTOR_ACTIVE_SQL} directly on the primary lookup (grants-dao.ts:470) and the T-0366 fallback lookup (grants-dao.ts:484), added by T-0738; NOT yet a T-0662 AUTHORITY_RESOLVERS entry (still ALLOWLIST there) -- added here on the T-0726 side only, per §5 below"}
+  ],
+  "part_b_status": "NOT implemented -- actor-authority-deactivation-gate.sh (T-0662) untouched. Promoting getRoleSlugsForActor from ALLOWLIST to AUTHORITY_RESOLVERS requires REMOVING the existing ALLOWLIST line + its now-partially-stale comment, which is a mutation/reclassification, not a pure addition: mechanically verified NOT auto-additive-safe (auto-sanction-additive.sh's A-4 rejects it -- the string 'src/db/grants-dao.ts:getRoleSlugsForActor' already exists in base_ents via ALLOWLIST, so re-adding it to AUTHORITY_RESOLVERS introduces no new entity and is flagged as 'delta line only references existing entities', the same R-1-ABSENT-AT-BASE case the self-test guards). Requires a founder-class sanction (FF-FCI12, via a real founder_decide, not a self-authored 'sanctioned_by:founder' line -- that would be forgery). Exact ready-to-apply diff + stale-comment fix documented in docs/tasks/T-0740.adr.md §5 for a future founder-sanctioned follow-up.",
+  "auto_additive_sanction": {
+    "file": "ci/checks/actor-active-route-coverage.sh",
+    "owner": "T-0726",
+    "mechanism": "ci/checks/auto-sanction-additive.sh (T-0232, FF-FCI13)",
+    "catalog_family_added": "ACTOR-ACTIVE (docs/design/T-0152-security-invariants-catalog.md §7.7, new section -- catalog itself is NOT frozen yet, T-0155 is the pending freeze task)",
+    "verification": "bash ci/checks/auto-sanction-additive.sh --verify T-0740 ci/checks/actor-active-route-coverage.sh 12624db636569801eb9f5f43d6daa1beb517b6d5 \"$SANCTION_JSON\" -> PASS [A-1..A-4], PASS [ATTEST-R1a/R1b], exit 0; then bash ci/checks/frozen-checks-immutable.sh -> SANCTION [FF-FCI13] ... modification ALLOWED, PASS overall",
+    "empirical_frozen_check": "Verified live on this branch (not theory): a synthetic one-line probe edit to actor-active-route-coverage.sh, BEFORE the sanction existed, produced FAIL [FF-FCI1] belongs to task 'T-0726' not T-0740 -- confirming the task brief's frozen-file warning (stated only for actor-authority-deactivation-gate.sh) applies EQUALLY to this file, which the brief did not flag."
+  },
+  "live_proof": "n/a (substrate/gate task, changes_product=0 -- reconciles registry metadata + one comment; no product-facing behavior changed; the deactivation predicate itself was already live-PG-proven by T-0738)",
+  "deviations_from_adr": [
+    "Task brief scoped part (B) as conditionally in-scope ('if legitimate, promote + fix comment; otherwise report'). Empirical investigation found (B) is NOT auto-additive-safe (requires removing an existing ALLOWLIST line, which A-1/A-4 mechanically reject) -- so (B) code changes were skipped per the brief's own explicit fallback instruction. This IS the anticipated deviation, not an unplanned one.",
+    "Task brief did not flag actor-active-route-coverage.sh (part A) as frozen/needing a thaw procedure -- only part (B) was flagged. Empirical testing found it is EQUALLY frozen (owned by T-0726, no standing sanction). Resolved via the legitimate auto-additive channel (T-0232) rather than a direct unsanctioned edit -- documented in docs/tasks/T-0740.adr.md §3-4.",
+    "GET /api/inbox/:id was NOT closed and is NOT expected to close via this task -- it is a genuine, separate, pre-existing security gap (no role/authority check at all, any tenant member), already identified by T-0738 (ADR §4) as out of scope for the deactivation predicate class. Flagged for a follow-up task via spawn_task, not fixed here (would be scope creep beyond registry reconciliation)."
+  ],
+  "friction_events": [],
+  "durable_findings": [
+    "frozen-checks-immutable.sh (T-0146) resolves BASE_REF via the CURRENT local dev/origin-dev ref at run time -- if a task's own branch has already been merged into dev (or dev is stale/unfetched in that worktree), merge-base(dev, HEAD) collapses toward HEAD and a real foreign-file edit reads as a clean diff post-hoc. Forensic replay (git worktree at the true historical dev-tip, 018d2ac8, before T-0737 merged) shows T-0737's real edit to actor-active-route-coverage.sh WOULD have failed FF-FCI1 had it been checked against the true BASE_REF at the time -- no sanction line exists for that task/file pair. This likely explains how T-0737 (and possibly other wave siblings) edited a foreign frozen file undetected, while T-0736 explicitly avoided it and T-0738 explicitly refused it citing this exact concern. Not a T-0740 defect; flagged for a future T-0146 hardening task (e.g. pin BASE_REF resolution to a recorded merge-base at branch-creation time, not a live ref lookup).",
+    "ci/checks/entitlement-gates-vendor-only.sh (T-0198, FF-T127-4) false-positives on the substring 'activation' inside the word 'deactivation' -- a T-0727 comment in src/http/user-mgmt.ts ('deactivation (best-effort, ADR-T0702 §2.2)...') trips it. Pre-existing on dev@12624db6 (before this task), unrelated to T-0740, not fixed here (foreign frozen file). Blocks a literal full `npm run fitness` run for ANY task whose base includes T-0727 -- i.e. every task in this wave since T-0727 merged. Candidate quick fix: word-boundary the check's grep pattern."
+  ],
+  "gates_run": {
+    "actor_active_route_coverage": "PASS -- findings 2 -> 1 (SUMMARY: 77 GET routes audited — 21 marker-covered, 55 whitelisted, 1 findings)",
+    "actor_active_route_coverage_self_test": "PASS",
+    "actor_authority_deactivation_gate": "PASS -- FF-0662-1/2 unchanged (file not touched)",
+    "actor_authority_deactivation_gate_self_test": "PASS",
+    "frozen_checks_immutable": "PASS -- SANCTION [FF-FCI13] auto-additive, verified mechanically",
+    "auto_sanction_additive_standalone": "PASS",
+    "auto_sanction_additive_self_test": "PASS",
+    "http_route_auth_coverage": "PASS",
+    "anti_case_lock": "PASS",
+    "anti_case_lock_self_test": "PASS",
+    "build": "PASS (tsc + seed/tsconfig)",
+    "eslint_inbox_ts": "PASS (0 errors, 4 pre-existing unrelated warnings)",
+    "vitest_no_db": "PASS -- 4713/4730 (17 pre-existing skips)",
+    "vitest_db_live_pg": "PASS -- 1416/1416 (155 files, incl. grants-dao-role-slug-deactivation.db.test.ts 7/7)",
+    "npm_run_fitness_full": "ABORTED at a pre-existing, unrelated foreign-check failure (entitlement-gates-vendor-only.sh, T-0198) -- see durable_findings; the checks this task actually touches were independently verified green above"
+  }
+}
