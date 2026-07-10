@@ -190,6 +190,16 @@ export interface InstanceProjection {
    * O2 for the follow-up once a service-executor source of truth exists).
    */
   readonly starterActorKind: "human" | "agent";
+  /**
+   * T-0654 [part A / UX-study §5.3]: the raw actor id of who STARTED this instance
+   * (`process.started` audit_event.actor — the SAME value that feeds resolveActorKinds
+   * above for starterActorKind). Surfaced so the display plane (src/http/processes.ts,
+   * pg-free) can (a) resolve it to a human name via the injected resolveActorsDisplay
+   * (T-0648) for «Запущен: <Имя>», and (b) evaluate the `?mine=` filter (starterId ===
+   * the reading actor's slug) WITHOUT re-querying — never used to widen visibility (the
+   * projection is already tenant-scoped). Always present.
+   */
+  readonly starterActorId: string;
 }
 
 /** The waiting user-task surfaced to inbox, addressed to a ROLE (not a person). */
@@ -1176,6 +1186,9 @@ export async function listInstanceProjections(
       stepsDone,
       stepsKnownTotal,
       starterActorKind: actorKinds.get(row.actor) ?? "human",
+      // T-0654 [part A]: the raw starter actor id (same source as starterActorKind's
+      // lookup). The display plane resolves it to a name / evaluates ?mine= against it.
+      starterActorId: row.actor,
       ...(recordId !== undefined ? { recordId } : {}),
     };
   });
