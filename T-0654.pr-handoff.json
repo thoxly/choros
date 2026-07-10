@@ -1,0 +1,117 @@
+{
+  "task_id": "T-0654",
+  "status": "pr_open",
+  "branch": "task/T-0654",
+  "pr_url": "(stand offline — local branch task/T-0654 @ dev a9d95206; promote via founder gate)",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/tasks/T-0654.spec.md",
+    "docs/design/ADR-T0654-processes-split.md",
+    "src/http/process-projection.ts",
+    "src/http/processes.ts",
+    "src/__tests__/processes-list-query.test.ts",
+    "src/__tests__/processes.e2e.test.ts",
+    "src/__tests__/processes-live-instances.test.ts"
+  ],
+  "deviations_from_adr": [
+    "None for the delivered scope (part A). The ADR itself scopes the full task and recommends the split below.",
+    "Scope drift vs the 07-05 spec (code beats spec, as the brief warned): spec §5.2 (modeler requires name) is ALREADY delivered by T-0684 — verification only, not built here. Spec §5.3 (detail) is ~80% delivered (deriveInstanceTitle/RecordRef/ActorChip); only starter-name/related-tasks-link/header-record remain (folded into proposed sub-task T-0654-b)."
+  ],
+  "scope_delivered": {
+    "summary": "Part A — the server keystone both UI zones consume: GET /api/processes query params + pagination + deterministic sort + starter identity. Thin core, pg-free display plane, deterministic unit+HTTP tests.",
+    "acceptance_criteria_met": [
+      "AC-A1 ?q= (name/procId/id/node, case-insensitive)",
+      "AC-A2 ?definition= exact procKey",
+      "AC-A3 ?status= exact",
+      "AC-A4 ?started_from/?started_to (epoch-ms|ISO, inclusive, unknown passes)",
+      "AC-A5 ?mine=1 (starterId === reading actor; unknown-starter excluded)",
+      "AC-A6 ?limit/?offset pagination; response {instances,total,limit,offset}; default limit=200 (no regression)",
+      "AC-A7 deterministic total order (startedAt DESC, unknown last, id ASC tiebreak)",
+      "AC-A8 filters applied after tenant-scoped projection (never widen); ?record= composes",
+      "AC-A9 InstanceProjection.starterActorId + additive ProcessInstance startedAtMs/starterId/starterName/starterType; name via resolveActorsDisplay (T-0648), starter folded into the SAME single detail batch as history completers",
+      "AC-A10 processes.ts stays pg-free (FF-7-3); live-overlay only on the returned page (≤limit engine reads)"
+    ]
+  },
+  "split_recommendation": {
+    "why": "Full T-0654 spans two product zones (Работа + Конструктор) and ~1000 LOC of new UI (a full screen rewrite + a brand-new screen with nav) — a mega-diff for one honest review. The brief explicitly welcomes a split. Part 3 (modeler name) is already done (T-0684).",
+    "order_matters": "B before C — the Каталог card's instance-count deep-links into the Процессы grid with ?definition=, which B builds.",
+    "subtasks": [
+      {
+        "id": "T-0654-b",
+        "title": "Экран «Процессы» = грид + доводка деталки (зона Работа)",
+        "covers": "spec parts B + D",
+        "consumes": "part A query params/pagination + starter fields",
+        "scope": "Rewrite the instances section of screen-processes.jsx into a server-filtered grid (search/definition/status/date/mine controls → part-A query params; pagination via total/limit/offset) over PROCESSES_VIEW_COLUMNS (name/process/status/started/actor) + density; starter by name (starterName + ActorChip). Detail polish: «Запущен: <Имя> (<тип>)» from starterName/starterType; «Связанные задачи» → /inbox?instance=<id> (inbox seeds its filter from the ?instance= URL param — server ?instance= scope already exists, T-0710) + chip; promote source-record RecordRef into the header line. Empty/Loading/Error honest; UX gates G2/G5/G7. Move the catalog/связи sections OUT (to T-0654-c). Web tests for the grid + detail.",
+        "risks": "ListViewPanel is records/registry_def-bound — do NOT force-reuse it; render the grid from the static PROCESSES_VIEW_COLUMNS catalog. Saved personal views for processes (ViewSwitcher/config editor) is a further follow-up (original §5 wave B), not this sub-task."
+      },
+      {
+        "id": "T-0654-c",
+        "title": "«Каталог процессов» карточками (зона Конструктор)",
+        "covers": "spec part C",
+        "depends_on": "T-0654-b (deep-link target)",
+        "scope": "New screen in nav-config zone 'constructor' (capability authoring_draft, route e.g. /process-catalog), near Модельер. Definition cards from GET /api/process-catalog: name, status, version(s), instance_count (click → /processes?definition=<procKey>); trigger-links (bindings) rendered ON the card (the third «Связи» table disappears); buttons «В модельер» / «Правила ветвления (DMN)»; remove the duplicate «+ Новый процесс». Slim screen-processes.jsx to instances-only. UX gates G2/G5/G7; no fake buttons. Consider surfacing a versions list in the catalog API (currently only latest version number).",
+        "notes": "CatalogDefinition already carries process_key/name/source/status/version/instance_count; ProcessAppBinding carries trigger_type/application/form for the on-card trigger-links."
+      }
+    ],
+    "already_done": {
+      "id": "spec-part-3-modeler-name",
+      "by": "T-0684",
+      "evidence": "src/core/process-name-policy.ts + web/src/screens/process-name-policy.js (isRejectedProcessName gate on create+publish + editor pre-flight guard); generateUniqueProcessKey auto-key; process-name-policy.test.ts (6 tests, green). Verify in acceptance, do not rebuild."
+    }
+  },
+  "gates_run": {
+    "types": "tsc --noEmit — 0 errors",
+    "build": "npm run build (tsc + seed tsconfig) — 0 errors",
+    "lint": "eslint on all changed src files — 0",
+    "tests_targeted": "processes.e2e (14) + processes-list-query (20) + processes-live-instances (35) + adjacent projection/catalog/inbox/demo/auth (233) — all green",
+    "tests_full_src": "vitest run src — 5785 passed, 10 skipped, 0 failed",
+    "anti_case_lock": "PASS (self-test PASS) — caught + fixed a denylisted literal in a test fixture during the run",
+    "detel_base_task_from_engine": "PASS",
+    "detel_literal_baseline": "PASS (aggregate 4 < baseline 7)",
+    "http_route_auth_coverage": "PASS (FF-0328-1/2/3, self-test PASS)",
+    "start_route_isolation": "PASS (FF-7-3: processes.ts display plane pg-free)",
+    "no_db_fallback": "PASS (/api/processes no-DB → 200 + 8 instances, no regression)",
+    "ux_gates": "N/A for this slice — server-only, no web/ changes (relevant to sub-tasks B/C)",
+    "fitness_db": "NOT RUN per brief (stand offline; needs live PG :55432). The DB path is covered by unit tests over the pure pipeline + the no-DB HTTP wiring; the projection fold itself is unchanged except the additive starterActorId."
+  },
+  "live_proof_plan": {
+    "note": "Stand offline at handoff. Plan to run once the dev stack (Tailscale 100.121.76.86:3000, PG :55432, Keycloak :8180, Flowable) is back, as a rank-and-file (non-owner) per D-064.",
+    "setup": [
+      "Have a tenant with >25 real process instances across ≥2 definitions and ≥2 starters (start several via record on_create + explicit launch, by two different employees).",
+      "Log in as a rank-and-file employee WITHOUT constructor grants (the anti-case persona)."
+    ],
+    "steps": [
+      "1. GET /api/processes (no params) → 200, body has {instances,total,limit,offset}; total = real instance count; instances.length = min(total,200); order = newest-first (startedAt DESC), ties by id.",
+      "2. GET /api/processes?limit=10&offset=0 then ?offset=10 → two disjoint pages, total constant, no row repeats across pages, deterministic order.",
+      "3. GET /api/processes?definition=<procKey> → only that definition's instances (total drops); ?status=running → only running; both compose with ?q=.",
+      "4. GET /api/processes?q=<substring of a source record's title / definition name> → the operator finds their instance by human text, никогда не по UUID (anti-case).",
+      "5. GET /api/processes?started_from=<iso>&started_to=<iso> → only instances started in the window; an instance outside is absent.",
+      "6. As employee X: GET /api/processes?mine=1 → only instances X started; as employee Y the same query returns Y's set (no cross-leak — FF-5).",
+      "7. GET /api/processes/<instanceId> → detail carries starterName + starterType (человеко-имя, not just a glyph); resolver called exactly once for the request (union of history completers + starter).",
+      "8. Negative: ?definition=<foreign-tenant procKey> and ?record=<foreign record> → honest-empty, never another tenant's rows.",
+      "9. Regression: an existing consumer (current /processes table) still renders — default limit 200 returns the full set for tenants ≤200 instances."
+    ],
+    "expected_red_flags_to_watch": [
+      "starterName absent for all rows → resolveActorsDisplay not wired in server.ts composition root (best-effort degrade is acceptable, but investigate).",
+      "total not matching a manual count → fold window (≤500) exceeded; document/raise the window bound.",
+      "pagination showing duplicates across pages → sort not total (should be impossible given the id tiebreak; would indicate a data id collision)."
+    ]
+  },
+  "risks_integration": [
+    "Interim UI: until T-0654-b ships, the current dumb /processes table calls GET /api/processes with no pagination params → gets the default limit=200 (unchanged behavior for tenants ≤200 instances; >200 shows first page only, but the table is already in the scroll-slit that B fixes).",
+    "Fold window: filtering/pagination operate over the last ≤500 instances (readEvents cap). Deep history beyond 500 is out of scope (the projection is an audit fold, not a paginated table) — same bound the projection already had. Documented in ADR rejected-alternatives.",
+    "starterName is best-effort (T-0648 resolver): no resolver / unresolved actor / no-DB path → field simply absent; the frontend must fall back to starterType/starterId (never render a raw UUID).",
+    "listInstanceProjections is now called with {limit:500} on the list path (was default 200) — widens the fold window; additive, no behavioral regression."
+  ],
+  "friction_events": [
+    "Worktree had no node_modules — ran npm ci (188 pkgs, ~8s) before any gate could run.",
+    "anti-case-lock caught a D-064 denylisted step-name literal ('Согласование') that I introduced in a TEST FIXTURE — fixed to a neutral term. The gate scans ADDED lines under src/ INCLUDING tests; fixture strings must avoid case-domain vocabulary.",
+    "Adding starter resolution naively made the detail route call resolveActorsDisplay twice (history + starter), tripping the T-0648 'exactly one call per request' invariant — refactored to fold the starter id into the history's single batch resolve."
+  ]
+}
