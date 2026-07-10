@@ -22,10 +22,22 @@
  *  - AC-3: no raw "Tier-1"/"Tier-2" jargon leaks into user-visible text —
  *    tier stays a data-tier attribute / plain number, never the string
  *    "Tier" in prose.
+ *
+ * T-0720 (follow-up из ревью T-0697, эпик T-0585) adds:
+ *  - SelfAbsenceForm now consumes the server's `tier` ("tier1"/"tier2",
+ *    src/http/rights-intents.ts registerSelfAbsence, unchanged by this task —
+ *    it already returned tier) in its post-submit ResultBanner, via the new
+ *    selfAbsenceResultMessage helper — mirrors substituteResultMessage's
+ *    honest tier-branch feedback (closes review R-3).
+ *  - Both static hints (SubstituteForm + SelfAbsenceForm) got the R-1/R-2
+ *    wording polish from the T-0697 review: "не шире / попытка расширить
+ *    будет отклонена" (R-1) and an explicit "не считая ... и самого
+ *    замещающего" pool-exclusion clause (R-2) — kept textually IDENTICAL
+ *    between the two forms except for the necessarily-different pronoun.
  */
 
 import { describe, it, expect } from 'vitest';
-import { missingSubstituteFields, substituteResultMessage } from './ra-intents.jsx';
+import { missingSubstituteFields, substituteResultMessage, selfAbsenceResultMessage } from './ra-intents.jsx';
 
 const fs = await import('fs');
 const path = await import('path');
@@ -219,7 +231,6 @@ describe('SelfAbsenceForm source — static hint no longer leaks "Tier-N" jargon
     expect(body).toMatch(/покрывается пулом/);
     expect(body).toMatch(/временный грант не выпускается/);
     expect(body).toMatch(/выпускается ограниченный временный грант/);
-    expect(body).toMatch(/расширение прав невозможно и отклоняется сервером/);
   });
 
   it('SubstituteForm and SelfAbsenceForm now use textually consistent phrasing for the same rule (no jargon divergence)', () => {
@@ -227,9 +238,165 @@ describe('SelfAbsenceForm source — static hint no longer leaks "Tier-N" jargon
     const subEnd = src.indexOf('/* ---- Я в отпуске');
     const subBody = src.slice(subStart, subEnd);
     const selfBody = selfAbsenceBody();
-    for (const term of ['покрывается пулом', 'временный грант не выпускается', 'расширение прав невозможно и отклоняется сервером']) {
+    for (const term of ['покрывается пулом', 'временный грант не выпускается', 'выпускается ограниченный временный грант', 'не шире', 'попытка расширить будет отклонена сервером']) {
       expect(subBody).toMatch(new RegExp(term));
       expect(selfBody).toMatch(new RegExp(term));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0720 (эпик T-0585, follow-up из ревью T-0697 R-1/R-2/R-3) —
+//   R-1: "строго ограничены подмножеством X прав — расширение прав
+//        невозможно и отклоняется сервером" was slightly technical (P3 nit) →
+//        reworded to "не шире X прав — попытка расширить будет отклонена
+//        сервером" in BOTH forms.
+//   R-2: "(есть другие активные держатели)" undersold that the pool-probe
+//        also excludes the substitute themself, not just the absentee — the
+//        note now names BOTH excluded parties explicitly.
+//   R-3: SelfAbsenceForm's ResultBanner did not consume the server's `tier`
+//        for post-submit feedback (SubstituteForm already did, T-0639) —
+//        closed via the new selfAbsenceResultMessage helper below.
+// ---------------------------------------------------------------------------
+
+describe('R-1/R-2 wording polish — both static hints reworded, consistently (T-0720)', () => {
+  const subBody = () => {
+    const start = src.indexOf('export function SubstituteForm');
+    const end = src.indexOf('/* ---- Я в отпуске');
+    return src.slice(start, end);
+  };
+  const selfBody = () => {
+    const start = src.indexOf('function SelfAbsenceForm');
+    const end = src.indexOf('/* ---- Срочно отозвать');
+    return src.slice(start, end);
+  };
+
+  it('the old, slightly-technical R-1 phrasing is gone from both forms\' visible notes', () => {
+    for (const body of [subBody(), selfBody()]) {
+      const withoutComments = body.replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+      expect(withoutComments).not.toMatch(/строго ограничены подмножеством/);
+      expect(withoutComments).not.toMatch(/расширение прав невозможно и отклоняется сервером/);
+    }
+  });
+
+  it('R-1: both forms now say "не шире ... — попытка расширить будет отклонена сервером"', () => {
+    expect(subBody()).toMatch(/не шире прав замещаемой роли — попытка расширить будет отклонена сервером/);
+    expect(selfBody()).toMatch(/не шире ваших прав — попытка расширить будет отклонена сервером/);
+  });
+
+  it('R-2: SubstituteForm names BOTH excluded parties (замещаемый AND замещающий), not just "other holders"', () => {
+    expect(subBody()).toMatch(/есть держатель, отличный от замещаемого и от самого замещающего/);
+  });
+
+  it('R-2: SelfAbsenceForm names BOTH excluded parties (вы AND замещающий), not just "other active holders"', () => {
+    expect(selfBody()).toMatch(/есть держатель, отличный от вас и от самого замещающего/);
+  });
+
+  it('the old, imprecise R-2 phrasing ("есть другие активные держатели") is gone', () => {
+    const withoutComments = selfBody().replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+    expect(withoutComments).not.toMatch(/есть другие активные держатели/);
+  });
+});
+
+describe('selfAbsenceResultMessage — honest tier-aware feedback (T-0720, closes review R-3)', () => {
+  it('tier1 (role covered by another holder) → says the substitute got NO temporary access, acts within THEIR OWN rights', () => {
+    const msg = selfAbsenceResultMessage({ tier: 'tier1', rule_id: 'rule-1', ttl_grant_id: null, valid_until: 123 });
+    expect(msg).toMatch(/не выпускался/);
+    expect(msg).toMatch(/в рамках его собственных прав/);
+    expect(msg).not.toMatch(/выпущен ограниченный временный/);
+  });
+
+  it('B1 regression lock: tier1 message promises NO auto-escalation — the system has no tier1→tier2 re-mint mechanism', () => {
+    // Судейский блок T-0720 B1: первая редакция tier1-сообщения обещала
+    // «замещение вступит в силу автоматически», но механизма авто-эскалации
+    // при опустошении пула НЕТ (в tier1 ttl_grant_id остаётся NULL навсегда —
+    // серверный тест s5 в rights-intents.self-absence.authz.test.ts; claim-гейт
+    // inbox.ts даёт tier1-замещающему без собственной роли 403 NOT_ELIGIBLE).
+    // Лочим отсутствие этого обещания в tier1-тексте.
+    const msg = selfAbsenceResultMessage({ tier: 'tier1', rule_id: 'rule-1', ttl_grant_id: null, valid_until: 123 });
+    expect(msg).not.toMatch(/автоматически/);
+    expect(msg).not.toMatch(/вступит в силу/);
+  });
+
+  it('tier2 (sole holder → grant minted) → says the substitute got a scoped temporary access, "до <date>"', () => {
+    // A fixed epoch ms so the formatted date is deterministic across timezones
+    // that all resolve the same calendar day in Moscow-adjacent test runners
+    // is out of scope here — we only assert the STRUCTURE (tier2 message
+    // names the access as scoped ("не шире ваших прав") and includes "до ").
+    const msg = selfAbsenceResultMessage({ tier: 'tier2', rule_id: 'rule-2', ttl_grant_id: 'g-1', valid_until: Date.UTC(2026, 7, 1, 10, 0) });
+    expect(msg).toMatch(/выпущен ограниченный временный доступ/);
+    expect(msg).toMatch(/не шире ваших прав/);
+    expect(msg).toMatch(/ до /);
+    expect(msg).not.toMatch(/не выпускался/);
+  });
+
+  it('tier2 without a valid_until still produces a coherent message (no dangling "до" / no crash)', () => {
+    const msg = selfAbsenceResultMessage({ tier: 'tier2', ttl_grant_id: 'g-1' });
+    expect(msg).toMatch(/выпущен ограниченный временный доступ/);
+    expect(msg).not.toMatch(/ до $/);
+  });
+
+  it('the two tier messages are textually distinct', () => {
+    const m1 = selfAbsenceResultMessage({ tier: 'tier1' });
+    const m2 = selfAbsenceResultMessage({ tier: 'tier2', ttl_grant_id: 'g-1' });
+    expect(m1).not.toBe(m2);
+  });
+
+  it('defensive fallback when tier is absent (contract not broken)', () => {
+    const withGrant = selfAbsenceResultMessage({ ttl_grant_id: 'g-9' });
+    const withoutGrant = selfAbsenceResultMessage({});
+    expect(withGrant).toContain('Отсутствие объявлено');
+    expect(withoutGrant).toContain('Отсутствие объявлено');
+  });
+
+  it('neither tier message leaks the internal "Tier" jargon word', () => {
+    const m1 = selfAbsenceResultMessage({ tier: 'tier1' });
+    const m2 = selfAbsenceResultMessage({ tier: 'tier2', ttl_grant_id: 'g-1' });
+    const mFallback = selfAbsenceResultMessage({});
+    expect(m1).not.toMatch(/Tier/i);
+    expect(m2).not.toMatch(/Tier/i);
+    expect(mFallback).not.toMatch(/Tier/i);
+  });
+
+  it('selfAbsenceResultMessage and substituteResultMessage use consistent vocabulary for the same concepts (не выпускался / ограниченный ... доступ, не шире)', () => {
+    // Cross-check against SubstituteForm's own message (imported above) — both
+    // helpers describe the identical server-side tier split, so the honest
+    // "nothing changed" vs "scoped temporary access" framing should read the
+    // same way to an admin who has already seen the other form.
+    const subTier1 = substituteResultMessage({ tier: 1 });
+    const selfTier1 = selfAbsenceResultMessage({ tier: 'tier1' });
+    // Both must communicate "no access was minted" without claiming the
+    // opposite outcome.
+    expect(subTier1).not.toMatch(/получил временный доступ/);
+    expect(selfTier1).not.toMatch(/выпущен ограниченный временный/);
+  });
+});
+
+describe('SelfAbsenceForm source — server tier consumed additively, tier stays out of prose (data-tier only) (T-0720)', () => {
+  const selfAbsenceBody = () => {
+    const start = src.indexOf('function SelfAbsenceForm');
+    const end = src.indexOf('/* ---- Срочно отозвать');
+    return src.slice(start, end);
+  };
+
+  it('submit reads r.data?.tier and stores it alongside the result for the banner', () => {
+    const body = selfAbsenceBody();
+    expect(body).toContain('selfAbsenceResultMessage(r.data)');
+    expect(body).toContain('tier: r.data?.tier');
+  });
+
+  it('SelfAbsenceForm passes tier={result?.tier} into its ResultBanner (same pattern as SubstituteForm)', () => {
+    const body = selfAbsenceBody();
+    expect(body).toMatch(/<ResultBanner result=\{result\} tier=\{result\?\.tier\}\s*\/>/);
+  });
+
+  it('the old, tier-blind post-submit message ("Отсутствие объявлено" with only a ttl_grant_id check inline in JSX) is gone', () => {
+    const body = selfAbsenceBody();
+    expect(body).not.toMatch(/message:\s*`Отсутствие объявлено\$\{r\.data/);
+  });
+
+  it('SelfAbsenceForm still posts to /api/rights/intents/self-absence (no new/renamed route)', () => {
+    const body = selfAbsenceBody();
+    expect(body).toContain("'/api/rights/intents/self-absence'");
   });
 });

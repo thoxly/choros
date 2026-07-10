@@ -18,7 +18,7 @@ import { Button, Field, Select, KitIcon, ConfirmDialog, ErrorState } from '../..
 import { SectionHead } from './ra-data.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
-import { formatError } from '../../lib/format.js';
+import { formatError, formatDate } from '../../lib/format.js';
 import { ConsequenceSummary, useDestructiveConfirm } from '../../util/confirm-helpers.jsx';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
@@ -282,6 +282,45 @@ export function substituteResultMessage(data) {
   return `Подмена объявлена${data?.ttl_grant_id ? ' (с временным грантом)' : ''}`;
 }
 
+/**
+ * Честный пост-сабмит фидбек для SelfAbsenceForm (T-0720, follow-up ревью
+ * T-0697 R-3). registerSelfAbsence (src/http/rights-intents.ts:1284-1393) уже
+ * возвращает `tier: "tier1" | "tier2"` в теле ответа — тот же сигнал, что
+ * substituteResultMessage потребляет для SubstituteForm, только строкой
+ * ("tier1"/"tier2"), а не числом (1/2), т.к. это два независимых роута;
+ * сервер не расширялся под эту задачу. tier1 = роль покрыта другим
+ * держателем (не считая самого отсутствующего и замещающего) — правило
+ * создано, временный доступ замещающему НЕ выпускался. tier2 = держателя
+ * кроме вас и замещающего нет — замещающему сразу выпущен ограниченный
+ * (не шире ваших прав) временный доступ до конца окна отсутствия. Как и в
+ * substituteResultMessage, жаргон «Tier-N» в текст не выводится — только в
+ * data-tier для тестов/дебага.
+ */
+export function selfAbsenceResultMessage(data) {
+  const tier = data?.tier;
+  if (tier === 'tier1') {
+    // B1 (судейский блок T-0720): НЕ обещать авто-эскалацию tier1→tier2 —
+    // такого механизма в системе НЕТ (в tier1 ttl_grant_id остаётся NULL
+    // навсегда, серверный тест s5 в rights-intents.self-absence.authz.test.ts;
+    // claim-гейт inbox.ts отсеивает tier1-замещающего без собственной роли →
+    // 403 NOT_ELIGIBLE). Говорим только то, что система реально делает:
+    // правило создано, грант не выпускался, замещающий действует в рамках
+    // СВОИХ прав.
+    return 'Отсутствие объявлено. Роль сейчас покрыта другими держателями — '
+      + 'временный доступ замещающему не выпускался. Задачи будут '
+      + 'перенаправляться замещающему в рамках его собственных прав.';
+  }
+  if (tier === 'tier2') {
+    const until = data?.valid_until ? formatDate(data.valid_until) : null;
+    return 'Отсутствие объявлено. Замещающему выпущен ограниченный временный '
+      + `доступ (не шире ваших прав)${until ? ` до ${until}` : ''} — он увидит `
+      + 'ваши задачи в своём инбоксе.';
+  }
+  // Оборонительный fallback — тот же принцип, что substituteResultMessage:
+  // контракт не должен ломаться, если tier когда-то не придёт.
+  return `Отсутствие объявлено${data?.ttl_grant_id ? ' (с временным грантом для замещающего)' : ''} — маршрутизатор перенаправит ваши задачи замещающему.`;
+}
+
 export function SubstituteForm({ dir }) {
   const [absentId, setAbsentId] = useState('');
   const [substituteId, setSubstituteId] = useState('');
@@ -326,8 +365,8 @@ export function SubstituteForm({ dir }) {
         <Field label="До (дата/время) *" type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} />
       </div>
       <p className="chs-section2__note">
-        Права замещающего строго ограничены подмножеством прав замещаемой роли — расширение прав невозможно и отклоняется сервером.
-        Если замещение покрывается пулом, временный грант не выпускается; иначе выпускается ограниченный временный грант.
+        Права замещающего не шире прав замещаемой роли — попытка расширить будет отклонена сервером.
+        Если замещение покрывается пулом (есть держатель, отличный от замещаемого и от самого замещающего), временный грант не выпускается; иначе замещающему выпускается ограниченный временный грант.
       </p>
       <div className="chs-intent__bar">
         <Button variant="primary" size="sm" loading={result === 'loading'} disabled={result === 'loading' || !canSubmit} onClick={submit}>
@@ -375,10 +414,7 @@ function SelfAbsenceForm({ dir }) {
       valid_until: validUntil,
       org_scope: { kind: 'node', hierarchy: 'org', nodeId: orgNodeId, nodeLevel: 'department' },
     });
-    setResult(r.ok ? {
-      ...r,
-      message: `Отсутствие объявлено${r.data?.ttl_grant_id ? ' (с временным грантом для замещающего)' : ''} — маршрутизатор перенаправит ваши задачи замещающему.`,
-    } : r);
+    setResult(r.ok ? { ...r, message: selfAbsenceResultMessage(r.data), tier: r.data?.tier } : r);
   };
 
   return (
@@ -409,18 +445,24 @@ function SelfAbsenceForm({ dir }) {
       {/*
         T-0697 (follow-up из T-0639, эпик T-0585): та же честная переформулировка
         Tier-N-жаргона на человеческий русский, что T-0639 применил к аналогичной
-        статичной подсказке в SubstituteForm — те же термины («покрывается пулом»,
-        «временный грант не выпускается», «расширение прав невозможно и отклоняется
-        сервером»). Это СТАТИЧНОЕ объяснение механики (обе ветки сразу), не
-        пост-сабмит-фидбек конкретного результата — в отличие от SubstituteForm,
-        эта форма пока не читает `tier` из ответа сервера в ResultBanner (server
-        уже возвращает tier: "tier1"|"tier2", см. src/http/rights-intents.ts
-        registerSelfAbsence) — честный tier-branch пост-сабмит фидбек для
-        self-absence остаётся отдельным, вне охвата этой задачи, follow-up.
+        статичной подсказке в SubstituteForm — те же термины («временный грант не
+        выпускается», «выпускается ограниченный временный грант»). Это СТАТИЧНОЕ
+        объяснение механики (обе ветки сразу), не пост-сабмит-фидбек конкретного
+        результата.
+        T-0720 (follow-up из ревью T-0697, R-1/R-2): полировка обеих статичных
+        подсказок (эта + SubstituteForm) — «строго ограничены подмножеством / …
+        отклоняется сервером» → «не шире / попытка расширить будет отклонена»
+        (R-1, человечнее); «есть другие активные держатели» → явно назван
+        держатель, отличный от вас И от самого замещающего (R-2, сервер
+        (src/http/rights-intents.ts registerSelfAbsence, poolRows-запрос)
+        исключает из пула оба employee_id — отсутствующего и замещающего —
+        прежний текст этого не говорил). ТАКЖЕ: server уже возвращает
+        tier: "tier1"|"tier2" — ResultBanner теперь читает его через
+        selfAbsenceResultMessage (см. выше), закрывая R-3.
       */}
       <p className="chs-section2__note">
-        Права замещающего строго ограничены подмножеством ваших прав — расширение прав невозможно и отклоняется сервером.
-        Если роль покрывается пулом (есть другие активные держатели), временный грант не выпускается; иначе замещающему выпускается ограниченный временный грант.
+        Права замещающего не шире ваших прав — попытка расширить будет отклонена сервером.
+        Если роль покрывается пулом (есть держатель, отличный от вас и от самого замещающего), временный грант не выпускается; иначе замещающему выпускается ограниченный временный грант.
       </p>
       <div className="chs-intent__bar">
         <Button
@@ -433,7 +475,7 @@ function SelfAbsenceForm({ dir }) {
           Объявить отсутствие
         </Button>
       </div>
-      <ResultBanner result={result} />
+      <ResultBanner result={result} tier={result?.tier} />
     </section>
   );
 }

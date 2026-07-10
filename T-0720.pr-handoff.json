@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0720",
+  "status": "pr_open",
+  "branch": "task/T-0720",
+  "ci_local": {
+    "build": true,
+    "build_result": "web: npx vite build — 546 modules transformed, 0 errors. root: npx tsc --noEmit — 0 errors (no server files touched by this diff).",
+    "lint": true,
+    "lint_result": "npx eslint web/src --ext .jsx (root) — the ONE finding inside ra-intents.jsx (line 63, 'selId' unused var, inside OrgPicker — a different function, not touched by this task) is pre-existing (confirmed already documented in T-0697's handoff for the same file). Zero new lint findings introduced by this change.",
+    "types": true,
+    "types_result": "covered by tsc --noEmit above (root); no web-scoped tsconfig.json in this repo (JSX typecheck happens via vite build's esbuild transform, also green).",
+    "tests": true,
+    "tests_result": "npx vitest run src/screens/rights/ra-intents.test.jsx (web) — 38/38 passed (18 pre-existing T-0639 + 4 pre-existing T-0697 + 16 T-0720 tests: R-1/R-2 wording-polish assertions, selfAbsenceResultMessage tier-branch coverage incl. no-Tier-jargon and fallback, SelfAbsenceForm source now consuming r.data?.tier / passing tier into ResultBanner, PLUS the B1 regression lock: tier1 message must never contain 'автоматически'/'вступит в силу' — the auto-escalation promise the judge blocked). No server file was changed by this task (registerSelfAbsence already returned tier — see deviations_from_adr), so no server-side vitest run was required/performed.",
+    "fitness": true,
+    "fitness_result": "Full fitness suite intentionally NOT run per task instruction (targeted gates only). Ran: bash ci/checks/rights-ui-no-new-write.sh -> PASS (no new POST route; diff is web/src only). bash ci/checks/rights-ui-anti-case.sh -> PASS (no anti-case literal added under web/src/). bash ci/checks/rights-ui-frozen-write.sh -> PASS (all 7 frozen write-core files byte-unchanged vs base). bash ci/checks/ux/ux-g5-jargon-denylist.sh -> PASS (informational mode; ra-intents.jsx lives under web/src/screens/rights/, outside this gate's web/src/screens/*.jsx glob, so it isn't even scanned — the no-'Tier-N'-in-prose invariant is enforced by ra-intents.test.jsx instead, unchanged assertion)."
+  },
+  "files_changed": [
+    "web/src/screens/rights/ra-intents.jsx",
+    "web/src/screens/rights/ra-intents.test.jsx",
+    "T-0720.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "No ADR for this task (follow-up from T-0697's review, epic T-0585). Task item 1 said 'if server doesn't return tier, extend it minimally' — it was UNNECESSARY: registerSelfAbsence (src/http/rights-intents.ts:1284-1393, unchanged by this diff) already returns `tier: \"tier1\"|\"tier2\"` plus `ttl_grant_id`/`valid_until` in the POST /api/rights/intents/self-absence response body (confirmed both by reading the handler and by the pre-existing server tests src/__tests__/rights-intents.self-absence.authz.test.ts s5/s6, which assert exactly that). So this task is web/src-only: added selfAbsenceResultMessage (mirrors substituteResultMessage), wired it + tier into SelfAbsenceForm's submit/ResultBanner, and polished both forms' static hints (R-1/R-2 from T-0697.review.md). src/http/rights-intents.ts, and the write-core files listed in ci/checks/rights-ui-frozen-write.sh, are byte-unchanged."
+  ],
+  "texts_before_after": {
+    "self_absence_post_submit_R3": {
+      "before": "Отсутствие объявлено (с временным грантом для замещающего) — маршрутизатор перенаправит ваши задачи замещающему. [same generic sentence for BOTH tier1 and tier2, only the parenthetical toggled on ttl_grant_id]",
+      "after_tier1": "Отсутствие объявлено. Роль сейчас покрыта другими держателями — временный доступ замещающему не выпускался. Задачи будут перенаправляться замещающему в рамках его собственных прав.",
+      "after_tier1_B1_note": "Judge-blocked first draft said 'Если все остальные держатели станут недоступны, замещение вступит в силу автоматически' — REMOVED (B1): no tier1→tier2 auto-escalation / grant re-mint mechanism exists (tier1 ttl_grant_id stays NULL forever, server test s5; the inbox.ts claim-gate 403s a tier1 substitute without their own role). Regression-locked in ra-intents.test.jsx (tier1 message must not match /автоматически|вступит в силу/).",
+      "after_tier2": "Отсутствие объявлено. Замещающему выпущен ограниченный временный доступ (не шире ваших прав) до <дата valid_until> — он увидит ваши задачи в своём инбоксе.",
+      "after_tier2_N1_note": "N1 (judge nit, acknowledged as-is): 'до <дата>' renders via the shared formatDate (web/src/lib/format.js) as e.g. '1 авг 2026, 13:00' — ru-RU human-readable month-name format, same formatter the rights screens already use (ra-grant-trail.jsx); intentionally left unchanged."
+    },
+    "substitute_form_static_hint_R1_R2": {
+      "before": "Права замещающего строго ограничены подмножеством прав замещаемой роли — расширение прав невозможно и отклоняется сервером. Если замещение покрывается пулом, временный грант не выпускается; иначе выпускается ограниченный временный грант.",
+      "after": "Права замещающего не шире прав замещаемой роли — попытка расширить будет отклонена сервером. Если замещение покрывается пулом (есть держатель, отличный от замещаемого и от самого замещающего), временный грант не выпускается; иначе замещающему выпускается ограниченный временный грант."
+    },
+    "self_absence_form_static_hint_R1_R2": {
+      "before": "Права замещающего строго ограничены подмножеством ваших прав — расширение прав невозможно и отклоняется сервером. Если роль покрывается пулом (есть другие активные держатели), временный грант не выпускается; иначе замещающему выпускается ограниченный временный грант.",
+      "after": "Права замещающего не шире ваших прав — попытка расширить будет отклонена сервером. Если роль покрывается пулом (есть держатель, отличный от вас и от самого замещающего), временный грант не выпускается; иначе замещающему выпускается ограниченный временный грант."
+    }
+  },
+  "open_questions": [
+    "Observation for a possible follow-up (NOT changed here — out of B1's stated scope, and the wording is locked by T-0639's own tests + live proof docs/live-proof/T-0639.md): substituteResultMessage's tier-1 text (SubstituteForm, admin path, shipped in T-0639) carries the SAME kind of promise — 'подмена вступит в силу автоматически, если этот держатель станет недоступен (уйдёт или будет деактивирован)'. If B1's finding holds (no tier1→tier2 re-mint mechanism, claim-gate requires the substitute's own eligibility), that message likely overpromises identically and should get the same honest rewrite in its own task."
+  ],
+  "live_proof_plan": [
+    "Stand is currently offline — this is a PLAN, not an executed run.",
+    "1. Log in as employee A (holds role R in scope S, e.g. a department-scoped role with a KNOWN second confirmed holder — a 'pool-covered' role) and open Rights -> Бытовые операции прав (/rights/intents) -> 'Я в отпуске'.",
+    "2. Declare absence: nominate employee B as substitute for role R, org-node = S, until = some future datetime. Submit.",
+    "3. Expected (tier1, pool-covered path): the ResultBanner shows 'Отсутствие объявлено. Роль сейчас покрыта другими держателями — временный доступ замещающему не выпускался. Задачи будут перенаправляться замещающему в рамках его собственных прав.' The banner's data-tier attribute reads \"tier1\" (inspect DOM/devtools, not visible text). Confirm employee B's inbox does NOT gain any new tasks for role R immediately (no grant minted, ttl_grant_id null server-side), and that B WITHOUT their own eligibility on role R gets 403 NOT_ELIGIBLE on claim (inbox.ts claim-gate) — the message promises nothing beyond B's own rights.",
+    "4. Log in as employee C who holds a role R2 in scope S2 with NO other confirmed holder ('single-holder' role). Repeat steps 1-2 nominating employee D as substitute for R2/S2.",
+    "5. Expected (tier2, sole-holder path): the ResultBanner shows 'Отсутствие объявлено. Замещающему выпущен ограниченный временный доступ (не шире ваших прав) до <the submitted until-date, formatted ru-RU> — он увидит ваши задачи в своём инбоксе.' data-tier reads \"tier2\". Confirm employee D's inbox NOW shows role-R2 tasks (a TTL grant was minted, subset-gated -- no wider than C's own confirmed grants on R2).",
+    "6. Confirm the two banners in steps 3 and 5 are visibly DIFFERENT messages (not the same generic text) -- this is the core AC (R-3) this task closes.",
+    "7. Cross-check terminology: open 'Подмена' (SubstituteForm) directly above and confirm its static hint paragraph now reads 'не шире прав замещаемой роли — попытка расширить будет отклонена сервером... (есть держатель, отличный от замещаемого и от самого замещающего)...' -- same construction as SelfAbsenceForm's hint below it, only the pronoun differs (замещаемой роли / ваших; замещаемого / вас). A reader should not notice the two paragraphs were written by different people/times.",
+    "8. Regression: neither ResultBanner's visible text contains the literal substring 'Tier' anywhere (data-tier attribute is fine, prose is not)."
+  ],
+  "friction_events": []
+}
