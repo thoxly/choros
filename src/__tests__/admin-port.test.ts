@@ -21,7 +21,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { makeHttpKeycloakAdminPort, makeHttpKeycloakUserPort } from "../keycloak/admin-port.js";
+import {
+  makeHttpKeycloakAdminPort,
+  makeHttpKeycloakUserPort,
+  splitDisplayName,
+} from "../keycloak/admin-port.js";
 import type { KcAdminConfig, KcRegistrarConfig } from "../keycloak/admin-port.js";
 import * as http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -523,5 +527,186 @@ describe("AP-7 — revokeUserSessions (T-0702)", () => {
     };
     const port = makeHttpKeycloakUserPort(cfg);
     await expect(port.revokeUserSessions("user-z")).resolves.toEqual({ revoked: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AP-8 [T-0741, follow-up on T-0734 §5]: createHumanUser derives KC
+// firstName/lastName from an optional spec.displayName via splitDisplayName().
+// LIVE_PROOF (docs/live-proof/T-0741-firstname-lastname.live-proof.md): a user
+// created WITHOUT firstName/lastName cannot obtain ANY token via direct grant
+// (400 invalid_grant "Account is not fully set up") against a real KC 25.0.6 —
+// this pure function + the payload-capture test below are the regression lock
+// for that fix.
+// ---------------------------------------------------------------------------
+
+describe("AP-8a — splitDisplayName (T-0741, pure)", () => {
+  it("two tokens: first word -> firstName, second word -> lastName", () => {
+    expect(splitDisplayName("Иван Петров")).toEqual({ firstName: "Иван", lastName: "Петров" });
+  });
+
+  it("matches this codebase's own seed convention (migrations/016_employee.sql e-petrov: 'И. Петров')", () => {
+    expect(splitDisplayName("И. Петров")).toEqual({ firstName: "И.", lastName: "Петров" });
+  });
+
+  it("3+ tokens: first word -> firstName, REMAINDER (rejoined) -> lastName", () => {
+    expect(splitDisplayName("Иван Петрович Петров")).toEqual({
+      firstName: "Иван",
+      lastName: "Петрович Петров",
+    });
+  });
+
+  it("single token (no space) -> duplicated into BOTH fields (never leave lastName blank)", () => {
+    expect(splitDisplayName("Мадонна")).toEqual({ firstName: "Мадонна", lastName: "Мадонна" });
+  });
+
+  it("Latin-script name passes through unchanged (no transliteration)", () => {
+    expect(splitDisplayName("John Smith")).toEqual({ firstName: "John", lastName: "Smith" });
+  });
+
+  it("anti-case: irregular whitespace (leading/trailing/double spaces) normalizes cleanly", () => {
+    expect(splitDisplayName("   Иван   Петров   ")).toEqual({ firstName: "Иван", lastName: "Петров" });
+  });
+
+  it("anti-case: empty/whitespace-only input -> both fields empty (defensive; upstream already rejects this)", () => {
+    expect(splitDisplayName("")).toEqual({ firstName: "", lastName: "" });
+    expect(splitDisplayName("   ")).toEqual({ firstName: "", lastName: "" });
+  });
+});
+
+/**
+ * Stub that answers the token endpoint, captures the /users POST body, then
+ * answers 201 followed by a GET-lookup response carrying a fake userId — lets
+ * us drive createHumanUser's SUCCESS path end-to-end and inspect the exact
+ * JSON body sent to Keycloak (not just the port's return value).
+ */
+function startCreateCaptureStub(): Promise<{
+  cfg: KcRegistrarConfig;
+  createCalls: Array<Record<string, unknown>>;
+  close: () => Promise<void>;
+}> {
+  const createCalls: Array<Record<string, unknown>> = [];
+  const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+    const path = req.url ?? "";
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      if (path.includes("/protocol/openid-connect/token")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ access_token: "stub-token" }));
+      } else if (path.endsWith("/users") && req.method === "POST") {
+        createCalls.push(JSON.parse(body) as Record<string, unknown>);
+        res.writeHead(201);
+        res.end();
+      } else if (path.includes("/users?username=") && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([{ id: "stub-kc-user-id" }]));
+      } else {
+        res.writeHead(500);
+        res.end();
+      }
+    });
+    req.on("error", () => { res.writeHead(500); res.end(); });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+      resolve({
+        cfg: {
+          baseUrl: `http://127.0.0.1:${port}`,
+          realm: "choros",
+          clientId: "choros-registrar",
+          clientSecret: "stub-secret",
+        },
+        createCalls,
+        close: () => new Promise<void>((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+describe("AP-8b — createHumanUser payload carries firstName/lastName from displayName (T-0741)", () => {
+  it("displayName provided -> POST /users body carries firstName+lastName derived from it", async () => {
+    const stub = await startCreateCaptureStub();
+    try {
+      const port = makeHttpKeycloakUserPort(stub.cfg);
+      const result = await port.createHumanUser({
+        username: "ivan.petrov",
+        email: "ivan.petrov@example.com",
+        password: "password12345",
+        actorType: "human",
+        displayName: "Иван Петров",
+      });
+      expect(result).toEqual({ userId: "stub-kc-user-id" });
+      expect(stub.createCalls).toHaveLength(1);
+      const body = stub.createCalls[0];
+      expect(body["firstName"]).toBe("Иван");
+      expect(body["lastName"]).toBe("Петров");
+      // Unaffected fields — regression guard the new fields didn't clobber anything.
+      expect(body["username"]).toBe("ivan.petrov");
+      expect(body["email"]).toBe("ivan.petrov@example.com");
+      expect((body["attributes"] as { actor_type: string[] }).actor_type).toEqual(["human"]);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("AC-3 regression guard: displayName ABSENT -> POST /users body carries NEITHER firstName NOR lastName (register.ts's exact call shape, byte-identical to pre-T-0741)", async () => {
+    const stub = await startCreateCaptureStub();
+    try {
+      const port = makeHttpKeycloakUserPort(stub.cfg);
+      await port.createHumanUser({
+        username: "owner@example.com",
+        email: "owner@example.com",
+        password: "password12345",
+        actorType: "human",
+        // no displayName — mirrors src/core/register.ts's call site exactly
+      });
+      const body = stub.createCalls[0];
+      expect("firstName" in body).toBe(false);
+      expect("lastName" in body).toBe(false);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("displayName is an empty/whitespace string -> treated as absent (no firstName/lastName sent)", async () => {
+    const stub = await startCreateCaptureStub();
+    try {
+      const port = makeHttpKeycloakUserPort(stub.cfg);
+      await port.createHumanUser({
+        username: "someone",
+        email: "someone@example.com",
+        password: "password12345",
+        actorType: "human",
+        displayName: "   ",
+      });
+      const body = stub.createCalls[0];
+      expect("firstName" in body).toBe(false);
+      expect("lastName" in body).toBe(false);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("single-token displayName -> firstName and lastName both carry the SAME value (never sent blank)", async () => {
+    const stub = await startCreateCaptureStub();
+    try {
+      const port = makeHttpKeycloakUserPort(stub.cfg);
+      await port.createHumanUser({
+        username: "mono",
+        email: "mono@example.com",
+        password: "password12345",
+        actorType: "human",
+        displayName: "Мадонна",
+      });
+      const body = stub.createCalls[0];
+      expect(body["firstName"]).toBe("Мадонна");
+      expect(body["lastName"]).toBe("Мадонна");
+    } finally {
+      await stub.close();
+    }
   });
 });

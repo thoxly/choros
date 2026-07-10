@@ -70,6 +70,16 @@
  * this task's own spec. `employee.email` (migration 127) stores the value
  * distinct from `employee.login` (migration 126, unaffected by this change —
  * the account list still shows `login`, not `email`).
+ *
+ * T-0741 fix (follow-up on T-0734 §5 out-of-scope finding): `display_name`
+ * (already a required field on this form) is now ALSO passed to
+ * kc.createHumanUser as `displayName`, which admin-port.ts splits into KC's
+ * firstName/lastName. Without this, KC 25's declarative user profile (which
+ * keeps firstName/lastName `required.roles:["user"]`, unmodified by T-0734)
+ * leaves a UI-created account unable to obtain ANY login token — proven live:
+ * a direct grant on such a user 400s `invalid_grant "Account is not fully set
+ * up"` — until an interactive profile-update step is completed by hand. See
+ * docs/design/T-0741-firstname-lastname.adr.md.
  */
 
 import { randomUUID } from "node:crypto";
@@ -392,6 +402,14 @@ export function registerUserMgmtRoutes(
         email,
         password,
         actorType: "human",
+        // T-0741 (follow-up on T-0734 §5): reuse the ALREADY-collected
+        // display_name to derive KC firstName/lastName (admin-port.ts
+        // splitDisplayName) — no second name field in the form, no second
+        // typing pass. Closes the gap where a UI-created account without
+        // firstName/lastName could not obtain ANY login token ("Account is
+        // not fully set up") until the user manually filled an interactive
+        // profile-update step.
+        displayName: display_name,
       });
       kcUserId = result.userId;
     } catch (err) {
