@@ -114,3 +114,25 @@ deactivated: row.deactivated_at != null,   // ResolvedActor — BOOLEAN, не д
   (не рукотворно) → `PersonCell` на деактивированном id получает
   `deactivated: true` на `ActorChip`.
 - AC-4: `tsc`/vitest (web + server затронутые файлы) зелёные.
+
+## Addendum — B1-раунд судьи (третий обрыв: деталка записи)
+
+Судья (changes_requested, B1 blocking) нашёл ТРЕТИЙ обрыв протяжки, который
+раунд 1 превратил в видимую рассогласованность: `screen-record-detail.jsx`
+строил `authorNames` как Map строк-имён и `PersonFieldValue` не передавал
+`deactivated` в `ActorChip` — деактивированный исполнитель приглушён в
+списке записей, но «активен» в деталке той же записи.
+
+- F6 (B1). `authorNames` несёт ЦЕЛЫЕ employee-entries (`{id, name, position,
+  deactivated}`) через общий хелпер `buildEmployeesById`
+  (`web/src/forms/field-renderer.jsx`); `PersonFieldValue` прокидывает
+  `deactivated` в `ActorChip` с той же boolean-семантикой, что `PersonCell`.
+  Оба читателя карты обновлены (PersonFieldValue; сайдбар «Автор» →
+  `.get(...)?.name`, degrade к сырому слагу сохранён байт-в-байт).
+- N6 (N1-нит). e2e-тесты и экраны используют ОДИН экспортированный
+  `buildEmployeesById` — никакого копирования Map-выражения литералом.
+- AC-5 (B1): честный e2e деталки — реальный wire-shape `/api/org` → реальный
+  `fetchEmployees` → `buildEmployeesById` → `PersonFieldValue`; маркер
+  true для деактивированного, false для активного.
+- AC-6 (B1): деталка и список ОДНОЙ записи согласованы по маркеру
+  деактивации (live-proof план, шаги 4–5).

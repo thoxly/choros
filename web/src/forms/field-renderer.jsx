@@ -149,6 +149,27 @@ export async function fetchEmployees() {
 }
 
 /**
+ * buildEmployeesById — the ONE canonical "fetchEmployees() list → lookup Map"
+ * step (T-0698 B1/N1). Both record screens batch-load employees once per page
+ * and then resolve person-typed values against a Map keyed by employee
+ * id/slug; before this helper each screen hand-rolled its own Map with its
+ * own value shape (screen-app-records kept whole entries,
+ * screen-record-detail kept only the name STRING — which is exactly how the
+ * `deactivated` signal got dropped a third time on the detail screen,
+ * invisible to tests that copied the screen's Map-literal instead of calling
+ * shared code). One exported function means the screens AND their e2e tests
+ * all consume the SAME construction — a screen can no longer drift to a
+ * narrower value shape without its tests exercising that exact drift.
+ *
+ * @param {Array<{id:string,name:string,position:string,deactivated:boolean}>} list
+ *   the fetchEmployees() result ([] / non-array tolerated → empty Map).
+ * @returns {Map<string, {id:string,name:string,position:string,deactivated:boolean}>}
+ */
+export function buildEmployeesById(list) {
+  return new Map((Array.isArray(list) ? list : []).map((e) => [e.id, e]));
+}
+
+/**
  * PersonPicker — inline employee selector for a record form.
  * Renders a search box + a <select> of human employees from the org (filtered
  * by name OR position — T-0649, UX study §2 "поиск по имени, «имя +

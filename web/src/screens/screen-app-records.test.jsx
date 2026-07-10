@@ -263,7 +263,7 @@ describe('screen-app-records — no duplicate «Создано» column (T-0649)
 // ---------------------------------------------------------------------------
 
 import { PersonCell } from './screen-app-records.jsx';
-import { fetchEmployees } from '../forms/field-renderer.jsx';
+import { fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx';
 
 describe('PersonCell (T-0673)', () => {
   it('resolves a known employee id to their display name via ActorChip', () => {
@@ -308,8 +308,9 @@ describe('PersonCell (T-0673)', () => {
   // T-0698 (P2 from T-0673's judge): honest end-to-end coverage for the
   // deactivated marker — a REAL /api/org response shape (not a hand-built
   // Map), through the REAL fetchEmployees() (web/src/forms/field-renderer.jsx),
-  // through the SAME `new Map(list.map((e) => [e.id, e]))` expression
-  // screen-app-records.jsx itself uses to build employeesById, into
+  // through buildEmployeesById — the SAME shared helper (T-0698 N1,
+  // field-renderer.jsx) screen-app-records.jsx itself calls to build
+  // employeesById (not a test-local Map literal that could drift) — into
   // PersonCell. This is the test that would have caught the original P2:
   // before T-0698 this test fails because fetchEmployees() dropped the
   // `deactivated` field the API sent (and, one link further back,
@@ -355,8 +356,8 @@ describe('PersonCell (T-0673)', () => {
       });
 
       const list = await fetchEmployees();
-      // Same construction expression as screen-app-records.jsx's employeesById.
-      const employeesById = new Map(list.map((e) => [e.id, e]));
+      // The SAME shared helper the screen's useEffect calls (T-0698 N1).
+      const employeesById = buildEmployeesById(list);
 
       const activeEl = PersonCell({ personId: 'emp-active', employees: employeesById });
       const goneEl = PersonCell({ personId: 'emp-gone', employees: employeesById });
@@ -375,7 +376,10 @@ describe('screen-app-records — PersonCell wiring (T-0673)', () => {
   });
 
   it('batch-loads employees via fetchEmployees() ONCE per page — gated on hasPersonColumn, not per-row/per-cell', () => {
-    expect(src).toContain("import { FieldControl, fetchEmployees } from '../forms/field-renderer.jsx'");
+    expect(src).toContain("import { FieldControl, fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx'");
+    // T-0698 N1: the list→Map step is the shared exported helper, not an
+    // inline Map literal a test could silently diverge from.
+    expect(src).toContain('setEmployeesById(buildEmployeesById(list))');
     expect(src).toMatch(/const hasPersonColumn = useMemo\(\(\) => columns\.some\(\(c\) => c\.type === 'person'\), \[columns\]\);/);
     expect(src).toMatch(/if \(!hasPersonColumn\) return undefined;/);
     expect(src).toContain('fetchEmployees()');

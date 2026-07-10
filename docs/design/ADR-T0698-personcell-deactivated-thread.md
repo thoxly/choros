@@ -166,3 +166,55 @@ const employees = new Map([['emp-slug-1', { id: 'emp-slug-1', name: 'К. Орл�
   корректен как unit-тест компонента (не переизобретает форму `/api/org`),
   удалять его — потеря покрытия на случай регрессии самого `PersonCell`.
   Оставлен + дополнен комментарием + новым интеграционным тестом (§5).
+
+## 8. B1-раунд (changes_requested судьи) — ТРЕТИЙ обрыв: деталка записи
+
+Судья вынес blocking B1: §2 этого ADR насчитал два обрыва, но существовал
+третий, и фикс раунда 1 делал его ВИДИМЫМ как рассогласованность:
+`web/src/screens/screen-record-detail.jsx` строил свою карту
+`authorNames = new Map(list.map((e) => [e.id, e.name]))` — значения-СТРОКИ
+(только имя), и `PersonFieldValue` (рендер person-полей в ДЕТАЛКЕ записи,
+тот же `ActorChip`) не передавал проп `deactivated` вовсе. Итог после
+раунда 1: деактивированный исполнитель в СПИСКЕ записей приглушён
+(PersonCell), а в деталке той же записи — в одном клике — выглядит активным.
+
+### 8.1 Фикс
+
+- Новый общий хелпер `buildEmployeesById(list)` в
+  `web/src/forms/field-renderer.jsx` — ЕДИНСТВЕННЫЙ канонический шаг
+  «список fetchEmployees → lookup-Map» (значения = ЦЕЛЫЕ entries
+  `{id, name, position, deactivated}`; терпит не-массив → пустая Map).
+  Оба экрана записей переведены на него (`screen-app-records.jsx` — с
+  инлайн-литерала Map; `screen-record-detail.jsx` — со строкового
+  narrowing'а).
+- `PersonFieldValue` читает `hit.name` / `hit.deactivated` и прокидывает
+  `deactivated` в `ActorChip` с той же boolean-семантикой, что `PersonCell`.
+- **Аудит читателей `authorNames`** (двое, других нет — grep по всем
+  вхождениям): (1) `PersonFieldValue` — обновлён; (2) сайдбар «Автор»
+  (`formatPersonName(authorNames.get(record.created_by))`) — обновлён на
+  `.get(...)?.name`: без этого formatPersonName(объект) вернул бы null и
+  имя автора молча регрессировало бы к сырому слагу. `?.name` сохраняет
+  degrade отсутствующей записи байт-в-байт (undefined → null → слаг).
+  `PersonFieldValue` не импортируется никаким другим файлом (только свой
+  тест).
+
+### 8.2 N1 (нит судьи) — литерал Map-выражения в e2e-тестах
+
+Решён, не отложен: e2e-тесты больше не копируют выражение построения Map
+литералом — оба экрана И все три e2e-теста вызывают ОДИН экспортированный
+`buildEmployeesById`, так что экран не может дрейфануть к более узкой форме
+значений так, чтобы его тест не прожил ровно тот же дрейф. Wiring-тесты
+пиннят `set…(buildEmployeesById(list))` в обоих экранах, а тест деталки
+дополнительно утверждает, что старый строковый narrowing не вернулся.
+
+### 8.3 Тесты B1-раунда
+
+- `screen-record-detail.test.jsx`: +unit на прокидку `deactivated`
+  (контракт как у PersonCell), +честный e2e (реальный wire-shape `/api/org`
+  → реальный `fetchEmployees` → `buildEmployeesById` → `PersonFieldValue`,
+  активный И деактивированный), +wiring; фикстуры T-0673 переведены со
+  строковых карт на entry-объекты (контракт значения карты изменился);
+  ассерция created_by обновлена на `?.name`-форму.
+- `field-renderer-t0649.test.jsx`: +2 прямых unit-теста
+  `buildEmployeesById`.
+- `screen-app-records.test.jsx`: e2e/wiring переведены на общий хелпер.

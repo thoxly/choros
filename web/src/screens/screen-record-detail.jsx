@@ -33,7 +33,7 @@ import { fetchFileBlob, downloadFile } from '../lib/authed-file.js';
 import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, FILE_CELL_ASYNC, PERSON_CELL_ASYNC, deriveRecordLabel, computeComputedFieldValue } from './records-form.js';
 // T-0608 (пункт г): resolve record.created_by (an employee SLUG — for a
 // Keycloak-registered human, slug === the KC user UUID) to a display name.
-import { fetchEmployees } from '../forms/field-renderer.jsx';
+import { fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx';
 // T-0568: reuse the SAME create-drawer for editing (prefilled → PUT).
 import { CreateRecordDrawer } from './screen-app-records.jsx';
 import {
@@ -614,21 +614,41 @@ function FileFieldValue({ versionId, recordId }) {
 // employee id/slug) to a human-readable name via ActorChip.
 //
 // formatCellValue returns PERSON_CELL_ASYNC for a non-empty person value.
-// NO per-field fetch here: `authorNames` is the SAME slug→name Map the
-// screen already batch-loads once (via the org-employee fetch below, T-0608)
+// NO per-field fetch here: `authorNames` is the SAME batch employee Map the
+// screen already loads once (via the org-employee fetch below, T-0608)
 // to resolve record.created_by — reused as-is rather than a second resolver/fetch.
 //
 // Honest fallback (D2): an id absent from the map renders the RAW SLUG via
 // ActorChip's own resolved:false contract — never blank, never invented.
+//
+// T-0698 B1: `authorNames` used to be a Map of name STRINGS (each entry
+// narrowed to just the employee's name at construction) — a THIRD break in
+// the deactivated_at chain: even after listOrgTree + fetchEmployees started
+// carrying `deactivated`, this screen's own flatten-to-string step dropped it
+// again, so a deactivated executor was correctly muted in the record LIST
+// (PersonCell, screen-app-records.jsx) but rendered as active in the DETAIL
+// of the same record — one click apart. The map now keeps whole employee
+// entries (buildEmployeesById — the SAME shared helper screen-app-records
+// uses), and this component threads `deactivated` into ActorChip with the
+// identical boolean semantics PersonCell uses.
 // ---------------------------------------------------------------------------
 
 /**
  * @param {string} personId  the employee id/slug stored as the field value.
- * @param {Map<string, string>} authorNames  batch-resolved id → display-name map.
+ * @param {Map<string, {id:string,name:string,deactivated?:boolean}>} authorNames
+ *   batch-resolved employee map (id/slug → display shape), built once by the
+ *   screen via buildEmployeesById from the fetchEmployees list.
  */
 export function PersonFieldValue({ personId, authorNames }) {
-  const name = authorNames instanceof Map ? authorNames.get(personId) : undefined;
-  return <ActorChip type="human" name={name || personId} id={personId} />;
+  const hit = authorNames instanceof Map ? authorNames.get(personId) : undefined;
+  return (
+    <ActorChip
+      type="human"
+      name={(hit && hit.name) || personId}
+      id={personId}
+      deactivated={Boolean(hit && hit.deactivated)}
+    />
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -756,12 +776,20 @@ function RecordDetailScreen() {
   // NEVER asserts the record exists — see ADR-T0627 §3.2 (deliberately
   // true under EITHER "hidden" or "never existed").
   const [notFoundAppIsDraft, setNotFoundAppIsDraft] = useState(false);
-  // T-0608 (пункт г): slug → display-name map for record.created_by (an
+  // T-0608 (пункт г): slug → employee map for record.created_by (an
   // employee SLUG, which for a Keycloak-registered human equals the KC user
   // UUID — rendering it raw is exactly the «АВТОР: 4c653940-…» bug). Loaded
   // once per screen mount (not per-record) — /api/org is tenant-wide and
   // cheap; a failed load degrades to the raw slug (fetchAuthorNames below),
   // never blocks the record itself from rendering.
+  //
+  // T-0698 B1: values are now WHOLE employee entries ({id, name, position,
+  // deactivated}), not name strings — built via buildEmployeesById, the same
+  // shared helper screen-app-records.jsx uses, so PersonFieldValue can thread
+  // the `deactivated` marker exactly like PersonCell does in the list view
+  // (list and detail of one record must not disagree about the executor's
+  // status). Readers: PersonFieldValue (reads .name/.deactivated) and the
+  // created_by sidebar line below (reads .name explicitly).
   const [authorNames, setAuthorNames] = useState(() => new Map());
 
   useEffect(() => {
@@ -769,7 +797,7 @@ function RecordDetailScreen() {
     fetchEmployees()
       .then((list) => {
         if (cancelled) return;
-        setAuthorNames(new Map(list.map((e) => [e.id, e.name])));
+        setAuthorNames(buildEmployeesById(list));
       })
       .catch(() => { /* degrade to raw slug — non-fatal, see render below */ });
     return () => { cancelled = true; };
@@ -1109,8 +1137,11 @@ function RecordDetailScreen() {
                         the /api/org-backed map; fall back to the raw slug when
                         the lookup has no entry (e.g. still loading, or the
                         author has no position and /api/org's tree omits them)
-                        — degrades to the PREVIOUS behaviour, never worse. */}
-                    {formatPersonName(authorNames.get(record.created_by)) || record.created_by}
+                        — degrades to the PREVIOUS behaviour, never worse.
+                        T-0698 B1: the map now holds employee ENTRIES, so read
+                        .name explicitly (?.name keeps the missing-entry path
+                        identical: undefined → formatPersonName null → slug). */}
+                    {formatPersonName(authorNames.get(record.created_by)?.name) || record.created_by}
                   </Mono>
                 </div>
               )}

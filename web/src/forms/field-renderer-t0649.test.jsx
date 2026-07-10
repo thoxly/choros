@@ -28,6 +28,7 @@ import {
   DateInput,
   groupThousands,
   fetchEmployees,
+  buildEmployeesById,
 } from './field-renderer.jsx';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -263,7 +264,7 @@ describe('fetchEmployees — P1 /api/org 401 fix (T-0649)', () => {
       }),
     });
     const list = await fetchEmployees();
-    const byId = new Map(list.map((e) => [e.id, e]));
+    const byId = buildEmployeesById(list);
     expect(byId.get('emp-active').deactivated).toBe(false);
     expect(byId.get('emp-gone').deactivated).toBe(true);
   });
@@ -284,6 +285,31 @@ describe('fetchEmployees — P1 /api/org 401 fix (T-0649)', () => {
     // mention of it in the fix's explanatory JSDoc is fine — we only forbid an
     // actual quoted-string call `fetch('/api/org')` / `fetch("/api/org")`.)
     expect(RENDERER_SRC).not.toMatch(/(?<![`\w])fetch\(['"]\/api\/org['"]\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildEmployeesById — the ONE canonical list→Map step (T-0698 B1/N1) both
+// record screens AND their e2e tests call, so the map's value shape cannot
+// drift between a screen and its test (the drift that hid the third
+// deactivated_at break in screen-record-detail's flatten-to-string map).
+// ---------------------------------------------------------------------------
+
+describe('buildEmployeesById (T-0698 N1)', () => {
+  it('keys WHOLE entries by id — name and deactivated both reachable from one lookup', () => {
+    const map = buildEmployeesById([
+      { id: 'emp-1', name: 'Human One', position: 'Position A', deactivated: false },
+      { id: 'emp-2', name: 'Human Two', position: 'Position B', deactivated: true },
+    ]);
+    expect(map.get('emp-1').name).toBe('Human One');
+    expect(map.get('emp-1').deactivated).toBe(false);
+    expect(map.get('emp-2').deactivated).toBe(true);
+  });
+
+  it('tolerates non-array input (still-loading/failed state) → empty Map, never throws', () => {
+    expect(buildEmployeesById(undefined).size).toBe(0);
+    expect(buildEmployeesById(null).size).toBe(0);
+    expect(buildEmployeesById([]).size).toBe(0);
   });
 });
 

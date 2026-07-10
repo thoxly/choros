@@ -93,7 +93,7 @@ import { readSelectEnum, isFieldRequired } from './kanban-board.js';
 // structural contracts (relation/collection/rollup) dispatch to their dedicated
 // editors below — keyed off the SAME binding-contract catalog via
 // resolveFieldContract, NOT a parallel `inputKind` string chain (spec §2).
-import { FieldControl, fetchEmployees } from '../forms/field-renderer.jsx';
+import { FieldControl, fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx';
 import { resolveFieldContract } from '../forms/field-contract.js';
 
 // ---------------------------------------------------------------------------
@@ -1295,7 +1295,9 @@ function AppRecordsScreen() {
     fetchEmployees()
       .then((list) => {
         if (cancelled) return;
-        setEmployeesById(new Map(list.map((e) => [e.id, e])));
+        // T-0698 (N1): shared canonical list→Map step — the SAME exported
+        // helper the e2e tests call, so test and screen cannot drift apart.
+        setEmployeesById(buildEmployeesById(list));
       })
       .catch(() => { /* degrade to raw id — non-fatal, mirrors authorNames */ });
     return () => { cancelled = true; };
