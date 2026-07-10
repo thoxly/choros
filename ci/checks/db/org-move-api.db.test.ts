@@ -18,6 +18,9 @@
 //              appends department.moved; the id is preserved (no delete+recreate).
 //   AC-cycle — PATCH /api/departments/:id { parent_id: <own descendant> } → 400
 //              CYCLE and does NOT write an audit event (rejected before UPDATE).
+//   AC-audit-read-node (T-0733) — GET /api/audit (real HTTP route, registered
+//              on the SAME router) resolves department.moved's targetDisplay
+//              to the department's LIVE display_name via node-resolver.ts.
 //
 // Owner authority is a confirmed tenant-owner role_assignment (migration 026 shape),
 // so the route's assertOrgObjectAuthority short-circuits and the real UPDATE + audit
@@ -38,6 +41,12 @@ import { registerSeedWriteRoutes } from '../../../src/http/seed-write.js';
 // suite's own move-API just wrote (subject column), not just a static fixture.
 import { readAuditLog, type AuditReadFilters } from '../../../src/db/audit-read-dao.js';
 import type { PgClientLike } from '../../../src/db/audit-writer.js';
+// T-0733 (R-1 из ревью T-0712): the REAL HTTP audit route (registerAuditRoutes),
+// registered on the SAME router as the move-API routes below — proves the
+// node-resolver.ts batch (department.moved/position.moved targetDisplay) reaches
+// a real Postgres row this suite's own move-API just wrote, through the actual
+// GET /api/audit wiring (not just readAuditLog in isolation).
+import { registerAuditRoutes } from '../../../src/http/audit.js';
 
 const hasDb = Boolean(process.env['DATABASE_URL']);
 const d = hasDb ? describe : describe.skip;
@@ -165,6 +174,27 @@ function request(method: string, path: string, body: unknown): Promise<{ status:
   });
 }
 
+// T-0733: a bodyless GET helper for /api/audit (the move-API `request()` above
+// always writes a JSON body, which GET routes here simply ignore, but a real
+// bodyless GET is the honest shape for a read route).
+function getJson(path: string): Promise<{ status: number; body: any }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port, path, method: 'GET', headers: { 'x-dev-user': OWNER_SLUG } },
+      (res) => {
+        let data = '';
+        res.on('data', (ch) => (data += ch.toString()));
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode ?? 0, body: JSON.parse(data) }); }
+          catch { resolve({ status: res.statusCode ?? 0, body: data }); }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /** Count <type> audit events for this tenant (RLS-scoped via the app pool). */
 async function auditCount(type: string, subject: string): Promise<number> {
   const client = await getPool().connect();
@@ -205,6 +235,9 @@ d('T-0655 org move-API — live Postgres', () => {
     await seed();
     const router = new Router();
     registerSeedWriteRoutes(router, getPool());
+    // T-0733: audit routes on the SAME router — proves the real GET /api/audit
+    // wiring, not just the move-API writes.
+    registerAuditRoutes(router, undefined, getPool());
     server = http.createServer((req, res) => router.dispatch(req, res));
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
     port = (server!.address() as AddressInfo).port;
@@ -264,5 +297,29 @@ d('T-0655 org move-API — live Postgres', () => {
     } finally {
       client.release();
     }
+  });
+
+  // T-0733 [R-1 из ревью T-0712, столп 4 анти-UUID] — the node-resolver READ
+  // side, through the REAL HTTP route (not just readAuditLog in isolation):
+  // GET /api/audit must resolve department.moved's targetDisplay to the
+  // department's LIVE display_name — proving node-resolver.ts's
+  // batchResolveOrgNodes actually reaches Postgres and that the HTTP wiring
+  // (audit.ts) attaches it. Runs AFTER AC-dept (which renamed fx.deptA to
+  // 'Переименовано'), so this also proves the resolved name reflects the
+  // department's CURRENT row, not a stale/cached value.
+  it('AC-audit-read-node — GET /api/audit resolves department.moved targetDisplay to the department\'s LIVE name (T-0733)', async () => {
+    const r = await getJson('/api/audit?action=department.moved');
+    expect(r.status).toBe(200);
+    const body = r.body as { events: Array<Record<string, unknown>> };
+    const row = body.events.find((e) => e['target'] === fx.deptA);
+    expect(row).toBeDefined();
+    // AC-dept only renamed (display_name), did not reparent → "переименован".
+    expect(row!['summary']).toBe('Отдел переименован');
+    expect(row!['targetDisplay']).toMatchObject({
+      id: fx.deptA,
+      name: 'Переименовано', // AC-dept's live rename — proves a REAL Postgres read, not a fixture
+      kind: 'department',
+      resolved: true,
+    });
   });
 });

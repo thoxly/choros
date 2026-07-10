@@ -14,15 +14,20 @@
  *   5. AuditEventRow renders ONLY the redacted fields (actor/summary/action/target)
  *      and NEVER leaks a raw payload (the wire item has none — proven structurally).
  *   6. T-0712 — AuditEventRow's target-chip choice: `employee.moved` with a
- *      `targetDisplay` renders an ActorChip (human name primary); everything
- *      else (department.moved/position.moved, or any row without
- *      targetDisplay) keeps the pre-existing MonoId technical-id chip.
+ *      `targetDisplay` renders an ActorChip (human name primary); a row with
+ *      NO targetDisplay at all keeps the pre-existing MonoId technical-id chip.
+ *   7. T-0733 (R-1 из ревью T-0712) — `department.moved`/`position.moved` now
+ *      ALSO carry a `targetDisplay` (the server's node-resolver.ts batch) and
+ *      render it via NodeRef (org-tree node name), not ActorChip — a
+ *      department/position is not an actor. An UNRESOLVED node (deleted, or
+ *      never existed) still gets NodeRef (never falls back to a raw-id MonoId
+ *      chip) — NodeRef itself owns the honest degradation.
  */
 
 import { describe, it, expect } from 'vitest';
-import { execTypeOf, humanError, fmtTs, buildAuditUrl } from './screen-audit.logic.js';
+import { execTypeOf, humanError, fmtTs, buildAuditUrl, isOrgNodeMoveAction } from './screen-audit.logic.js';
 import { AuditEventRow } from './screen-audit.jsx';
-import { ActorChip, MonoId } from '../components/components.jsx';
+import { ActorChip, NodeRef, MonoId } from '../components/components.jsx';
 
 /** Recursively collect every element of a given `type` (component reference)
  *  in a React element tree — used to prove WHICH primitive (ActorChip vs
@@ -151,6 +156,23 @@ describe('T-0500 buildAuditUrl', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4b. T-0733 — isOrgNodeMoveAction
+// ---------------------------------------------------------------------------
+
+describe('T-0733 isOrgNodeMoveAction', () => {
+  it('department.moved / position.moved → true', () => {
+    expect(isOrgNodeMoveAction('department.moved')).toBe(true);
+    expect(isOrgNodeMoveAction('position.moved')).toBe(true);
+  });
+  it('employee.moved / anything else → false', () => {
+    expect(isOrgNodeMoveAction('employee.moved')).toBe(false);
+    expect(isOrgNodeMoveAction('grant.create')).toBe(false);
+    expect(isOrgNodeMoveAction('')).toBe(false);
+    expect(isOrgNodeMoveAction(undefined)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5. AuditEventRow renders ONLY the redacted wire fields.
 // ---------------------------------------------------------------------------
 
@@ -226,30 +248,6 @@ describe('T-0712 AuditEventRow — target-chip choice', () => {
     expect(monoTexts).toContain('employee.moved');
   });
 
-  it('department.moved / position.moved (no targetDisplay) keep the pre-existing MonoId chip for the target id', () => {
-    const ev = {
-      id: 'evt-dept',
-      ts: 1700000000000,
-      actor: 'e-owner',
-      actorDisplay: { id: 'e-owner', name: 'Е. Ларина', type: 'human', deactivated: false, resolved: true },
-      action: 'department.moved',
-      summary: 'Отдел перемещён',
-      target: 'dept-9',
-      targetDisplay: null,
-    };
-    const tree = AuditEventRow({ ev });
-    // Only ONE ActorChip (the actor) — the target is not employee-shaped, so no
-    // second ActorChip is fabricated for it.
-    const chips = findElementsByType(tree, ActorChip);
-    expect(chips.length).toBe(1);
-    expect(chips[0].props.name).toBe('Е. Ларина');
-
-    const monoIds = findElementsByType(tree, MonoId);
-    const monoTexts = monoIds.map((m) => m.props.children);
-    expect(monoTexts).toContain('dept-9'); // target chip — same fidelity as record.create today
-    expect(monoTexts).toContain('department.moved');
-  });
-
   it('a row with no target at all (target=null) renders no target chip of either kind', () => {
     const ev = {
       id: 'evt-none',
@@ -266,5 +264,111 @@ describe('T-0712 AuditEventRow — target-chip choice', () => {
     const monoIds = findElementsByType(tree, MonoId);
     // The only MonoId left is the trailing raw action token.
     expect(monoIds.map((m) => m.props.children)).toEqual(['employee.moved']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. T-0733 (R-1 из ревью T-0712, столп 4 анти-UUID) — department.moved/
+//    position.moved target-chip choice: NodeRef (org-tree node), not ActorChip
+//    (a department/position is not an actor) and not a bare MonoId id chip.
+// ---------------------------------------------------------------------------
+
+describe('T-0733 AuditEventRow — org-node target-chip (department.moved/position.moved)', () => {
+  it('department.moved with a RESOLVED targetDisplay renders a NodeRef (not ActorChip, not MonoId) carrying the department name', () => {
+    const ev = {
+      id: 'evt-dept',
+      ts: 1700000000000,
+      actor: 'e-owner',
+      actorDisplay: { id: 'e-owner', name: 'Е. Ларина', type: 'human', deactivated: false, resolved: true },
+      action: 'department.moved',
+      summary: 'Отдел перемещён',
+      target: 'dept-9',
+      targetDisplay: { id: 'dept-9', name: 'Финансы', kind: 'department', resolved: true },
+    };
+    const tree = AuditEventRow({ ev });
+
+    // Exactly ONE ActorChip — the actor. No second ActorChip is fabricated for
+    // a department (it is not employee-shaped).
+    const chips = findElementsByType(tree, ActorChip);
+    expect(chips.length).toBe(1);
+    expect(chips[0].props.name).toBe('Е. Ларина');
+
+    // Exactly ONE NodeRef — the moved department — carrying the resolved name.
+    const nodes = findElementsByType(tree, NodeRef);
+    expect(nodes.length).toBe(1);
+    expect(nodes[0].props.kind).toBe('department');
+    expect(nodes[0].props.name).toBe('Финансы');
+    expect(nodes[0].props.id).toBe('dept-9');
+
+    // The raw target id 'dept-9' is NEVER rendered as a bare MonoId chip.
+    const monoIds = findElementsByType(tree, MonoId);
+    const monoTexts = monoIds.map((m) => m.props.children);
+    expect(monoTexts).not.toContain('dept-9');
+    expect(monoTexts).toContain('department.moved'); // trailing action token, unaffected
+  });
+
+  it('position.moved with a RESOLVED targetDisplay renders a NodeRef carrying the position title', () => {
+    const ev = {
+      id: 'evt-pos',
+      ts: 1700000000000,
+      actor: 'e-owner',
+      actorDisplay: { id: 'e-owner', name: 'Е. Ларина', type: 'human', deactivated: false, resolved: true },
+      action: 'position.moved',
+      summary: 'Должность перемещена',
+      target: 'pos-9',
+      targetDisplay: { id: 'pos-9', name: 'Эскалации L2', kind: 'position', resolved: true },
+    };
+    const tree = AuditEventRow({ ev });
+
+    const nodes = findElementsByType(tree, NodeRef);
+    expect(nodes.length).toBe(1);
+    expect(nodes[0].props.kind).toBe('position');
+    expect(nodes[0].props.name).toBe('Эскалации L2');
+
+    const monoIds = findElementsByType(tree, MonoId);
+    expect(monoIds.map((m) => m.props.children)).not.toContain('pos-9');
+  });
+
+  it('department.moved with an UNRESOLVED targetDisplay (deleted node, server honest fallback) STILL renders a NodeRef — never a raw-id MonoId chip', () => {
+    const ev = {
+      id: 'evt-dept-gone',
+      ts: 1700000000000,
+      actor: 'e-owner',
+      actorDisplay: { id: 'e-owner', name: 'Е. Ларина', type: 'human', deactivated: false, resolved: true },
+      action: 'department.moved',
+      summary: 'Отдел перемещён',
+      target: 'dept-ghost',
+      // Server's honest fallback (node-resolver.ts resolveNodeDisplay): the
+      // node no longer exists — name === id, resolved:false. NodeRef itself
+      // demotes this (never renders the raw id as primary text) — proven
+      // directly in node-ref.test.jsx; this test proves AuditEventRow still
+      // routes it through NodeRef (not a degraded-further MonoId chip).
+      targetDisplay: { id: 'dept-ghost', name: 'dept-ghost', kind: 'department', resolved: false },
+    };
+    const tree = AuditEventRow({ ev });
+
+    const nodes = findElementsByType(tree, NodeRef);
+    expect(nodes.length).toBe(1);
+    expect(nodes[0].props.id).toBe('dept-ghost');
+
+    // No bare MonoId carrying the raw target id anywhere in the row.
+    const monoIds = findElementsByType(tree, MonoId);
+    expect(monoIds.map((m) => m.props.children)).not.toContain('dept-ghost');
+  });
+
+  it('employee.moved is UNAFFECTED — still renders via ActorChip, never NodeRef', () => {
+    const ev = {
+      id: 'evt-emp-regress',
+      ts: 1700000000000,
+      actor: 'e-owner',
+      actorDisplay: { id: 'e-owner', name: 'Е. Ларина', type: 'human', deactivated: false, resolved: true },
+      action: 'employee.moved',
+      summary: 'Сотрудник перемещён',
+      target: 'emp-1',
+      targetDisplay: { id: 'emp-1', name: 'Иван Петров', type: 'human', deactivated: false, resolved: true },
+    };
+    const tree = AuditEventRow({ ev });
+    expect(findElementsByType(tree, NodeRef).length).toBe(0);
+    expect(findElementsByType(tree, ActorChip).length).toBe(2); // actor + target
   });
 });

@@ -71,6 +71,15 @@
   text-decoration: underline;
 }
 
+/* ---------------- NodeRef (T-0733) ---------------- */
+.chs-noderef {
+  font-size: var(--chs-text-sm);
+}
+.chs-noderef--unresolved {
+  color: var(--chs-color-text-faint);
+  font-style: italic;
+}
+
 /* ---------------- ProcessRef (T-0683) ---------------- */
 .chs-processref {
   display: inline-flex;

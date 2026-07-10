@@ -55,6 +55,19 @@ export function humanError(status) {
 }
 
 /**
+ * True for the two ORG-TREE NODE move types (department/position) — as
+ * opposed to `employee.moved`, whose target is an ACTOR (rendered via
+ * ActorChip). Used by AuditEventRow (screen-audit.jsx) to pick the right
+ * target-chip primitive: NodeRef for a node move, ActorChip for an actor
+ * move. T-0733 (R-1 из ревью T-0712, столп 4 анти-UUID).
+ * @param {string} action  the audit event `type`.
+ * @returns {boolean}
+ */
+export function isOrgNodeMoveAction(action) {
+  return action === 'department.moved' || action === 'position.moved';
+}
+
+/**
  * Build the GET /api/audit URL with optional actor/action filters + cursor.
  * Filter VALUES are URL-encoded via URLSearchParams (no manual concatenation) —
  * the server binds them as SQL parameters, but encoding here is still correct hygiene.

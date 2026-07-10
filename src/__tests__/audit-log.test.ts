@@ -29,6 +29,12 @@
  *       no degradation for existing rows); `employee.moved` additionally gets a
  *       resolved `targetDisplay` (the moved employee IS an actor, resolved via the
  *       same batch resolver as T-0648); other types are byte-identical (regression)
+ *   (8) T-0733 [R-1 из ревью T-0712] — `department.moved`/`position.moved` ALSO get
+ *       a resolved `targetDisplay` now, through the SEPARATE node-resolver.ts batch
+ *       (department/position are org-tree NODES, not actors): honest degradation for
+ *       a deleted/never-existed node (resolved:false, never a raw id leak), tenant-
+ *       scope (the node query is bound to the ACTOR's tenant, defence-in-depth), and
+ *       a single page mixing both node kinds resolving in ONE round-trip (no N+1)
  */
 
 import { describe, it, expect } from "vitest";
@@ -50,6 +56,14 @@ const INJECTION = "'; DROP TABLE choros.audit_event; --";
 interface Capture {
   auditSql: string | null;
   auditParams: unknown[] | null;
+  nodeSql: string | null;
+  nodeParams: unknown[] | null;
+}
+
+interface OrgNodeFixture {
+  id: string;
+  name: string;
+  kind: "department" | "position";
 }
 
 interface Scenario {
@@ -57,6 +71,7 @@ interface Scenario {
   isOwner: boolean;
   hasMgmtGrant: boolean;
   auditRows: Array<Record<string, unknown>>;
+  orgNodes: OrgNodeFixture[];
   capture: Capture;
 }
 
@@ -138,6 +153,24 @@ function makePool(s: Scenario): pg.Pool {
         return { rows: s.auditRows, rowCount: s.auditRows.length };
       }
 
+      // T-0733 — batchResolveOrgNodes: ONE UNION ALL query over
+      // choros.department + choros.position.
+      if (text.includes("FROM choros.department") && text.includes("UNION ALL")) {
+        s.capture.nodeSql = text;
+        s.capture.nodeParams = (params as unknown[]) ?? null;
+        const [, deptIdsRaw, posIdsRaw] = (params ?? []) as [string, string[], string[]];
+        const deptIds = new Set(deptIdsRaw ?? []);
+        const posIds = new Set(posIdsRaw ?? []);
+        const rows = s.orgNodes
+          .filter(
+            (n) =>
+              (n.kind === "department" && deptIds.has(n.id)) ||
+              (n.kind === "position" && posIds.has(n.id)),
+          )
+          .map((n) => ({ id: n.id, name: n.name, kind: n.kind }));
+        return { rows, rowCount: rows.length };
+      }
+
       // BEGIN / SET LOCAL / COMMIT / ROLLBACK → no-op OK.
       return { rows: [], rowCount: 1 };
     },
@@ -201,7 +234,8 @@ function baseScenario(over: Partial<Scenario> = {}): Scenario {
     isOwner: true,
     hasMgmtGrant: false,
     auditRows: [],
-    capture: { auditSql: null, auditParams: null },
+    orgNodes: [],
+    capture: { auditSql: null, auditParams: null, nodeSql: null, nodeParams: null },
     ...over,
   };
 }
@@ -537,7 +571,12 @@ describe("T-0712 (7) — .moved events: human summary + target chip", () => {
     }
   });
 
-  it("department.moved → 'Отдел перемещён'; target=subject (dept id) but targetDisplay is null — no employee-resolver batch for departments", async () => {
+  // T-0733 (R-1 из ревью T-0712): department.moved/position.moved NOW ALSO get
+  // a resolved targetDisplay (was hardcoded null before this task — see the
+  // T-0733 (8) block below for the fuller node-resolver coverage; these two
+  // stay here as the direct sibling regressions of the employee.moved cases
+  // above, proving the SAME `.moved` family now resolves symmetrically).
+  it("department.moved → 'Отдел перемещён'; target=subject (dept id); targetDisplay resolves to the department's name (T-0733)", async () => {
     const s = baseScenario({
       isOwner: true,
       auditRows: [
@@ -550,6 +589,7 @@ describe("T-0712 (7) — .moved events: human summary + target chip", () => {
           payload: { to_parent_id: "dept-8", from_parent_id: "dept-7" },
         },
       ],
+      orgNodes: [{ id: "dept-9", name: "Клиентский сервис", kind: "department" }],
     });
     const { port, close } = await startServer(makePool(s));
     try {
@@ -558,13 +598,18 @@ describe("T-0712 (7) — .moved events: human summary + target chip", () => {
       const ev = body.events[0]!;
       expect(ev["summary"]).toBe("Отдел перемещён");
       expect(ev["target"]).toBe("dept-9");
-      expect(ev["targetDisplay"]).toBeNull();
+      expect(ev["targetDisplay"]).toMatchObject({
+        id: "dept-9",
+        name: "Клиентский сервис",
+        kind: "department",
+        resolved: true,
+      });
     } finally {
       await close();
     }
   });
 
-  it("position.moved (department changed AND renamed) → 'Должность перемещена и переименована'; target=subject, targetDisplay null", async () => {
+  it("position.moved (department changed AND renamed) → 'Должность перемещена и переименована'; targetDisplay resolves to the position's title (T-0733)", async () => {
     const s = baseScenario({
       isOwner: true,
       auditRows: [
@@ -577,6 +622,7 @@ describe("T-0712 (7) — .moved events: human summary + target chip", () => {
           payload: { to_department_id: "dept-4", renamed: true, from_title: "A", to_title: "B" },
         },
       ],
+      orgNodes: [{ id: "pos-9", name: "Эскалации L2", kind: "position" }],
     });
     const { port, close } = await startServer(makePool(s));
     try {
@@ -585,7 +631,12 @@ describe("T-0712 (7) — .moved events: human summary + target chip", () => {
       const ev = body.events[0]!;
       expect(ev["summary"]).toBe("Должность перемещена и переименована");
       expect(ev["target"]).toBe("pos-9");
-      expect(ev["targetDisplay"]).toBeNull();
+      expect(ev["targetDisplay"]).toMatchObject({
+        id: "pos-9",
+        name: "Эскалации L2",
+        kind: "position",
+        resolved: true,
+      });
     } finally {
       await close();
     }
@@ -634,6 +685,170 @@ describe("T-0712 (7) — .moved events: human summary + target chip", () => {
       const deferred = body.events.find((e) => e["action"] === "agent.deferred")!;
       expect(deferred["summary"]).toBe("Агент передал решение человеку");
       expect(deferred["target"]).toBe("inst-1");
+    } finally {
+      await close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (8) T-0733 [R-1 из ревью T-0712, столп 4 анти-UUID] — the node-resolver
+// batch: department.moved/position.moved targetDisplay now resolves through
+// node-resolver.ts (choros.department/choros.position), the ORG-TREE-NODE
+// sibling of the T-0648 actor batch. Covers: honest degradation for a
+// deleted/never-existed node, cross-tenant non-leak, and a single page mixing
+// both node kinds resolving in one round-trip.
+// ---------------------------------------------------------------------------
+
+describe("T-0733 (8) — node-resolver batch (department.moved/position.moved targetDisplay)", () => {
+  it("a DELETED department (no matching row) → targetDisplay is an honest fallback, NEVER the raw id as the response's only signal of success", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "99999999-0000-0000-0000-000000000009",
+          type: "department.moved",
+          actor: "e-owner",
+          subject: "dept-ghost",
+          occurred_at: "1700000006000",
+          payload: { to_parent_id: "dept-x" },
+        },
+      ],
+      orgNodes: [], // the department row no longer exists (hard delete, AC-9)
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      expect(ev["target"]).toBe("dept-ghost");
+      expect(ev["targetDisplay"]).toEqual({
+        id: "dept-ghost",
+        name: "dept-ghost",
+        kind: "department",
+        resolved: false,
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it("a DELETED position (no matching row) → targetDisplay is an honest fallback shape, resolved:false", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "aaaaaaaa-1111-0000-0000-00000000000a",
+          type: "position.moved",
+          actor: "e-owner",
+          subject: "pos-ghost",
+          occurred_at: "1700000006500",
+          payload: { to_department_id: "dept-x" },
+        },
+      ],
+      orgNodes: [],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      expect(ev["targetDisplay"]).toEqual({
+        id: "pos-ghost",
+        name: "pos-ghost",
+        kind: "position",
+        resolved: false,
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it("a CROSS-TENANT node id never resolves — the node query is bound to the ACTOR's tenant, never a request-supplied one", async () => {
+    // A department that exists, but in orgNodes we simulate it belonging to a
+    // different tenant by simply NOT returning it for this tenant's query (the
+    // mock pool has no per-row tenant field — the REAL isolation guarantee is
+    // node-resolver.ts's `SET LOCAL choros.tenant_id` + literal WHERE tenant_id
+    // = $1, proven directly by node-resolver.test.ts's tenant-scope case (g);
+    // this HTTP-level test proves the WIRING passes the resolved tenantId, not
+    // a second tenant, into the node query — the same discipline test (3)
+    // above already proves for the audit SELECT itself).
+    const s = baseScenario({
+      tenantId: TENANT_B,
+      isOwner: true,
+      auditRows: [
+        {
+          id: "bbbbbbbb-2222-0000-0000-00000000000b",
+          type: "department.moved",
+          actor: "e-owner",
+          subject: "dept-tenant-a-only",
+          occurred_at: "1700000007000",
+          payload: {},
+        },
+      ],
+      orgNodes: [], // tenant A's department is invisible to tenant B's query
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      expect(r.status).toBe(200);
+      // The node query (like the audit query) is bound to TENANT_B — never TENANT_A.
+      expect(s.capture.nodeParams?.[0]).toBe(TENANT_B);
+      expect(s.capture.nodeParams?.[0]).not.toBe(TENANT_A);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      // Honest miss — not a leaked tenant-A name, not a 500.
+      expect((body.events[0]!["targetDisplay"] as { resolved: boolean }).resolved).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  it("a single page mixing department.moved AND position.moved resolves BOTH in one node-resolver round-trip", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "cccccccc-3333-0000-0000-00000000000c",
+          type: "department.moved",
+          actor: "e-owner",
+          subject: "dept-mix",
+          occurred_at: "1700000008000",
+          payload: {},
+        },
+        {
+          id: "dddddddd-4444-0000-0000-00000000000d",
+          type: "position.moved",
+          actor: "e-owner",
+          subject: "pos-mix",
+          occurred_at: "1700000007900",
+          payload: {},
+        },
+      ],
+      orgNodes: [
+        { id: "dept-mix", name: "Платформа", kind: "department" },
+        { id: "pos-mix", name: "Интеграции", kind: "position" },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const dept = body.events.find((e) => e["action"] === "department.moved")!;
+      const pos = body.events.find((e) => e["action"] === "position.moved")!;
+      expect((dept["targetDisplay"] as { name: string }).name).toBe("Платформа");
+      expect((pos["targetDisplay"] as { name: string }).name).toBe("Интеграции");
+    } finally {
+      await close();
+    }
+  });
+
+  it("a page with NO .moved events at all never queries the node resolver", async () => {
+    const s = baseScenario({ isOwner: true, auditRows: sampleRows() }); // grant.create + agent.deferred only
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      expect(r.status).toBe(200);
+      expect(s.capture.nodeSql).toBeNull();
     } finally {
       await close();
     }
