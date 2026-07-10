@@ -44,7 +44,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect } from 'react';
-import { KitIcon } from '../components/components.jsx';
+import { KitIcon, ActorChip } from '../components/components.jsx';
 // Pure contract-resolution lives in a React-free sibling (field-contract.js) so
 // the load-bearing logic is unit-testable without a React runtime (codebase
 // convention — cf. records-form.js). Re-export it for callers/tests.
@@ -167,6 +167,61 @@ export async function fetchEmployees() {
  */
 export function buildEmployeesById(list) {
   return new Map((Array.isArray(list) ? list : []).map((e) => [e.id, e]));
+}
+
+// ---------------------------------------------------------------------------
+// T-0673/T-0728: PersonCell — cell/card renderer that resolves a person-type
+// field's value (an employee id/slug) to a human-readable name via ActorChip.
+//
+// Canonical home (T-0728, N2 of T-0698's review): originally lived ONLY in
+// screen-app-records.jsx (the record table). kanban-board.jsx's cards needed
+// the IDENTICAL resolve-and-render step for person-type card fields and had
+// none at all — records-form.js's formatCellValue returns the PERSON_CELL_ASYNC
+// sentinel for a non-empty person value (mirrors RELATION_CELL_ASYNC/
+// FILE_CELL_ASYNC), but kanban-board.jsx's cell loop only knew `typeof
+// rendered === 'string' ? rendered : '—'` — so every person-typed sentinel
+// (relation/file too, out of THIS task's scope) silently fell to "—", and the
+// board never showed WHO a card's executor was. Moved here — the file that
+// already owns fetchEmployees()/buildEmployeesById (T-0698's "ONE canonical"
+// helper) — so the table AND the kanban board render a person value through
+// this exact component instead of a second per-screen hand-rolled ActorChip
+// wrapper. screen-app-records.jsx imports it from here (no local definition
+// anymore) and re-exports it for backward-compat callers.
+//
+// NOT YET consolidated (out of THIS task's scope): screen-record-detail.jsx's
+// PersonFieldValue is a near-identical SEPARATE implementation (same
+// ActorChip contract, different prop name `authorNames` vs `employees`) —
+// T-0698 B1 gave it the same deactivated-threading fix but did not merge it
+// with PersonCell. A future cleanup could fold it into this one too.
+//
+// UNLIKE RelationCell/FileCell, resolution needs NO per-cell fetch: `employees`
+// is a single Map<id, {id,name,deactivated}> BATCH-loaded ONCE per screen
+// (screen-app-records.jsx's employeesById state / kanban-board.jsx's
+// employeesById prop, T-0728) and passed down by the caller — a page/board of
+// N records stays at ONE request total, never N+1.
+//
+// Honest fallback (D2): an id absent from the map (deleted/never-synced
+// employee, or the map not loaded yet) renders the RAW SLUG via ActorChip's
+// own `resolved:false` contract — never blank, never a fabricated name
+// (anti-uuid-actor-render discipline: the id is still shown, just not as a
+// bare unwrapped string).
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {string} personId  the employee id/slug stored as the field value.
+ * @param {Map<string, {id:string,name:string,deactivated?:boolean}>} employees
+ *   batch-resolved employee map (id/slug → display shape), loaded once by the caller.
+ */
+export function PersonCell({ personId, employees }) {
+  const hit = employees instanceof Map ? employees.get(personId) : null;
+  return (
+    <ActorChip
+      type="human"
+      name={hit ? hit.name : personId}
+      id={personId}
+      deactivated={Boolean(hit && hit.deactivated)}
+    />
+  );
 }
 
 /**

@@ -376,7 +376,7 @@ describe('screen-app-records — PersonCell wiring (T-0673)', () => {
   });
 
   it('batch-loads employees via fetchEmployees() ONCE per page — gated on hasPersonColumn, not per-row/per-cell', () => {
-    expect(src).toContain("import { FieldControl, fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx'");
+    expect(src).toContain("import { FieldControl, fetchEmployees, buildEmployeesById, PersonCell } from '../forms/field-renderer.jsx'");
     // T-0698 N1: the list→Map step is the shared exported helper, not an
     // inline Map literal a test could silently diverge from.
     expect(src).toContain('setEmployeesById(buildEmployeesById(list))');
@@ -390,5 +390,24 @@ describe('screen-app-records — PersonCell wiring (T-0673)', () => {
     expect(idx).toBeGreaterThan(-1);
     const block = src.slice(idx, idx + 500);
     expect(block).toMatch(/\.catch\(/);
+  });
+
+  // T-0728 (N2, T-0698 review): the SAME employeesById map the table's
+  // PersonCell cells consume must also reach <KanbanBoard> — before this fix
+  // it was computed but never passed as a prop, so kanban cards had no map to
+  // resolve person values against at all (a display-mode gap, not just a
+  // missing branch in formatCellValue).
+  it('threads the SAME employeesById map into <KanbanBoard> (not a second fetch/state)', () => {
+    // indexOf('<KanbanBoard\n') targets the actual JSX usage, not the header
+    // comment's prose mention ("renders <KanbanBoard> instead of the table").
+    const idx = src.indexOf('<KanbanBoard\n');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 700);
+    expect(block).toContain('employeesById={employeesById}');
+  });
+
+  it('PersonCell no longer has a local definition here — canonical home is field-renderer.jsx, re-exported for callers', () => {
+    expect(src).not.toMatch(/export function PersonCell\(/);
+    expect(src).toMatch(/export \{ PersonCell \};/);
   });
 });

@@ -189,6 +189,44 @@ export function resolveCardLabel(
 }
 
 // ---------------------------------------------------------------------------
+// resolveCardFieldCell (T-0728, N2 from T-0698 review) — decide how ONE card
+// field cell renders: a person-cell dispatch (personId to resolve via
+// PersonCell/ActorChip, the SAME mechanism the record table uses) or a plain
+// formatted text value. Extracted as a PURE function for the SAME reason as
+// resolveCardLabel above — KanbanCard uses useCallback, so its render body
+// cannot be exercised as a plain function call in this repo's hook-free
+// vitest tier (see kanban-board.jsx.test.js header note); the
+// render-affecting DECISION is what matters, so it lives here, testable
+// without React.
+//
+// Before this task, kanban-board.jsx's card-field loop only handled
+// formatCellValue's STRING return; every non-string return (the
+// RELATION_CELL_ASYNC/FILE_CELL_ASYNC/PERSON_CELL_ASYNC async-cell sentinels,
+// records-form.js) fell through to a bare "—", so a person-typed card field
+// never showed the executor. This function special-cases person (this task's
+// scope, N2); relation/file sentinels still degrade to "—" here — out of
+// scope, unlike the record table/detail which do resolve them.
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {string} key                          field key
+ * @param {{key,label,type}|undefined} meta      fieldMetaByKey.get(key)
+ * @param {object} data                          record.data
+ * @param {(v:unknown, type:string) => (string|symbol)} formatCellValueFn
+ * @param {(field:object, data:object) => unknown} computeComputedFieldValueFn
+ * @param {symbol} personSentinel                records-form.js's PERSON_CELL_ASYNC
+ * @returns {{isPerson:true, personId:string} | {isPerson:false, displayVal:string}}
+ */
+export function resolveCardFieldCell(key, meta, data, formatCellValueFn, computeComputedFieldValueFn, personSentinel) {
+  const rawVal = meta && meta.type === "computed" ? computeComputedFieldValueFn(meta, data) : data[key];
+  const rendered = formatCellValueFn(rawVal, meta ? meta.type : "string");
+  if (rendered === personSentinel) {
+    return { isPerson: true, personId: String(rawVal) };
+  }
+  return { isPerson: false, displayVal: typeof rendered === "string" ? rendered : "—" };
+}
+
+// ---------------------------------------------------------------------------
 // readSelectEnum — mirror of src/core/view-config.ts's enumValuesForSelectField
 // (client-side; the SAME read as the server helper of the same intent, kept as
 // a small local mirror since this module stays framework/build-target-neutral
