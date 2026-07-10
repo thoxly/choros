@@ -804,8 +804,15 @@ async function findInboxItems(
   devUserId?: string | null,
   nowMs: number = Date.now(),
   claimMap?: Map<string, ClaimState>,
+  // T-0710 [E16, capstone T-0691 P2]: optional instance SCOPE (GET /api/inbox
+  // ?instance=<id>). Pushed into the SQL-backed sources (listInstanceInboxTasks /
+  // listDeferredInboxTasks — each filters its OWN honest instance-identity field,
+  // not a shared post-fetch predicate) and applied to the in-memory seed fixture.
+  // Absent/null ⇒ byte-identical to the pre-T-0710 unscoped read.
+  instanceFilter?: string | null,
 ): Promise<InboxItem[]> {
   const tenantId = await resolveTenant(devUserId);
+  const instScope = instanceFilter && instanceFilter.trim() !== "" ? instanceFilter.trim() : undefined;
 
   // T-0653 (fix-forward defect #10): the `canApprove` flag must compare the
   // task's role against the ENV-CONFIGURABLE default approver role
@@ -835,7 +842,10 @@ async function findInboxItems(
 
   const tenantItems = INBOX_SEED
     // Tenant isolation: only this actor's tenant. Foreign-tenant tasks never leak.
-    .filter((item) => item.tenant === tenantId);
+    .filter((item) => item.tenant === tenantId)
+    // T-0710: seed fixtures carry their own honest `.inst` — scope in-memory
+    // (no LIMIT-window concern for a small constant fixture array).
+    .filter((item) => instScope === undefined || item.inst === instScope);
 
   // T-0648 (W4-UX/столп 4): resolve display info for EVERY distinct claimer across
   // the WHOLE claim-state map (seed + defer + instance items all share claimStateMap)
@@ -902,7 +912,7 @@ async function findInboxItems(
 
   let deferItems: InboxItem[] = [];
   try {
-    const deferRows = await listDeferredInboxTasks(getOrgPool(), tenantId);
+    const deferRows = await listDeferredInboxTasks(getOrgPool(), tenantId, { instanceId: instScope });
 
     // T-0638 (F6, defect #4): honest addressing — a defer task addressed to a
     // role with NO confirmed holders in this tenant must not go to a
@@ -1006,7 +1016,7 @@ async function findInboxItems(
   // owner lookup once per request, regardless of task count.
   let instanceItems: InboxItem[] = [];
   try {
-    const instanceTasks = await listInstanceInboxTasks(getOrgPool(), tenantId);
+    const instanceTasks = await listInstanceInboxTasks(getOrgPool(), tenantId, { instanceId: instScope });
 
     // T-0558 (sandbox gate): remember each task's originating process key so we can
     // suppress tasks of a DRAFT (unpublished) process definition for a non-privileged
@@ -1152,6 +1162,19 @@ async function findInboxItems(
 
 function isEscalated(item: InboxItem): boolean {
   return item.escalated === true || item.status === "failed";
+}
+
+/**
+ * T-0710 [E16, capstone T-0691 P2]: STABLE partition — non-escalated items first,
+ * escalated items last, ORIGINAL relative order preserved within each group
+ * (Array.prototype.sort is stability-guaranteed since ES2019; this file targets
+ * a modern Node runtime). Pure, exported for the unit tier. See the call site
+ * (GET /api/inbox default ordering) for why: agent escalations otherwise
+ * dominate the front of the list and bury older genuine approver-waiting tasks
+ * past the default page size.
+ */
+export function stableSortEscalatedLast(items: InboxItem[]): InboxItem[] {
+  return [...items].sort((a, b) => Number(isEscalated(a)) - Number(isEscalated(b)));
 }
 
 /**
@@ -1423,6 +1446,15 @@ export function registerInboxRoutes(
       actor = typeof devUserId === "string" ? devUserId : null;
     }
 
+    // T-0710 [E16, capstone T-0691 P2]: parse the query EARLY (was parsed only
+    // after findInboxItems ran, so `?instance=<id>` — meant to scope the list to
+    // one process instance's tasks — was silently ignored: it never reached
+    // findInboxItems at all, and applying it AFTER the fact as a post-filter over
+    // an already tab/paginated response would have narrowed the wrong (partial)
+    // set. Parsed once here and reused unchanged below (tab/exec/sort/filters).
+    const query = parseQuery(req.url);
+    const instanceParam = query.get("instance");
+
     // T-0458 [D8-R3]: timer-firing projection (reconcile-on-read). A boundary/
     // intermediate TIMER that fired in Flowable routes the token to the escalation
     // user-task WITHOUT a human action, so the firing cannot be projected on the
@@ -1496,7 +1528,10 @@ export function registerInboxRoutes(
       }
     }
 
-    const base = await findInboxItems(actor);
+    // T-0710: thread the ?instance= scope through — honestly narrows at the
+    // SOURCE (SQL WHERE for the DB-backed reads, in-memory for the seed fixture),
+    // not a post-fetch filter over an already tab/paginated response.
+    const base = await findInboxItems(actor, Date.now(), undefined, instanceParam);
     // T-0331 (S0a): resolve role slugs from live DB (falls back to in-memory fixture
     // when !hasDb()); DB errors propagate as 500 (fail-closed, NF-3). tenantId from
     // resolveTenant mirrors the same source used by findInboxItems so role-check and
@@ -1504,7 +1539,6 @@ export function registerInboxRoutes(
     const inboxTenantId = await resolveTenant(actor);
     const myRoles = await resolveRolesForActor(actor, inboxTenantId);
 
-    const query = parseQuery(req.url);
     const tab = parseTab(query.get("tab"));
     const execFilter = parseExec(query.get("exec"));
     const sort = query.get("sort");
@@ -1537,6 +1571,21 @@ export function registerInboxRoutes(
     if (sort === "sla") {
       // Ascending SLA headroom — most-urgent (incl. overdue, negative `left`) first.
       filtered = [...filtered].sort((a, b) => a.sla.left - b.sla.left);
+    } else {
+      // T-0710 [E16, capstone T-0691 P2]: default-order visibility fix. Live-found:
+      // the inbox is dominated by agent escalations (every defer row IS an
+      // escalation by construction — T-0638 F7 — and the merge lists ALL defer
+      // rows before ANY instance row), so an older genuine approver-waiting task
+      // (a plain, non-escalated instance row) can sit past the default page size
+      // and be invisible unless the operator pages through. A STABLE partition —
+      // non-escalated rows first, escalated rows last, original relative order
+      // preserved within each group — surfaces the human-waiting-for-approval
+      // queue ahead of the escalation queue by default, without inventing a new
+      // tab/IA (the esc tab's own contents are ALL escalated already, so this is a
+      // no-op there) and without touching the explicit `sort=sla` urgency order
+      // above (an operator who asked for urgency-first keeps getting it,
+      // escalations included — they are usually the most urgent by construction).
+      filtered = stableSortEscalatedLast(filtered);
     }
 
     // T-0653: group-by-process summaries (with counts) over the FILTERED set.

@@ -108,13 +108,28 @@ export interface DeferredInboxRow {
 export async function listDeferredInboxTasks(
   pool: pg.Pool,
   tenantId: string,
-  opts?: { limit?: number },
+  opts?: {
+    limit?: number;
+    /**
+     * T-0710 [E16, capstone T-0691 P2]: scope to ONE Flowable instance — matched
+     * against payload.instance_id (the REAL engine instance id, T-0638 F1), NOT
+     * the `inst`/subject field (which for a defer row is an "agent:<id>" subject
+     * reference, not a process-instance id). Pushed into the SQL WHERE clause
+     * (not a post-fetch filter) for the same LIMIT-window-honesty reason as
+     * process-projection.ts's readEvents. A defer row with no instance_id (a
+     * legacy row, or one not tied to a live engine instance) never matches a
+     * scoped read — correct: it is not honestly "of" any instance.
+     */
+    instanceId?: string;
+  },
 ): Promise<DeferredInboxRow[]> {
   const limit = Math.min(opts?.limit ?? 100, 500);
+  const instanceId = opts?.instanceId;
 
   return withTenant(pool, tenantId, async (client) => {
     // $1 = tenantId (explicit BYPASSRLS guard, mirrors T-0184 / audit-grant-trail.ts).
-    // $2 = limit.
+    // $2 = limit. $3 = instanceId (only when scoped).
+    const instScope = instanceId ? ` AND payload->>'instance_id' = $3` : "";
     const sql = `
       SELECT
         id,
@@ -125,10 +140,11 @@ export async function listDeferredInboxTasks(
         occurred_at::float8 AS occurred_at
       FROM choros.audit_event
       WHERE type = 'agent.deferred'
-        AND tenant_id = $1
+        AND tenant_id = $1${instScope}
       ORDER BY occurred_at DESC
       LIMIT $2
     `;
+    const params = instanceId ? [tenantId, limit, instanceId] : [tenantId, limit];
 
     const result = await client.query<{
       id: string;
@@ -137,7 +153,7 @@ export async function listDeferredInboxTasks(
       scope: Record<string, unknown> | null;
       payload: Record<string, unknown>;
       occurred_at: number;
-    }>(sql, [tenantId, limit]);
+    }>(sql, params);
 
     return result.rows.map((r) => {
       const payload = r.payload ?? {};
