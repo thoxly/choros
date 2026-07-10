@@ -1,0 +1,33 @@
+{
+  "task_id": "T-0738",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "ci/checks/actor-authority-deactivation-gate.sh:190 (ALLOWLIST) + 168-177 (rationale)",
+      "issue": "getRoleSlugsForActor now carries ACTOR_ACTIVE_SQL but remains on the T-0662 gate's ALLOWLIST (excused from FF-0662-1), not promoted into AUTHORITY_RESOLVERS. Consequence: the anti-recurrence seam does NOT enforce that this resolver keeps its predicate — a future edit removing `AND deactivated_at IS NULL` would still pass the gate (it is allowlisted, not registered), i.e. a blind spot on exactly the lookup just fixed (the whack-a-mole reopening T-0662 exists to prevent). NOT a T-0738 defect: the gate is a top-level ci/checks/*.sh owned by T-0662, frozen against a T-0738 edit under frozen-checks-immutable.sh/FF-FCI. The builder correctly fixed reality, proved it live-PG, and flagged this as a follow-up in the handoff. Also note the allowlist rationale ('sole consumer inbox.ts holds its own deactivation gate BEFORE the call') is now the very premise judge T-0726 disproved for the READ path.",
+      "suggestion": "Follow-up (needs founder sanction or auto-additive thaw of the T-0662-owned gate): promote getRoleSlugsForActor from ALLOWLIST to AUTHORITY_RESOLVERS (resolver G) so FF-0662-1 enforces its predicate going forward, and correct the now-false 'downstream-guarded / sole consumer gates before the call' comment."
+    },
+    {
+      "id": "N-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "T-0738.pr-handoff.json (gates_run.vitest_targeted_grants_dao)",
+      "issue": "Handoff cites '42 grants-dao unit tests'; the single file grants-dao.test.ts has 30. Verified the 42 reconciles across 3 files (grants-dao.test.ts 30 + grants-dao.provisioned-agent.test.ts 6 + grants-dao.role-slug-resolution.test.ts 6), all green — cosmetic wording only, no defect.",
+      "suggestion": "None required; count is accurate once the three files are summed."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1 DAO: deactivated actor with intact confirmed in-window assignment -> [] (fail-closed)", "covered": true },
+    { "ac": "AC-1+ positive control: active actor, identical assignment shape -> role resolved (no regression, rules out false-pass)", "covered": true },
+    { "ac": "AC-2 T-0366 fallback: absent/deactivated primary + ACTIVE fallback -> resolves normally", "covered": true },
+    { "ac": "AC-2+ predicate on BOTH lookups: deactivated fallback identity -> []; deactivated primary falls through to active fallback", "covered": true },
+    { "ac": "AC-3 HTTP live route: GET /api/inbox?tab=pool deactivated=empty (items=[], counts.pool=0), active=populated", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "T-0662 anti-recurrence seam (actor-authority-deactivation-gate.sh) cannot be extended by the task that closes a hole in a resolver it allowlists, because the .sh is frozen to its owner branch (frozen-checks-immutable.sh). A newly-hardened resolver therefore stays UNENFORCED until a separate cross-task/sanctioned edit registers it — recurring friction between least-privilege file ownership and single-seam anti-recurrence enforcement."
+  ]
+}
