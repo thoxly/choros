@@ -52,6 +52,72 @@ export interface KcHumanUserSpec {
   email: string;
   password: string;
   actorType: "human";  // MANDATORY: verifyClaims checks for actor_type (FF-3)
+  /**
+   * T-0741 (follow-up on T-0734 §5): the caller's free-text display name
+   * (e.g. "Иван Петров"), used ONLY to derive Keycloak's firstName/lastName
+   * (see splitDisplayName below) — NOT stored verbatim as a KC attribute.
+   * OPTIONAL and back-compat: omitted/empty means createHumanUser sends no
+   * firstName/lastName at all (prior behavior, unchanged) — this is what
+   * src/core/register.ts (self-registration, no real name collected — its
+   * `display_name` is the email address itself) still does; splitting an
+   * email would be nonsense. src/http/user-mgmt.ts's POST /api/users DOES
+   * pass it (the "Создать учётку" form already collects a real display name
+   * — reusing it costs the caller nothing extra to type).
+   */
+  displayName?: string;
+}
+
+// ---------------------------------------------------------------------------
+// T-0741: derive Keycloak firstName/lastName from a free-text display name.
+// ---------------------------------------------------------------------------
+
+/**
+ * splitDisplayName — T-0741 (follow-up on T-0734 §5 "out of scope" finding):
+ * derive Keycloak firstName/lastName from the SAME free-text `display_name`
+ * already collected by the "Создать учётку" form (web/src/screens/screen-users.jsx)
+ * — no second name field, no second typing pass (less friction beats a
+ * "technically correct" split of an inherently ambiguous free-text name).
+ *
+ * WHY this matters (proven LIVE against KC 25.0.6, container t-0633-keycloak-1,
+ * 2026-07-10 — see docs/live-proof/T-0741-firstname-lastname.live-proof.md):
+ * config/keycloak/realm-choros.json's declarative user profile keeps
+ * firstName/lastName `required.roles:["user"]` — the unmodified KC-25 default,
+ * untouched by T-0734. `createHumanUser` previously sent NEITHER. This is NOT
+ * just an extra browser screen: a user created without them gets
+ * `POST /protocol/openid-connect/token grant_type=password` → `400
+ * invalid_grant "Account is not fully set up"` — KC refuses to issue ANY
+ * token (direct grant OR, per T-0734's own note, an interactive VERIFY_PROFILE
+ * detour on the browser flow) until the required attributes are filled.
+ * Populating both fields at create time removes the gap outright.
+ *
+ * Convention (matches this codebase's OWN seed data, migrations/016_employee.sql
+ * — e.g. slug=`e-petrov`: KC firstName="И." lastName="Петров", employee
+ * display_name="И. Петров"): the FIRST whitespace-separated token is
+ * firstName, the REMAINDER (rejoined with single spaces) is lastName. A name
+ * with no space (one token) is duplicated into BOTH fields — KC requires
+ * firstName AND lastName to be independently non-empty; leaving either blank
+ * still trips the same "Account is not fully set up" gap this fix closes. An
+ * empty/whitespace-only input (should not happen — user-mgmt.ts's
+ * validateCreateBody already rejects an empty display_name before this point)
+ * returns `{firstName:"", lastName:""}` so the caller can detect it and omit
+ * both rather than send KC a rejected empty required field.
+ *
+ * No transliteration, no case-folding, no script assumption — Cyrillic,
+ * Latin, mixed, hyphenated, or apostrophe'd names all pass through unchanged
+ * (KC's own `person-name-prohibited-characters` validator is the authority on
+ * what characters are legal, not this function; T-0741 anti-case: a name
+ * containing characters KC itself rejects still surfaces as KC's own 400, not
+ * a silent local mutation).
+ */
+export function splitDisplayName(displayName: string): { firstName: string; lastName: string } {
+  const normalized = displayName.trim().replace(/\s+/g, " ");
+  if (normalized.length === 0) return { firstName: "", lastName: "" };
+  const spaceIdx = normalized.indexOf(" ");
+  if (spaceIdx === -1) return { firstName: normalized, lastName: normalized };
+  return {
+    firstName: normalized.slice(0, spaceIdx),
+    lastName: normalized.slice(spaceIdx + 1),
+  };
 }
 
 /**
@@ -389,7 +455,7 @@ export function makeHttpKeycloakUserPort(cfg?: KcRegistrarConfig): KeycloakUserP
 
       const usersUrl = `${config.baseUrl}/admin/realms/${config.realm}/users`;
 
-      const userBody = {
+      const userBody: Record<string, unknown> = {
         username: spec.username,
         email: spec.email,
         enabled: true,
@@ -405,6 +471,16 @@ export function makeHttpKeycloakUserPort(cfg?: KcRegistrarConfig): KeycloakUserP
           },
         ],
       };
+
+      // T-0741: derive firstName/lastName from spec.displayName when the
+      // caller provided one (see splitDisplayName above + KcHumanUserSpec
+      // doc). Omitted when displayName is absent/blank — preserves the prior
+      // wire shape exactly for callers that don't pass it (register.ts).
+      if (spec.displayName !== undefined && spec.displayName.trim().length > 0) {
+        const { firstName, lastName } = splitDisplayName(spec.displayName);
+        userBody["firstName"] = firstName;
+        userBody["lastName"] = lastName;
+      }
 
       const createResp = await doRequest(usersUrl, "POST", JSON.stringify(userBody), {
         "Content-Type": "application/json",

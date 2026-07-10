@@ -1,0 +1,32 @@
+{
+  "task_id": "T-0741",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "NF-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/keycloak/admin-port.ts:521-525 (pre-existing generic 400 fallback, newly reachable) + src/http/user-mgmt.ts:441-443",
+      "issue": "A display_name containing characters KC 25's built-in `person-name-prohibited-characters` validator rejects (e.g. '<', '&', '#', '(', '\"') now surfaces as KC 400 `error-person-name-invalid-character` on firstName/lastName derived by splitDisplayName. This 400 falls into admin-port.ts's PRE-EXISTING generic '400 -> EMAIL_INVALID' fallback (from T-0625/T-0628, untouched by this diff), which user-mgmt.ts maps to 'email must be a valid email address' — the WRONG field is blamed; the owner is misdirected. Before T-0741 this branch was effectively unreachable in the normal flow (firstName/lastName were never sent). Verified live against t-0633-keycloak-1: 'Bot #1', 'Menu (Test)', 'A&B', 'Guest\"1' all 400; ordinary names (Cyrillic/Latin, hyphens, apostrophes, umlauts, №, @, commas — \"O'Brien\", \"Petrov-Vodkin\", \"Müller\", \"Смирнов-Дашевский\", \"Оператор №3\", \"Info@Sales\", \"Иванов, Иван\") all succeed cleanly (201 + token). Fails clean (no orphaned employee row — createHumanUser throws before the INSERT, KC-first flow).",
+      "suggestion": "Follow-up: map KC's `error-person-name-invalid-character` to a distinct error code naming the actual field (display_name / 'Отображаемое имя'), OR pre-validate display_name against an allowed-character set before calling KC (mirroring EMAIL_RE's role for email) and return an honest VALIDATION 400 earlier."
+    },
+    {
+      "id": "NF-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "T-0741.pr-handoff.json:ci_local_notes.fitness",
+      "issue": "Cites gate paths as `ci/checks/ux-g5-jargon-denylist.sh` / `ci/checks/ux-g6-no-new-hardcode.sh`; actual location is `ci/checks/ux/ux-g5-jargon-denylist.sh` / `ci/checks/ux/ux-g6-no-new-hardcode.sh`. Cosmetic — re-ran both from the correct path, both PASS (0 new hardcode findings), claimed result holds.",
+      "suggestion": "Fix the path in future handoff notes for this gate pair."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1 two-token displayName -> firstName/lastName split correctly", "covered": true },
+    { "ac": "AC-2 single-token displayName -> duplicated into both fields", "covered": true },
+    { "ac": "AC-3 displayName absent/blank -> neither field sent, byte-identical payload (register.ts regression guard)", "covered": true },
+    { "ac": "AC-4 irregular whitespace normalizes cleanly", "covered": true },
+    { "ac": "AC-5 (live) no-names -> 400 invalid_grant 'Account is not fully set up'; with-names -> token issued", "covered": true },
+    { "ac": "AC-6 POST /api/users forwards display_name as displayName to kc.createHumanUser", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

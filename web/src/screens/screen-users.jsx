@@ -170,9 +170,9 @@ function CreateUserModal({ positions, onClose, onDone }) {
             label="Отображаемое имя"
             value={values.display_name}
             onChange={set('display_name')}
-            placeholder="Иванов Иван"
+            placeholder="Иван Петров"
             invalid={!!fieldErrors.display_name}
-            hint={fieldErrors.display_name || undefined}
+            hint={fieldErrors.display_name || 'имя и фамилия — так учётка сразу готова ко входу, без лишнего шага «заполните профиль»'}
           />
 
           <Select

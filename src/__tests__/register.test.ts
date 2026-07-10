@@ -209,6 +209,14 @@ describe("FF-3 — KC user created with actor_type=human + password credential",
     expect(created.spec.actorType).toBe("human");
     expect(created.spec.password.length).toBeGreaterThanOrEqual(8);
     expect(created.spec.email).toBe("founder@acme.com");
+    // T-0741 regression guard (ADR §3, deliberate scope boundary): self-
+    // registration does NOT pass displayName to createHumanUser — its own
+    // display_name is the normalized email address (no real name is ever
+    // collected on this form), so splitting it would produce nonsense KC
+    // firstName/lastName values. Register.ts's own (pre-existing, wider)
+    // version of the T-0734 §5 gap is intentionally left unresolved by T-0741
+    // — see the spec's §6 "Out of scope" note.
+    expect(created.spec.displayName).toBeUndefined();
   });
 });
 

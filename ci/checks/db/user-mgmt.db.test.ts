@@ -191,6 +191,13 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     // the same string duplicated into both KC fields.
     expect(kc.created[0].spec.username).toBe(login);
     expect(kc.created[0].spec.email).toBe(email);
+    // T-0741 (AC-6, follow-up on T-0734 §5): the real HTTP route forwards the
+    // request's `display_name` as `displayName` on the createHumanUser call —
+    // admin-port.ts's live adapter derives KC firstName/lastName from it (see
+    // src/__tests__/admin-port.test.ts AP-8 for the payload-shape unit test).
+    // Without this, a UI-created account cannot obtain a login token at all
+    // (proven live: docs/live-proof/T-0741-firstname-lastname.live-proof.md).
+    expect(kc.created[0].spec.displayName).toBe('T-0583 Test Account');
     expect(kc.created).toHaveLength(1);
     const kcUserId = kc.created[0].userId;
 
