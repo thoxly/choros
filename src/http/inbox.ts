@@ -42,7 +42,8 @@ import {
   getRoleAssignmentOrgScopesForEmployee,
 } from "../db/grants-dao.js";
 import { getActiveSubstitutionsByRole, getActiveSubstitutionsForSubstitute } from "../db/substitution-dao.js";
-import { isRuleEffective } from "../core/substitution.js";
+import { isRuleEffective, computeEffectivePool } from "../core/substitution.js";
+import { isGenesisOwnerForTenant } from "../db/org.js";
 import { isNarrowerOrEqual, type ScopeElement } from "../core/grant-lattice.js";
 import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import { parsePaginationParams, paginateInMemory } from "../core/data-access-port.js";
@@ -659,20 +660,13 @@ async function resolveExecutorFallbackBatch(
           return;
         }
 
-        // Apply suppress-absent + add-substitute per holder.
-        const effective = new Set<string>(holders);
-        for (const holderSlug of holders) {
-          // Find the first active rule where absentEmployeeId = holderSlug (slugs,
-          // from mapRow in substitution-dao.ts) AND role matches roleSlug.
-          const rule = substRules.find(
-            (r) => r.absentEmployeeId === holderSlug && r.roleId === roleSlug,
-          );
-          if (rule) {
-            effective.delete(holderSlug);
-            effective.add(rule.substituteEmployeeId);
-          }
-        }
-        effectivePoolByRole.set(roleSlug, [...effective]);
+        // T-0744: build the effective pool via the ONE coverage invariant
+        // (computeEffectivePool). An absent holder is always suppressed; the
+        // substitute re-joins ONLY when they provide coverage (Tier-2 grant, or
+        // they personally hold the role). A Tier-1 non-holder no longer masks an
+        // emptied role — routing now agrees with the claim-gate, so the role
+        // surfaces as routed_to_fallback:"role_unfilled" (§2.4/§3-в1).
+        effectivePoolByRole.set(roleSlug, computeEffectivePool(holders, substRules, roleSlug));
       }),
     );
 
@@ -1375,7 +1369,15 @@ async function resolveTier2SubstitutionClaim(
     const candidates = substRules.filter(
       (r) =>
         r.roleId === taskRole &&
-        r.ttlGrantId !== null && // Tier-2 only — Tier-1 substitutes already hold the role via role_assignment
+        // T-0744: Tier-2 only. This is NOT because "a Tier-1 substitute already
+        // holds the role" (the false premise, T-0729 §2.7 / T-0588 §1.3 — a Tier-1
+        // stand-in may NOT hold it): a Tier-1 substitute who DOES hold the role
+        // claims via their own role_assignment (myRoles) and never reaches here; a
+        // Tier-1 non-holder gives NO coverage (substituteProvidesCoverage=false) →
+        // the role is orphaned → routing falls it to the owner (owner-orphan claim
+        // branch), not this substitution path. So this filter matching only Tier-2
+        // is exactly right, and no longer rests on the false premise.
+        r.ttlGrantId !== null &&
         isRuleEffective(r, nowMs),
     );
     if (candidates.length === 0) return undefined;
@@ -1399,6 +1401,55 @@ async function resolveTier2SubstitutionClaim(
     // Degrade gracefully: a lookup failure does NOT grant a claim/approve that
     // the base role-check already rejected — falls through to the caller's 403.
     return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0744 (в2) — owner-claim of an orphaned role.
+//
+// isRoleEffectivePoolEmpty: does the role currently have ZERO claim-eligible
+// executors? Reuses the SAME coverage invariant the routing path uses
+// (computeEffectivePool over confirmed holders + active substitution rules), so
+// "empty here" ⟺ "routed_to_fallback:'role_unfilled' there" — the router and the
+// claim-gate cannot drift. Confirmed holders come from getHoldersForRole (already
+// deactivation-filtered, T-0588); Tier-1 non-holder substitutes do NOT count as
+// coverage, so a role covered only by such a stand-in reads as empty (§2.6/§3-в2).
+// ---------------------------------------------------------------------------
+
+async function isRoleEffectivePoolEmpty(
+  pool: pg.Pool,
+  tenantId: string,
+  roleSlug: string,
+  nowMs: number,
+): Promise<boolean> {
+  const holders = await getHoldersForRole(pool, tenantId, roleSlug, nowMs);
+  if (holders.length === 0) return true;
+  const substRules = await getActiveSubstitutionsByRole(pool, tenantId, roleSlug, nowMs);
+  return computeEffectivePool(holders, substRules, roleSlug).length === 0;
+}
+
+// isOwnerOrphanClaimEligible: may `actorSlug` claim/approve THIS role's task as
+// the tenant owner? True iff the actor is the genesis tenant-owner
+// (isGenesisOwnerForTenant — deactivation-safe: a deactivated owner is false, so
+// the task stays unresolvable per T-0588 AC-7) AND the role's effective pool is
+// empty (the task is genuinely orphaned). The empty-pool gate is critical: the
+// owner may take ONLY an orphaned task, never pool work with live holders — that
+// would bypass pool discipline. Fail-CLOSED: any DB error → false, so the caller
+// falls through to its honest 403 (never a wrong-allow, never a 500 masking it).
+// The owner acts as THEMSELVES (they hold top authority + are the F6/PD-10
+// last-resort executor) — the caller records NO on_behalf_of for an owner claim.
+async function isOwnerOrphanClaimEligible(
+  pool: pg.Pool,
+  tenantId: string,
+  actorSlug: string,
+  roleSlug: string,
+  nowMs: number,
+): Promise<boolean> {
+  try {
+    if (!(await isGenesisOwnerForTenant(pool, tenantId, actorSlug, nowMs))) return false;
+    return await isRoleEffectivePoolEmpty(pool, tenantId, roleSlug, nowMs);
+  } catch {
+    return false;
   }
 }
 
@@ -1902,11 +1953,23 @@ export function registerInboxRoutes(
     // (does NOT widen getRoleSlugsForActor / myRoles — see ADR rejected-alternatives):
     // it only ever ALLOWS this one claim, and only records who was substituted for.
     let onBehalfOfSlug: string | undefined;
+    // T-0744 (в2): owner-claim of an orphaned role. When the Tier-2 substitution
+    // branch also misses, the tenant OWNER may claim a task whose role is
+    // genuinely orphaned (effective pool empty) — the F6/PD-10 last-resort path,
+    // now actually reachable (§2.6 fixed: the display-only routed_to_fallback no
+    // longer leaves the owner stuck at 403). The owner acts as themselves — no
+    // on_behalf_of. Gated on empty pool so the owner cannot grab pool work with
+    // live holders.
+    let ownerOrphanClaim = false;
     if (taskRole !== undefined && !myRoles.includes(taskRole)) {
       if (hasDb()) {
-        onBehalfOfSlug = await resolveTier2SubstitutionClaim(getOrgPool(), tenantId, devUserId, taskRole, nowMs);
+        const orgPool = getOrgPool();
+        onBehalfOfSlug = await resolveTier2SubstitutionClaim(orgPool, tenantId, devUserId, taskRole, nowMs);
+        if (onBehalfOfSlug === undefined) {
+          ownerOrphanClaim = await isOwnerOrphanClaimEligible(orgPool, tenantId, devUserId, taskRole, nowMs);
+        }
       }
-      if (onBehalfOfSlug === undefined) {
+      if (onBehalfOfSlug === undefined && !ownerOrphanClaim) {
         throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
       }
     }
@@ -2307,9 +2370,17 @@ export function registerInboxRoutes(
       // deactivated-substitute filter via SUBST_SELECT, org-scope containment
       // against the absent holder's real role_assignment).
       let approveOnBehalfOfSlug: string | undefined;
+      // T-0744 (в2): mirror the claim route's owner-orphan branch on approve so
+      // an owner who claimed an orphaned task can also complete it (claim→approve
+      // →done, or the owner-claim is dead weight). Same empty-pool gate; owner
+      // acts as themselves (no on_behalf_of).
+      let approveOwnerOrphanClaim = false;
       if (!myRoles.includes(task.role)) {
         approveOnBehalfOfSlug = await resolveTier2SubstitutionClaim(pool, tenantId, actor, task.role, nowMs);
         if (approveOnBehalfOfSlug === undefined) {
+          approveOwnerOrphanClaim = await isOwnerOrphanClaimEligible(pool, tenantId, actor, task.role, nowMs);
+        }
+        if (approveOnBehalfOfSlug === undefined && !approveOwnerOrphanClaim) {
           throw new HttpError(
             403,
             "NOT_ELIGIBLE",

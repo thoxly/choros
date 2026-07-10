@@ -197,6 +197,80 @@ export function resolveSubstitution(
 }
 
 // ---------------------------------------------------------------------------
+// substituteProvidesCoverage — T-0744: the ONE coverage invariant (pure)
+// ---------------------------------------------------------------------------
+
+/**
+ * The single source of truth for "does this substitution rule COVER the role?".
+ *
+ * A stand-in provides coverage of a role IFF:
+ *   - Tier-2: the rule minted a TTL'd delegation grant (ttlGrantId !== null) —
+ *     the substitute has real (delegated) authority the claim-gate honours; OR
+ *   - Tier-1-as-holder: the substitute PERSONALLY holds the role
+ *     (roleHolders.has(substituteEmployeeId)) — they claim under their own
+ *     role_assignment.
+ *
+ * A Tier-1 substitute who does NOT hold the role (ttlGrantId === null AND not in
+ * roleHolders) is NOT coverage: they were a routing courtesy while the pool was
+ * covered by a THIRD holder (the Tier-1 premise). When that pool empties the role
+ * is honestly UNFILLED — this predicate makes the router agree with the claim-gate
+ * (inbox.ts resolveTier2SubstitutionClaim's ttlGrantId!==null filter), closing the
+ * T-0729 deadlock and deleting the false premise "Tier-1 ⇒ substitute already holds
+ * the role" (T-0588 §1.3 / inbox.ts:1378 comment).
+ *
+ * Pure: no IO. `roleHolders` is the raw confirmed-holder slug set of the role.
+ */
+export function substituteProvidesCoverage(
+  rule: Pick<SubstitutionRule, "ttlGrantId" | "substituteEmployeeId">,
+  roleHolders: ReadonlySet<string>,
+): boolean {
+  if (rule.ttlGrantId !== null) return true;
+  return roleHolders.has(rule.substituteEmployeeId);
+}
+
+// ---------------------------------------------------------------------------
+// computeEffectivePool — T-0744: shared effective-pool builder (pure)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the effective claim-eligible pool of a role from its raw holders and its
+ * active substitution rules, applying the coverage invariant:
+ *   - an absent holder (a holder with a matching rule) is ALWAYS suppressed;
+ *   - their substitute re-joins the pool ONLY when substituteProvidesCoverage
+ *     holds (Tier-2, or the substitute personally holds the role).
+ *
+ * `rules` are the active (confirmed, in-window) substitution rules for the role
+ * (org-scope containment is NOT re-applied here — the batch routing path B and
+ * this helper both address a pool task, which carries no task-level org-scope;
+ * scope containment lives in the claim-gate resolveTier2SubstitutionClaim path).
+ *
+ * Returns the effective pool slugs. Empty ⇒ the role is honestly unfilled →
+ * routed_to_fallback:"role_unfilled" / owner-claim eligible.
+ *
+ * Pure: no IO. Single source of truth reused by inbox.ts (path B routing +
+ * owner-claim empty-pool check).
+ */
+export function computeEffectivePool(
+  holders: readonly string[],
+  rules: readonly SubstitutionRule[],
+  roleSlug: string,
+): string[] {
+  const holderSet = new Set<string>(holders);
+  const effective = new Set<string>(holders);
+  for (const holderSlug of holders) {
+    const rule = rules.find(
+      (r) => r.absentEmployeeId === holderSlug && r.roleId === roleSlug,
+    );
+    if (!rule) continue;
+    effective.delete(holderSlug);
+    if (substituteProvidesCoverage(rule, holderSet)) {
+      effective.add(rule.substituteEmployeeId);
+    }
+  }
+  return [...effective];
+}
+
+// ---------------------------------------------------------------------------
 // isNonInheritable — grant.constraint jsonb convention
 // ---------------------------------------------------------------------------
 

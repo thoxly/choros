@@ -50,6 +50,7 @@
 
 import {
   resolveSubstitution,
+  substituteProvidesCoverage,
   type SubstitutionRule,
 } from "./substitution.js";
 import { BOTTOM, type AncestryOracle, type ScopeElement } from "./grant-lattice.js";
@@ -217,7 +218,11 @@ export async function resolveExecutor(
     const orgScope: ScopeElement = opts.orgScope ?? BOTTOM;
     const oracle = deps.ancestry ?? NO_OP_ANCESTRY;
 
-    // Build the effective pool: suppress absent holders, add their substitutes.
+    // Build the effective pool: suppress absent holders, add their substitutes
+    // ONLY when the rule provides coverage (T-0744). `holderSet` is the raw
+    // confirmed-holder set — the coverage predicate needs it to decide whether a
+    // Tier-1 substitute personally holds the role.
+    const holderSet = new Set<string>(holders);
     const effectivePool = new Set<string>(holders);
     let firstSubstitution: { absentSlug: string; substituteSlug: string } | null = null;
 
@@ -228,27 +233,40 @@ export async function resolveExecutor(
       // orgScope ⊑ rule.orgScope (i.e. the task's org-scope is covered by the rule's scope).
       const matched = resolveSubstitution(rules, holderSlug, roleSlug, orgScope, oracle, nowMs);
       if (matched !== null) {
-        // Suppress the absent holder; add their substitute.
+        // The absent holder is ALWAYS suppressed.
         effectivePool.delete(holderSlug);
-        effectivePool.add(matched.substituteEmployeeId);
-        // Record the first substitution for the "substitution" kind result.
-        if (firstSubstitution === null) {
-          firstSubstitution = {
-            absentSlug: holderSlug,
-            substituteSlug: matched.substituteEmployeeId,
-          };
+        // T-0744: the substitute re-joins the effective pool ONLY when the rule
+        // provides coverage — a minted Tier-2 grant (ttlGrantId set) OR the
+        // substitute personally holds the role. A Tier-1 non-holder is NOT
+        // coverage: they were a routing courtesy while a THIRD holder covered the
+        // role; once the pool empties the role is honestly unfilled and falls
+        // through to fallback (rung 4), never masked by a stand-in who cannot claim.
+        if (substituteProvidesCoverage(matched, holderSet)) {
+          effectivePool.add(matched.substituteEmployeeId);
+          // Record the first COVERING substitution for the "substitution" kind result.
+          if (firstSubstitution === null) {
+            firstSubstitution = {
+              absentSlug: holderSlug,
+              substituteSlug: matched.substituteEmployeeId,
+            };
+          }
         }
       }
     }
 
-    // If any substitution was applied AND there is exactly one absent→substitute
-    // mapping (common single-holder case), return kind: "substitution".
-    // For multi-holder pools with partial substitutions, return kind: "pool"
-    // with the effective (substituted) candidate set.
-    if (firstSubstitution !== null) {
-      const effectiveCandidates = [...effectivePool];
-      if (effectiveCandidates.length === 1 && firstSubstitution.substituteSlug === effectiveCandidates[0]) {
-        // Single substitution: canonical "substitution" result.
+    // Decide from the effective pool itself (T-0744): a single covering substitute
+    // → canonical "substitution"; any remaining candidates → "pool"; an emptied
+    // pool (all holders suppressed, no covering substitute) → fall through to
+    // fallback (step 4). This unifies the old "no rule / partial / all-suppressed"
+    // branches around the one effective-pool truth.
+    const effectiveCandidates = [...effectivePool];
+    if (effectiveCandidates.length > 0) {
+      if (
+        firstSubstitution !== null &&
+        effectiveCandidates.length === 1 &&
+        firstSubstitution.substituteSlug === effectiveCandidates[0]
+      ) {
+        // Single covering substitution: canonical "substitution" result.
         return {
           kind: "substitution",
           roleSlug,
@@ -256,15 +274,10 @@ export async function resolveExecutor(
           substituteSlug: firstSubstitution.substituteSlug,
         };
       }
-      if (effectiveCandidates.length > 0) {
-        // Mixed pool: some holders present, some substituted. Return as pool.
-        return { kind: "pool", roleSlug, candidates: effectiveCandidates };
-      }
-      // All holders absent with no substitutes → fall through to fallback (step 4).
-    } else if (holders.length > 0) {
-      // No substitution rules active → return pool unchanged.
-      return { kind: "pool", roleSlug, candidates: holders };
+      // Holders still present (unchanged pool or a mixed/covered pool) → pool.
+      return { kind: "pool", roleSlug, candidates: effectiveCandidates };
     }
+    // Effective pool empty → fall through to fallback (step 4).
   } else if (holders.length > 0) {
     // No substitution port injected — pool path (substitution step skipped).
     return { kind: "pool", roleSlug, candidates: holders };

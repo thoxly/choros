@@ -37,6 +37,12 @@ const TENANT = "a0000000-0000-0000-0000-000000000001";
 const ROLE = "fin-ctrl";
 const NOW = 1_000_000;
 
+// T-0744: a substitute who does NOT personally hold the role provides coverage
+// ONLY via a minted Tier-2 grant. The "substitute takes over" scenarios below
+// therefore carry a ttl_grant_id (Tier-2) — the corrected contract; a Tier-1
+// non-holder now honestly routes to fallback (see the dedicated T-0744 test).
+const T2_GRANT = "g-tier2-1";
+
 // Employee slugs (match slug-based resolution from substitution-dao mapRow)
 const ALICE = "e-alice";
 const BOB = "e-bob";
@@ -170,11 +176,11 @@ describe("ER-9: no substitution port → step 3 is no-op", () => {
 // ---------------------------------------------------------------------------
 
 describe("ER-3: substitution rung (single-holder absent)", () => {
-  it("suppresses absent holder and returns kind: 'substitution'", async () => {
+  it("suppresses absent holder and returns kind: 'substitution' (Tier-2 substitute)", async () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE] }),
       substitution: makeInMemorySubstitutionPort({
-        [ALICE]: [makeRule(ALICE, BOB)],
+        [ALICE]: [makeRule(ALICE, BOB, ROLE, { ttlGrantId: T2_GRANT })],
       }),
       fallback: makeInMemoryFallbackPort(OWNER),
     };
@@ -187,17 +193,34 @@ describe("ER-3: substitution rung (single-holder absent)", () => {
     }
   });
 
-  it("does NOT fall back to owner when a substitute is available", async () => {
+  it("does NOT fall back to owner when a covering (Tier-2) substitute is available", async () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE] }),
       substitution: makeInMemorySubstitutionPort({
-        [ALICE]: [makeRule(ALICE, BOB)],
+        [ALICE]: [makeRule(ALICE, BOB, ROLE, { ttlGrantId: T2_GRANT })],
       }),
       fallback: makeInMemoryFallbackPort(OWNER),
     };
     const res = await resolveExecutor(TENANT, ROLE, NOW, deps);
     expect(res.kind).not.toBe("fallback");
     expect(res.kind).not.toBe("unresolvable");
+  });
+
+  // T-0744: a Tier-1 substitute who does NOT hold the role gives NO coverage →
+  // the sole absent holder leaves an empty pool → fallback (role_unfilled).
+  it("T-0744: sole holder absent + Tier-1 NON-holder substitute → fallback, not substitution", async () => {
+    const deps: ResolverDeps = {
+      roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE] }),
+      substitution: makeInMemorySubstitutionPort({
+        [ALICE]: [makeRule(ALICE, BOB)], // Tier-1 (ttlGrantId null), BOB not a holder
+      }),
+      fallback: makeInMemoryFallbackPort(OWNER),
+    };
+    const res = await resolveExecutor(TENANT, ROLE, NOW, deps);
+    expect(res.kind).toBe("fallback");
+    if (res.kind === "fallback") {
+      expect(res.fallbackReason).toBe("role_unfilled");
+    }
   });
 });
 
@@ -212,23 +235,24 @@ describe("ER-5: absent ≠ unfilled", () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE, BOB] }),
       substitution: makeInMemorySubstitutionPort({
-        [ALICE]: [makeRule(ALICE, CAROL)],
-        [BOB]: [makeRule(BOB, CAROL)],
+        [ALICE]: [makeRule(ALICE, CAROL, ROLE, { ttlGrantId: T2_GRANT })],
+        [BOB]: [makeRule(BOB, CAROL, ROLE, { ttlGrantId: T2_GRANT })],
       }),
       fallback: makeInMemoryFallbackPort(OWNER),
     };
     const res = await resolveExecutor(TENANT, ROLE, NOW, deps);
-    // Both Alice and Bob are suppressed; Carol is the only effective candidate.
-    // Result is kind: "substitution" (single effective) or kind: "pool" (multiple effective).
+    // Both Alice and Bob are suppressed; Carol (covering Tier-2 substitute) is the
+    // only effective candidate. Result is kind: "substitution" (single effective)
+    // or kind: "pool" (multiple effective).
     expect(res.kind).not.toBe("fallback");
     expect(res.kind).not.toBe("unresolvable");
   });
 
-  it("single holder absent WITH substitute → kind: 'substitution' (not 'fallback')", async () => {
+  it("single holder absent WITH covering (Tier-2) substitute → kind: 'substitution' (not 'fallback')", async () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE] }),
       substitution: makeInMemorySubstitutionPort({
-        [ALICE]: [makeRule(ALICE, CAROL)],
+        [ALICE]: [makeRule(ALICE, CAROL, ROLE, { ttlGrantId: T2_GRANT })],
       }),
       fallback: makeInMemoryFallbackPort(OWNER),
     };
@@ -248,8 +272,8 @@ describe("ER-10: mixed pool (partial substitution)", () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE, BOB] }),
       substitution: makeInMemorySubstitutionPort({
-        [ALICE]: [],                          // Alice has no absence rule → present
-        [BOB]: [makeRule(BOB, CAROL)],        // Bob is absent → Carol substitutes
+        [ALICE]: [],                                               // Alice present
+        [BOB]: [makeRule(BOB, CAROL, ROLE, { ttlGrantId: T2_GRANT })], // Bob absent → Carol (Tier-2)
       }),
       fallback: makeInMemoryFallbackPort(OWNER),
     };
@@ -289,14 +313,13 @@ describe("ER-6: all holders absent, no substitutes → fallback", () => {
     }
   });
 
-  it("returns kind: 'fallback' when holder has a rule but ALL substitutes are also absent (no rule suppresses if rule matches)", async () => {
-    // Alice is absent → Bob should substitute. Alice is suppressed, Bob added.
-    // Effective pool = { Bob }. kind: "substitution".
-    // This test verifies the "holder absent WITH substitute" path is NOT fallback.
+  it("holder absent WITH a covering (Tier-2) substitute → kind: 'substitution', not fallback", async () => {
+    // Alice is absent → Bob substitutes under a Tier-2 rule. Alice is suppressed,
+    // Bob added. Effective pool = { Bob }. kind: "substitution".
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE] }),
       substitution: makeInMemorySubstitutionPort({
-        [ALICE]: [makeRule(ALICE, BOB)],
+        [ALICE]: [makeRule(ALICE, BOB, ROLE, { ttlGrantId: T2_GRANT })],
       }),
       fallback: makeInMemoryFallbackPort(OWNER),
     };
@@ -372,7 +395,7 @@ describe("ER-4: chain substitution / hop semantics", () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE] }),
       substitution: makeInMemorySubstitutionPort({
-        [ALICE]: [makeRule(ALICE, BOB)],
+        [ALICE]: [makeRule(ALICE, BOB, ROLE, { ttlGrantId: T2_GRANT })],
         [BOB]: [], // Bob is not absent
       }),
       fallback: makeInMemoryFallbackPort(OWNER),
@@ -395,7 +418,7 @@ describe("ER-4: chain substitution / hop semantics", () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE] }),
       substitution: makeInMemorySubstitutionPort({
-        [ALICE]: [makeRule(ALICE, BOB)],
+        [ALICE]: [makeRule(ALICE, BOB, ROLE, { ttlGrantId: T2_GRANT })],
         [BOB]: [makeRule(BOB, CAROL)], // chain: Bob → Carol; NOT followed by resolver
       }),
       fallback: makeInMemoryFallbackPort(OWNER),
@@ -425,7 +448,7 @@ describe("on_behalf_of: substitution provenance (kind: 'substitution' carries bo
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ [ROLE]: [ALICE] }),
       substitution: makeInMemorySubstitutionPort({
-        [ALICE]: [makeRule(ALICE, BOB)],
+        [ALICE]: [makeRule(ALICE, BOB, ROLE, { ttlGrantId: T2_GRANT })],
       }),
     };
     const res = await resolveExecutor(TENANT, ROLE, NOW, deps);
