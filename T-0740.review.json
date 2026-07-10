@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0740",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "T-0740-N1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/inbox.ts:2262-2277",
+      "issue": "Registry-reconciliation task touches product-source inbox.ts, but the change is comment-only (verified: every changed line is within a // block, zero executable-code delta) and truthful (approve-path local gate is now defence-in-depth post-T-0738). Harmless.",
+      "suggestion": "None required; noting scope only."
+    },
+    {
+      "id": "T-0740-N2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/inbox.ts:1657-1789 (GET /api/inbox/:id)",
+      "issue": "Genuine residual tenant-open hole: DETAIL route reaches zero authority resolvers (extractActorSlug + findInboxItems tenant-scoped, no role filter; no resolveRolesForActor/getRoleSlugsForActor in reachable graph). Any authenticated actor in the tenant can read any task detail by id; a deactivated actor's residual JWT window also applies. Correctly LEFT as the sole honest finding (adding a marker would be evasion). Out of THIS task's reconciliation scope; separate follow-up.",
+      "suggestion": "Track as a security-debt follow-up (role-addressing PDP on GET /api/inbox/:id); judge is filing the task. Not blocking T-0740."
+    },
+    {
+      "id": "T-0740-N3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/actor-authority-deactivation-gate.sh:168-190 (ALLOWLIST comment)",
+      "issue": "ALLOWLIST comment for getRoleSlugsForActor ('DOWNSTREAM-GUARDED authority projection', line refs inbox.ts:1413/1631) is partially stale: the predicate is now carried by the resolver itself (T-0738), and the cited line numbers drifted to ~1868/~2276. ADR §5 already acknowledges this.",
+      "suggestion": "Fold into the same founder-sanctioned pass as Part B (promotion into AUTHORITY_RESOLVERS) — not additive-safe now, correctly deferred."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Markers do not mask: resolveRolesForActor + getRoleSlugsForActor both carry ACTOR_ACTIVE_SQL (deactivated_at IS NULL) on all lookups (grants-dao.ts:470,484); composed by resolveRolesForActor (inbox.ts:428-439), called inbox.ts:1540 in GET /api/inbox handler block", "covered": true },
+    { "ac": "GET /api/inbox/:id honestly left as finding: reaches zero authority resolvers, no marker added (not evasion); confirmed sole remaining finding in live run", "covered": true },
+    { "ac": "Auto-sanction legitimate: frozen-checks-immutable PASS via FF-FCI13; auto-sanction-additive --verify PASS (A-1..A-4 additive + valid enemy-attestation, family ACTOR-ACTIVE covers file, corpus_ref ancestor); sanction is append-only; enemy_segment test exists (15.7KB, positive+negative controls)", "covered": true },
+    { "ac": "Catalog T-0152 §7.7 ACTOR-ACTIVE is a real family (invariant + enforced-by both gates + 7 live-PG runtime tests + coverage-table row), not fiction", "covered": true },
+    { "ac": "Part B correctly founder-gated: promotion requires deleting ALLOWLIST line (A-1 byte-preservation forbids) OR duplication (A-4 rejects, R-1-ABSENT-AT-BASE, self-test confirmed); founder-class FF-FCI12 needed, self-write would be forgery; builder did not self-authorize; ADR §5 diff accurate", "covered": true },
+    { "ac": "Both gate self-tests non-tautological: actor-active-route-coverage --self-test PASS (unmarked route -> finding); actor-authority-deactivation-gate --self-test PASS (resolver without predicate -> FAIL)", "covered": true },
+    { "ac": "Gates green: route-coverage 2->1 findings; deactivation FF-0662-1/2; frozen-checks; auto-sanction verify+self-test; http-route-auth FF-0328; anti-case-lock; diff scoped to 6 in-task files", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "resolveRolesForActor DB-path composes getRoleSlugsForActor with no bypass; no-DB path uses USER_ROLES fixture (test-mode) — grants-dao is the sole authority backstop, and it carries deactivated_at IS NULL on primary (grants-dao.ts:470) + T-0366 fallback (grants-dao.ts:484)",
+    "GET /api/inbox/:id (inbox.ts:1657-1789) reachable graph: extractActorSlug, findInboxItems(actor) [tenant-scoped, no role filter], findWaitingInstanceTask, listInstanceProjections — zero authority resolvers; deactivated-JWT and cross-actor read both apply (residual gap, tracked)"
+  ]
+}

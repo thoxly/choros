@@ -2325,13 +2325,16 @@ export function registerInboxRoutes(
       // be able to APPROVE any task either — not even one addressed to a role
       // they still hold a live role_assignment for. Deactivation disables the
       // ACCOUNT (T-0583/migration 125) independently of role_assignment.valid_until
-      // (ADR §"Дыра №2" — "деактивированный = не держатель"); getRoleSlugsForActor
-      // does not filter on employee.deactivated_at, so without this check a fired
-      // employee whose role_assignment was not separately revoked could still
-      // approve tasks up to that point (same privilege-escalation class as the
-      // claim-path gap fixed in BLOCK-3, ~line 1413). Mirrors that gate exactly:
-      // fail-closed on DB error (this IS the security gate, not telemetry), and
-      // runs BEFORE the myRoles/Tier-2-substitution PDP check below.
+      // (ADR §"Дыра №2" — "деактивированный = не держатель"). This local gate
+      // predates T-0738: as of T-0738, getRoleSlugsForActor (grants-dao.ts:431)
+      // itself now carries `${ACTOR_ACTIVE_SQL}` on both the primary and T-0366
+      // fallback lookups (grants-dao.ts:470,484), so `myRoles` below already
+      // resolves empty for a deactivated actor — this check is defence-in-depth,
+      // not the only backstop, for the SAME privilege-escalation class as the
+      // claim-path gate (BLOCK-3, findEmployeeById guard ~1868-1873 above).
+      // Mirrors that gate exactly: fail-closed on DB error (this IS a security
+      // gate, not telemetry), and runs BEFORE the myRoles/Tier-2-substitution
+      // PDP check below.
       // Uses writeDeps.pool (NOT getOrgPool()) — same reasoning as the actor-tenant
       // resolution above: this route is wired to an injected pool, and every other
       // DB call in this handler consistently uses that same connection.

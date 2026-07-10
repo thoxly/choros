@@ -124,6 +124,26 @@ ACTIVE_MARKERS=(
                                 # kept as a marker because it is a common enough
                                 # naming pattern that a real hit is worth trusting,
                                 # but ANY specific instance should be spot-checked.
+  "resolveRolesForActor"       # src/http/inbox.ts:428-439 — module-scope helper
+                                # defined BEFORE the first .register( in the file
+                                # (same "invisible wrapper" class as requirePrivilege
+                                # above, limitation #1); composes getRoleSlugsForActor
+                                # (inbox.ts:439) directly, no bypass. T-0740 (auto-
+                                # additive sanction, docs/design/T-0152-security-
+                                # invariants-catalog.md §7.7): closes the GET /api/inbox
+                                # finding (resolveRolesForActor literally referenced at
+                                # inbox.ts:1540, inside that route's own handler block).
+  "getRoleSlugsForActor"       # src/db/grants-dao.ts:431-494 — carries
+                                # ${ACTOR_ACTIVE_SQL} DIRECTLY on BOTH lookups (primary
+                                # slug=$2 at grants-dao.ts:470, T-0366 fallback at
+                                # grants-dao.ts:484; added by T-0738). Hand-verified,
+                                # not a Group-1 T-0662 AUTHORITY_RESOLVERS entry today
+                                # (still on that gate's ALLOWLIST as "downstream-guarded"
+                                # — T-0740 ADR recommends promotion but that specific
+                                # edit is NOT additive against actor-authority-
+                                # deactivation-gate.sh's BASE_REF — see docs/tasks/
+                                # T-0740.adr.md §5 — so it stays a T-0726-side marker
+                                # only until a founder-sanctioned promotion lands).
 )
 
 MARKERS_RE="$(printf '%s|' "${ACTIVE_MARKERS[@]}")"
