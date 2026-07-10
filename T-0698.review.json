@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0698",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "B1",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "web/src/screens/screen-record-detail.jsx:772 (+ PersonFieldValue :629-632, call site :1064-1070)",
+      "issue": "Третий flatten дропает поле. Деталка записи — второй потребитель fetchEmployees() — строит authorNames = new Map(list.map((e) => [e.id, e.name])), теряя deactivated. Эта карта питает PersonFieldValue, который рендерит значения person-ТИПА полей через тот же ActorChip, что и PersonCell, но БЕЗ пропа deactivated. Итог: T-0698 ВВОДИТ новую рассогласованность — один и тот же деактивированный сотрудник в одном person-поле показан зачёркнуто-приглушённым в ТАБЛИЦЕ записей, но полностью активным в ДЕТАЛКЕ (один клик). Ровно класс дефекта «сигнал теряется в человеческом слое», ради устранения которого существует эпик E-UX-HUMAN/T-0648. Спека декларирует это 'вне охвата', но нельзя убрать пользовательскую рассогласованность, объявив рассогласованного близнеца вне охвата — обе поверхности рождены T-0673 и рендерят через один ActorChip.",
+      "suggestion": "Протянуть deactivated через screen-record-detail.jsx: authorNames → Map<id,{name,deactivated}> (или параллельная карта), передать deactivated в PersonFieldValue → ActorChip тем же выражением, что employeesById в screen-app-records.jsx. Метадата 'Автор' (created_by, :1113) — простой Mono-текст, маркер не нужен; блокер только про person-ТИПА поля."
+    },
+    {
+      "id": "N1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/screens/screen-app-records.test.jsx:359",
+      "issue": "e2e-тест честно гоняет реальный fetchEmployees() и реальный PersonCell, но пересобирает Map рукотворной копией `new Map(list.map((e) => [e.id, e]))` вместо импорта/общего хелпера. Если screen-app-records.jsx:1298 отрефакторит построение карты, тест продолжит зеленеть против своей копии — разъедется молча.",
+      "suggestion": "Вынести построение employeesById в импортируемый хелпер и переиспользовать его и в экране, и в тесте. Риск низкий, не блокирует."
+    },
+    {
+      "id": "N2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/kanban-board.jsx:88-89",
+      "issue": "ПРЕ-СУЩЕСТВУЮЩЕЕ, НЕ введено T-0698: канбан рендерит person-поля как «—» (formatCellValue возвращает Symbol PERSON_CELL_ASYNC → displayVal падает на em-dash). KanbanBoard не получает employeesById вовсе — на карточках нет ни имени, ни маркера деактивации. Канбан никогда не резолвил person-поля, так что это не разрыв ЭТОЙ протяжки.",
+      "suggestion": "Отдельный follow-up: пробросить employeesById в KanbanBoard и резолвить person-поля через PersonCell/ActorChip (заодно получит и маркер деактивации). Не блокер T-0698."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1: GET /api/org people[] несёт deactivated boolean, мутационно доказано", "covered": true },
+    { "ac": "AC-2: fetchEmployees() flatten несёт deactivated true/false", "covered": true },
+    { "ac": "AC-3: клиентский честный тест — Map реальным fetchEmployees → PersonCell.deactivated", "covered": true },
+    { "ac": "AC-4: tsc/vitest (web+server затронутые) зелёные", "covered": true },
+    { "ac": "Цель эпика: сигнал деактивации согласован на ВСЕХ поверхностях показа актора в записях (таблица+деталка)", "covered": false }
+  ],
+  "role_gap_evidence": [
+    "Узкая спека ('любые другие места кроме PersonCell — вне охвата') позволила строителю починить один из двух sibling-компонентов T-0673 (PersonCell), оставив PersonFieldValue рассогласованным. Гейты (db-тест + web vitest) зелёные, потому что покрывают только табличную ячейку — второй потребитель fetchEmployees() (screen-record-detail) не имеет теста на маркер. Класс 'фикс близнеца A, забыт близнец B, тесты покрывают только A' повторяется (ср. T-0662 узкий гейт скрывал живую дыру). Кандидат в durable: при протяжке сигнала грепать ВСЕХ потребителей источника (fetchEmployees/people[]) и требовать покрытие на каждой поверхности, а не только на инцидентной."
+  ]
+}
