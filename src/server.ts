@@ -1130,6 +1130,12 @@ function buildRouter(
   // projection for the record card (§6 card policy: lazy, per-section expand).
   // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
   // APPEND-ONLY: must be the last register* call before setFallback.
+  //
+  // T-0739 [SECURITY P2, столп 4]: resolveReadVisibility — reuses the SAME
+  // reportAggReadVisibility instance wired above for registerReportPageRenderRoutes
+  // (getGrantsForSubject + loadTenantOrgAncestry, BYTE-IDENTICAL composition,
+  // NF-1 single-resolver). Gates the SOURCE record's READ-PDP visibility
+  // (ADR-T0739 §3.3).
   registerRecordLinksRoutes(
     router,
     grantsPool
@@ -1137,6 +1143,7 @@ function buildRouter(
           pool: grantsPool,
           resolveActorTenant: (actorSlug: string) =>
             resolveActorTenant(getOrgPool(), actorSlug),
+          resolveReadVisibility: reportAggReadVisibility,
         }
       : undefined,
   );
@@ -1311,11 +1318,18 @@ function buildRouter(
 
   // T-0405 [PD-20]: operational analytics — GROUP BY on index, lightweight result,
   // xlsx/csv export. GET /api/operational-analytics, GET /api/operational-analytics/export.
+  //
+  // T-0739 [SECURITY P2, столп 4]: resolveReadVisibility — reuses the SAME
+  // reportAggReadVisibility instance wired above for registerReportPageRenderRoutes
+  // (getGrantsForSubject + loadTenantOrgAncestry, BYTE-IDENTICAL composition,
+  // NF-1 single-resolver). Entry gate (>=1 confirmed grant) + record_sums
+  // narrowing to READ-PDP-visible records (T-0632 parity, ADR-T0739 §3.1).
   if (grantsPool) {
     registerOperationalAnalyticsRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
+      resolveReadVisibility: reportAggReadVisibility,
     });
   }
 

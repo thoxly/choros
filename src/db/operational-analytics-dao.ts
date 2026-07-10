@@ -328,8 +328,60 @@ export interface LoadOperationalAnalyticsParams {
   fieldKey?: string;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+export const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEK_MS = 7 * DAY_MS;
+
+// ---------------------------------------------------------------------------
+// T-0739 (security P2, столп 4): READ-PDP record-visibility scan for
+// record_sums. Mirrors report-page-render.ts's AGG_SCAN_LIMIT/buildRawRecordSql
+// discipline (T-0632) — a BOUNDED candidate-row window the HTTP layer folds
+// through `isRecordReadable` per-row (that filtering stays in src/http, NOT
+// here, to mirror T-0632's layering exactly). This DAO function only fetches;
+// it carries NO authority decision itself.
+// ---------------------------------------------------------------------------
+
+export const RECORD_SCAN_LIMIT = 5000;
+
+export interface RecordVisibilityCandidateRow {
+  readonly id: string;
+  readonly data: unknown;
+  readonly created_at: string;
+  /** Governing application id (via registry_def JOIN) — required by RowAncestry. */
+  readonly application_id: string;
+}
+
+/**
+ * Fetch a bounded window of raw `{id, data, created_at, application_id}` rows
+ * for one registry, newest-first — the SAME tenant/registry/cutoff WHERE
+ * predicate `loadRecordSumsByPeriod` uses, plus the `registry_def.application_id`
+ * JOIN (mirrors records.ts's RECORD_SELECT_JOIN) so the caller can build a
+ * complete RowAncestry for `isRecordReadable` without a second query.
+ */
+export async function loadRecordScanForVisibility(
+  pool: pg.Pool,
+  tenantId: string,
+  registryDefId: string,
+  cutoffMs: number,
+  limit: number = RECORD_SCAN_LIMIT,
+): Promise<RecordVisibilityCandidateRow[]> {
+  assertUuid(registryDefId, "registryDefId");
+
+  return withTenant(pool, tenantId, async (client) => {
+    const { rows } = await client.query<RecordVisibilityCandidateRow>(
+      `SELECT r.id, r.data, r.created_at, rd.application_id
+         FROM choros.record r
+         JOIN choros.registry_def rd
+           ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
+        WHERE r.tenant_id = $1
+          AND r.registry_id = $2
+          AND r.created_at >= $3
+        ORDER BY r.created_at DESC, r.id ASC
+        LIMIT $4`,
+      [tenantId, registryDefId, cutoffMs, limit],
+    );
+    return rows;
+  });
+}
 
 export async function loadOperationalAnalytics(
   pool: pg.Pool,

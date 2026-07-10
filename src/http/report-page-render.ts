@@ -1550,6 +1550,25 @@ export function registerReportPageRenderRoutes(
       const pool = _poolHint ?? getPool();
       const actor = await extractActor(req, pool); // throws 401 if missing
       const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
+      const nowMs = Date.now();
+
+      // T-0739 (security P2, столп 4): ACTOR_ACTIVE entry gate — reuses the
+      // SAME resolveReadVisibility resolver /render, /export, /data already
+      // consult (ADR-T0739 §3.2), no new wiring. The actor must hold >=1
+      // confirmed grant of ANY kind (role-reader default-open backfill,
+      // migrations 117/124, guarantees every ACTIVE employee holds at least
+      // this one grant — getGrantsForSubject fail-closes a DEACTIVATED
+      // actor's residual JWT to grants=[]). cycleTime/actorBreakdown remain
+      // tenant-wide audit_event telemetry past this gate (ADR-T0632 already
+      // audited this exact route: "process telemetry, NOT choros.record...
+      // no change needed" — unchanged here, only the entry gate is new).
+      // Honest-degrade (NF-2): resolver absent (test-only) → gate skipped.
+      if (resolveReadVisibility !== undefined) {
+        const visibility = await resolveReadVisibility(actor, tenantId, nowMs);
+        if (visibility.grants.length === 0) {
+          throw new HttpError(403, "NO_READ_GRANT", "no confirmed grant for this tenant");
+        }
+      }
 
       // T-0495: optional drill-down by process. The process_key from the query is
       // ONLY ever passed to the loaders as a bound SQL parameter ($N) — never
