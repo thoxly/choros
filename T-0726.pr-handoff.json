@@ -2,7 +2,7 @@
   "task_id": "T-0726",
   "status": "pr_open",
   "branch": "task/T-0726",
-  "pr_url": "",
+  "pr_url": "https://github.com/thoxly/choros/pull/61",
   "ci_local": {
     "build": true,
     "lint": true,
