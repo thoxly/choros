@@ -81,6 +81,21 @@ export function registerFormDocumentOpsRoute(
       throw new HttpError(400, "VALIDATION", "op is required");
     }
 
+    // T-0711 (P2, review T-0706 finding #37): same optional application_id
+    // pin as POST /api/forms/binding (binding.ts) — a process can be bound to
+    // 2+ applications, and this seam runs the SAME classifyLayoutSave gate on
+    // save. An agent driver that knows which binding it targets can name it
+    // explicitly; absent, the gate falls back to a deterministic resolution
+    // (see live-form-schema.ts) rather than an arbitrary DB row.
+    const rawApplicationId = (
+      typeof body["applicationId"] === "string" ? body["applicationId"] :
+      typeof body["application_id"] === "string" ? body["application_id"] : ""
+    ).trim();
+    if (rawApplicationId) {
+      assertUuidShape(rawApplicationId, "applicationId");
+    }
+    const applicationId: string | null = rawApplicationId || null;
+
     const tenantId = await resolveActorTenant(actor);
     assertUuidShape(tenantId, "tenantId");
     const nowMs = Date.now();
@@ -110,7 +125,8 @@ export function registerFormDocumentOpsRoute(
       const nextLayout = applied.doc as unknown as Record<string, unknown>;
 
       // SAME Floor-1/Floor-2 content gate as the human save (one judge).
-      await classifyLayoutSave(client, tenantId, processKey, nextLayout);
+      // T-0711: thread the same optional applicationId pin as /api/forms/binding.
+      await classifyLayoutSave(client, tenantId, processKey, nextLayout, applicationId);
 
       // Persist (version+1) — the same upsert semantics as /api/forms/binding.
       const newVersion = existing.version + 1;

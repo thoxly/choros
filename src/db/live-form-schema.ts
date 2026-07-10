@@ -15,11 +15,22 @@
  *   from the database. This module loads exactly that.
  *
  * RESOLUTION PATH (mirrors step-applier.ts loadFormBindingForValidation §385-418):
- *   processKey → process_app_binding.application_id → registry_def (slug='soglasovanie')
+ *   processKey (+ optional applicationId, T-0711) → process_app_binding.application_id
+ *   → registry_def (slug='soglasovanie' or the binding's target_registry_slug)
  *   → record_schema.properties → key set.
  *
  * The core classifier (floor-boundary.ts) stays pure: it still receives a ready
  * LiveSchemaView projection. This module is the DB-side adapter that builds it.
+ *
+ * MULTI-BINDING DISAMBIGUATION (T-0711, review T-0706 finding #37 — P2):
+ *   `process_app_binding` carries `UNIQUE (tenant_id, process_key, application_id)`
+ *   (migration 075), not `UNIQUE (tenant_id, process_key)` — one process CAN be
+ *   bound to several applications. Every resolver below now accepts an optional
+ *   `applicationId` to PIN which binding row to resolve; when the caller doesn't
+ *   pass one (or the id doesn't match any row), the query falls back to a
+ *   DETERMINISTIC choice (oldest binding by created_at, id tiebreak) rather than
+ *   an ORDER-BY-less `LIMIT 1` at the mercy of the planner. See
+ *   resolveLiveRecordSchema's doc comment for the full rationale.
  *
  * FAIL-CLOSED (spec §4.1 lines 180-181, task constraint):
  *   When the live schema cannot be resolved (no process_app_binding, no registry_def,
@@ -59,6 +70,10 @@ function isUuid(value: string): boolean {
  * @param client    open pg client inside a tenant transaction.
  * @param tenantId  the resolved tenant UUID.
  * @param processKey the process the form belongs to.
+ * @param applicationId T-0711 (optional): pin resolution to this exact
+ *        (processKey, applicationId) binding when a process is bound to 2+
+ *        applications — see resolveLiveRecordSchema's doc for why. Omitted →
+ *        deterministic fallback (oldest binding), not planner-order.
  * @returns Set<fieldKey> from the live record_schema, OR null when the live schema
  *          is unresolvable (no app binding / no registry) — caller fails closed.
  * @throws  re-throws DB errors (fail-closed: a transient fault must reject, not pass).
@@ -67,8 +82,9 @@ export async function resolveLiveSchemaFieldKeys(
   client: pg.PoolClient,
   tenantId: string,
   processKey: string,
+  applicationId?: string | null,
 ): Promise<Set<string> | null> {
-  const recordSchema = await resolveLiveRecordSchema(client, tenantId, processKey);
+  const recordSchema = await resolveLiveRecordSchema(client, tenantId, processKey, applicationId);
   if (recordSchema === null) {
     return null;
   }
@@ -110,6 +126,11 @@ export async function resolveLiveSchemaFieldKeys(
  * unresolvable (caller fails closed); an empty map when the schema has zero
  * collection fields (authoritative — no sub-schemas to check).
  *
+ * @param applicationId T-0711 (optional): same pin as resolveLiveSchemaFieldKeys
+ *        — MUST be the same value passed to the sibling call for a given save
+ *        (classifyLayoutSave threads one applicationId to both) so the field
+ *        key-set and the collection sub-key-sets are resolved against the
+ *        SAME binding row, never two different ones.
  * @returns { [collectionKey]: string[] } | null (unresolvable → caller fails closed).
  * @throws  re-throws DB errors (fail-closed), same as resolveLiveSchemaFieldKeys.
  */
@@ -117,8 +138,9 @@ export async function resolveLiveCollectionSubKeys(
   client: pg.PoolClient,
   tenantId: string,
   processKey: string,
+  applicationId?: string | null,
 ): Promise<Record<string, string[]> | null> {
-  const recordSchema = await resolveLiveRecordSchema(client, tenantId, processKey);
+  const recordSchema = await resolveLiveRecordSchema(client, tenantId, processKey, applicationId);
   if (recordSchema === null) {
     return null;
   }
@@ -167,6 +189,30 @@ export async function resolveLiveCollectionSubKeys(
  * process_app_binding → registry_def SQL walk. resolveLiveSchemaFieldKeys
  * itself is UNCHANGED in signature/behavior — this is an additive sibling.
  *
+ * T-0711 (P2 fix, review T-0706 finding #37): `process_app_binding` carries
+ * `UNIQUE (tenant_id, process_key, application_id)` — ONE process CAN be
+ * bound to SEVERAL applications (migration 075; the FormDesigner "Приложение"
+ * picker, T-0669, lets an author pick any of them for the SAME process_key).
+ * Before this fix, step 1 below resolved by `process_key` ALONE with no
+ * `ORDER BY`, so a process bound to 2+ apps let Postgres return WHICHEVER row
+ * its planner picked — independent of, and possibly disagreeing with, the
+ * application the caller actually selected. `applicationId` (optional 4th
+ * param) closes that: when the caller knows which binding it means (the
+ * gate's HTTP callers now thread the FormDesigner-selected app through), the
+ * resolution is PINNED to that exact (process_key, application_id) row —
+ * never a different one. When omitted (legacy/agent callers with no app
+ * selection UI, e.g. floor1-editor.ts, or a process with exactly one
+ * binding — the overwhelming common case), the query is unchanged in EFFECT
+ * for a single-binding process, and for the rare multi-binding-without-a-hint
+ * case it now resolves DETERMINISTICALLY (oldest binding by `created_at`,
+ * `id` tiebreak — see ORDER BY below) instead of an unspecified planner
+ * choice. Both branches share ONE SQL statement (`$3::uuid IS NULL OR
+ * application_id = $3`) rather than two — no risk of the two diverging.
+ *
+ * @param applicationId optional — pin resolution to this exact
+ *        (tenant_id, process_key, application_id) binding row. When omitted
+ *        (or the row for the given id doesn't exist), falls back to the
+ *        oldest binding for `processKey` (deterministic, not planner-order).
  * @returns the parsed record_schema object, OR null when unresolvable (no
  *          process_app_binding / no registry_def) — same fail-closed
  *          contract as resolveLiveSchemaFieldKeys.
@@ -176,21 +222,36 @@ export async function resolveLiveRecordSchema(
   client: pg.PoolClient,
   tenantId: string,
   processKey: string,
+  applicationId?: string | null,
 ): Promise<unknown | null> {
   if (!isUuid(tenantId)) {
     // Cannot scope a query without a valid tenant → unvalidatable → fail-closed.
     return null;
   }
+  if (applicationId != null && !isUuid(applicationId)) {
+    // A malformed applicationId hint is worse than none — silently ignoring it
+    // would resurrect the exact ambiguity this param exists to close. Fail
+    // closed rather than guess (mirrors the tenantId UUID-shape check above).
+    return null;
+  }
 
-  // Step 1: processKey → application_id + target_registry_slug (process_app_binding).
+  // Step 1: processKey (+ optional applicationId pin) → application_id +
+  // target_registry_slug (process_app_binding). ONE statement covers both the
+  // pinned and unpinned case: `$3::uuid IS NULL OR application_id = $3` is a
+  // no-op filter when applicationId is absent, an exact-row filter when
+  // present. ORDER BY makes the unpinned fallback deterministic (oldest
+  // binding wins, ties broken by id) instead of depending on the planner's
+  // unspecified row order for a `LIMIT 1` with no ORDER BY (T-0711).
   // NOT wrapped in try/catch — a DB error here must propagate (fail-closed).
   const appRes = await client.query<{ application_id: string; target_registry_slug: string | null }>(
     `SELECT application_id, target_registry_slug
        FROM choros.process_app_binding
       WHERE tenant_id = $1
         AND process_key = $2
+        AND ($3::uuid IS NULL OR application_id = $3)
+      ORDER BY created_at ASC, id ASC
       LIMIT 1`,
-    [tenantId, processKey],
+    [tenantId, processKey, applicationId ?? null],
   );
   const appRow = appRes.rows[0];
   if (!appRow || !isUuid(appRow.application_id)) {
