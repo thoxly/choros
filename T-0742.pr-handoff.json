@@ -1,0 +1,79 @@
+{
+  "task_id": "T-0742",
+  "status": "pr_open",
+  "branch": "task/T-0742",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "ci_local_detail": {
+    "build": "web: `vite build` OK (548 modules, 2.3s). root `tsc --noEmit` clean (src only; no server .ts touched).",
+    "lint": "web eslint jsx is config-ignored by convention (`eslint web/src --ext .jsx || true`); no new errors. server eslint untouched.",
+    "types": "root `tsc --noEmit` exit 0.",
+    "tests": "targeted vitest: 116 passed (process-catalog.test.js 62, screen-process-catalog.test.jsx 9, screen-processes.test.jsx 17, nav-config.test.js 28). Full suite NOT run per orchestrator instruction (Полные сьюты НЕ гоняй).",
+    "fitness": "targeted gates green: anti-uuid-actor-render (0 + self-test), ux-g2-theme-pairing (+self-test), ux-g5-jargon-denylist (informational, 0 product-screen findings; only test-file task-ids), ux-g6-no-new-hardcode (0), ux-g7-no-fake-buttons (0 + self-test), ux-g8-scroll-reachable (+self-test), anti-case-lock (within baseline + self-test), screen-registry-declares (OK + self-test). Full fitness chain NOT run per instruction."
+  },
+  "files_changed": [
+    "docs/tasks/T-0742.spec.md",
+    "docs/tasks/T-0742.adr.md",
+    "web/src/screens/process-catalog.js",
+    "web/src/screens/process-catalog.test.js",
+    "web/src/screens/screen-process-catalog.jsx",
+    "web/src/screens/screen-process-catalog.test.jsx",
+    "web/src/screens/screen-processes.jsx",
+    "web/src/screens/screen-processes.test.jsx",
+    "web/src/app-shell/nav-config.js",
+    "web/src/app-shell/nav-config.test.js",
+    "web/src/app-shell/shell.jsx",
+    "e2e/tel-linear-negative.e2e.ts"
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-C1", "covered": true, "how": "nav-config item process-catalog (constructor zone, capability authoring_draft, path /process-catalog) + <Route> in shell.jsx; screen-registry-declares gate green."},
+    {"ac": "AC-C2", "covered": true, "how": "Card per definition: human name is content (title), status Badge (definitionStatusLabel), version Badge (definitionVersionLabel), instance count (instanceCountLabel); raw key demoted to <MonoId> only when name differs."},
+    {"ac": "AC-C3", "covered": true, "how": "instance-count is a Button (only when count>0) → navigate(processGridDeepLink(procKey)) = /processes?definition=<key>; grid ProcessesScreen seeds definition from useSearchParams().get('definition'). Verified live in jsdom-mount: click → location /processes?definition=flow-alpha."},
+    {"ac": "AC-C4", "covered": true, "how": "bindingsForDefinition(bindings, process_key) rendered inline in the card (app name + trigger label + form key); the standalone «Связи процессов с приложениями» table is gone."},
+    {"ac": "AC-C5", "covered": true, "how": "card footer buttons: «В модельер» → /processes/:key/edit, «Правила ветвления» → /processes/:key/branch-rules, «Настроить триггер» → BindProcessModal (moved here, POST upsert /api/process-app-bindings)."},
+    {"ac": "AC-C6", "covered": true, "how": "one «Новый процесс» button in the header; empty-state has NO create button (would duplicate). Verified live: exactly 1 button in loaded jsdom-mount."},
+    {"ac": "AC-C7", "covered": true, "how": "kit primitives + --chs-* tokens; instance-count is a button ONLY when >0 (zero = static text, no dead affordance); ux-g2/g5/g6/g7/g8 green."},
+    {"ac": "AC-C8", "covered": true, "how": "screen-processes.jsx no longer defines/mounts ProcessCatalogSection or BindProcessModal; process-catalog.js imports removed; grid gains only the ?definition= seed. Nothing orphaned — every function has a new home in the catalog."}
+  ],
+  "deviations_from_adr": [
+    "BindProcessModal gained one additive prop `initialProcessKey` (not in the original) so the card's «Настроить триггер» pre-selects that definition in the modal's process picker (the author can still change it). Logic/contract otherwise moved verbatim. Proportionate: makes the per-card trigger button meaningful.",
+    "Catalog empty-state carries NO «Новый процесс» CTA button (unlike the sections screen empty-state pattern). Deliberate: the header already has the single creation point; an empty-state button would visually duplicate «Новый процесс» on an empty catalog, violating AC-C6. The empty-state copy points the user to the header button instead.",
+    "Full fitness chain / full vitest suites NOT run — per the orchestrator's explicit instruction (Полные сьюты НЕ гоняй; run targeted gates only). Targeted gates + self-tests all green."
+  ],
+  "live_proof_plan": {
+    "why_offline": "Dev-стенд offline на момент сдачи (та же ситуация, что part-A T-0654 и T-0735). Каталог потребляет ГОТОВЫЙ серверный контракт GET /api/process-catalog (definitions/instances/bindings) + GET /api/applications — уже в dev; сервер не менялся. Живое проживание требует поднятого стека с Postgres + Keycloak + реальными определениями.",
+    "offline_verification_done": [
+      "vite build (548 modules) — компилируется; root tsc --noEmit clean.",
+      "targeted vitest 116/116 (pure helpers + source-presence + nav).",
+      "SSR-mount smoke (react-dom/server): обе screens монтируются без throw; каталог рендерит header + одну «Новый процесс» + loading; грид монтируется с ?definition= seed.",
+      "ЖИВОЙ jsdom-mount (эфемерный, не закоммичен): 7/7 — карточки с человеко-именами, deep-link клик→/processes?definition=flow-alpha, счётчик-0=статичный текст (не кнопка), триггеры inline (app+label), 3 кнопки действий ×2 карточки, «В модельер»→/processes/flow-alpha/edit, ровно 1 «Новый процесс». ЭТО поймало реальный дефект (KitIcon name='process' не в реестре → console-warn в живом приложении), которого не видел сорс-скан; исправлено (external-link убран, empty=inbox)."
+    ],
+    "live_proof_steps_when_stand_up": [
+      "1. Войти рядовым внедренцем (authoring_draft, НЕ владельцем) на стенд с ≥2 определениями и ≥1 живым инстансом.",
+      "2. Сайдбар: зона «Конструктор» → «Каталог процессов» видна и открывается (/process-catalog).",
+      "3. Определения — карточками: человеко-имя как заголовок (ни одного UUID/машинного ключа как основного контента; ключ — только серая mono-подпись). Проверить обе темы (light/dark) — читаемость, токены.",
+      "4. У определения с инстансами: клик по «N инстанс(ов)» → попадание на «Процессы» с активным фильтром определения (URL ?definition=<key>, select показывает это определение, грид показывает ровно эти живые инстансы).",
+      "5. У определения с 0 инстансов: «0 инстансов» — статичный текст, НЕ кликается (нет мёртвой кнопки).",
+      "6. Связи-триггеры видны ПРЯМО на карточке (имя приложения + тип триггера + форма); отдельной таблицы «Связи» на /processes больше нет.",
+      "7. «Настроить триггер» на карточке → модалка с ПРЕДвыбранным процессом; сохранить связь → карточка обновилась.",
+      "8. «В модельер» → /processes/<key>/edit (bpmn-js); «Правила ветвления» → /processes/<key>/branch-rules (DMN).",
+      "9. Одна кнопка «Новый процесс» (в шапке) → модельер нового процесса; на /processes «Новый процесс» больше нет (только грид оператора).",
+      "10. Анти-кейс D-064: рядовой находит своё определение по человеко-имени, кликает счётчик, видит свои живые процессы — ни разу не увидев UUID как контент."
+    ],
+    "residual_risk": "Низкий. Сервер не тронут; клиент потребляет тот же контракт, что снятая ProcessCatalogSection (визуально проверенная в прошлых прогонах). Основной риск — визуальная плотность карточек при десятках определений (одноколоночный стек, maxWidth 880px) — приемлемо для MVP; личные виды/пагинация каталога — follow-up."
+  },
+  "follow_ups": [
+    "Каталог: серверная пагинация/поиск определений при их десятках (сейчас весь список одним GET, одноколоночный стек).",
+    "Личные виды каталога (owner_actor per-user) — тот же view-примитив, что грид/инбокс (UX-study §4/§5.4).",
+    "«В модельер»/«Новый процесс»: модельер обязан требовать имя при создании (UX-study §5.2 — гигиена имён у корня; закрыто частично T-0684)."
+  ],
+  "friction_events": [
+    "Worktree без установленных зависимостей (нет node_modules) — пришлось npm ci в root + web перед тестами/сборкой (memory: npm ci после merge).",
+    "web vitest config = node-env source-scan по конвенции (нет jsdom); живой mount-рендер потребовал эфемерной установки jsdom+@testing-library (--no-save --no-package-lock, lockfiles не тронуты, temp-тесты удалены). Именно он поймал KitIcon name='process' дефект, невидимый сорс-скану — сигнал: сорс-презенс тесты не ловят runtime icon/registry-ошибки."
+  ]
+}
