@@ -42,11 +42,18 @@ const NOW_MS = 1_700_000_000_000;
  * queried for a specific absentId. absentId = holder slug (T-0429: port is
  * called per-holder with holder slug as the absent key). The rule's roleId
  * must match the roleSlug being resolved.
+ *
+ * T-0744: `ttlGrantId` selects the tier. A Tier-2 rule (ttlGrantId set) always
+ * provides coverage; a Tier-1 rule (ttlGrantId null) provides coverage ONLY when
+ * the substitute is themselves a confirmed holder of the role. Legacy "substitute
+ * takes over" tests are Tier-2 (a minted grant IS the coverage) — the corrected
+ * contract; a Tier-1 non-holder now honestly routes to fallback.
  */
 function makeSubPortStub(
   absentSlug: string,
   roleSlug: string,
   substituteSlug: string,
+  ttlGrantId: string | null = null,
 ): ExecutorSubstitutionPort {
   return {
     async getActiveSubstitutions(tenantId, queriedAbsentId, _nowMs) {
@@ -60,7 +67,7 @@ function makeSubPortStub(
         substituteEmployeeId: substituteSlug,
         roleId: roleSlug,             // slug (as returned by DAO mapRow)
         orgScope: BOTTOM,
-        ttlGrantId: null,
+        ttlGrantId,
         nonInheritableExcluded: false,
         proposedBy: null,
         confirmedBy: "e-owner",       // confirmed = effective
@@ -190,12 +197,13 @@ describe("resolveExecutor — step 2: role pool", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveExecutor — step 3: substitution port contract (T-0429 ladder)", () => {
-  it("T-0429: returns kind=substitution when holder is absent AND port returns matching rule", async () => {
-    // Pool has one holder (e-kravtsova); she has an active substitution rule.
-    // Expected: e-kravtsova is suppressed, e-mironov substitutes → kind: "substitution".
+  it("T-0429/T-0744: returns kind=substitution when holder is absent AND the (Tier-2) rule provides coverage", async () => {
+    // Pool has one holder (e-kravtsova); she has an active Tier-2 substitution
+    // rule (a minted grant IS coverage). Expected: e-kravtsova is suppressed,
+    // e-mironov substitutes → kind: "substitution".
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
-      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"),
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov", "grant-t2"),
     };
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
     expect(result.kind).toBe("substitution");
@@ -242,11 +250,11 @@ describe("resolveExecutor — step 3: substitution port contract (T-0429 ladder)
     expect(subQueried).toBe(false);
   });
 
-  it("does NOT trigger fallback when holder is absent and substitute is available", async () => {
+  it("does NOT trigger fallback when holder is absent and a covering (Tier-2) substitute is available", async () => {
     let fallbackQueried = false;
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
-      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"),
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov", "grant-t2"),
       fallback: {
         async resolveFallbackSlug() {
           fallbackQueried = true;
@@ -257,6 +265,68 @@ describe("resolveExecutor — step 3: substitution port contract (T-0429 ladder)
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
     expect(result.kind).toBe("substitution");
     expect(fallbackQueried).toBe(false);
+  });
+
+  // T-0744: a Tier-1 substitute who does NOT hold the role is NOT coverage. When
+  // the sole holder is absent under such a rule, the effective pool is empty →
+  // the role is honestly UNFILLED → fallback (rung 4), never masked by a stand-in
+  // who would only get a 403 at the claim-gate (the T-0729 deadlock).
+  it("T-0744: sole holder absent + Tier-1 NON-holder substitute → fallback (role_unfilled), not substitution", async () => {
+    const deps: ResolverDeps = {
+      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
+      // Tier-1 (ttlGrantId null); substitute e-mironov is NOT in the holder pool.
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"),
+      fallback: makeInMemoryFallbackPort("e-owner"),
+    };
+    const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
+    expect(result.kind).toBe("fallback");
+    if (result.kind === "fallback") {
+      expect(result.fallbackReason).toBe("role_unfilled");
+      expect(result.fallbackSlug).toBe("e-owner");
+    }
+  });
+
+  // T-0744: a Tier-1 substitute who IS themselves a confirmed holder of the role
+  // DOES provide coverage — they claim under their own role_assignment. The absent
+  // holder is suppressed and the substitute (already a holder) carries the role.
+  it("T-0744: Tier-1 substitute who is a co-holder → coverage (kind=substitution, no fallback)", async () => {
+    let fallbackQueried = false;
+    const deps: ResolverDeps = {
+      // Both e-kravtsova and e-mironov hold the role.
+      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova", "e-mironov"] }),
+      // e-kravtsova is absent → e-mironov (a co-holder) stands in (Tier-1, ttl null).
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"),
+      fallback: {
+        async resolveFallbackSlug() {
+          fallbackQueried = true;
+          return "e-owner";
+        },
+      },
+    };
+    const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
+    expect(result.kind).toBe("substitution");
+    if (result.kind === "substitution") {
+      expect(result.substituteSlug).toBe("e-mironov");
+    }
+    expect(fallbackQueried).toBe(false);
+  });
+
+  // T-0744: when a Tier-1 non-holder substitute's absent holder is suppressed but
+  // ANOTHER live holder remains, the role is still covered by that live holder —
+  // no fallback, and the ghost (non-covering) substitute is dropped from the pool.
+  it("T-0744: absent holder w/ Tier-1 non-holder sub + a second live holder → pool = {live holder}", async () => {
+    const deps: ResolverDeps = {
+      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova", "e-sokolov"] }),
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"), // Tier-1 non-holder
+      fallback: makeInMemoryFallbackPort("e-owner"),
+    };
+    const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
+    expect(result.kind).toBe("pool");
+    if (result.kind === "pool") {
+      expect(result.candidates).toContain("e-sokolov");
+      expect(result.candidates).not.toContain("e-mironov"); // ghost sub dropped
+      expect(result.candidates).not.toContain("e-kravtsova"); // absent, suppressed
+    }
   });
 
   it("falls through to fallback when substitution port returns no matching rule for the holder", async () => {
@@ -416,11 +486,12 @@ describe("resolveExecutor — priority invariants (T-0429 ladder)", () => {
     expect(result.kind).toBe("pool");
   });
 
-  it("substitution wins over fallback when holder is absent AND has active substitute", async () => {
-    // Pool has one holder (e-kravtsova) who is absent → Bob substitutes.
+  it("substitution wins over fallback when holder is absent AND has a covering (Tier-2) substitute", async () => {
+    // Pool has one holder (e-kravtsova) who is absent → e-mironov substitutes
+    // under a covering Tier-2 rule (minted grant).
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
-      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"),
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov", "grant-t2"),
       fallback: makeInMemoryFallbackPort("e-owner"),
     };
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
