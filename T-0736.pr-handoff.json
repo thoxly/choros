@@ -1,0 +1,73 @@
+{
+  "task_id": "T-0736",
+  "status": "pr_open",
+  "branch": "task/T-0736",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/http/grant-trail.ts",
+    "src/http/rights-change-requests.ts",
+    "src/http/rights-sod.ts",
+    "src/__tests__/rights-sod.test.ts",
+    "ci/checks/db/grant_trail_route.db.test.ts",
+    "ci/checks/db/T-0736-grant-trail-authz.db.test.ts",
+    "ci/checks/db/T-0736-rights-change-requests-authz.db.test.ts",
+    "ci/checks/db/T-0736-rights-sod-check-authz.db.test.ts",
+    "docs/tasks/T-0736.adr.md"
+  ],
+  "deviations_from_adr": [
+    "Collateral bug fix (not an ADR deviation, but flagged for visibility): src/http/rights-change-requests.ts::listChangeRequests had TWO pre-existing SELECTs referencing `r.name AS role_name`, but choros.role (migration 019) has no `name` column (only `display_name`) — a genuine, unrelated-to-authorization bug that made GET /api/rights/change-requests 500 against a real Postgres whenever any pending item had a role_id (i.e. essentially always in production). Never caught before because the only prior test coverage (src/__tests__/rights-change-requests.test.ts CR-1) uses a stub pool that never validates SQL against a real schema. Fixed both occurrences (r.name -> r.display_name) — required to even prove the new gate's 'authorized sees' positive path against live PG. See docs/tasks/T-0736.adr.md §4."
+  ],
+  "friction_events": [],
+  "changes_product": 0,
+  "live_proof": "not_required (changes_product=0, substrate/security fix — proven via targeted live-PG gate tests instead, see gates_run below)",
+  "spec_ref": "docs/tasks/T-0726.adr.md §5.2 (three findings this task closes: grant-trail.ts, rights-change-requests.ts, rights-sod.ts), docs/tasks/T-0736.adr.md (this task's mini-ADR)",
+  "summary": "Three GET rights-family routes passed authentication (withAuth) and tenant-scoping (resolveActorTenant) but never called any of the 7 registered T-0658/T-0662 authority resolvers — confirmed live by the T-0726 judge. Closed all three findings by reusing already-sanctioned resolvers/markers (no new authority path): (1) GET /api/grant-trail -> resolveActorPrivilege(...).isOwnerOrAdmin (admin/owner, same bar as rights-overview.ts's can_manage), 403 FORBIDDEN otherwise. (2) GET /api/rights/change-requests -> assertApproverIsHuman (the SAME registered T-0662 resolver #7 the sibling approve/reject routes on this exact file already carry) — deliberately NOT narrowed to admin/owner, per T-0044 ADR §9 (any distinct active human may be a second approver). (3) GET /api/rights/sod-check -> self-view (subjectId===actorId or omitted) needs no gate (established self-scoped doctrine); subjectId OVERRIDE now requires resolveActorPrivilege(...).isOwnerOrAdmin, 403 BEFORE the target subject's existence is even resolved (no exists/doesn't-exist oracle leak).",
+  "resolver_per_route": {
+    "GET /api/grant-trail": "resolveActorPrivilege(pool, tenantId, actor, nowMs).isOwnerOrAdmin — src/db/sandbox-gate-dao.ts (already an ACTIVE_MARKERS Group-2 verified derivative composing loadAdminContext [Group-1 B2] + getGrantsForSubject [Group-1 A]). hasAuthoringDraftGrant is deliberately IGNORED (config-authoring privilege, unrelated to rights-domain visibility).",
+    "GET /api/rights/change-requests": "assertApproverIsHuman(pool, tenantId, actorId) — src/http/rights-change-requests.ts, the registered 7th AUTHORITY_RESOLVERS entry (T-0662 round-2), REUSED verbatim from the sibling approve/reject routes in this same file. NOT admin/owner-narrowed by design (T-0044 ADR §9: any distinct active human is an eligible second approver).",
+    "GET /api/rights/sod-check": "self (subjectId===actorId or omitted): no gate (self-scoped doctrine, mirrors notifications.ts/user-prefs.ts). override (subjectId!==actorId): resolveActorPrivilege(...).isOwnerOrAdmin, same bar as grant-trail."
+  },
+  "sod_check_subjectid_policy": "subjectId defaults to the authenticated actor (self, ungated). Any override to a DIFFERENT slug requires isOwnerOrAdmin (via resolveActorPrivilege -> loadAdminContext's isGenesisOwner || adminGrants.length>0). An unprivileged override now gets 403 FORBIDDEN with an EMPTY body (no subjectId/conflicts/heldRoles echoed) BEFORE checkSodForSubject ever resolves whether the target subject exists — closes the bare identity-swap hole (T-0726 §5.2, the most dangerous of the three findings) without breaking self-view or a privileged owner's legitimate cross-employee SoD review. Live-PG proof: ci/checks/db/T-0736-rights-sod-check-authz.db.test.ts AC-1..AC-4 (self ok / owner-override sees real target data / unprivileged override 403 no-leak / deactivated-owner-override 403 fail-closed).",
+  "who_may_read": {
+    "grant-trail": "admin/owner only (isGenesisOwner || delegable mgmt_object:* admin grants) — full tenant-wide grant/assignment journal is administrative data by construction; no existing precedent in the codebase gives an ordinary member visibility into OTHER employees' grant events.",
+    "change-requests": "ANY active human (not narrowed to admin/owner) — the pending dual-control queue is a potential-second-approver worklist; T-0044 ADR §9 makes any distinct active human an eligible approver, so narrowing the LIST to admin/owner would have been a product regression (a legitimate non-admin approver could no longer see what's pending)."
+  },
+  "findings_closed": {
+    "count": 3,
+    "route_findings_closed": [
+      "grant-trail.ts:GET:/api/grant-trail",
+      "rights-change-requests.ts:GET:/api/rights/change-requests",
+      "rights-sod.ts:GET:/api/rights/sod-check"
+    ],
+    "gate_findings_summary_on_this_branch": "ci/checks/actor-active-route-coverage.sh: 12 findings BEFORE this task's changes (verified by git-stash before/after on this exact branch, base dev@8a7434b0) -> 9 findings AFTER, closed MECHANICALLY (resolveActorPrivilege/assertApproverIsHuman were already registered ACTIVE_MARKERS — no edit to the T-0726-owned gate file needed, same demonstrated pattern as T-0721 in ADR-T0726 §5).",
+    "reconciliation_note": "T-0736's branch base (dev@8a7434b0) predates the sibling P1 task T-0737 (audit.ts READ-PDP), which has SINCE merged into dev (visible via shared git history: dev now contains T-0737's merge commit; task/T-0736 does not, since it branched earlier). T-0737 independently closes ITS OWN three findings (audit.ts x3) from the SAME 12-finding baseline -> also '12->9', but a DIFFERENT three. Once T-0736 is rebased/merged on top of the current dev (which already carries T-0737), the combined result converges to 9->6 total findings — exactly the count this task was originally briefed against. The 12->9 figures in this handoff and in docs/tasks/T-0736.adr.md are the FACTUAL numbers measured on task/T-0736's own branch pre-rebase (Rule 8c: report actual branch state, not remembered/expected numbers)."
+  },
+  "gates_run": {
+    "tsc_noEmit": "PASS (clean, 0 errors)",
+    "npm_run_build": "PASS (tsc && seed tsc, clean)",
+    "npm_run_lint": "PASS (0 errors; 45 pre-existing no-console warnings unrelated to this change)",
+    "vitest_targeted": "PASS — rights-sod.test.ts (13/13, incl. new SOD-8b/SOD-12), rights-change-requests.test.ts (16/16, untouched), rights-change-requests.reject-owner.authz.test.ts (3/3, untouched), grant-trail.e2e.test.ts (12/12, static-fallback path untouched), grant-trail.adversarial.test.ts (17/17, static-fallback path untouched), spaAuthSiblings.test.ts (all passed, incl. grant-trail FF-1/FF-2 static-fallback dev-mode 200)",
+    "vitest_new_live_pg_db_tests": "PASS — T-0736-grant-trail-authz.db.test.ts (3/3: owner 200 / member 403 / deactivated-owner 403), T-0736-rights-change-requests-authz.db.test.ts (3/3: active-non-admin 200 / deactivated 403 / agent 403), T-0736-rights-sod-check-authz.db.test.ts (4/4: self 200 / owner-override 200-real-data / unprivileged-override 403-no-leak / deactivated-owner-override 403) — all against live Postgres :55432 (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros)",
+    "vitest_regression_sibling_db_tests": "PASS — grant-trail.db.test.ts (4/4), grant-trail-pool-role.test.ts (2/2), grant_trail_route.db.test.ts (3/3, UPDATED to seed real genesis-owner fixtures under the new gate — see deviations_from_adr / ADR §5), rights-change-requests-deactivated-approver.db.test.ts (4/4, untouched), actor-resolve-seeded-persona.db.test.ts (17/17, untouched — its GET /api/grant-trail owner-path test still passes because OWNER_SLUG there is already a real genesis tenant-owner)",
+    "actor_active_route_coverage_sh": "PASS exit=0; self-test PASS; SUMMARY 12->9 findings (route-scan diff verified via git-stash before/after on this branch — see findings_closed above)",
+    "actor_authority_deactivation_gate_sh": "PASS exit=0 (FF-0662-1 + FF-0662-2 accounting scan both clean — no new bespoke slug-lookup added anywhere); self-test PASS",
+    "http_route_auth_coverage_sh": "PASS exit=0; self-test PASS",
+    "anti_case_lock_sh": "PASS exit=0; self-test PASS (aggregate denylist count strictly decreased: 15 vs baseline 16)",
+    "dual_control_isolation_sh": "PASS exit=0 (unaffected, run as a sibling sanity check since rights-change-requests.ts was touched)",
+    "sod_isolation_sh": "PASS exit=0 (unaffected, run as a sibling sanity check since rights-sod.ts was touched)",
+    "grant_trail_bypassrls_predicate_sh": "PASS exit=0",
+    "grant_trail_no_new_table_sh": "PASS exit=0",
+    "grant_trail_encoder_isolation_sh": "PASS exit=0",
+    "no_committed_secret_sh": "PASS exit=0",
+    "frozen_checks_immutable_sh": "PASS exit=0 — no ci/checks/*.sh files touched (only ci/checks/db/*.db.test.ts files, not matched by the .sh glob)",
+    "full_fitness_db": "NOT RUN per task instructions (out of scope for this focused P1 substrate fix)"
+  },
+  "notes": "Scope respected per task instructions: did not touch src/db/grants-dao.ts::getRoleSlugsForActor (T-0738 turf, already merged, read-only) or src/http/audit.ts (T-0737 turf, parallel — confirmed via shared git history that T-0737 has since merged into dev independently, see findings_closed.reconciliation_note). No sub-agents spawned. No background processes left running."
+}

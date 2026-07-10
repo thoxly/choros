@@ -13,10 +13,18 @@
  *   SOD-5  sod-check — subject holding both conflicting roles → static conflict
  *   SOD-6  sod-check — subject holding only one of the two roles → no conflict
  *   SOD-7  sod-check — dynamic constraint surfaces as note (role_a match)
- *   SOD-8  sod-check — unknown subjectId returns 404
+ *   SOD-8  sod-check — unknown subjectId, PRIVILEGED override → 404
+ *   SOD-8b sod-check — subjectId override WITHOUT privilege → 403 (T-0736)
  *   SOD-9  routing — /api/rights/sod-rules resolves BEFORE :roleId catch-all
  *   SOD-10 routing — /api/rights/sod-check resolves BEFORE :roleId catch-all
  *   SOD-11 sod-check defaults subjectId to authenticated actor when omitted
+ *   SOD-12 sod-check — PRIVILEGED override to a real, DIFFERENT subject → 200
+ *          with that subject's own data (T-0736 positive control)
+ *
+ * T-0736 [security P1]: SOD-8/SOD-8b/SOD-12 cover the subjectId-override
+ * privilege gate added on top of the pre-existing 404/self-default coverage
+ * (T-0726 §5.2 finding — subjectId was overridable to ANY slug with zero
+ * privilege check). See docs/tasks/T-0736.adr.md.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -36,6 +44,7 @@ const ROLE_A_ID   = "e0000000-0000-0000-0000-000000000001";
 const ROLE_B_ID   = "e0000000-0000-0000-0000-000000000002";
 const CONSTRAINT_ID = "d0000000-0000-0000-0000-000000000001";
 const ACTOR_SLUG  = "e-orlov";
+const OTHER_SUBJECT_SLUG = "e-kravtsova";
 
 // ---------------------------------------------------------------------------
 // Stub pg.Pool factory
@@ -48,6 +57,13 @@ interface StubOptions {
   raRows?: Record<string, unknown>[];
   /** whether the employee lookup finds the subject (default: true) */
   employeeFound?: boolean;
+  /**
+   * T-0736: whether the AUTHENTICATED ACTOR (ACTOR_SLUG, not the subject
+   * being looked up) resolves as owner/admin via resolveActorPrivilege
+   * (loadAdminContext isGenesisOwner formula). Drives the subjectId-override
+   * gate on GET /api/rights/sod-check — default false (ordinary member).
+   */
+  isOwnerOrAdmin?: boolean;
 }
 
 function makePool(opts: StubOptions = {}): pg.Pool {
@@ -55,6 +71,7 @@ function makePool(opts: StubOptions = {}): pg.Pool {
     constraintRows = [],
     raRows = [],
     employeeFound = true,
+    isOwnerOrAdmin = false,
   } = opts;
 
   const stubClient = {
@@ -70,6 +87,19 @@ function makePool(opts: StubOptions = {}): pg.Pool {
       // SELECT e.tenant_id FROM choros.employee e JOIN ... WHERE e.slug = $1
       if (/choros\.employee.*WHERE\s+e\.slug/is.test(sql)) {
         return { rows: [{ tenant_id: TENANT_A }], rowCount: 1 };
+      }
+
+      // ── T-0736: resolveActorPrivilege → loadAdminContext isGenesisOwner
+      // (the subjectId-override gate on sod-check). This query is a
+      // `choros.role_assignment ra JOIN choros.role r ... AND r.slug =
+      // 'tenant-owner'` shape — distinct from (and checked BEFORE) the
+      // broader "subject employee lookup" matcher below, even though the
+      // isGenesisOwner query ALSO embeds a `SELECT id FROM choros.employee
+      // WHERE tenant_id...` subquery that would otherwise false-match it.
+      if (/r\.slug\s*=\s*'tenant-owner'/i.test(sql)) {
+        return isOwnerOrAdmin
+          ? { rows: [{ id: "t0736-owner-assignment" }], rowCount: 1 }
+          : { rows: [], rowCount: 0 };
       }
 
       // ── Subject employee lookup (sod-check) ───────────────────────────────
@@ -361,13 +391,18 @@ describe("SOD-7 — sod-check: dynamic constraint surfaced with note", () => {
 });
 
 // ---------------------------------------------------------------------------
-// SOD-8: sod-check — unknown subjectId returns 404
+// SOD-8: sod-check — unknown subjectId, PRIVILEGED override → 404
+//
+// T-0736: subjectId="ghost" !== ACTOR_SLUG is an OVERRIDE, so the actor must
+// now be owner/admin to even reach checkSodForSubject. Privileged here on
+// purpose — this test's AC is "unknown subject → 404", not "unprivileged
+// override → 403" (that is SOD-8b, below).
 // ---------------------------------------------------------------------------
 
-describe("SOD-8 — sod-check: unknown subjectId → 404", () => {
+describe("SOD-8 — sod-check: unknown subjectId (privileged override) → 404", () => {
   let server: { baseUrl: string; close: () => Promise<void> };
   beforeAll(async () => {
-    server = await startTestServer({ employeeFound: false });
+    server = await startTestServer({ employeeFound: false, isOwnerOrAdmin: true });
   });
   afterAll(async () => { await server.close(); });
 
@@ -376,6 +411,35 @@ describe("SOD-8 — sod-check: unknown subjectId → 404", () => {
     expect(res.status).toBe(404);
     const data = JSON.parse(res.body) as { error?: { code: string } };
     expect(data.error?.code).toBe("NOT_FOUND");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SOD-8b: sod-check — subjectId override WITHOUT owner/admin privilege → 403
+// (T-0736 P1 fix — the MOST dangerous of the three T-0726 §5.2 findings:
+// subjectId was a bare, unchecked identity swap before this task).
+// ---------------------------------------------------------------------------
+
+describe("SOD-8b — sod-check: subjectId override without privilege → 403 (T-0736)", () => {
+  let server: { baseUrl: string; close: () => Promise<void> };
+  beforeAll(async () => {
+    // Ordinary (non-owner/admin) actor, and the override target EXISTS
+    // (employeeFound: true) — proves the 403 fires on the PRIVILEGE check,
+    // before ever resolving whether the target subject exists (no
+    // exists/doesn't-exist oracle leaks through to an unprivileged caller).
+    server = await startTestServer({ employeeFound: true, isOwnerOrAdmin: false });
+  });
+  afterAll(async () => { await server.close(); });
+
+  it("returns 403 FORBIDDEN, not the subject's data and not a 404", async () => {
+    const res = await req(
+      server.baseUrl,
+      "GET",
+      `/api/rights/sod-check?subjectId=${OTHER_SUBJECT_SLUG}`,
+    );
+    expect(res.status).toBe(403);
+    const data = JSON.parse(res.body) as { error?: { code: string } };
+    expect(data.error?.code).toBe("FORBIDDEN");
   });
 });
 
@@ -447,5 +511,45 @@ describe("SOD-11 — sod-check: no subjectId → defaults to authenticated actor
     expect(res.status).toBe(200);
     const data = JSON.parse(res.body) as { subjectId: string };
     expect(data.subjectId).toBe(ACTOR_SLUG);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SOD-12: sod-check — PRIVILEGED override to a real, DIFFERENT subject → 200
+// (T-0736 positive control: the gate blocks ONLY unprivileged override, an
+// owner/admin can legitimately inspect a colleague's SoD conflicts).
+// ---------------------------------------------------------------------------
+
+describe("SOD-12 — sod-check: privileged override to a different subject → 200 (T-0736)", () => {
+  let server: { baseUrl: string; close: () => Promise<void> };
+  beforeAll(async () => {
+    server = await startTestServer({
+      constraintRows: [STATIC_CONSTRAINT_ROW],
+      raRows: [
+        { role_id: ROLE_A_ID, display_name: "Контролёр расчётов" },
+        { role_id: ROLE_B_ID, display_name: "Согласующий бюджет" },
+      ],
+      employeeFound: true,
+      isOwnerOrAdmin: true,
+    });
+  });
+  afterAll(async () => { await server.close(); });
+
+  it("returns 200 with the OTHER subject's own conflicts (not blocked, not self-substituted)", async () => {
+    const res = await req(
+      server.baseUrl,
+      "GET",
+      `/api/rights/sod-check?subjectId=${OTHER_SUBJECT_SLUG}`,
+    );
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body) as {
+      subjectId: string;
+      conflicts: unknown[];
+    };
+    // The response echoes the REQUESTED subject, not the caller — an owner
+    // viewing someone else's SoD must see THAT subject's id back, not their own.
+    expect(data.subjectId).toBe(OTHER_SUBJECT_SLUG);
+    expect(data.subjectId).not.toBe(ACTOR_SLUG);
+    expect(data.conflicts).toHaveLength(1);
   });
 });
