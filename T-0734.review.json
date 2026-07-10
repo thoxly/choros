@@ -1,0 +1,33 @@
+{
+  "task_id": "T-0734",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/kc/ui-created-user-actor-type.sh:49",
+      "issue": "The live check and live-proof ADD firstName/lastName, but the real createHumanUser (src/keycloak/admin-port.ts:392-407) omits them. Verified live: a no-names UI account persists actor_type + gets the claim (the fix works), but ROPC hard-fails 'Account is not fully set up' and browser login hits an interactive VERIFY_PROFILE step. This is PRE-EXISTING (KC 25 default profile also declares firstName/lastName required:{roles:[user]} — confirmed on a components-stripped pre-fix realm), not introduced by this fix, and correctly scoped out by the builder in followups_out_of_scope. Consequence: the automated live check proves actor_type persistence in isolation, not real end-to-end product login of a UI-created account.",
+      "suggestion": "Prioritize the flagged follow-up: the 'Создать учётку' form should collect a display name OR createHumanUser should send firstName/lastName so UI accounts are login-complete without a VERIFY_PROFILE interstitial. Optionally add an e2e that browser-completes VERIFY_PROFILE."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "scripts/kc-dev-setup.sh (step 5, PUT /users/profile)",
+      "issue": "On a non-2xx from PUT /users/profile the reconcile prints only [WARN] and continues (exit 0). A silently-failed reconcile on a persistent stand would leave actor_type unmanaged. Acceptable (DEV-only script; CI and fresh provisioning use --import-realm, not this script), but a loud fail on non-2xx would be more honest.",
+      "suggestion": "Consider exiting non-zero on a non-2xx response from PUT /users/profile."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "actor_type persists on admin-REST create", "covered": true },
+    { "ac": "token carries actor_type; verifyClaims (auth.ts:302) passes", "covered": true },
+    { "ac": "AC-3 anti-case: invalid actor_type value -> 400", "covered": true },
+    { "ac": "AC-5 setUserEnabled preserves actor_type", "covered": true },
+    { "ac": "self-escalation human->agent blocked (edit=[admin])", "covered": true },
+    { "ac": "seeded users not broken", "covered": true },
+    { "ac": "realm-json diff additive (components only)", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
