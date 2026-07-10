@@ -24,6 +24,8 @@ import { tryLoadShowcasePack } from "./pack-serve.js";
 import { makeStartInstanceHandler, type StartInstanceDeps, type ActorsDisplayResolver } from "./process-start.js";
 import {
   listInstanceProjections,
+  isInstanceDetailVisible,
+  filterProjectionsByReadVisibility,
   type InstanceProjection,
 } from "./process-projection.js";
 import {
@@ -788,17 +790,50 @@ export function registerProcessesRoutes(
           // Fold up to the full window (≤500, readEvents cap) so the filters/pagination
           // page over the real set, not an arbitrary slice.
           const projections = await listInstanceProjections(startDeps.pool, tenantId, { limit: 500 });
-          // Map ALL projections (cheap, no engine I/O yet) so the pure pipeline can
-          // filter/sort/paginate over the tenant-scoped set.
-          const allInstances = projections.map(projectionToInstance);
+          // T-0722 (D-064, P2 из T-0714 — security/PDP): narrow the ALREADY tenant-scoped
+          // `projections` to the READ-visibility of each instance's SOURCE RECORD — the
+          // SAME single authority path (isRecordReadable) the DETAIL gate (T-0721) applies,
+          // batched over the whole list (filterProjectionsByReadVisibility) instead of a
+          // per-instance round-trip. Reuses the SAME startDeps.resolveReadVisibility
+          // resolver DETAIL calls below (no new server.ts wiring). Honest-degrade (NF-2):
+          // resolver absent → skip, byte-identical to pre-T-0722 tenant-scope-only.
+          //
+          // T-0654 [rebase+recompose]: this PDP narrowing runs FIRST — BEFORE the query
+          // pipeline AND before any live-engine overlay — so parseProcessListQuery/
+          // selectProcessPage filter/sort/paginate over the ALREADY PDP-visible set.
+          // Therefore {total} = |PDP-visible ∩ query-match|, NOT the raw tenant count:
+          // the pagination `total` cannot leak the number of instances the caller may not
+          // see (the enumeration side-channel T-0722 closed stays closed under pagination).
+          let visibleProjections = projections;
+          if (startDeps.resolveReadVisibility) {
+            const gateNowMs = Date.now();
+            const { grants, ancestry } = await startDeps.resolveReadVisibility(
+              actorSlug,
+              tenantId,
+              gateNowMs,
+            );
+            visibleProjections = await filterProjectionsByReadVisibility(
+              startDeps.pool,
+              tenantId,
+              projections,
+              grants,
+              ancestry,
+              gateNowMs,
+            );
+          }
+          // Map the PDP-visible projections (cheap, no engine I/O yet) so the pure
+          // pipeline filters/sorts/paginates over the visible set only.
+          const allInstances = visibleProjections.map(projectionToInstance);
           const selected = selectProcessPage(allInstances, query);
           total = selected.total;
 
           // T-0709-R-P0-1: overlay the LIVE active node — but ONLY for the returned PAGE
-          // (≤ limit engine reads), not all ≤500 projections (FF-6). Re-map the overlaid
-          // projections and splice them back into the page by id, preserving page order.
+          // (≤ limit engine reads), not all visible projections (FF-6). Input is drawn
+          // from visibleProjections (post-PDP), so a hidden instance never reaches the
+          // engine layer either. Re-map the overlaid projections and splice them back into
+          // the page by id, preserving page order.
           const pageIds = new Set(selected.page.map((i) => i.id));
-          const pageProjections = projections.filter((p) => pageIds.has(p.inst));
+          const pageProjections = visibleProjections.filter((p) => pageIds.has(p.inst));
           const overlaid = await overlayDetailLiveSteps(startDeps.flowable, pageProjections);
           const overlaidByInst = new Map(overlaid.map((p) => [p.inst, projectionToInstance(p)]));
           const overlaidPage = selected.page.map((i) => overlaidByInst.get(i.id) ?? i);
@@ -866,46 +901,77 @@ export function registerProcessesRoutes(
           const projections = await listInstanceProjections(startDeps.pool, tenantId);
           const match = projections.find((p) => p.inst === instanceId);
           if (match) {
-            // T-0709-R-P0-1: overlay THIS instance's LIVE active node (step/role/
-            // concurrentSteps) so the detail screen's node/nodes reflect the token's
-            // real position — the SAME live source the catalog reads. Overlaying only
-            // the matched projection keeps the fan-out at one engine call; a miss leaves
-            // `match` byte-unchanged on its snapshot (overlayLiveSteps no-ops).
-            const [displayMatch] = await overlayDetailLiveSteps(startDeps.flowable, [match]);
-            const overlaid = displayMatch ?? match;
-            // T-0609: variables + detailed transition history, read from the SAME
-            // Flowable client already threaded into startDeps — under the SAME
-            // tenant-membership gate this whole branch already applies (no new
-            // PDP/capability path; the live acceptance directive was explicit:
-            // do not widen visibility beyond what this page already grants).
-            // Best-effort: an engine error degrades to empty arrays +
-            // historyAvailable:false, never a 500 (the instance's core fields
-            // above do not depend on the engine being reachable).
-            // T-0654 [part A / UX-study §5.3]: pass the starter id so the starter NAME
-            // for «Запущен: <Имя>» resolves in the SAME single batch as the step
-            // completers (no extra query — T-0648 one-call-per-request invariant kept).
-            const { starterDisplay, ...historyDetail } = await fetchInstanceHistoryDetail(
-              startDeps.flowable,
-              match.inst,
-              tenantId,
-              startDeps.resolveActorsDisplay,
-              overlaid.starterActorId,
-            );
-            const detailInstance = projectionToInstance(overlaid);
-            const withStarter = starterDisplay
-              ? { ...detailInstance, starterName: starterDisplay.name, starterType: starterDisplay.type }
-              : detailInstance;
-            res.statusCode = 200;
-            res.setHeader("Content-Type", "application/json");
-            res.end(JSON.stringify({ ...withStarter, ...historyDetail }));
-            return;
+            // T-0721 (D-064, P1 из T-0714 — security/PDP): DETAIL visibility
+            // (variables/history/completedBy*/starter below) is INHERITED from the
+            // READ-visibility of the instance's SOURCE RECORD — the same
+            // isRecordReadable/resolveReadVisibility single authority path records.ts
+            // already gates on (T-0570). Honest-degrade (NF-2): resolveReadVisibility
+            // absent ⇒ skip, byte-identical to pre-T-0721. Record-less instances (no
+            // recordId) are NEVER narrowed here (phase-1 scope — see process-projection.ts's
+            // isInstanceDetailVisible doc-comment; process-def-scoped narrowing is a follow-up).
+            let detailVisible = true;
+            if (startDeps.resolveReadVisibility) {
+              const gateNowMs = Date.now();
+              const { grants, ancestry } = await startDeps.resolveReadVisibility(
+                actorSlug,
+                tenantId,
+                gateNowMs,
+              );
+              detailVisible = await isInstanceDetailVisible(
+                startDeps.pool,
+                tenantId,
+                match.recordId,
+                grants,
+                ancestry,
+                gateNowMs,
+              );
+            }
+            if (detailVisible) {
+              // T-0709-R-P0-1: overlay THIS instance's LIVE active node (step/role/
+              // concurrentSteps) so the detail screen's node/nodes reflect the token's
+              // real position — the SAME live source the catalog reads. Overlaying only
+              // the matched projection keeps the fan-out at one engine call; a miss leaves
+              // `match` byte-unchanged on its snapshot (overlayLiveSteps no-ops).
+              const [displayMatch] = await overlayDetailLiveSteps(startDeps.flowable, [match]);
+              const overlaid = displayMatch ?? match;
+              // T-0609: variables + detailed transition history, read from the SAME
+              // Flowable client already threaded into startDeps. Best-effort: an engine
+              // error degrades to empty arrays + historyAvailable:false, never a 500.
+              //
+              // T-0654 [part A / UX-study §5.3, rebase+recompose]: pass the starter id so
+              // the starter NAME for «Запущен: <Имя>» resolves in the SAME single batch as
+              // the step completers (no extra query — T-0648 one-call-per-request invariant
+              // kept). CRITICAL: this whole body — INCLUDING the starter resolve — runs ONLY
+              // inside `if (detailVisible)`, so no raw variables/history/completedBy AND no
+              // starter identity is ever resolved or emitted for a PDP-hidden instance
+              // (the T-0721 P1 gate is preserved around the added starter-fold).
+              const { starterDisplay, ...historyDetail } = await fetchInstanceHistoryDetail(
+                startDeps.flowable,
+                match.inst,
+                tenantId,
+                startDeps.resolveActorsDisplay,
+                overlaid.starterActorId,
+              );
+              const detailInstance = projectionToInstance(overlaid);
+              const withStarter = starterDisplay
+                ? { ...detailInstance, starterName: starterDisplay.name, starterType: starterDisplay.type }
+                : detailInstance;
+              res.statusCode = 200;
+              res.setHeader("Content-Type", "application/json");
+              res.end(JSON.stringify({ ...withStarter, ...historyDetail }));
+              return;
+            }
+            // else: fall through to the honest 404 below (T-0570 precedent,
+            // records.ts:2059-2071) — indistinguishable from not-found, never
+            // reveals that a hidden instance exists (FR-5-style non-disclosure).
           }
         } catch {
           // Read-projection: degrade gracefully — fall through to 404 (never 500).
         }
       }
-      // DB mode + no matching real instance ⇒ 404 (the seed fixture is NOT served to
-      // real authenticated tenants; T-0301 mock-leak invariant).
+      // DB mode + no matching real instance (OR denied by the READ-visibility
+      // gate above) ⇒ 404 (the seed fixture is NOT served to real authenticated
+      // tenants; T-0301 mock-leak invariant).
       throw new HttpError(404, "NOT_FOUND", "instance not found");
     }
 

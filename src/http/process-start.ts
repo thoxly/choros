@@ -50,6 +50,10 @@ import { resolveActorPrivilege, type ActorPrivilege } from "../db/sandbox-gate-d
 // ExternalTask BEFORE it is written to choros.job (see externalTaskBridge.ts
 // doc-comment on CHOROS_TENANT_VAR for the full rationale).
 import { CHOROS_TENANT_VAR } from "../core/externalTaskBridge.js";
+// T-0721 (D-064, P1 из T-0714): READ-PDP visibility types ONLY (Grant/AncestryOracle
+// are pure lattice types — no math imported here; process-projection.ts is the sole
+// consumer of isRecordReadable, NF-5/FF-INST-VIS-2).
+import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 
 // ---------------------------------------------------------------------------
 // UUID guard — same shape as process-defs.ts withTenantTx
@@ -149,6 +153,28 @@ export type ActorsDisplayResolver = (
   ids: readonly string[],
 ) => Promise<Map<string, { id: string; name: string; type: "human" | "agent" | "service"; deactivated: boolean; resolved: boolean }>>;
 
+/**
+ * T-0721 (D-064, P1 из T-0714 — security/PDP): resolve the actor's covering
+ * READ grants + composite ancestry ONCE per request. Mirrors
+ * `ReadVisibilityResolver` (src/http/records.ts) / `ReportAggReadVisibilityResolver`
+ * (src/http/report-page-render.ts) BYTE-FOR-BYTE: same `{ grants, ancestry }`
+ * shape `isRecordReadable` (core/read-visibility.ts) already consumes. NOT a
+ * new authority path (NF-5) — production wiring (src/server.ts) composes this
+ * from the SAME `getGrantsForSubject` + `loadTenantOrgAncestry` →
+ * `makeResourceAncestryOracle` factory records.ts's resolver uses
+ * (FF-INST-VIS-2: single-resolver, no bespoke grant query).
+ *
+ * OPTIONAL on StartInstanceDeps (honest-degrade, NF-2): when absent, the
+ * DETAIL route's read-visibility gate is skipped entirely — byte-identical to
+ * pre-T-0721 behaviour (never a new failure mode for tests / deployments that
+ * do not wire it yet).
+ */
+export type ProcessReadVisibilityResolver = (
+  actorSlug: string,
+  tenantId: string,
+  nowMs: number,
+) => Promise<{ grants: Grant[]; ancestry: AncestryOracle }>;
+
 export interface StartInstanceDeps {
   pool: pg.Pool;
   flowable: FlowableClient;
@@ -171,6 +197,15 @@ export interface StartInstanceDeps {
    * unresolved (honest degrade — never a 500, never invented data).
    */
   resolveActorsDisplay?: ActorsDisplayResolver;
+  /**
+   * T-0721 (D-064, P1 из T-0714 — security/PDP): OPTIONAL read-visibility
+   * resolver (see {@link ProcessReadVisibilityResolver}). When supplied, GET
+   * /api/processes/:id gates `variables`/`history`/`completedBy*` on the
+   * READ-visibility of the instance's source record (isInstanceDetailVisible,
+   * process-projection.ts). When absent (honest-degrade, NF-2): the gate is
+   * skipped — byte-identical to pre-T-0721 behaviour.
+   */
+  resolveReadVisibility?: ProcessReadVisibilityResolver;
 }
 
 /**

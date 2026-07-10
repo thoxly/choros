@@ -22,6 +22,13 @@
  *   (6) filters — ?actor= / ?action= are bound as PARAMETERS ($N), never interpolated
  *       (injection-safe); a `'; DROP TABLE` actor lands in params, not the SQL text;
  *       the action prefix is escaped + bound (LIKE wildcards neutralised)
+ *   (7) T-0712 — `department.moved`/`position.moved`/`employee.moved` (org-move-API,
+ *       T-0655) get a payload-aware human `summary` (moved/renamed/both, never
+ *       echoing free-text names) + a `target` chip sourced from the writer's
+ *       `subject` column (always populated since T-0655, so this is retroactive —
+ *       no degradation for existing rows); `employee.moved` additionally gets a
+ *       resolved `targetDisplay` (the moved employee IS an actor, resolved via the
+ *       same batch resolver as T-0648); other types are byte-identical (regression)
  */
 
 import { describe, it, expect } from "vitest";
@@ -432,6 +439,201 @@ describe("T-0500 (5) — pagination", () => {
       expect(s.capture.auditSql).toContain("occurred_at <");
       expect(s.capture.auditParams).toContain(1700000001000);
       expect(s.capture.auditParams).toContain("22222222-0000-0000-0000-000000000002");
+    } finally {
+      await close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (7) T-0712 [P3 из LIVE_PROOF T-0655] — `.moved` events (org-move-API,
+// department/position/employee) get a payload-aware human summary + a target
+// chip. Before this fix `summaryFor` had no entry for these three types, so
+// the raw `type` token ("employee.moved") WAS the entire summary, and
+// `target` was always null (the move-diff payload carries none of
+// SAFE_TARGET_KEYS — the moved entity's own id lives only in the writer's
+// `subject` column, which the DAO now also reads).
+// ---------------------------------------------------------------------------
+
+describe("T-0712 (7) — .moved events: human summary + target chip", () => {
+  it("employee.moved (position changed only) → 'Сотрудник перемещён'; target=subject; targetDisplay resolved (fallback shape, honest — no raw UUID as primary text)", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "33333333-0000-0000-0000-000000000003",
+          type: "employee.moved",
+          actor: "e-owner",
+          subject: "emp-1",
+          occurred_at: "1700000005000",
+          payload: { to_position_id: "pos-2", from_position_id: "pos-1" },
+        },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      expect(r.status).toBe(200);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      expect(ev["summary"]).toBe("Сотрудник перемещён");
+      expect(ev["target"]).toBe("emp-1");
+      expect(ev["targetDisplay"]).toBeTruthy();
+    } finally {
+      await close();
+    }
+  });
+
+  it("employee.moved (renamed only, no position change) → 'Сотрудник переименован'; from_name/to_name NEVER echoed in the summary text", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "44444444-0000-0000-0000-000000000004",
+          type: "employee.moved",
+          actor: "e-owner",
+          subject: "emp-2",
+          occurred_at: "1700000004000",
+          payload: { renamed: true, from_name: REASON_SENTINEL, to_name: "Новое Имя Сотрудника" },
+        },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      expect(r.status).toBe(200);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      expect(ev["summary"]).toBe("Сотрудник переименован");
+      expect(ev["target"]).toBe("emp-2");
+      expect(r.raw).not.toContain("Новое Имя Сотрудника");
+      expect(r.raw).not.toContain(REASON_SENTINEL);
+    } finally {
+      await close();
+    }
+  });
+
+  it("employee.moved (position changed AND renamed) → combined summary", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "55555555-0000-0000-0000-000000000015",
+          type: "employee.moved",
+          actor: "e-owner",
+          subject: "emp-3",
+          occurred_at: "1700000004500",
+          payload: { to_position_id: "pos-3", renamed: true, from_name: "A", to_name: "B" },
+        },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      expect(body.events[0]!["summary"]).toBe("Сотрудник перемещён и переименован");
+    } finally {
+      await close();
+    }
+  });
+
+  it("department.moved → 'Отдел перемещён'; target=subject (dept id) but targetDisplay is null — no employee-resolver batch for departments", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "66666666-0000-0000-0000-000000000006",
+          type: "department.moved",
+          actor: "e-owner",
+          subject: "dept-9",
+          occurred_at: "1700000003000",
+          payload: { to_parent_id: "dept-8", from_parent_id: "dept-7" },
+        },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      expect(ev["summary"]).toBe("Отдел перемещён");
+      expect(ev["target"]).toBe("dept-9");
+      expect(ev["targetDisplay"]).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  it("position.moved (department changed AND renamed) → 'Должность перемещена и переименована'; target=subject, targetDisplay null", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "77777777-0000-0000-0000-000000000007",
+          type: "position.moved",
+          actor: "e-owner",
+          subject: "pos-9",
+          occurred_at: "1700000002500",
+          payload: { to_department_id: "dept-4", renamed: true, from_title: "A", to_title: "B" },
+        },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      expect(ev["summary"]).toBe("Должность перемещена и переименована");
+      expect(ev["target"]).toBe("pos-9");
+      expect(ev["targetDisplay"]).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  // Honest degradation: a hypothetical `.moved` row with no `subject` at all
+  // (the column has ALWAYS been populated by seed-write.ts since T-0655's
+  // first commit, so this is a defensive edge case, not a real legacy shape)
+  // still gets a human summary — just no target chip, exactly like today
+  // before this fix, never worse.
+  it("employee.moved with an empty diff AND no subject → honest fallback summary, target null (never worse than before this fix)", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "88888888-0000-0000-0000-000000000008",
+          type: "employee.moved",
+          actor: "e-owner",
+          occurred_at: "1700000001500",
+          payload: {},
+        },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      expect(ev["summary"]).toBe("Сотрудник изменён");
+      expect(ev["target"]).toBeNull();
+      expect(ev["targetDisplay"]).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  it("regression: record.create / grant.create summary+target are byte-identical to before this fix", async () => {
+    const s = baseScenario({ isOwner: true, auditRows: sampleRows() });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const grant = body.events.find((e) => e["action"] === "grant.create")!;
+      expect(grant["summary"]).toBe("Выдан грант прав");
+      expect(grant["target"]).toBe("g-77");
+      const deferred = body.events.find((e) => e["action"] === "agent.deferred")!;
+      expect(deferred["summary"]).toBe("Агент передал решение человеку");
+      expect(deferred["target"]).toBe("inst-1");
     } finally {
       await close();
     }

@@ -1,0 +1,39 @@
+{
+  "task_id": "T-0705",
+  "status": "pr_open",
+  "branch": "task/T-0705",
+  "pr_url": "https://github.com/thoxly/choros/pull/60",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/server.ts",
+    "src/__tests__/rights-resources-routing.test.ts"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [],
+  "diagnosis": {
+    "symptom": "На /rights, /users, /rights/trail при валидной сессии консоль браузера показывала несколько 401 + один 404, хотя экраны рендерились и данные грузились корректно (live-proof T-0652 F-3).",
+    "root_cause_401": "НЕ найдено — все fetch-вызовы на /rights (screen-rights.jsx), /users (screen-users.jsx), /rights/trail (ra-grant-trail.jsx) уже используют authHeaders()/fetchGrantTrail с корректными заголовками (T-0668-класс здесь не воспроизведён). Живой прогон живым владельческим сеансом (реальный вход через форму Keycloak) на всех трёх экранах дал 0 не-2xx запросов ДО фикса, кроме одного — см. root_cause_404. Гипотеза: наблюдавшиеся в T-0652 401 были кратковременной гонкой на КОНКРЕТНОЙ сессии/токене того прогона (не воспроизведена мной с валидным свежим токеном) либо связаны с истечением токена в момент наблюдения — не системная дыра в коде экранов на момент этой проверки.",
+    "root_cause_404": "GET /api/rights/resources (src/http/rights-resources.ts, T-0609) регистрировался в src/server.ts ПОСЛЕ registerRightsRoutes (которая добавляет catch-all GET /api/rights/:roleId). Router (src/http/router.ts) — first-match-wins по плоскому массиву, поэтому '/api/rights/resources' совпадал с :roleId первым → findRole('resources') → 404 'role not found'. Четыре соседних роута (change-requests/sod-rules/sod-admin/tenant-state) уже несли явный комментарий 'MUST be registered BEFORE registerRightsRoutes' — этот роут (T-0609, добавлен позже) этого не получил.",
+    "fix": "Перенесена регистрация registerRightsResourcesRoute к соседям (сразу после registerRightsOverviewRoutes), до registerRightsRoutes. Один call-site вместо двух.",
+    "confirmation": "Живой прогон, ВЫСОКАЯ уверенность. Локально собран web dist + server (tsc build), поднят против существующего локального Postgres (:55432, choros/choros_migrator) + Keycloak 25.0.6 (:8180, realm choros) в режиме CHOROS_AUTH_MODE=keycloak. Реальный вход через форму Keycloak (владелец e-owner — KC-юзер создан на этом локальном стенде через partialImport с корректным actor_type-атрибутом, т.к. обычный admin POST /users молча роняет незадекларированные атрибуты в KC25 declarative User Profile — см. отдельная находка ниже). Сетевой лог браузера (claude-in-chrome read_network_requests) на чистой загрузке /rights, /users, /rights/trail: ДО фикса — GET /api/rights/resources = 404, все остальные 200; ПОСЛЕ фикса (пересборка+рестарт) — 0 не-2xx на всех трёх экранах. Регресс-тест src/__tests__/rights-resources-routing.test.ts мутационно проверен (временная инверсия порядка регистрации → тест падает 404≠200; восстановление порядка → тест зелёный)."
+  },
+  "unrelated_finding_out_of_scope": "Обнаружено попутно при живом воспроизведении (НЕ входит в этот PR, заведена отдельная задача через spawn_task): Keycloak 25 declarative User Profile в этом realm декларирует только username/email/firstName/lastName как admin-редактируемые атрибуты. src/keycloak/admin-port.ts createHumanUser шлёт attributes.actor_type через обычный admin REST POST /users — KC отвечает 201, но атрибут МОЛЧА не сохраняется (подтверждено: созданный так юзер получил токен БЕЗ claim actor_type → 401 'missing or invalid actor_type claim' на КАЖДЫЙ запрос, ErrorState на экране, не просто консольный шум). Это тот же путь, что использует продовый POST /api/users ('Создать учётку'). Не входит в T-0705 (это про 401/404-шум при УЖЕ рабочей сессии), но при определённой конфигурации realm может полностью ломать вход для людей, заведённых через UI создания учёток.",
+  "live_proof_plan": {
+    "precondition": "Стенд дев offline на момент задачи — верификация выполнена ЛОКАЛЬНО против существующего docker Postgres (choros-postgres-1, :55432) + Keycloak (t-0633-keycloak-1, :8180, realm choros), пересобранных web dist + server из ветки. Это НЕ замена финальной приёмке на реальном dev-стенде.",
+    "steps": [
+      "1. На dev-стенде (после промоушна) открыть /rights под ЛЮБОЙ валидной сессией (лучше — владелец/админ, чтобы сработали доп. фетчи dictionaries/resources/org-tenant-state).",
+      "2. Открыть DevTools → Console + Network, включить 'Preserve log', сделать hard-reload (Cmd+Shift+R).",
+      "3. Проверить: 0 красных строк в консоли, 0 запросов со статусом 4xx/5xx в Network (кроме, возможно, легитимных 403 у не-владельца — это не предмет фикса).",
+      "4. Повторить шаги 2-3 для /users и /rights/trail.",
+      "5. Убедиться, что данные на экране реальные (список ролей/учёток/журнала не пуст для тенанта с данными), а не демо-заглушка — фикс не должен был поменять контент, только устранить шумный 404.",
+      "6. Если ЛЮБОЙ 401/404 всё ещё виден — сверить URL упавшего запроса с диагнозом выше (это уже не /api/rights/resources) и завести отдельный follow-up, не путать с этим фиксом."
+    ],
+    "expected": "0 не-2xx сетевых запросов в консоли на все три экрана при валидной сессии."
+  }
+}

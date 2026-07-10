@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0717",
+  "status": "pr_open",
+  "branch": "task/T-0717",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "web/src/screens/screen-record-detail.jsx",
+    "web/src/screens/screen-record-detail.test.jsx",
+    "docs/tasks/T-0717.spec.md (NEW)",
+    "docs/tasks/T-0717.adr.md (NEW)",
+    "T-0717.pr-handoff.json (NEW)"
+  ],
+  "summary": "P3 из LIVE_PROOF T-0708 (docs/live-proof/T-0708.md): deriveInstanceTitle (T-0684, web/src/screens/process-instance.logic.js) корректно НИКОГДА не показывает голый машинный ключ, но для движковых (source=engine, нет строки choros.process_definition — напр. telLinear, деплоенный напрямую в Flowable из config/flowable/processes/) процессов честно демотирует до generic «Процесс». Функция УЖЕ возвращает keyDemoted (демотированный сырой ключ) РОВНО для различения таких случаев, и screen-process-instance.jsx уже рендерит его мета-строкой под заголовком — но RelatedProcessRow (секция «ПРОЦЕССЫ ПО ЭТОЙ ЗАПИСИ», screen-record-detail.jsx, T-0708) деструктурировал из ТОГО ЖЕ вызова deriveInstanceTitle(instance) ТОЛЬКО { title }, отбрасывая keyDemoted целиком. Итог: запись с 2+ движковыми процессами показывала визуально ИДЕНТИЧНЫЕ строки «Процесс» подряд, неразличимые без клика в каждую. ФИКС (docs/tasks/T-0717.adr.md): RelatedProcessRow теперь деструктурирует { title, keyDemoted } и рендерит keyDemoted тем же демотированным <Mono> чипом (fontSize xs, muted), байт-в-байт скопированным из screen-process-instance.jsx — одна и та же визуальная конвенция для одного и того же поля контракта в двух местах. НОЛЬ новых резолверов, НОЛЬ новых HTTP/engine запросов: procId уже приходит в каждом элементе GET /api/processes?record=<id>. Два кандидата на 'настоящее' человеко-имя для source=engine (чтение config/flowable/processes/*.bpmn20.xml на сервере; живой GET /repository/process-definitions к Flowable) разведаны и ОТКЛОНЕНЫ — см. ADR §2: (1) config/ не копируется в рантайм-образ (Dockerfile), чтение сработало бы только в dev-чекауте, молча ничего не давая на реальном стенде; (2) Flowable process_key НЕ tenant-partitioned в этой системе (deployBpmn/startInstance никогда не передают нативный Flowable tenantId) — резолюция по голому ключу рискует межтенантной утечкой имени (класс, который T-0616 §F-1 закрывал для resolveDefinitionNames). Оба — вне периметра P3, задокументированы как follow-up.",
+  "reuse_notes": [
+    "deriveInstanceTitle (process-instance.logic.js, T-0684) НЕ тронут — контракт уже полный (title + keyDemoted), дефект был в ОДНОМ из двух потребителей, отбрасывавшем половину результата.",
+    "keyDemoted-рендер в RelatedProcessRow скопирован байт-в-байт (тот же fontSize/color) из screen-process-instance.jsx's собственного title-блока — не изобретена новая визуальная конвенция.",
+    "fallbackDefinitionName / resolveDefinitionNames (server, T-0614/T-0616) НЕ тронуты — FF-1 anti-case-lock pin (fallbackDefinitionName('telLinear') === 'telLinear') остаётся в силе байт-в-байт."
+  ],
+  "deviations_from_adr": [],
+  "tests_added": [
+    {
+      "file": "web/src/screens/screen-record-detail.test.jsx",
+      "covers": "Новый тест 'renders the demoted key (keyDemoted) so 2+ generic «Процесс» rows stay distinguishable': проверяет `const { title, keyDemoted } = deriveInstanceTitle(instance);`, условный рендер `{keyDemoted && <Mono>...` и что primary `{title}` рендерится отдельным span'ом безусловно (демотированный чип никогда не подменяет primary). Существующие 2 теста этого же describe-блока (human-layer primitives; done-instance terminal note) обновлены только в части slice-окна (rowStart..rowEnd по индексу следующей функции вместо магического +1400 символов — функция выросла после правки; сами ожидания байт-в-байт не менялись). Мутационно проверено вживую: временный откат `const { title, keyDemoted } = ...` → `const { title } = ...` дал RED (ровно 1 упавший тест из 40 в файле, новый тест keyDemoted), откат отменён, git diff чист."
+    }
+  ],
+  "gates": {
+    "tsc": "green — node_modules/.bin/tsc --noEmit, exit 0, 0 ошибок (server-код T-0717 не трогал; типов не задел)",
+    "eslint_web": "0 НОВЫХ ошибок в screen-record-detail.jsx (единственная строка react-hooks/exhaustive-deps:542 — pre-existing, подтверждено git-stash diff-сравнением до/после правки, идентична на обеих сторонах). Web lint-скрипт в package.json намеренно `|| true` (некритичен по конвенции репо, см. T-0684 pr-handoff)",
+    "vitest_targeted_web": "green — 3 целевых файла: screen-record-detail.test.jsx (40, было 39, +1 новый), process-instance.logic.test.js (30, не тронут, регресс-подтверждение), screen-process-instance.test.jsx (12, не тронут) = 82 passed, 0 failed",
+    "vitest_full_web": "green — 98 файлов, 2684 tests passed, 0 failed (npx vitest run из web/)",
+    "vite_build": "green — 546 modules transformed, exit 0",
+    "fitness_targeted": "anti-case-lock.sh PASS (aggregate 15 ≤ baseline 16, telLinear: 1 == baseline 1, никакого нового кейс-литерала) + --self-test PASS; detel-base-task-from-engine.sh PASS (не затронут этой задачей, точечный прогон по инструкции) + --self-test PASS; ux/anti-uuid-actor-render.sh PASS (0 голых raw-identifier рендеров под web/src/screens/) + --self-test PASS. Полный fitness:db НЕ гонялся (задача чисто презентационная, ноль SQL/миграций/DB-путей — по прямой инструкции оркестратора)."
+  },
+  "live_proof_plan": {
+    "status": "deferred — стенд offline на момент задачи (coder-worktree без доступа к dev-стенду)",
+    "steps": [
+      "1. На dev-стенде (Tailscale 100.121.76.86:3000, залогиненная сессия e-owner/владелец) найти или создать запись, к которой привязаны/от которой стартованы 2+ РАЗНЫХ движковых (source=engine) процесса без modeler-строки — простейший воспроизводимый случай: запись с on_create-триггером на процесс telLinear, запущенная ДВАЖДЫ (2 отдельных инстанса одного и того же engine-only ключа) — этого достаточно, т.к. деньги вопроса не в РАЗНОСТИ ключей, а в том, что демотированный ключ теперь ВООБЩЕ виден.",
+      "2. Открыть карточку записи (/apps/:appId/records/:id) → секция «ПРОЦЕССЫ ПО ЭТОЙ ЗАПИСИ» (data-testid=related-processes).",
+      "3. ДО фикса (на dev до промоушна этой ветки): обе строки показывают ТОЛЬКО «Процесс» без какого-либо вторичного признака — неразличимы визуально.",
+      "4. ПОСЛЕ фикса (эта ветка): каждая строка показывает «Процесс» + демотированный мото-чип с сырым ключом (напр. `telLinear`) рядом с заголовком — строки РАЗЛИЧИМЫ (при разных ключах — разные чипы; при одинаковом ключе, если оба инстанса реально того же telLinear — чипы идентичны, но это ЧЕСТНО: это буквально два запуска ОДНОГО и того же процесса, различать их по названию процесса и не должно быть возможно — StepRef/StatusChip/ссылка на конкретный /processes/:id остаются единственным способом различить ИНСТАНСЫ одного определения, что уже работает).",
+      "5. Регресс-проверка: запись с процессом, у которого ЕСТЬ modeler-имя (source=modeler) — строка рендерит primary=реальное имя + демотированный ключ рядом (было — только primary; теперь плюс мета-чип, не регресс, тот же паритет со screen-process-instance.jsx).",
+      "6. Клик по любой строке ведёт на /processes/:id как раньше (href/title не тронуты) — карточка инстанса там уже показывала keyDemoted (не тронута этой задачей)."
+    ]
+  },
+  "friction_events": [
+    "Worktree был без node_modules (root + web) — npm ci --maxsockets=3 в обоих потребовался до любых гейтов (тот же паттерн, что T-0684/T-0711 handoff уже фиксировали).",
+    "Первоначальная задача сформулирована как «дать движковым процессам человеко-имя из BPMN name» — разведка (grep всех 4 использований deriveInstanceTitle, чтение Dockerfile, flowable-client.ts, process-defs.ts) показала, что ОБА буквальных прочтения этой формулировки (локальный BPMN-файл; живой Flowable REST) либо мертвы в проде (config/ не копируется в рантайм-образ), либо небезопасны (Flowable process_key не tenant-partitioned — риск межтенантной утечки имени). Реальный, безопасный, P3-соразмерный дефект оказался ЗНАЧИТЕЛЬНО у́же: один потребитель уже существующего резолвера (T-0684) отбрасывал половину его контракта (keyDemoted). Задокументировано в ADR §2 как явно отклонённые альтернативы + follow-up O-1, а не тихо подменено."
+  ]
+}

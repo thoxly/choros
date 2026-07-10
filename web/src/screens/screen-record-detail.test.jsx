@@ -479,7 +479,8 @@ describe('screen-record-detail — RelatedProcessesPanel reverse link (T-0708, E
     expect(src).toContain("import { deriveInstanceTitle, currentNodes } from './process-instance.logic.js'");
     const rowStart = src.indexOf('function RelatedProcessRow(');
     expect(rowStart).toBeGreaterThan(-1);
-    const rowSrc = src.slice(rowStart, rowStart + 1400);
+    const rowEnd = src.indexOf('function RelatedProcessesPanel(', rowStart);
+    const rowSrc = src.slice(rowStart, rowEnd);
     expect(rowSrc).toContain('deriveInstanceTitle(instance)');
     expect(rowSrc).toContain('<StepRef step={nodes[0]} />');
     expect(rowSrc).toContain('<StatusChip status={instance.status} />');
@@ -488,9 +489,33 @@ describe('screen-record-detail — RelatedProcessesPanel reverse link (T-0708, E
     expect(rowSrc).not.toMatch(/>\s*\{instance\.id\}\s*</);
   });
 
+  // T-0717 [P3 follow-up, T-0708 LIVE_PROOF]: keyDemoted was silently dropped here —
+  // a record with 2+ engine-only related instances (source=engine, no modeler row,
+  // e.g. telLinear) all showed the IDENTICAL honest generic «Процесс» with nothing
+  // to tell them apart. deriveInstanceTitle already computes the demoted secondary
+  // for exactly this purpose (screen-process-instance.jsx already renders it) —
+  // this row must consume BOTH fields of the SAME call, not just `title`.
+  it('renders the demoted key (keyDemoted) so 2+ generic «Процесс» rows stay distinguishable', () => {
+    const rowStart = src.indexOf('function RelatedProcessRow(');
+    const rowEnd = src.indexOf('function RelatedProcessesPanel(', rowStart);
+    const rowSrc = src.slice(rowStart, rowEnd);
+    // Both fields destructured from the ONE deriveInstanceTitle call (no second
+    // resolver, no new fetch — procId already rides the existing instance payload).
+    expect(rowSrc).toContain('const { title, keyDemoted } = deriveInstanceTitle(instance);');
+    // Rendered conditionally (never for a null/absent key) via the SAME `Mono`
+    // demoted-chip convention screen-process-instance.jsx's own title block uses.
+    expect(rowSrc).toContain('{keyDemoted &&');
+    expect(rowSrc).toContain('<Mono');
+    expect(rowSrc).toContain('{keyDemoted}');
+    // The demoted chip never usurps the primary label — `title` still renders
+    // as its own dedicated span, unconditionally.
+    expect(rowSrc).toMatch(/<span[^>]*>\s*\{title\}\s*<\/span>/);
+  });
+
   it('a done instance shows the honest terminal note instead of an empty step', () => {
     const rowStart = src.indexOf('function RelatedProcessRow(');
-    const rowSrc = src.slice(rowStart, rowStart + 1400);
+    const rowEnd = src.indexOf('function RelatedProcessesPanel(', rowStart);
+    const rowSrc = src.slice(rowStart, rowEnd);
     expect(rowSrc).toContain("'Процесс завершён'");
   });
 });

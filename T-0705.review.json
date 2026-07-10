@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0705",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__/rights-resources-routing.test.ts",
+      "issue": "Regression test is order-sensitive (I mutation-verified it myself: swapping to catch-all-first -> 404 RED), so it is NOT tautological. BUT it re-registers registerRightsResourcesRoute + registerRightsRoutes by hand rather than importing buildRouter from server.ts. It therefore locks the CONTRACT (resources module before rights module) but would NOT auto-catch a future re-ordering of the real call in server.ts. Same limitation as the sibling CR-9 lock it mirrors.",
+      "suggestion": "Acceptable (established sibling pattern). Ideal future hardening: assert against the router assembled by buildRouter() so a server.ts re-order regresses automatically."
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/app-shell/dev-auth.js:89 (authHeaders) + web/src/screens/rights/screen-rights.jsx / ra-grant-trail.jsx",
+      "issue": "401 is most likely a token-timing artifact (I AGREE): shell.jsx:1015 authReady gates first render until the KC bootstrap/refresh completes, so a valid-session boot 401 is unlikely. However the mechanism for a latent race EXISTS: authHeaders() returns {} (no Authorization) whenever getToken() is momentarily null (refresh in flight), and the three admin screens use BARE fetch(authHeaders()), NOT the T-0608 fetchWithAuthRetry self-heal wrapper. A transient no-token window or mid-session expiry would 401 without self-heal. Not a proven non-issue.",
+      "suggestion": "Non-blocking follow-up: migrate screen-rights.jsx / ra-grant-trail.jsx / users screen fetches to fetchWithAuthRetry (T-0608) so a transient/expired token self-heals instead of surfacing a raw 401."
+    },
+    {
+      "id": "F3",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/keycloak/admin-port.ts:380-407 (createHumanUser) + config/keycloak/realm-choros.json (no userProfile) + scripts/kc-dev-setup.sh:257-266",
+      "issue": "OUT-OF-SCOPE finding by the builder is a REAL P1 (high plausibility), NOT a false alarm. KC 25.0.6 (docker-compose.yml:52) ships the declarative user profile GA with unmanaged attributes DISABLED by default. createHumanUser sets attributes.actor_type=[\"human\"] via admin REST POST /users, but realm-choros.json has NO userProfile section, so kc-dev-setup.sh step 5 (explicitly designed to declare actor_type via PUT /users/profile) hits its [SKIP] branch -> actor_type stays undeclared/unmanaged -> KC25 silently drops it on admin-API create -> the UI-created user's login token carries no actor_type claim -> verifyClaims (FF-3) rejects -> 401 on everything. Seeded/fixture users work because realm import writes attributes directly (bypasses profile validation) -> the exact seeded-OK vs UI-created-401 asymmetry reported. Corroborated by prior memory T-0638 (realm-reimport wipes actor_type -> 401). Caveat: not live-reproduced; if KC returns 400 instead of silently dropping, createHumanUser maps it to a misleading EMAIL_INVALID. Either way it is a genuine defect for UI-created accounts.",
+      "suggestion": "Separate task (judge already filing). Fix by adding a userProfile block to realm-choros.json declaring actor_type (options-validated per the kc-dev-setup.sh comment) OR set unmanagedAttributePolicy. NOT fixed here (out of scope for the 404 ordering fix)."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "404 root cause = /api/rights/resources shadowed by /api/rights/:roleId catch-all (registration ordering)", "covered": true },
+    { "ac": "Fix moves registerRightsResourcesRoute BEFORE registerRightsRoutes, next to its 5 siblings", "covered": true },
+    { "ac": "No OTHER 4-seg GET /api/rights/<literal> route remains shadowed (all 6 register before line 693)", "covered": true },
+    { "ac": "Router is first-match-wins over insertion order with exact segment-count guard (no specificity sort)", "covered": true },
+    { "ac": "Regression test is order-sensitive / mutation-proven (self-verified RED on swap)", "covered": true },
+    { "ac": "no-DB honest-degrade preserved (moved block stays inside if(grantsPool))", "covered": true },
+    { "ac": "Gates: tsc 0, targeted vitest 15/15, http-route-auth-coverage PASS, rights-ui-{no-new-write,anti-case,frozen-write} PASS", "covered": true },
+    { "ac": "Diff scoped to server.ts + new test + pr-handoff.json", "covered": true }
+  ]
+}

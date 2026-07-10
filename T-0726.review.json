@@ -1,0 +1,52 @@
+{
+  "task_id": "T-0726",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/actor-active-route-coverage.sh:124 (ACTIVE_MARKERS requirePrivilege)",
+      "issue": "requirePrivilege — маркер по имени-конвенции (wildcard). Любой будущий файл-локальный requirePrivilege, НЕ оборачивающий authority-резолвер, получит ложное зелёное (единственное маскирующее направление гейта). Сейчас единственное живое использование (solution-publish.ts:485-496) верифицировано реальным — оборачивает resolveActorPrivilege и 403-ит не-owner/admin/authoring_draft. Ложного зелёного в живом дереве НЕТ.",
+      "suggestion": "Оставить как есть (disclosed в ADR лимит #1). При добавлении ВТОРОГО файл-локального requirePrivilege — обязательный ручной спот-чек, что он реально доходит до ACTOR_ACTIVE-резолвера."
+    },
+    {
+      "id": "N2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/actor-active-route-coverage.sh:262-296 (extract_routes)",
+      "issue": "Вложенный .register( со СТРОКОВЫМИ литералами внутри хендлера разбил бы блок роута и осиротил его маркер (ложно-положительное + фантом-роут — SYN1). В живом коде не встречается: единственные не-router.register — target.register(method, pattern, ...) в 2 фасадах с ПЕРЕМЕННЫМИ аргументами → extractor даёт пустой method/path → корректно пропускается. Ложно-положительное направление (шум), не маскирующее.",
+      "suggestion": "Оставить (disclosed в ADR лимит #2). Направление шума, не дыры."
+    },
+    {
+      "id": "N3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/actor-active-route-coverage.sh:165-174 (ROUTE_WHITELIST §D)",
+      "issue": "solution-publish publish-preview и files download значатся ОДНОВРЕМЕННО marker-covered и в whitelist §D — избыточно.",
+      "suggestion": "Безвредно; сами §D-записи это отмечают ('the marker scan already passes this route'). Косметика."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Гейт по образцу FF-0328 (перечисление роутов, whitelist, self-test)", "covered": true },
+    { "ac": "7 резолверов сверены с FF-0662 registry (дословно)", "covered": true },
+    { "ac": "Честно спроектирован (что доказывает / не доказывает)", "covered": true },
+    { "ac": "Прогон на живом дереве, каждый hit классифицирован (77=12+52+13)", "covered": true },
+    { "ac": "self-test: негатив + позитив + method-scope + whitelist", "covered": true },
+    { "ac": "informational/required решение обосновано (mask-unmask урок)", "covered": true },
+    { "ac": "Соседние гейты не сломаны (FF-0328/FF-0662/frozen-checks PASS)", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "ALL 13 findings confirmed real (zero false positives). Security debt to file as tasks:",
+    "audit.ts GET /api/audit, /export, /:instanceId — self-documented FORWARD-OBLIGATION, no PDP (audit.ts:635-638)",
+    "grant-trail.ts GET /api/grant-trail — zero authority marker in file; whole tenant grant journal open to any member",
+    "inbox.ts GET /api/inbox, /:id — getRoleSlugsForActor (grants-dao.ts:431) resolves employee by slug+tenant WITHOUT deactivated_at IS NULL",
+    "operational-analytics.ts GET /api/operational-analytics, /export — tenant-wide aggregate + cross-employee top_actors, no READ-PDP; parity gap vs T-0632",
+    "processes.ts GET /api/processes (LIST) — no marker in LIST block; T-0714-tracked (DETAIL closed by T-0721)",
+    "record-links.ts GET /api/records/:id/links — self-documented 'no grant resolver threaded' (record-links.ts:31); RLS-only",
+    "report-page-render.ts GET /api/process-analytics — no checkReadGrant (siblings /render//export//data carry it); cross-actor breakdown open",
+    "rights-change-requests.ts GET /api/rights/change-requests — listChangeRequests(pool,tenantId) no authority; pending privilege-change requests open to any member",
+    "rights-sod.ts GET /api/rights/sod-check — subjectId query-overridable to ANY slug, no privilege check; cross-employee SoD report open"
+  ]
+}
