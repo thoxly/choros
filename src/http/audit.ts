@@ -7,8 +7,10 @@
  *                                 log (choros.audit_event), tenant-scoped + REDACTED
  *                                 + keyset-paginated + authz-gated. Replaces the
  *                                 former in-memory "Счёт-агент" demo timeline.
- *   GET /api/audit/:instanceId  — demo instance trace (in-memory seed) — UNCHANGED.
- *   GET /api/audit/export       — download a demo instance as JSON (T-0138) — UNCHANGED.
+ *   GET /api/audit/:instanceId  — demo instance trace (in-memory seed). Data shape
+ *                                 UNCHANGED since T-0234; authz gate ADDED (T-0737).
+ *   GET /api/audit/export       — download a demo instance as JSON (T-0138). Data
+ *                                 shape UNCHANGED; authz gate ADDED (T-0737).
  *
  * T-0500 (the reality-gap fix): `GET /api/audit` used to return a hardcoded in-memory
  * timeline ({instance, trace}) that had NOTHING to do with the real audit_log. It now
@@ -16,8 +18,9 @@
  * CALLER's tenant, redacted at the projection boundary (raw payload/scope NEVER egress),
  * behind a conservative owner/admin gate (the whole tenant's audit is sensitive).
  * Response shape: { events: AuditLogItem[], nextCursor } — the flat, paginated list the
- * audit screen now consumes. The instance-trace demo routes are left untouched (they are
- * a different, instance-scoped surface used by the process-instance demo).
+ * audit screen now consumes. The instance-trace demo routes serve different (fixture)
+ * data — a different, instance-scoped surface used by the process-instance demo — but
+ * are gated by the SAME authority policy (see T-0737 below).
  *
  * SECURITY (the spine of this read — it is audit EXPOSURE):
  *   • authz   — genesis-owner ONLY (T-0500 review: mgmt_object:* grant must not open
@@ -30,10 +33,23 @@
  *   • filters — optional ?actor= / ?action= are bound as parameters ($N), never
  *               interpolated (injection-safe; LIKE wildcards neutralised).
  *
+ * T-0737 (security/P1, closes a forward obligation this file carried since T-0138/
+ * T-0500): GET /api/audit/export and GET /api/audit/:instanceId used to have NO
+ * PDP/authority gate at all — export required only an x-dev-user header (any tenant
+ * member, or in keycloak mode any authenticated caller), and :instanceId required
+ * NOTHING (dev-mode auth is a no-op; no per-route check either). A T-0726 judge
+ * finding (R-3, on T-0702) confirmed a live-but-deactivated actor's residual JWT
+ * (~300s window; KC session revocation cannot shrink an already-issued access token)
+ * would read all three routes unfiltered. All three now share ONE gate —
+ * requireAuditRead() — the SAME loadAdminContext + genesis-owner-only policy as the
+ * pre-existing /api/audit gate. See requireAuditRead()'s doc comment for why the
+ * gate is a shared FUNCTION (not inlined per-route) and how that interacts with
+ * ci/checks/actor-active-route-coverage.sh (ADR-T0726).
+ *
  * Export-API (T-0138, demo instance) write-path:
  *   GET /api/audit/export?instance=<id>  — download named instance as JSON.
  *   GET /api/audit/export                — download default instance (INS-7731).
- *   Authz: x-dev-user header required in dev mode (401 if absent).
+ *   Authz: requireAuditRead() (T-0737) — genesis-owner only, same as /api/audit.
  */
 import pg from "pg";
 import { HttpError, type Router } from "./router.js";
@@ -506,6 +522,52 @@ function holdsAuditRead(admin: AdminContext): boolean {
   return admin.isGenesisOwner;
 }
 
+/**
+ * T-0737 — the SINGLE shared authority gate for ALL THREE audit-surface GET
+ * routes registered below: the REAL tenant-wide journal (T-0500) AND the two
+ * legacy demo routes (GET /api/audit/export, GET /api/audit/:instanceId —
+ * T-0138/T-0234). Those two used to carry only AUTHENTICATION (withAuth /
+ * an x-dev-user presence check) with NO authorization at all — the file's own
+ * "FORWARD-OBLIGATION" comment flagged this and explicitly required closing
+ * all three together (T-0726 judge finding on T-0702's R-3: a live-but-
+ * deactivated actor's residual JWT window would otherwise read the entire
+ * audit surface unfiltered). This reuses the EXACT SAME resolver + policy as
+ * the pre-existing /api/audit gate (loadAdminContext + holdsAuditRead,
+ * genesis-owner ONLY) — no second authority path.
+ *
+ * Fail-closed at every step: unresolved/unauthenticated identity -> 401/403
+ * from extractActor / resolveActorTenant; insufficient authority -> 403
+ * ADMIN_GATE_REJECTED. Callers MUST check `pool !== undefined` first (503
+ * AUDIT_UNAVAILABLE) — this function needs a live DB connection to resolve
+ * the caller's admin context and cannot fail open when one is absent.
+ *
+ * NOTE for readers of ci/checks/actor-active-route-coverage.sh (ADR-T0726):
+ * this is a module-scope helper defined BEFORE registerAuditRoutes' first
+ * `.register(` call, so its `loadAdminContext` reference is invisible to that
+ * gate's block-scoped text scan (§2.4 limitation #1 — the SAME class of gap
+ * notification-prefs.ts's `checkAdminGrant` wrapper already has). All three
+ * call sites below are hand-verified and whitelisted under ROUTE_WHITELIST §D
+ * with a citation to this function — do NOT "fix" the scan gap by duplicating
+ * this gate inline per-route; that would triple the surface for any future
+ * change to the audit-read authority policy.
+ */
+async function requireAuditRead(
+  pool: pg.Pool,
+  req: import("node:http").IncomingMessage,
+): Promise<{ actorId: string; tenantId: string }> {
+  const actorId = await extractActor(req, pool);
+  const tenantId = await resolveActorTenant(pool, actorId);
+  const admin = await loadAdminContext(pool, tenantId, actorId, Date.now());
+  if (!holdsAuditRead(admin)) {
+    throw new HttpError(
+      403,
+      "ADMIN_GATE_REJECTED",
+      "insufficient authority to read the tenant audit log",
+    );
+  }
+  return { actorId, tenantId };
+}
+
 /** Parse ?limit= / ?cursor= / ?actor= / ?action= for the audit list. */
 function parseAuditQuery(req: import("node:http").IncomingMessage): {
   limit: number;
@@ -548,21 +610,10 @@ async function handleGetAuditLog(
   req: import("node:http").IncomingMessage,
   res: import("node:http").ServerResponse,
 ): Promise<void> {
-  const actorId = await extractActor(req, pool);
-  const tenantId = await resolveActorTenant(pool, actorId);
+  // Authz — requireAuditRead resolves actor+tenant and requires owner authority
+  // (loadAdminContext, own tx, no side-effect) BEFORE the read tx. Fail-closed.
+  const { tenantId } = await requireAuditRead(pool, req);
   const { limit, cursor, actor, action } = parseAuditQuery(req);
-  const nowMs = Date.now();
-
-  // Authz — loadAdminContext is a DB read (own tx, no side-effect), BEFORE the read
-  // tx (mirrors agents.ts). Fail-closed: owner/admin only.
-  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
-  if (!holdsAuditRead(admin)) {
-    throw new HttpError(
-      403,
-      "ADMIN_GATE_REJECTED",
-      "insufficient authority to read the tenant audit log",
-    );
-  }
 
   const page = await withTenantTx(pool, tenantId, async (client) =>
     readAuditLog(
@@ -646,25 +697,23 @@ export function registerAuditRoutes(
   //   ?instance=<id>  — export a specific instance (404 if not found)
   //   (absent)        — export the default instance (INS-7731)
   //
-  // Authz: x-dev-user header required (dev mode); 401 if absent.
-  //   FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
-  //   PDP check: operation=read, resource=audit_trace before returning data.
-  //   (Same obligation applies to GET /api/audit and GET /api/audit/:instanceId
-  //   — all three routes must be closed together in the hardening pass.)
+  // Authz (T-0737 — CLOSED, was FORWARD-OBLIGATION): requireAuditRead — the SAME
+  // owner-only gate as GET /api/audit (loadAdminContext + holdsAuditRead). This
+  // route serves demo/fixture data (T-0138), not the real journal, but is grouped
+  // under the SAME audit-surface authority policy per the file's own forward
+  // obligation ("all three routes must be closed together"). No pool wired
+  // (memory mode) -> 503, same as /api/audit (the gate itself needs a DB read).
   //
   // Response: 200 application/json + Content-Disposition: attachment.
   router.register("GET", "/api/audit/export", withAuth(async (req, res) => {
-    // Mode-aware actor resolution (T-0327): keycloak → JWT sub validated by withAuth;
-    // dev → x-dev-user. Actor is resolved for audit but not used further (access check only).
-    const _authCtx = getAuthContext(req);
-    if (_authCtx === undefined) {
-      // Dev mode — verify x-dev-user is present (same as before).
-      let devUser = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(devUser)) devUser = devUser[0];
-      if (!devUser || typeof devUser !== "string") {
-        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
-      }
+    if (pool === undefined) {
+      throw new HttpError(
+        503,
+        "AUDIT_UNAVAILABLE",
+        "audit export is not available (no database configured)",
+      );
     }
+    await requireAuditRead(pool, req);
 
     // Parse optional ?instance= query param
     const rawUrl = req.url ?? "/";
@@ -698,9 +747,21 @@ export function registerAuditRoutes(
 
   // GET /api/audit/:instanceId — return specific instance or 404
   //
-  // FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
-  // PDP check: operation=read, resource=audit_trace before returning data.
-  router.register("GET", "/api/audit/:instanceId", withAuth(async (_req, res, params) => {
+  // Authz (T-0737 — CLOSED, was FORWARD-OBLIGATION): requireAuditRead — the SAME
+  // owner-only gate as GET /api/audit and GET /api/audit/export. Previously this
+  // route had NO gate at all (not even an x-dev-user presence check) — any
+  // withAuth-authenticated caller (or, in dev mode, ANY request at all, since dev
+  // auth is a no-op) could read it. No pool wired (memory mode) -> 503.
+  router.register("GET", "/api/audit/:instanceId", withAuth(async (req, res, params) => {
+    if (pool === undefined) {
+      throw new HttpError(
+        503,
+        "AUDIT_UNAVAILABLE",
+        "audit instance trace is not available (no database configured)",
+      );
+    }
+    await requireAuditRead(pool, req);
+
     const instanceId = params.instanceId as string;
     // T-0234: the demo ТЭЛ instance is built lazily (async motor run, stub port).
     const data =

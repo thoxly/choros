@@ -172,6 +172,15 @@ ROUTE_WHITELIST=(
   #   getFileContentUrl IS an ACTIVE_MARKERS hit inside this route's own block
   #   (files.ts:614) — listed here only for documentation; the marker scan
   #   already passes this route without needing this entry.
+  "audit.ts:GET:/api/audit"
+  #   requireAuditRead() (audit.ts:554-569) wraps loadAdminContext (owner-only
+  #   audit-read gate, T-0500/T-0737); defined before this route's block.
+  "audit.ts:GET:/api/audit/export"
+  #   T-0737 (was a FINDING — no gate at all before this task): SAME
+  #   requireAuditRead() (audit.ts:554-569) as GET /api/audit above.
+  "audit.ts:GET:/api/audit/:instanceId"
+  #   T-0737 (was a FINDING — no gate at all before this task): SAME
+  #   requireAuditRead() (audit.ts:554-569) as GET /api/audit above.
 
   # --- E. Tenant-uniform config/catalog surfaces — no employee-specific
   #        grant/instance/record decision (mirrors ADR-T0658 §3.4 "display
