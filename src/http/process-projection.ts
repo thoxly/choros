@@ -51,6 +51,8 @@ import {
 } from "../core/message-correlation.js";
 import { fallbackDefinitionName } from "../core/process-catalog-view.js";
 import { findEmployeeById } from "../db/org.js";
+import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
+import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 
 // ---------------------------------------------------------------------------
 // Audit event types (free-text `type` column; no enum constraint — migrations/006).
@@ -786,6 +788,97 @@ async function withTenant<T>(
   } finally {
     client.release();
   }
+}
+
+// ---------------------------------------------------------------------------
+// T-0721 (D-064, P1 из T-0714 — security/PDP): DETAIL read-visibility gate.
+//
+// THE PROBLEM (T-0714 §3 P1): GET /api/processes/:id returns Flowable's raw
+// `variables` + full step `history` (with `completedBy*`) to ANY member of the
+// tenant, regardless of whether they hold a READ grant on the instance's
+// SOURCE RECORD. The same business values (sums, verdicts, field values) are
+// already gated on the record plane by field-visibility (T-0081) and READ-PDP
+// (T-0570) — this was a side-door around both.
+//
+// THE FIX (T-0714 §5 option c, phase 1): an instance's DETAIL visibility is
+// INHERITED from the READ-visibility of its source record. Reuses the SAME
+// single authority path records.ts already consumes — `isRecordReadable`
+// (src/core/read-visibility.ts, pure, no second math) fed by the injected
+// `resolveReadVisibility` resolver (grants + ancestry, wired byte-identically
+// to records.ts's in src/server.ts — see ProcessReadVisibilityResolver in
+// process-start.ts). This module owns ONLY the recordId → RowAncestry
+// reverse-lookup (registryId/applicationId columns) the predicate needs —
+// records.ts already has these columns in hand from its own SELECT; a
+// process instance only carries `recordId`, so one extra tenant-scoped
+// single-row fetch is unavoidable (T-0714 §5 "Против" — anticipated).
+//
+// RECORD-LESS INSTANCES (T-0714 §5 phase 1 fallback): an instance started
+// WITHOUT create=start (no `recordId` — e.g. the explicit /api/processes/start
+// launch affordance) is NOT narrowed by this gate — visibility stays
+// tenant-default-open, unchanged from pre-T-0721 behaviour. Narrowing that
+// case needs a process-definition-scoped read grant (T-0714 §5 phase 3,
+// follow-up, out of scope here).
+//
+// Display-plane isolation (FF-INST-VIS-3 / FF-7-3): this predicate lives HERE
+// (process-projection.ts already imports pg for the projection read-path) —
+// processes.ts stays pg/src-db-free, it only calls this exported function
+// through the pool it already threads into listInstanceProjections.
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up the READ-visibility ancestry columns (`registryId`, `applicationId`)
+ * for ONE record, tenant-scoped. Returns `null` when the record does not exist
+ * in this tenant (deleted / never existed) — the caller treats that as
+ * NOT readable (honest-deny, never worse than a 404, never assumes an
+ * existence it cannot prove). Pure data fetch — no grant/authority math here;
+ * `isRecordReadable` (core/read-visibility.ts) remains the ONLY containment
+ * decision (NF-5, FF-INST-VIS-2).
+ */
+async function loadRecordRowAncestry(
+  pool: pg.Pool,
+  tenantId: string,
+  recordId: string,
+): Promise<RowAncestry | null> {
+  return withTenant(pool, tenantId, async (client) => {
+    const res = await client.query<{ id: string; registry_id: string; application_id: string }>(
+      `SELECT r.id, r.registry_id, rd.application_id
+         FROM choros.record r
+         JOIN choros.registry_def rd
+           ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
+        WHERE r.tenant_id = $1 AND r.id = $2`,
+      [tenantId, recordId],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return { recordId: row.id, registryId: row.registry_id, applicationId: row.application_id };
+  });
+}
+
+/**
+ * T-0721: decide whether the DETAIL plane (`variables`/`history`/`completedBy*`)
+ * of ONE instance is visible to the actor whose covering READ grants are
+ * `grants` (already resolved ONCE per request by the injected
+ * ProcessReadVisibilityResolver — NF-1, mirrors records.ts).
+ *
+ * - `recordId === undefined` (record-less instance) → `true` (phase-1 scope:
+ *   NOT narrowed, see module doc-comment above).
+ * - `recordId` present but the record no longer resolves in this tenant
+ *   (deleted, or — defensively — a foreign id) → `false` (honest-deny).
+ * - Otherwise → `isRecordReadable(rowAncestry, grants, ancestry, nowMs)`, the
+ *   EXACT SAME predicate records.ts's LIST/DETAIL routes already gate on.
+ */
+export async function isInstanceDetailVisible(
+  pool: pg.Pool,
+  tenantId: string,
+  recordId: string | undefined,
+  grants: readonly Grant[],
+  ancestry: AncestryOracle,
+  nowMs: number,
+): Promise<boolean> {
+  if (recordId === undefined) return true;
+  const rowAncestry = await loadRecordRowAncestry(pool, tenantId, recordId);
+  if (rowAncestry === null) return false;
+  return isRecordReadable(rowAncestry, grants, ancestry, nowMs);
 }
 
 interface StartedRow {

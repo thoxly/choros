@@ -691,6 +691,26 @@ function buildRouter(
           // `completedBy` slugs (processes.ts stays pg/db-import-free — FF-DISPLAY-4).
           resolveActorsDisplay: (tenantId: string, ids: readonly string[]) =>
             batchResolveActors(grantsPool, tenantId, ids),
+          // T-0721 (D-064, P1 из T-0714 — security/PDP): DETAIL read-visibility
+          // resolver — REUSE, BYTE-IDENTICAL composition to registerRecordRoutes's
+          // resolveReadVisibility above (getGrantsForSubject + loadTenantOrgAncestry
+          // → makeResourceAncestryOracle; single-resolver, FF-INST-VIS-2, no
+          // bespoke grant query). Closes T-0714 §3 P1: GET /api/processes/:id used
+          // to return Flowable's raw variables/history to any tenant member
+          // regardless of their READ grant on the instance's source record — the
+          // exact side-door around field-visibility (T-0081) / READ-PDP (T-0570)
+          // that gate records.ts already enforces.
+          resolveReadVisibility: async (actorSlug: string, tenantId: string, nowMs: number) => {
+            const [grants, orgOracle] = await Promise.all([
+              getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+              loadTenantOrgAncestry(grantsPool, tenantId),
+            ]);
+            const emptyRowIndex = new Map<string, RowAncestry>();
+            return {
+              grants,
+              ancestry: makeResourceAncestryOracle(orgOracle, emptyRowIndex),
+            };
+          },
         }
       : undefined,
     // T-0328 G1: actor-slug resolver (kind='human') for the actor-inject façade so the

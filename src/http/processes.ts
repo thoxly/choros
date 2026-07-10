@@ -24,6 +24,7 @@ import { tryLoadShowcasePack } from "./pack-serve.js";
 import { makeStartInstanceHandler, type StartInstanceDeps, type ActorsDisplayResolver } from "./process-start.js";
 import {
   listInstanceProjections,
+  isInstanceDetailVisible,
   type InstanceProjection,
 } from "./process-projection.js";
 import {
@@ -640,38 +641,71 @@ export function registerProcessesRoutes(
           const projections = await listInstanceProjections(startDeps.pool, tenantId);
           const match = projections.find((p) => p.inst === instanceId);
           if (match) {
-            // T-0709-R-P0-1: overlay THIS instance's LIVE active node (step/role/
-            // concurrentSteps) so the detail screen's node/nodes reflect the token's
-            // real position — the SAME live source the catalog reads. Overlaying only
-            // the matched projection keeps the fan-out at one engine call; a miss leaves
-            // `match` byte-unchanged on its snapshot (overlayLiveSteps no-ops).
-            const [displayMatch] = await overlayDetailLiveSteps(startDeps.flowable, [match]);
-            const overlaid = displayMatch ?? match;
-            // T-0609: variables + detailed transition history, read from the SAME
-            // Flowable client already threaded into startDeps — under the SAME
-            // tenant-membership gate this whole branch already applies (no new
-            // PDP/capability path; the live acceptance directive was explicit:
-            // do not widen visibility beyond what this page already grants).
-            // Best-effort: an engine error degrades to empty arrays +
-            // historyAvailable:false, never a 500 (the instance's core fields
-            // above do not depend on the engine being reachable).
-            const detail = await fetchInstanceHistoryDetail(
-              startDeps.flowable,
-              match.inst,
-              tenantId,
-              startDeps.resolveActorsDisplay,
-            );
-            res.statusCode = 200;
-            res.setHeader("Content-Type", "application/json");
-            res.end(JSON.stringify({ ...projectionToInstance(overlaid), ...detail }));
-            return;
+            // T-0721 (D-064, P1 из T-0714 — security/PDP): DETAIL visibility
+            // (variables/history/completedBy* below) is INHERITED from the
+            // READ-visibility of the instance's SOURCE RECORD — the same
+            // isRecordReadable/resolveReadVisibility single authority path
+            // records.ts already gates on (T-0570). Supersedes the old T-0609
+            // comment's "do not widen visibility beyond what this page already
+            // grants" — that page-level tenant gate is exactly the side-door
+            // T-0714 found around field-visibility (T-0081) / READ-PDP (T-0570),
+            // which shipped AFTER this detail route did. Honest-degrade (NF-2):
+            // resolveReadVisibility absent ⇒ skip, byte-identical to pre-T-0721.
+            // Record-less instances (no recordId) are NEVER narrowed here
+            // (phase-1 scope — see process-projection.ts's isInstanceDetailVisible
+            // doc-comment; process-definition-scoped narrowing is a follow-up).
+            let detailVisible = true;
+            if (startDeps.resolveReadVisibility) {
+              const gateNowMs = Date.now();
+              const { grants, ancestry } = await startDeps.resolveReadVisibility(
+                actorSlug,
+                tenantId,
+                gateNowMs,
+              );
+              detailVisible = await isInstanceDetailVisible(
+                startDeps.pool,
+                tenantId,
+                match.recordId,
+                grants,
+                ancestry,
+                gateNowMs,
+              );
+            }
+            if (detailVisible) {
+              // T-0709-R-P0-1: overlay THIS instance's LIVE active node (step/role/
+              // concurrentSteps) so the detail screen's node/nodes reflect the token's
+              // real position — the SAME live source the catalog reads. Overlaying only
+              // the matched projection keeps the fan-out at one engine call; a miss leaves
+              // `match` byte-unchanged on its snapshot (overlayLiveSteps no-ops).
+              const [displayMatch] = await overlayDetailLiveSteps(startDeps.flowable, [match]);
+              const overlaid = displayMatch ?? match;
+              // T-0609: variables + detailed transition history, read from the SAME
+              // Flowable client already threaded into startDeps.
+              // Best-effort: an engine error degrades to empty arrays +
+              // historyAvailable:false, never a 500 (the instance's core fields
+              // above do not depend on the engine being reachable).
+              const detail = await fetchInstanceHistoryDetail(
+                startDeps.flowable,
+                match.inst,
+                tenantId,
+                startDeps.resolveActorsDisplay,
+              );
+              res.statusCode = 200;
+              res.setHeader("Content-Type", "application/json");
+              res.end(JSON.stringify({ ...projectionToInstance(overlaid), ...detail }));
+              return;
+            }
+            // else: fall through to the honest 404 below (T-0570 precedent,
+            // records.ts:2059-2071) — indistinguishable from not-found, never
+            // reveals that a hidden instance exists (FR-5-style non-disclosure).
           }
         } catch {
           // Read-projection: degrade gracefully — fall through to 404 (never 500).
         }
       }
-      // DB mode + no matching real instance ⇒ 404 (the seed fixture is NOT served to
-      // real authenticated tenants; T-0301 mock-leak invariant).
+      // DB mode + no matching real instance (OR denied by the READ-visibility
+      // gate above) ⇒ 404 (the seed fixture is NOT served to real authenticated
+      // tenants; T-0301 mock-leak invariant).
       throw new HttpError(404, "NOT_FOUND", "instance not found");
     }
 
