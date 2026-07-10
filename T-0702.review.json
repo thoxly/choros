@@ -1,0 +1,61 @@
+{
+  "task_id": "T-0702",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/user-mgmt.ts:12-16 (module header comment) + commit f5ec6fc5 message",
+      "issue": "Overclaim: the comment says revokeUserSessions 'kills already-issued KC access/refresh tokens'. Choros validates access tokens PURELY OFFLINE (src/http/auth.ts verifyJwt — JWKS signature + exp, JWKS cached 5min, NO introspection, NO per-request session round-trip to KC). POST /users/:id/logout revokes the SSO session + refresh tokens but CANNOT invalidate an already-issued access-token JWT — choros keeps accepting it until its own exp. The same sentence self-contradicts ('a live one stays valid until its own exp'). The authoritative ADR-T0702 §8 IS honest ('WINDOW-SHRINK, not a cryptographically instantaneous revocation'), and admin-port.ts:interface doc correctly scopes it to 'SSO session and refresh tokens'.",
+      "suggestion": "Align the user-mgmt.ts header comment and commit wording to the ADR §8 / admin-port.ts framing: revoke kills the SSO session + refresh tokens; the already-issued access token survives to its own exp (5min realm TTL). Do not claim it kills access tokens."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 6,
+      "location": "docs/design/ADR-T0702-kc-session-revocation.md:170-179 (§8 bullet 2)",
+      "issue": "ADR §8 attributes the residual window to 'a short-lived access token already cached by the KC adapter ON THE CLIENT SIDE ... until the adapter's own session check next round-trips to KC (implementation detail of the specific OIDC client, out of this task's control)'. That is a misattribution: the residual window is choros's OWN server-side resource verification (src/http/auth.ts) doing offline JWKS checks that never round-trip to KC for session liveness — not a client-adapter detail out of scope. The conclusion (window-shrink, not instantaneous) is correct; the mechanism is misdescribed, which understates that the floor is squarely choros's own access-token TTL (300s, config/keycloak/realm-choros.json:5).",
+      "suggestion": "Reframe §8 bullet 2: the residual window exists because choros's server-side JWT verification (auth.ts, offline JWKS + exp, no introspection) accepts any signed unexpired access token regardless of KC session state — floor = accessTokenLifespan (300s). Not a client-side detail."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 6,
+      "location": "docs/design/ADR-T0702-kc-session-revocation.md:65-72 §2.2 + src/http/user-mgmt.ts:682-684 (premise of the silent best-effort degrade)",
+      "issue": "The best-effort silent-degrade rests on the premise that 'the PDP-side gate (T-0658/T-0662 ACTOR_ACTIVE_SQL) already denies the deactivated actor UNCONDITIONALLY, independent of this call'. ACTOR_ACTIVE_SQL is applied at the named authority resolvers (grants-dao, binding, report-page-render, rights-intents, rights-change-requests), and http-route-auth-coverage.sh proves universal AUTHENTICATION (every route wrapped in withAuth). But NO fitness check proves every data-returning route funnels through an ACTOR_ACTIVE authority resolver, and sibling T-0714 (already merged, 09e4323c) found /api/processes/:id returns raw process variables under tenant-scope only, bypassing record-level READ-PDP. So the 'unconditional PDP guarantee' is mostly-but-not-provably-universal — combined with the fact that revoke cannot shrink the offline-token window (R-1), a deactivated employee's still-valid access token (up to 5min) remains a live authorization exposure on any such non-ACTOR_ACTIVE route. Pre-existing (T-0714 territory), NOT introduced by T-0702, and T-0702 records the outcome in audit.",
+      "suggestion": "Non-blocking for T-0702. Follow-up: a fitness check (or extension of actor-authority-deactivation-gate.sh) that asserts every route resolving an actor also passes through an ACTOR_ACTIVE predicate, to make the 'unconditional PDP' premise true-by-construction rather than assumed. Track alongside T-0714."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/keycloak/admin-port.ts:519-533 (revoke catch) + src/http/user-mgmt.ts:688-692 (call site)",
+      "issue": "On KC-down-for-revoke, the failure is recorded ONLY as payload.kc_sessions_revoked:false on the user_account.deactivate audit event — there is NO active operator signal (no console.warn/error, no logger). A degraded revoke is observable solely by proactively querying audit events, which no one reads by default = silent degradation. Acceptable given the (imperfect, per R-3) PDP backstop, but a live incident (KC flaky during a batch of terminations) leaves live SSO sessions with zero operator-facing alert.",
+      "suggestion": "Emit a one-line warn log ('T-0702 revokeUserSessions degraded for <employeeId>: revoked=false') on the false branch so degradation is noticeable in logs, not just in an audit row."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/user-mgmt.ts:669-716 (order: setUserEnabled -> revoke -> DB-tx)",
+      "issue": "Order is setUserEnabled(false) -> revokeUserSessions -> DB-tx(deactivated_at + audit). If the DB-tx fails AFTER KC is disabled and sessions are revoked, choros's employee row still shows deactivated_at=NULL, so ACTOR_ACTIVE_SQL PASSES and the (now KC-disabled) employee still resolves FULL authority via the PDP until their current access token expires (up to 5min). This is the PRE-EXISTING T-0583 KC-first ordering (N4) — revoke merely slots between setUserEnabled and the tx; not a new risk. Retry (re-PATCH) is state-idempotent (setUserEnabled/logout both idempotent) but appends a DUPLICATE user_account.deactivate audit event.",
+      "suggestion": "Non-blocking (pre-existing pattern). If ever tightened, the deactivated_at write should be the atomic authority-flip and KC calls should follow it (or be compensated); duplicate deactivate audit on retry is cosmetic."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1 revokeUserSessions called once with KC userId on deactivate (FF-702-CALLED-ONCE)", "covered": true },
+    { "ac": "AC-2 successful revoke -> audit payload.kc_sessions_revoked===true (FF-702-AUDIT-SUCCESS)", "covered": true },
+    { "ac": "AC-3 revoke fails -> deactivation still 200, deactivated_at set, payload false (FF-702-DEGRADE)", "covered": true },
+    { "ac": "AC-4 reactivation makes no revoke call (FF-702-REACTIVATE-NOOP)", "covered": true },
+    { "ac": "AC-5 setUserEnabled fails -> 503, deactivated_at unchanged, revoke never reached (FF-702-SETENABLED-REGRESSION)", "covered": true },
+    { "ac": "AC-6 tsc — all 5 port implementers complete", "covered": true },
+    { "ac": "AC-7 inherited fitness scripts stay green (reuses-kc-port / no-secret-leak)", "covered": true },
+    { "ac": "AC-8 live KC endpoint contract 204/404 (re-verified live vs t-0633-keycloak-1)", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Security-lens finding class (R-1/R-2/R-3): the task's stated goal ('shrink the live-token TTL window') is not actually achieved by session revocation under choros's offline-JWKS verification — an already-issued access token survives to exp (300s) regardless, and setUserEnabled(false) already blocks the refresh path, so the incremental authentication-window reduction of revokeUserSessions over T-0583 is ~zero. Value is honest defense-in-depth (kills the live SSO session record), NOT a TTL-window shrink. A dedicated security-reviewer would flag 'offline JWT verification means logout != token revocation' as a recurring pattern worth a standing check.",
+    "The real deactivation guarantee is the PDP-side ACTOR_ACTIVE_SQL gate, whose universality across all actor-resolving routes is asserted but not proven by any fitness function (R-3); T-0714 already found a tenant-scope-only bypass (/api/processes/:id). Candidate for a security-reviewer + a route-level ACTOR_ACTIVE coverage fitness check (SQ11)."
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "task_id": "T-0702",
+  "status": "pr_open",
+  "branch": "task/T-0702",
+  "pr_url": "https://github.com/thoxly/choros/pull/56",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/keycloak/admin-port.ts (KeycloakUserPort interface gains revokeUserSessions(userId): Promise<{revoked:boolean}>; live implementation in makeHttpKeycloakUserPort — POST /admin/realms/<realm>/users/<userId>/logout via the same choros-registrar token setUserEnabled uses; never throws, degrades to {revoked:false} on any failure)",
+    "src/keycloak/fake-user-port.ts (InMemoryKeycloakUserPort: revokeUserSessions capture log + revokeSessionsCallCount + one-shot failOnRevokeSessions switch, mirrors setUserEnabled pattern; reset() extended)",
+    "src/http/user-mgmt.ts (PATCH /api/users/:employee_id, active===false branch: calls kc.revokeUserSessions(kcUserId) right after setUserEnabled(false) succeeds; outcome recorded as payload.kc_sessions_revoked on the same user_account.deactivate audit event; reactivation branch unchanged — no call made)",
+    "src/server.ts (honest-degrade inline KeycloakUserPort literal — no registrar secret configured — gets a no-op revokeUserSessions returning {revoked:false}, structural completeness only; setUserEnabled above it already 503s first)",
+    "src/__tests__/register.test.ts (2 inline test-local KeycloakUserPort mocks get a no-op revokeUserSessions to satisfy the widened interface; not exercised by those tests)",
+    "src/__tests__/admin-port.test.ts (NEW describe AP-7 — revokeUserSessions unit tests against a stub KC server: 204/200 success, 404/500/unreachable degrade to {revoked:false} without throwing, exact endpoint path + bearer token asserted)",
+    "ci/checks/db/user-mgmt.db.test.ts (NEW describe block, 4 tests, live Postgres: FF-702-CALLED-ONCE/AUDIT-SUCCESS, FF-702-DEGRADE, FF-702-REACTIVATE-NOOP, FF-702-SETENABLED-REGRESSION)",
+    "docs/specs/T-0702-kc-session-revocation.spec.md (NEW — mini-spec, coder-authored per compressed S+D+B)",
+    "docs/design/ADR-T0702-kc-session-revocation.md (NEW — mini-ADR: decision, degrade policy, rejected alternatives, fitness table, traceability)"
+  ],
+
+  "root_cause": "ADR-T0658 §9 named this gap explicitly and deferred it: setUserEnabled(false) (T-0583) only blocks Keycloak from issuing a NEW access token to a deactivated employee — an access token issued BEFORE deactivation stays cryptographically valid until its own exp (Keycloak default TTL, ~300s). In that window the holder still passes AUTHENTICATION (withAuth — signature/exp check succeeds), even though every AUTHORIZATION path (T-0658/T-0662's ACTOR_ACTIVE_SQL gate across all 7 authority resolvers) already denies them a grant. This task SHRINKS the authentication-side window by killing the KC SSO session + refresh tokens (no further access token can be minted from the live session) — it does NOT invalidate an already-issued access-JWT, which choros validates offline against JWKS (src/http/auth.ts) and which therefore stays accepted until its own exp; the guarantee in that residual window remains the PDP ACTOR_ACTIVE gate.",
+
+  "fix_summary": "Added KeycloakUserPort.revokeUserSessions(userId) — POST /admin/realms/<realm>/users/<userId>/logout, live-confirmed against the t-0633-keycloak-1 dev container (204 on an existing user, 404 on an unknown one) using the SAME choros-registrar service-account token setUserEnabled already authorizes with (no new KC role/client). Called from PATCH /api/users/:employee_id's active:false branch immediately after setUserEnabled(false) succeeds. Deliberately BEST-EFFORT (never throws): a transient KC hiccup on this specific call must not fail the whole deactivation, because the PDP-side denial (T-0658/T-0662) is already unconditional and independent of this call's outcome — this is a defense-in-depth window-shrink, not a new security gate. The boolean outcome is written into the SAME user_account.deactivate audit event as payload.kc_sessions_revoked, so a failure is observable (not silently swallowed) without blocking the HR action. Reactivation is untouched — a fresh login creates its own new session, so there is nothing to revoke there (ADR §2.3).",
+
+  "test_methodology_note": "Two layers: (1) src/__tests__/admin-port.test.ts AP-7 — a local stub HTTP server (no live KC) exercises the live adapter's request shape (POST to the exact /admin/realms/<realm>/users/<id>/logout path, Bearer token from the registrar client_credentials flow) and its never-throw contract across 204/200/404/500/connection-refused. (2) ci/checks/db/user-mgmt.db.test.ts — full HTTP-server + live Postgres :55432 (isolated cloned template DB per T-0147 convention) drives the ACTUAL PATCH route with InMemoryKeycloakUserPort standing in for KC (same pattern as the existing FF-583-4 test in this file), proving the call count, the audit payload, and — critically — that a revoke failure (failOnRevokeSessions) does not prevent deactivated_at from being set or the 200 response from returning. Separately, BEFORE writing any code, the live KC admin REST endpoint itself was sanity-checked with raw curl against the running t-0633-keycloak-1 container (choros-registrar client_credentials token → GET .../sessions → 200, POST .../logout on a real fixture user → 204, POST .../logout on a bogus UUID → 404) to confirm the exact status-code contract the port now codes against — this is documented in the ADR §2 rather than re-run as an automated test (no live-KC-required test was added to the suite; the stub-based AP-7 tests are what CI actually runs).",
+
+  "live_proof_plan": "Dev stand was offline at task time (T-0702 build session), so the full UI→KC e2e was not run live end-to-end through the browser. HONEST EXPECTATION (R-1): /logout kills the KC SSO session + refresh tokens — it does NOT invalidate an already-issued access-JWT, which choros validates offline against JWKS (src/http/auth.ts) and which therefore stays accepted until its own exp (~300s realm TTL); the guarantee in that residual window is the PDP ACTOR_ACTIVE gate, not authentication. Plan for whoever runs it next: (1) log in to the product as a tenant owner, (2) in a SECOND browser session/incognito window, log in as a regular employee of that tenant and note their session is live (any authenticated page loads), (3) in the owner session, go to accounts management and deactivate that employee (PATCH /api/users/:id {active:false}), (4) cross-check via Keycloak admin console (Users → the deactivated user → Sessions) that the session list is empty IMMEDIATELY after step 3, not after a TTL wait — this is the direct observable effect of revokeUserSessions, (5) in the employee's still-open second session, confirm silent re-auth/token-refresh now FAILS (SSO session gone + account disabled — no new access token can be minted), and that within the residual ~5-min window of a cached access-JWT any privileged action is DENIED by the PDP layer (403/empty grants) even though bare authentication may still pass until exp, (6) confirm the audit_event row for user_account.deactivate (via GET /api/audit or DB) carries payload.kc_sessions_revoked:true for this real KC round-trip (proves the live HTTP path, not just the mock-covered code path).",
+
+  "deviations_from_adr": [],
+
+  "friction_events": [
+    "npm ci had not been run in this fresh worktree (no node_modules) — had to install deps (npm ci --maxsockets=3) before tsc/vitest would run at all; consistent with prior sessions' DURABLE note 'npm install после merge'.",
+    "First attempt to run the live-PG db test file directly with `npx vitest run ci/checks/db/user-mgmt.db.test.ts` silently matched zero files — the repo's vitest config excludes `ci/checks/db/**` by default and only the `fitness:db` npm script's `--dir ci/checks/db` flag re-includes it; had to pass `--dir ci/checks/db` explicitly alongside the filename to target one file instead of the whole db suite.",
+    "Two Edit attempts against ci/checks/db/user-mgmt.db.test.ts failed on an exact-string match because the existing comment used a colon-continuation ('FIX-2 — LAST-OWNER GUARD: the T-0658 deactivation gate') rather than the period I assumed — re-read the file bytes (od -c) to confirm the literal text before retrying.",
+    "bash reserved variable name: a throwaway shell snippet used `UID` for a captured Keycloak user id, which collided with bash's own readonly $UID and threw a cryptic 'bad math expression' error — renamed to KCUID."
+  ],
+
+  "open_questions": []
+}

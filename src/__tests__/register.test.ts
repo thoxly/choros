@@ -516,6 +516,10 @@ describe("R-2 — createHumanUser: userId from Location header; compensation sti
       async setUserEnabled(_userId: string, _enabled: boolean) {
         // not exercised by this test (T-0583 addition to the port interface)
       },
+      async revokeUserSessions(_userId: string) {
+        // not exercised by this test (T-0702 addition to the port interface)
+        return { revoked: false };
+      },
     };
 
     const routerL = new Router();
@@ -562,6 +566,10 @@ describe("R-2 — createHumanUser: userId from Location header; compensation sti
       },
       async setUserEnabled(_userId: string, _enabled: boolean) {
         // not exercised by this test (T-0583 addition to the port interface)
+      },
+      async revokeUserSessions(_userId: string) {
+        // not exercised by this test (T-0702 addition to the port interface)
+        return { revoked: false };
       },
     };
 

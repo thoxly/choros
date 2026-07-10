@@ -100,6 +100,20 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
    */
   failOnSetEnabled = false;
 
+  /** T-0702: userId args passed to revokeUserSessions, in order. */
+  readonly revokeSessionsCalls: string[] = [];
+
+  /** T-0702: counter incremented on each revokeUserSessions call. */
+  revokeSessionsCallCount = 0;
+
+  /**
+   * T-0702: if true, the NEXT revokeUserSessions call degrades to
+   * {revoked:false} (models KC being unreachable for THAT specific call —
+   * mirrors the live port's never-throw contract, so this switch does NOT
+   * make the fake throw; it makes it return the degraded outcome). One-shot.
+   */
+  failOnRevokeSessions = false;
+
   async createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }> {
     this.createCallCount++;
 
@@ -196,18 +210,36 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
     return u ? u.enabled : true;
   }
 
+  /**
+   * T-0702: revoke all sessions for a user — mirrors the live port's
+   * never-throw, best-effort contract (ADR-T0702 §2.2). `failOnRevokeSessions`
+   * models KC being unreachable for this call specifically.
+   */
+  async revokeUserSessions(userId: string): Promise<{ revoked: boolean }> {
+    this.revokeSessionsCallCount++;
+    this.revokeSessionsCalls.push(userId);
+    if (this.failOnRevokeSessions) {
+      this.failOnRevokeSessions = false;
+      return { revoked: false };
+    }
+    return { revoked: true };
+  }
+
   /** Reset the capture log and failure switches. */
   reset(): void {
     this.created.length = 0;
     this.deleteCalls.length = 0;
     this.setEnabledCalls.length = 0;
+    this.revokeSessionsCalls.length = 0;
     this.failOnCreate = false;
     this.failOnLoginTaken = false;
     this.failOnAuth = false;
     this.failOnSetEnabled = false;
+    this.failOnRevokeSessions = false;
     this.createCallCount = 0;
     this.deleteCallCount = 0;
     this.setEnabledCallCount = 0;
+    this.revokeSessionsCallCount = 0;
   }
 
   /** True iff a user with the given userId was created and NOT deleted. */

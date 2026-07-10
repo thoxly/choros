@@ -410,3 +410,118 @@ describe("AP-6 — createHumanUser 409 username-vs-email disambiguation (T-0633)
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// AP-7 [T-0702, ADR-T0702 §5 FF-702-PORT-UNIT]: revokeUserSessions posts to
+// POST /admin/realms/<realm>/users/<id>/logout with the registrar bearer
+// token, and NEVER throws — a non-2xx or unreachable stub degrades to
+// {revoked:false} instead of propagating an error.
+// ---------------------------------------------------------------------------
+
+/**
+ * Stub that answers the token endpoint with a valid token, then answers the
+ * logout POST with `logoutStatus`. Captures the logout request's path/method
+ * so we can assert the exact endpoint shape without a live KC.
+ */
+function startLogoutStub(logoutStatus: number): Promise<{
+  cfg: KcRegistrarConfig;
+  logoutCalls: Array<{ path: string; method: string; authHeader: string | undefined }>;
+  close: () => Promise<void>;
+}> {
+  const logoutCalls: Array<{ path: string; method: string; authHeader: string | undefined }> = [];
+  const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+    const path = req.url ?? "";
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      if (path.includes("/protocol/openid-connect/token")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ access_token: "stub-token" }));
+      } else if (path.includes("/logout") && req.method === "POST") {
+        logoutCalls.push({ path, method: req.method ?? "", authHeader: req.headers.authorization });
+        res.writeHead(logoutStatus);
+        res.end();
+      } else {
+        res.writeHead(500);
+        res.end();
+      }
+    });
+    req.on("error", () => { res.writeHead(500); res.end(); });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+      resolve({
+        cfg: {
+          baseUrl: `http://127.0.0.1:${port}`,
+          realm: "choros",
+          clientId: "choros-registrar",
+          clientSecret: "stub-secret",
+        },
+        logoutCalls,
+        close: () => new Promise<void>((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+describe("AP-7 — revokeUserSessions (T-0702)", () => {
+  it("204 from KC → {revoked:true}; posts to /admin/realms/<realm>/users/<id>/logout with a bearer token", async () => {
+    const stub = await startLogoutStub(204);
+    try {
+      const port = makeHttpKeycloakUserPort(stub.cfg);
+      const result = await port.revokeUserSessions("some-kc-user-id");
+      expect(result).toEqual({ revoked: true });
+      expect(stub.logoutCalls).toHaveLength(1);
+      expect(stub.logoutCalls[0].method).toBe("POST");
+      expect(stub.logoutCalls[0].path).toBe(
+        "/admin/realms/choros/users/some-kc-user-id/logout",
+      );
+      expect(stub.logoutCalls[0].authHeader).toBe("Bearer stub-token");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("200 from KC → {revoked:true} (some deployments may answer 200 instead of 204)", async () => {
+    const stub = await startLogoutStub(200);
+    try {
+      const port = makeHttpKeycloakUserPort(stub.cfg);
+      expect(await port.revokeUserSessions("user-x")).toEqual({ revoked: true });
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("404 (unknown user) → {revoked:false}, does NOT throw", async () => {
+    const stub = await startLogoutStub(404);
+    try {
+      const port = makeHttpKeycloakUserPort(stub.cfg);
+      await expect(port.revokeUserSessions("unknown-user")).resolves.toEqual({ revoked: false });
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("500 from KC → {revoked:false}, does NOT throw", async () => {
+    const stub = await startLogoutStub(500);
+    try {
+      const port = makeHttpKeycloakUserPort(stub.cfg);
+      await expect(port.revokeUserSessions("user-y")).resolves.toEqual({ revoked: false });
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("KC completely unreachable (connection refused) → {revoked:false}, does NOT throw", async () => {
+    const cfg: KcRegistrarConfig = {
+      baseUrl: "http://127.0.0.1:1", // nothing listens on port 1 — ECONNREFUSED
+      realm: "choros",
+      clientId: "choros-registrar",
+      clientSecret: "stub-secret",
+    };
+    const port = makeHttpKeycloakUserPort(cfg);
+    await expect(port.revokeUserSessions("user-z")).resolves.toEqual({ revoked: false });
+  });
+});

@@ -1081,6 +1081,14 @@ function buildRouter(
             (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
             throw err;
           },
+          async revokeUserSessions(): Promise<{ revoked: boolean }> {
+            // T-0702: honest-degrade — no registrar secret configured, so
+            // there is no KC to call. setUserEnabled above already throws
+            // 503 before this would ever be reached in the deactivation
+            // flow; this never-throw stub exists only to satisfy the port
+            // contract structurally (mirrors this object's other methods).
+            return { revoked: false };
+          },
         };
     registerRegisterRoutes(router, { pool: grantsPool, kc: kcUserPort });
     // T-0583: per-tenant "create user account" / list / deactivate — reuses
