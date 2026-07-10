@@ -105,9 +105,14 @@ import {
   runConfigurator,
   AUTHORING_CAPTURE_CONFIRMATION,
   type ApprovedOp,
+  type RegistryListCandidate,
 } from "../core/assistant-configurator.js";
 import type { RegistryDefCandidate } from "../core/relation-cascade.js";
-import { reconcileCrossAppRefs } from "./registry-defs.js";
+// T-0724: listRegistryDefs is the SAME DAO GET /api/registry-defs uses to serve
+// the human bind-form's "Реестр результата" picker (T-0681) — reused verbatim
+// (never a second query) so the configurator's list_registries tool can never
+// see more than that picker already shows a human of this tenant.
+import { reconcileCrossAppRefs, listRegistryDefs } from "./registry-defs.js";
 // T-0464 (D8-G3): free-topology process generation loop (generate→validate→repair).
 import { runProcessGenLoop } from "../core/process-gen-loop.js";
 import type { GroundingContext } from "../core/process-gen-validator.js";
@@ -424,6 +429,35 @@ async function fetchRegistryDefCandidates(
     return [];
   } finally {
     client.release();
+  }
+}
+
+/**
+ * T-0724 [E-FORMS, столп 5]: fetch this tenant's real registries for the
+ * configurator's list_registries introspection tool. REUSES listRegistryDefs
+ * (src/http/registry-defs.ts) — the EXACT DAO GET /api/registry-defs calls to
+ * serve the human bind-form's "Реестр результата" picker (T-0681) — so the bot
+ * can never see a registry the picker would not also show a human of this
+ * tenant. No application_id filter here (null): the FULL tenant list is fetched
+ * once per turn and processToolCall (pure core) filters it by the applicationId
+ * arg the LLM supplies, mirroring how existingRegistryDefs (T-0463) is fetched
+ * once and filtered in-core. Honest-degrade on failure: empty list, never a crash
+ * (the tool then honestly reports zero registries rather than 500ing the turn).
+ */
+export async function fetchRegistryListCandidates(
+  pool: pg.Pool,
+  tenantId: string,
+): Promise<RegistryListCandidate[]> {
+  try {
+    const rows = await listRegistryDefs(pool, tenantId, null);
+    return rows.map((r) => ({
+      id: r.id,
+      slug: r.slug,
+      displayName: r.display_name,
+      applicationId: r.application_id,
+    }));
+  } catch {
+    return [];
   }
 }
 
@@ -2266,7 +2300,16 @@ export function registerAssistantRoutes(
           // T-0463 (D8-G2): supply existing registry_defs so relation cascades dedup
           // against existing apps (PD-5) — same candidate list the visual picker uses.
           const cfgCandidates = await fetchRegistryDefCandidates(pool, tenantId).catch(() => []);
-          const cfgResult = await runConfigurator(userText, handlerCtx, cfgPromptOverride, cfgCandidates);
+          // T-0724: same-turn data for the list_registries introspection tool
+          // (reuses listRegistryDefs — the human bind-form picker's own DAO).
+          const cfgRegistryList = await fetchRegistryListCandidates(pool, tenantId).catch(() => []);
+          const cfgResult = await runConfigurator(
+            userText,
+            handlerCtx,
+            cfgPromptOverride,
+            cfgCandidates,
+            cfgRegistryList,
+          );
           handlerResult = { text: cfgResult.text, intent: "configurator" as const };
 
           // T-0466 (D8-G5): capture-as-request. When the user lacks authoring_draft

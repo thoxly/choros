@@ -54,6 +54,22 @@ import {
   type RegistryDefCandidate,
   type RelationCascadeDecision,
 } from "./relation-cascade.js";
+
+/**
+ * T-0724: a registry candidate for the list_registries introspection tool — carries
+ * applicationId (unlike RegistryDefCandidate above, the narrower relation-cascade
+ * dedup shape that has no application scoping concept). Populated by the HTTP layer
+ * from the SAME DAO the human registry picker uses (listRegistryDefs,
+ * src/http/registry-defs.ts, reused verbatim — see fetchRegistryListCandidates in
+ * src/http/assistant.ts) — never a bespoke query, never a wider result than what
+ * GET /api/registry-defs already returns for that tenant.
+ */
+export interface RegistryListCandidate {
+  readonly id: string;
+  readonly slug: string;
+  readonly displayName: string;
+  readonly applicationId: string;
+}
 import { generateSlugFromName } from "./slug-generator.js";
 import type { ChatLlmRequest, ChatLlmResult, ChatToolCall } from "./llm-port.js";
 // T-0600: canonical, jargon-free error text for a caught LLM failure — never
@@ -163,6 +179,45 @@ const TOOL_RELATE_APPLICATION: ToolDeclaration = {
         humanReadableReason: { type: "string", description: "Why this relation is being created (for changelog)." },
       },
       required: ["sourceRegistryDefId", "relationFieldKey", "humanReadableReason"],
+    },
+  },
+};
+
+/**
+ * list_registries — T-0724 (E-FORMS, столп 5 «бот==человек»): introspection tool,
+ * READ-ONLY, no DRAFT write. Lists the REAL registry_def rows (slug + human
+ * display_name) the acting user can see — the SAME data the human bind-form's
+ * "Реестр результата" picker fetches (GET /api/registry-defs, T-0681). Closes the
+ * gap T-0700 left open: T-0700 let the bot NAME a targetRegistrySlug in
+ * author_binding, but the bot still had to GUESS the exact slug — a human always
+ * sees the real options in a dropdown, the bot had no equivalent. This tool is
+ * that equivalent: call it BEFORE author_binding to learn real slugs instead of
+ * guessing (a guessed slug the tenant does not have is honestly rejected server-
+ * side, T-0681 — this tool prevents the guess in the first place).
+ */
+const TOOL_LIST_REGISTRIES: ToolDeclaration = {
+  type: "function",
+  function: {
+    name: "list_registries",
+    description:
+      "Перечислить РЕАЛЬНЫЕ реестры (registry_def: slug + человеко-читаемое название) — " +
+      "ТЕ ЖЕ данные, что видит человек в пикере «Реестр результата» при привязке процесса " +
+      "(нельзя показать больше, чем видит человек). Вызывай этот инструмент ПЕРЕД author_binding, " +
+      "когда нужно указать targetRegistrySlug — чтобы взять РЕАЛЬНЫЙ slug, а не угадывать его " +
+      "(угаданный slug, которого нет у приложения, сервер честно отклонит). Ничего не пишет " +
+      "и не требует прав сверх тех, что уже нужны для работы с конфигуратором.",
+    parameters: {
+      type: "object",
+      properties: {
+        applicationId: {
+          type: "string",
+          description:
+            "Необязательно: UUID приложения, чьи реестры перечислить. Пусто — перечисляются " +
+            "реестры ВСЕХ приложений этого пространства (то же, чем GET /api/registry-defs " +
+            "отвечает без фильтра). Приложение без реестров даёт честный пустой список, не ошибку.",
+        },
+      },
+      required: [],
     },
   },
 };
@@ -404,6 +459,11 @@ export const CONFIGURATOR_DEFAULT_SYSTEM_PROMPT =
   "Используй инструменты для каждого конкретного изменения. " +
   "Если поле-связь ссылается на приложение, которого ещё нет — используй relate_application: " +
   "система сама создаст связанное приложение в том же черновике или сошлётся на существующее (без дубликатов). " +
+  // T-0724 (столп 5): list_registries FIRST — never guess a targetRegistrySlug.
+  "Если пользователь просит направить результат шага процесса в КОНКРЕТНЫЙ (не дефолтный) реестр — " +
+  "СНАЧАЛА вызови list_registries (реестры того приложения), чтобы узнать РЕАЛЬНЫЕ slug'и, и только " +
+  "потом вызывай author_binding с targetRegistrySlug из этого списка. Никогда не угадывай slug реестра. " +
+  "list_registries ничего не пишет — только показывает то, что видит человек в своём пикере. " +
   "Если пользователь описывает ПРОЦЕСС/маршрут словами (подача → согласование → если сумма большая → доп. согласование) — " +
   "используй generate_process: система соберёт BPMN циклом генерация→проверка→починка, заземлит условия и роли на реальные поля, " +
   "и положит черновик в Модельер на ревью (без авто-публикации). " +
@@ -419,6 +479,10 @@ const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
   TOOL_PROPOSE_PLAN,
   TOOL_CREATE_APPLICATION,
   TOOL_RELATE_APPLICATION,
+  // T-0724: introspection BEFORE author_binding — lets the bot learn real
+  // targetRegistrySlug values instead of guessing (T-0700 declared the param;
+  // this tool answers "what are the real slugs?").
+  TOOL_LIST_REGISTRIES,
   TOOL_AUTHOR_BINDING,
   TOOL_EDIT_JSONSCHEMA,
   TOOL_EMIT_FORM,
@@ -660,6 +724,13 @@ function processToolCall(
    * Empty array → every relation target cascades a new app (no dedup possible).
    */
   existingRegistryDefs: readonly RegistryDefCandidate[] = [],
+  /**
+   * T-0724: this tenant's real registries (id/slug/displayName/applicationId) for
+   * the list_registries introspection tool. Injected pure from the loop; the HTTP
+   * layer supplies the SAME data the human registry picker fetches (never wider).
+   * Empty array → list_registries honestly reports zero registries (not an error).
+   */
+  registryListCandidates: readonly RegistryListCandidate[] = [],
 ): {
   approved?: ApprovedOp;
   blocked?: BlockedOp;
@@ -880,6 +951,33 @@ function processToolCall(
             ? { status: "draft", mode: "create_cascade", appSlug: decision.appSlug, relationFieldKey, tier: "draft" }
             : { status: "draft", mode: "link", targetRegistryId: decision.targetRegistryId, matchReason: decision.matchReason, relationFieldKey, tier: "draft" },
         ),
+      };
+    }
+
+    // -----------------------------------------------------------------------
+    // list_registries — T-0724: READ-ONLY introspection, NO ApprovedOp, NO write.
+    // Filters the pre-fetched registryListCandidates (tenant-scoped, the SAME data
+    // GET /api/registry-defs returns to the human picker) by applicationId when
+    // given. Returns slug + human display_name — never more than the human sees.
+    // -----------------------------------------------------------------------
+    case "list_registries": {
+      const rawApplicationId =
+        typeof args["applicationId"] === "string" ? args["applicationId"].trim() : "";
+      const scoped = rawApplicationId.length > 0
+        ? registryListCandidates.filter((r) => r.applicationId === rawApplicationId)
+        : registryListCandidates;
+
+      const registries = scoped.map((r) => ({ slug: r.slug, displayName: r.displayName }));
+      const scopeNote = rawApplicationId.length > 0 ? ` для приложения «${rawApplicationId}»` : "";
+      return {
+        // No approved/blocked/pendingPromote/planProposal — this tool writes nothing.
+        changelogLine: `ℹ [СПРАВКА] list_registries${scopeNote}: ${registries.length} реестр(ов)`,
+        toolResultContent: JSON.stringify({
+          status: "ok",
+          applicationId: rawApplicationId.length > 0 ? rawApplicationId : null,
+          count: registries.length,
+          registries,
+        }),
       };
     }
 
@@ -1206,6 +1304,8 @@ async function runConfiguratorLoop(
   systemPromptOverride: string | null = null,
   /** T-0463: existing registry_defs for relation-cascade dedup (PD-5). */
   existingRegistryDefs: readonly RegistryDefCandidate[] = [],
+  /** T-0724: this tenant's real registries for the list_registries tool. */
+  registryListCandidates: readonly RegistryListCandidate[] = [],
 ): Promise<ConfiguratorResult> {
   const approvedOps: ApprovedOp[] = [];
   const blockedOps: BlockedOp[] = [];
@@ -1262,7 +1362,7 @@ async function runConfiguratorLoop(
     // Process each tool call
     const toolResultParts: string[] = [];
     for (const call of result.toolCalls) {
-      const processed = processToolCall(call, existingRegistryDefs);
+      const processed = processToolCall(call, existingRegistryDefs, registryListCandidates);
 
       if (processed.approved) approvedOps.push(processed.approved);
       if (processed.blocked) blockedOps.push(processed.blocked);
@@ -1373,6 +1473,8 @@ export async function handleConfigurator(
   systemPromptOverride: string | null = null,
   /** T-0463: existing registry_defs for relation-cascade dedup (PD-5). */
   existingRegistryDefs: readonly RegistryDefCandidate[] = [],
+  /** T-0724: this tenant's real registries for the list_registries tool. */
+  registryListCandidates: readonly RegistryListCandidate[] = [],
 ): Promise<HandlerResult> {
   // SECURITY: Check grant ceiling FIRST (intersection already agent ∩ user)
   const hasGrant = await hasAuthoringDraftGrant(ctx);
@@ -1391,7 +1493,13 @@ export async function handleConfigurator(
     };
   }
 
-  const result = await runConfiguratorLoop(userText, ctx, systemPromptOverride, existingRegistryDefs);
+  const result = await runConfiguratorLoop(
+    userText,
+    ctx,
+    systemPromptOverride,
+    existingRegistryDefs,
+    registryListCandidates,
+  );
 
   return {
     text: result.text,
@@ -1423,6 +1531,8 @@ export async function runConfigurator(
   systemPromptOverride: string | null = null,
   /** T-0463: existing registry_defs for relation-cascade dedup (PD-5). */
   existingRegistryDefs: readonly RegistryDefCandidate[] = [],
+  /** T-0724: this tenant's real registries for the list_registries tool. */
+  registryListCandidates: readonly RegistryListCandidate[] = [],
 ): Promise<ConfiguratorResult> {
   const hasGrant = await hasAuthoringDraftGrant(ctx);
   if (!hasGrant) {
@@ -1447,5 +1557,11 @@ export async function runConfigurator(
       captureRequest: worthy ? { description: userText.trim() } : undefined,
     };
   }
-  return runConfiguratorLoop(userText, ctx, systemPromptOverride, existingRegistryDefs);
+  return runConfiguratorLoop(
+    userText,
+    ctx,
+    systemPromptOverride,
+    existingRegistryDefs,
+    registryListCandidates,
+  );
 }
