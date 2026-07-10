@@ -50,6 +50,7 @@ import {
   type CorrelationResult,
 } from "../core/message-correlation.js";
 import { fallbackDefinitionName } from "../core/process-catalog-view.js";
+import { selectEngineProcessNames } from "../db/engine-process-name.js";
 import { findEmployeeById } from "../db/org.js";
 import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
 import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
@@ -1159,6 +1160,20 @@ async function resolveDefinitionNames(
         [tenantId, uniqueKeys],
       );
       for (const r of rows) names.set(r.process_key, r.name);
+
+      // T-0732 [E16, O-1 из T-0717]: SECOND (middle) tier — for keys with NO
+      // modeler row (engine-source processes, e.g. telLinear deployed straight to
+      // Flowable), resolve the human name from the tenant-scoped engine_process_name
+      // overlay (migration 131) instead of demoting to the raw key. Precedence:
+      // modeler row (above) > engine overlay (here) > fallbackDefinitionName (below).
+      // Same tenant-scoped client → one tx; selectEngineProcessNames carries its own
+      // explicit `WHERE tenant_id = $1` (+RLS) so a name from another tenant with the
+      // same key can never leak here (T-0616 §F-1 class).
+      const unresolved = uniqueKeys.filter((k) => !names.has(k));
+      if (unresolved.length > 0) {
+        const engineNames = await selectEngineProcessNames(client, tenantId, unresolved);
+        for (const [key, name] of engineNames) names.set(key, name);
+      }
     });
   } catch {
     // Honest degrade: every key falls back below (DB error is not fatal to the

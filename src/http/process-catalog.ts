@@ -55,6 +55,7 @@ import {
   type CatalogInstance,
   type ProcessDefRow,
 } from "../core/process-catalog-view.js";
+import { selectEngineProcessNames } from "../db/engine-process-name.js";
 
 // ---------------------------------------------------------------------------
 // Constants / helpers
@@ -361,9 +362,31 @@ export function registerProcessCatalogRoutes(
         }
       }
 
+      // T-0732 [E16, O-1 из T-0717]: resolve human names for ENGINE-source keys
+      // (observed in projections but with NO modeler defRow) from the tenant-scoped
+      // engine_process_name overlay (migration 131) — the SAME middle-tier
+      // resolveDefinitionNames applies on the instance/inbox plane, so the catalog's
+      // engine definitions show the human name (e.g. «Канонический линейный ТЭЛ»)
+      // instead of the bare key. Tenant-scoped + own explicit WHERE tenant_id (no
+      // cross-tenant leak). Empty / no engine keys ⇒ no query, unchanged behaviour.
+      const defKeys = new Set(defRows.map((d) => d.process_key));
+      const engineKeys = [...new Set(projections.map((p) => p.procKey))].filter(
+        (k) => !defKeys.has(k),
+      );
+      const engineNames =
+        engineKeys.length > 0
+          ? await withTenantTx(pool, tenantId, (client) =>
+              selectEngineProcessNames(client, tenantId, engineKeys),
+            )
+          : new Map<string, string>();
+
       // Definitions count instances by key — unaffected by the step/role overlay, so
       // build them from the original projections (both arrays share the same instances).
-      const definitions: CatalogDefinition[] = buildCatalogDefinitions(defRows, projections);
+      const definitions: CatalogDefinition[] = buildCatalogDefinitions(
+        defRows,
+        projections,
+        engineNames,
+      );
       const instances: CatalogInstance[] = displayProjections.map(serializeInstance);
       const bindings = bindingRows.map(serializeBinding);
 

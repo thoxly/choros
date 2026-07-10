@@ -112,10 +112,18 @@ export function fallbackDefinitionName(processKey: string): string {
  *
  * @param defRows     rows from choros.process_definition (074), tenant-scoped.
  * @param projections REAL instance projections (audit-backed), tenant-scoped.
+ * @param engineNames T-0732 [E16, O-1 из T-0717]: OPTIONAL { process_key → human
+ *   name } overlay for engine-source keys (choros.engine_process_name, migration
+ *   131), tenant-scoped. When an engine-observed key (no modeler row) has an entry
+ *   here, its human name is used instead of fallbackDefinitionName(key) = the raw
+ *   key — the same middle-tier resolution resolveDefinitionNames applies on the
+ *   instance/inbox plane, so the catalog agrees with the detail. Omitted / no entry
+ *   ⇒ the honest key fallback (unchanged behaviour).
  */
 export function buildCatalogDefinitions(
   defRows: readonly ProcessDefRow[],
   projections: readonly ProjectionLike[],
+  engineNames?: ReadonlyMap<string, string>,
 ): CatalogDefinition[] {
   // Count real instances per process key.
   const countByKey = new Map<string, number>();
@@ -139,11 +147,14 @@ export function buildCatalogDefinitions(
   }
 
   // 2. Engine-observed keys with NO modeler row (e.g. Flowable-deployed telLinear).
+  //    T-0732: prefer the tenant-scoped engine_process_name overlay (human name from
+  //    the BPMN <process name>) over the raw-key fallback — so the catalog shows the
+  //    same human name the detail/inbox plane does, never a bare machine key.
   for (const [key, count] of countByKey) {
     if (byKey.has(key)) continue;
     byKey.set(key, {
       process_key: key,
-      name: fallbackDefinitionName(key),
+      name: engineNames?.get(key) ?? fallbackDefinitionName(key),
       source: "engine",
       status: "deployed",
       version: null,
