@@ -2,7 +2,7 @@
   "task_id": "T-0740",
   "status": "pr_open",
   "branch": "task/T-0740",
-  "pr_url": "",
+  "pr_url": "https://github.com/thoxly/choros/pull/65",
   "ci_local": {
     "build": true,
     "lint": true,
