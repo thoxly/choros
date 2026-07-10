@@ -399,6 +399,39 @@ corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
   `ci/checks/grant-resolver-isolation.sh`. **Покрытие: STRONG** (exhaustive deny-matrix
   + root-identity; broken self-test = allow-by-default матрица + не-denyAll дефолт).
 
+### 7.7 ACTOR-ACTIVE — деактивированный сотрудник теряет authority на READ-путях
+- **Инвариант:** ни один employee actor-slug lookup, питающий grant/role/owner/
+  admin-решение, не возвращает результат для деактивированного сотрудника
+  (`employee.deactivated_at IS NOT NULL`) — держатель уже живого access-JWT
+  (offline-JWKS, остаточное окно ~300s, T-0702) теряет ЛЮБУЮ ролевую/грантовую
+  authority сразу после деактивации, а не только после истечения токена.
+- **Enforced by:** `ci/checks/actor-authority-deactivation-gate.sh` (T-0662,
+  FF-0662-1 предикат-покрытие 7 зарегистрированных `AUTHORITY_RESOLVERS` +
+  FF-0662-2 accounting-скан ВСЕХ employee actor-lookup'ов в `src/db`+`src/http`),
+  `ci/checks/actor-active-route-coverage.sh` (T-0726, FF-726-1, informational —
+  route→resolver reachability на ВСЕХ GET-роутах); источник предиката
+  `src/db/actor-authority-gate.ts` (`ACTOR_ACTIVE_SQL = "deactivated_at IS NULL"`).
+- **Runtime (vitest, живой PG):** `ci/checks/db/org-admin-deactivation.db.test.ts`,
+  `ci/checks/db/grants-dao-deactivated.db.test.ts`,
+  `ci/checks/db/grants-dao-subject-deactivation.db.test.ts`,
+  `ci/checks/db/grants-dao-role-slug-deactivation.db.test.ts` (T-0738 —
+  `getRoleSlugsForActor`, обе выборки: primary + T-0366 fallback),
+  `ci/checks/db/rights-change-requests-deactivated-approver.db.test.ts`,
+  `ci/checks/db/audit-route-deactivation-gate.db.test.ts`,
+  `ci/checks/db/org-tree-deactivated.db.test.ts`.
+- **Покрытие: STRONG** (static registry + accounting-скан двойного слоя + 7
+  независимых live-PG adversarial файлов, каждый со своим позитив-контролем).
+- **История / gap:** T-0658 нашёл 5 bespoke-резолверов без предиката
+  (whack-a-mole, grep-ripple по одному имени пропускает остальные); T-0662
+  механизировал реестр (структурный анти-рецидив, FF-0662-1/2); T-0721/T-0736/
+  T-0737/T-0738/T-0739 закрыли READ-поверхность роут-за-роутом (находки
+  обнаруживал T-0726); T-0740 реконсилировал маркер-реестр `ACTIVE_MARKERS`
+  (T-0726) с `AUTHORITY_RESOLVERS`/предикатом (T-0662) — см.
+  `docs/tasks/T-0740.adr.md`. **Остаточный known gap:** `GET /api/inbox/:id`
+  (T-0738 ADR §4) не вызывает authority-резолвер вовсе — tenant-open-by-
+  construction для ЛЮБОГО актора (не специфично для деактивации), отдельный
+  вопрос от этой семьи, не закрыт.
+
 ---
 
 ## 8. Сводная таблица покрытия
@@ -415,6 +448,7 @@ corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
 | 7.3 | NO-KILLSWITCH | ✅ + self-test | — | — | PARTIAL | red-line, проверяется grep'ом |
 | 7.4 | EGRESS-POLICY | ✅ | — | — | PARTIAL | runtime-проверка политики egress |
 | 7.5 | FROZEN-CHECKS | ✅ + probe | — | hostile-probe | STRONG | держит конституцию; T-0155 вешает сюда каталог |
+| 7.7 | ACTOR-ACTIVE | ✅ registry+accounting | ✅ 7 live-PG | — | STRONG | route-coverage (T-0726) informational остаток (`GET /api/inbox/:id`, T-0738 ADR §4) — отдельный follow-up |
 
 ---
 
