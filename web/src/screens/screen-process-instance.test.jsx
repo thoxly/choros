@@ -88,3 +88,33 @@ describe('screen-process-instance — human title + honest variables (T-0684)', 
     expect(screenSrc).not.toMatch(/String\(variable\.value\)/);
   });
 });
+
+describe('screen-process-instance — detail polish (T-0735 / T-0654-b, spec §5.3)', () => {
+  it('AC-D1: the starter is shown BY NAME via ActorChip (starterName/starterType/starterId)', () => {
+    expect(screenSrc).toContain('ActorChip');
+    expect(screenSrc).toContain('Кем запущен');
+    expect(screenSrc).toMatch(/<ActorChip type=\{instance\.starterType \|\| 'human'\} name=\{instance\.starterName\} id=\{instance\.starterId\} \/>/);
+    // rendered only when the starter identity is present (honest-degrade).
+    expect(screenSrc).toMatch(/\(instance\.starterType \|\| instance\.starterId\) &&/);
+  });
+
+  it('AC-D1: anti-uuid — the starter is NEVER a bare id in the sidebar', () => {
+    // no `>{instance.starterId}<` bare JSX child anywhere.
+    expect(screenSrc).not.toMatch(/>\s*\{instance\.starterId\}\s*</);
+  });
+
+  it('AC-D2: «Связанные задачи» deep-links the inbox to THIS instance (?instance=<id>)', () => {
+    expect(screenSrc).toMatch(/to=\{`\/inbox\?instance=\$\{encodeURIComponent\(instance\.id\)\}`\}/);
+    expect(screenSrc).toContain('Задачи этого процесса');
+    // regression: no longer a plain /inbox link.
+    expect(screenSrc).not.toMatch(/to="\/inbox"/);
+  });
+
+  it('AC-D3: the header carries «Имя процесса · Запись-источник» as a RecordRef link', () => {
+    // RecordRef is promoted into the title row (gated on hasSourceRecord), not only the sidebar.
+    const titleIdx = screenSrc.indexOf('deriveInstanceTitle(instance)');
+    const titleBlock = screenSrc.slice(titleIdx, titleIdx + 1200);
+    expect(titleBlock).toMatch(/hasSourceRecord\(instance\)/);
+    expect(titleBlock).toMatch(/<RecordRef recordId=\{instance\.recordId\}/);
+  });
+});
