@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0751",
+  "status": "pr_open",
+  "branch": "task/T-0751",
+  "ci_local": {
+    "build": true,
+    "build_result": "node_modules/.bin/tsc --noEmit -p . -> 0 errors. node_modules were not present in the worktree at task start -- npm ci --maxsockets=3 was run before any gate could execute (environment setup, not a code deviation).",
+    "lint": true,
+    "lint_result": "npx eslint src/http/rights-intents.ts src/db/actor-authority-gate.ts src/__tests__/rights-intents.substitution-coverage.authz.test.ts ci/checks/db/rights-intents.db.test.ts -> 0 findings.",
+    "types": true,
+    "types_result": "Covered by the tsc --noEmit run above.",
+    "tests": true,
+    "tests_result": "Targeted: npx vitest run src/__tests__/rights-intents.test.ts src/__tests__/rights-intents.self-absence.authz.test.ts src/__tests__/rights-intents.fire-owner.authz.test.ts src/__tests__/rights-intents.substitution-coverage.authz.test.ts -> 18/18 passed (14 pre-existing unchanged + 4 new c1..c4: active-holder->200 true, active-non-holder->200 false, deactivated-caller->404 NOT_FOUND with holder-set query NEVER issued (mutation-verified via captured query log), 400 VALIDATION unaffected). Broader sanity: npx vitest run src/__tests__ -> 252 files / 4739 tests passed, 2 files / 17 tests skipped (pre-existing skips, e.g. flowable-client.integration.test.ts), ZERO failures -- full-repo regression check. Live-PG (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros): npx vitest run --dir ci/checks/db --no-file-parallelism ci/checks/db/rights-intents.db.test.ts -> 17/17 passed (15 pre-existing T-0745/T-0658 tests unchanged + 2 new T-0751 tests: active caller gets real coverage answer [regression guard -- T-0745 form not broken], deactivated caller -> 404 with provides_coverage/holder_count both undefined in the response body [no leak, not just a status-code check]).",
+    "fitness": true,
+    "fitness_result": "Full fitness suite intentionally NOT run per task instruction (substrate/targeted gates only). Ran: bash ci/checks/actor-active-route-coverage.sh -> 1 FINDING -> 0 FINDINGS (SUMMARY: 78 GET routes audited, 23 marker-covered [was 22], 55 whitelisted, 0 findings; STATUS: clean). bash ci/checks/actor-active-route-coverage.sh --self-test -> PASS. bash ci/checks/actor-authority-deactivation-gate.sh -> PASS, FF-0662-1 green for all 8 registered resolvers (new 8th: src/http/rights-intents.ts:resolveActiveActorEmployeeId, 1 lookup / 1 predicate), FF-0662-2 accounting scan green (new lookup accounted via the new registration, no orphan lookup). bash ci/checks/actor-authority-deactivation-gate.sh --self-test -> PASS. bash ci/checks/http-route-auth-coverage.sh (+ --self-test) -> PASS. bash ci/checks/anti-case-lock.sh -> PASS (0 new case literals; aggregate unchanged/improved vs baseline). bash ci/checks/frozen-checks-immutable.sh -> PASS via the auto-additive frozen-thaw channel (FF-FCI13, NOT founder-path): both touched ci/checks/*.sh (actor-authority-deactivation-gate.sh owner=T-0662, actor-active-route-coverage.sh owner=T-0726) mechanically verified A-1..A-4 additive (each delta is exactly ONE new-entity line -- resolveActiveActorEmployeeId was absent from BOTH registries at BASE_REF, not a reclassification of an existing entry, the exact distinction T-0740 ADR Sec.5 drew between an allowed new-entity append and a blocked promotion) plus a valid ACTOR-ACTIVE-family Враг-attestation (family already exists in T-0152 catalog Sec.7.7, its Enforced-by list covers BOTH touched files; corpus_ref=b983ecff [merge-base/BASE_REF itself, corpus.jsonl untouched so its blob matches HEAD]; enemy_segment=ci/checks/db/rights-intents.db.test.ts, the real live-PG adversarial file proving the fix). 2 new sanction lines appended to ci/checks/data/frozen-sanctions.jsonl (append-only, outside the T-0146 glob). bash ci/checks/auto-sanction-additive.sh (standalone, both sanctions re-verified post-commit) -> PASS. bash ci/checks/auto-sanction-additive.sh --self-test -> PASS, untouched."
+  },
+  "files_changed": [
+    "src/http/rights-intents.ts",
+    "src/db/actor-authority-gate.ts",
+    "ci/checks/actor-authority-deactivation-gate.sh",
+    "ci/checks/actor-active-route-coverage.sh",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "ci/checks/db/rights-intents.db.test.ts",
+    "src/__tests__/rights-intents.substitution-coverage.authz.test.ts",
+    "docs/design/T-0152-security-invariants-catalog.md",
+    "docs/tasks/T-0751.adr.md",
+    "T-0751.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "design_summary": {
+    "choice": "(a) -- gate the route on ACTOR_ACTIVE like its siblings. Rejected (b) whitelist: provides_coverage+holder_count answers the exact per-(role_id,employee_id) membership question rights-overview.ts's self-scope projection deliberately hides from an ordinary ACTIVE non-admin employee (that hiding is the whole reason T-0745 needed a new route in the first place); a deactivated caller -- no longer a legitimate party to the self-absence/substitute flow this route exists to serve -- must not get a strictly WIDER answer than a legitimate active non-admin already can't get through the normal channel. Whitelisting would require proving the boolean+count is harmless, which is impossible once that framing is accepted (real enumeration vector: pair a tenant-open GET /api/org roster with a per-substitute_employee_id probe over a known role_id).",
+    "mechanism": "resolveActiveActorEmployeeId (rights-intents.ts) -- an INDEPENDENT copy of registerSelfAbsence's own inline `slug = $2 AND ${ACTOR_ACTIVE_SQL}` actor-resolve, not a shared-helper refactor (extracting the code out of registerSelfAbsence's body would have made that already-registered T-0662 resolver's own text stop carrying the predicate literally, breaking FF-0662-1 for a resolver this task didn't need to touch). Called BEFORE the holder-set read; deactivated caller resolves to null -> 404 NOT_FOUND \"actor employee record not found\", byte-identical error shape to registerSelfAbsence's own denial (sibling-policy consistency, as the task requested).",
+    "sibling_check": "registerSubstitute/registerFire/registerHire/registerUrgentRevoke all route through loadAdminContext (admin gate, ACTOR_ACTIVE-carrying). registerSelfAbsence is the ONLY authority-writing sibling WITHOUT an admin gate (self-service, by design) -- and it carries its OWN bespoke ACTOR_ACTIVE check for exactly that reason. T-0745's read copied registerSelfAbsence's \"no admin gate\" half (correctly, for self-service parity) but not its \"still ACTOR_ACTIVE-gate the caller\" half -- this task closes that gap.",
+    "frontend_impact": "None observed/expected: web/src/screens/rights/ra-intents.jsx's useSubstitutionCoverage hook already treats any non-2xx response as advisory-unknown (`r.ok ? r.json() : Promise.reject(...)`, caught, sets providesCoverage=null -> no warning banner rendered, form fully usable) -- a 404 for a (practically impossible in normal use, since the caller IS the logged-in actor) deactivated caller degrades gracefully to 'no banner', never blocks the form."
+  },
+  "gate_counts": {
+    "actor_active_route_coverage_findings": "1 -> 0 (78 GET routes audited, 23 marker-covered, 55 whitelisted)",
+    "actor_authority_deactivation_gate_resolvers": "7 -> 8 registered (all FF-0662-1 green, FF-0662-2 accounting green)",
+    "root_vitest_targeted_rights_intents": "18/18 (14 pre-existing unchanged + 4 new)",
+    "root_vitest_full_unit_suite": "4739/4739 passed, 17 pre-existing skips, 0 failures",
+    "root_vitest_live_pg_rights_intents_db": "17/17 (15 pre-existing unchanged + 2 new)",
+    "named_ci_gates_run": [
+      "tsc --noEmit: 0 errors",
+      "eslint (4 files): 0 findings",
+      "actor-active-route-coverage.sh: 1->0 findings, STATUS clean",
+      "actor-active-route-coverage.sh --self-test: PASS",
+      "actor-authority-deactivation-gate.sh: PASS (8 resolvers)",
+      "actor-authority-deactivation-gate.sh --self-test: PASS",
+      "http-route-auth-coverage.sh (+ --self-test): PASS",
+      "anti-case-lock.sh: PASS",
+      "frozen-checks-immutable.sh: PASS (auto-additive sanctions verified, FF-FCI13)",
+      "auto-sanction-additive.sh (standalone + --self-test): PASS"
+    ]
+  },
+  "live_proof_plan": "Not required (substrate/security-fitness-gate task, no product-facing UI surface changed; T-0745's own live_proof already covers the ra-intents.jsx forms end-to-end and is unaffected -- see design_summary.frontend_impact above and the regression-guard live-PG test in ci/checks/db/rights-intents.db.test.ts §T-0751).",
+  "friction_events": [
+    "The worktree had no node_modules installed at task start -- npm ci --maxsockets=3 was required before tsc/eslint/vitest could run at all (same cold-start pattern prior tasks on this repo have already recorded).",
+    "First draft of the new unit-test stub pool matched the coverage route's holder-set query with `!text.includes(\"employee_id\")`, which excluded the query's OWN `SELECT employee_id FROM ...` text and broke the positive-control tests (c1/c2) with false-empty holder sets. Fixed by narrowing the exclusion to the actual FILTER shapes (`employee_id <>` / `employee_id = $3`) that distinguish this route's holder-set query from the substitute/self-absence sibling routes' tier-probe queries -- caught immediately by running the new test file before wiring it into the targeted suite."
+  ]
+}
