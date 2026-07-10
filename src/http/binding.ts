@@ -300,6 +300,19 @@ export async function getBindingLayout(
  * the POST /api/forms/binding handler so the human save AND the agent op-apply
  * seam share it exactly (no divergent second check).
  *
+ * @param applicationId T-0711 (optional, review T-0706 finding #37 — P2): the
+ *        application the CALLER selected for this save (FormDesigner's
+ *        "Приложение" picker / an agent's explicit choice). A process can be
+ *        bound to 2+ applications (process_app_binding UNIQUE(tenant_id,
+ *        process_key, application_id), migration 075) — without this pin the
+ *        live schema used to resolve to WHICHEVER binding row Postgres
+ *        returned first (LIMIT 1, no ORDER BY), independent of what the user
+ *        actually picked. Passed through to resolveLiveSchemaFieldKeys /
+ *        resolveLiveCollectionSubKeys (fail-closed if the id is malformed or
+ *        names a nonexistent row — see resolveLiveRecordSchema's doc).
+ *        Omitted → deterministic oldest-binding fallback (T-0711), never a
+ *        planner-order pick.
+ *
  * Throws HttpError(409, "WRONG_FLOOR") on a Floor-2 classification or an
  * unresolvable live schema (fail-closed). Returns void on Floor-1 (safe to save).
  */
@@ -308,8 +321,9 @@ export async function classifyLayoutSave(
   tenantId: string,
   processKey: string,
   layout: Record<string, unknown>,
+  applicationId?: string | null,
 ): Promise<void> {
-  const liveKeys = await resolveLiveSchemaFieldKeys(client, tenantId, processKey);
+  const liveKeys = await resolveLiveSchemaFieldKeys(client, tenantId, processKey, applicationId);
   if (liveKeys === null) {
     // FAIL-CLOSED: live schema unresolvable (no registry_def) → reject as Floor-2.
     throw new HttpError(
@@ -323,7 +337,9 @@ export async function classifyLayoutSave(
   // subKeys) is checked against each collection's OWN nested key set — not the
   // flat top-level namespace, which falsely flagged every table column as a
   // dangling binding and 409'd any form carrying a «Позиции»-style table (T-0678).
-  const subKeysByCollection = await resolveLiveCollectionSubKeys(client, tenantId, processKey);
+  // T-0711: SAME applicationId as liveKeys above — the field key-set and the
+  // collection sub-key-sets MUST resolve against the SAME binding row.
+  const subKeysByCollection = await resolveLiveCollectionSubKeys(client, tenantId, processKey, applicationId);
   const schemaView: LiveSchemaView = {
     fieldKeys: [...liveKeys],
     ...(subKeysByCollection ? { subKeysByCollection } : {}),
@@ -442,17 +458,24 @@ export function collectLayoutFieldKeys(doc: unknown): string[] {
  * unresolvable schema BEFORE this is called, so unresolvable-here in
  * practice only happens for a layout with zero fieldKey references, e.g. a
  * pure static-content form).
+ *
+ * @param applicationId T-0711 (optional): MUST be the SAME value passed to
+ *        the classifyLayoutSave call that gated this same save (the caller
+ *        below always passes the identical variable) — deriving fields from
+ *        a DIFFERENT binding's schema than the one the gate just validated
+ *        against would reintroduce the exact inconsistency this task closes.
  */
 export async function deriveFieldsFromLayout(
   client: pg.PoolClient,
   tenantId: string,
   processKey: string,
   layout: Record<string, unknown>,
+  applicationId?: string | null,
 ): Promise<BindingField[]> {
   const referencedKeys = collectLayoutFieldKeys(layout);
   if (referencedKeys.length === 0) return [];
 
-  const recordSchema = await resolveLiveRecordSchema(client, tenantId, processKey);
+  const recordSchema = await resolveLiveRecordSchema(client, tenantId, processKey, applicationId);
   if (recordSchema === null) return [];
 
   const allFieldDefs = deriveFieldDefsFromSchema(recordSchema);
@@ -690,6 +713,25 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
         throw new HttpError(400, "VALIDATION", "stepKey must be a non-empty string");
       }
 
+      // T-0711 (P2, review T-0706 finding #37): optional application_id hint —
+      // the application the FormDesigner "Приложение" picker (T-0669) had
+      // selected for THIS process at save time. A process can be bound to 2+
+      // applications (process_app_binding UNIQUE(tenant_id, process_key,
+      // application_id)); without this, the content gate resolved the live
+      // schema by process_key alone and could validate against a DIFFERENT
+      // binding than the one the author actually chose. Same dual-casing
+      // convention as processKey/stepKey above. Absent → classifyLayoutSave /
+      // deriveFieldsFromLayout fall back to a deterministic (not arbitrary)
+      // resolution — see live-form-schema.ts.
+      const rawApplicationId = (
+        typeof body["applicationId"] === "string" ? body["applicationId"] :
+        typeof body["application_id"] === "string" ? body["application_id"] : ""
+      ).trim();
+      if (rawApplicationId) {
+        assertUuidShape(rawApplicationId, "applicationId");
+      }
+      const applicationId: string | null = rawApplicationId || null;
+
       // Optional layout document (FormDesigner path). When present it must be a JSON object.
       const rawLayout = body["layout"];
       let layout: Record<string, unknown> | null = null;
@@ -738,7 +780,7 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
         // T-0656: the gate body lives in classifyLayoutSave() (exported above) so the agent
         // op-apply seam (POST /api/forms/document-ops) runs the IDENTICAL check — one judge.
         if (layout !== null) {
-          await classifyLayoutSave(client, tenantId, processKey, layout);
+          await classifyLayoutSave(client, tenantId, processKey, layout, applicationId);
         }
 
         // T-0665-e2e (P0 fix, fields-from-layout): resolve the field list to
@@ -753,7 +795,7 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
         const fields: BindingField[] =
           fieldsFromBody !== null
             ? fieldsFromBody
-            : await deriveFieldsFromLayout(client, tenantId, processKey, layout as Record<string, unknown>);
+            : await deriveFieldsFromLayout(client, tenantId, processKey, layout as Record<string, unknown>, applicationId);
 
         const existing = await getBinding(client, tenantId, processKey, stepKey);
         if (!existing) {

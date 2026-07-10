@@ -141,7 +141,7 @@ describe('FormDesigner — process/step binding picker (T-0665 F1)', () => {
     // The fallback ('record'/'record-form') is a LAST-RESORT default when no
     // step object is available at all — assert the picker's `step` argument
     // takes priority over it (persistLayout(doc, step, ...) signature).
-    expect(FORM_DESIGNER_SRC).toContain('function persistLayout(doc, step, setSaveState, savedDocRef, setSaveGen)');
+    expect(FORM_DESIGNER_SRC).toContain('function persistLayout(doc, step, setSaveState, savedDocRef, setSaveGen, applicationId)');
     expect(FORM_DESIGNER_SRC).toContain("step?.processKey || doc.step?.processKey || 'record'");
     expect(FORM_DESIGNER_SRC).toContain("step?.step || doc.step?.step || 'record-form'");
   });
@@ -178,11 +178,18 @@ describe('FormDesigner — process/step binding picker (T-0665 F1)', () => {
 // that has no process_app_binding row — authoring such a pair used to pass
 // cleanly (drag/drop/fields/preview all worked) and only fail on Save with an
 // opaque "Не удалось сохранить." (the server's classifyLayoutSave 409
-// WRONG_FLOOR, src/http/binding.ts, resolves application_id ITSELF from
-// process_app_binding — independent of whatever the picker had selected).
-// Fix reuses T-0681's GET /api/process-app-bindings (same endpoint
-// BindProcessModal / screen-processes.jsx already calls) to filter the
-// application picker to the SAME table the server's save-time gate consults.
+// WRONG_FLOOR, src/http/binding.ts). Before T-0711, the server resolved
+// application_id ITSELF from process_app_binding — independent of whatever
+// the picker had selected (a process bound to 2+ apps could 409, or worse,
+// silently validate against the WRONG app's schema). T-0711 threads the
+// picker's own selectedAppId into the save request (persistLayout's
+// `applicationId` param) so the gate resolves the SAME binding row shown
+// here — this filter remains the first line of defense (never OFFER an
+// unbound pair), T-0711 is defense-in-depth for the picker's OWN choice among
+// 2+ valid bindings. Fix reuses T-0681's GET /api/process-app-bindings (same
+// endpoint BindProcessModal / screen-processes.jsx already calls) to filter
+// the application picker to the SAME table the server's save-time gate
+// consults.
 //
 // This tier has no jsdom/act (see file header) so the network-driven filter
 // itself cannot be exercised end-to-end here — these are source-presence
@@ -270,6 +277,39 @@ describe('FormDesigner — application picker synced with process_app_binding (T
     expect(memoBlock).toContain('processAppBindings');
     expect(memoBlock).toContain('b.process_key === selectedProcessKey');
     expect(memoBlock).not.toMatch(/source\s*===\s*['"]engine['"]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0711 (P2, review T-0706 finding #37): the picker's own selectedAppId must
+// actually reach the server — before this task, persistLayout() sent only
+// {process_key, form_key, layout}; the server's classifyLayoutSave gate
+// resolved application_id ITSELF from process_app_binding by process_key
+// ALONE (no ORDER BY), so a process bound to 2+ applications let the server
+// silently validate/derive fields against WHICHEVER binding row Postgres
+// happened to return — independent of, and possibly disagreeing with, the
+// application shown selected in this exact picker.
+//
+// This tier has no jsdom/act (see file header) — source-presence checks for
+// the wiring (save-button click site passes selectedAppId; persistLayout
+// forwards it as application_id only when non-empty).
+// ---------------------------------------------------------------------------
+describe('FormDesigner — selected application threaded into the save request (T-0711)', () => {
+  it('the save button passes the picker\'s selectedAppId into persistLayout', () => {
+    const idx = FORM_DESIGNER_SRC.indexOf('onClick={() => persistLayout(');
+    expect(idx).toBeGreaterThan(-1);
+    const block = FORM_DESIGNER_SRC.slice(idx, idx + 220);
+    expect(block).toContain('setSaveState, savedDocRef, setSaveGen,');
+    expect(block).toContain('selectedAppId,');
+  });
+
+  it('persistLayout forwards applicationId as application_id in the request body, only when non-empty', () => {
+    const idx = FORM_DESIGNER_SRC.indexOf('function persistLayout(doc, step, setSaveState, savedDocRef, setSaveGen, applicationId)');
+    expect(idx).toBeGreaterThan(-1);
+    const block = FORM_DESIGNER_SRC.slice(idx, idx + 700);
+    expect(block).toContain("...(applicationId ? { application_id: applicationId } : {})");
+    // never a hardcoded/literal id — always the parameter.
+    expect(block).not.toMatch(/application_id:\s*['"][0-9a-fA-F-]{8,}['"]/);
   });
 });
 

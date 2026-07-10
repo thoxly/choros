@@ -1528,6 +1528,7 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                 doc,
                 { processKey: selectedProcessKey, step: stepKey.trim() },
                 setSaveState, savedDocRef, setSaveGen,
+                selectedAppId,
               )}
               style={{ marginTop: 'var(--chs-space-2)', width: '100%' }}
             >
@@ -1602,8 +1603,19 @@ function resolveKey(doc, key) {
  * remain the last-resort default for the (now rare) case where neither is
  * set. Previously `doc.step` was NEVER populated by this component at all,
  * so every save silently hit that dead fallback (LIVE_PROOF T-0656 P0).
+ *
+ * T-0711 (P2, review T-0706 finding #37): `applicationId` is the designer's
+ * `selectedAppId` — the SAME application the "Приложение" picker (T-0669)
+ * resolved for `processKey`. A process can be bound to 2+ applications
+ * (process_app_binding UNIQUE(tenant_id, process_key, application_id)); the
+ * server's content gate (classifyLayoutSave → resolveLiveRecordSchema) used
+ * to resolve the live schema by processKey ALONE and could silently validate
+ * against a DIFFERENT binding than the one shown in this picker. Sent only
+ * when non-empty (a design opened before an app is chosen, or a legacy
+ * single-binding process, still saves — the server falls back to a
+ * deterministic resolution, not an error).
  */
-function persistLayout(doc, step, setSaveState, savedDocRef, setSaveGen) {
+function persistLayout(doc, step, setSaveState, savedDocRef, setSaveGen, applicationId) {
   setSaveState({ status: 'saving' });
   const processKey = step?.processKey || doc.step?.processKey || 'record';
   const formKey = step?.step || doc.step?.step || 'record-form';
@@ -1614,6 +1626,7 @@ function persistLayout(doc, step, setSaveState, savedDocRef, setSaveGen) {
     process_key: processKey,
     form_key: formKey,
     layout: docWithStep,
+    ...(applicationId ? { application_id: applicationId } : {}),
   };
   fetch('/api/forms/binding', {
     method: 'POST',
