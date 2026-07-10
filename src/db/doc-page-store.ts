@@ -389,18 +389,42 @@ export async function setDocRefs(
   );
   const deleted = (delResult as unknown as { rowCount: number }).rowCount ?? 0;
 
-  // Upsert each planned ref (DO NOTHING on exact conflict).
-  let set = 0;
-  for (const ref of refs) {
+  // Upsert planned refs (DO NOTHING on exact conflict) in ONE batched
+  // multi-row INSERT per chunk, not one round-trip per ref (T-0701).
+  //
+  // The previous per-ref loop issued `refs.length` sequential round-trips
+  // (≈1844 for a full REGEN run). Round-trip count dominated wall-clock and
+  // scaled directly with DB latency, so under CI/contention the doc-regen
+  // fitness test crossed the 5000 ms per-test timeout (flake). A batched
+  // INSERT collapses that to ⌈refs.length / CHUNK⌉ round-trips (2–3 in
+  // practice) — same columns, same ON CONFLICT semantics, same `set` count.
+  //
+  // tenant_id ($1) and page_id ($2) are constant across the whole call and
+  // are reused by every VALUES row; each row contributes 4 varying params
+  // (id, ref_kind, ref_target, created_at). CHUNK caps the per-statement
+  // bind-parameter count (2 + 4·CHUNK) far below Postgres' 65535 limit.
+  const CHUNK = 500;
+  for (let start = 0; start < refs.length; start += CHUNK) {
+    const batch = refs.slice(start, start + CHUNK);
+    const values: string[] = [];
+    const params: unknown[] = [tenantId, pageId];
+    for (const ref of batch) {
+      const base = params.length;
+      // ($1 tenant_id, $base+1 id, $2 page_id, $base+2 ref_kind, $base+3 ref_target, false, $base+4 created_at)
+      values.push(
+        `($1, $${base + 1}, $2, $${base + 2}, $${base + 3}::jsonb, false, $${base + 4})`,
+      );
+      params.push(ref.id, ref.refKind, JSON.stringify(ref.refTarget), ref.createdAt);
+    }
     await client.query(
       `INSERT INTO choros.doc_ref
          (tenant_id, id, page_id, ref_kind, ref_target, broken, created_at)
-       VALUES ($1, $2, $3, $4, $5::jsonb, false, $6)
+       VALUES ${values.join(', ')}
        ON CONFLICT (tenant_id, page_id, ref_kind, ref_target) DO NOTHING`,
-      [tenantId, ref.id, pageId, ref.refKind, JSON.stringify(ref.refTarget), ref.createdAt],
+      params,
     );
-    set++;
   }
+  const set = refs.length;
 
   return { set, deleted };
 }
