@@ -50,7 +50,6 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   Button, Mono, Drawer, EmptyState, ErrorState, LoadingState, KitIcon, Select, ConfirmDialog,
-  ActorChip,
 } from '../components/components.jsx';
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js';
@@ -93,7 +92,7 @@ import { readSelectEnum, isFieldRequired } from './kanban-board.js';
 // structural contracts (relation/collection/rollup) dispatch to their dedicated
 // editors below — keyed off the SAME binding-contract catalog via
 // resolveFieldContract, NOT a parallel `inputKind` string chain (spec §2).
-import { FieldControl, fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx';
+import { FieldControl, fetchEmployees, buildEmployeesById, PersonCell } from '../forms/field-renderer.jsx';
 import { resolveFieldContract } from '../forms/field-contract.js';
 
 // ---------------------------------------------------------------------------
@@ -469,57 +468,13 @@ function FileCell({ versionId, recordId }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// T-0673: PersonCell — table/detail cell that resolves a person-type field's
-// value (an employee id/slug) to a human-readable name via ActorChip.
-//
-// formatCellValue returns PERSON_CELL_ASYNC for a non-empty person value. The
-// list/detail render this component instead of a plain <td>/<span> string
-// (never a raw slug like "e-larina" as the primary text, mirroring
-// RelationCell/FileCell's async-cell contract for relation/file types).
-//
-// UNLIKE RelationCell/FileCell, resolution needs NO per-cell fetch: `employees`
-// is a single Map<id, {id,name,deactivated}> BATCH-loaded ONCE per screen (one
-// GET /api/org via fetchEmployees(), the SAME source PersonPicker and
-// screen-record-detail.jsx's created_by resolver already use — T-0648's
-// generic org/employee data layer) and passed down by the caller. This keeps
-// a page of N records at ONE request total, never N+1.
-//
-// Honest fallback (D2): an id absent from the map (deleted/never-synced
-// employee) renders the RAW SLUG via ActorChip's own `resolved:false`
-// contract — never blank, never a fabricated name.
-//
-// T-0698 (P2, T-0673's judge finding): the `deactivated` prop below was
-// ALWAYS false in production before this fix — GET /api/org's `people[]`
-// carried no deactivation signal at all, so fetchEmployees()'s flattened
-// entries (and therefore this Map) never had a `deactivated` key regardless
-// of the real employee.deactivated_at (migration 125). The T-0673 unit test
-// covering this line hand-built its `employees` Map with `deactivated: true`
-// literally in the fixture, which exercised PersonCell's own prop-threading
-// correctly but never proved the REAL Map (built from the REAL /api/org
-// response) ever carries that key — false coverage. Fixed at the source:
-// src/db/org.ts's listOrgTree now selects deactivated_at and exposes it as a
-// boolean on OrgPerson, and fetchEmployees() (field-renderer.jsx) now copies
-// it into the flattened shape. See screen-app-records.test.jsx's
-// "real /api/org response shape" test for the honest end-to-end coverage.
-// ---------------------------------------------------------------------------
-
-/**
- * @param {string} personId  the employee id/slug stored as the field value.
- * @param {Map<string, {id:string,name:string,deactivated?:boolean}>} employees
- *   batch-resolved employee map (id/slug → display shape), loaded once by the caller.
- */
-export function PersonCell({ personId, employees }) {
-  const hit = employees instanceof Map ? employees.get(personId) : null;
-  return (
-    <ActorChip
-      type="human"
-      name={hit ? hit.name : personId}
-      id={personId}
-      deactivated={Boolean(hit && hit.deactivated)}
-    />
-  );
-}
+// T-0673/T-0728: PersonCell (table/detail cell + kanban card person-field
+// resolve, via ActorChip) moved to its canonical home in
+// ../forms/field-renderer.jsx (alongside fetchEmployees/buildEmployeesById —
+// the "ONE canonical" employee data layer, T-0698) so kanban-board.jsx can
+// render the SAME component instead of a second hand-rolled ActorChip wrapper.
+// Imported above; re-exported for backward-compat callers of this module.
+export { PersonCell };
 
 // ---------------------------------------------------------------------------
 // T-0450: LineItemsField — row-table editor for a «Список строк» (collection)
@@ -1501,6 +1456,7 @@ function AppRecordsScreen() {
                 columnsOrder={kanbanConfig ? kanbanConfig.columns_order : undefined}
                 cardFields={kanbanCardFields}
                 fieldMetaByKey={kanbanFieldMetaByKey}
+                employeesById={employeesById}
                 onMoveRecord={handleMoveRecord}
                 onLocalUpdate={applyLocalRecordPatch}
               />

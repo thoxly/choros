@@ -130,7 +130,7 @@ describe('NF-6: kit-only + no drag-and-drop LIBRARY (native HTML5 DnD only)', ()
 
 describe('T-0626: empty card_fields falls back to deriveRecordLabel, not a raw UUID', () => {
   it('imports deriveRecordLabel from records-form.js and resolveCardLabel from kanban-board.js (reuses the platform convention, no second implementation)', () => {
-    expect(boardSrc).toMatch(/import \{ formatCellValue, computeComputedFieldValue, deriveRecordLabel \} from '\.\/records-form\.js';/);
+    expect(boardSrc).toMatch(/import \{ formatCellValue, computeComputedFieldValue, deriveRecordLabel, PERSON_CELL_ASYNC \} from '\.\/records-form\.js';/);
     expect(boardSrc).toMatch(/resolveCardLabel/);
     expect(boardSrc).toMatch(/from '\.\/kanban-board\.js';/);
   });
@@ -146,6 +146,26 @@ describe("T-0626 FF-K: resolveCardLabel's fallback contract (source-level; behav
   });
   it('resolveCardLabel is exported (unit-testable pure function, no React/hooks)', () => {
     expect(boardJsSrc).toMatch(/export function resolveCardLabel\(/);
+  });
+});
+
+describe('T-0728 (N2, столп 2 anti-UUID): kanban person-field cell wiring', () => {
+  it('imports PersonCell from field-renderer.jsx (the SAME component the record table uses — no second ActorChip wrapper)', () => {
+    expect(boardSrc).toMatch(/import \{ PersonCell \} from '\.\.\/forms\/field-renderer\.jsx';/);
+  });
+  it('imports resolveCardFieldCell from kanban-board.js and uses it (never re-checks the sentinel inline in the .jsx)', () => {
+    expect(boardSrc).toMatch(/resolveCardFieldCell/);
+    expect(boardSrc).toMatch(/const cell = resolveCardFieldCell\(key, meta, data, formatCellValue, computeComputedFieldValue, PERSON_CELL_ASYNC\);/);
+  });
+  it('a person cell renders <PersonCell> with the resolved personId + the batch-loaded employeesById map — never a bare id/string', () => {
+    expect(boardSrc).toMatch(/cell\.isPerson \? \(\s*\n\s*<PersonCell personId=\{cell\.personId\} employees=\{employeesById\} \/>/);
+  });
+  it('KanbanBoard accepts an employeesById prop (default empty Map — never undefined into PersonCell) and threads it through KanbanColumnView -> KanbanCard', () => {
+    expect(boardSrc).toMatch(/employeesById = EMPTY_EMPLOYEES_MAP/);
+    // Both intermediate hops (KanbanBoard->KanbanColumnView, KanbanColumnView->
+    // KanbanCard) carry the prop through by the SAME name (no renaming/dropping).
+    const occurrences = (boardSrc.match(/employeesById=\{employeesById\}/g) || []).length;
+    expect(occurrences).toBeGreaterThanOrEqual(2);
   });
 });
 

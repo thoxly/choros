@@ -36,8 +36,20 @@ import React, { useCallback, useMemo, useState } from 'react';
 import {
   Card, Badge, EmptyState, LoadingState, ErrorState,
 } from '../components/components.jsx';
-import { formatCellValue, computeComputedFieldValue, deriveRecordLabel } from './records-form.js';
-import { buildKanbanColumns, buildMovePayload, isFieldRequired, resolveCardLabel } from './kanban-board.js';
+import { formatCellValue, computeComputedFieldValue, deriveRecordLabel, PERSON_CELL_ASYNC } from './records-form.js';
+import {
+  buildKanbanColumns, buildMovePayload, isFieldRequired, resolveCardLabel, resolveCardFieldCell,
+} from './kanban-board.js';
+// T-0728 (N2, T-0698 review): person-type card fields resolve through the SAME
+// PersonCell/ActorChip mechanism the record table/detail already use (never a
+// raw employee id/slug, anti-uuid-actor-render) — reused verbatim, not a
+// second hand-rolled ActorChip wrapper.
+import { PersonCell } from '../forms/field-renderer.jsx';
+
+// Stable empty-Map fallback for the employeesById prop — avoids allocating a
+// fresh Map on every render when the caller has no person-typed card field
+// (screen-app-records.jsx only loads employeesById when hasPersonColumn).
+const EMPTY_EMPLOYEES_MAP = new Map();
 
 // ---------------------------------------------------------------------------
 // KanbanCard — one record rendered as a kit <Card>, with the keyboard-operable
@@ -46,6 +58,7 @@ import { buildKanbanColumns, buildMovePayload, isFieldRequired, resolveCardLabel
 
 function KanbanCard({
   record, cardFields, fieldMetaByKey, columnValues, currentValue, moving, onMove, onDragStart, onDragEnd, dragging,
+  employeesById,
 }) {
   const data = record && typeof record.data === 'object' && record.data !== null ? record.data : {};
   const fields = Array.isArray(cardFields) ? cardFields : [];
@@ -84,15 +97,21 @@ function KanbanCard({
             </span>
           ) : fields.map((key) => {
             const meta = fieldMetaByKey.get(key);
-            const rawVal = meta && meta.type === 'computed' ? computeComputedFieldValue(meta, data) : data[key];
-            const rendered = formatCellValue(rawVal, meta ? meta.type : 'string');
-            const displayVal = typeof rendered === 'string' ? rendered : '—';
+            // T-0728 (N2): the person-vs-text dispatch decision lives in the
+            // pure resolveCardFieldCell (kanban-board.js) — same rationale as
+            // resolveCardLabel above (KanbanCard uses useCallback, so this
+            // logic must live outside it to be unit-testable without React).
+            const cell = resolveCardFieldCell(key, meta, data, formatCellValue, computeComputedFieldValue, PERSON_CELL_ASYNC);
             return (
               <div key={key} style={{ fontSize: 'var(--chs-text-sm)' }}>
                 <span style={{ color: 'var(--chs-color-text-muted)', marginRight: 'var(--chs-space-2)' }}>
                   {meta ? meta.label : key}:
                 </span>
-                <span style={{ color: 'var(--chs-color-text)' }}>{displayVal}</span>
+                {cell.isPerson ? (
+                  <PersonCell personId={cell.personId} employees={employeesById} />
+                ) : (
+                  <span style={{ color: 'var(--chs-color-text)' }}>{cell.displayVal}</span>
+                )}
               </div>
             );
           })}
@@ -123,6 +142,7 @@ function KanbanCard({
 
 function KanbanColumnView({
   column, cardFields, fieldMetaByKey, columnValues, movingId, onMove, dragOverValue, onDragOver, onDragLeave, onDrop, draggingId,
+  employeesById,
 }) {
   const isDragOver = dragOverValue !== undefined && dragOverValue === column.value;
   return (
@@ -175,6 +195,7 @@ function KanbanColumnView({
               onMove={onMove}
               onDragStart={(r) => onDragOver(undefined, r.id)}
               onDragEnd={() => onDragOver(undefined, undefined)}
+              employeesById={employeesById}
             />
           ))}
         </ul>
@@ -198,13 +219,17 @@ function KanbanColumnView({
  *   columnsOrder: string[]|undefined,
  *   cardFields: string[],
  *   fieldMetaByKey: Map<string,{key,label,type}>,
+ *   employeesById: Map<string,{id,name,deactivated?}>|undefined,  // T-0728: batch-loaded
+ *     employee map for person-type card fields (PersonCell) — the SAME map
+ *     screen-app-records.jsx's table already builds via buildEmployeesById;
+ *     defaults to an empty Map (PersonCell degrades to the raw id, never blank).
  *   onMoveRecord: (recordId:string, nextData:object) => Promise<{ok:boolean, error?:string}>,
  *   onLocalUpdate: (recordId:string, nextData:object) => void,  // optimistic local patch
  * }} props
  */
 export function KanbanBoard({
   records, recordsError, onRetry, groupByField, groupByRequired, enumValues, columnsOrder,
-  cardFields, fieldMetaByKey, onMoveRecord, onLocalUpdate,
+  cardFields, fieldMetaByKey, employeesById = EMPTY_EMPLOYEES_MAP, onMoveRecord, onLocalUpdate,
 }) {
   const [movingId, setMovingId] = useState(null);
   const [moveError, setMoveError] = useState(null);
@@ -328,6 +353,7 @@ export function KanbanBoard({
             onDragLeave={() => setDragOverValue(undefined)}
             onDrop={handleDrop}
             draggingId={draggingId}
+            employeesById={employeesById}
           />
         ))}
       </div>
