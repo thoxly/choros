@@ -447,6 +447,26 @@
       ]
     },
     {
+      "username": "e-configurator",
+      "email": "e-configurator@choros.dev",
+      "firstName": "К.",
+      "lastName": "Конфигуратор",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {
+        "actor_type": [
+          "human"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-pw-configurator",
+          "temporary": false
+        }
+      ]
+    },
+    {
       "username": "service-account-agent-orchestrator",
       "enabled": true,
       "emailVerified": true,
