@@ -1,0 +1,83 @@
+{
+  "task_id": "T-0732",
+  "status": "pr_open",
+  "branch": "task/T-0732",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "O-1 из ревью T-0717 (эпик E16 T-0349, столп 2): движковые процессы (source=engine — задеплоенные прямо в Flowable из config/flowable/processes/*.bpmn20.xml, БЕЗ строки choros.process_definition) различимы в UI лишь по camelCase-ключу (telLinear) — machine-leak. resolveDefinitionNames (src/http/process-projection.ts) для таких ключей отдавал fallbackDefinitionName (= сам ключ), поэтому deriveInstanceTitle (web, T-0684/T-0717) честно демотировал их до generic «Процесс» + keyDemoted-чип. ФИКС: настоящее человеко-имя из BPMN <process name> хранится в НОВОЙ tenant-scoped таблице-оверлее choros.engine_process_name (migration 131) и резолвится СРЕДНИМ ярусом (modeler-строка > engine-оверлей > голый ключ) в ОДНОМ общем резолвере resolveDefinitionNames (покрывает список инстансов, деталь записи / RelatedProcessRow — симптом T-0717, и инбокс) + в buildCatalogDefinitions (каталог). Имя — DATA из <process name> (чистый parseBpmnProcessMeta через общий tokenize), НЕ платформенный литерал. deriveInstanceTitle (web) НЕ тронут — он уже корректно делает name!==key → primary; фикс чисто серверный (делает definitionName настоящим). ВАРИАНТ (a) из ADR T-0717 (строка в choros.process_definition) ОТВЕРГНУТ по коду: «движковый процесс = ОТСУТСТВИЕ строки» — несущий инвариант (process-start.ts sandbox-гейт даёт 409 обычным юзерам при наличии draft-строки; inbox.ts скрывает задачи не-published ключей; каталог переклассифицирует в source=modeler). Оверлей-таблица трогает РОВНО один read-резолвер (+каталог) и НОЛЬ authz/видимости. Обе цели задачи достигнуты: своя tenant-scoped таблица обходит и config-вне-Docker (пишем на deploy, читаем из БД под RLS), и Flowable-tenant-partition (RLS FORCE + явный WHERE tenant_id = defense-in-depth, класс утечки T-0616 §F-1 закрыт). Доставка имён на живой стенд — @demo-seed migration 132 (telLinear → «Канонический линейный ТЭЛ», chorosSmoke → «Choros Smoke Process» — значения дословно из BPMN, фикстура; anti-case-lock сканирует src/+web/src/, НЕ migrations/). Переиспользуемый deploy-time примитив parseBpmnProcessMeta + registerEngineProcessName доказан db-тестом (parse→register→resolve).",
+  "decision_variant": "a-prime — dedicated tenant-scoped overlay table choros.engine_process_name (NOT a process_definition row). ADR docs/tasks/T-0732.adr.md §2.",
+  "files_changed": [
+    "migrations/131_engine_process_name.sql (NEW — таблица-оверлей, T-0013 contract)",
+    "migrations/132_engine_process_name_seed.sql (NEW — @demo-seed доставка имён DEV-тенанта)",
+    "src/core/bpmn-process-meta.ts (NEW — чистый parseBpmnProcessMeta, реюз tokenize)",
+    "src/db/engine-process-name.ts (NEW — registerEngineProcessName + selectEngineProcessNames, tenant-scoped)",
+    "src/http/process-projection.ts (resolveDefinitionNames: middle-tier engine-оверлей врезка)",
+    "src/core/process-catalog-view.ts (buildCatalogDefinitions: optional engineNames param)",
+    "src/http/process-catalog.ts (handler резолвит engineNames и передаёт в buildCatalogDefinitions)",
+    "ci/checks/known_tenant_tables.txt (+engine_process_name)",
+    "ci/checks/db/engine-process-name.db.test.ts (NEW — round-trip/cross-tenant/precedence/read-plane)",
+    "ci/checks/db/cross_tenant.test.ts (seedRowForTable case + SEEDED_TABLES для новой таблицы)",
+    "src/core/__tests__/bpmn-process-meta.test.ts (NEW — parse unit)",
+    "src/__tests__/process-catalog-view.test.ts (engineNames overlay tests)",
+    "docs/tasks/T-0732.adr.md (NEW), docs/tasks/T-0732.spec.md (NEW)"
+  ],
+  "reuse_notes": [
+    "resolveDefinitionNames (process-projection.ts, T-0614/T-0616) — ЕДИНСТВЕННЫЙ общий резолвер definitionName для списка/детали/инбокса; middle-tier врезка покрывает все три поверхности одним изменением. НЕ создан второй резолвер.",
+    "selectEngineProcessNames — ОДИН read-оверлей, зовётся из обоих дисплей-путей (process-projection + process-catalog), single source (каталог ↔ деталь не расходятся).",
+    "tokenize (bpmn-xml-parser.ts, fail-closed, тот же, что использует bpmn-deploy-normalizer.ts) реюзан для parseBpmnProcessMeta — не самописный regex.",
+    "fallbackDefinitionName (process-catalog-view.ts, T-0616 F-2) НЕ тронут — остаётся уровнем-фолбэком (голый ключ) ПОСЛЕ engine-оверлея. keyDemoted-инвариант deriveInstanceTitle цел.",
+    "T-0013 tenant-table boilerplate скопирован дословно из 074/129; @demo-seed паттерн — из 085 (tel-binding seed)."
+  ],
+  "deviations_from_adr": [
+    "Задача предлагала вариант (a) = запись в choros.process_definition как «вероятно проще/безопаснее — но проверь по коду». Проверка по коду показала ОБРАТНОЕ: строка в process_definition ломает sandbox-гейт (process-start.ts:351 → 409 обычным юзерам), draft-скрытие инбокса (inbox.ts:753) и каталог-классификацию (source=modeler). Выбран вариант (a′) — отдельная tenant-scoped таблица-оверлей: НОЛЬ риппла в authz/видимость, тонкое ядро. Это архитектурный выбор в DESIGN (задача явно дала латитюд «выбери в DESIGN, обоснуй»), задокументировано в ADR §2 с код-обоснованием, а не тихо."
+  ],
+  "tests_added": [
+    {
+      "file": "src/core/__tests__/bpmn-process-meta.test.ts",
+      "covers": "parseBpmnProcessMeta: извлечение id+name (порядок атрибутов, namespaced prefix, энтити-декод), null при отсутствии/пустом name / нет <process> / malformed; first-named-wins в multi-process. 9 тестов."
+    },
+    {
+      "file": "src/__tests__/process-catalog-view.test.ts",
+      "covers": "buildCatalogDefinitions: движковый ключ берёт человеко-имя из engineNames-оверлея; без записи — фолбэк-ключ; оверлей НЕ перебивает modeler-строку (modeler precedence). +3 теста (всего 33 в файле)."
+    },
+    {
+      "file": "ci/checks/db/engine-process-name.db.test.ts",
+      "covers": "Живой PG (choros_app, RLS): register/select round-trip + upsert; FF-2 cross-tenant (тот же ключ в двух тенантах разными именами → тенант A резолвит ТОЛЬКО своё, RLS-enforced, класс T-0616 §F-1) — helper И listInstanceProjections.definitionName; FF-3 движковый инстанс с оверлеем → человеко-имя в definitionName, без — голый ключ (keyDemoted-фолбэк, не пусто); modeler-строка > оверлей (precedence). 8 тестов."
+    },
+    {
+      "file": "ci/checks/db/cross_tenant.test.ts",
+      "covers": "Добавлен seedRowForTable case + SEEDED_TABLES для engine_process_name → таблица автоматически покрыта RLS-инвариантом cross_tenant (202 теста зелёные)."
+    }
+  ],
+  "gates": {
+    "build": "green — npm run build (tsc + seed/tsconfig.json tsc), exit 0",
+    "types": "green — node_modules/.bin/tsc --noEmit exit 0",
+    "lint": "green — eslint на всех изменённых src-файлах exit 0 (bpmn-process-meta / engine-process-name / process-projection / process-catalog / process-catalog-view)",
+    "tests_unit": "green — vitest: bpmn-process-meta (9) + process-catalog-view (33) = 42; полный non-db unit-suite 5906 passed / 17 skipped / 0 failed (регресса от правок process-projection/process-catalog нет)",
+    "tests_db": "green — на живом PG :55432 с изоляцией (choros_test_template_9c398948, hash пересчитан после migrations 131/132): engine-process-name.db (8) + schema.test (16) + process-projection (7) + process-catalog (9) + cross_tenant (202) = 242 passed. DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros",
+    "fitness_targeted": "green — cross-tenant-fitness.sh PASS; detel-base-task-from-engine.sh PASS +--self-test; anti-case-lock.sh PASS +--self-test; ux/anti-uuid-actor-render.sh PASS +--self-test; migrations/no-hardcoded-tenant-uuid.sh PASS; detel-literal-baseline.sh PASS; pg-single-dep.sh / no-env-in-core.sh PASS; process-detail-single-resolver / process-detail-read-gate / process-list-display-plane-isolation / process-list-tenant-scope-additive / read-pdp-anti-case PASS; frozen-checks-immutable.sh PASS. Полный fitness:db НЕ гонялся (по инструкции — точечные db-тесты + schema/cross_tenant достаточны)."
+  },
+  "live_proof_plan": {
+    "status": "deferred — стенд offline на момент задачи (coder-worktree без доступа к dev-стенду). Код-уровневая верификация покрыта db-тестом end-to-end (appendProcessStarted → listInstanceProjections.definitionName = человеко-имя — та же функция, что читает GET /api/processes).",
+    "steps": [
+      "1. На dev-стенде (Tailscale 100.121.76.86:3000, залогиненная сессия e-owner/владелец) убедиться, что migrations 131/132 применены (npm run migrate) → choros.engine_process_name несёт telLinear → «Канонический линейный ТЭЛ» и chorosSmoke → «Choros Smoke Process» (select под psql).",
+      "2. Найти/создать запись с 2+ ДВИЖКОВЫМИ инстансами: telLinear стартован по записи (on_create/launcher) + второй движковый ключ (напр. chorosSmoke) стартован. Открыть карточку записи (/apps/:appId/records/:id) → секция «ПРОЦЕССЫ ПО ЭТОЙ ЗАПИСИ» (data-testid=related-processes).",
+      "3. ПОСЛЕ фикса: каждая строка показывает ЧЕЛОВЕКО-ИМЯ как primary («Канонический линейный ТЭЛ» / «Choros Smoke Process») + демотированный ключ вторичным чипом — различимы по человеко-имени, а не по camelCase-ключу. ДО фикса (dev до промоушна): обе строки primary = generic «Процесс» + keyDemoted-ключ.",
+      "4. Открыть каталог процессов (/processes или GET /api/process-catalog): движковые дефиниции несут человеко-имя, не голый ключ.",
+      "5. Инбокс (/inbox): задача движкового инстанса в колонке «ПРОЦЕСС» показывает человеко-имя (тот же resolveDefinitionNames).",
+      "6. Регресс БЕЗ name: движковый процесс, у которого НЕТ строки в engine_process_name (напр. незасидженный ключ), — primary остаётся демотированный «Процесс» + keyDemoted-ключ (никогда голый ключ как primary; deriveInstanceTitle-инвариант).",
+      "7. МЕЖТЕНАНТНО (если доступен второй тенант): движковый процесс с тем же ключом в другом тенанте НЕ показывает чужое имя (RLS)."
+    ]
+  },
+  "friction_events": [
+    "Worktree был без node_modules — npm ci --maxsockets=3 до любых гейтов (тот же паттерн, что T-0717/T-0684 handoff уже фиксировали).",
+    "Тестовый template-DB требовал пересоздания после добавления migrations 131/132 (migrations hash сменился 9c398948) — `npm run fitness:db:setup-template` перед db-тестами с изоляцией; альтернатива DB_ISOLATION=off бьёт в shared choros (где живут Flowable ACT_* таблицы) и ложно валит schema.test's act_-guard — не дефект задачи, артефакт shared-DB.",
+    "Мутационная проверка FF-2 (снятие явного WHERE tenant_id из selectEngineProcessNames) осталась ЗЕЛЁНОЙ — изоляцию реально несёт RLS FORCE на tenant-scoped choros_app-клиенте, явный WHERE = defense-in-depth (ровно как признаёт T-0616 §F-1 own comment). Тест переусилен до паттерна T-0616 (тот же ключ в ДВУХ тенантах разными именами → A видит только своё) и формулировка FF-2 честно исправлена: инвариант изоляции RLS-enforced, а не «WHERE-mutation → red»."
+  ]
+}
