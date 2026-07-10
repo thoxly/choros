@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0707",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "NB-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/migration-130-fallback-name-cast.test.ts",
+      "issue": "The 'mutation-verified' claim rests on the pr-handoff transcript plus manual/adversarial reproduction, not on a standing automated RED case. Regression is guarded indirectly: FF-1 (regex on the ::text cast) and FF-2 (reverting the cast makes the query throw, failing .resolves) both go red on a revert. Independently reproduced by the judge; confidence high.",
+      "suggestion": "Optionally bake in an explicit negative case: execute the cast-reverted block against the same fixture and expect the exact 'operator does not exist: name[] = text[]' error, making the test self-proving."
+    },
+    {
+      "id": "NB-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "shared PG :55432 (environment, not attributable to this diff)",
+      "issue": "Orphan choros_test_1* template-clone databases (eb78/928a/b978) remain on the shared PG with timestamps OLDER than this run's db — pre-existing cruft from other worktrees, not created by T-0707 (this task's own test db was dropped; no t0707% fixtures left).",
+      "suggestion": "Run scripts/db-cleanup-orphans.ts outside this task to clear stale template clones."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "run.mjs tracks applied migrations by filename version with no content checksum — raw-edit does not re-run or break already-applied environments", "covered": true },
+    { "ac": "frozen-checks-immutable.sh scopes only ci/checks/*.sh; migrations/ and ci/checks/db/ are out of gate scope; no migration content-immutability gate exists in repo", "covered": true },
+    { "ac": "ELSE fallback branch is unreachable on the real linear graph 001..130 (migration 123 inline UNIQUE auto-names canonically -> primary IF path always matches)", "covered": true },
+    { "ac": "a.attname::text makes both operands text[]; ORDER BY + set-equality semantics preserved (verified live: patched block finds and drops the non-canonical constraint)", "covered": true },
+    { "ac": "Regression test reads real on-disk ELSE-block bytes, retargets only the object name, executes live; extraction anchored on content sentinels (fails loud)", "covered": true },
+    { "ac": "Mutation reproduced independently by judge: revert cast -> 'operator does not exist: name[] = text[]'; with cast -> constraint dropped", "covered": true },
+    { "ac": "Full linear replay 001..130 with the fix is clean (content-hashed test template built/cloned); teardown leaves no fixtures on shared PG", "covered": true },
+    { "ac": "Diff scoped to 1 sql + 1 test + 1 handoff; substrate gates (frozen-checks-immutable, fleet-migration-matrix, no-hardcoded-tenant-uuid, anti-case-lock, view-registry-rls), tsc --noEmit, targeted live-PG test all green", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "run.mjs schema_migrations(version text PRIMARY KEY, applied_at) — applied set = Set(version); no content checksum read/compared anywhere (migrations/run.mjs)",
+    "frozen-checks-immutable.sh changed_sh() filters ^ci/checks/[^/]+\\.sh$ — subdirs and migrations/ excluded (FF-FCI6); PASS on task/T-0707",
+    "migrations/123_list_view_registry.sql:46 inline UNIQUE(tenant_id, registry_def_id, name) in CREATE TABLE -> PG auto-name list_view_tenant_id_registry_def_id_name_key = the name 130 primary IF matches; list_view created only in 123",
+    "independent psql mutation: MUTATED (cast reverted) -> 'operator does not exist: name[] = text[]'; PATCHED -> constraints after: []",
+    "migrations-hash.ts:34-38 SHA256 over each migration filename + full file contents -> template name reflects edited 130; test cloned choros_test_template_960e8ea4 (clean 001..130 replay)",
+    "gates run green: tsc --noEmit exit 0; migration-130-fallback-name-cast 3/3 live; frozen-checks-immutable/fleet-migration-matrix/no-hardcoded-tenant-uuid/anti-case-lock/view-registry-rls PASS"
+  ]
+}
