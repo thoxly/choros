@@ -1,0 +1,70 @@
+{
+  "task_id": "T-0733",
+  "status": "pr_open",
+  "branch": "task/T-0733",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/db/node-resolver.ts (NEW)",
+    "src/http/audit.ts",
+    "web/src/components/components.jsx",
+    "web/src/components/components.css",
+    "web/src/screens/screen-audit.jsx",
+    "web/src/screens/screen-audit.logic.js",
+    "src/__tests__/node-resolver.test.ts (NEW)",
+    "web/src/components/node-ref.test.jsx (NEW)",
+    "src/__tests__/audit-log.test.ts (EXTENDED)",
+    "web/src/screens/screen-audit.test.jsx (EXTENDED)",
+    "ci/checks/db/org-move-api.db.test.ts (EXTENDED)",
+    "docs/tasks/T-0733.adr.md (NEW)",
+    "T-0733.pr-handoff.json (NEW)"
+  ],
+  "summary": "R-1 из ревью T-0712 (эпик E-UX-HUMAN T-0647, столп 4 анти-UUID): department.moved/position.moved в /audit рендерили цель сырым MonoId (id узла org-дерева), хотя T-0712 уже резолвит employee.moved's цель в человеко-имя через batchResolveActors/ActorChip (T-0648). T-0712's собственный handoff явно отложил это: 'резолвер имён department/position не существует в кодовой базе... отдельный follow-up'. Этот follow-up добавляет node-resolver.ts — СИБЛИНГ (не расширение) actor-resolver.ts, потому что org-tree узел НЕ актор: нет kind/deactivated_at, EXEC_META/ActorChip не имеют глифа 'узла' (квадрат 'Сервис' исказил бы отдел под системного актора).",
+  "fix": "1) src/db/node-resolver.ts (НОВЫЙ): batchResolveOrgNodes(pool, tenantId, departmentIds, positionIds) — ОДИН SQL-запрос (UNION ALL над choros.department + choros.position, каждая сторона со своим ANY($N::text[])) резолвит ОБА множества id за один round-trip — O(1) на страницу, не N+1, не 2 отдельных запроса. Матчит СТРОГО по id (не по slug — PATCH /api/departments/:id и /positions/:id принимают только сырой UUID, assertUuidShape, нет клиентского slug-пути для этих двух сущностей). Tenant-scoped: SET LOCAL choros.tenant_id + литеральный WHERE tenant_id = $1 (defence-in-depth, тот же паттерн, что actor-resolver.ts/org.ts). resolveNodeDisplay(resolved, id, kind) — честный фоллбэк {id, name: id, kind, resolved:false} при промахе, БУКВАЛЬНО тот же контракт, что resolveActorDisplay — name=id это ВНУТРЕННИЙ сигнал для фронта, не предназначен для показа как есть. 2) src/http/audit.ts: handleGetAuditLog собирает distinctDeptIds/distinctPosIds из page.items (department.moved/position.moved targets), батч-резолвит через batchResolveOrgNodes (try/catch → пустая карта при сбое резолвера, никогда не превращает редактированное чтение в 500 — та же дисциплина, что уже есть для актор-батча), кладёт targetDisplay = resolveNodeDisplay(...) для этих двух типов (было жёстко null). 3) web/src/components/components.jsx: НОВЫЙ примитив NodeRef({kind, name, id}) — имя первично, id только в tooltip (по умолчанию, как showId=false у ActorChip); переиспользует isMachineActorLabel (T-0685 гард ActorChip) чтобы демотировать UUID-подобное name; честная деградация → 'Отдел удалён'/'Должность удалена' (НЕ 'деактивирован' — у department/position нет soft-delete колонки в отличие от employee, DELETE-роут — жёсткое удаление, значит промах резолвера ВСЕГДА означает 'узла больше нет'). Добавлен .chs-noderef/.chs-noderef--unresolved в components.css. 4) web/src/screens/screen-audit.logic.js: isOrgNodeMoveAction(action) — чистая функция, true для department.moved/position.moved. 5) web/src/screens/screen-audit.jsx: AuditEventRow выбирает NodeRef (nodeMove) или ActorChip (иначе) когда targetDisplay присутствует; иначе — прежний MonoId-фоллбэк (для target без резолва вовсе, напр. если резолвер упал).",
+  "deviations_from_adr": [],
+  "live_proof_plan": "Стенд offline в этой сессии — серверная половина уже доказана ЖИВЬЁМ на реальном Postgres (ci/checks/db/org-move-api.db.test.ts::AC-audit-read-node — PATCH /api/departments/:id переименовывает отдел, затем GET /api/audit?action=department.moved на РЕАЛЬНОМ роутере резолвит targetDisplay.name='Переименовано', т.е. ЖИВОЕ значение из строки, не фикстуру). Follow-up для браузерного прохода: (1) войти владельцем на /org; (2) переместить отдел в другого родителя (или переименовать) через сайдбар DnD/меню 'Переместить в…' (T-0655) → PATCH /api/departments/:id 200; (3) открыть /audit → верхняя строка department.moved должна показывать: ActorChip актора + текст 'Отдел перемещён'/'переименован'/'перемещён и переименован' + ИМЯ ОТДЕЛА (не сырой UUID) вторым чипом (NodeRef), с id отдела видимым только в tooltip при наведении; (4) то же для должности (PATCH /api/positions/:id) → position.moved показывает имя должности; (5) владельцем удалить только что перемещённый отдел (DELETE /api/departments/:id, AC-9) → перезагрузить /audit → та же строка department.moved теперь должна показывать честную деградацию 'Отдел удалён' (курсивный/приглушённый стиль chs-noderef--unresolved), а НЕ сырой UUID и НЕ 'undefined'; (6) прокрутить историю до строки, записанной ДО этого деплоя (существующие *.moved события в дев-тенанте, если есть) — она ДОЛЖНА тоже показать резолвленное имя (ретроактивность без бэкфилла, subject всегда был записан).",
+  "tests_added": [
+    {
+      "file": "src/__tests__/node-resolver.test.ts",
+      "covers": "10 сценариев мокнутым pool (зеркалит actor-resolver.test.ts): department/position резолвятся по id; ОДИН запрос резолвит оба множества вместе (нет N+1); промах → честный фоллбэк, не ошибка; пустой инпут с обеих сторон → ноль запросов; одна пустая сторона (department-only страница) резолвится чисто; tenant-scope (параметр запроса = переданный tenantId); resolveNodeDisplay(null/undefined/'') → честный пустой фоллбэк; дубликаты дедуплицируются до запроса."
+    },
+    {
+      "file": "web/src/components/node-ref.test.jsx",
+      "covers": "9 тестов NodeRef напрямую (без DOM, без хуков): резолвленное имя первично/id только в tooltip (department И position); нерезолвленный узел (name===id===UUID) — UUID НИКОГДА в видимом тексте, честный фоллбэк 'Отдел удалён'/'Должность удалена'; демотированный UUID остаётся в tooltip; визуальный маркер chs-noderef--unresolved присутствует ТОЛЬКО для нерезолвленных; отсутствие id/name не рендерит 'undefined'/'null'; неизвестный kind → дженерик 'Узел удалён'."
+    },
+    {
+      "file": "src/__tests__/audit-log.test.ts",
+      "covers": "Мокнутый pool расширен веткой для UNION ALL node-запроса (choros.department + UNION ALL). 2 существовавших теста (department.moved/position.moved) обновлены: было targetDisplay:null, теперь резолвленная форма {id,name,kind,resolved:true}. НОВЫЙ блок '(8) T-0733': удалённый department → честный фоллбэк (resolved:false, НЕ раскрытие имени); удалённый position → то же; кросс-тенантный узел — параметр node-запроса всегда tenantId ВЫЗЫВАЮЩЕГО (TENANT_B), никогда второй тенант, честный промах, не 500; одна страница со смешанными department.moved+position.moved резолвится ОДНИМ round-trip (оба targetDisplay корректны); страница вообще без .moved-эвентов не дёргает node-резолвер (nodeSql остаётся null)."
+    },
+    {
+      "file": "web/src/screens/screen-audit.test.jsx",
+      "covers": "Старые department.moved/position.moved тесты (ожидавшие MonoId-фоллбэк, targetDisplay:null) УДАЛЕНЫ — заменены НОВЫМ блоком 'T-0733 AuditEventRow — org-node target-chip' (4 теста): резолвленный department/position → РОВНО один NodeRef с правильными kind/name/id, сырой id НИКОГДА не всплывает в MonoId; нерезолвленный (удалённый) узел ВСЁ РАВНО рендерит NodeRef (не деградирует до отдельного MonoId-чипа поверх — деградацию несёт сам NodeRef); employee.moved НЕ затронут регрессией (по-прежнему ActorChip×2, ноль NodeRef). Плюс unit-тест isOrgNodeMoveAction (2 кейса) в логическом блоке."
+    },
+    {
+      "file": "ci/checks/db/org-move-api.db.test.ts",
+      "covers": "registerAuditRoutes теперь регистрируется на ТОМ ЖЕ роутере, что registerSeedWriteRoutes (мирроит реальную server.ts-проводку). НОВЫЙ тест AC-audit-read-node (после AC-dept, который переименовал fx.deptA в 'Переименовано'): GET /api/audit?action=department.moved на РЕАЛЬНОМ HTTP-роуте резолвит targetDisplay.name==='Переименовано' — доказывает, что node-resolver.ts реально доходит до Postgres и что HTTP-проводка (audit.ts) корректно её подключает, читая ЖИВОЕ (только что изменённое) значение, не статичную фикстуру."
+    }
+  ],
+  "gates": {
+    "tsc_noemit": "green — ./node_modules/.bin/tsc --noEmit, exit 0",
+    "eslint": "green — npx eslint src/db/node-resolver.ts src/http/audit.ts src/__tests__/audit-log.test.ts src/__tests__/node-resolver.test.ts, 0 errors (web/ jsx вне текущего eslint.config.js scope — тот же статус, что у остальных задач этого репо, package.json's web lint script сам содержит || true)",
+    "vitest_server_targeted": "green — src/__tests__/audit-log.test.ts (25), node-resolver.test.ts (10), actor-resolver.test.ts (15), audit.e2e.test.ts (6, 3 skip pre-existing), audit-export.e2e.test.ts (7, 5 skip pre-existing) = 55 passed / 8 skipped, 0 failed",
+    "vitest_server_full": "green — npx vitest run (src/): 313 files passed | 2 skipped, 5904 tests passed | 17 skipped, 0 failed",
+    "vitest_web_targeted": "green — web/: screen-audit.test.jsx (23), node-ref.test.jsx (9), actor-chip.test.jsx (44) = 76 passed, 0 failed",
+    "vitest_web_full": "green — npx vitest run (web/): 99 files, 2728 passed, 0 failed",
+    "vitest_db_targeted": "green — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism org-move-api.db.test.ts: 5 passed (3 pre-existing AC-emp/AC-dept/AC-cycle без диффа + 1 pre-existing AC-audit-read (T-0712) + 1 NEW AC-audit-read-node), live PG (docker choros-postgres-1, миграционный шаблон клонирован/удалён самим тест-раннером). Также прогнаны смежные live-PG чеки без диффа для регрессии: audit-route-deactivation-gate.db.test.ts (9), actor-resolver.db.test.ts (4), org-tree-deactivated.db.test.ts (3) — все зелёные. Полный fitness:db НЕ гонялся (точечный фикс, по прямой инструкции орас-оркестратора)",
+    "audit_append_only_sh": "PASS — bash ci/checks/audit_append_only.sh (append-only DDL/триггеры не тронуты — этой задачей писатель вообще не задет)",
+    "audit_writer_isolation_sh": "PASS — bash ci/checks/audit_writer_isolation.sh (единственный писатель audit_event/audit_head — src/db/audit-writer.ts — не тронут вовсе)",
+    "anti_uuid_actor_render_sh": "PASS + --self-test PASS — bash ci/checks/ux/anti-uuid-actor-render.sh (0 голых raw-identifier рендеров под web/src/screens/)",
+    "anti_case_lock_sh": "PASS + --self-test PASS — bash ci/checks/anti-case-lock.sh (Phase 1+2, aggregate 15 ≤ baseline 16, ноль новых case-литералов — новые фикстуры используют дженерик-имена dept-9/pos-9/dept-mix + реальные seed-имена Финансы/Платформа из миграций 014/015)",
+    "full_fitness_suite": "НЕ гонялся — по прямой инструкции задачи (точечный R-1-фикс, targeted-only), см. gates выше"
+  },
+  "blocked_reason": "",
+  "friction_events": []
+}
