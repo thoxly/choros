@@ -1,0 +1,40 @@
+{
+  "task_id": "T-0724",
+  "status": "pr_open",
+  "branch": "task/T-0724",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/assistant-configurator.ts",
+    "src/http/assistant.ts",
+    "src/__tests__/assistant-configurator.test.ts",
+    "ci/checks/db/T-0724-list-registries-candidates.db.test.ts (NEW)",
+    "docs/tasks/T-0724.spec.md (NEW)",
+    "docs/tasks/T-0724.adr.md (NEW)",
+    "T-0724.pr-handoff.json (NEW)"
+  ],
+  "summary": "Столп 5, инвариант «бот==человек» (эпик E-FORMS T-0479, N1 из ревью T-0700). T-0700 дал конфигуратору-ассистенту право НАЗВАТЬ non-default targetRegistrySlug в author_binding, но не дал способа УЗНАТЬ реальный slug — человек в UI (screen-processes.jsx BindProcessModal, GET /api/registry-defs) видит РЕАЛЬНЫЙ список реестров приложения в пикере, бот был обязан угадывать. Фикс: новый READ-ONLY тул list_registries (TOOL_LIST_REGISTRIES, src/core/assistant-configurator.ts) — не пишет DRAFT, не производит ApprovedOp/BlockedOp/PendingPromote. Данные приходят из fetchRegistryListCandidates (src/http/assistant.ts) — тонкая обёртка, которая РЕЮЗАЕТ listRegistryDefs (src/http/registry-defs.ts) ДОСЛОВНО, БЕЗ новой SQL-строки: та же DAO, что GET /api/registry-defs (человеческий пикер, T-0681) и rights-resources.ts (T-0609) уже используют. Контур прав = граница тенанта (+опционально приложения) — единственная граница listRegistryDefs имеет, RLS через withTenantTx; никакого отдельного per-registry ACL нет ни у человека, ни у бота, так что реюз той же выборки автоматически даёт паритет «бот ≤ человек» без нового PDP-слоя. Плюс тул-цикл конфигуратора уже гейтится hasAuthoringDraftGrant ДО любого тул-диспетча (строже, чем требуется для GET /api/registry-defs) — list_registries наследует этот гейт бесплатно. processToolCall (pure core, PURE-заявлено в шапке файла) остаётся чистым: данные предзагружаются ОДИН РАЗ на входящее сообщение HTTP-слоем и фильтруются чисто по applicationId — тот же паттерн, что existingRegistryDefs (T-0463) уже устроен. Системный промпт обновлён: «сначала list_registries → потом author_binding с реальным targetRegistrySlug, никогда не угадывай». Пустое приложение или пустой инжектированный список → честный {count:0, registries:[]}, не ошибка.",
+  "gates": {
+    "types": "tsc --noEmit — 0 ошибок; npm run build (tsc + seed/tsconfig.json) — exit 0",
+    "lint": "eslint src — 0 ошибок, 45 pre-existing no-console warnings (ни одного в изменённых строках этой задачи)",
+    "unit_targeted": "npx vitest run src/__tests__/assistant-configurator.test.ts — 49/49 (7 новых: AC-T724-1 схема объявляет list_registries с applicationId не-required; AC-T724-2 READ-ONLY — ноль ApprovedOp/BlockedOp; AC-T724-3×2 скоуп по applicationId не течёт в другое приложение / без applicationId — весь тенант; AC-T724-4×2 пустое приложение и пустой candidates-список → честный count:0; AC-T724-5 двухраундовый list_registries→author_binding — targetRegistrySlug в ApprovedOp прослеживается к ответу list_registries, не угадан)",
+    "unit_assistant_suite": "8 assistant-файлов (configurator/owner/prompt/prompt-authz/bundle-review/thread-ux/llm-message/intent-routing) — 125/125",
+    "db_targeted": "DATABASE_URL=:55432 (T-0147 изолированная clone-БД): T-0724-list-registries-candidates.db.test.ts — 2/2 (AC-1 tenant-scoped выборка с верным applicationId+display_name, пустое приложение → 0 строк; AC-2 два тенанта — реестр тенанта B НИКОГДА не в списке тенанта A и наоборот, RLS-граница = контур человеческого пикера). Регрессия: author-binding-target-registry.test.ts (T-0700) — 1/1 по-прежнему зелёный. Полный fitness:db НЕ гонялся (по постановке)",
+    "forms_schema_binding": "bash ci/checks/forms-schema-binding.sh (+ --self-test) — PASS: FF-FORMS1 не задета этой задачей (нет изменений в форм-слое)",
+    "anti_case_lock": "bash ci/checks/anti-case-lock.sh (+ --self-test) — PASS: Phase 1 делегаты чисты (aggregate 4 < baseline 7), Phase 2 полный денилист aggregate 15 (baseline 16, не растёт) — ноль новых кейс-литералов (фикстуры теста нейтральные: orders/invoices/t0724-*)",
+    "http_route_auth_coverage": "bash ci/checks/http-route-auth-coverage.sh (+ --self-test) — PASS: FF-0328-1/2/3 — эта задача не регистрирует новый HTTP-роут (list_registries живёт внутри существующего тул-цикла конфигуратора), secret-handle.ts byte-unchanged",
+    "full_fitness_note": "Дополнительно (не входило в постановку гейтов задачи) прогнан полный `npm run fitness` (non-DB, ~560 чеков) для честности: прервался на ПРЕДСУЩЕСТВУЮЩЕЙ, НЕ связанной с этим диффом находке — entitlement-gates-vendor-only.sh (FF-T127-4) ложно флагает src/http/user-mgmt.ts:755 (слово «deactivation» содержит подстроку «activation» — нежёсткий regex-матч, файл не тронут этой задачей, тот же результат на базовой ветке dev@d468e4c9 до этого диффа, коммит 665a09f5 T-0727). Все 559 чеков ДО этой точки — PASS. Заведена фоновая задача на исправление регекса (не блокирует эту PR — вне скоупа T-0724)."
+  },
+  "live_proof_plan": "Цель: ассистент ПО ТЕКСТУ сначала ПЕРЕЧИСЛЯЕТ реальные реестры приложения, потом ПРИВЯЗЫВАЕТ процесс к одному из НИХ (не к угаданному слагу) — то, что до T-0724 требовало от модели знать точный slug заранее. Стенд: dev-стек (Tailscale 100.121.76.86:3000) — OFFLINE на момент сессии, исполнение отложено; нужен тенант с живым LLM-ключом (BYO, T-0679 строгий BYO). Шаги: (1) в тенанте с LLM-подключением подготовить приложение с ДВУМЯ-ТРЕМЯ реестрами (реальные данные тенанта, не кейс-литералы) и опубликованный процесс; (2) в чате ассистента (режим конфигуратора, актор с authoring_draft или владелец) текстом попросить: «покажи реестры приложения <имя>» — ожидание: ассистент вызывает list_registries, в ответе перечисляет реальные slug+название (сверить с GET /api/registry-defs?application_id=<id> тем же браузером/curl — списки идентичны); (3) текстом попросить: «привяжи процесс <key> к этому приложению, результат клади в реестр <имя одного из перечисленных>» — ожидание: ассистент вызывает author_binding с targetRegistrySlug РОВНО тем slug'ом, что назвал на шаге 2 (не переспрашивает пользователя за слагом, не выдумывает свой); changelog-строка ответа называет «реестр результата=«<слаг>»»; (4) проверить в UI (Процессы → привязка) и/или GET /api/process-app-bindings, что target_registry_slug записан этим слагом; (5) негативная ветка: попросить показать реестры НЕСУЩЕСТВУЮЩЕГО приложения (или только что созданного, ещё без реестров) — ассистент отдаёт честный список count:0, не выдумывает реестр и не роняет диалог; (6) контроль паритета: тот же выбор через человеческую форму (Реестр результата) даёт идентичный список вариантов, что видел бот на шаге 2. Артефакты: скрин/лог диалога с list_registries → author_binding парой вызовов; скрин/JSON привязки с target_registry_slug; сравнение списка бота с ответом GET /api/registry-defs того же приложения. NOT YET EXECUTED — стенд offline на момент сессии; вся серверная механика (реюз DAO, тенант-скоуп, приложение-скоуп, честный пустой список) доказана unit + live-PG (T-0724-list-registries-candidates.db.test.ts); непрожитым остаётся только LLM-звено (модель реально вызывает list_registries ПЕРЕД author_binding и берёт слаг из его ответа, а не угадывает).",
+  "deviations_from_adr": [],
+  "friction_events": [
+    "Полный `npm run fitness` (non-DB) прерывается на ПРЕДСУЩЕСТВУЮЩЕЙ находке в entitlement-gates-vendor-only.sh (FF-T127-4) — regex 'activation|entitlement|...' без word-boundary ложно матчит подстроку в слове 'deactivation' в src/http/user-mgmt.ts (файл этой задачей не тронут, найдено идентично на базовой ветке). Задача не входила в 5 явно перечисленных гейтов постановки T-0724 — заведена фоновая задача на фикс регекса отдельно (не блокирует эту PR).",
+    "vitest.config.js исключает ci/checks/db/** из дефолтного прогона — таргетный db-тест гоняется через `npx vitest run --dir ci/checks/db --no-file-parallelism <file>` (то же ограничение, что задокументировано в T-0700's friction)."
+  ]
+}

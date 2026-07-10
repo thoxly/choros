@@ -25,6 +25,20 @@
  *  AC-T700-3: author_binding tool call WITHOUT targetRegistrySlug → args has no such key
  *             (unchanged default-registry behavior, no regression).
  *
+ *  AC-T724-1: list_registries tool schema declared (optional applicationId param) —
+ *             closes the remaining gap T-0700 left: the bot could NAME a
+ *             targetRegistrySlug but still had to guess it; list_registries lets it
+ *             learn the real slugs first (same data the human picker shows, T-0681).
+ *  AC-T724-2: list_registries produces NO ApprovedOp/BlockedOp — pure read, no write.
+ *  AC-T724-3: list_registries scoped by applicationId never leaks another
+ *             application's registries (bot ≤ human — mirrors GET /api/registry-defs
+ *             ?application_id=); omitted applicationId lists the whole tenant.
+ *  AC-T724-4: an application with zero registries (or no candidates supplied at all)
+ *             → honest empty list, never an error/crash.
+ *  AC-T724-5: two-round list_registries → author_binding flow — the bound
+ *             targetRegistrySlug traces back to what list_registries reported,
+ *             not a guess.
+ *
  * DB paths (process-defs POST, binding POST, registry-defs PUT execution) are the
  * assistant HTTP route's responsibility — not tested here (DB-untested by design).
  */
@@ -814,6 +828,180 @@ describe("AC-T463-4: relate_application missing target → honest block, not sil
     expect(result.approvedOps).toHaveLength(0);
     expect(result.blockedOps.length).toBeGreaterThan(0);
     expect(result.blockedOps[0]!.kind).toBe("pending_human_confirm");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T724: list_registries introspection tool (E-FORMS, столп 5 «бот==человек»).
+//
+// T-0700 let the bot NAME a targetRegistrySlug in author_binding, but the bot
+// still had to GUESS the real slug — a human always sees the real options in
+// the "Реестр результата" picker (GET /api/registry-defs, T-0681). list_registries
+// closes that gap: READ-ONLY, no ApprovedOp, filters the injected registryListCandidates
+// (the 5th runConfigurator arg — the SAME tenant-scoped data GET /api/registry-defs
+// returns) by applicationId, never wider than what a human of this tenant sees.
+// ---------------------------------------------------------------------------
+
+/**
+ * SequentialToolCallLlmPort — emits ONE tool call per round, in order, then a
+ * text-only reply once the sequence is exhausted. Unlike ToolCallLlmPort (always
+ * the SAME call) or MultiToolCallLlmPort (all calls in round 1), this simulates a
+ * genuine multi-round flow: list_registries in round 1, then author_binding in
+ * round 2 using data the LLM "learned" from round 1's tool result. Records every
+ * chat() request (chatCalls) so a test can inspect what the synthetic tool-result
+ * message fed back to the LLM actually contained (proves the filtered data reached
+ * the model, not just that SOME changelog line was produced).
+ */
+class SequentialToolCallLlmPort implements LlmPort {
+  private _callCount = 0;
+  public readonly chatCalls: ChatLlmRequest[] = [];
+  private readonly _sequence: ReadonlyArray<{ name: string; args: Record<string, unknown> }>;
+  constructor(sequence: ReadonlyArray<{ name: string; args: Record<string, unknown> }>) {
+    this._sequence = sequence;
+  }
+  complete(_req: LlmRequest): Promise<LlmResult> {
+    return Promise.resolve({ confidence: 0.9, answer: { answerForm: "t", redFlags: [], summary: "t" } });
+  }
+  async chat(req: ChatLlmRequest): Promise<ChatLlmResult> {
+    this.chatCalls.push(req);
+    const step = this._sequence[this._callCount];
+    this._callCount++;
+    if (step) {
+      return {
+        text: "",
+        toolCalls: [{ id: `call-${step.name}-${this._callCount}`, name: step.name, arguments: JSON.stringify(step.args) }],
+      };
+    }
+    return { text: "Готово.", toolCalls: undefined };
+  }
+}
+
+const APP_A = "a1000000-0000-0000-0000-000000000001";
+const APP_B = "a2000000-0000-0000-0000-000000000002";
+const REG_ORDERS = { id: "e1000000-0000-0000-0000-000000000001", slug: "orders", displayName: "Заказы", applicationId: APP_A };
+const REG_INVOICES = { id: "e1000000-0000-0000-0000-000000000002", slug: "invoices", displayName: "Счета", applicationId: APP_A };
+const REG_OTHER_APP = { id: "e1000000-0000-0000-0000-000000000003", slug: "contacts", displayName: "Контакты", applicationId: APP_B };
+
+describe("AC-T724-1: list_registries is declared in the configurator toolset", () => {
+  it("the configurator's first LLM call declares a list_registries tool with an optional applicationId param", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Какие реестры показать?" });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("покажи реестры приложения", ctx);
+
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{
+      function?: { name?: string; parameters?: { properties?: Record<string, unknown>; required?: string[] } };
+    }>;
+    const tool = tools.find((t) => t.function?.name === "list_registries");
+    expect(tool).toBeDefined();
+    expect(tool!.function!.parameters!.properties).toHaveProperty("applicationId");
+    expect(tool!.function!.parameters!.required).not.toContain("applicationId");
+  });
+});
+
+describe("AC-T724-2: list_registries is READ-ONLY — no ApprovedOp, no BlockedOp", () => {
+  it("a list_registries-only turn produces zero approvedOps and zero blockedOps", async () => {
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: { applicationId: APP_A } }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("какие реестры есть у приложения?", ctx, null, [], [REG_ORDERS, REG_INVOICES, REG_OTHER_APP]);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.pendingPromotes).toHaveLength(0);
+  });
+});
+
+describe("AC-T724-3: list_registries scoped by applicationId — bot sees exactly what the human picker shows, never wider", () => {
+  it("scoping to APP_A surfaces APP_A's registries (slug + human name) but NOT APP_B's (cross-application isolation, mirrors GET /api/registry-defs?application_id=)", async () => {
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: { applicationId: APP_A } }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    await runConfigurator("покажи реестры этого приложения", ctx, null, [], [REG_ORDERS, REG_INVOICES, REG_OTHER_APP]);
+
+    // The tool result was fed back to the LLM as the 2nd round's last message —
+    // inspect it directly (not just "some changelog line exists").
+    expect(llm.chatCalls.length).toBeGreaterThanOrEqual(2);
+    const secondRoundMsgs = llm.chatCalls[1]!.messages;
+    const toolResultContent = String(secondRoundMsgs[secondRoundMsgs.length - 1]!.content);
+
+    expect(toolResultContent).toContain("orders");
+    expect(toolResultContent).toContain("Заказы");
+    expect(toolResultContent).toContain("invoices");
+    expect(toolResultContent).toContain("Счета");
+    // INVARIANT (bot ≤ human): the other application's registry must NOT leak
+    // into an applicationId-scoped call — a human picking APP_A's registry in
+    // the bind-form never sees APP_B's registries either.
+    expect(toolResultContent).not.toContain("contacts");
+    expect(toolResultContent).not.toContain("Контакты");
+  });
+
+  it("omitted applicationId lists across all of this tenant's applications (still tenant-scoped — the unfiltered GET /api/registry-defs shape)", async () => {
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: {} }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    await runConfigurator("покажи все реестры", ctx, null, [], [REG_ORDERS, REG_INVOICES, REG_OTHER_APP]);
+
+    const secondRoundMsgs = llm.chatCalls[1]!.messages;
+    const toolResultContent = String(secondRoundMsgs[secondRoundMsgs.length - 1]!.content);
+    expect(toolResultContent).toContain("orders");
+    expect(toolResultContent).toContain("contacts");
+  });
+});
+
+describe("AC-T724-4: list_registries on an application with zero registries → honest empty list, not an error", () => {
+  it("an applicationId that matches no candidate → count=0, registries=[] (never a crash/error)", async () => {
+    const EMPTY_APP = "a9000000-0000-0000-0000-000000000009";
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: { applicationId: EMPTY_APP } }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("покажи реестры этого приложения", ctx, null, [], [REG_ORDERS, REG_INVOICES]);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(0);
+    const secondRoundMsgs = llm.chatCalls[1]!.messages;
+    const toolResultContent = String(secondRoundMsgs[secondRoundMsgs.length - 1]!.content);
+    expect(toolResultContent).toMatch(/"count":0/);
+    expect(toolResultContent).toMatch(/"registries":\[\]/);
+  });
+
+  it("no registryListCandidates supplied at all (default []) → honest empty list, no crash", async () => {
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: {} }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("покажи реестры", ctx); // no 5th arg at all
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(0);
+  });
+});
+
+describe("AC-T724-5: list → bind two-step flow — author_binding's targetRegistrySlug comes from list_registries, never guessed", () => {
+  it("round 1 list_registries(APP_A) then round 2 author_binding with a slug from that list → ApprovedOp carries it verbatim", async () => {
+    const llm = new SequentialToolCallLlmPort([
+      { name: "list_registries", args: { applicationId: APP_A } },
+      {
+        name: "author_binding",
+        args: {
+          processKey: "purchase-approval",
+          applicationId: APP_A,
+          triggerType: "on_create",
+          // The LLM "read" this slug off round 1's tool result (real slug, not guessed).
+          targetRegistrySlug: "invoices",
+          humanReadableReason: "Результат — в реестр Счета, который назвал list_registries",
+        },
+      },
+    ]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator(
+      "привяжи процесс согласования закупки, результат клади в реестр Счета",
+      ctx,
+      null,
+      [],
+      [REG_ORDERS, REG_INVOICES, REG_OTHER_APP],
+    );
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps.find((o) => o.kind === "author_binding")!;
+    expect(op).toBeDefined();
+    expect(op.args["targetRegistrySlug"]).toBe("invoices");
+    // Round 1's list_registries call itself produced no write — exactly one
+    // approvedOp (the bind), not two.
+    expect(result.approvedOps).toHaveLength(1);
   });
 });
 
