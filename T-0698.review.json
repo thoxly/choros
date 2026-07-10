@@ -1,41 +1,55 @@
 {
   "task_id": "T-0698",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": { "green": true },
+  "reverify": {
+    "round": 2,
+    "builder_fix_commit": "bf20b9fa",
+    "checks": {
+      "b1_closed": "PersonFieldValue threads deactivated via Boolean(hit && hit.deactivated) into the SAME ActorChip/ExecutorBadge path (.chs-exec--deactivated: opacity 0.55 + line-through + '· деактивирован') as PersonCell — таблица↔деталка согласованы",
+      "shared_helper": "buildEmployeesById (field-renderer.jsx) — единственный list→Map шаг; оба экрана зовут его; grep подтвердил: литеральных копий new Map(list.map…) в web/src не осталось",
+      "author_sidebar": "?.name корректен и load-bearing: missing entry → formatPersonName(undefined) → null → || record.created_by (байт-в-байт прежний slug-degrade, не 'undefined'); без ?.name объект-entry регрессировал бы имя автора в слаг; тест пинит точную строку",
+      "non_array_input": "тест есть: buildEmployeesById(undefined/null/[]) → Map size 0, не бросает",
+      "person_picker": "не сломан — читает .id/.name/.position из списка напрямую, deactivated аддитивен",
+      "mutation_proof_b1": "revert screen-record-detail.jsx → 40dcfc6c: 6 RED (deactivated unit, detail e2e, wiring); восстановлено, дерево чистое",
+      "gates": "targeted 101/101; full web 2680/2680 (98 files, +5); tsc 0; anti-case-lock PASS (aggregate 15 < baseline 16); ux-g2 PASS; anti-uuid-actor-render PASS"
+    },
+    "round1_still_valid": "db-тест 3/3 live PG + mutation-proof org.ts (3 RED); приватность PASS (boolean-only, сырой deactivated_at отсутствует в /api/org — db-тест утверждает undefined); сервер — аддитивная колонка той же таблицы, без JOIN, RLS/индексы не задеты"
+  },
   "findings": [
     {
       "id": "B1",
-      "severity": "blocking",
+      "severity": "nit",
       "axis": 2,
-      "location": "web/src/screens/screen-record-detail.jsx:772 (+ PersonFieldValue :629-632, call site :1064-1070)",
-      "issue": "Третий flatten дропает поле. Деталка записи — второй потребитель fetchEmployees() — строит authorNames = new Map(list.map((e) => [e.id, e.name])), теряя deactivated. Эта карта питает PersonFieldValue, который рендерит значения person-ТИПА полей через тот же ActorChip, что и PersonCell, но БЕЗ пропа deactivated. Итог: T-0698 ВВОДИТ новую рассогласованность — один и тот же деактивированный сотрудник в одном person-поле показан зачёркнуто-приглушённым в ТАБЛИЦЕ записей, но полностью активным в ДЕТАЛКЕ (один клик). Ровно класс дефекта «сигнал теряется в человеческом слое», ради устранения которого существует эпик E-UX-HUMAN/T-0648. Спека декларирует это 'вне охвата', но нельзя убрать пользовательскую рассогласованность, объявив рассогласованного близнеца вне охвата — обе поверхности рождены T-0673 и рендерят через один ActorChip.",
-      "suggestion": "Протянуть deactivated через screen-record-detail.jsx: authorNames → Map<id,{name,deactivated}> (или параллельная карта), передать deactivated в PersonFieldValue → ActorChip тем же выражением, что employeesById в screen-app-records.jsx. Метадата 'Автор' (created_by, :1113) — простой Mono-текст, маркер не нужен; блокер только про person-ТИПА поля."
+      "location": "web/src/screens/screen-record-detail.jsx (PersonFieldValue + authorNames)",
+      "issue": "RESOLVED в bf20b9fa (раунд 1: blocking). Третий flatten (authorNames = Map id→name-строка) дропал deactivated; PersonFieldValue рендерил person-поля деталки без маркера — деактивированный сотрудник приглушён в таблице, но 'активен' в деталке того же поля. Закрыто: общий buildEmployeesById (целые entries), PersonFieldValue протягивает deactivated в ActorChip с той же boolean-семантикой, что PersonCell; оба читателя authorNames обновлены (сайдбар 'Автор' через ?.name с сохранением missing-entry degrade). Mutation-proof: revert экрана → 6 red. Понижено до nit-записи только как след истории — актуальных претензий нет.",
+      "suggestion": "—"
     },
     {
       "id": "N1",
       "severity": "nit",
       "axis": 4,
-      "location": "web/src/screens/screen-app-records.test.jsx:359",
-      "issue": "e2e-тест честно гоняет реальный fetchEmployees() и реальный PersonCell, но пересобирает Map рукотворной копией `new Map(list.map((e) => [e.id, e]))` вместо импорта/общего хелпера. Если screen-app-records.jsx:1298 отрефакторит построение карты, тест продолжит зеленеть против своей копии — разъедется молча.",
-      "suggestion": "Вынести построение employeesById в импортируемый хелпер и переиспользовать его и в экране, и в тесте. Риск низкий, не блокирует."
+      "location": "web/src/forms/field-renderer.jsx (buildEmployeesById) + оба test-файла",
+      "issue": "RESOLVED в bf20b9fa. Раунд 1: e2e-тест копировал Map-выражение литералом — мог молча разъехаться с экраном. Теперь экраны И тесты зовут один экспортированный buildEmployeesById; wiring-тесты пинят setEmployeesById(buildEmployeesById(list)) / setAuthorNames(buildEmployeesById(list)). След истории, претензий нет.",
+      "suggestion": "—"
     },
     {
       "id": "N2",
       "severity": "nit",
       "axis": 3,
       "location": "web/src/screens/kanban-board.jsx:88-89",
-      "issue": "ПРЕ-СУЩЕСТВУЮЩЕЕ, НЕ введено T-0698: канбан рендерит person-поля как «—» (formatCellValue возвращает Symbol PERSON_CELL_ASYNC → displayVal падает на em-dash). KanbanBoard не получает employeesById вовсе — на карточках нет ни имени, ни маркера деактивации. Канбан никогда не резолвил person-поля, так что это не разрыв ЭТОЙ протяжки.",
-      "suggestion": "Отдельный follow-up: пробросить employeesById в KanbanBoard и резолвить person-поля через PersonCell/ActorChip (заодно получит и маркер деактивации). Не блокер T-0698."
+      "issue": "ПРЕ-СУЩЕСТВУЮЩЕЕ, не введено T-0698: канбан рендерит person-поля как «—» (PERSON_CELL_ASYNC Symbol → em-dash; KanbanBoard не получает employeesById — ни имени, ни маркера). Вынесено в follow-up T-0728 (заведён координатором) — не сужу в рамках T-0698.",
+      "suggestion": "T-0728: пробросить employeesById в KanbanBoard, резолвить через PersonCell/ActorChip."
     }
   ],
   "acceptance_coverage": [
-    { "ac": "AC-1: GET /api/org people[] несёт deactivated boolean, мутационно доказано", "covered": true },
+    { "ac": "AC-1: GET /api/org people[] несёт deactivated boolean, мутационно доказано (live PG)", "covered": true },
     { "ac": "AC-2: fetchEmployees() flatten несёт deactivated true/false", "covered": true },
-    { "ac": "AC-3: клиентский честный тест — Map реальным fetchEmployees → PersonCell.deactivated", "covered": true },
+    { "ac": "AC-3: клиентский честный тест — Map реальным fetchEmployees + общий buildEmployeesById → PersonCell.deactivated", "covered": true },
     { "ac": "AC-4: tsc/vitest (web+server затронутые) зелёные", "covered": true },
-    { "ac": "Цель эпика: сигнал деактивации согласован на ВСЕХ поверхностях показа актора в записях (таблица+деталка)", "covered": false }
+    { "ac": "Цель эпика: сигнал деактивации согласован на обеих поверхностях записи (таблица PersonCell + деталка PersonFieldValue), mutation-доказано на каждом звене", "covered": true }
   ],
   "role_gap_evidence": [
-    "Узкая спека ('любые другие места кроме PersonCell — вне охвата') позволила строителю починить один из двух sibling-компонентов T-0673 (PersonCell), оставив PersonFieldValue рассогласованным. Гейты (db-тест + web vitest) зелёные, потому что покрывают только табличную ячейку — второй потребитель fetchEmployees() (screen-record-detail) не имеет теста на маркер. Класс 'фикс близнеца A, забыт близнец B, тесты покрывают только A' повторяется (ср. T-0662 узкий гейт скрывал живую дыру). Кандидат в durable: при протяжке сигнала грепать ВСЕХ потребителей источника (fetchEmployees/people[]) и требовать покрытие на каждой поверхности, а не только на инцидентной."
+    "Раунд 1: узкая спека ('любые другие места кроме PersonCell — вне охвата') позволила починить одного из двух sibling-компонентов T-0673, оставив PersonFieldValue рассогласованным; гейты были зелёные, т.к. покрывали только табличную ячейку. Класс 'фикс близнеца A, забыт близнец B, тесты покрывают только A' (ср. T-0662). Durable-кандидат: при протяжке сигнала грепать ВСЕХ потребителей источника и требовать покрытие на каждой поверхности. Раунд 2 подтвердил, что механическое лекарство — общий экспортированный хелпер, который зовут и экраны, и тесты (дрейф формы значения становится невозможен молча) — строитель применил именно его."
   ]
 }
