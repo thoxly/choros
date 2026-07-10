@@ -884,8 +884,12 @@ describe("T-0648 · GET /api/processes/:id resolves completedBy to a display nam
     });
     expect(resolveCallCount - before).toBe(1);
     // Distinct-ids only: "e-fixture-assignee" appears twice in the activities but must be
-    // passed ONCE to the resolver.
-    expect(lastIdsArg).toEqual(["e-fixture-assignee"]);
+    // passed ONCE to the resolver. T-0654 [part A]: the instance STARTER id (ACTOR) is
+    // folded into the SAME single batch (for «Запущен: <Имя>»), so the one call now
+    // carries the union {distinct completer, starter} — still ONE call, still no dupes.
+    expect(lastIdsArg).toEqual(["e-fixture-assignee", ACTOR]);
+    // The completer slug still appears exactly once (no per-step / per-concern re-add).
+    expect(lastIdsArg?.filter((id) => id === "e-fixture-assignee")).toHaveLength(1);
   });
 
   it("a step with completedBy:null carries no completedByName (nothing to resolve)", async () => {
