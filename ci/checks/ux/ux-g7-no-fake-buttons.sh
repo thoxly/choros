@@ -17,12 +17,27 @@
 #
 # SCOPE: added lines in web/src/screens/** and web/src/app-shell/**.
 #
-# DETECTION (line-local heuristic on an ADDED line):
-#   A line that marks a control inert —
+# DETECTION (T-0699: JSX-tag BLOCK scope, not line-local):
+#   The unit of judgement is one JSX opening tag — from the line where `<Tag`
+#   starts to the line carrying the `>` (or `/>`) that closes THAT opening tag
+#   — not a single diff line. All ADDED (and any interleaved unchanged context)
+#   lines inside that span are concatenated into one block before matching.
+#   This was flipped from a pure line-local heuristic (T-0652) because a
+#   synthetic-diff judge (T-0652 round 3) proved line-local is blind in BOTH
+#   directions on real multi-line JSX: (a) it MISSES the exact anti-pattern it
+#   exists to stop when `aria-disabled`/inert-`onClick` lands on one line and no
+#   reason marker is anywhere in the tag (a multi-line fake button sails
+#   through untouched); (b) it FALSE-POSITIVES on an honest multi-line control
+#   whenever the reason marker (`title=`/`aria-describedby=`) is attached to a
+#   DIFFERENT attribute line than `aria-disabled` — the real shape both
+#   shell.jsx topbar stubs and the ra-grant-trail.jsx export stub use.
+#
+#   A block is a VIOLATION when the concatenated tag text carries an inert
+#   marker —
 #     • aria-disabled="true"  / aria-disabled={true}
 #     • onClick={(e) => e.preventDefault()}   (the inert-only handler idiom)
-#   is a VIOLATION when that SAME added line does NOT ALSO carry a visible-reason
-#   marker. Visible-reason markers (any ONE clears the line):
+#   and does NOT ALSO carry a visible-reason marker ANYWHERE in the same tag.
+#   Visible-reason markers (any ONE clears the block):
 #     • aria-describedby=          — points at a reason element (we then trust
 #                                    the author wired a VISIBLE one; the sr-only
 #                                    anti-pattern is caught by the class check)
@@ -30,12 +45,24 @@
 #     • title=                     — a native tooltip reason (visible on hover)
 #     • disabled                   — a real disabled attr (kit renders it visibly)
 #   HARD anti-pattern (always flagged, even if a describedby is present): the
-#   SAME added line pairs `aria-disabled` with `chs-sr-only` — a reason hidden
-#   from sighted users is the exact fake this gate outlaws.
+#   tag pairs `aria-disabled` with `chs-sr-only` anywhere in the block — a
+#   reason hidden from sighted users is the exact fake this gate outlaws.
 #
-# This is a heuristic, not a parser: it is intentionally conservative (line-local)
-# to stay portable (bash 3.2 POSIX-ERE, no PCRE) and to avoid false positives on
-# multi-line JSX. It catches the copy-paste stub idiom, which is the real risk.
+#   Only a block whose OPENING line was itself added ('+') is tracked — a block
+#   opened by unchanged context is pre-existing debt (or a pre-existing honest
+#   control) and out of scope for a diff-based "only new debt" gate. Once
+#   tracking starts, both added and interleaved context lines are folded in
+#   (a genuinely new insertion is contiguous '+' lines in practice). Tracking
+#   resets at any file/hunk boundary (`+++`/`---`/`@@`/`diff --git`) — a tag can
+#   never span one, so an unterminated tag at a boundary is silently dropped
+#   (no false judgement on a truncated view).
+#
+#   This is still a heuristic, not a parser (portable bash 3.2 POSIX-ERE, no
+#   PCRE, no new deps): finding the tag-closing `>` is done by stripping the
+#   `=>`/`>=` two-char tokens (arrow functions / numeric comparisons) before
+#   testing for a leftover `>` — a bare `>` comparison inside a JSX expression
+#   (e.g. `{count > 5}`) can still misfire as a tag boundary; none of the
+#   controls this gate guards use that shape today.
 #
 # MODE — INFORMATIONAL (default): prints findings, exits 0. Pass --required to
 # fail (exit 1) on any newly-added fake button.
@@ -49,31 +76,85 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# An inert-control marker on the line.
+# An inert-control marker anywhere in the tag block.
 INERT_RE='aria-disabled=("true"|\{true\})|onClick=\{\(e\)[[:space:]]*=>[[:space:]]*e\.preventDefault\(\)\}'
-# A visible-reason marker on the SAME line (any one clears it).
+# A visible-reason marker anywhere in the SAME tag block (any one clears it).
 REASON_RE='aria-describedby=|title=|[[:space:]]disabled([[:space:]=>/]|$)|className=[^>]*(hint|reason|stub)'
 # The hard anti-pattern: an sr-only reason paired with an inert marker.
 SRONLY_RE='chs-sr-only'
+# A JSX opening tag start, e.g. `<Button` / `<span`.
+TAGSTART_RE='<[A-Za-z]'
+
+# judge_block — classifies ONE fully-accumulated JSX opening-tag block (all its
+# attribute text concatenated). Prints "RULE\ttext" when it violates. Global
+# state (IN_TAG/BLOCK) is owned by classify_added_lines; this only reads its arg.
+judge_block() {
+  local text="$1"
+  # Only lines that mark a control inert are candidates.
+  [[ "${text}" =~ ${INERT_RE} ]] || return 0
+  # HARD: inert + sr-only reason anywhere in the block — a hidden reason IS the fake.
+  if [[ "${text}" =~ ${SRONLY_RE} ]]; then
+    printf 'sr-only-reason-on-inert-control\t%s\n' "${text}"
+    return 0
+  fi
+  # Inert WITHOUT any visible-reason marker anywhere in the block → fake button.
+  if [[ ! "${text}" =~ ${REASON_RE} ]]; then
+    printf 'inert-control-no-visible-reason\t%s\n' "${text}"
+  fi
+}
+
+# has_tag_close <text> — true iff <text> carries the `>` (or `/>`) that closes a
+# JSX opening tag, i.e. a `>` that survives stripping the two-char tokens `=>`
+# (arrow functions) and `>=` (numeric comparisons) first.
+has_tag_close() {
+  local tmp="${1//=>/  }"
+  tmp="${tmp//>=/  }"
+  [[ "${tmp}" == *">"* ]]
+}
 
 # classify_added_lines — reads a unified diff on stdin, prints "RULE\ttext" per
-# offending ADDED line. Used by both MAIN and SELF-TEST.
+# offending JSX-tag BLOCK (T-0699: block-scope, from `<Tag` to its closing `>`,
+# not a single line). Used by both MAIN and SELF-TEST.
 classify_added_lines() {
-  local line body
+  local line marker body
+  IN_TAG=0
+  BLOCK=""
   while IFS= read -r line; do
-    [[ "${line}" == +++* ]] && continue
-    [[ "${line}" == +* ]] || continue
-    body="${line#+}"
-    # Only lines that mark a control inert are candidates.
-    [[ "${body}" =~ ${INERT_RE} ]] || continue
-    # HARD: inert + sr-only reason on the same line — a hidden reason IS the fake.
-    if [[ "${body}" =~ ${SRONLY_RE} ]]; then
-      printf 'sr-only-reason-on-inert-control\t%s\n' "${body}"
+    # File/hunk boundary — a tag can never span one; drop any in-flight block.
+    if [[ "${line}" == +++* || "${line}" == ---* || "${line}" == @@* || "${line}" == "diff --git"* ]]; then
+      IN_TAG=0
+      BLOCK=""
       continue
     fi
-    # Inert WITHOUT any visible-reason marker → fake button.
-    if [[ ! "${body}" =~ ${REASON_RE} ]]; then
-      printf 'inert-control-no-visible-reason\t%s\n' "${body}"
+
+    marker="${line:0:1}"
+
+    if [[ "${IN_TAG}" -eq 1 ]]; then
+      # Inside an in-progress tag: fold in '+' and unchanged context lines
+      # (a genuinely new insertion is contiguous '+' in practice); a '-'
+      # (removed) line belongs to the OLD tag shape — irrelevant, skip it.
+      [[ "${marker}" == "+" || "${marker}" == " " ]] || continue
+      body="${line:1}"
+      BLOCK+=" ${body}"
+      if has_tag_close "${BLOCK}"; then
+        judge_block "${BLOCK}"
+        IN_TAG=0
+        BLOCK=""
+      fi
+      continue
+    fi
+
+    # Not inside a tag: only a newly-ADDED line can start new debt — a tag
+    # opened by unchanged context is pre-existing and out of diff-based scope.
+    [[ "${marker}" == "+" ]] || continue
+    body="${line:1}"
+    [[ "${body}" =~ ${TAGSTART_RE} ]] || continue
+
+    if has_tag_close "${body}"; then
+      judge_block "${body}"
+    else
+      IN_TAG=1
+      BLOCK="${body}"
     fi
   done
 }
@@ -96,7 +177,20 @@ if [[ "${1:-}" == "--self-test" ]]; then
   # 5. inert + title → CLEAN
   fake_diff+=$'+        <Button aria-disabled="true" title="в разработке">Y</Button>\n'
   # 6. a real working button (no inert marker) → CLEAN (not a candidate)
-  fake_diff+=$'+        <Button onClick={() => doThing()}>Работает</Button>'
+  fake_diff+=$'+        <Button onClick={() => doThing()}>Работает</Button>\n'
+  # 7. T-0699 regression case (a): MULTI-LINE fake button — aria-disabled and
+  #    the inert onClick land on SEPARATE added lines, no reason marker
+  #    anywhere in the tag → MUST be flagged. A line-local heuristic misses
+  #    this (neither line alone carries "inert + no reason" together).
+  fake_diff+=$'+        <Button\n+          aria-disabled="true"\n+          onClick={(e) => e.preventDefault()}\n+        >РегрессФейк</Button>\n'
+  # 8. T-0699 regression case (b): MULTI-LINE HONEST button, shell.jsx real
+  #    shape — aria-disabled and its aria-describedby reason on DIFFERENT
+  #    lines of the same opening tag → must NOT be flagged.
+  fake_diff+=$'+        <Button\n+          variant="secondary"\n+          size="sm"\n+          aria-disabled="true"\n+          aria-describedby="hint-multiline-ok"\n+          className="chs-btn--stub"\n+          onClick={(e) => e.preventDefault()}\n+        >ЧестнаяДискрайб</Button>\n'
+  # 9. T-0699 regression case (b), second shape — ra-grant-trail.jsx real
+  #    shape — aria-disabled and its `title=` reason on DIFFERENT lines →
+  #    must NOT be flagged.
+  fake_diff+=$'+        <Button\n+          variant="secondary"\n+          size="sm"\n+          aria-disabled="true"\n+          className="chs-btn--stub"\n+          title="Нет записей для экспорта"\n+          onClick={(e) => e.preventDefault()}\n+        >ЧестнаяТайтл</Button>'
 
   out="$(printf '%s\n' "${fake_diff}" | classify_added_lines)"
 
@@ -134,6 +228,32 @@ if [[ "${1:-}" == "--self-test" ]]; then
     echo "SELF-TEST FAIL: classified the '+++' diff header"; exit 2
   fi
   echo "  [OK] '+++' diff header ignored"
+
+  # --- T-0699: block-scope (multi-line JSX tag) cases -----------------------
+
+  if ! grep -q $'inert-control-no-visible-reason\t.*РегрессФейк' <<<"${out}"; then
+    echo "SELF-TEST FAIL (T-0699): missed a MULTI-LINE inert control (attrs on separate added lines) with no visible reason anywhere in the tag"; exit 2
+  fi
+  echo "  [OK] T-0699: flagged multi-line fake button (aria-disabled + inert onClick on separate lines, no reason)"
+
+  if grep -q 'ЧестнаяДискрайб' <<<"${out}"; then
+    echo "SELF-TEST FAIL (T-0699): flagged a MULTI-LINE honest control whose aria-describedby reason lands on a different line than aria-disabled (shell.jsx real shape)"; exit 2
+  fi
+  echo "  [OK] T-0699: multi-line honest control (aria-describedby on a different line) not flagged"
+
+  if grep -q 'ЧестнаяТайтл' <<<"${out}"; then
+    echo "SELF-TEST FAIL (T-0699): flagged a MULTI-LINE honest control whose title reason lands on a different line than aria-disabled (ra-grant-trail.jsx real shape)"; exit 2
+  fi
+  echo "  [OK] T-0699: multi-line honest control (title on a different line) not flagged"
+
+  # A tag that never closes before a hunk boundary must be dropped silently —
+  # no false judgement on a truncated view, no crash.
+  boundary_diff=$'+++ b/web/src/app-shell/shell.jsx\n@@ -1,3 +1,6 @@\n+        <Button\n+          aria-disabled="true"\n@@ -10,2 +13,2 @@\n+          onClick={(e) => e.preventDefault()}\n+        >ХвостБезГраницы</Button>'
+  boundary_out="$(printf '%s\n' "${boundary_diff}" | classify_added_lines)"
+  if [[ -n "${boundary_out}" ]]; then
+    echo "SELF-TEST FAIL (T-0699): a tag truncated by a hunk boundary produced a finding instead of being dropped: ${boundary_out}"; exit 2
+  fi
+  echo "  [OK] T-0699: tag truncated at a hunk boundary is dropped, not judged"
 
   echo "[T-0652] ux-g7-no-fake-buttons: --self-test PASS"
   exit 0
