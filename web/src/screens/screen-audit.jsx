@@ -24,10 +24,29 @@ import { execTypeOf, fmtTs, humanError, buildAuditUrl } from './screen-audit.log
  * tooltip/technical-id chip). Falls back to the raw `ev.actor` string when
  * `actorDisplay` is absent (older cached response shape) — never worse than
  * before this change.
+ *
+ * T-0712 (P3 из LIVE_PROOF T-0655): `department.moved`/`position.moved`/
+ * `employee.moved` (move-API, T-0655) used to show only the raw `type` token
+ * as the whole row — no summary, no target chip (the move-diff payload
+ * carries no SAFE_TARGET_KEYS-matching field). `ev.summary` is now
+ * payload-aware for the three move types (server-side, audit-read-dao.ts) and
+ * `ev.target` falls back to the writer's `subject` column (always populated
+ * since T-0655 — retroactive, no degradation of old rows). For
+ * `employee.moved` specifically, the moved entity IS an employee — the
+ * server resolves it through the SAME batch actor-resolver and attaches
+ * `ev.targetDisplay`, so it renders as a full human-named ActorChip (not just
+ * a raw id) — `department.moved`/`position.moved` have no name resolver yet,
+ * so their target stays the existing MonoId technical-id chip (same fidelity
+ * `record.create`'s target chip already has).
  */
-function AuditEventRow({ ev }) {
+// Named export (additive) — T-0712: no hooks inside this component (pure
+// props → JSX), so it is directly callable/unit-testable without a DOM or a
+// hooks dispatcher (mirrors the T-0648 `asRenderableText`/`deriveRecordRefLabel`
+// export-for-testability convention in components.jsx).
+export function AuditEventRow({ ev }) {
   const type = execTypeOf(ev.action);
   const display = ev.actorDisplay;
+  const targetDisplay = ev.targetDisplay;
   return (
     <div className="chs-ev">
       <div className="chs-ev__time">{fmtTs(ev.ts)}</div>
@@ -38,7 +57,11 @@ function AuditEventRow({ ev }) {
         <div className="chs-ev__line">
           <ActorChip type={display?.type || type} name={display?.name || ev.actor} id={display?.id || ev.actor} deactivated={display?.deactivated} />
           <span>{ev.summary || ev.action}</span>
-          {ev.target && <MonoId chip>{ev.target}</MonoId>}
+          {targetDisplay ? (
+            <ActorChip type={targetDisplay.type} name={targetDisplay.name} id={targetDisplay.id} deactivated={targetDisplay.deactivated} />
+          ) : (
+            ev.target && <MonoId chip>{ev.target}</MonoId>
+          )}
           <MonoId>{ev.action}</MonoId>
         </div>
       </div>

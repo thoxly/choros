@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0712",
+  "status": "pr_open",
+  "branch": "task/T-0712",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/db/audit-read-dao.ts",
+    "src/http/audit.ts",
+    "web/src/screens/screen-audit.jsx",
+    "src/__tests__/audit-log.test.ts (EXTENDED)",
+    "web/src/screens/screen-audit.test.jsx (EXTENDED)",
+    "ci/checks/db/org-move-api.db.test.ts (EXTENDED)",
+    "T-0712.spec.md (NEW)",
+    "T-0712.pr-handoff.json (NEW)"
+  ],
+  "summary": "P3 из LIVE_PROOF T-0655 (эпик E-UX-HUMAN T-0647): department.moved/position.moved/employee.moved (move-API, src/http/seed-write.ts) рендерились на /audit сырой action-строкой — summaryFor() (src/db/audit-read-dao.ts) не знал эти три типа и падал на raw type token ('employee.moved'), target был всегда null (move-diff payload buildDeptMoveDiff/buildPositionMoveDiff/buildEmployeeMoveDiff, src/core/org-move.ts, не несёт ни одного SAFE_TARGET_KEYS-ключа). Эталон — record.create уже несёт чип цели через payload.record_id. ФИКС ЧИСТО НА ЧТЕНИИ, БЕЗ правки writer'а: audit_event.subject уже пишется = id перемещённой сущности для ВСЕХ трёх типов с первого коммита T-0655 (seed-write.ts:924/1018/1113) — ci/checks/db/org-move-api.db.test.ts УЖЕ читал WHERE subject=$3 до этой задачи, значит DAO просто никогда не SELECT-ил колонку subject. Добавление subject в SELECT — ретроактивное обогащение, работает на ВСЕХ существующих строках, деградации старых строк нет вовсе (append-only дисциплина соблюдена тривиально: 0 диффа в audit-writer.ts/seed-write.ts/org-move.ts).",
+  "fix": "1) src/db/audit-read-dao.ts: AuditRow += subject (SELECT id,type,actor,subject,payload,occurred_at — было без subject); summaryFor(type, payload) — для трёх .moved типов строит динамическую человеко-summary (перемещён/переименован/оба/изменён), читая ТОЛЬКО presence ключа (to_parent_id/to_department_id/to_position_id) + bool renamed — НИКОГДА from_name/to_name (free-text), сохраняя инвариант 'never echo payload free-text', уже действующий для остальных типов; прочие типы байт-идентичны (SUMMARY_BY_PREFIX без изменений). safeTargetFromPayload (бывший safeTarget, тело без изменений) + новая обёртка safeTarget(type, payload, subject): сначала payload-allowlist как раньше (для ВСЕХ типов), ТОЛЬКО когда тот вернул null И type — один из трёх .moved — падает на subject; поведение остальных типов не меняется. 2) src/http/audit.ts: distinctActors (Set) для batch actor-resolve теперь включает item.target для строк action==='employee.moved' (тот же ОДИН round-trip — сотрудник, которого переместили, резолвится тем же batchResolveActors, что и акторы, т.к. это та же таблица choros.employee); events[] += targetDisplay (форма ResolvedActor), null для всех кроме employee.moved. 3) web/src/screens/screen-audit.jsx: AuditEventRow — targetDisplay есть → <ActorChip> (человеко-имя первично, id вторично/tooltip — T-0648 дисциплина); иначе прежний <MonoId chip>{ev.target}</MonoId> (department.moved/position.moved — нет батч-резолвера имени отдела/должности, честная деградация до id-чипа — та же глубина, что у record.create сегодня). AuditEventRow экспортирован именованно (аддитивно) для юнит-тестируемости без DOM (нет хуков внутри).",
+  "deviations_from_adr": [
+    "Спека допускала два варианта чипа цели: полное 'из <узел> в <узел>' с резолвом имён department/position, ИЛИ честная деградация до id-уровня (та же спека прямо разрешает 'по фактическим данным payload'). Выбран второй — резолвер имён department/position не существует в кодовой базе, заводить его — отдельный follow-up (см. T-0712.spec.md §Не в скоупе), не входит в объём P3-фикса аудит-рендера.",
+    "employee.moved получает ПОЛНЫЙ ActorChip (сотрудник = actor-shaped сущность, тот же батч-резолвер), department.moved/position.moved — только MonoId id-чип (нет batch-резолвера имени узла); это асимметрия по дизайну, не недосмотр — задокументирована в спеке."
+  ],
+  "live_proof_plan": "Стенд offline в этой сессии — план для follow-up живого прохода: (1) войти владельцем на /org; (2) перетащить сотрудника на другую должность (или через 'Переместить в…' — T-0655 DnD/меню) → PATCH /api/employees/:id 200; (3) открыть /audit → верхняя строка должна показывать: ActorChip актора (кто переместил) + текст 'Сотрудник перемещён' (или 'и переименован', если заодно переименовали) + ВТОРОЙ ActorChip — имя перемещённого сотрудника (не сырой UUID) + технический MonoId-чип с action-токеном 'employee.moved' в хвосте строки; (4) переместить/переименовать отдел или должность (owner, /org) → строка department.moved/position.moved показывает 'Отдел перемещён'/'Должность перемещена и переименована' + MonoId id-чип цели (id отдела/должности, честная деградация — нет резолвера имени узла); (5) прокрутить историю до строки, записанной ДО этого деплоя (существующие *.moved события, если есть в дев-тенанте) — она ДОЛЖНА тоже показать summary+target (subject был записан всегда), доказывая ретроактивность без бэкфилла.",
+  "tests_added": [
+    {
+      "file": "src/__tests__/audit-log.test.ts",
+      "covers": "7 новых сценариев (описание '(7) T-0712'): employee.moved moved-only/renamed-only/both → summary текст; department.moved/position.moved → summary + target=subject, targetDisplay=null; honest degradation (нет subject в строке) → summary всё равно человечна, target=null; regression — record.create/grant.create summary+target байт-идентичны (Выдан грант прав/g-77, Агент передал решение человеку/inst-1). Мок-пул того же паттерна, что уже в файле (scripted stub pg.Pool, без реальной БД)."
+    },
+    {
+      "file": "web/src/screens/screen-audit.test.jsx",
+      "covers": "3 новых теста ('T-0712 AuditEventRow — target-chip choice'): employee.moved+targetDisplay → ДВА ActorChip (актор + цель, имя цели видно, сырой id 'emp-1' НЕ встречается ни в одном MonoId); department.moved без targetDisplay → ОДИН ActorChip (только актор) + MonoId chip с id отдела; target=null → ни одного target-чипа, только хвостовой MonoId с action-токеном. Прямой вызов AuditEventRow({ev}) как функции (без хуков внутри — не нужен DOM/dispatcher), сверка node.type===ActorChip/MonoId (именованные экспорты components.jsx)."
+    },
+    {
+      "file": "ci/checks/db/org-move-api.db.test.ts",
+      "covers": "+1 тест (AC-audit-read, живой PG): после AC-emp реального PATCH /api/employees/:id читает readAuditLog() НАПРЯМУЮ на РЕАЛЬНОЙ строке, которую этот же тест-сьют только что записал через боевой seed-write.ts роут — summary==='Сотрудник перемещён', target===fx.emp (id перемещённого сотрудника). Доказывает, что subject реально долетает от writer'а до reader'а на живой транзакционной БД, не только в статических фикстурах."
+    }
+  ],
+  "gates": {
+    "tsc_noemit": "green — npx tsc --noEmit, exit 0",
+    "eslint": "green — npx eslint src/db/audit-read-dao.ts src/http/audit.ts, 0 errors",
+    "vitest_targeted_server": "green — src/__tests__/audit-log.test.ts (20), audit.e2e.test.ts (7, 1 skip pre-existing), audit-export.e2e.test.ts (6), org-move.test.ts (16), seed-write.move-api.authz.test.ts (10) = 58 passed / 1 skipped, 0 failed",
+    "vitest_web_full": "green — npx vitest run (web/): 98 files, 2693 passed, 0 failed (было 2680 на T-0698/T-0710 baseline; +13 за счёт T-0712 (+18 screen-audit.test.jsx было ~15) и прочих задач между тем мержем и HEAD)",
+    "vitest_db_targeted": "green — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism org-move-api.db.test.ts: 4 passed (3 pre-existing AC-emp/AC-dept/AC-cycle без диффа + 1 NEW AC-audit-read), live PG (docker choros-postgres-1, миграционный шаблон клонирован/удалён самим тест-раннером). Полный fitness:db НЕ гонялся (P3, таргетный фикс, по прямой инструкции орas-оркестратора)",
+    "audit_append_only_sh": "PASS — bash ci/checks/audit_append_only.sh (append-only DDL/триггеры не тронуты)",
+    "audit_writer_isolation_sh": "PASS — bash ci/checks/audit_writer_isolation.sh (единственный писатель audit_event/audit_head — src/db/audit-writer.ts — не тронут вовсе)",
+    "anti_uuid_actor_render_sh": "PASS + --self-test PASS — bash ci/checks/ux/anti-uuid-actor-render.sh (0 голых raw-identifier рендеров под web/src/screens/)",
+    "anti_case_lock_sh": "PASS + --self-test PASS — bash ci/checks/anti-case-lock.sh (Phase 1+2, aggregate 15 ≤ baseline 16, ноль новых case-литералов)",
+    "full_fitness_suite": "НЕ гонялся — по прямой инструкции задачи (P3, targeted-only), см. gates выше"
+  },
+  "blocked_reason": "",
+  "friction_events": []
+}
