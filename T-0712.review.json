@@ -1,0 +1,39 @@
+{
+  "task_id": "T-0712",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/screen-audit.jsx:60-64",
+      "issue": "target department.moved/position.moved остаётся MonoId (сырой id узла) — нет резолвера имени узла org-tree (batch только по employee). Честная деградация той же глубины, что record.create/grant.create (тот же <MonoId chip> путь), не регресс: до фикса эти типы показывали сырой type-токен как всю строку.",
+      "suggestion": "Follow-up: протянуть node-id→name резолвер (department/position) для второго ActorChip-паритета с employee.moved."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/db/org-move-api.db.test.ts",
+      "issue": "Ветка позади dev (merge-base 986f1d60). Файл org-move-api.db.test.ts — чистый аддитивный супернабор dev-версии (T-0712 дописывает блок AC-audit-read в конец), при мерже add/add-reconcile. Забота интегратора, не дефект кода.",
+      "suggestion": "Rebase на dev перед promote; add/add на этом файле тривиален (аддитивный хвост)."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 6,
+      "location": "src/db/actor-resolver.ts:223",
+      "issue": "Нерезолвимый (hard-deleted) employee.moved target рендерится ActorChip'ом с name=raw-id, type=service. Установленный контракт T-0648 (тот же fallback, что у actor-колонки, gate-санкционирован) — не дефект этой задачи.",
+      "suggestion": "Действий не требует; отмечено для полноты."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "*.moved (department/position/employee) человеко-summary payload-aware", "covered": true },
+    { "ac": "чип цели вместо сырой action-строки (employee→ActorChip, dept/position→MonoId)", "covered": true },
+    { "ac": "free-text (from_name/to_name) НЕ эхоится в summary/target", "covered": true },
+    { "ac": "писатель seed-write.ts не менялся; subject был всегда; нет деградации старых строк", "covered": true },
+    { "ac": "employee.moved target-резолв честен на краях (деактив/удалён/кросс-тенант)", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
