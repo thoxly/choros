@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0745",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/http/rights-intents.ts:registerSubstitutionCoverage",
+      "issue": "Новый read — булев оракул 'держит ли сотрудник X роль Y' без admin-гейта, вызываемый на любую пару role_id/substitute_employee_id внутри своего тенанта (без ограничения role_id набором ролей, видимых актору). Не новая категория утечки (тот же факт уже извлекаем через существующий WRITE self-absence/substitute ценой побочного эффекта — см. tier в ответе), но чуть расширяет площадь бесплатного зондирования.",
+      "suggestion": "Если станет реальным беспокойством — ограничить role_id ролями из self-scope актора (аналог self-scope-фильтра GET /api/rights/tenant-state), а не любой ролью тенанта. Non-blocking сейчас: holder-идентичности не палятся, только boolean+count, гейт осознанно симметричен self-absence-записи."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/http/rights-intents.ts (комментарий) / commit message",
+      "issue": "Ссылка 'rights-intents.ts:744,1231' на существующий force_tier2-параметр устарела после вставки нового роута выше по файлу (актуально 747/1314).",
+      "suggestion": "Косметика счёта строк, не функциональный дефект — уточнить при желании."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 6,
+      "location": "web/src/screens/rights/ra-intents.test.jsx; T-0745.pr-handoff.json live_proof_plan",
+      "issue": "Весь тест-файл (включая T-0745-часть) — source-string/'source-presence' тесты, не настоящие @testing-library render-тесты (в web/package.json нет testing-library/jsdom — структурное ограничение проекта). Заявленный live_proof_plan честно помечен хендоффом как НЕ выполненный (стенд был офлайн) — визуальное появление баннера/чекбокса в реальном браузере не подтверждено живьём.",
+      "suggestion": "Прогнать live_proof_plan §1-8 при следующем доступном окне на стенде до закрытия эпика T-0585 как LIVE_PROOF-доказанного. Non-blocking для этого вердикта: все гейты, которые можно было прогнать локально, честны — перепроверил их сам против реального PG (:55432) и получил заявленные числа."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "новый роут GET /api/rights/intents/substitution-coverage withAuth-гейтнут, tenant-scoped через resolveTenant(actorId)+withTenantTx RLS, не палит holder-идентичности (только boolean+count)", "covered": true },
+    { "ac": "гейт роута — self-service паритет с self-absence-записью (extractActor+resolveTenant, без admin-гейта) — подтверждено живым PG-тестом с ordinary non-admin актором", "covered": true },
+    { "ac": "предупреждение реюзит T-0744 substituteProvidesCoverage буквально (импорт из substitution.ts, не переписан)", "covered": true },
+    { "ac": "предупреждение честно против реальной T-0744 owner-claim/role_unfilled-fallback механики (inbox.ts) — сверено чтением", "covered": true },
+    { "ac": "force_tier2 пробрасывает уже существующий API-параметр, WRITE-пути (registerSubstitute/registerSelfAbsence) byte-не-тронуты этим дифом", "covered": true },
+    { "ac": "без чекбокса (force_tier2=false) — идентично прежнему дефолтному поведению (regression не найден)", "covered": true },
+    { "ac": "нет 'force_tier2'/'Tier-N' жаргона в видимом JSX-тексте — перепроверено вручную (ux-g5 гейт не покрывает screens/rights/, известный гэп)", "covered": true },
+    { "ac": "ra-intents.test.jsx 60/60 (19 новых) — прогнал сам", "covered": true },
+    { "ac": "backend unit 14/14 — прогнал сам", "covered": true },
+    { "ac": "live-PG rights-intents.db.test.ts 15/15 (5 новых) — прогнал сам против реального PG :55432", "covered": true },
+    { "ac": "tsc --noEmit 0 errors — прогнал сам", "covered": true },
+    { "ac": "rights-ui-no-new-write/anti-case/frozen-write, substitution-isolation, anti-case-lock, http-route-auth-coverage — все PASS, прогнал сам", "covered": true },
+    { "ac": "диф скоуплен (5 рабочих файлов + pr-handoff, все T-0745-owned)", "covered": true }
+  ]
+}
