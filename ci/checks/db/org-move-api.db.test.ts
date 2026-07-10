@@ -33,6 +33,11 @@ import pg from 'pg';
 import { migratorUrl, uuid } from './_helpers.js';
 import { Router } from '../../../src/http/router.js';
 import { registerSeedWriteRoutes } from '../../../src/http/seed-write.js';
+// T-0712: the readAuditLog side of the loop — proves the read-side enrichment
+// (audit-read-dao.ts summaryFor/safeTarget) actually resolves a REAL row this
+// suite's own move-API just wrote (subject column), not just a static fixture.
+import { readAuditLog, type AuditReadFilters } from '../../../src/db/audit-read-dao.js';
+import type { PgClientLike } from '../../../src/db/audit-writer.js';
 
 const hasDb = Boolean(process.env['DATABASE_URL']);
 const d = hasDb ? describe : describe.skip;
@@ -233,5 +238,31 @@ d('T-0655 org move-API — live Postgres', () => {
     expect(r.body?.error?.code).toBe('CYCLE');
     // no new audit event from the rejected move
     expect(await auditCount('department.moved', fx.deptA)).toBe(before);
+  });
+
+  // T-0712 [P3 из LIVE_PROOF T-0655] — the READ side of the loop: the audit
+  // screen (/api/audit) reads through readAuditLog(), which used to have no
+  // summary and no target for `employee.moved` (the raw `type` token was the
+  // whole row). Proves against the SAME real row AC-emp just wrote (not a
+  // static fixture) that the DAO now resolves a human summary AND `target ===
+  // <the moved employee's id>` (sourced from the writer's `subject` column,
+  // which this suite's own seed-write.ts route already populates — no writer
+  // change was needed for this fix).
+  it('AC-audit-read — readAuditLog resolves the real employee.moved row into a human summary + target=subject', async () => {
+    const client = await getPool().connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
+      await client.query('SET LOCAL search_path TO choros');
+      const filters: AuditReadFilters = { actor: null, action: 'employee.moved' };
+      const page = await readAuditLog(client as unknown as PgClientLike, TENANT, 50, null, filters);
+      await client.query('COMMIT');
+      const row = page.items.find((item) => item.target === fx.emp);
+      expect(row).toBeDefined();
+      expect(row!.summary).toBe('Сотрудник перемещён');
+      expect(row!.action).toBe('employee.moved');
+    } finally {
+      client.release();
+    }
   });
 });

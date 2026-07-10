@@ -115,6 +115,16 @@ interface AuditRow {
   id: string;
   type: string;
   actor: string;
+  /**
+   * The event SUBJECT — the primary object id the writer recorded (T-0016 §4.4;
+   * see audit-writer.ts buildRow). Always an opaque identifier (a UUID, or a
+   * `kind:id`-shaped synthetic key — e.g. "record:<id>", "agent:<id>" — see the
+   * repo-wide `subject:` call-site survey; never free text). T-0712: read here so
+   * `safeTarget` can fall back to it for `.moved` events (see below) — the column
+   * has ALWAYS been populated for those (T-0655 seed-write.ts), so this is a pure
+   * read-side enrichment with no writer change and no degradation of old rows.
+   */
+  subject: string | null;
   payload: unknown; // jsonb — node-postgres returns a parsed object
   occurred_at: string | number; // bigint comes back as a string
 }
@@ -144,7 +154,75 @@ const SUMMARY_BY_PREFIX: ReadonlyArray<readonly [string, string]> = [
   ["process.", "Событие процесса"],
 ];
 
-function summaryFor(type: string): string {
+// ---------------------------------------------------------------------------
+// T-0712 [P3 из LIVE_PROOF T-0655, эпик E-UX-HUMAN] — payload-aware summary for
+// the three org-move `*.moved` events (department/position/employee, T-0655
+// seed-write.ts). Before this, none of the three had a SUMMARY_BY_PREFIX entry,
+// so summaryFor() fell through to the raw `type` token ("employee.moved") —
+// exactly the reported defect (a raw action string, no human summary).
+//
+// The move-diff payload (buildDeptMoveDiff/buildPositionMoveDiff/
+// buildEmployeeMoveDiff, src/core/org-move.ts) carries `to_parent_id` /
+// `to_department_id` / `to_position_id` (present iff the entity was reparented)
+// and `renamed: true` (present iff display_name/title changed) — we read ONLY
+// key PRESENCE + the boolean flag, never `from_name`/`to_name` (free-text
+// values), preserving the same "never echo payload free-text" invariant the
+// rest of this module already holds for every other type.
+// ---------------------------------------------------------------------------
+
+const MOVE_SUMMARY: Readonly<
+  Record<string, { subject: string; movedKey: string }>
+> = {
+  "department.moved": { subject: "Отдел", movedKey: "to_parent_id" },
+  "position.moved": { subject: "Должность", movedKey: "to_department_id" },
+  "employee.moved": { subject: "Сотрудник", movedKey: "to_position_id" },
+};
+
+const MOVE_VERBS: Readonly<
+  Record<string, { moved: string; renamed: string; both: string; neither: string }>
+> = {
+  "Отдел": {
+    moved: "перемещён",
+    renamed: "переименован",
+    both: "перемещён и переименован",
+    neither: "изменён",
+  },
+  "Должность": {
+    moved: "перемещена",
+    renamed: "переименована",
+    both: "перемещена и переименована",
+    neither: "изменена",
+  },
+  "Сотрудник": {
+    moved: "перемещён",
+    renamed: "переименован",
+    both: "перемещён и переименован",
+    neither: "изменён",
+  },
+};
+
+/**
+ * summaryForMoved — payload-aware human summary for `department.moved` /
+ * `position.moved` / `employee.moved`. Returns null for any other type (the
+ * caller falls through to the generic SUMMARY_BY_PREFIX lookup).
+ */
+function summaryForMoved(type: string, payload: unknown): string | null {
+  const shape = MOVE_SUMMARY[type];
+  if (shape === undefined) return null;
+  const p =
+    payload !== null && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {};
+  const moved = shape.movedKey in p;
+  const renamed = p["renamed"] === true;
+  const verbs = MOVE_VERBS[shape.subject]!;
+  const verb = moved && renamed ? verbs.both : moved ? verbs.moved : renamed ? verbs.renamed : verbs.neither;
+  return `${shape.subject} ${verb}`;
+}
+
+function summaryFor(type: string, payload: unknown): string {
+  const moved = summaryForMoved(type, payload);
+  if (moved !== null) return moved;
   for (const [prefix, label] of SUMMARY_BY_PREFIX) {
     if (type === prefix || type.startsWith(prefix)) return label;
   }
@@ -167,7 +245,7 @@ const SAFE_TARGET_KEYS = [
   "record_id",
 ] as const;
 
-function safeTarget(payload: unknown): string | null {
+function safeTargetFromPayload(payload: unknown): string | null {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
     return null;
   }
@@ -179,11 +257,36 @@ function safeTarget(payload: unknown): string | null {
   return null;
 }
 
+// T-0712: the three `.moved` types (see MOVE_SUMMARY above) — their payload
+// (org-move.ts diff builders) carries no SAFE_TARGET_KEYS-matching key, so
+// safeTargetFromPayload always returns null for them. The moved entity's OWN
+// id has ALWAYS been recorded in the `subject` column (seed-write.ts:924/
+// 1018/1113, since T-0655's first commit) — falling back to it here is a
+// pure read-side enrichment that works retroactively on every existing row.
+const MOVE_TYPES = new Set(Object.keys(MOVE_SUMMARY));
+
+/**
+ * safeTarget — a safe target identifier for the redacted wire item. Tries the
+ * payload allow-list first (unchanged behaviour for every type). ONLY when that
+ * misses AND `type` is one of the `.moved` types does it fall back to `subject`
+ * (also an opaque identifier — see the AuditRow.subject doc comment above; every
+ * other type's target behaviour is byte-identical to before this change).
+ */
+function safeTarget(type: string, payload: unknown, subject: string | null): string | null {
+  const fromPayload = safeTargetFromPayload(payload);
+  if (fromPayload !== null) return fromPayload;
+  if (MOVE_TYPES.has(type) && typeof subject === "string" && subject.length > 0 && subject.length <= 128) {
+    return subject;
+  }
+  return null;
+}
+
 /**
  * Project a raw audit row to the REDACTED wire item. The ONLY payload field read is a
- * SAFE target identifier (allow-listed keys). Everything else in payload/scope/subject
- * (free-text reasons, drafts, record values, secrets) is DROPPED here and never reaches
- * the response.
+ * SAFE target identifier (allow-listed keys), plus — for `.moved` events only — the
+ * already-recorded `subject` column (also a safe opaque identifier, never free text).
+ * Everything else in payload/scope (free-text reasons, drafts, record values, secrets)
+ * is DROPPED here and never reaches the response.
  */
 function toAuditItem(row: AuditRow): AuditLogItem {
   return {
@@ -191,8 +294,8 @@ function toAuditItem(row: AuditRow): AuditLogItem {
     ts: Number(row.occurred_at),
     actor: row.actor,
     action: row.type,
-    summary: summaryFor(row.type),
-    target: safeTarget(row.payload),
+    summary: summaryFor(row.type, row.payload),
+    target: safeTarget(row.type, row.payload, row.subject),
   };
 }
 
@@ -270,7 +373,7 @@ export async function readAuditLog(
   const limitParam = `$${params.length}`;
 
   const res = await client.query(
-    `SELECT id, type, actor, payload, occurred_at
+    `SELECT id, type, actor, subject, payload, occurred_at
        FROM choros.audit_event
       WHERE ${conds.join(" AND ")}
       ORDER BY occurred_at DESC, id DESC

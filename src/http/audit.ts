@@ -578,11 +578,22 @@ async function handleGetAuditLog(
   // query (batchResolveActors) — not a per-row lookup. A resolver failure degrades to
   // an empty map (every item then falls back to resolveActorDisplay's honest fallback
   // shape — raw id as name, resolved:false), never turning a redacted read into a 500.
-  const distinctActors = [...new Set(page.items.map((item) => item.actor))];
+  //
+  // T-0712: `employee.moved` rows also carry a `target` that is itself an employee id
+  // (the person who got moved — audit-read-dao.ts falls back to the writer's `subject`
+  // column for the three org-move `.moved` types). That id is resolvable through the
+  // SAME employee table/batch query — folded into the SAME single round-trip rather
+  // than a second query, so the "who got moved" chip is a real human name too, not
+  // just a bare id (department.moved/position.moved targets are NOT employee ids —
+  // left out of this batch; they stay a MonoId technical chip on the client).
+  const distinctActors = new Set(page.items.map((item) => item.actor));
+  for (const item of page.items) {
+    if (item.action === "employee.moved" && item.target) distinctActors.add(item.target);
+  }
   let actorResolved: Map<string, ResolvedActor> = new Map();
-  if (distinctActors.length > 0) {
+  if (distinctActors.size > 0) {
     try {
-      actorResolved = await batchResolveActors(pool, tenantId, distinctActors);
+      actorResolved = await batchResolveActors(pool, tenantId, [...distinctActors]);
     } catch {
       actorResolved = new Map();
     }
@@ -591,6 +602,10 @@ async function handleGetAuditLog(
   const events = page.items.map((item) => ({
     ...item,
     actorDisplay: resolveActorDisplay(actorResolved, item.actor),
+    targetDisplay:
+      item.action === "employee.moved" && item.target
+        ? resolveActorDisplay(actorResolved, item.target)
+        : null,
   }));
 
   res.statusCode = 200;
