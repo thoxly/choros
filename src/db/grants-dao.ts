@@ -440,9 +440,34 @@ export async function getRoleSlugsForActor(
     // T-0366: try primary first; if no row AND fallback is provided (and distinct),
     // try the fallback slug. The primary short-circuits so registered users
     // (slug == sub) never reach the fallback path — no impersonation risk.
+    //
+    // T-0738 [security P1, substrate] — `AND ${ACTOR_ACTIVE_SQL}` (fail-closed).
+    // Judge T-0726 (ADR-T0726 §5.2, actor-active-route-coverage.sh finding
+    // `inbox.ts:GET:/api/inbox[/:id]`) found this was the one remaining employee
+    // actor-lookup left WITHOUT the deactivation predicate. The ALLOWLIST entry
+    // in ci/checks/actor-authority-deactivation-gate.sh ("DOWNSTREAM-GUARDED
+    // authority projection") excused it on the premise that its sole consumer,
+    // inbox.ts, always gates deactivation locally BEFORE calling it — true for
+    // the WRITE paths (claim: inbox.ts findEmployeeById guard ~1869-1871,
+    // approve: ~2276-2278 — both throw 403 before ever reaching
+    // resolveRolesForActor), but FALSE for the READ path: GET /api/inbox
+    // (inbox.ts ~1540) calls resolveRolesForActor directly with NO local gate.
+    // A deactivated actor whose role_assignment was not separately revoked
+    // (deactivation ≠ automatic revocation — ADR-T0658 §"Дыра №2") still saw the
+    // "pool" tab (and its badge count) populated for the role they used to hold,
+    // for the residual ~300s window their already-issued access-JWT stays valid
+    // (T-0702). Fixing it HERE (the single resolver, not a 5th bespoke
+    // per-route gate) closes it for every current AND future consumer — the
+    // WRITE paths are unaffected (they never reach a deactivated actor here
+    // anyway; this is defence-in-depth for them). Applied to BOTH lookups
+    // (primary and the T-0366 fallback) — a deactivated actor must not resolve
+    // roles via EITHER identity. A deactivated primary now falls through to the
+    // fallback exactly like an unknown primary would (fail-closed to empty if
+    // the fallback also misses/is absent — same "deactivated ≈ unknown actor"
+    // sentinel shape getGrantsForSubject already documents).
     const { rows: empRows } = await client.query<{ id: string }>(
       `SELECT id FROM choros.employee
-        WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+        WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
       [tenantId, actorSlug],
     );
 
@@ -450,10 +475,13 @@ export async function getRoleSlugsForActor(
     if (empRows.length > 0) {
       employeeId = empRows[0]!.id;
     } else if (fallbackSlug !== undefined && fallbackSlug !== actorSlug) {
-      // Primary slug matched no employee — try the fallback (preferred_username).
+      // Primary slug matched no employee (or matched a DEACTIVATED one — see
+      // T-0738 note above) — try the fallback (preferred_username). T-0738:
+      // same predicate — a deactivated fallback identity must not resolve
+      // roles either.
       const { rows: fbRows } = await client.query<{ id: string }>(
         `SELECT id FROM choros.employee
-          WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+          WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
         [tenantId, fallbackSlug],
       );
       if (fbRows.length === 0) {

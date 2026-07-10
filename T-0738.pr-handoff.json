@@ -1,0 +1,75 @@
+{
+  "task_id": "T-0738",
+  "status": "pr_open",
+  "branch": "task/T-0738",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/db/grants-dao.ts",
+    "ci/checks/db/grants-dao-role-slug-deactivation.db.test.ts",
+    "docs/tasks/T-0738.adr.md"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [],
+  "changes_product": 0,
+  "live_proof": "not_required (changes_product=0, substrate/security fix — proven via targeted live-PG gate tests instead, see below)",
+  "spec_ref": "docs/tasks/T-0726.adr.md §5.2 (finding), docs/tasks/T-0738.adr.md (this task's mini-ADR)",
+  "summary": "getRoleSlugsForActor (src/db/grants-dao.ts:431) resolved an employee actor by slug+tenant WITHOUT deactivated_at IS NULL — the one remaining employee actor-lookup lacking the T-0658/T-0662 deactivation predicate (judge T-0726, ADR-T0726 §5.2). Fixed by adding `AND ${ACTOR_ACTIVE_SQL}` to BOTH lookups (primary slug + T-0366 preferred_username fallback).",
+  "caller_inventory": [
+    {
+      "caller": "GET /api/inbox (LIST, pool-tab + badge counts) — src/http/inbox.ts:~1435-1656, via resolveRolesForActor:~1540",
+      "had_local_gate_before_call": false,
+      "effect_of_fix": "SECURITY FIX: a deactivated actor whose role_assignment was not separately revoked previously still saw the pool tab (and counts.pool) populated for the role they used to hold, for the residual ~300s window of their already-issued access-JWT (T-0702). After the fix, myRoles=[] for a deactivated actor -> pool tab and badge are honestly empty. No effect on active actors."
+    },
+    {
+      "caller": "POST /api/inbox/:id/claim — src/http/inbox.ts:~1893, via resolveRolesForActor",
+      "had_local_gate_before_call": true,
+      "effect_of_fix": "No behavior change. findEmployeeById + deactivatedAt!=null guard at ~1869-1871 already throws 403 NOT_ELIGIBLE BEFORE resolveRolesForActor is ever reached for a deactivated actor. The fix is pure defence-in-depth for this path."
+    },
+    {
+      "caller": "POST /api/inbox/:id/action (approve, direct instance path) — src/http/inbox.ts:~2300, via resolveRolesForActor",
+      "had_local_gate_before_call": true,
+      "effect_of_fix": "No behavior change. findEmployeeById + deactivatedAt!=null guard at ~2276-2278 already throws 403 BEFORE resolveRolesForActor is reached. Defence-in-depth only."
+    },
+    {
+      "caller": "POST /api/inbox/:id/action (approve, defer/agent-deferred path) — src/http/inbox.ts:~2141, via resolveRolesForActor",
+      "had_local_gate_before_call": false,
+      "effect_of_fix": "No externally observable change. resolveRolesForActor IS called before the local deactivatedAt gate here (~2160-2163), but a deactivated actor already failed at the SAME final outcome (403) via the Tier-2 substitution branch (getActiveSubstitutionsForSubstitute already carries e_sub.deactivated_at IS NULL, T-0588 BLOCK-2) before reaching that local gate. With the fix, myRoles=[] short-circuits one step earlier via the same 403 path — same final result, no new caller reaches a state change."
+    },
+    {
+      "caller": "getRoleSlugsForActor direct unit tests — src/__tests__/grants-dao.test.ts (fake pg.Pool)",
+      "had_local_gate_before_call": "n/a (test)",
+      "effect_of_fix": "No change. The fake pool matches on /FROM choros\\.employee/i and ignores the rest of the WHERE clause text, so the added predicate text is transparent to all 42 existing tests (all still pass)."
+    },
+    {
+      "caller": "src/core/executor-resolver.ts:363",
+      "had_local_gate_before_call": "n/a",
+      "effect_of_fix": "None — this is a doc-comment reference (\"mirrors getRoleSlugsForActor\"), not an actual call site."
+    }
+  ],
+  "design_decision": "Fixed the resolver directly (both lookups carry ACTOR_ACTIVE_SQL) rather than adding an includeDeactivated parameter. The sole production caller (resolveRolesForActor) is used exclusively to resolve the ACTING actor's own roles for self-authority PDP decisions (claim/approve/pool visibility) — there is no display-of-a-deactivated-employee's-roles use case anywhere in the codebase for this DAO (unlike e.g. pdp-explain.ts:loadSubjectGrants, which stays untouched in the T-0662 allowlist as a legitimate DISPLAY path). Adding a parameter with zero callers that would set it to true is needless surface.",
+  "gate_findings_note": "ci/checks/actor-active-route-coverage.sh (T-0726, informational) SUMMARY is UNCHANGED before/after this fix: 77 GET routes audited — 13 marker-covered, 52 whitelisted, 12 findings (both before and after). inbox.ts:GET:/api/inbox and inbox.ts:GET:/api/inbox/:id REMAIN in the findings list. This is expected and honestly documented in docs/tasks/T-0738.adr.md §5: that gate is a pure TEXT scan against a fixed ACTIVE_MARKERS registry (7 T-0662 resolver names + verified derivatives) owned by T-0726; getRoleSlugsForActor/resolveRolesForActor were never in that registry and adding them requires either founder sanction or an auto-sanction-additive thaw of a file T-0738 does not own (frozen-checks-immutable.sh ownership is by branch T-ID). The REAL vulnerability is closed and proven via the new live-PG tests below — I deliberately did not add a dead/theatrical call to a registered marker name just to make the informational gate's text-match go green, since that is exactly the evasion pattern T-0662's own self-test (case 3, dead-reference-next-to-ungated-lookup) is designed to catch. Flagged as a natural follow-up for the T-0726 owner: one additive line in ACTIVE_MARKERS citing this ADR.",
+  "gates_run": {
+    "tsc_noEmit": "PASS (clean, 0 errors)",
+    "npm_run_build": "PASS (tsc && seed tsc, clean)",
+    "npm_run_lint": "PASS (0 errors, 44 pre-existing no-console warnings unrelated to this change)",
+    "vitest_run_full_suite": "PASS — 310 files passed | 2 skipped, 5855 tests passed | 10 skipped, 0 failed",
+    "vitest_targeted_grants_dao": "PASS — grants-dao.test.ts (30), grants-dao.provisioned-agent.test.ts (6), grants-dao.role-slug-resolution.test.ts (6) = 42/42",
+    "vitest_targeted_inbox": "PASS — 20 inbox test files, 205/205 tests",
+    "vitest_new_live_pg_db_test": "PASS — ci/checks/db/grants-dao-role-slug-deactivation.db.test.ts, 7/7 (AC-1, AC-1+, AC-2, AC-2+ x2, AC-3 x2), run against live PG :55432 (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros)",
+    "vitest_regression_sibling_db_tests": "PASS — grants-dao-deactivated.db.test.ts (7), grants-dao-subject-deactivation.db.test.ts (3), inbox-actor-resolve.db.test.ts (1), inbox_claim_substitution.db.test.ts (12), inbox-defer-escalation.db.test.ts (3), actor-resolve-seeded-persona.db.test.ts (17) = 43/43, live PG",
+    "actor_active_route_coverage_sh": "PASS exit=0; self-test PASS; SUMMARY unchanged (12 findings before/after, inbox routes remain — see gate_findings_note)",
+    "http_route_auth_coverage_sh": "PASS exit=0; self-test PASS",
+    "actor_authority_deactivation_gate_sh": "PASS exit=0 (FF-0662-1 + FF-0662-2 accounting scan both clean); self-test PASS",
+    "anti_case_lock_sh": "PASS exit=0; self-test PASS",
+    "frozen_checks_immutable_sh": "PASS exit=0 — no ci/checks/*.sh files touched by this task (only a new ci/checks/db/*.db.test.ts file added, which is not captured by the ci/checks/[^/]+\\.sh glob)",
+    "full_fitness_db": "NOT RUN per task instructions (out of scope for this focused substrate fix)"
+  },
+  "notes": "This task owns grants-dao.ts exclusively this round; no other files under ci/checks/*.sh were modified. The T-0726-owned actor-active-route-coverage.sh and the T-0662-owned actor-authority-deactivation-gate.sh were run but NOT edited (their ALLOWLIST/ACTIVE_MARKERS registries still describe getRoleSlugsForActor by its pre-fix rationale — a natural, low-risk follow-up for those gates' owners to register the now-hardened resolver, not done here to respect file ownership under frozen-checks-immutable.sh / T-0146)."
+}
