@@ -37,7 +37,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { missingSubstituteFields, substituteResultMessage, selfAbsenceResultMessage } from './ra-intents.jsx';
+import { missingSubstituteFields, substituteResultMessage, selfAbsenceResultMessage, substituteCoverageWarning } from './ra-intents.jsx';
 
 const fs = await import('fs');
 const path = await import('path');
@@ -435,3 +435,157 @@ describe('SelfAbsenceForm source — server tier consumed additively, tier stays
     expect(body).toContain("'/api/rights/intents/self-absence'");
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0745 (эпик T-0585, design: docs/tasks/T-0729.assessment.md §3 variant б +
+// docs/tasks/T-0745.spec.md) — предупреждение о не-держателе роли + вывод
+// уже существующего API-параметра force_tier2 в обе формы.
+// ---------------------------------------------------------------------------
+
+describe('substituteCoverageWarning — pure (T-0745, design §4)', () => {
+  it('providesCoverage: false → returns a warning naming the role', () => {
+    const msg = substituteCoverageWarning({ providesCoverage: false, roleLabel: 'бюджет-approver' });
+    expect(msg).toMatch(/не держит «бюджет-approver»/);
+  });
+
+  it('providesCoverage: false with no roleLabel → falls back to a generic phrase, no crash', () => {
+    const msg = substituteCoverageWarning({ providesCoverage: false, roleLabel: null });
+    expect(msg).toMatch(/не держит выбранную роль/);
+  });
+
+  it('providesCoverage: true → no warning (null)', () => {
+    expect(substituteCoverageWarning({ providesCoverage: true, roleLabel: 'x' })).toBeNull();
+  });
+
+  it('providesCoverage: null (unknown/loading/incomplete selection) → no warning (never a false negative)', () => {
+    expect(substituteCoverageWarning({ providesCoverage: null, roleLabel: 'x' })).toBeNull();
+  });
+
+  it('honest post-T-0744 mechanic: names the tenant OWNER as the fallback recipient, not the stand-in', () => {
+    const msg = substituteCoverageWarning({ providesCoverage: false, roleLabel: 'x' });
+    expect(msg).toMatch(/владельцу тенанта/);
+  });
+
+  it('names the force_tier2 checkbox by its human label, not "force_tier2" or "Tier-2"', () => {
+    const msg = substituteCoverageWarning({ providesCoverage: false, roleLabel: 'x' });
+    expect(msg).toMatch(/выдать собственный временный доступ/);
+    expect(msg).not.toMatch(/force_tier2/);
+    expect(msg).not.toMatch(/Tier-2|Tier-1/);
+  });
+
+  it('never claims the stand-in loses ability to act at all — only that access does not land on them automatically (honest, not alarmist)', () => {
+    const msg = substituteCoverageWarning({ providesCoverage: false, roleLabel: 'x' });
+    expect(msg).not.toMatch(/не сможет ничего/);
+  });
+});
+
+describe('useSubstitutionCoverage — source presence (T-0745): pre-submit read wired to the new endpoint', () => {
+  it('calls GET /api/rights/intents/substitution-coverage with role_id + substitute_employee_id', () => {
+    const start = src.indexOf('function useSubstitutionCoverage');
+    const end = src.indexOf('substituteCoverageWarning — T-0745, pure');
+    const body = src.slice(start, end);
+    expect(body).toContain('/api/rights/intents/substitution-coverage');
+    expect(body).toContain('role_id');
+    expect(body).toContain('substitute_employee_id');
+  });
+
+  it('only fetches once BOTH roleId and substituteId are chosen (no premature/партиал query)', () => {
+    const start = src.indexOf('function useSubstitutionCoverage');
+    const end = src.indexOf('substituteCoverageWarning — T-0745, pure');
+    const body = src.slice(start, end);
+    expect(body).toMatch(/if \(!roleId \|\| !substituteId\)/);
+  });
+
+  it('a failed/errored read resolves to null (unknown), never to false (advisory-only, no false negative)', () => {
+    const start = src.indexOf('function useSubstitutionCoverage');
+    const end = src.indexOf('substituteCoverageWarning — T-0745, pure');
+    const body = src.slice(start, end);
+    expect(body).toMatch(/\.catch\(\(\) => \{ if \(alive\) setProvidesCoverage\(null\); \}\)/);
+  });
+});
+
+describe('SubstitutionCoverageHint — shared block used by BOTH forms (T-0745)', () => {
+  const hintBody = () => {
+    const start = src.indexOf('function SubstitutionCoverageHint');
+    const end = src.indexOf('export function SubstituteForm');
+    return src.slice(start, end);
+  };
+
+  it('renders the force_tier2 checkbox with an honest human label (no "force_tier2"/"Tier-2" jargon)', () => {
+    const body = hintBody();
+    expect(body).toMatch(/type="checkbox"/);
+    expect(body).toContain('Выдать замещающему собственный временный доступ сразу');
+    expect(body).not.toMatch(/force_tier2/);
+    expect(body).not.toMatch(/Tier-1|Tier-2/);
+  });
+
+  it('the checkbox hint is textually consistent with both forms\' existing static notes ("ограниченный временный грант", "не шире")', () => {
+    const body = hintBody();
+    expect(body).toMatch(/ограниченный временный грант/);
+    expect(body).toMatch(/не шире прав замещаемой роли/);
+  });
+
+  it('the warning banner renders ONLY when `warning` is truthy (never blocks submit — no disabled= wiring here)', () => {
+    const body = hintBody();
+    expect(body).toMatch(/\{warning && \(/);
+    expect(body).not.toMatch(/disabled=/);
+  });
+});
+
+describe('SubstituteForm — force_tier2 + coverage warning wired into the write body (T-0745)', () => {
+  const subBody = () => {
+    const start = src.indexOf('export function SubstituteForm');
+    const end = src.indexOf('/* ---- Я в отпуске');
+    return src.slice(start, end);
+  };
+
+  it('posts force_tier2 (the state driven by the new checkbox) to the EXISTING /api/rights/intents/substitute endpoint — no new/second write route', () => {
+    const body = subBody();
+    expect(body).toContain('force_tier2: forceTier2');
+    expect(body).toContain("'/api/rights/intents/substitute'");
+  });
+
+  it('renders SubstitutionCoverageHint once a substitute is picked, wired to useSubstitutionCoverage(roleId, substituteId)', () => {
+    const body = subBody();
+    expect(body).toContain('useSubstitutionCoverage(roleId, substituteId)');
+    expect(body).toMatch(/\{substituteId && \(\s*<SubstitutionCoverageHint/);
+  });
+
+  it('still carries no raw "Tier-1"/"Tier-2" jargon after the T-0745 additions (regression lock over the T-0639 guarantee)', () => {
+    const body = subBody();
+    expect(body).not.toMatch(/Tier-1|Tier-2/);
+  });
+});
+
+describe('SelfAbsenceForm — force_tier2 + coverage warning wired into the write body (T-0745)', () => {
+  const selfBody = () => {
+    const start = src.indexOf('function SelfAbsenceForm');
+    const end = src.indexOf('/* ---- Срочно отозвать');
+    return src.slice(start, end);
+  };
+
+  it('posts force_tier2 to the EXISTING /api/rights/intents/self-absence endpoint — no new/second write route', () => {
+    const body = selfBody();
+    expect(body).toContain('force_tier2: forceTier2');
+    expect(body).toContain("'/api/rights/intents/self-absence'");
+  });
+
+  it('renders SubstitutionCoverageHint once a substitute is picked, wired to useSubstitutionCoverage(roleId, substituteId)', () => {
+    const body = selfBody();
+    expect(body).toContain('useSubstitutionCoverage(roleId, substituteId)');
+    expect(body).toMatch(/\{substituteId && \(\s*<SubstitutionCoverageHint/);
+  });
+
+  it('still carries no raw "Tier-1"/"Tier-2" jargon after the T-0745 additions (regression lock over the T-0697/T-0720 guarantee)', () => {
+    const withoutComments = selfBody().replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+    expect(withoutComments).not.toMatch(/Tier-1|Tier-2/);
+  });
+});
+
+// T-0745 anti-case: NOT re-implemented as a source-string test here — this
+// worktree's ci/checks/rights-ui-anti-case.sh / anti-case-lock.sh ALREADY
+// scan every added web/src/ line (git-diff scoped) for the banned literals.
+// A parallel unit test would have to spell out the SAME denylist as string
+// literals, which the case-content scanner then flags as an anti-case hit
+// in the test file itself (self-defeating duplication) — the CI gate is the
+// single source of truth for this invariant.
