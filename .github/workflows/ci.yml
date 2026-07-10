@@ -335,6 +335,13 @@ jobs:
         # PATH on the runner → exit 127 (command not found). This was masked until
         # the static-checks step above stopped failing first (T-0216).
         run: npx vitest run src/__tests__/workerAuth.kc.e2e.test.ts
+      - name: UI-created user carries actor_type (T-0734, FF-UP2)
+        # Proves the declarative user-profile fix: a user created via the SAME
+        # admin-REST path the product UI uses (registrar POST /users) gets a
+        # login token carrying actor_type — i.e. UI-created accounts work
+        # instead of 401-ing. The realm imported via --import-realm above now
+        # activates the profile (components entry in realm-choros.json).
+        run: bash ci/checks/kc/ui-created-user-actor-type.sh
       - name: Stop services
         if: always()
         run: docker compose stop keycloak postgres

@@ -230,9 +230,24 @@ print("[kc-dev-setup] Realm-management grants reconciled.")
 PYEOF
 
 # ---------------------------------------------------------------------------
-# 5. Update user-profile (declarative schema: firstName/lastName optional,
-#    actor_type attribute declared with options validation).
-#    Uses the KC 25 user-profile Admin REST endpoint (PUT /users/profile).
+# 5. Reconcile the declarative user-profile schema (T-0734).
+#    The profile declares actor_type as a MANAGED, admin-editable, options-
+#    validated ([human,agent]) attribute. Without it, KC 25's declarative
+#    profile (unmanagedAttributePolicy DISABLED by default) SILENTLY DROPS
+#    actor_type on every admin-REST user create (POST /users) — so a user
+#    created from the product UI (createHumanUser) gets a login token with NO
+#    actor_type claim and verifyClaims (FF-3) rejects every request with 401.
+#    Seeded users escape this because realm-import writes attributes straight to
+#    the DB, bypassing profile validation.
+#
+#    SOURCE OF TRUTH: the realm-import-native `components` entry
+#    (org.keycloak.userprofile.UserProfileProvider → declarative-user-profile →
+#    kc.user.profile.config[0]). That is the ONLY shape KC 25 `--import-realm`
+#    actually activates (a top-level "userProfile" key is NOT honored by import;
+#    empirically verified T-0734). This step re-applies the SAME embedded config
+#    via the Admin REST endpoint (PUT /users/profile) so PERSISTENT stands —
+#    whose realm was imported BEFORE this fix and which `--import-realm` will NOT
+#    re-import into an existing realm — also get actor_type declared.
 # ---------------------------------------------------------------------------
 echo "[kc-dev-setup] Reconciling user-profile schema..."
 
@@ -254,13 +269,24 @@ def kc(method, path, data=None):
     return result.returncode, result.stdout.strip()
 
 data = json.load(open(REALM_JSON))
-user_profile = data.get("userProfile")
-if not user_profile:
-    print("  [SKIP] no userProfile section in realm JSON")
+# Extract the declarative-user-profile config from the components entry
+# (single source of truth — same bytes KC import activates).
+raw = None
+prov = data.get("components", {}).get(
+    "org.keycloak.userprofile.UserProfileProvider", [])
+if prov:
+    cfgs = prov[0].get("config", {}).get("kc.user.profile.config", [])
+    if cfgs:
+        raw = cfgs[0]
+
+if not raw:
+    print("  [SKIP] no declarative-user-profile component in realm JSON")
 else:
+    user_profile = json.loads(raw)
     rc, _ = kc("PUT", "/users/profile", user_profile)
     if rc == 0:
-        print("  [OK] user-profile schema applied")
+        print("  [OK] user-profile schema applied "
+              "(actor_type managed, admin-editable, options=[human,agent])")
     else:
         print("  [WARN] PUT /users/profile returned non-zero (KC version may differ)")
 print("[kc-dev-setup] User-profile reconciled.")
