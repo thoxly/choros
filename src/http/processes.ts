@@ -25,6 +25,7 @@ import { makeStartInstanceHandler, type StartInstanceDeps, type ActorsDisplayRes
 import {
   listInstanceProjections,
   isInstanceDetailVisible,
+  filterProjectionsByReadVisibility,
   type InstanceProjection,
 } from "./process-projection.js";
 import {
@@ -573,10 +574,41 @@ export function registerProcessesRoutes(
         try {
           const tenantId = await startDeps.resolveActorTenant(actorSlug);
           const projections = await listInstanceProjections(startDeps.pool, tenantId);
+          // T-0722 (D-064, P2 из T-0714 — security/PDP): narrow the ALREADY
+          // tenant-scoped `projections` to the READ-visibility of each instance's
+          // source record — the SAME single authority path (isRecordReadable) the
+          // DETAIL gate (T-0721) already applies, batched over the whole list
+          // (filterProjectionsByReadVisibility, process-projection.ts) instead of
+          // a per-instance round-trip. Reuses the SAME startDeps.resolveReadVisibility
+          // resolver DETAIL already calls below — no new server.ts wiring (T-0721
+          // already closed the wiring asymmetry for the whole startDeps object).
+          // Applied BEFORE overlayDetailLiveSteps (never spend a live-engine call on
+          // an instance that is about to be dropped) and BEFORE the response is
+          // built — this endpoint carries no separate pagination/count field to
+          // desync (the `instances` array below IS the authoritative visible set).
+          // Honest-degrade (NF-2): resolver absent → skip, byte-identical to
+          // pre-T-0722 (tenant-scope-only) behaviour.
+          let visibleProjections = projections;
+          if (startDeps.resolveReadVisibility) {
+            const gateNowMs = Date.now();
+            const { grants, ancestry } = await startDeps.resolveReadVisibility(
+              actorSlug,
+              tenantId,
+              gateNowMs,
+            );
+            visibleProjections = await filterProjectionsByReadVisibility(
+              startDeps.pool,
+              tenantId,
+              projections,
+              grants,
+              ancestry,
+              gateNowMs,
+            );
+          }
           // T-0709-R-P0-1: overlay each non-done instance's LIVE active node so the list's
           // node/nodes match the catalog AND the detail route (single live source). Best-
           // effort — an engine miss leaves that instance on its snapshot (never worse).
-          const display = await overlayDetailLiveSteps(startDeps.flowable, projections);
+          const display = await overlayDetailLiveSteps(startDeps.flowable, visibleProjections);
           instances = display.map(projectionToInstance);
         } catch {
           // Read-projection: degrade gracefully to honest-empty — never 500.

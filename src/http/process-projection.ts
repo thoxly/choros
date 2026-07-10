@@ -881,6 +881,110 @@ export async function isInstanceDetailVisible(
   return isRecordReadable(rowAncestry, grants, ancestry, nowMs);
 }
 
+// ---------------------------------------------------------------------------
+// T-0722 (D-064, P2 из T-0714 — security/PDP): LIST read-visibility filter —
+// Фаза 2 of option (c) (T-0721 above was Фаза 1, DETAIL). Narrows an ALREADY
+// tenant-scoped `InstanceProjection[]` (the output of listInstanceProjections)
+// to the subset the actor holds a covering READ grant for on the source
+// record — the SAME predicate (isRecordReadable), the SAME grants/ancestry
+// shape (resolved ONCE per request by the caller, NF-1), reused from
+// isInstanceDetailVisible above — but BATCHED over the whole list in ONE
+// extra SQL query instead of N+1 per-instance round-trips (DETAIL handles
+// exactly one instance per request — 1 query is fine there; LIST can carry
+// up to readEvents's internal 200-row cap, so a per-instance loop would be a
+// real N+1). Mirrors resolveDefinitionNames/resolveActorKinds' batching
+// pattern already established in this module.
+// ---------------------------------------------------------------------------
+
+/**
+ * Batched sibling of `loadRecordRowAncestry`: resolve `{registryId,
+ * applicationId}` for MANY records in ONE tenant-scoped query
+ * (`id = ANY($2::uuid[])`) instead of one round-trip per record. Same
+ * honest-deny contract per id: a recordId absent from the returned map means
+ * "does not resolve in this tenant" (deleted / never existed) — the caller
+ * treats that as NOT readable, never as an error. Pure data fetch — no
+ * grant/authority math here; `isRecordReadable` remains the ONLY containment
+ * decision (NF-5, FF-INST-VIS-2 precedent extended to the batched path).
+ */
+async function loadRecordRowAncestryBatch(
+  pool: pg.Pool,
+  tenantId: string,
+  recordIds: readonly string[],
+): Promise<Map<string, RowAncestry>> {
+  return withTenant(pool, tenantId, async (client) => {
+    const res = await client.query<{ id: string; registry_id: string; application_id: string }>(
+      `SELECT r.id, r.registry_id, rd.application_id
+         FROM choros.record r
+         JOIN choros.registry_def rd
+           ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
+        WHERE r.tenant_id = $1 AND r.id = ANY($2::uuid[])`,
+      [tenantId, recordIds],
+    );
+    const map = new Map<string, RowAncestry>();
+    for (const row of res.rows) {
+      map.set(row.id, { recordId: row.id, registryId: row.registry_id, applicationId: row.application_id });
+    }
+    return map;
+  });
+}
+
+/**
+ * T-0722: narrow `projections` to the instances the actor (whose covering
+ * READ grants are `grants`, resolved ONCE per request by the caller — NF-1,
+ * mirrors isInstanceDetailVisible/records.ts's LIST filter) may see, per the
+ * READ-visibility of each instance's SOURCE RECORD.
+ *
+ * - Record-less instances (`recordId === undefined`) are NEVER narrowed —
+ *   kept unconditionally (phase-1/2 scope, byte-identical to
+ *   isInstanceDetailVisible's record-less branch and to pre-T-0722 LIST
+ *   behaviour for those rows; see module doc-comment above §T-0721).
+ * - A non-UUID-shaped recordId (malformed/legacy row) is treated as
+ *   unresolvable WITHOUT touching the DB (dropped — see below for why this
+ *   pre-validation exists here but not on isInstanceDetailVisible's
+ *   single-instance path).
+ * - A recordId that does not resolve in this tenant (deleted / foreign) is
+ *   DROPPED (honest-deny — same posture as isInstanceDetailVisible's
+ *   null-row branch).
+ * - Otherwise → `isRecordReadable(rowAncestry, grants, ancestry, nowMs)`,
+ *   the EXACT SAME predicate DETAIL and records.ts already gate on.
+ *
+ * Pure filter over the input array (preserves order, never re-fetches beyond
+ * the ONE batched ancestry SELECT). Tenant/RLS additive-only (FF-INST-VIS-4):
+ * this NARROWS an already tenant-scoped array — it is never the tenant
+ * boundary itself, and the batched ancestry SELECT is itself tenant-scoped.
+ */
+export async function filterProjectionsByReadVisibility(
+  pool: pg.Pool,
+  tenantId: string,
+  projections: readonly InstanceProjection[],
+  grants: readonly Grant[],
+  ancestry: AncestryOracle,
+  nowMs: number,
+): Promise<InstanceProjection[]> {
+  // Only UUID-shaped recordIds are queried — a malformed recordId can never
+  // resolve against choros.record's `uuid` column, so pre-filtering here
+  // avoids a cast error aborting the WHOLE batch over one bad row (see
+  // module ADR §2.5) — malformed ids fall straight through to the "not in
+  // ancestryByRecordId" honest-drop branch below without a DB round-trip.
+  const recordIds = [
+    ...new Set(
+      projections
+        .map((p) => p.recordId)
+        .filter((v): v is string => v !== undefined && UUID_RE.test(v)),
+    ),
+  ];
+
+  const ancestryByRecordId =
+    recordIds.length > 0 ? await loadRecordRowAncestryBatch(pool, tenantId, recordIds) : new Map<string, RowAncestry>();
+
+  return projections.filter((p) => {
+    if (p.recordId === undefined) return true; // record-less: unnarrowed (phase-1/2 scope)
+    const rowAncestry = ancestryByRecordId.get(p.recordId);
+    if (rowAncestry === undefined) return false; // malformed / deleted / foreign → honest-deny
+    return isRecordReadable(rowAncestry, grants, ancestry, nowMs);
+  });
+}
+
 interface StartedRow {
   id: string;
   actor: string;
