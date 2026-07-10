@@ -1,0 +1,100 @@
+{
+  "task_id": "T-0735",
+  "status": "pr_open",
+  "branch": "task/T-0735",
+  "pr_url": "(стенд offline — локальная ветка task/T-0735 на базе dev@b983ecff; промоут через founder gate)",
+  "parent_task": "T-0654 (T-0654-b: части B грид + D доводка деталки)",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "ci_local_detail": {
+    "types": "node_modules/.bin/tsc --noEmit → exit 0 (сервер src/*.ts не тронут; веб — JS, валидируется vite build)",
+    "build": "cd web && vite build → 547 modules, built ok",
+    "lint": "web lint = eslint web/src --ext .jsx || true (eslint не установлен в web/, скрипт swallow'ит — эффективно no-op в этом окружении; vite build = фактический compile-гейт, зелёный). Root eslint (src) не нужен — .ts не менялись.",
+    "tests": "cd web && vitest run (4 файла экрана) → 121 passed (24 logic + 14 grid-src + 16 detail-src + 67 inbox-src)",
+    "fitness_ux_gates": {
+      "anti-uuid-actor-render": "PASS (0 findings) + --self-test PASS",
+      "ux-g2-theme-pairing": "PASS (tokens.css не тронут) + --self-test PASS",
+      "ux-g5-jargon-denylist": "PASS (informational, exit 0; T-ids/telLinear только в комментариях/тест-строках)",
+      "ux-g7-no-fake-buttons": "PASS (0 новых fake-кнопок) + --self-test PASS",
+      "anti-case-lock": "PASS (delegates clean + Phase 2 denylist в baseline: aggregate 15/16) + --self-test PASS",
+      "process-list-display-plane-isolation": "PASS (sanity — сервер не тронут)"
+    }
+  },
+  "files_changed": [
+    "docs/tasks/T-0735.spec.md (new)",
+    "docs/tasks/T-0735.adr.md (new)",
+    "web/src/screens/screen-processes.logic.js (new — pure query/pagination/options logic)",
+    "web/src/screens/screen-processes.logic.test.js (new — 24 behavioral tests)",
+    "web/src/screens/screen-processes.jsx (ProcessesScreen переписан на грид; ProcessCatalogSection/BindProcessModal без изменений)",
+    "web/src/screens/screen-processes.test.jsx (new — 14 source-presence wiring tests)",
+    "web/src/screens/screen-process-instance.jsx (part D: стартер-имя, /inbox?instance=, RecordRef в заголовок)",
+    "web/src/screens/screen-process-instance.test.jsx (+4 detail-polish tests)",
+    "web/src/screens/screen-inbox.jsx (part D: useSearchParams, instanceScope из ?instance=, чип)",
+    "web/src/screens/screen-inbox.test.jsx (+5 URL-seed tests, 1 обновлён под новый импорт)"
+  ],
+  "commits": [
+    "c7e3f91e T-0735: экран «Процессы» = серверный грид (часть B)",
+    "52ecc28d T-0735: доводка деталки экземпляра + инбокс-фильтр по инстансу (часть D)"
+  ],
+  "scope_delivered": {
+    "part_B_grid": {
+      "AC-B1": "Грид (не скролл-щель): колонки из PROCESSES_COLUMNS (name/process/status/started/actor, зеркало view-config.ts) + плотность comfortable/compact через user_pref 'processes.view'.",
+      "AC-B2": "Серверные контролы → query-параметры части A: поиск ?q (debounce 250мс), селект определения ?definition (лейбл — человеко-имя из /api/process-catalog), селект статуса ?status, диапазон дат ?started_from/?started_to (date-input → epoch-ms), тумблер «мои» ?mine=1. Смена не-текстового фильтра — немедленный релоуд; loadSeq-токен против гонок.",
+      "AC-B3": "Пагинация: явный limit=25; «Показано N из total» + «Показать ещё» (offset += limit, append); читает {total,limit,offset}.",
+      "AC-B4": "Стартер именем: <ActorChip type=starterType name=starterName id=starterId> — при отсутствии имени падает на тип-лейбл, не голый глиф, не UUID.",
+      "AC-B5": "Честные Loading/Error/Empty (kit); отфильтровано-в-ноль → отдельный Empty «Ничего не найдено» + «Сбросить фильтры»; пустой тенант → «процессы запускаются автоматически».",
+      "AC-B6": "ОТЛОЖЕНО в T-0654-c (осознанное отклонение — см. deviations_from_adr)."
+    },
+    "part_D_detail": {
+      "AC-D1": "screen-process-instance.jsx сайдбар: строка «Кем запущен» → <ActorChip> по starterName/starterType/starterId (рендерится лишь когда стартер известен).",
+      "AC-D2": "«Связанные задачи» → <Link to=/inbox?instance=<id>>; инбокс: useSearchParams → instanceScope, ?instance= в query (серверный scope T-0710), чип «Задачи этого процесса» (сбрасывает state+URL). processFilter/?process= НЕ тронут (залочен source-тестом screen-inbox.test.jsx:492).",
+      "AC-D3": "Заголовок деталки: <RecordRef> поднят в строку h1 «Имя процесса · Запись-источник» ссылкой (gated hasSourceRecord)."
+    }
+  },
+  "anti_uuid": "Грид НЕ рендерит инстанс-UUID (колонка «Инстанс» с <MonoId>{inst.id}</MonoId> УБРАНА — анти-кейс D-064: находят по имени заявки). Стартер → ActorChip (резолвит имя, id вторично). Запись → RecordRef (резолвит title, ссылка). Деталка: стартер тоже ActorChip. Гейт anti-uuid-actor-render: 0 findings.",
+  "anti_case": "Грид/логика генеричны над ЛЮБЫМ процессом: колонки платформенные (PROCESSES_COLUMNS), контролы платформенные, тексты родовые. Тест-фикстуры абстрактны («Процесс А», «Этап один» — не домен-слова). anti-case-lock PASS.",
+  "deviations_from_adr": [
+    "AC-B6 (каталог/связи уходят с экрана «Процессы») ОТЛОЖЕНО в T-0654-c. Обоснование: удаление ProcessCatalogSection ДО постройки её нового дома (отдельный экран зоны «Конструктор» = часть C) осиротило бы живой функционал — список определений, «Настроить триггер» (единственный вход в binding-config) и «Правила ветвления» (единственный вход в DMN-редактор для определения). Порядок «B раньше C» существует ради deep-link C→B (Каталог-карточка ?definition= → грид), а НЕ ради преждевременного удаления. Поэтому B строит грид как ведущую секцию и ОСТАВЛЯЕТ каталог ниже без изменений; фактический переезд+удаление — часть C. Зафиксировано в docs/tasks/T-0735.adr.md §«AC-B6 отложен».",
+    "Колонка каталога 'process' отрисована как «Текущий шаг» (человеко-лейбл), а 'name' как «Процесс». Ключи каталога — стабильные внутренние id (плейсхолдер T-0653); маппинг ключ→лейбл задокументирован в ADR (таблица). Сохранённые ЛИЧНЫЕ виды процессов (колонки on/off) — отдельный follow-up (ADR + родитель-split); в объёме — фиксированная честная раскладка + плотность."
+  ],
+  "live_proof_plan": {
+    "why_offline": "Стенд (dev /srv/choros, 100.121.76.86:3000) offline на момент сдачи — как и часть A T-0654. План детерминированного live-проживания ниже, для запуска после промоута dev→main и подъёма стенда.",
+    "preconditions": "DB-mode (DATABASE_URL) + Flowable up. Тенант с ≥30 живыми инстансами процессов от РАЗНЫХ определений и РАЗНЫХ стартеров (человек e-orlov + агент), часть запущена из записей (recordId есть — напр. «Заявка на аренду офиса»). Рядовой актор без грантов конструктора (напр. e-orlov) залогинен через реальную KC-форму (Playwright, паттерн из choros-acceptance-t0583).",
+    "journey_grid": [
+      "1. Открыть /processes рядовым (e-orlov). ОЖИДАНИЕ: полноценный грид (не скролл-щель в одну строку), колонки Процесс/Текущий шаг/Статус/Запущен/Кто запустил + Действие. Ни одного сырого UUID в строках. Стартер — ИМЕНЕМ (ActorChip), не глифом.",
+      "2. Ввести в поиск название заявки (напр. «аренда офиса»). ОЖИДАНИЕ: через ~250мс список сужается до инстансов, чьё имя определения/ключ/id/шаг содержат подстроку; сеть — GET /api/processes?q=аренда+офиса&limit=25&offset=0. Оператор находит СВОЙ процесс по имени заявки, ни разу не набрав/не увидев UUID.",
+      "3. Выбрать в селекте определения конкретное (человеко-имя). ОЖИДАНИЕ: ?definition=<procKey>; список — только этого определения. Опции пришли из /api/process-catalog (полный список тенанта).",
+      "4. Выбрать статус «Выполняется». ОЖИДАНИЕ: ?status=running; композиция с поиском/определением.",
+      "5. Задать диапазон дат «Запущен с/по». ОЖИДАНИЕ: ?started_from=<epoch>&started_to=<epoch>; инстансы вне диапазона исчезают, инстанс с неизвестным временем старта границей НЕ отсекается (AC-A4).",
+      "6. Нажать «Мои процессы». ОЖИДАНИЕ: ?mine=1; остаются только инстансы, запущенные e-orlov (starterId === актор). Инстансы без известного стартера отсекаются.",
+      "7. Пролистать: «Показать ещё». ОЖИДАНИЕ: offset += 25, строки аппендятся; «Показано N из total» растёт; total не фабрикуется (= размер отфильтрованного PDP-видимого набора).",
+      "8. Сбросить все фильтры до нуля результатов (напр. несуществующий поиск). ОЖИДАНИЕ: Empty «Ничего не найдено» + кнопка «Сбросить фильтры» (не тупик, не пустота).",
+      "9. Переключить плотность «Обычная»↔«Плотная». ОЖИДАНИЕ: строки сжимаются (chs-itable--compact); перезагрузка страницы сохраняет выбор (user_pref 'processes.view')."
+    ],
+    "journey_detail": [
+      "10. Нажать «Открыть» на строке инстанса, запущенного из записи. ОЖИДАНИЕ: /processes/:id; заголовок «<Имя процесса> · <Заявка (ссылка)>» — RecordRef ведёт на запись-источник. Не сырой ключ, не UUID в заголовке (UUID демотирован в mono-строку ниже).",
+      "11. В сайдбаре — строка «Кем запущен»: ИМЯ стартера + тип (человек/агент) через ActorChip. Для агент-стартера — глиф агента, не человек.",
+      "12. Нажать «Задачи этого процесса». ОЖИДАНИЕ: переход /inbox?instance=<id>; инбокс открывается уже отфильтрованным по ЭТОМУ инстансу (серверный ?instance= scope T-0710), сверху чип «Задачи этого процесса». Клик по крестику чипа — фильтр снят, URL очищен, список расширяется.",
+      "13. Обратная совместимость: старый in-inbox путь «Задачи этого процесса» из drawer'а задачи (processFilter/?process=) продолжает работать (не тронут)."
+    ],
+    "adversarial_checks": [
+      "A. Рядовой БЕЗ грантов конструктора не видит в гриде ни одного сырого UUID (журнал прохода — скриншоты обеих тем). Если где-то мелькнул UUID/slug как основной текст — регрессия анти-кейса.",
+      "B. PDP: total и строки для рядового = только PDP-видимые инстансы (часть A T-0722 гарантирует; грид лишь потребляет — проверить, что грид не обходит total из ответа собственным подсчётом).",
+      "C. Гонка: быстро менять поиск+фильтры — поздний ответ на устаревший запрос не должен перезаписать свежий (loadSeq-токен).",
+      "D. Обе темы (светлая/тёмная): контраст тулбара/грида/чипа ≥ WCAG AA; дата-инпуты читаемы."
+    ]
+  },
+  "follow_ups": [
+    "T-0654-c: экран «Каталог процессов» (зона Конструктор) — переезд ProcessCatalogSection + удаление её с /processes (закрывает AC-B6); deep-link счётчика инстансов → /processes?definition=<procKey>.",
+    "Сохранённые ЛИЧНЫЕ виды процессов (колонки on/off, не только плотность) — по образцу ListViewPanel, но над processes-source."
+  ],
+  "friction_events": [
+    "web/root node_modules отсутствовали в свежем worktree — npm ci в web/ и в корне (shared cache, ~2s каждый); tsc/vitest/vite после этого зелёные.",
+    "anti-case-lock завернул тест-фикстуру со словом 'Согласование' (denylist) — заменил на абстрактные «Процесс А»/«Этап один»; урок: тест-данные грида держать генеричными, домен-слова = анти-кейс даже в тестах."
+  ]
+}
