@@ -514,6 +514,9 @@ function fakeProjection(overrides: Partial<InstanceProjection> & { inst: string 
     stepsDone: 0,
     stepsKnownTotal: 1,
     starterActorKind: "human",
+    // T-0654 [rebase]: starterActorId is a required field of InstanceProjection (the raw
+    // starter actor id, = process.started audit_event.actor). Default fixture value.
+    starterActorId: "e-fixture-starter",
     ...overrides,
   };
 }

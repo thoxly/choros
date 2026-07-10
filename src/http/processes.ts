@@ -69,6 +69,34 @@ export type ProcessInstance = {
    * Absent for instances started via the explicit launch affordance.
    */
   recordId?: string;
+  /**
+   * T-0654 [part A]: numeric epoch-ms of the start, carried alongside the pre-formatted
+   * `started` string so the server-side date filter (?started_from/?started_to) and the
+   * deterministic newest-first sort can operate on a real number. Present on DB-backed
+   * projections; ABSENT on the seed/pack fixtures (whose `started` is only a ru-RU string).
+   * An absent value is "unknown start time" — it passes an optional date bound (cannot be
+   * judged) and sorts after all known-time instances.
+   */
+  startedAtMs?: number;
+  /**
+   * T-0654 [part A / UX-study §5.3]: the starter's raw actor id (from the projection's
+   * starterActorId). Drives the ?mine= filter and is the key the name resolver keys on.
+   * Present on DB-backed projections; absent on seed/pack fixtures.
+   */
+  starterId?: string;
+  /**
+   * T-0654 [part A]: the starter's human-readable name, batch-resolved via the injected
+   * resolveActorsDisplay (T-0648). Best-effort — absent when no resolver is wired, the
+   * actor did not resolve, or in the no-DB path (the frontend then falls back to the
+   * `starterType` glyph / `starterId`, never worse than today's exec glyphs).
+   */
+  starterName?: string;
+  /**
+   * T-0654 [part A]: the starter's actor type. Defaults from the projection's
+   * starterActorKind (human|agent), refined to the resolver's type (which can also be
+   * "service") when the name resolves. Present on DB-backed projections.
+   */
+  starterType?: "human" | "agent" | "service";
 };
 
 // ---------------------------------------------------------------------------
@@ -255,30 +283,25 @@ function projectionToInstance(p: InstanceProjection): ProcessInstance {
     // T-0414 / T-0356: pass through the originating record id for on_create instances
     // so the e2e spec can correlate by recordId without a separate lookup.
     ...(p.recordId !== undefined ? { recordId: p.recordId } : {}),
+    // T-0654 [part A]: numeric start + starter identity for server-side filter/sort and
+    // the «Запущен: <Имя>» display. starterName is filled later (batch resolve on the
+    // page only); starterType defaults from the projection's kind here.
+    startedAtMs: p.startedAt,
+    starterId: p.starterActorId,
+    starterType: p.starterActorKind,
   };
 }
 
 // ---------------------------------------------------------------------------
 // T-0708 [E16 §6, capstone T-0691]: record-scoped filter for GET /api/processes.
-// Pure + exported so the wiring (the record→instance reverse link on the record
-// card) is unit-testable without an HTTP round-trip. Two small helpers:
-//   - readRecordFilter: extract a trimmed non-empty `record` query param, else null
-//     (null = "no filter", the byte-unchanged legacy full-list path).
-//   - filterInstancesByRecord: keep only instances whose recordId === the filter.
-//     An instance with a different OR absent recordId is dropped; the filter is
-//     applied AFTER tenant-scoped projection so it can never widen visibility.
+// The record→instance reverse link (record card → its instances). T-0654 [part A]
+// folded the URL parse of `?record=` INTO parseProcessListQuery (record is now one
+// field of the unified query, composed with every other filter), so the standalone
+// `readRecordFilter` reader is gone. This pure `filterInstancesByRecord` predicate is
+// retained (exported, unit-tested) as the single source of the record-match rule: an
+// instance with a different OR absent recordId is dropped, applied AFTER the
+// tenant-scoped projection so it can never widen visibility.
 // ---------------------------------------------------------------------------
-
-/** Extract the `?record=<id>` filter, or null when absent/blank (no filter). */
-function readRecordFilter(req: import("node:http").IncomingMessage): string | null {
-  const rawUrl = req.url ?? "";
-  const qIdx = rawUrl.indexOf("?");
-  if (qIdx < 0) return null;
-  const value = new URLSearchParams(rawUrl.slice(qIdx + 1)).get("record");
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
 
 /**
  * Keep only the instances whose `recordId` exactly equals `recordId`. An instance
@@ -290,6 +313,147 @@ export function filterInstancesByRecord(
   recordId: string,
 ): ProcessInstance[] {
   return instances.filter((i) => i.recordId === recordId);
+}
+
+// ---------------------------------------------------------------------------
+// T-0654 [part A / UX-study §5.1]: server-side query pipeline for GET /api/processes.
+//
+// Before this the read had ONE optional filter (?record=) and returned every projected
+// instance in one shot (the live-found "25 инстансов в скролл-щели"). This adds the
+// operator-page contract: search (?q=), exact definition (?definition=) / status
+// (?status=) filters, a started-time range (?started_from/?started_to), a "mine" toggle
+// (?mine=, instances the reading actor started), and server-side pagination
+// (?limit/?offset) — all as PURE, exported functions so the whole contract unit-tests in
+// isolation (no HTTP, no pg — this module stays display-plane-pure, FF-DISPLAY-4).
+//
+// Everything operates on the ALREADY tenant-scoped ProcessInstance[] (mapped from the
+// projection fold), so no filter can ever widen visibility (FF-5): a foreign
+// definition/record/actor simply matches nothing. Sort + paginate are a total,
+// deterministic order (FF-3/FF-4).
+// ---------------------------------------------------------------------------
+
+/** Parsed, validated query for the process list. All filters null ⇒ absent. */
+export interface ProcessListQuery {
+  q: string | null;
+  definition: string | null;
+  status: string | null;
+  startedFrom: number | null;
+  startedTo: number | null;
+  /** actor slug to match against starterId when ?mine= was requested; null ⇒ no mine filter. */
+  mineActor: string | null;
+  record: string | null;
+  limit: number;
+  offset: number;
+}
+
+/** Default page size when no ?limit given — high enough that an unparameterised read is
+ *  byte-for-byte the pre-T-0654 "return everything (up to the fold window)" behaviour. */
+export const PROCESS_LIST_DEFAULT_LIMIT = 200;
+/** Hard cap on page size (mirrors the ≤500 fold window; a page never exceeds this). */
+export const PROCESS_LIST_MAX_LIMIT = 200;
+
+/** Parse a bound as epoch-ms: accepts a numeric string OR an ISO/date string. null on junk. */
+function parseTimeBound(raw: string | null): number | null {
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  // Pure-integer string ⇒ treat as epoch-ms directly (avoids Date.parse mangling "1717…").
+  if (/^-?\d+$/.test(trimmed)) {
+    const n = Number(trimmed);
+    return Number.isFinite(n) ? n : null;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function clampInt(raw: string | null, dflt: number, min: number, max: number): number {
+  if (raw === null) return dflt;
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.max(min, Math.min(max, n));
+}
+
+/**
+ * Parse the GET /api/processes query string into a validated {@link ProcessListQuery}.
+ * `actorSlug` is the resolved reading actor (dev header or sub→slug) — required for the
+ * ?mine= filter; when absent, ?mine= is treated as "no mine filter" (an unauthenticated /
+ * unresolvable reader has no notion of "mine"). Reads the raw URL directly (same approach
+ * the record filter used) so it needs no router-parsed query object.
+ */
+export function parseProcessListQuery(
+  req: import("node:http").IncomingMessage,
+  actorSlug: string | null,
+): ProcessListQuery {
+  const rawUrl = req.url ?? "";
+  const qIdx = rawUrl.indexOf("?");
+  const params = new URLSearchParams(qIdx < 0 ? "" : rawUrl.slice(qIdx + 1));
+  const nonEmpty = (key: string): string | null => {
+    const v = params.get(key);
+    if (typeof v !== "string") return null;
+    const t = v.trim();
+    return t.length > 0 ? t : null;
+  };
+  const mineRaw = params.get("mine");
+  const mineRequested = mineRaw === "1" || mineRaw === "true";
+  return {
+    q: nonEmpty("q"),
+    definition: nonEmpty("definition"),
+    status: nonEmpty("status"),
+    startedFrom: parseTimeBound(params.get("started_from")),
+    startedTo: parseTimeBound(params.get("started_to")),
+    mineActor: mineRequested ? actorSlug : null,
+    record: nonEmpty("record"),
+    limit: clampInt(params.get("limit"), PROCESS_LIST_DEFAULT_LIMIT, 1, PROCESS_LIST_MAX_LIMIT),
+    offset: Math.max(0, clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER)),
+  };
+}
+
+/** True when `inst` passes EVERY active filter of `q`. Unknown-time instances pass an
+ *  optional date bound (cannot be judged); ?mine excludes instances with no known starter. */
+function instanceMatchesQuery(inst: ProcessInstance, q: ProcessListQuery): boolean {
+  if (q.record !== null && inst.recordId !== q.record) return false;
+  if (q.definition !== null && inst.procId !== q.definition) return false;
+  if (q.status !== null && inst.status !== q.status) return false;
+  if (q.mineActor !== null && inst.starterId !== q.mineActor) return false;
+  if (q.startedFrom !== null && inst.startedAtMs !== undefined && inst.startedAtMs < q.startedFrom) return false;
+  if (q.startedTo !== null && inst.startedAtMs !== undefined && inst.startedAtMs > q.startedTo) return false;
+  if (q.q !== null) {
+    const needle = q.q.toLowerCase();
+    const hay = [inst.name, inst.procId, inst.id, inst.node].filter((s): s is string => typeof s === "string");
+    if (!hay.some((s) => s.toLowerCase().includes(needle))) return false;
+  }
+  return true;
+}
+
+/** Total, deterministic order: known start time DESC (newest first), unknown-time last,
+ *  ties (and the whole unknown group) broken by id ASC. */
+function compareForList(a: ProcessInstance, b: ProcessInstance): number {
+  const am = a.startedAtMs;
+  const bm = b.startedAtMs;
+  if (am !== undefined && bm !== undefined) {
+    if (am !== bm) return bm - am; // newer first
+  } else if (am !== undefined) {
+    return -1; // known before unknown
+  } else if (bm !== undefined) {
+    return 1;
+  }
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; // stable tiebreak
+}
+
+/**
+ * Filter → sort → paginate a tenant-scoped instance list. PURE. Returns the requested
+ * page plus the `total` size of the filtered set (BEFORE the slice) so the client can
+ * render "N из total". A slice past the end yields an empty page with total unchanged.
+ */
+export function selectProcessPage(
+  instances: ProcessInstance[],
+  q: ProcessListQuery,
+): { page: ProcessInstance[]; total: number } {
+  const filtered = instances.filter((i) => instanceMatchesQuery(i, q));
+  filtered.sort(compareForList);
+  const total = filtered.length;
+  const page = filtered.slice(q.offset, q.offset + q.limit);
+  return { page, total };
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +507,13 @@ async function fetchInstanceHistoryDetail(
   engineInstanceId: string,
   tenantId?: string,
   resolveActorsDisplay?: ActorsDisplayResolver,
-): Promise<InstanceHistoryDetail> {
+  // T-0654 [part A / UX-study §5.3]: the instance's starter id — folded into the SAME
+  // single batch resolve as the step completers so «Запущен: <Имя>» costs NO extra query
+  // (preserves the T-0648 "exactly one resolve call PER REQUEST" invariant). The resolved
+  // starter display is returned via `starterDisplay` (kept OFF InstanceHistoryDetail so
+  // that interface stays history-only) for the caller to apply to the instance header.
+  starterActorId?: string,
+): Promise<InstanceHistoryDetail & { starterDisplay?: { name: string; type: "human" | "agent" | "service" } }> {
   // Both methods are OPTIONAL on FlowableClient (mirrors pingEngine — existing
   // partial test-stub clients across src/__tests__/ need no change). Absent ⇒
   // the same honest-degrade as an engine error.
@@ -382,9 +552,14 @@ async function fetchInstanceHistoryDetail(
   // T-0648: batch-resolve every DISTINCT completedBy slug in ONE query (no
   // per-step round-trip) — this instance's history is typically a handful of
   // steps, but the O(1)-queries invariant holds regardless of step count.
+  // T-0654: the starter id joins the SAME distinct set so the whole request still
+  // costs exactly ONE resolve call (no separate starter lookup).
   let historyWithNames = history;
+  let starterDisplay: { name: string; type: "human" | "agent" | "service" } | undefined;
   if (tenantId && resolveActorsDisplay) {
-    const slugs = [...new Set(history.map((h) => h.completedBy).filter((v): v is string => !!v))];
+    const idSet = new Set(history.map((h) => h.completedBy).filter((v): v is string => !!v));
+    if (starterActorId) idSet.add(starterActorId);
+    const slugs = [...idSet];
     if (slugs.length > 0) {
       try {
         const resolved = await resolveActorsDisplay(tenantId, slugs);
@@ -403,13 +578,20 @@ async function fetchInstanceHistoryDetail(
               }
             : h;
         });
+        // T-0654: pull the starter's resolved display from the SAME batch.
+        if (starterActorId) {
+          const starterHit = resolved.get(starterActorId);
+          if (starterHit && starterHit.resolved) {
+            starterDisplay = { name: starterHit.name, type: starterHit.type };
+          }
+        }
       } catch {
         // Degrade gracefully: keep the raw slug (read-projection, never throws).
       }
     }
   }
 
-  return { variables, history: historyWithNames, historyAvailable: actsResult.ok };
+  return { variables, history: historyWithNames, historyAvailable: actsResult.ok, starterDisplay };
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +640,38 @@ async function overlayDetailLiveSteps(
     { deadlineMs: LIVE_OVERLAY_DEADLINE_MS },
   );
   return overlayLiveSteps(projections, liveByInst);
+}
+
+// ---------------------------------------------------------------------------
+// T-0654 [part A / UX-study §5.3]: batch-resolve the starter NAME for a page of
+// instances. One query for the whole page's DISTINCT starter ids (O(1) queries,
+// never per-row), via the SAME injected resolveActorsDisplay the history detail uses
+// (T-0648). Best-effort + non-fatal: no resolver, no tenant, or a resolve error leaves
+// the page unchanged (starterName absent, starterType/starterId from the projection
+// remain) — the frontend degrades to the type glyph, never worse than today. Returns a
+// NEW array; inputs are not mutated. Display-plane-pure: reaches the DB only through the
+// injected function (no pg here).
+// ---------------------------------------------------------------------------
+async function enrichStarterNames(
+  page: ProcessInstance[],
+  tenantId: string,
+  resolveActorsDisplay?: ActorsDisplayResolver,
+): Promise<ProcessInstance[]> {
+  if (!resolveActorsDisplay) return page;
+  const ids = [...new Set(page.map((i) => i.starterId).filter((v): v is string => !!v))];
+  if (ids.length === 0) return page;
+  try {
+    const resolved = await resolveActorsDisplay(tenantId, ids);
+    return page.map((inst) => {
+      if (!inst.starterId) return inst;
+      const hit = resolved.get(inst.starterId);
+      if (!hit || !hit.resolved) return inst;
+      return { ...inst, starterName: hit.name, starterType: hit.type };
+    });
+  } catch {
+    // Read-projection: degrade gracefully — keep the raw starter fields.
+    return page;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -556,38 +770,40 @@ export function registerProcessesRoutes(
   // T-0564: wrapped in withAuth so getAuthContext(req) is populated in keycloak mode
   // (in dev mode withAuth is a pass-through, so the x-dev-user branch is unchanged).
   router.register("GET", "/api/processes", withAuth(async (req, res) => {
-    // T-0708 [E16 §6, capstone T-0691]: optional `?record=<recordId>` filter — the
-    // record-detail card's reverse link (запись→инстансы). The existing card→record
-    // link («ЗАПИСЬ-ИСТОЧНИК») made the pair one-directional; this closes it. The
-    // filter is applied AFTER the tenant-scoped projection fold, so it never widens
-    // visibility (a foreign record id can only match this tenant's own instances)
-    // and needs no new route — it lives on this already-withAuth-wrapped GET.
-    const recordFilter = readRecordFilter(req);
+    // T-0564: resolve sub→slug (keycloak) or x-dev-user (dev) — needed for the tenant
+    // lookup AND the ?mine= filter. Resolved once, up front, for both branches.
+    const actorSlug = await resolveActorSlugForRead(req);
+    // T-0654 [part A / UX-study §5.1]: parse the operator-page query — search, exact
+    // definition/status filters, started-time range, ?mine=, pagination. Supersedes the
+    // single T-0708 `?record=` read (record is now one field of the query; it still
+    // composes with every other filter and is still applied AFTER the tenant-scoped
+    // projection, so visibility can never widen — FF-5).
+    const query = parseProcessListQuery(req, actorSlug);
 
     // DB mode: serve ONLY real tenant-scoped projections (T-0301).
     if (hasDb() && startDeps) {
-      // T-0564: resolve sub→slug (keycloak) or x-dev-user (dev) BEFORE the tenant lookup.
-      const actorSlug = await resolveActorSlugForRead(req);
-
-      let instances: ProcessInstance[] = [];
+      let page: ProcessInstance[] = [];
+      let total = 0;
       if (actorSlug) {
         try {
           const tenantId = await startDeps.resolveActorTenant(actorSlug);
-          const projections = await listInstanceProjections(startDeps.pool, tenantId);
-          // T-0722 (D-064, P2 из T-0714 — security/PDP): narrow the ALREADY
-          // tenant-scoped `projections` to the READ-visibility of each instance's
-          // source record — the SAME single authority path (isRecordReadable) the
-          // DETAIL gate (T-0721) already applies, batched over the whole list
-          // (filterProjectionsByReadVisibility, process-projection.ts) instead of
-          // a per-instance round-trip. Reuses the SAME startDeps.resolveReadVisibility
-          // resolver DETAIL already calls below — no new server.ts wiring (T-0721
-          // already closed the wiring asymmetry for the whole startDeps object).
-          // Applied BEFORE overlayDetailLiveSteps (never spend a live-engine call on
-          // an instance that is about to be dropped) and BEFORE the response is
-          // built — this endpoint carries no separate pagination/count field to
-          // desync (the `instances` array below IS the authoritative visible set).
-          // Honest-degrade (NF-2): resolver absent → skip, byte-identical to
-          // pre-T-0722 (tenant-scope-only) behaviour.
+          // Fold up to the full window (≤500, readEvents cap) so the filters/pagination
+          // page over the real set, not an arbitrary slice.
+          const projections = await listInstanceProjections(startDeps.pool, tenantId, { limit: 500 });
+          // T-0722 (D-064, P2 из T-0714 — security/PDP): narrow the ALREADY tenant-scoped
+          // `projections` to the READ-visibility of each instance's SOURCE RECORD — the
+          // SAME single authority path (isRecordReadable) the DETAIL gate (T-0721) applies,
+          // batched over the whole list (filterProjectionsByReadVisibility) instead of a
+          // per-instance round-trip. Reuses the SAME startDeps.resolveReadVisibility
+          // resolver DETAIL calls below (no new server.ts wiring). Honest-degrade (NF-2):
+          // resolver absent → skip, byte-identical to pre-T-0722 tenant-scope-only.
+          //
+          // T-0654 [rebase+recompose]: this PDP narrowing runs FIRST — BEFORE the query
+          // pipeline AND before any live-engine overlay — so parseProcessListQuery/
+          // selectProcessPage filter/sort/paginate over the ALREADY PDP-visible set.
+          // Therefore {total} = |PDP-visible ∩ query-match|, NOT the raw tenant count:
+          // the pagination `total` cannot leak the number of instances the caller may not
+          // see (the enumeration side-channel T-0722 closed stays closed under pagination).
           let visibleProjections = projections;
           if (startDeps.resolveReadVisibility) {
             const gateNowMs = Date.now();
@@ -605,23 +821,35 @@ export function registerProcessesRoutes(
               gateNowMs,
             );
           }
-          // T-0709-R-P0-1: overlay each non-done instance's LIVE active node so the list's
-          // node/nodes match the catalog AND the detail route (single live source). Best-
-          // effort — an engine miss leaves that instance on its snapshot (never worse).
-          const display = await overlayDetailLiveSteps(startDeps.flowable, visibleProjections);
-          instances = display.map(projectionToInstance);
+          // Map the PDP-visible projections (cheap, no engine I/O yet) so the pure
+          // pipeline filters/sorts/paginates over the visible set only.
+          const allInstances = visibleProjections.map(projectionToInstance);
+          const selected = selectProcessPage(allInstances, query);
+          total = selected.total;
+
+          // T-0709-R-P0-1: overlay the LIVE active node — but ONLY for the returned PAGE
+          // (≤ limit engine reads), not all visible projections (FF-6). Input is drawn
+          // from visibleProjections (post-PDP), so a hidden instance never reaches the
+          // engine layer either. Re-map the overlaid projections and splice them back into
+          // the page by id, preserving page order.
+          const pageIds = new Set(selected.page.map((i) => i.id));
+          const pageProjections = visibleProjections.filter((p) => pageIds.has(p.inst));
+          const overlaid = await overlayDetailLiveSteps(startDeps.flowable, pageProjections);
+          const overlaidByInst = new Map(overlaid.map((p) => [p.inst, projectionToInstance(p)]));
+          const overlaidPage = selected.page.map((i) => overlaidByInst.get(i.id) ?? i);
+
+          // T-0654: batch-resolve the starter NAME for the page (T-0648 resolver).
+          page = await enrichStarterNames(overlaidPage, tenantId, startDeps.resolveActorsDisplay);
         } catch {
           // Read-projection: degrade gracefully to honest-empty — never 500.
-          instances = [];
+          page = [];
+          total = 0;
         }
       }
 
-      // T-0708: apply the record filter over the ALREADY tenant-scoped list.
-      if (recordFilter !== null) instances = filterInstancesByRecord(instances, recordFilter);
-
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ instances }));
+      res.end(JSON.stringify({ instances: page, total, limit: query.limit, offset: query.offset }));
       return;
     }
 
@@ -632,18 +860,18 @@ export function registerProcessesRoutes(
     if (base === null) {
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ instances: [], demo: true }));
+      res.end(JSON.stringify({ instances: [], total: 0, limit: query.limit, offset: query.offset, demo: true }));
       return;
     }
 
-    // T-0708: the seed/pack fixtures carry NO recordId, so a record-scoped query in
-    // no-DB mode is honestly empty (we do not fabricate a record binding for a
-    // fixture). Without the filter the legacy full-list behaviour is byte-unchanged.
-    const list = recordFilter !== null ? filterInstancesByRecord(base, recordFilter) : base;
+    // T-0654: same pure pipeline over the seed/pack fixtures. The fixtures carry NO
+    // recordId/starterId/startedAtMs, so ?record=/?mine= are honestly empty and the date
+    // filter cannot judge them (they pass); ?q=/?definition=/?status=/pagination all work.
+    const { page, total } = selectProcessPage(base, query);
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ instances: list }));
+    res.end(JSON.stringify({ instances: page, total, limit: query.limit, offset: query.offset }));
   }));
 
   // GET /api/processes/:id — return specific instance or 404.
@@ -674,18 +902,13 @@ export function registerProcessesRoutes(
           const match = projections.find((p) => p.inst === instanceId);
           if (match) {
             // T-0721 (D-064, P1 из T-0714 — security/PDP): DETAIL visibility
-            // (variables/history/completedBy* below) is INHERITED from the
+            // (variables/history/completedBy*/starter below) is INHERITED from the
             // READ-visibility of the instance's SOURCE RECORD — the same
-            // isRecordReadable/resolveReadVisibility single authority path
-            // records.ts already gates on (T-0570). Supersedes the old T-0609
-            // comment's "do not widen visibility beyond what this page already
-            // grants" — that page-level tenant gate is exactly the side-door
-            // T-0714 found around field-visibility (T-0081) / READ-PDP (T-0570),
-            // which shipped AFTER this detail route did. Honest-degrade (NF-2):
-            // resolveReadVisibility absent ⇒ skip, byte-identical to pre-T-0721.
-            // Record-less instances (no recordId) are NEVER narrowed here
-            // (phase-1 scope — see process-projection.ts's isInstanceDetailVisible
-            // doc-comment; process-definition-scoped narrowing is a follow-up).
+            // isRecordReadable/resolveReadVisibility single authority path records.ts
+            // already gates on (T-0570). Honest-degrade (NF-2): resolveReadVisibility
+            // absent ⇒ skip, byte-identical to pre-T-0721. Record-less instances (no
+            // recordId) are NEVER narrowed here (phase-1 scope — see process-projection.ts's
+            // isInstanceDetailVisible doc-comment; process-def-scoped narrowing is a follow-up).
             let detailVisible = true;
             if (startDeps.resolveReadVisibility) {
               const gateNowMs = Date.now();
@@ -712,19 +935,30 @@ export function registerProcessesRoutes(
               const [displayMatch] = await overlayDetailLiveSteps(startDeps.flowable, [match]);
               const overlaid = displayMatch ?? match;
               // T-0609: variables + detailed transition history, read from the SAME
-              // Flowable client already threaded into startDeps.
-              // Best-effort: an engine error degrades to empty arrays +
-              // historyAvailable:false, never a 500 (the instance's core fields
-              // above do not depend on the engine being reachable).
-              const detail = await fetchInstanceHistoryDetail(
+              // Flowable client already threaded into startDeps. Best-effort: an engine
+              // error degrades to empty arrays + historyAvailable:false, never a 500.
+              //
+              // T-0654 [part A / UX-study §5.3, rebase+recompose]: pass the starter id so
+              // the starter NAME for «Запущен: <Имя>» resolves in the SAME single batch as
+              // the step completers (no extra query — T-0648 one-call-per-request invariant
+              // kept). CRITICAL: this whole body — INCLUDING the starter resolve — runs ONLY
+              // inside `if (detailVisible)`, so no raw variables/history/completedBy AND no
+              // starter identity is ever resolved or emitted for a PDP-hidden instance
+              // (the T-0721 P1 gate is preserved around the added starter-fold).
+              const { starterDisplay, ...historyDetail } = await fetchInstanceHistoryDetail(
                 startDeps.flowable,
                 match.inst,
                 tenantId,
                 startDeps.resolveActorsDisplay,
+                overlaid.starterActorId,
               );
+              const detailInstance = projectionToInstance(overlaid);
+              const withStarter = starterDisplay
+                ? { ...detailInstance, starterName: starterDisplay.name, starterType: starterDisplay.type }
+                : detailInstance;
               res.statusCode = 200;
               res.setHeader("Content-Type", "application/json");
-              res.end(JSON.stringify({ ...projectionToInstance(overlaid), ...detail }));
+              res.end(JSON.stringify({ ...withStarter, ...historyDetail }));
               return;
             }
             // else: fall through to the honest 404 below (T-0570 precedent,

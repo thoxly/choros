@@ -114,4 +114,69 @@ describe("Processes API E2E", () => {
 
     expect(result.statusCode).toBe(404);
   });
+
+  // -------------------------------------------------------------------------
+  // T-0654 [part A / UX-study §5.1]: server-side query params + pagination.
+  // Exercised over the no-DB seed fixture (8 instances) so the whole contract is
+  // wired end-to-end through the real router (the pure logic is unit-tested in
+  // processes-list-query.test.ts). Seed statuses: 3 running, 2 waiting, 2 done, 1 failed.
+  // -------------------------------------------------------------------------
+  describe("T-0654 · query params + pagination", () => {
+    it("response carries total/limit/offset alongside instances", async () => {
+      const { body } = await makeRequest("GET", "/api/processes");
+      const data = JSON.parse(body);
+      expect(data.total).toBe(8);
+      expect(data.limit).toBe(200); // default (no ?limit) — no regression vs full list
+      expect(data.offset).toBe(0);
+      expect(data.instances.length).toBe(8);
+    });
+
+    it("?status=running filters to the 3 running instances", async () => {
+      const { body } = await makeRequest("GET", "/api/processes?status=running");
+      const data = JSON.parse(body);
+      expect(data.total).toBe(3);
+      expect(data.instances.every((i: { status: string }) => i.status === "running")).toBe(true);
+    });
+
+    it("?status=done filters to the 2 done instances", async () => {
+      const { body } = await makeRequest("GET", "/api/processes?status=done");
+      expect(JSON.parse(body).total).toBe(2);
+    });
+
+    it("?definition=<procId> is an exact match", async () => {
+      const { body } = await makeRequest("GET", "/api/processes?definition=PRC-REFUND");
+      const data = JSON.parse(body);
+      expect(data.total).toBe(1);
+      expect(data.instances[0].id).toBe("INS-7702");
+    });
+
+    it("?q= searches name (case-insensitive)", async () => {
+      const { body } = await makeRequest("GET", `/api/processes?q=${encodeURIComponent("возврат")}`);
+      const data = JSON.parse(body);
+      expect(data.total).toBe(1);
+      expect(data.instances[0].name).toContain("Возврат");
+    });
+
+    it("?limit paginates; total stays the full filtered size; order is deterministic (id ASC for unknown-time seed)", async () => {
+      const { body } = await makeRequest("GET", "/api/processes?limit=3");
+      const data = JSON.parse(body);
+      expect(data.total).toBe(8);
+      expect(data.limit).toBe(3);
+      expect(data.instances.map((i: { id: string }) => i.id)).toEqual(["INS-7690", "INS-7698", "INS-7702"]);
+    });
+
+    it("?offset returns the last page; page never exceeds the remaining rows", async () => {
+      const { body } = await makeRequest("GET", "/api/processes?limit=3&offset=6");
+      const data = JSON.parse(body);
+      expect(data.total).toBe(8);
+      expect(data.instances.map((i: { id: string }) => i.id)).toEqual(["INS-7740", "INS-7755"]);
+    });
+
+    it("offset past the end → empty page, total unchanged", async () => {
+      const { body } = await makeRequest("GET", "/api/processes?offset=100");
+      const data = JSON.parse(body);
+      expect(data.instances).toEqual([]);
+      expect(data.total).toBe(8);
+    });
+  });
 });

@@ -281,19 +281,23 @@ function getInstanceDetail(
   });
 }
 
-/** T-0722: GET /api/processes (LIST) helper — mirrors getInstanceDetail. */
+/** T-0722: GET /api/processes (LIST) helper — mirrors getInstanceDetail.
+ *  T-0654 [rebase]: also returns `total` (the T-0654 pagination count field) so the
+ *  composition test can assert it is POST-PDP (= |visible ∩ query|), never the tenant
+ *  count. Existing T-0722 callers destructure only {statusCode, instances} — additive. */
 function getInstanceList(
   baseUrl: string,
   actor: string,
-): Promise<{ statusCode: number; instances: Array<Record<string, unknown>> }> {
+  query = '',
+): Promise<{ statusCode: number; instances: Array<Record<string, unknown>>; total: number }> {
   return new Promise((resolve, reject) => {
-    const url = new URL(`${baseUrl}/api/processes`);
+    const url = new URL(`${baseUrl}/api/processes${query}`);
     const req = http.request(url, { method: 'GET', headers: { 'x-dev-user': actor } }, (res) => {
       let raw = '';
       res.on('data', (c: Buffer) => { raw += c.toString(); });
       res.on('end', () => {
-        const body = JSON.parse(raw) as { instances?: Array<Record<string, unknown>> };
-        resolve({ statusCode: res.statusCode ?? 0, instances: body.instances ?? [] });
+        const body = JSON.parse(raw) as { instances?: Array<Record<string, unknown>>; total?: number };
+        resolve({ statusCode: res.statusCode ?? 0, instances: body.instances ?? [], total: body.total ?? 0 });
       });
     });
     req.on('error', reject);
@@ -740,5 +744,98 @@ describe.skipIf(!hasDb)('T-0722: honest-degrade when resolveReadVisibility is no
     const list = await getInstanceList(basePreGate, 'a-degrade-list-actor');
     expect(list.statusCode).toBe(200);
     expect(list.instances.some((i) => i['id'] === instanceId)).toBe(true);
+  });
+});
+
+// =============================================================================
+// T-0654 [rebase+recompose] · GET /api/processes LIST `total` is POST-PDP — the
+// pagination count field this task ADDED must NOT re-open the enumeration
+// side-channel T-0722 closed. The composition rule under test: the T-0722
+// READ-visibility filter runs BEFORE the T-0654 query pipeline, so
+// {total} = |PDP-visible ∩ query-match|, NOT the raw tenant instance count.
+//
+// Method (hermetic to the shared-TENANT_A instance accumulation above): seed a
+// FRESH record with TWO instances, grant a "seer" a NARROW grant scoped to that
+// record ONLY, and give a "blind" actor ZERO grant on it. Both actors see the
+// SAME record-less / otherwise-visible instances from the tests above, so those
+// CANCEL in the delta — the ONLY difference between them is the two new
+// record-bound instances. Therefore:
+//   - the seer's `total` counts the two hidden-to-blind instances,
+//   - the blind actor's `total` does NOT (delta === 2, exactly the visible-only set),
+//   - and for BOTH, total === instances.length (post-PDP total, no leaked count).
+// =============================================================================
+
+describe.skipIf(!hasDb)('T-0654: LIST `total` is post-PDP — a hidden instance never inflates total (enumeration stays closed)', () => {
+  it('seer total counts the record-scoped instances; blind total excludes them; total === instances.length for both', async () => {
+    // A fresh record unique to THIS test (no prior test seeded instances on it).
+    const secretRecord = await withClient(migratorUrl(), (c) =>
+      seedRecord(c, TENANT_A, regAId, 'source-record-secret-t0654'),
+    );
+    const instX1 = `flw-piv-${uuid().slice(0, 8)}`;
+    const instX2 = `flw-piv-${uuid().slice(0, 8)}`;
+    for (const instanceId of [instX1, instX2]) {
+      await withTenantTx(TENANT_A, (tx) =>
+        appendProcessStarted(tx, {
+          instanceId,
+          procKey: 'telLinear',
+          actor: 'a-starter',
+          nowMs: Date.now(),
+          recordId: secretRecord,
+        }),
+      );
+    }
+
+    // SEER: a NARROW grant scoped to secretRecord ONLY (self-match rule) — sees the
+    // two instances above PLUS whatever record-less/other instances any tenant member
+    // sees. BLIND: zero grant on secretRecord — sees the SAME baseline, minus those two.
+    const seer = `a-seer-${uuid().slice(0, 8)}`;
+    const blind = `a-blind-${uuid().slice(0, 8)}`;
+    await withClient(migratorUrl(), async (c) => {
+      const seerEmp = await seedEmployee(c, TENANT_A, seer);
+      const seerRole = await seedRole(c, TENANT_A, `role-seer-${uuid().slice(0, 8)}`);
+      await seedAssignment(c, TENANT_A, seerEmp, seerRole);
+      await seedReadGrant(c, TENANT_A, seerRole, recordScope(secretRecord));
+      // BLIND: an employee with a role but NO grant covering secretRecord.
+      const blindEmp = await seedEmployee(c, TENANT_A, blind);
+      const blindRole = await seedRole(c, TENANT_A, `role-blind-${uuid().slice(0, 8)}`);
+      await seedAssignment(c, TENANT_A, blindEmp, blindRole);
+    });
+
+    const seerList = await getInstanceList(basePostGate, seer);
+    const blindList = await getInstanceList(basePostGate, blind);
+
+    expect(seerList.statusCode).toBe(200);
+    expect(blindList.statusCode).toBe(200);
+
+    // (1) total is honest per side: equals the actual visible array length (no
+    //     separately-computed count that could leak the invisible set).
+    expect(seerList.total).toBe(seerList.instances.length);
+    expect(blindList.total).toBe(blindList.instances.length);
+
+    // (2) the two record-scoped instances are visible to the seer, hidden from blind.
+    const seerIds = seerList.instances.map((i) => i['id']);
+    const blindIds = blindList.instances.map((i) => i['id']);
+    expect(seerIds).toContain(instX1);
+    expect(seerIds).toContain(instX2);
+    expect(blindIds).not.toContain(instX1);
+    expect(blindIds).not.toContain(instX2);
+
+    // (3) THE enumeration proof: the ONLY difference between the two actors' visibility
+    //     is those two record-bound instances, so total(seer) - total(blind) === 2.
+    //     The blind actor's `total` therefore does NOT include the invisible instances —
+    //     the added pagination count cannot be used to enumerate hidden process work.
+    expect(seerList.total - blindList.total).toBe(2);
+  });
+
+  it('a status filter composes AFTER the PDP narrowing — total counts only PDP-visible ∩ status', async () => {
+    // Prove the query pipeline sees the ALREADY PDP-narrowed set: a status that no
+    // visible instance matches yields total 0 for the seer, even though the raw tenant
+    // has matching-status instances the caller cannot read.
+    const seerList = await getInstanceList(basePostGate, 'a-nogrant-status-actor', '?status=done');
+    expect(seerList.statusCode).toBe(200);
+    // a-nogrant-status-actor has no grants → sees only record-less instances; none of
+    // this suite's record-less instances are `done` (telLinear starts `waiting`).
+    expect(seerList.total).toBe(seerList.instances.length);
+    expect(seerList.instances.every((i) => i['status'] === 'done')).toBe(true);
   });
 });
