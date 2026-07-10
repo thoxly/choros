@@ -123,12 +123,50 @@ export async function fetchEmployees() {
           // matches "имя + должность" (UX study §2). Existing callers (e.g.
           // screen-record-detail.jsx's created_by resolver) only read .id/.name
           // and are unaffected by the extra field.
-          employees.push({ id: p.id, name: p.name || p.id, position: pos.title || '' });
+          //
+          // T-0698: carry `deactivated` additively too — this is the batch map
+          // screen-app-records.jsx's PersonCell reads (T-0673) to show a
+          // deactivated-executor marker on record cells, mirroring the signal
+          // ActorChip already renders elsewhere via T-0648's batchResolveActors.
+          // Before this fix GET /api/org's `people[]` carried no deactivation
+          // signal at all, so this line always dropped it — PersonCell's
+          // `deactivated` prop was permanently false in production regardless
+          // of the real employee.deactivated_at. Boolean(...) normalizes both
+          // the DB-backed shape (always a real boolean, see src/db/org.ts) and
+          // the dev-no-db ORG_SEED fallback shape (no `deactivated` key at all
+          // → undefined → false, the correct "active" default).
+          employees.push({
+            id: p.id,
+            name: p.name || p.id,
+            position: pos.title || '',
+            deactivated: Boolean(p.deactivated),
+          });
         }
       }
     }
   }
   return employees;
+}
+
+/**
+ * buildEmployeesById — the ONE canonical "fetchEmployees() list → lookup Map"
+ * step (T-0698 B1/N1). Both record screens batch-load employees once per page
+ * and then resolve person-typed values against a Map keyed by employee
+ * id/slug; before this helper each screen hand-rolled its own Map with its
+ * own value shape (screen-app-records kept whole entries,
+ * screen-record-detail kept only the name STRING — which is exactly how the
+ * `deactivated` signal got dropped a third time on the detail screen,
+ * invisible to tests that copied the screen's Map-literal instead of calling
+ * shared code). One exported function means the screens AND their e2e tests
+ * all consume the SAME construction — a screen can no longer drift to a
+ * narrower value shape without its tests exercising that exact drift.
+ *
+ * @param {Array<{id:string,name:string,position:string,deactivated:boolean}>} list
+ *   the fetchEmployees() result ([] / non-array tolerated → empty Map).
+ * @returns {Map<string, {id:string,name:string,position:string,deactivated:boolean}>}
+ */
+export function buildEmployeesById(list) {
+  return new Map((Array.isArray(list) ? list : []).map((e) => [e.id, e]));
 }
 
 /**

@@ -10,7 +10,7 @@
  * confirm-gated → DELETE /api/records/:id → navigate back to the list.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 const fs = await import('fs');
 const path = await import('path');
@@ -40,11 +40,17 @@ describe('screen-record-detail — edit (T-0568)', () => {
 
 describe('screen-record-detail — author display name (T-0608 пункт г)', () => {
   it('resolves created_by (a slug) to a display name via fetchEmployees, not raw', () => {
-    expect(src).toContain("import { fetchEmployees } from '../forms/field-renderer.jsx'");
+    // T-0698 B1: the import also pulls buildEmployeesById — the shared
+    // list→Map helper (field-renderer.jsx) both record screens now use.
+    expect(src).toContain("import { fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx'");
     expect(src).toContain('fetchEmployees()');
   });
   it('renders the resolved name through formatPersonName, falling back to the raw slug (never blank)', () => {
-    expect(src).toContain('formatPersonName(authorNames.get(record.created_by)) || record.created_by');
+    // T-0698 B1: authorNames now holds employee ENTRIES ({name, deactivated,
+    // …}), not name strings — the created_by line reads .name explicitly.
+    // ?.name preserves the missing-entry degrade byte-for-byte: undefined →
+    // formatPersonName(undefined) → null → `|| record.created_by` raw slug.
+    expect(src).toContain('formatPersonName(authorNames.get(record.created_by)?.name) || record.created_by');
   });
   it('a failed /api/org lookup degrades non-fatally (record still renders)', () => {
     const idx = src.indexOf('fetchEmployees()');
@@ -305,9 +311,16 @@ describe('screen-record-detail — honest 404 for a draft-tier app (T-0627)', ()
 // raw employee slug instead of a resolved human name, unlike relation/file
 // which already have an async-resolve value component. Renders through
 // ActorChip (T-0648 primitive, reused verbatim — no second resolver) against
-// `authorNames`, the SAME batch slug→name Map the screen already loads ONCE
+// `authorNames`, the SAME batch employee Map the screen already loads ONCE
 // (the org-employee fetch, T-0608) to resolve record.created_by — no new
 // fetch, no per-field resolution.
+//
+// T-0698 B1: authorNames' VALUE shape changed from a name string to a whole
+// employee entry ({id, name, position, deactivated}) built via
+// buildEmployeesById — the third break in the deactivated_at chain was this
+// screen's own flatten-to-string step, which left a deactivated executor
+// muted in the record LIST (PersonCell) but rendered active in the DETAIL of
+// the same record. Fixtures below use the entry shape.
 //
 // PersonFieldValue has no hooks/state — pure function of (personId,
 // authorNames) — exercised directly, mirroring this file's other pure-
@@ -315,10 +328,11 @@ describe('screen-record-detail — honest 404 for a draft-tier app (T-0627)', ()
 // ---------------------------------------------------------------------------
 
 import { PersonFieldValue } from './screen-record-detail.jsx';
+import { fetchEmployees as realFetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx';
 
 describe('PersonFieldValue (T-0673)', () => {
   it('resolves a known employee id to their display name via ActorChip', () => {
-    const authorNames = new Map([['emp-slug-1', 'К. Орлов']]);
+    const authorNames = new Map([['emp-slug-1', { id: 'emp-slug-1', name: 'К. Орлов' }]]);
     const el = PersonFieldValue({ personId: 'emp-slug-1', authorNames });
     expect(el.type.name).toBe('ActorChip');
     expect(el.props.name).toBe('К. Орлов');
@@ -337,6 +351,74 @@ describe('PersonFieldValue (T-0673)', () => {
     expect(() => PersonFieldValue({ personId: 'emp-slug-1', authorNames: undefined })).not.toThrow();
     const el = PersonFieldValue({ personId: 'emp-slug-1', authorNames: undefined });
     expect(el.props.name).toBe('emp-slug-1');
+  });
+
+  // T-0698 B1: same prop-threading contract as PersonCell (screen-app-records).
+  it('threads deactivated into ActorChip when the batch entry carries it', () => {
+    const authorNames = new Map([['emp-slug-1', { id: 'emp-slug-1', name: 'К. Орлов', deactivated: true }]]);
+    const el = PersonFieldValue({ personId: 'emp-slug-1', authorNames });
+    expect(el.props.deactivated).toBe(true);
+  });
+
+  // T-0698 B1: honest end-to-end coverage — a REAL /api/org response shape,
+  // through the REAL fetchEmployees (field-renderer.jsx), through
+  // buildEmployeesById (the SAME shared helper this screen's useEffect calls
+  // — not a test-local Map literal that could drift from the screen), into
+  // PersonFieldValue. Mirrors the equivalent T-0698 test for PersonCell in
+  // screen-app-records.test.jsx: list and detail must not disagree about a
+  // deactivated executor.
+  describe('T-0698: real /api/org response shape through fetchEmployees + buildEmployeesById', () => {
+    let originalFetch;
+    let originalLocalStorage;
+
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+      originalLocalStorage = globalThis.localStorage;
+      const store = new Map([['chs-dev-user', JSON.stringify({ id: 'e-owner' })]]);
+      globalThis.localStorage = {
+        getItem: (k) => (store.has(k) ? store.get(k) : null),
+        setItem: (k, v) => store.set(k, String(v)),
+        removeItem: (k) => store.delete(k),
+        clear: () => store.clear(),
+      };
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      globalThis.localStorage = originalLocalStorage;
+    });
+
+    it('a deactivated executor is marked in the DETAIL view; an active one is not', async () => {
+      globalThis.fetch = async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          // Generic synthetic fixtures (D-064 anti-case discipline) — the
+          // exact wire shape src/db/org.ts::listOrgTree produces.
+          departments: [{
+            positions: [{
+              title: 'Position A',
+              people: [
+                { id: 'emp-active', name: 'Active One', type: 'human', deactivated: false },
+                { id: 'emp-gone', name: 'Gone One', type: 'human', deactivated: true },
+              ],
+            }],
+          }],
+        }),
+      });
+
+      const list = await realFetchEmployees();
+      // The SAME shared helper the screen's useEffect calls.
+      const authorNames = buildEmployeesById(list);
+
+      const activeEl = PersonFieldValue({ personId: 'emp-active', authorNames });
+      const goneEl = PersonFieldValue({ personId: 'emp-gone', authorNames });
+
+      expect(activeEl.props.deactivated).toBe(false);
+      expect(activeEl.props.name).toBe('Active One');
+      expect(goneEl.props.deactivated).toBe(true);
+      expect(goneEl.props.name).toBe('Gone One');
+    });
   });
 });
 
@@ -357,6 +439,13 @@ describe('screen-record-detail — PersonFieldValue wiring (T-0673)', () => {
     expect(stateMatches.length).toBe(1);
     const fetchMatches = src.match(/fetchEmployees\(\)/g) || [];
     expect(fetchMatches.length).toBe(1);
+  });
+
+  it('T-0698 B1: populates authorNames via the shared buildEmployeesById helper (whole entries, not name strings)', () => {
+    expect(src).toContain('setAuthorNames(buildEmployeesById(list))');
+    // The old flatten-to-string step — the third deactivated_at break — must
+    // stay gone: no map value may be narrowed back down to e.name.
+    expect(src).not.toContain('[e.id, e.name]');
   });
 });
 

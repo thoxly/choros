@@ -27,6 +27,20 @@ export type OrgPerson = {
   id: string;
   name: string;
   type: "human" | "agent";
+  // T-0698 (P2 from T-0673's judge, D-064/anti-UUID, столп 4): true when the
+  // employee row is soft-deactivated (migration 125, employee.deactivated_at).
+  // A BOOLEAN, never the raw epoch-ms timestamp — mirrors the ONE existing
+  // precedent for surfacing this signal to the browser, T-0648's
+  // batchResolveActors/ResolvedActor.deactivated (src/db/actor-resolver.ts),
+  // which already exposes exactly this boolean to any authenticated tenant
+  // member via ActorChip on the audit/inbox/grant-trail screens. GET /api/org
+  // is itself already broadly readable by any authenticated tenant member (no
+  // mgmt_object:* gate — it powers PersonPicker/PersonCell for every record
+  // screen), so this is not a new privacy tier, just the same boolean already
+  // granted elsewhere reaching one more reader. Optional so ORG_SEED's
+  // in-memory dev-no-db fallback (src/http/org.ts) — which has no deactivation
+  // concept — remains a valid OrgPerson without carrying the field.
+  deactivated?: boolean;
 };
 
 export type OrgPosition = {
@@ -151,13 +165,18 @@ export async function listOrgTree(
 
       for (const pos of posRows.rows) {
         // Fetch employees for this position (tenant_id scoping for BYPASSRLS safety).
+        // T-0698: additive `e.deactivated_at` column select — mirrors the T-0588
+        // (BLOCK-3) precedent on findEmployeeById just below in this same file:
+        // existing callers destructure only {id,slug,display_name,kind}, so this
+        // widened row shape is backward-compat.
         const empRows = await client.query<{
           id: string;
           slug: string;
           display_name: string;
           kind: string;
+          deactivated_at: string | null;
         }>(
-          `SELECT id, slug, display_name, kind FROM choros.employee
+          `SELECT id, slug, display_name, kind, deactivated_at FROM choros.employee
            WHERE tenant_id = $1 AND position_id = $2
            ORDER BY slug`,
           [tenantId, pos.id],
@@ -167,6 +186,9 @@ export async function listOrgTree(
           id: e.slug,
           name: e.display_name,
           type: e.kind as "human" | "agent",
+          // T-0698: boolean only (never the raw deactivated_at timestamp) — see
+          // the OrgPerson.deactivated doc comment above for why boolean.
+          deactivated: e.deactivated_at != null,
         }));
 
         positions.push({

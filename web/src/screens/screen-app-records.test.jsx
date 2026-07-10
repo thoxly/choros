@@ -15,7 +15,7 @@
  * The create drawer is REUSED for edit (PUT) when `existingRecord` is passed.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 const fs = await import('fs');
 const path = await import('path');
@@ -263,6 +263,7 @@ describe('screen-app-records — no duplicate «Создано» column (T-0649)
 // ---------------------------------------------------------------------------
 
 import { PersonCell } from './screen-app-records.jsx';
+import { fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx';
 
 describe('PersonCell (T-0673)', () => {
   it('resolves a known employee id to their display name via ActorChip', () => {
@@ -287,10 +288,83 @@ describe('PersonCell (T-0673)', () => {
     expect(el.props.name).toBe('emp-slug-1');
   });
 
+  // NOTE (T-0698): this test builds `employees` BY HAND — it proves ONLY that
+  // PersonCell itself correctly forwards a `deactivated` key already present
+  // on its map entry. It does NOT prove the REAL map (built by
+  // screen-app-records.jsx from fetchEmployees()'s real /api/org response)
+  // ever contains that key — before T-0698 it never did (src/db/org.ts's
+  // listOrgTree didn't select deactivated_at at all, and fetchEmployees()
+  // separately dropped it even had the API sent it). Kept as a legitimate
+  // narrow unit test of PersonCell's own prop-threading contract; the honest
+  // end-to-end coverage (real /api/org shape → real fetchEmployees() → the
+  // SAME Map-construction expression screen-app-records.jsx uses →
+  // PersonCell) is the "real /api/org response shape" test below.
   it('threads deactivated through when the batch entry carries it', () => {
     const employees = new Map([['emp-slug-1', { id: 'emp-slug-1', name: 'К. Орлов', deactivated: true }]]);
     const el = PersonCell({ personId: 'emp-slug-1', employees });
     expect(el.props.deactivated).toBe(true);
+  });
+
+  // T-0698 (P2 from T-0673's judge): honest end-to-end coverage for the
+  // deactivated marker — a REAL /api/org response shape (not a hand-built
+  // Map), through the REAL fetchEmployees() (web/src/forms/field-renderer.jsx),
+  // through buildEmployeesById — the SAME shared helper (T-0698 N1,
+  // field-renderer.jsx) screen-app-records.jsx itself calls to build
+  // employeesById (not a test-local Map literal that could drift) — into
+  // PersonCell. This is the test that would have caught the original P2:
+  // before T-0698 this test fails because fetchEmployees() dropped the
+  // `deactivated` field the API sent (and, one link further back,
+  // listOrgTree didn't send it at all).
+  describe('T-0698: real /api/org response shape through fetchEmployees()', () => {
+    let originalFetch;
+    let originalLocalStorage;
+
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+      originalLocalStorage = globalThis.localStorage;
+      const store = new Map([['chs-dev-user', JSON.stringify({ id: 'e-owner' })]]);
+      globalThis.localStorage = {
+        getItem: (k) => (store.has(k) ? store.get(k) : null),
+        setItem: (k, v) => store.set(k, String(v)),
+        removeItem: (k) => store.delete(k),
+        clear: () => store.clear(),
+      };
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      globalThis.localStorage = originalLocalStorage;
+    });
+
+    it('a deactivated executor is marked; an active one is not — both via the real data path', async () => {
+      globalThis.fetch = async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          // Generic synthetic fixtures (D-064 anti-case discipline) — the
+          // exact wire shape src/db/org.ts::listOrgTree now produces.
+          departments: [{
+            positions: [{
+              title: 'Position A',
+              people: [
+                { id: 'emp-active', name: 'Active One', type: 'human', deactivated: false },
+                { id: 'emp-gone', name: 'Gone One', type: 'human', deactivated: true },
+              ],
+            }],
+          }],
+        }),
+      });
+
+      const list = await fetchEmployees();
+      // The SAME shared helper the screen's useEffect calls (T-0698 N1).
+      const employeesById = buildEmployeesById(list);
+
+      const activeEl = PersonCell({ personId: 'emp-active', employees: employeesById });
+      const goneEl = PersonCell({ personId: 'emp-gone', employees: employeesById });
+
+      expect(activeEl.props.deactivated).toBe(false);
+      expect(goneEl.props.deactivated).toBe(true);
+    });
   });
 });
 
@@ -302,7 +376,10 @@ describe('screen-app-records — PersonCell wiring (T-0673)', () => {
   });
 
   it('batch-loads employees via fetchEmployees() ONCE per page — gated on hasPersonColumn, not per-row/per-cell', () => {
-    expect(src).toContain("import { FieldControl, fetchEmployees } from '../forms/field-renderer.jsx'");
+    expect(src).toContain("import { FieldControl, fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx'");
+    // T-0698 N1: the list→Map step is the shared exported helper, not an
+    // inline Map literal a test could silently diverge from.
+    expect(src).toContain('setEmployeesById(buildEmployeesById(list))');
     expect(src).toMatch(/const hasPersonColumn = useMemo\(\(\) => columns\.some\(\(c\) => c\.type === 'person'\), \[columns\]\);/);
     expect(src).toMatch(/if \(!hasPersonColumn\) return undefined;/);
     expect(src).toContain('fetchEmployees()');
