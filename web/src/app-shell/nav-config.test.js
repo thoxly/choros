@@ -38,8 +38,9 @@ const ORIGINAL_IDS = new Set([
 ]);
 // FF-NAV-MAP also accepts 'reference' (T-0538 new grouping entry-point),
 // 'operational-analytics' (T-0405 PD-20, added to observability zone after
-// FF-NAV-MAP snapshot), and 'users' (T-0583: user-account management screen).
-const ALLOWED_NEW_IDS = new Set(['reference', 'operational-analytics', 'sections', 'users']);
+// FF-NAV-MAP snapshot), 'users' (T-0583: user-account management screen), and
+// 'process-catalog' (T-0742/T-0654-c: process-definition catalog, «Конструктор» zone).
+const ALLOWED_NEW_IDS = new Set(['reference', 'operational-analytics', 'sections', 'users', 'process-catalog']);
 
 // Systems/admin ids that must NOT appear in zone='work' (FF-NAV-NOSYS).
 const NOSYS_IDS = new Set([
@@ -226,6 +227,17 @@ describe('nav-config T-0538: 4-zone IA', () => {
     expect(modeler.path).toBeTruthy();
     expect(modeler.path).not.toBe('/modeler');
     expect(modeler.path).toMatch(/^\/processes\/.+\/edit$/);
+  });
+
+  // T-0742 (T-0654-c, AC-C1): «Каталог процессов» lives in the «Конструктор» zone,
+  // gated on authoring_draft, at /process-catalog, next to Модельер.
+  it('process-catalog is a constructor-zone item at /process-catalog (authoring_draft)', () => {
+    const cz = ZONES.find((z) => z.id === 'constructor');
+    const cat = cz.items.find((i) => i.id === 'process-catalog');
+    expect(cat).toBeDefined();
+    expect(cat.path).toBe('/process-catalog');
+    expect(cat.capability).toBe('authoring_draft');
+    expect(cat.status).toBe('live');
   });
 
   it('reference item has path=/rights/criticality (existing route)', () => {

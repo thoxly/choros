@@ -333,6 +333,81 @@ export function triggerTypeLabel(triggerType) {
 }
 
 // ---------------------------------------------------------------------------
+// T-0742 (T-0654-c) — «Каталог процессов» card helpers (pure, pg/DOM-free).
+// ---------------------------------------------------------------------------
+
+/**
+ * The bindings that belong to ONE definition, filtered by process_key. The catalog
+ * screen collapses the former standalone «Связи процессов с приложениями» table INTO
+ * each definition's card (AC-C4) — this returns exactly the rows for that card, from
+ * the SAME `bindings[]` the catalog already loaded (no extra fetch). PURE.
+ * @param {Array<{process_key?}>} bindings  GET /api/process-catalog → bindings[]
+ * @param {string} processKey
+ * @returns {Array<object>} the binding rows for this definition (possibly empty)
+ */
+export function bindingsForDefinition(bindings, processKey) {
+  const pk = str(processKey).trim();
+  if (!pk || !Array.isArray(bindings)) return [];
+  return bindings.filter((b) => b && str(b.process_key).trim() === pk);
+}
+
+/**
+ * The deep-link (AC-C3) from a definition's instance-count into the operator grid
+ * (screen «Процессы», T-0735), pre-filtered by this definition. Mirrors the grid's
+ * own query param exactly (`?definition=<procKey>`, screen-processes.logic.js
+ * buildProcessesQuery), so the grid seeds its definition filter from the URL. The
+ * process_key is URL-encoded (defensive — engine keys are slug-safe, but a
+ * modeler/imported key is not guaranteed to be). PURE — returns a string, no nav.
+ * @param {string} processKey
+ * @returns {string} e.g. "/processes?definition=purchase-approval"
+ */
+export function processGridDeepLink(processKey) {
+  return `/processes?definition=${encodeURIComponent(str(processKey).trim())}`;
+}
+
+/**
+ * Russian version label for a definition card (AC-C2). Modeler definitions carry a
+ * numeric `version` (latest); engine-derived definitions have `version === null`
+ * (no modeler row to version) → returns null so the card omits the badge honestly
+ * rather than showing «Версия null». PURE.
+ * @param {{version?: number|null}} def
+ * @returns {string|null}
+ */
+export function definitionVersionLabel(def) {
+  const v = def ? def.version : null;
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+  return `Версия ${v}`;
+}
+
+/**
+ * Russian plural picker (nominative): pluralizeRu(1,[…]) picks `one`, 2-4 `few`,
+ * 0/5-20 `many` — the standard ru three-form rule. PURE, no locale lib.
+ * @param {number} n
+ * @param {[string,string,string]} forms  [one, few, many]
+ * @returns {string}
+ */
+export function pluralizeRu(n, forms) {
+  const abs = Math.abs(Math.trunc(Number(n) || 0));
+  const mod10 = abs % 10;
+  const mod100 = abs % 100;
+  if (mod10 === 1 && mod100 !== 11) return forms[0];
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return forms[1];
+  return forms[2];
+}
+
+/**
+ * Human label for a definition's live-instance count (AC-C2 счётчик). «0 инстансов»,
+ * «1 инстанс», «3 инстанса», «12 инстансов». `count` is a platform integer (from the
+ * audit-backed projection), never a case constant. PURE.
+ * @param {number} count
+ * @returns {string}
+ */
+export function instanceCountLabel(count) {
+  const n = Math.max(0, Math.trunc(Number(count) || 0));
+  return `${n} ${pluralizeRu(n, ['инстанс', 'инстанса', 'инстансов'])}`;
+}
+
+// ---------------------------------------------------------------------------
 // Error mapping — honest surfacing of the process-catalog/binding contracts.
 // ---------------------------------------------------------------------------
 

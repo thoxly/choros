@@ -28,6 +28,7 @@ import OrgScreen from '../screens/screen-org.jsx';
 import ProcessesScreen from '../screens/screen-processes.jsx';
 // T-0556: read-only process-instance detail view — /processes/:instanceId
 import ProcessInstanceScreen from '../screens/screen-process-instance.jsx';
+import ProcessCatalogScreen from '../screens/screen-process-catalog.jsx';
 import AppsScreen from '../screens/screen-apps.jsx';
 import SectionsScreen from '../screens/screen-sections.jsx';
 import AppSchemaScreen from '../screens/screen-app-schema.jsx';
@@ -1718,6 +1719,9 @@ function AppShell() {
             <Route path="/inbox" element={<InboxScreen />} />
             <Route path="/org" element={<OrgScreen onOpenRights={openRights} onOpenRightsForSubject={openRightsForSubject} />} />
             <Route path="/processes" element={<ProcessesScreen />} />
+            {/* T-0742 (T-0654-c): «Каталог процессов» — определения карточками, зона
+                «Конструктор». Дом для функций, снятых с /processes (AC-B6). */}
+            <Route path="/process-catalog" element={<ProcessCatalogScreen />} />
             {/* T-0556: read-only process-instance detail. Single-segment param —
                 distinct from the 2-segment /processes/:id/edit and
                 /processes/:processKey/branch-rules below (no route collision). */}

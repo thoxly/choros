@@ -104,10 +104,26 @@ describe('screen-processes grid — anti-uuid / anti-case (D-064)', () => {
   });
 });
 
-describe('screen-processes — Каталог section retained until T-0654-c (AC-B6 deferred)', () => {
-  it('keeps ProcessCatalogSection mounted (removing it before its new home would orphan it)', () => {
-    expect(src).toContain('<ProcessCatalogSection />');
-    // documented as a deliberate deferral, not a silent miss.
-    expect(src).toMatch(/T-0654-c/);
+describe('screen-processes — Каталог section removed, moved to /process-catalog (T-0742, AC-B6/AC-C8)', () => {
+  it('no longer defines or mounts ProcessCatalogSection (its home is screen-process-catalog.jsx)', () => {
+    expect(src).not.toContain('function ProcessCatalogSection');
+    expect(src).not.toContain('<ProcessCatalogSection');
+  });
+
+  it('no longer defines the trigger BindProcessModal (moved to the catalog screen)', () => {
+    expect(src).not.toContain('function BindProcessModal');
+  });
+
+  it('drops the process-catalog.js binding imports (grid does not bind processes)', () => {
+    expect(src).not.toContain("from './process-catalog.js'");
+    expect(src).not.toContain('validateBindingForm');
+  });
+});
+
+describe('screen-processes grid — ?definition= deep-link seed (T-0742, AC-C3)', () => {
+  it('reads useSearchParams and seeds the definition filter from ?definition=', () => {
+    expect(src).toContain("import { useNavigate, useSearchParams } from 'react-router-dom'");
+    expect(gridSrc).toMatch(/useSearchParams\(\)/);
+    expect(gridSrc).toMatch(/useState\(\(\) => searchParams\.get\('definition'\) \|\| ''\)/);
   });
 });

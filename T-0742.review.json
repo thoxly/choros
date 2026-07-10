@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0742",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/screen-processes.jsx:93",
+      "issue": "The grid seeds `definition` from `?definition=` ONLY in the useState initializer, which runs once on mount. There is no effect syncing searchParams→state afterward. In the specified anti-case the deep-link always originates from /process-catalog (fresh mount of ProcessesScreen), so it works. But an in-grid `?definition=` change or browser back/forward while already on /processes would leave the filter desynced from the URL.",
+      "suggestion": "Optional follow-up: add a `useEffect([searchParams])` that syncs the definition filter when the URL param changes without a remount. Not required for the current C→B flow."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/screen-processes.jsx:243-251",
+      "issue": "On deep-link arrival the filter IS applied (definition state seeded, fetch already filtered), but `<select value={definition}>` has no matching <option> until the async GET /api/process-catalog options resolve, so the dropdown briefly shows blank instead of the definition name. Self-heals when options load; the filter is never silently dropped. Honest, not a dead state.",
+      "suggestion": "Cosmetic only. Could show the seeded key as a transient option label until names load; low value."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/tasks/T-0742.adr.md:109 (runtime_target) / T-0742.pr-handoff.json",
+      "issue": "LIVE_PROOF deferred — stand offline at handoff. The C→B navigation, modeler/DMN entry points, trigger upsert, and (critically) that the grid's ?definition= filter counts the SAME instances the card's instance_count advertises are proven only by unit/source tests + build, not a live browser pass. A '3 инстанса' link that lands on a grid showing a different count would be a jarring (non-fatal) mismatch.",
+      "suggestion": "Before promote dev→main, run the D-064 live pass on the stand: open /process-catalog, click a >0 counter, confirm the grid lands pre-filtered and the count agrees; open modeler + branch-rules + a trigger save. Plan is already in the pr-handoff."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-C1", "covered": true },
+    { "ac": "AC-C2", "covered": true },
+    { "ac": "AC-C3", "covered": true },
+    { "ac": "AC-C4", "covered": true },
+    { "ac": "AC-C5", "covered": true },
+    { "ac": "AC-C6", "covered": true },
+    { "ac": "AC-C7", "covered": true },
+    { "ac": "AC-C8", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

@@ -29,6 +29,12 @@ import {
   findExistingBinding,
   prefillFieldsFromBinding,
   TRIGGER_TYPES,
+  // T-0742 (T-0654-c) — catalog card helpers
+  bindingsForDefinition,
+  processGridDeepLink,
+  definitionVersionLabel,
+  pluralizeRu,
+  instanceCountLabel,
 } from './process-catalog.js';
 
 const APP_UUID = 'a0000000-0000-0000-0000-000000000099';
@@ -485,5 +491,70 @@ describe('prefillFieldsFromBinding — pure projection for the bind-form pre-fil
   it('a NULL target_registry_slug (default, never set) pre-fills to the empty-string "default" option, not the literal "null"', () => {
     const binding = { process_key: 'p', application_id: APP_UUID, target_registry_slug: null };
     expect(prefillFieldsFromBinding(binding).targetRegistrySlug).toBe('');
+  });
+});
+
+// ===========================================================================
+// T-0742 (T-0654-c) — «Каталог процессов» card helpers
+// ===========================================================================
+
+describe('bindingsForDefinition (AC-C4 — collapse the «Связи» table into the card)', () => {
+  const bindings = [
+    { id: 'b1', process_key: 'alpha', application_id: APP_UUID },
+    { id: 'b2', process_key: 'beta', application_id: APP_UUID },
+    { id: 'b3', process_key: 'alpha', application_id: APP_UUID },
+  ];
+
+  it('returns only the bindings whose process_key matches the definition', () => {
+    const rows = bindingsForDefinition(bindings, 'alpha');
+    expect(rows.map((b) => b.id)).toEqual(['b1', 'b3']);
+  });
+
+  it('returns [] for a definition with no bindings, an empty key, or a non-array', () => {
+    expect(bindingsForDefinition(bindings, 'gamma')).toEqual([]);
+    expect(bindingsForDefinition(bindings, '')).toEqual([]);
+    expect(bindingsForDefinition(null, 'alpha')).toEqual([]);
+  });
+});
+
+describe('processGridDeepLink (AC-C3 — deep-link into the operator grid)', () => {
+  it('builds /processes?definition=<procKey> matching the grid query param', () => {
+    expect(processGridDeepLink('purchase-approval')).toBe('/processes?definition=purchase-approval');
+  });
+
+  it('URL-encodes a key with unsafe characters', () => {
+    expect(processGridDeepLink('a b/c')).toBe('/processes?definition=a%20b%2Fc');
+  });
+});
+
+describe('definitionVersionLabel (AC-C2 — version badge)', () => {
+  it('labels a numeric modeler version', () => {
+    expect(definitionVersionLabel({ version: 3 })).toBe('Версия 3');
+  });
+
+  it('returns null for an engine-derived def (version null) so the badge is omitted', () => {
+    expect(definitionVersionLabel({ version: null })).toBeNull();
+    expect(definitionVersionLabel({})).toBeNull();
+    expect(definitionVersionLabel(null)).toBeNull();
+  });
+});
+
+describe('pluralizeRu + instanceCountLabel (AC-C2 — instance count)', () => {
+  it('picks the correct Russian plural form', () => {
+    const forms = ['инстанс', 'инстанса', 'инстансов'];
+    expect(pluralizeRu(1, forms)).toBe('инстанс');
+    expect(pluralizeRu(2, forms)).toBe('инстанса');
+    expect(pluralizeRu(4, forms)).toBe('инстанса');
+    expect(pluralizeRu(5, forms)).toBe('инстансов');
+    expect(pluralizeRu(11, forms)).toBe('инстансов'); // 11 is an exception → many
+    expect(pluralizeRu(21, forms)).toBe('инстанс');
+    expect(pluralizeRu(0, forms)).toBe('инстансов');
+  });
+
+  it('instanceCountLabel renders a count + its plural form (0 is honest)', () => {
+    expect(instanceCountLabel(0)).toBe('0 инстансов');
+    expect(instanceCountLabel(1)).toBe('1 инстанс');
+    expect(instanceCountLabel(3)).toBe('3 инстанса');
+    expect(instanceCountLabel(25)).toBe('25 инстансов');
   });
 });
