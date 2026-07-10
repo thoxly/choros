@@ -6,7 +6,17 @@
  * through the SAME KeycloakUserPort (src/keycloak/admin-port.ts, T-0342/T-0470).
  * This module does NOT introduce a second KC-integration path (N5): it
  * imports KeycloakUserPort and calls createHumanUser / setUserEnabled /
- * deleteUser — no direct Keycloak admin-REST HTTP call lives here (FF-583-8).
+ * deleteUser / revokeUserSessions (T-0702) — no direct Keycloak admin-REST
+ * HTTP call lives here (FF-583-8).
+ *
+ * T-0702 (ADR-T0702): PATCH .../:employee_id {active:false} also calls
+ * kc.revokeUserSessions(kcUserId) right after setUserEnabled(false) — this
+ * kills already-issued KC access/refresh tokens (setUserEnabled alone only
+ * blocks a NEW token; a live one stays valid until its own exp). Best-effort
+ * by design (never throws) — the outcome is recorded as
+ * payload.kc_sessions_revoked on the same user_account.deactivate audit
+ * event, not treated as a hard gate (T-0658/T-0662's PDP resolver gate is
+ * the actual authorization guarantee, independent of this call's outcome).
  *
  * Routes (all under the existing org-write gate, T-0469):
  *   POST   /api/users               — create a KC-backed login + employee(kind='human')
@@ -664,6 +674,23 @@ export function registerUserMgmtRoutes(
       throw new HttpError(503, "AUTH_UNAVAILABLE", "account service unavailable — try again later");
     }
 
+    // T-0702 (ADR-T0702) — on DEACTIVATION only, revoke any already-issued KC
+    // access/refresh tokens (setUserEnabled(false) above only blocks a NEW
+    // token; a live one stays valid until its own exp — T-0658 §9's
+    // acknowledged remaining gap). BEST-EFFORT: revokeUserSessions never
+    // throws (ADR §2.2) — a transient KC hiccup on THIS call must not fail
+    // the whole deactivation (the PDP-side gate, T-0658/T-0662
+    // ACTOR_ACTIVE_SQL, already denies the deactivated actor regardless of
+    // this outcome). The boolean outcome is recorded in the audit event
+    // below so a failed revoke is observable, not silently swallowed.
+    // Reactivation does NOT call this (ADR §2.3) — a fresh login creates its
+    // own new session; there is nothing live to revoke.
+    let kcSessionsRevoked: boolean | null = null;
+    if (active === false) {
+      const { revoked } = await kc.revokeUserSessions(kcUserId);
+      kcSessionsRevoked = revoked;
+    }
+
     const ts = nowMs();
     await withTenantTx(pool, tenantId, async (client) => {
       await client.query(
@@ -681,7 +708,9 @@ export function registerUserMgmtRoutes(
         via: null,
         proposed_by: null,
         confirmed_by: actorId,
-        payload: {},
+        // T-0702: kc_sessions_revoked is present only on the deactivate path
+        // (kcSessionsRevoked stays null on reactivate — ADR §2.3, no call made).
+        payload: kcSessionsRevoked === null ? {} : { kc_sessions_revoked: kcSessionsRevoked },
         occurred_at: ts,
       });
     });

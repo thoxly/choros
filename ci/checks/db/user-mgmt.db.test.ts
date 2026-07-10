@@ -409,6 +409,155 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
   });
 
   // ---------------------------------------------------------------------
+  // T-0702 (ADR-T0702) — KC session revocation on deactivation. setUserEnabled
+  // (false) alone only blocks a NEW token; revokeUserSessions kills already-
+  // issued sessions (best-effort, never throws — outcome lands in the audit
+  // event payload as kc_sessions_revoked).
+  // ---------------------------------------------------------------------
+
+  async function auditPayloadFor(
+    tenantId: string,
+    employeeId: string,
+    type: 'user_account.deactivate' | 'user_account.reactivate',
+  ): Promise<any> {
+    return withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      const { rows } = await c.query<{ payload: unknown }>(
+        `SELECT payload FROM choros.audit_event
+          WHERE tenant_id = $1 AND subject = $2 AND type = $3
+          ORDER BY seq DESC LIMIT 1`,
+        [tenantId, employeeId, type],
+      );
+      await c.query('COMMIT');
+      return rows[0]?.payload;
+    });
+  }
+
+  it('FF-702-CALLED-ONCE/AUDIT-SUCCESS: deactivation calls revokeUserSessions once and audits kc_sessions_revoked:true on success', async () => {
+    const t = await registerOne('t0702-revoke-ok');
+    kc.reset();
+    const login = `t0702-revoke-ok-${Date.now()}`;
+    const email = `t0702-revoke-ok-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Revoke Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+    const kcUserId = kc.created[kc.created.length - 1].userId;
+
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(off.status, JSON.stringify(off.json)).toBe(200);
+
+    // FF-702-CALLED-ONCE
+    expect(kc.revokeSessionsCallCount).toBe(1);
+    expect(kc.revokeSessionsCalls[0]).toBe(kcUserId);
+
+    // FF-702-AUDIT-SUCCESS
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.deactivate');
+    expect(payload).toEqual({ kc_sessions_revoked: true });
+  });
+
+  it('FF-702-DEGRADE: revokeUserSessions failing does not fail the deactivation — audits kc_sessions_revoked:false', async () => {
+    const t = await registerOne('t0702-revoke-fail');
+    kc.reset();
+    const login = `t0702-revoke-fail-${Date.now()}`;
+    const email = `t0702-revoke-fail-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Revoke Fail Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+    const kcUserId = kc.created[kc.created.length - 1].userId;
+
+    // KC reachable enough for setUserEnabled to succeed, but the revoke call
+    // specifically degrades (models a KC hiccup isolated to the logout call).
+    kc.failOnRevokeSessions = true;
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+
+    // Deactivation still completes — best-effort must not block the primary action.
+    expect(off.status, JSON.stringify(off.json)).toBe(200);
+    expect(off.json.active).toBe(false);
+    expect(kc.isEnabled(kcUserId)).toBe(false);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      expect(rows[0].deactivated_at).not.toBeNull();
+      await c.query('COMMIT');
+    });
+
+    expect(kc.revokeSessionsCallCount).toBe(1);
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.deactivate');
+    expect(payload).toEqual({ kc_sessions_revoked: false });
+  });
+
+  it('FF-702-REACTIVATE-NOOP: reactivation never calls revokeUserSessions', async () => {
+    const t = await registerOne('t0702-reactivate-noop');
+    kc.reset();
+    const login = `t0702-reactivate-noop-${Date.now()}`;
+    const email = `t0702-reactivate-noop-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Reactivate Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(off.status).toBe(200);
+    expect(kc.revokeSessionsCallCount).toBe(1); // from the deactivate step
+
+    const on = await patchUser(employeeId, { active: true }, t.ownerSlug);
+    expect(on.status, JSON.stringify(on.json)).toBe(200);
+    expect(on.json.active).toBe(true);
+
+    // Reactivation must NOT call revokeUserSessions — count unchanged.
+    expect(kc.revokeSessionsCallCount).toBe(1);
+
+    // Reactivate audit payload carries no kc_sessions_revoked field at all.
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.reactivate');
+    expect(payload).toEqual({});
+  });
+
+  it('FF-702-SETENABLED-REGRESSION: setUserEnabled failing (KC down before revoke) still 503s and never calls revokeUserSessions (T-0583 behavior preserved)', async () => {
+    const t = await registerOne('t0702-setenabled-fail');
+    kc.reset();
+    const login = `t0702-setenabled-fail-${Date.now()}`;
+    const email = `t0702-setenabled-fail-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'SetEnabled Fail Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    kc.failOnSetEnabled = true;
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(off.status, JSON.stringify(off.json)).toBe(503);
+
+    // setUserEnabled failed BEFORE revokeUserSessions is ever reached.
+    expect(kc.revokeSessionsCallCount).toBe(0);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      expect(rows[0].deactivated_at).toBeNull(); // untouched
+      await c.query('COMMIT');
+    });
+  });
+
+  // ---------------------------------------------------------------------
   // T-0658 (round 3) FIX-2 — LAST-OWNER GUARD: the T-0658 deactivation gate
   // (org.ts isGenesisOwnerForTenant / loadAdminContext) makes a deactivated
   // owner isGenesisOwner=false. That closes the security hole but would brick a

@@ -90,6 +90,24 @@ export interface KeycloakUserPort {
    * NOT flip the local `employee.deactivated_at` marker on failure (KC-first).
    */
   setUserEnabled(userId: string, enabled: boolean): Promise<void>;
+  /**
+   * T-0702 (ADR-T0702, followup on T-0658 §9 / T-0662 §3.7's own acknowledged
+   * gap): revoke all LIVE Keycloak sessions for a user — POST
+   * /admin/realms/<realm>/users/<userId>/logout. `setUserEnabled(false)`
+   * only blocks a NEW token from being issued; an already-issued access
+   * token stays cryptographically valid until its own exp (minutes). This
+   * call shrinks that AUTHENTICATION window by killing the SSO session and
+   * refresh tokens immediately.
+   *
+   * BEST-EFFORT BY DESIGN (ADR §2.2) — the AUTHORIZATION side is already
+   * closed unconditionally by the T-0658/T-0662 `ACTOR_ACTIVE_SQL` resolver
+   * gate regardless of whether this call succeeds; this is a defense-in-depth
+   * window-shrink, not a security gate. NEVER throws — any failure (network,
+   * non-2xx, KC down) is caught INSIDE the implementation and surfaces as
+   * `{revoked:false}` so the caller can record the outcome in an audit event
+   * without the deactivation request itself failing.
+   */
+  revokeUserSessions(userId: string): Promise<{ revoked: boolean }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +508,26 @@ export function makeHttpKeycloakUserPort(cfg?: KcRegistrarConfig): KeycloakUserP
         const err = new Error(`KC setUserEnabled failed: ${resp.status} ${resp.body}`);
         (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
         throw err;
+      }
+    },
+
+    // T-0702 — POST /admin/realms/<realm>/users/<userId>/logout (live-confirmed
+    // against t-0633-keycloak-1: 204 for an existing user, 404 for an unknown
+    // one). Unlike setUserEnabled, this NEVER throws (ADR-T0702 §2.2 — the
+    // caller's deactivation flow must not fail wholesale on a transient KC
+    // hiccup at THIS step; setUserEnabled just above remains the hard gate).
+    async revokeUserSessions(userId: string): Promise<{ revoked: boolean }> {
+      try {
+        const token = await getRegistrarToken(config);
+        const logoutUrl = `${config.baseUrl}/admin/realms/${config.realm}/users/${userId}/logout`;
+        const resp = await doRequest(logoutUrl, "POST", null, {
+          Authorization: `Bearer ${token}`,
+        });
+        return { revoked: resp.status === 204 || resp.status === 200 };
+      } catch {
+        // Best-effort: any failure (network, KC down, unexpected status)
+        // degrades to {revoked:false} — never propagates to the caller.
+        return { revoked: false };
       }
     },
   };
