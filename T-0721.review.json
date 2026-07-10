@@ -1,0 +1,54 @@
+{
+  "task_id": "T-0721",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "docs/tasks/T-0714.assessment.md §7 п.4 (hardening follow-up)",
+      "issue": "Sensitive business values still live in Flowable process variables; the T-0721 gate now PDP-protects them, but the least-sensitive-by-design fix (keep variables minimal — correlation keys only) is a separate hardening follow-up. Out of phase-1 scope.",
+      "suggestion": "Track T-0714 §7 п.4 as a follow-up: audit emit-sites so business truth stays in the (gated) record and Flowable variables carry only id/correlation keys."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/process-detail-read-gate.sh:140,150",
+      "issue": "FF-INST-VIS-1b/1c greps the substring `isInstanceDetailVisible(`; a superstring rename of the call (e.g. BYPASSED_isInstanceDetailVisible() slips past the FF. Verified live: FF-1 PASSed when the call was renamed to a superstring. Not a product hole — a superstring is an undefined symbol that tsc rejects — but the fitness detector is weaker than intended.",
+      "suggestion": "Tighten the grep to a word boundary (e.g. `(^|[^A-Za-z0-9_])isInstanceDetailVisible\\(`) so only the real call token matches."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/processes.ts:657-700",
+      "issue": "Timing side-channel: the denied-DETAIL path does +3 DB round-trips (getGrantsForSubject + loadTenantOrgAncestry + loadRecordRowAncestry) before its 404, whereas a genuine not-found 404 (no projection match) returns immediately. This discloses whether an instance exists in the tenant. Harmless in phase-1 because LIST already discloses instance existence wholesale (acknowledged scope).",
+      "suggestion": "When T-0722 gates LIST, revisit this DETAIL timing channel — otherwise it will re-disclose the existence of a hidden instance that the LIST gate is meant to hide."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/processes-read-visibility.db.test.ts",
+      "issue": "Live-PG matrix uses only the default-open RESOURCE_ROOT grant. It does not prove (a) a narrow record-scoped grant covering record X makes instance-of-X visible while instance-of-Y returns 404, nor (b) a revoked/expired grant (valid_until in the past) returns 404 on the instance path. Both are covered transitively by the reused isRecordReadable and its records-read-pdp suite, but not proven on the instance path here.",
+      "suggestion": "Add two live-PG cases: a record-scoped narrow grant (visible-X / 404-Y) and an expired grant → 404, to harden the instance-path proof."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "DETAIL variables/history/completedBy* gated by READ-visibility of source record (isInstanceDetailVisible reuses isRecordReadable/resolveReadVisibility, single authority path)", "covered": true },
+    { "ac": "server.ts wiring byte-identical to registerRecordRoutes (grants+ancestry oracle) — T-0714 asymmetry closed", "covered": true },
+    { "ac": "Denial = honest-404, byte-identical shape to not-found (mirror of records.ts)", "covered": true },
+    { "ac": "Record-less instance NOT narrowed (phase-1 fallback, T-0723)", "covered": true },
+    { "ac": "Owner sees DETAIL without bespoke branch (migration-117 role-reader grant)", "covered": true },
+    { "ac": "Executor-without-READ investigated and NOT implemented (inbox never calls /api/processes/:id) — ADR §2.4 with code cites", "covered": true },
+    { "ac": "FF-INST-VIS-1 (read-gate) + FF-INST-VIS-2 (single-resolver) present with --self-test, catch synthetic violations on the real tree", "covered": true },
+    { "ac": "Display-plane isolation preserved (start-route-isolation FF-7 green; processes.ts pg/db-free)", "covered": true },
+    { "ac": "No second channel leaks variables/history/completedBy* (LIST/catalog/inbox/assistant checked)", "covered": true },
+    { "ac": "Tenant isolation intact (cross-tenant instance → 404, additive AND inside tenant scope)", "covered": true },
+    { "ac": "Fail-closed on runtime error; fail-open on absent resolver is ratified T-0570 honest-degrade, structurally unreachable in production (co-wired + FF-2d anchor guards the wiring marker)", "covered": true },
+    { "ac": "Gates: tsc exit 0; targeted unit 182 pass incl. 10 new; live-PG 6/6; both FF + self-test green; diff scoped, no foreign ci/checks touched", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
