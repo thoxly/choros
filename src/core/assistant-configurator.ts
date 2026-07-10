@@ -174,7 +174,8 @@ const TOOL_AUTHOR_BINDING: ToolDeclaration = {
     name: "author_binding",
     description:
       "Upsert a process_app_binding row in DRAFT tier — links a process to an application " +
-      "with trigger type, start form, and field mapping. Writes to DRAFT only; human promotes.",
+      "with trigger type, start form, field mapping, and (optionally) the target registry " +
+      "the step result is written into. Writes to DRAFT only; human promotes.",
     parameters: {
       type: "object",
       properties: {
@@ -187,6 +188,20 @@ const TOOL_AUTHOR_BINDING: ToolDeclaration = {
         },
         startFormKey: { type: "string", description: "Optional: key of the start form (record_schema field key)." },
         fieldMapping: { type: "string", description: "Optional JSON string: field mapping object." },
+        // T-0700 (E-FORMS, столп 5): mirrors the visual constructor's "Реестр результата"
+        // picker (T-0681) — an agent without this parameter could not reach a non-default
+        // registry that a human could always pick in the UI (bot≠human asymmetry).
+        targetRegistrySlug: {
+          type: "string",
+          description:
+            "Необязательно: slug реестра (registry_def) внутри приложения этой привязки, " +
+            "куда должен попасть результат шага процесса — если он должен отличаться от " +
+            "реестра приложения по умолчанию. Укажите только когда пользователь явно " +
+            "просит направить результат в ДРУГОЙ, конкретный реестр этого приложения. " +
+            "Пусто или не указано — используется реестр по умолчанию (прежнее поведение). " +
+            "Значение должно быть slug'ом РЕАЛЬНОГО реестра этого приложения — иначе сервер " +
+            "честно отклонит привязку, а не создаст её вслепую.",
+        },
         humanReadableReason: { type: "string", description: "Why this binding is being created (for changelog)." },
       },
       required: ["processKey", "applicationId", "triggerType", "humanReadableReason"],
@@ -872,9 +887,14 @@ function processToolCall(
     // author_binding — always non-destructive (upsert on binding, no field drops)
     // -----------------------------------------------------------------------
     case "author_binding": {
+      // T-0700: surface a non-default target registry in the audit description,
+      // same as the visual constructor's bind-form shows it (parity, not a new op).
+      const targetRegistrySlugArg =
+        typeof args["targetRegistrySlug"] === "string" ? args["targetRegistrySlug"].trim() : "";
+      const registrySuffix = targetRegistrySlugArg.length > 0 ? `, реестр результата=«${targetRegistrySlugArg}»` : "";
       const approved: ApprovedOp = {
         kind: "author_binding",
-        description: `Привязка процесса «${String(args["processKey"] ?? "?")}» к приложению «${String(args["applicationId"] ?? "?")}» (тип=${String(args["triggerType"] ?? "?")}): ${reason}`,
+        description: `Привязка процесса «${String(args["processKey"] ?? "?")}» к приложению «${String(args["applicationId"] ?? "?")}» (тип=${String(args["triggerType"] ?? "?")}${registrySuffix}): ${reason}`,
         args,
         tier: "draft",
       };
@@ -886,6 +906,7 @@ function processToolCall(
           processKey: args["processKey"],
           applicationId: args["applicationId"],
           triggerType: args["triggerType"],
+          ...(targetRegistrySlugArg.length > 0 ? { targetRegistrySlug: targetRegistrySlugArg } : {}),
           tier: "draft",
         }),
       };
