@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0749",
+  "status": "pr_open",
+  "branch": "task/T-0749",
+  "pr_url": "https://github.com/thoxly/choros/pull/67",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "ci_local_note": "build=true: `npm run build` (tsc + seed/tsconfig) clean, zero errors (also runs inline as step in the fitness chain below). lint=true: `npm run lint` (eslint src) — 0 errors, 45 pre-existing no-console warnings, unrelated to this diff (0 .ts files touched). types=true: covered by build (tsc --noEmit-equivalent, full project). tests=true: `npx vitest run` (no DATABASE_URL) — 319 files (317 passed, 2 skipped) / 5977 tests (5960 passed, 17 pre-existing skips), 0 failed; this diff touches zero .ts source so this is a no-regression baseline run, not a targeted test. fitness=true: the FULL literal `npm run fitness` megachain (345 steps: object-handle-isolation.sh ... through the final process-list-tenant-scope-additive.sh --self-test, incl. `npm run build`) run end-to-end on this branch — exit 0. This is the actual repro-and-fix proof: BEFORE this task's fix, the same full chain hard-FAILs at ci/checks/entitlement-gates-vendor-only.sh (step 140/345) with a false positive on 'deactivation' in src/http/user-mgmt.ts (byte-identical to base, unrelated to this diff) — reproduced once on a fresh `npm ci` install of this worktree before any T-0749 edit. AFTER the fix: same full chain, same worktree, exit 0, zero unexpected FAIL lines (the 21 'FAIL [...]' text occurrences mid-log are self-test hostile-probe negative-case demonstrations, each immediately followed by 'PASS self-test: ... detects ...' — confirmed by inspection, and provable by the chain's own exit 0 since bash && would have halted immediately on any real non-zero exit).",
+  "files_changed": [
+    "ci/checks/entitlement-gates-vendor-only.sh",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "docs/tasks/T-0749.adr.md"
+  ],
+  "root_cause": "ci/checks/entitlement-gates-vendor-only.sh (T-0198, FF-T127-4) uses VOCAB_RE='activation|entitlement|verifyKey|isEntitled|not_after' as a BARE substring match (grep -qiE) over non-vendor src/http/*.ts code lines. 'activation' is a substring of 'deactivation' and 'reactivation' — words with NO relation to vendor entitlement/licensing that legitimately appear in src/http/user-mgmt.ts (T-0702 KC-session revoke on employee deactivation, T-0727 visibility fix). Every full `npm run fitness` run since those lines landed has hard-failed at this gate regardless of what the current diff touches. Discovered independently twice (T-0724, T-0740) as an out-of-scope friction finding; this task closes it.",
+  "frozen_status": {
+    "file": "ci/checks/entitlement-gates-vendor-only.sh",
+    "owner_per_base_ref_header": "T-0198",
+    "task_id_this_branch": "T-0749",
+    "verdict": "FOREIGN frozen check (owner != T-0749) — confirmed via ci/checks/frozen-checks-immutable.sh (FF-FCI1) header-anchor check on BASE_REF cf0acba54ca79ec972cb3818a422ee966deeb106. A direct edit of the VOCAB_RE line would be a MUTATION of an existing line, which frozen-checks-immutable's delegate auto-sanction-additive.sh (A-1: byte-preservation of every non-empty BASE_REF line) categorically rejects — that path would require a real founder_decide (FF-FCI12). Instead this task implemented the fix as PURE ADDITION (new function strip_deactivation_noise() + one new call line in scan_dir() + 4 new --self-test probe blocks; VOCAB_RE and every other existing line byte-unchanged), which IS auto-additive-eligible (T-0232/FF-FCI13, D-060) and does not require founder escalation — mechanically verified, not self-asserted (see auto_additive_sanction below). This exact channel/precedent was already used in this repo for the same false-positive announcement in docs/tasks/T-0740.adr.md §4 (different foreign file, same mechanism)."
+  },
+  "auto_additive_sanction": {
+    "sanctions_file": "ci/checks/data/frozen-sanctions.jsonl",
+    "entry_appended": "{\"task\":\"T-0749\",\"file\":\"ci/checks/entitlement-gates-vendor-only.sh\",\"owner\":\"T-0198\",\"sanctioned_by\":\"auto_additive\",\"vrag_attestation\":{\"families\":[\"NO-KILLSWITCH-IN-CORE\"],\"corpus_ref\":\"cf0acba54ca79ec972cb3818a422ee966deeb106\",\"enemy_segment\":\"ci/checks/entitlement-gates-vendor-only.sh --self-test (T-0749 negative/reactivation/positive/mixed probes added)\",\"attested_at\":\"2026-07-10\"}, ...}",
+    "family_binding": "NO-KILLSWITCH-IN-CORE (docs/design/T-0152-security-invariants-catalog.md §7.3) already lists ci/checks/entitlement-gates-vendor-only.sh in its Enforced-by — no catalog edit needed (unlike T-0740, which had to add a new family).",
+    "verify_command_output": "bash ci/checks/auto-sanction-additive.sh --verify T-0749 ci/checks/entitlement-gates-vendor-only.sh cf0acba54ca79ec972cb3818a422ee966deeb106 \"$SANCTION_JSON\" -> PASS [A-1..A-4], PASS [ATTEST-R1b] family covers file, PASS [ATTEST-R1a] corpus_ref ancestor+blob match, PASS [ATTEST] enemy_segment declared, PASS [FF-FCI13] bypass ALLOWED (exit 0)",
+    "frozen_gate_result": "bash ci/checks/frozen-checks-immutable.sh -> SANCTION [FF-FCI13] + AUDIT [FF-FCI13] printed, PASS: all ci/checks/*.sh changes are owned by T-0749 (exit 0)"
+  },
+  "regex_change": {
+    "vocab_re_unchanged": "activation|entitlement|verifyKey|isEntitled|not_after (byte-identical, not touched)",
+    "new_filter_function": "strip_deactivation_noise() { sed -E 's/deactivations?//gI; s/reactivations?//gI'; } -- applied to code lines BEFORE the VOCAB_RE scan, additive-only call site",
+    "negative_proof": "'deactivation' and 'reactivation' occurrences (e.g. the real src/http/user-mgmt.ts:773 string literal) no longer match VOCAB_RE after the filter",
+    "positive_proof": "a genuine 'checkVendorEntitlementActivation(...)' read in a non-vendor handler still matches VOCAB_RE after the filter (gate not weakened)",
+    "mixed_proof": "a line carrying BOTH 'deactivation' noise and a real 'isEntitled' term still matches (only the noise substring is stripped, not the whole line)",
+    "full_tree_scan_before": "1 match across all non-vendor src/http/*.ts (the false positive)",
+    "full_tree_scan_after": "0 matches across all non-vendor src/http/*.ts"
+  },
+  "gates_run": {
+    "entitlement-gates-vendor-only.sh": "FAIL(1 finding) -> PASS(0 findings), exit 0",
+    "entitlement-gates-vendor-only.sh --self-test": "PASS (incl. 4 new T-0749 probes: negative deactivation, negative reactivation, positive genuine-activation, mixed deactivation+isEntitled)",
+    "auto-sanction-additive.sh --verify T-0749 ...": "PASS, exit 0",
+    "auto-sanction-additive.sh --self-test": "PASS, unchanged (FF-ASA1..FF-ASA5 + R-1 adversarial cases)",
+    "frozen-checks-immutable.sh": "PASS, exit 0 (SANCTION+AUDIT for T-0749/entitlement-gates-vendor-only.sh printed, not red)",
+    "anti-case-lock.sh": "PASS, exit 0 (no new case-literals)",
+    "no-killswitch-in-core.sh": "PASS, exit 0 (sibling gate, untouched)",
+    "activation-verifier-offline.sh": "PASS, exit 0 (sibling gate, untouched)",
+    "npm run fitness (full, 345 steps)": "exit 0 end-to-end (was hard-FAIL at step 140/345 before the fix, reproduced on a fresh npm ci of this worktree)"
+  },
+  "deviations_from_adr": [],
+  "blocked_reason": "",
+  "friction_events": [
+    "Worktree had 0 node_modules on task start (npm ci never run here) -- npm run fitness immediately hard-FAILed at `npm run build` (tsc, missing @types/node) before it could even reach the entitlement gate, masking the actual bug being fixed. Ran `npm ci --maxsockets=3` to install deps (matches known DURABLE gotcha in prior run memory: 'npm install после merge/worktree-provision'), then re-ran the full chain successfully. Not a T-0749 regression -- pre-existing worktree provisioning gap."
+  ]
+}

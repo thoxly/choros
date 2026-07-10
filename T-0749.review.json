@@ -1,0 +1,33 @@
+{
+  "task_id": "T-0749",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/entitlement-gates-vendor-only.sh:strip_deactivation_noise()",
+      "issue": "strip_deactivation_noise() unconditionally removes the literal substrings 'deactivation'/'reactivation' anywhere they occur (no word-boundary/adjacency guard). A hypothetical future line describing a genuine vendor-license *reactivation* read (e.g. 'const ok = checkEntitlementReactivation(key)' — no, that still matches via 'entitlement'; but a line whose ONLY VOCAB_RE hit is the substring 'activation' embedded inside the word 'reactivation', with no other vocabulary token on the same line) would now be silently unflagged. Verified this does not currently mask anything (full-tree scan: 1 match before fix, 0 after, and that 1 was the known false positive) — this is a residual, currently-inert risk inherent to any substring-based VOCAB_RE heuristic (pre-dates T-0749; T-0198's original gate had the identical class of risk for any future benign word containing 'activation').",
+      "suggestion": "Non-blocking. If this class of gate is revisited later, consider anchoring VOCAB_RE hits to word boundaries (\\bactivation\\b) instead of a strip-then-scan approach — out of scope for this auto-additive thaw since that would be a VOCAB_RE mutation (founder-class, A-1 violation)."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 6,
+      "location": "T-0749.pr-handoff.json:friction_events",
+      "issue": "Builder correctly flagged 'npm ci needed on fresh worktree' as pre-existing worktree-provisioning friction unrelated to this diff — confirmed: T-0749's own diff touches zero package.json/lockfile lines and zero source files that would require new deps.",
+      "suggestion": "None — informational, no action needed."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1: entitlement-gates-vendor-only.sh false-positive on 'deactivation' in user-mgmt.ts is eliminated (gate FAIL→PASS on unmodified src)", "covered": true },
+    { "ac": "AC-2: fix implemented as pure auto-additive channel (T-0232/D-060), not a VOCAB_RE mutation / not founder-class", "covered": true },
+    { "ac": "AC-3: real vendor entitlement/activation reads outside vendor edges are still detected (gate not weakened)", "covered": true },
+    { "ac": "AC-4: auto-sanction-additive.sh --verify and frozen-checks-immutable.sh both PASS on the actual sanction line", "covered": true },
+    { "ac": "AC-5: self-test (--self-test) passes, including new negative/positive/mixed probes", "covered": true },
+    { "ac": "AC-6: full npm run fitness (345-step chain) exits 0 end-to-end", "covered": true },
+    { "ac": "AC-7: diff scoped to gate script + frozen-sanctions.jsonl + ADR doc + pr-handoff, no product code touched", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
