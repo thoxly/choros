@@ -103,6 +103,11 @@ ACTIVE_MARKERS=(
   "registerSelfAbsence"        # src/http/rights-intents.ts
   "assertApproverIsHuman"      # src/http/rights-change-requests.ts
   "checkRole"                  # src/http/binding.ts
+  "resolveActiveActorEmployeeId" # src/http/rights-intents.ts — T-0751, 8th T-0662
+                                # AUTHORITY_RESOLVERS entry (registry mirror); closes
+                                # GET /api/rights/intents/substitution-coverage
+                                # (rights-intents.ts, referenced at its own call site
+                                # inside that route's handler block).
   # --- Group 2: verified derivatives (compose a Group-1 resolver) ----------
   "isRecordReadable"           # core/read-visibility.ts pure predicate, fed by
                                 # resolveReadVisibility (server.ts:882-892).

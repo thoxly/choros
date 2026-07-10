@@ -90,6 +90,7 @@ AUTHORITY_RESOLVERS=(
   "src/http/rights-intents.ts:registerSelfAbsence"
   "src/http/rights-change-requests.ts:assertApproverIsHuman"
   "src/http/binding.ts:checkRole"
+  "src/http/rights-intents.ts:resolveActiveActorEmployeeId"
 )
 
 # ---------------------------------------------------------------------------
