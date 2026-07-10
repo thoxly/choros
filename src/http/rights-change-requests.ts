@@ -202,6 +202,15 @@ async function assertApproverIsHuman(
 // Returns all semi-confirmed grants + role_assignments for the tenant.
 // Semi-confirmed = confirmed_by IS NOT NULL AND confirmed2_by IS NULL.
 // These are pending dual-control approval and are NOT active on the read-path.
+//
+// T-0736 collateral fix: both SELECTs below referenced `r.name` — `choros.role`
+// has NO `name` column (only `display_name`, migration 019). This is a
+// pre-existing bug (unrelated to authorization) that made this route 500
+// against a real Postgres whenever a pending row had a role — masked because
+// the only prior test coverage was a stub pool (src/__tests__/rights-change-
+// requests.test.ts) that never validated SQL against a real schema. Found and
+// fixed while adding the live-PG authorization tests this task required
+// (T-0736.pr-handoff.json) — a one-column-name fix, not a design change.
 // ---------------------------------------------------------------------------
 
 async function listChangeRequests(
@@ -227,7 +236,7 @@ async function listChangeRequests(
       created_at: string;
     }>(
       `SELECT g.id, g.role_id,
-              r.name AS role_name,
+              r.display_name AS role_name,
               g.resource_type, g.operation, g.scope,
               g.proposed_by, g.confirmed_by, g.created_at
          FROM choros."grant" g
@@ -252,7 +261,7 @@ async function listChangeRequests(
       created_at: string;
     }>(
       `SELECT ra.id, ra.role_id,
-              r.name AS role_name,
+              r.display_name AS role_name,
               ra.employee_id,
               e.slug AS employee_slug,
               e.display_name AS employee_display,
@@ -575,6 +584,18 @@ export function registerRightsChangeRequestRoutes(
   router.register("GET", "/api/rights/change-requests", withAuth(async (req, res) => {
     const actorId = await extractActorFromReq(req, pool);
     const tenantId = await resolveActorTenant(pool, actorId);
+
+    // T-0736 [security P1]: this LIST was open to any tenant member — incl. a
+    // DEACTIVATED one with a still-live JWT — with zero authority check
+    // (T-0726 §5.2 finding). Reuse the SAME gate the write routes on this
+    // exact file already carry (assertApproverIsHuman, the registered 7th
+    // T-0662 authority resolver, defined above): viewing the pending-approval
+    // queue requires exactly the SAME eligibility as acting on an item in it
+    // (an ACTIVE human). Not narrowed to admin/owner — T-0044 ADR §9 (dual-
+    // control) is explicit that ANY distinct active human may be a second
+    // approver, not only admins; per-item distinctness (DC-1/DC-2) is still
+    // enforced at approve/reject time, unaffected by this LIST gate.
+    await assertApproverIsHuman(pool, tenantId, actorId);
 
     const result = await listChangeRequests(pool, tenantId);
 

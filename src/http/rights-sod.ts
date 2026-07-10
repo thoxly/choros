@@ -79,6 +79,7 @@ import {
   resolveActorTenant,
   resolveActorSlugFromAuth,
 } from "../db/org.js";
+import { resolveActorPrivilege } from "../db/sandbox-gate-dao.js";
 import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 
@@ -400,6 +401,30 @@ export function registerSodRoutes(router: Router, pool: pg.Pool): void {
       // Parse subjectId from query string (optional, defaults to actor self).
       const url = new URL(req.url ?? "/", "http://localhost");
       const subjectId = url.searchParams.get("subjectId") ?? actorId;
+
+      // T-0736 [security P1 — the MOST dangerous of the three T-0726 §5.2
+      // findings]: subjectId was caller-overridable to ANY slug with zero
+      // privilege check — an unprivileged member could read ANY colleague's
+      // SoD conflicts (which roles they hold + which pairs collide) just by
+      // querying that colleague's slug. Self-view needs no extra gate (the
+      // established §B "self-scoped" doctrine this same coverage gate already
+      // applies elsewhere — notifications.ts/user-prefs.ts — self data needs
+      // no authority resolver); gate ONLY the override, on the same
+      // admin/owner bar as GET /api/grant-trail (T-0736 ADR §2):
+      // resolveActorPrivilege(...).isOwnerOrAdmin. A bare identity swap
+      // (subjectId !== actorId) without that privilege is now rejected
+      // BEFORE checkSodForSubject ever resolves whether the subject exists —
+      // no exists/doesn't-exist oracle leaks to an unprivileged caller.
+      if (subjectId !== actorId) {
+        const priv = await resolveActorPrivilege(pool, tenantId, actorId, Date.now());
+        if (!priv.isOwnerOrAdmin) {
+          throw new HttpError(
+            403,
+            "FORBIDDEN",
+            "viewing another subject's SoD conflicts requires admin/owner authority",
+          );
+        }
+      }
 
       const result = await checkSodForSubject(pool, tenantId, subjectId);
       res.statusCode = 200;

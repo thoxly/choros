@@ -81,6 +81,64 @@ async function seedTenant(c: pg.Client, tenantId: string): Promise<void> {
   );
 }
 
+// ---------------------------------------------------------------------------
+// T-0736: GET /api/grant-trail now gates on resolveActorPrivilege(...)
+// .isOwnerOrAdmin (admin/owner authority) — this pre-existing tenant-isolation
+// regression test drove the route as a bare dev-header slug with NO backing
+// `choros.employee` row at all (dev mode's extractActor trusts the header
+// verbatim; the route itself resolved no authority before this task). Under
+// the new gate that resolves to isOwnerOrAdmin=false → 403, breaking the
+// "legitimate path" this file exists to prove. Fix: seed OWNER_X/OWNER_Y as
+// genuine genesis tenant-owners (role.slug='tenant-owner', confirmed_by set)
+// in their respective tenants — the SAME shape
+// rights-change-requests-deactivated-approver.db.test.ts uses to seed a real
+// human employee, extended with a tenant-owner role_assignment.
+// ---------------------------------------------------------------------------
+async function seedGenesisOwner(c: pg.Client, tenantId: string, slug: string): Promise<void> {
+  const deptId = uuid();
+  await c.query(
+    `INSERT INTO choros.department (tenant_id, id, parent_id, slug, display_name, created_at, updated_at)
+     VALUES ($1, $2, NULL, $3, $3, 0, 0)`,
+    [tenantId, deptId, `t0736-dept-${deptId.slice(0, 8)}`],
+  );
+  const posId = uuid();
+  await c.query(
+    `INSERT INTO choros.position (tenant_id, id, department_id, slug, title, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $4, 0, 0)`,
+    [tenantId, posId, deptId, `t0736-pos-${posId.slice(0, 8)}`],
+  );
+  const empId = uuid();
+  await c.query(
+    `INSERT INTO choros.employee
+       (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at, deactivated_at)
+     VALUES ($1, $2, $3, 'human', $4, $4, 0, 0, NULL)`,
+    [tenantId, empId, posId, slug],
+  );
+  const roleId = uuid();
+  await c.query(
+    `INSERT INTO choros.role (tenant_id, id, slug, display_name, description, created_at, updated_at)
+     VALUES ($1, $2, 'tenant-owner', 'Tenant Owner', NULL, 0, 0)`,
+    [tenantId, roleId],
+  );
+  await c.query(
+    `INSERT INTO choros.role_assignment
+       (tenant_id, id, employee_id, role_id, org_scope,
+        valid_from, valid_until, source, granted_by,
+        proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb,
+             NULL, NULL, 'seed', 'seed',
+             NULL, $6, NULL, 0, 0)`,
+    [
+      tenantId,
+      uuid(),
+      empId,
+      roleId,
+      JSON.stringify({ kind: 'node', hierarchy: 'org', nodeId: deptId, nodeLevel: 'department' }),
+      slug,
+    ],
+  );
+}
+
 async function seedGrantEvent(
   c: pg.Client,
   tenantId: string,
@@ -170,6 +228,10 @@ beforeAll(async () => {
   await withClient(migratorUrl(), async (c) => {
     await seedTenant(c, TENANT_X);
     await seedTenant(c, TENANT_Y);
+    // T-0736: OWNER_X/OWNER_Y must be real genesis tenant-owners — the route
+    // now gates GET /api/grant-trail on admin/owner authority.
+    await seedGenesisOwner(c, TENANT_X, OWNER_X);
+    await seedGenesisOwner(c, TENANT_Y, OWNER_Y);
     rowXId = await seedGrantEvent(c, TENANT_X, SEQ_BASE + 1, OWNER_X, 'role-x-test');
     rowYId = await seedGrantEvent(c, TENANT_Y, SEQ_BASE + 2, OWNER_Y, 'role-y-test');
   });

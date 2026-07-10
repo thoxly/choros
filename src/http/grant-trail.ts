@@ -24,6 +24,7 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { queryGrantTrail, type GrantTrailRow } from "../db/audit-grant-trail.js";
 import { getOrgPool, DEV_TENANT_ID, resolveActorSlugFromAuth } from "../db/org.js";
 import { batchResolveActors, type ResolvedActor } from "../db/actor-resolver.js";
+import { resolveActorPrivilege } from "../db/sandbox-gate-dao.js";
 
 // ---------------------------------------------------------------------------
 // Deps — injectable for tests and server.ts wiring.
@@ -327,6 +328,23 @@ export function registerGrantTrailRoutes(router: Router, deps?: GrantTrailRouteD
       const tenantId = deps?.resolveActorTenant
         ? await deps.resolveActorTenant(actor)
         : DEV_TENANT_ID;
+
+      // T-0736 [security P1]: the full tenant-wide grant/assignment journal —
+      // who granted/revoked which right to whom, by whom, when — was readable
+      // by ANY tenant member with zero authority check (T-0726 §5.2 finding).
+      // Gate on the SAME admin/owner bar the sibling tenant-wide rights read
+      // already established (rights-overview.ts canManage =
+      // isGenesisOwner || adminGrants.length > 0): resolveActorPrivilege
+      // composes exactly that formula via loadAdminContext. Its second fact
+      // (hasAuthoringDraftGrant, a content/config-authoring privilege) is
+      // deliberately IGNORED here — authoring a draft form/registry has
+      // nothing to do with rights-domain visibility, and consulting it would
+      // widen who sees the trail beyond the established rights-admin cohort
+      // (see T-0736 ADR §2 for the full rationale).
+      const priv = await resolveActorPrivilege(dbPool, tenantId, actor, Date.now());
+      if (!priv.isOwnerOrAdmin) {
+        throw new HttpError(403, "FORBIDDEN", "grant trail requires admin/owner authority");
+      }
 
       const result = await queryGrantTrail(dbPool, tenantId, {
         roleId: parsed.roleId,
