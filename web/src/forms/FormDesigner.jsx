@@ -548,6 +548,28 @@ function Inspector({ node, schemaField, multiCount, onPatch }) {
   );
 }
 
+// T-0682: pure decision function for the "registry def changed" schema-rebuild
+// effect (below, inside FormDesigner). Exported so the two invariants it must
+// hold — (a) the live schema is ALWAYS reparsed into `fields` [palette source],
+// (b) the DOCUMENT is only rebuilt when NOT told to skip [preserves an
+// existing-binding layout just loaded, T-0656 P0] — are unit-testable without
+// jsdom/@testing-library (neither is a dependency in this repo; see
+// FormDesigner.test.jsx file header for the established pure-logic-mirror
+// convention this follows).
+//
+// `def` — a registryDefs[] entry (or undefined/null if not yet resolved).
+// `opts.skipDocRebuild` — true exactly once, right after an existing bound
+// layout was loaded (skipNextSchemaRebuildRef in the effect below).
+// Returns `{ fields: FieldDef[], doc: Document|null }` — `doc` is null when
+// the caller must NOT touch history/savedDocRef (skip case).
+export function planSchemaRebuild(def, { skipDocRebuild, applicationId, registryDefId } = {}) {
+  if (!def) return { fields: [], doc: null };
+  const fields = parseRecordSchema(def.record_schema);
+  if (skipDocRebuild) return { fields, doc: null };
+  const doc = buildDefaultDocument({ applicationId, registryDefId }, fields, { withIds: true });
+  return { fields, doc };
+}
+
 // ---------------------------------------------------------------------------
 // The designer
 // ---------------------------------------------------------------------------
@@ -770,21 +792,32 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   }, [selectedAppId]);
 
   // Derive live schema + default document when the registry def changes.
-  // T-0665 (F3): skipped ONCE right after an existing layout was loaded above
+  // T-0665 (F3) / T-0682 fix: `parseRecordSchema` (and therefore `fields` —
+  // what the palette renders from) runs UNCONDITIONALLY here, every time.
+  // Only the DOCUMENT rebuild (buildDefaultDocument/setHistory/savedDocRef)
+  // is skipped ONCE right after an existing layout was loaded above
   // (skipNextSchemaRebuildRef) — otherwise picking the SAME app/def that the
   // loaded layout was built from would immediately overwrite it with a fresh
-  // flat rebuild, defeating the whole point of loading the saved layout.
+  // flat rebuild, defeating the whole point of loading the saved layout
+  // (T-0656 P0). Before T-0682 the skip flag ALSO gated `parseRecordSchema`
+  // itself, so the palette kept showing the schema as it was at binding-save
+  // time (`data.fields`, existing-binding effect above) until the author
+  // picked the same registry def a SECOND time — a field added to the live
+  // schema after the binding was last saved (e.g. a collection/table field)
+  // stayed invisible in the palette on first paint.
   useEffect(() => {
     if (!selectedDefId || !registryDefs) return;
-    if (skipNextSchemaRebuildRef.current) { skipNextSchemaRebuildRef.current = false; return; }
     const def = registryDefs.find((d) => d.id === selectedDefId);
     if (!def) return;
-    const parsed = parseRecordSchema(def.record_schema);
-    setFields(parsed);
-    const freshDoc = buildDefaultDocument({ applicationId: selectedAppId, registryDefId: selectedDefId }, parsed, { withIds: true });
-    setHistory(initHistory(freshDoc));
-    savedDocRef.current = freshDoc;
-    setSelectedKeys(new Set());
+    const skipDocRebuild = skipNextSchemaRebuildRef.current;
+    if (skipDocRebuild) skipNextSchemaRebuildRef.current = false;
+    const plan = planSchemaRebuild(def, { skipDocRebuild, applicationId: selectedAppId, registryDefId: selectedDefId });
+    setFields(plan.fields);
+    if (plan.doc) {
+      setHistory(initHistory(plan.doc));
+      savedDocRef.current = plan.doc;
+      setSelectedKeys(new Set());
+    }
   }, [selectedDefId, registryDefs, selectedAppId]);
 
   // T-0669: application ids validly bound to the SELECTED process, per the

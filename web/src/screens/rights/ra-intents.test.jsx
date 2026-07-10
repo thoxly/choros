@@ -156,10 +156,11 @@ describe('SubstituteForm source — server tier consumed additively, tier stays 
   });
 
   it('SubstituteForm itself (this task\'s scope) carries no raw "Tier-N" jargon in its own body', () => {
-    // NOTE: SelfAbsenceForm (a DIFFERENT form, out of scope per T-0639.spec.md
-    // §3 — only SubstituteForm was named in this task) still says "Tier-1"/
-    // "Tier-2" in its pre-existing static note; that is a separate, already-
-    // tracked concern, not something this task's diff touches or claims to fix.
+    // NOTE: at the time of T-0639, SelfAbsenceForm (a DIFFERENT form, out of
+    // scope per T-0639.spec.md §3 — only SubstituteForm was named in that
+    // task) still said "Tier-1"/"Tier-2" in its pre-existing static note.
+    // That follow-up shipped as T-0697 (below) — see the
+    // "SelfAbsenceForm source" describe block for the equivalent assertion.
     const start = src.indexOf('export function SubstituteForm');
     const end = src.indexOf('/* ---- Я в отпуске');
     const body = src.slice(start, end);
@@ -185,5 +186,50 @@ describe('T-0639 — write path unchanged (still exactly one POST to the existin
     const end = src.indexOf('/* ---- Я в отпуске');
     const body = src.slice(start, end);
     expect(body).toContain("'/api/rights/intents/substitute'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0697 (эпик T-0585, follow-up из T-0639) — SelfAbsenceForm's static hint
+// carried the same "Tier-1"/"Tier-2" jargon the T-0639 spec had explicitly
+// scoped OUT (only SubstituteForm was named). Same human-Russian translation
+// applied here, same terms as SubstituteForm's note ("покрывается пулом",
+// "временный грант не выпускается", "расширение прав невозможно и
+// отклоняется сервером") for consistency.
+// ---------------------------------------------------------------------------
+
+describe('SelfAbsenceForm source — static hint no longer leaks "Tier-N" jargon (T-0697)', () => {
+  const selfAbsenceBody = () => {
+    const start = src.indexOf('function SelfAbsenceForm');
+    const end = src.indexOf('/* ---- Срочно отозвать');
+    return src.slice(start, end);
+  };
+
+  it('carries no raw "Tier-1"/"Tier-2" jargon in its visible JSX body (only pre-existing dev comments may still name it)', () => {
+    const body = selfAbsenceBody();
+    // Strip JSX block comments ({/* ... */}) before asserting — comments are
+    // developer-facing, not user-visible, and the file convention (see line
+    // ~263, substituteResultMessage's docblock) already names "Tier-N" there.
+    const withoutComments = body.replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+    expect(withoutComments).not.toMatch(/Tier-1|Tier-2/);
+  });
+
+  it('the static note still explains both branches in human Russian, matching SubstituteForm\'s established terms', () => {
+    const body = selfAbsenceBody();
+    expect(body).toMatch(/покрывается пулом/);
+    expect(body).toMatch(/временный грант не выпускается/);
+    expect(body).toMatch(/выпускается ограниченный временный грант/);
+    expect(body).toMatch(/расширение прав невозможно и отклоняется сервером/);
+  });
+
+  it('SubstituteForm and SelfAbsenceForm now use textually consistent phrasing for the same rule (no jargon divergence)', () => {
+    const subStart = src.indexOf('export function SubstituteForm');
+    const subEnd = src.indexOf('/* ---- Я в отпуске');
+    const subBody = src.slice(subStart, subEnd);
+    const selfBody = selfAbsenceBody();
+    for (const term of ['покрывается пулом', 'временный грант не выпускается', 'расширение прав невозможно и отклоняется сервером']) {
+      expect(subBody).toMatch(new RegExp(term));
+      expect(selfBody).toMatch(new RegExp(term));
+    }
   });
 });

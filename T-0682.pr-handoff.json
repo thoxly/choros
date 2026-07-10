@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0682",
+  "status": "pr_open",
+  "branch": "task/T-0682",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": false
+  },
+  "summary": "P2 из live-proof T-0680 (эпик E-FORMS T-0479): FormDesigner на УЖЕ загруженном биндинге (сохранённый layout, T-0665 F3/T-0656 P0) не surfaced-ил collection-поле (напр. таблицу) в палитре при ПЕРВОМ выборе набора полей — оно появлялось только после повторного выбора того же набора. Корень: `skipNextSchemaRebuildRef` — флаг, выставляемый ОДИН раз при загрузке существующего layout, чтобы schema-rebuild эффект не затёр загруженную раскладку (T-0656 P0) — гасил ОДНИМ guard'ом ДВЕ разные вещи: (а) `parseRecordSchema`/`setFields` (источник палитры) и (б) rebuild документа (`history`/`savedDocRef`). Фикс расщепляет эффект через чистую экспортируемую функцию `planSchemaRebuild(def, opts)` (web/src/forms/FormDesigner.jsx): `fields` теперь ВСЕГДА реparse-ится из живой схемы набора на каждый проход эффекта; ТОЛЬКО rebuild документа пропускается один раз, когда `skipDocRebuild` взведён — сохраняя исходный T-0656 P0 инвариант (загруженная раскладка не затирается). Мини-spec/ADR — T-0682.spec.md / T-0682.adr.md (корень бага, AC, альтернативы).",
+  "files_changed": [
+    "web/src/forms/FormDesigner.jsx",
+    "web/src/forms/FormDesigner.test.jsx",
+    "T-0682.spec.md (NEW)",
+    "T-0682.adr.md (NEW)",
+    "T-0682.pr-handoff.json (NEW)"
+  ],
+  "tests_added": [
+    {
+      "file": "web/src/forms/FormDesigner.test.jsx",
+      "covers": "Новый describe-блок «FormDesigner — planSchemaRebuild (T-0682)» (5 тестов) поверх реальной production-функции (не мирроринг): AC-1 — skipDocRebuild:true всё равно surfaced-ит collection-поле в fields (доказательство фикса); AC-2 — skipDocRebuild:true возвращает doc:null (T-0656 P0 инвариант сохранён); AC-3 — skipDocRebuild:false строит fields+свежий документ как раньше (нет регрессии); defensive — undefined/null def не бросает; regression-lock — структурная проверка, что сам эффект переключён на planSchemaRebuild И что старый баговый ранний return (`if (skipNextSchemaRebuildRef.current) { ...; return; }` ДО поиска def) действительно удалён из исходника."
+    }
+  ],
+  "gates": {
+    "tsc_noemit_backend": "green — npx tsc --noEmit (корень, src/), 0 ошибок. web/ — чистый JS/JSX без TS-конфига (нет web/tsconfig.json, 0 файлов .ts/.tsx в web/src) — «цельный tsc по web» неприменим структурно; ближайший эквивалент — vite build (ниже), зелёный.",
+    "vitest_FormDesigner_targeted": "green — npx vitest run src/forms/FormDesigner.test.jsx (в web/): 46/46 тестов зелёных (41 старых + 5 новых T-0682).",
+    "vitest_forms_neighbors": "green — npx vitest run src/forms/ src/screens/apps-schema.test.js (в web/): 24 файла, все пройдены (apps-schema.test.js изначально падал на отсутствующем 'ajv' — предсуществующий пробел окружения: ajv объявлен в КОРНЕВОМ package.json, не в web/; чинится корневым `npm ci`, не связан с диффом этой задачи — перепрогнан зелёным после `npm ci` в корне).",
+    "vitest_web_full": "green — npx vitest run (в web/, без аргументов): 98 файлов, 2678 тестов, 0 упавших.",
+    "web_build": "green — npm run build (vite build) в web/: 546 модулей, exit 0 (единственное предупреждение — pre-existing chunk-size >500kB, не связано с этой задачей).",
+    "eslint": "soft-gate (не блокирует) — репозиторный `npm run lint` = `eslint web/src --ext .jsx || true` (всегда exit 0). Прогнан вручную от корня: 107 pre-existing проблем по всему web/src (react-hooks/exhaustive-deps правило не резолвится в этом окружении на МНОЖЕСТВЕ файлов, unused vars и т.п.) — НИ ОДНА не в диффе этой задачи (проверено построчно: единственная строка `react-hooks/exhaustive-deps` в FormDesigner.jsx — pre-existing eslint-disable-line на isDirty useMemo, строка вне диффа T-0682).",
+    "anti_case_lock": "green — bash ci/checks/anti-case-lock.sh: Phase 1 delegates PASS (read-pdp-anti-case/rights-ui-anti-case/detel-literal-baseline), Phase 2 aggregate 15 (baseline 16, не растёт). Grep диффа на банned-литералы (Позиции/purchases/soglasovanie/telLinear/e-larina/e-orlov) — 0 совпадений; тестовая фикстура использует generic-ключи 'items'/'title'/'label' (не business-слаг реального тенанта).",
+    "fitness_db": "НЕ прогнан локально (по прямому указанию задачи — оркестратор прогонит соло на мерж-гейте; изменение не касается БД/миграций/HTTP-контрактов, чисто web/src/forms/ клиентская логика)."
+  },
+  "test_proof_of_fix": "Верифицировано вручную git-stash'ем ТОЛЬКО web/src/forms/FormDesigner.jsx (тестовый файл оставлен с новыми T-0682 тестами) — откат к до-фикс содержимому (commit 36648d0d). Прогон npx vitest run src/forms/FormDesigner.test.jsx на этом откате: 5 новых тестов КРАСНЫЕ (4× 'planSchemaRebuild is not a function' — экспорта не существовало до фикса; 1× структурное несовпадение — старый ранний-return guard ещё присутствует в исходнике), 41 старый тест остаётся ЗЕЛЁНЫМ (доказывает, что тестовые фикстуры сами по себе корректны и не ломают существующее поведение). git stash pop восстановил фикс — прогон снова 46/46 зелёных.",
+  "deviations_from_adr": [
+    "Мини-ADR (T-0682.adr.md) написан САМИМ coder-агентом в рамках этой задачи (не отдельным DESIGN-шагом) — задача явно требовала мини-spec+мини-ADR как часть сжатого S+D+B для мелкой P2-задачи, а не полного цикла ADR-до-BUILD.",
+    "Файлы spec/adr/pr-handoff размещены ПЛОСКО в корне worktree (T-0682.spec.md/.adr.md/.pr-handoff.json), а НЕ по пути docs/tasks/T-0682.*, указанному в тексте задачи — директории docs/tasks/ не существует нигде в репозитории (проверено find); фактическая конвенция ПОСЛЕДНИХ ~20 задач (T-0637, T-0665, T-0669, T-0681, T-0706 и др., проверено git log / find) — плоские файлы в корне worktree. Следую коду/конвенции, не тексту задачи (принцип 'не верь памяти/спеке — верь коду')."
+  ],
+  "open_questions": [
+    "Живая проверка (стенд offline на момент задачи) не исполнена — см. live_proof_plan ниже."
+  ],
+  "live_proof_plan": "Когда стенд (Tailscale 100.121.76.86:3000) вернётся — прожить браузером, обычным владельцем/автором форм:\n\n1. Найти (или создать) процесс+шаг с УЖЕ сохранённым биндингом формы, чей registry-набор ('Набор полей') содержит хотя бы одно collection-поле (таблицу) — можно взять реальный набор с таблицей на этом тенанте, либо на минуту добавить временное table-поле в существующий набор через /apps (конструктор полей), сохранить.\n2. Открыть FormDesigner НА ЭТОМ процессе+шаге заново (свежая перезагрузка страницы — важно, чтобы это был первый выбор набора СРЕДИ ЭТОЙ сессии React-состояния, а не повторный клик в уже открытом дизайнере).\n3. ДО фикса (baseline, если возможно сравнить со старой версией / или просто зафиксировать как регрессионный скриншот): в палитре слева collection/table-поле НЕ появляется сразу — только после повторного клика на тот же набор.\n4. ПОСЛЕ фикса (главная проверка): при первом же открытии дизайнера на этом привязанном шаге палитра СРАЗУ показывает collection/table-поле среди доступных полей набора — без какого-либо повторного клика.\n5. Контрольная проверка обратного инварианта (T-0656 P0 НЕ должен был сломаться): если у этого шага уже была сохранена НЕтривиальная раскладка (canvas с расставленными блоками, не пустой), убедиться, что canvas при открытии показывает ИМЕННО сохранённую раскладку (расположение полей, порядок, вложенность) — а НЕ плоский автогенерированный список полей заново. Скриншот canvas ДО открытия (ожидание = сохранённая раскладка) и ПОСЛЕ (факт) для сравнения.\n\nАртефакты: 2 скриншота (палитра сразу после открытия дизайнера — видно collection-поле; canvas — видно, что сохранённая раскладка не сброшена)."
+}
