@@ -28,6 +28,10 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import {
   loadOperationalAnalytics,
+  loadRecordSumsByPeriod,
+  loadRecordScanForVisibility,
+  DAY_MS,
+  RECORD_SCAN_LIMIT,
   type LoadOperationalAnalyticsParams,
   type OperationalAnalyticsResult,
   type WorkloadPeriodRow,
@@ -36,6 +40,16 @@ import {
 } from "../db/operational-analytics-dao.js";
 import { toCsv, toXlsx, sanitizeSheetName, type Tabular } from "./tabular-export.js";
 import { batchResolveActors, type ResolvedActor } from "../db/actor-resolver.js";
+// T-0739 (security P2, столп 4): the SAME per-row READ-PDP predicate T-0632
+// (report-page-render.ts) and T-0570 (records.ts) already use — single-
+// resolver, NOT a second authority path (NF-1).
+import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
+import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
+// T-0739: reuse the EXACT resolver TYPE T-0632 already exports — server.ts
+// wires ONE composed instance (getGrantsForSubject + loadTenantOrgAncestry)
+// and passes the SAME function reference here and to
+// registerReportPageRenderRoutes (ADR-T0739 §2, single source of truth).
+import type { ReportAggReadVisibilityResolver } from "./report-page-render.js";
 
 // ---------------------------------------------------------------------------
 // Deps
@@ -46,6 +60,21 @@ export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
 export interface OperationalAnalyticsDeps {
   pool: pg.Pool;
   resolveActorTenant?: ActorTenantResolver;
+  /**
+   * T-0739 (security P2, столп 4): OPTIONAL READ-PDP visibility resolver.
+   * ADR-T0739 §3.1 — when present: (a) entry gate, the actor must hold >=1
+   * confirmed grant of ANY kind (the platform's role-reader default-open
+   * backfill, migrations 117/124, guarantees every ACTIVE employee holds at
+   * least this one grant; a deactivated actor's residual JWT resolves to
+   * `grants=[]` via getGrantsForSubject's ACTOR_ACTIVE_SQL predicate) — absent
+   * a grant, 403 NO_READ_GRANT on the WHOLE route; (b) `record_sums` (when
+   * requested) is narrowed to READ-PDP-visible records only (T-0632 parity —
+   * the exact record-level leak class T-0632 closed for report-page-render.ts's
+   * Floor-1 aggregate). Honest-degrade (NF-2): resolver absent → gate skipped,
+   * `record_sums` falls back to the legacy full-registry aggregate — test-only,
+   * production (server.ts) always wires this.
+   */
+  resolveReadVisibility?: ReportAggReadVisibilityResolver;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,12 +245,126 @@ export function flattenActorWorkloadToTable(rows: ActorWorkloadRow[]): Tabular {
 }
 
 // ---------------------------------------------------------------------------
+// T-0739 (security P2, столп 4): computeVisibleRecordSums — record_sums's
+// T-0632-parity path. Fetches a BOUNDED candidate window (RECORD_SCAN_LIMIT,
+// mirrors report-page-render.ts's AGG_SCAN_LIMIT), filters EACH row through
+// `isRecordReadable` (the SAME predicate GET /api/records and the Floor-1
+// aggregate use), and folds only visible rows into a per-day SUM — the
+// day-bucketing (`toISOString().slice(0,10)`) reproduces the SQL
+// `to_char(to_timestamp(created_at/1000) AT TIME ZONE 'UTC', 'YYYY-MM-DD')`
+// format loadRecordSumsByPeriod already uses (record_sums is always computed
+// for period="day" regardless of the export ?period= query — see
+// loadOperationalAnalytics, unchanged).
+// ---------------------------------------------------------------------------
+
+async function computeVisibleRecordSums(
+  pool: pg.Pool,
+  tenantId: string,
+  registryDefId: string,
+  fieldKey: string,
+  cutoffMs: number,
+  visibility: { grants: Grant[]; ancestry: AncestryOracle },
+  nowMs: number,
+): Promise<RecordSumPeriodRow[]> {
+  const candidates = await loadRecordScanForVisibility(
+    pool,
+    tenantId,
+    registryDefId,
+    cutoffMs,
+    RECORD_SCAN_LIMIT,
+  );
+
+  const byPeriod = new Map<string, { total: number; count: number }>();
+
+  for (const row of candidates) {
+    const rowAncestry: RowAncestry = {
+      recordId: row.id,
+      registryId: registryDefId,
+      applicationId: row.application_id,
+    };
+    if (!isRecordReadable(rowAncestry, visibility.grants, visibility.ancestry, nowMs)) continue;
+
+    const data = row.data;
+    const raw =
+      data !== null && typeof data === "object" && !Array.isArray(data)
+        ? (data as Record<string, unknown>)[fieldKey]
+        : undefined;
+    if (raw === undefined || raw === null || raw === "") continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) continue;
+
+    const createdAtMs = Number(row.created_at);
+    const period = new Date(createdAtMs).toISOString().slice(0, 10);
+    const acc = byPeriod.get(period) ?? { total: 0, count: 0 };
+    acc.total += n;
+    acc.count += 1;
+    byPeriod.set(period, acc);
+  }
+
+  return [...byPeriod.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0)) // ORDER BY 1 DESC
+    .map(([period, acc]) => ({
+      period,
+      period_type: "day" as const,
+      total: acc.total,
+      row_count: acc.count,
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// T-0739: loadGatedAnalytics — shared entry gate + record_sums narrowing,
+// used by BOTH handleGet and handleExport (single implementation, ADR-T0739
+// §3.1). Throws 403 NO_READ_GRANT when the resolver is wired and the actor
+// holds zero confirmed grants (ACTOR_ACTIVE closure — see
+// OperationalAnalyticsDeps.resolveReadVisibility doc comment).
+// ---------------------------------------------------------------------------
+
+async function loadGatedAnalytics(
+  pool: pg.Pool,
+  tenantId: string,
+  actor: string,
+  params: LoadOperationalAnalyticsParams,
+  resolveReadVisibility: ReportAggReadVisibilityResolver | undefined,
+  nowMs: number,
+): Promise<OperationalAnalyticsResult> {
+  const visibility = resolveReadVisibility
+    ? await resolveReadVisibility(actor, tenantId, nowMs)
+    : undefined;
+  if (visibility !== undefined && visibility.grants.length === 0) {
+    throw new HttpError(403, "NO_READ_GRANT", "no confirmed grant for this tenant");
+  }
+
+  const { processKey, registryDefId, fieldKey } = params;
+
+  // workload_*/top_actors are audit_event telemetry (ADR-T0739 §1.1 / ADR-T0632
+  // precedent) — computed tenant-wide, unaffected by narrowing. record_sums
+  // (choros.record) is requested separately below when both params are given.
+  const result = await loadOperationalAnalytics(pool, tenantId, { processKey }, nowMs);
+
+  if (registryDefId !== undefined && fieldKey !== undefined) {
+    const cutoff30d = nowMs - 30 * DAY_MS;
+    const recordSums = visibility
+      ? await computeVisibleRecordSums(pool, tenantId, registryDefId, fieldKey, cutoff30d, visibility, nowMs)
+      : await loadRecordSumsByPeriod(pool, tenantId, registryDefId, fieldKey, cutoff30d, "day", 30);
+    return {
+      ...result,
+      record_sums: recordSums,
+      registry_def_id: registryDefId,
+      field_key: fieldKey,
+    };
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Handler — GET /api/operational-analytics
 // ---------------------------------------------------------------------------
 
 async function handleGet(
   pool: pg.Pool,
   resolveActorTenant: ActorTenantResolver | undefined,
+  resolveReadVisibility: ReportAggReadVisibilityResolver | undefined,
   req: import("node:http").IncomingMessage,
   res: import("node:http").ServerResponse,
 ): Promise<void> {
@@ -231,13 +374,14 @@ async function handleGet(
   const url = new URL(req.url ?? "/", "http://localhost");
   const { processKey, registryDefId, fieldKey } = parseQueryParams(url);
 
-  const analyticsParams: LoadOperationalAnalyticsParams = {
-    processKey,
-    registryDefId,
-    fieldKey,
-  };
-
-  const result = await loadOperationalAnalytics(pool, tenantId, analyticsParams);
+  const result = await loadGatedAnalytics(
+    pool,
+    tenantId,
+    actor,
+    { processKey, registryDefId, fieldKey },
+    resolveReadVisibility,
+    Date.now(),
+  );
 
   // T-0648 (D-064, UX-study §3): «Топ исполнителей» rendered the raw actor slug
   // verbatim (TopActorsTable, screen-operational-analytics.jsx). Batch-resolve
@@ -273,6 +417,7 @@ async function handleGet(
 async function handleExport(
   pool: pg.Pool,
   resolveActorTenant: ActorTenantResolver | undefined,
+  resolveReadVisibility: ReportAggReadVisibilityResolver | undefined,
   req: import("node:http").IncomingMessage,
   res: import("node:http").ServerResponse,
 ): Promise<void> {
@@ -282,13 +427,14 @@ async function handleExport(
   const url = new URL(req.url ?? "/", "http://localhost");
   const { processKey, registryDefId, fieldKey, period, format } = parseQueryParams(url);
 
-  const analyticsParams: LoadOperationalAnalyticsParams = {
-    processKey,
-    registryDefId,
-    fieldKey,
-  };
-
-  const result = await loadOperationalAnalytics(pool, tenantId, analyticsParams);
+  const result = await loadGatedAnalytics(
+    pool,
+    tenantId,
+    actor,
+    { processKey, registryDefId, fieldKey },
+    resolveReadVisibility,
+    Date.now(),
+  );
   const table = flattenAnalyticsToTable(result, period);
 
   const safePeriod = sanitizeSheetName(`workload_${period}`);
@@ -326,17 +472,23 @@ export function registerOperationalAnalyticsRoutes(
   router: Router,
   deps: OperationalAnalyticsDeps,
 ): void {
-  const { pool, resolveActorTenant } = deps;
+  const { pool, resolveActorTenant, resolveReadVisibility } = deps;
 
+  // T-0739 (security P2, столп 4): resolveReadVisibility is threaded directly
+  // into this call site (not only into handleGet's body) so the ACTOR_ACTIVE
+  // marker is visible to ci/checks/actor-active-route-coverage.sh's per-route
+  // block scan WITHOUT a ROUTE_WHITELIST §D entry (ADR-T0739 §5) — handleGet
+  // is a module-scope helper declared BEFORE this .register( call, which the
+  // gate's block-scan otherwise cannot see (ADR-T0726 §2.4 limitation #1).
   router.register(
     "GET",
     "/api/operational-analytics",
-    withAuth((req, res) => handleGet(pool, resolveActorTenant, req, res)),
+    withAuth((req, res) => handleGet(pool, resolveActorTenant, resolveReadVisibility, req, res)),
   );
 
   router.register(
     "GET",
     "/api/operational-analytics/export",
-    withAuth((req, res) => handleExport(pool, resolveActorTenant, req, res)),
+    withAuth((req, res) => handleExport(pool, resolveActorTenant, resolveReadVisibility, req, res)),
   );
 }

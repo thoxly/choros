@@ -62,6 +62,15 @@ import {
   type CrossAppHopResult,
 } from "../core/cross-app-ref.js";
 import { listCrossAppRefsForSource } from "../db/cross-app-ref-dao.js";
+// T-0739 (security P2, столп 4): the SAME per-row READ-PDP predicate T-0570
+// (records.ts GET /api/records/:id) and T-0632 (report-page-render.ts) already
+// use — single-resolver, NOT a second authority path (NF-1).
+import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
+// Reuse records.ts's resolver TYPE verbatim (structurally identical to
+// report-page-render.ts's ReportAggReadVisibilityResolver) — server.ts wires
+// ONE composed instance and passes the SAME function reference to every
+// consumer (ADR-T0739 §2, single source of truth).
+import type { ReadVisibilityResolver } from "./records.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -103,6 +112,22 @@ export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
 export interface RecordLinksDeps {
   pool: pg.Pool;
   resolveActorTenant: ActorTenantResolver;
+  /**
+   * T-0739 (security P2, столп 4): OPTIONAL READ-PDP resolver for the SOURCE
+   * record (ADR-T0739 §3.3). This module's own header comment (§ACL + Redaction
+   * per hop) documented the gap directly: "no field-level PDP here (no grant
+   * resolver threaded to this route)". This closes it for the SOURCE record
+   * (the record whose card is being viewed) — mirrors records.ts's own
+   * GET /api/records/:id gate byte-for-byte: `isRecordReadable` false ⇒ the
+   * SAME 404 NOT_FOUND as "record not in tenant" (indistinguishable, FR-5
+   * pattern — existence is not leaked via a distinct 403). Target (hop) record
+   * field-level redaction remains FUTURE (unchanged, already documented below
+   * in makeHopFetcher) — out of this task's scope (ADR-T0739 §3.3: the judge's
+   * finding was "no grant resolver threaded to this route AT ALL", not
+   * "hop-level redaction missing"). Honest-degrade (NF-2): resolver absent →
+   * gate skipped, unchanged pre-T-0739 behavior.
+   */
+  resolveReadVisibility?: ReadVisibilityResolver;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +184,8 @@ interface SourceRecordRow {
   id: string;
   registry_id: string;
   data: unknown;
+  /** T-0739: governing application id (via registry_def JOIN) — RowAncestry needs it. */
+  application_id: string;
 }
 
 async function fetchSourceRecord(
@@ -166,10 +193,14 @@ async function fetchSourceRecord(
   tenantId: string,
   recordId: string,
 ): Promise<SourceRecordRow | null> {
+  // T-0739: JOIN registry_def for application_id — mirrors records.ts's own
+  // RECORD_SELECT_JOIN pattern (r.id, r.registry_id, rd.application_id, ...).
   const res = await client.query<SourceRecordRow>(
-    `SELECT id, registry_id, data
-       FROM choros.record
-      WHERE tenant_id = $1 AND id = $2`,
+    `SELECT r.id, r.registry_id, r.data, rd.application_id
+       FROM choros.record r
+       JOIN choros.registry_def rd
+         ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
+      WHERE r.tenant_id = $1 AND r.id = $2`,
     [tenantId, recordId],
   );
   return res.rows[0] ?? null;
@@ -233,7 +264,11 @@ function makeHopFetcher(client: pg.PoolClient, tenantId: string): CrossAppHopFet
 export async function resolveLinksForRecord(
   client: pg.PoolClient,
   tenantId: string,
-  record: SourceRecordRow,
+  // T-0739: narrowed to the two fields this function actually reads —
+  // `application_id` (added to SourceRecordRow for the READ-PDP gate at the
+  // register() call site, see fetchSourceRecord) is irrelevant here, so
+  // pre-existing callers/fixtures that don't carry it keep compiling.
+  record: Pick<SourceRecordRow, "id" | "registry_id" | "data">,
   nowMs?: number, // reserved for future snapshot timestamping (unused)
 ): Promise<LinkProjection[]> {
   void nowMs;
@@ -305,7 +340,7 @@ export function registerRecordLinksRoutes(
   deps?: RecordLinksDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant } = deps;
+  const { pool, resolveActorTenant, resolveReadVisibility } = deps;
 
   // GET /api/records/:id/links
   // Returns the 1-hop LIVE cross-app projection for the record's card view.
@@ -319,6 +354,14 @@ export function registerRecordLinksRoutes(
 
       const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
+      const nowMs = Date.now();
+
+      // T-0739 (security P2, столп 4): resolve visibility ONCE per request
+      // (NF-1, mirrors records.ts) — does not depend on the record row, so it
+      // can run before the fetch below.
+      const visibility = resolveReadVisibility
+        ? await resolveReadVisibility(actor, tenantId, nowMs)
+        : undefined;
 
       const result = await withTenantTx(pool, tenantId, async (client) => {
         // Step 1: fetch source record (404 if not in tenant via RLS).
@@ -327,7 +370,23 @@ export function registerRecordLinksRoutes(
           return null;
         }
 
-        // Step 2: resolve 1-hop links for each cross_app_ref definition.
+        // Step 2 (T-0739, ADR-T0739 §3.3): source-record READ-PDP gate —
+        // mirrors records.ts's GET /api/records/:id: a record the actor
+        // cannot read gets the SAME 404 as "not found" (indistinguishable,
+        // FR-5 pattern — existence not leaked via a distinct denial code).
+        // Honest-degrade (NF-2): resolver absent → gate skipped.
+        if (visibility !== undefined) {
+          const rowAncestry: RowAncestry = {
+            recordId: record.id,
+            registryId: record.registry_id,
+            applicationId: record.application_id,
+          };
+          if (!isRecordReadable(rowAncestry, visibility.grants, visibility.ancestry, nowMs)) {
+            return null;
+          }
+        }
+
+        // Step 3: resolve 1-hop links for each cross_app_ref definition.
         const links = await resolveLinksForRecord(client, tenantId, record);
         return { record_id: id, links } satisfies RecordLinksResponse;
       });
