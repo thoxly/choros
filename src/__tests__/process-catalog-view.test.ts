@@ -81,6 +81,41 @@ describe("buildCatalogDefinitions — honesty core", () => {
     });
   });
 
+  it("T-0732: an engine-only key uses the engine_process_name overlay human name (not the bare key)", () => {
+    const out = buildCatalogDefinitions(
+      [],
+      [proj({ inst: "flw-1", procKey: "telLinear" }), proj({ inst: "flw-2", procKey: "telLinear" })],
+      new Map([["telLinear", "Канонический линейный ТЭЛ"]]),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      process_key: "telLinear",
+      name: "Канонический линейный ТЭЛ", // human name from the overlay, DATA-sourced
+      source: "engine",
+      status: "deployed",
+      version: null,
+      instance_count: 2,
+    });
+  });
+
+  it("T-0732: an engine-only key with NO overlay entry keeps the honest key fallback", () => {
+    const out = buildCatalogDefinitions(
+      [],
+      [proj({ inst: "flw-1", procKey: "telLinear" })],
+      new Map([["someOtherKey", "Другое"]]), // overlay present but no entry for telLinear
+    );
+    expect(out[0]).toMatchObject({ process_key: "telLinear", name: "telLinear", source: "engine" });
+  });
+
+  it("T-0732: the overlay does NOT override a modeler row's name (modeler precedence intact)", () => {
+    const out = buildCatalogDefinitions(
+      [def({ process_key: "telLinear", name: "Modeler ТЭЛ", status: "published", version: 2 })],
+      [proj({ inst: "flw-1", procKey: "telLinear" })],
+      new Map([["telLinear", "Overlay name (should be ignored)"]]),
+    );
+    expect(out[0]).toMatchObject({ process_key: "telLinear", name: "Modeler ТЭЛ", source: "modeler" });
+  });
+
   it("a modeler row takes precedence over the engine source for the same key, but keeps the real instance count", () => {
     const out = buildCatalogDefinitions(
       [def({ process_key: "telLinear", name: "Modeler ТЭЛ", status: "draft", version: 1 })],
