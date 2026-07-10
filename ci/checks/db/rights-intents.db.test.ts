@@ -55,6 +55,15 @@ function api(path: string, body: unknown, user = OWNER_SLUG): Promise<{ status: 
   }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) }));
 }
 
+// T-0745: GET counterpart — the substitution-coverage read backing the
+// ra-intents.jsx warning banner has no body.
+function apiGet(path: string, user = OWNER_SLUG): Promise<{ status: number; json: any }> {
+  return fetch(`http://127.0.0.1:${port}${path}`, {
+    method: 'GET',
+    headers: { 'x-dev-user': user },
+  }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) }));
+}
+
 beforeAll(async () => {
   const { createServer } = await import(join(REPO_ROOT, 'src', 'server.js'));
   server = createServer();
@@ -254,6 +263,109 @@ describe('FF-SUB-3: substitution mints a non-widening, non-delegable TTL grant (
         expect(parents.length, 'minted grant scope must match a substituted-role parent grant (⊑)').toBeGreaterThan(0);
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0745 — GET /api/rights/intents/substitution-coverage (pre-submit READ
+// backing the ra-intents.jsx "stand-in does not hold the role" warning).
+// Reuses T-0744's substituteProvidesCoverage over a LIVE role_assignment
+// holder set — this is the honest coverage signal the UI banner (variant б,
+// docs/tasks/T-0729.assessment.md §3) relies on, so it must reflect what the
+// substitute/self-absence WRITE paths actually decide (same predicate).
+// ---------------------------------------------------------------------------
+describe('T-0745: GET /api/rights/intents/substitution-coverage', () => {
+  const stamp = Date.now();
+  const roleId = randomUUID();
+  const roleSlug = `r-t0745-coverage-${stamp}`;
+  let posId = '';
+  let holderId = '';
+  let nonHolderId = '';
+
+  beforeAll(async () => {
+    await withClient(migratorUrl(), async (c) => {
+      await c.query(`SET search_path TO choros`);
+      posId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.position (tenant_id, id, department_id, slug, title, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $4, 0, 0)`,
+        [DEV_TENANT, posId, DEPT_FIN, `p-t0745-coverage-${stamp}`],
+      );
+      await c.query(
+        `INSERT INTO choros.role (tenant_id, id, slug, display_name, description, created_at, updated_at)
+         VALUES ($1, $2, $3, $3, NULL, 0, 0)`,
+        [DEV_TENANT, roleId, roleSlug],
+      );
+
+      holderId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, $3, 'human', $4, $4, 0, 0)`,
+        [DEV_TENANT, holderId, posId, `e-t0745-holder-${stamp}`],
+      );
+      createdEmployees.push(holderId);
+      const raId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, NULL, NULL, 'seed', 'seed', NULL, 'seed', NULL, 0, 0)`,
+        [DEV_TENANT, raId, holderId, roleId, JSON.stringify(FIN_NODE)],
+      );
+      createdAssignments.push(raId);
+
+      nonHolderId = randomUUID();
+      await c.query(
+        `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, $3, 'human', $4, $4, 0, 0)`,
+        [DEV_TENANT, nonHolderId, posId, `e-t0745-nonholder-${stamp}`],
+      );
+      createdEmployees.push(nonHolderId);
+    });
+  });
+
+  it('a nominated stand-in who HOLDS the role → provides_coverage: true (reuses substituteProvidesCoverage)', async () => {
+    const res = await apiGet(
+      `/api/rights/intents/substitution-coverage?role_id=${roleId}&substitute_employee_id=${holderId}`,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(res.json.provides_coverage).toBe(true);
+    expect(res.json.holder_count).toBe(1);
+  });
+
+  it('a nominated stand-in who does NOT hold the role → provides_coverage: false (drives the UI warning)', async () => {
+    const res = await apiGet(
+      `/api/rights/intents/substitution-coverage?role_id=${roleId}&substitute_employee_id=${nonHolderId}`,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(res.json.provides_coverage).toBe(false);
+    expect(res.json.holder_count).toBe(1);
+  });
+
+  it('400 VALIDATION when role_id or substitute_employee_id is missing', async () => {
+    const res1 = await apiGet(`/api/rights/intents/substitution-coverage?substitute_employee_id=${nonHolderId}`);
+    expect(res1.status).toBe(400);
+    const res2 = await apiGet(`/api/rights/intents/substitution-coverage?role_id=${roleId}`);
+    expect(res2.status).toBe(400);
+  });
+
+  it('400 VALIDATION for a malformed UUID (defense-in-depth, mirrors assertUuidShape elsewhere in this file)', async () => {
+    const res = await apiGet(`/api/rights/intents/substitution-coverage?role_id=not-a-uuid&substitute_employee_id=${nonHolderId}`);
+    expect(res.status).toBe(400);
+  });
+
+  it('an ORDINARY (non-admin) authenticated actor can still read coverage — self-service parity with self-absence\'s own write (no admin gate)', async () => {
+    // holderId/nonHolderId are plain seeded employees with no admin authority —
+    // this proves the read does NOT require loadAdminContext/isGenesisOwner,
+    // matching self-absence's own "no admin gate on the window" philosophy
+    // (an ordinary employee filling in "Я в отпуске" must see the warning too).
+    const res = await apiGet(
+      `/api/rights/intents/substitution-coverage?role_id=${roleId}&substitute_employee_id=${holderId}`,
+      `e-t0745-nonholder-${stamp}`,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(res.json.provides_coverage).toBe(true);
   });
 });
 

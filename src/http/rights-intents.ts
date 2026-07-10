@@ -51,7 +51,7 @@ import {
   isEffective,
   normalize,
 } from "../core/grant-lattice.js";
-import { eligibleForTier2 } from "../core/substitution.js";
+import { eligibleForTier2, substituteProvidesCoverage } from "../core/substitution.js";
 import { combineCriticality } from "../core/role-criticality.js";
 import { validateAdminDelegation } from "../core/scoped-admin.js";
 import { loadAdminContext } from "../db/org.js";
@@ -292,6 +292,9 @@ export function registerRightsIntentRoutes(
   registerUrgentRevoke(router, pool, resolveActorTenant);
   // T-0429: self-service absence ("я в отпуске") — actor declares THEIR OWN absence.
   registerSelfAbsence(router, pool, resolveActorTenant);
+  // T-0745: pre-submit READ backing the SubstituteForm/SelfAbsenceForm
+  // "stand-in does not hold the role" warning banner (§3.3b above).
+  registerSubstitutionCoverage(router, pool, resolveActorTenant);
 }
 
 // ===========================================================================
@@ -929,6 +932,86 @@ function registerSubstitute(
         tier: result.tier,
         ttl_grant_id: result.ttlGrantId,
         valid_until: validUntil,
+      }),
+    );
+  }));
+}
+
+// ===========================================================================
+// 3.3b substitution-coverage — T-0745 (design: docs/tasks/T-0729.assessment.md
+//   §3 variant б, docs/tasks/T-0745.spec.md §2). Pre-submit READ the
+//   SubstituteForm/SelfAbsenceForm (web/src/screens/rights/ra-intents.jsx)
+//   call to decide whether to show the "this stand-in does not hold the role"
+//   warning banner.
+//
+//   WHY A NEW READ (not the existing GET /api/rights/tenant-state,
+//   rights-overview.ts): that endpoint's self-scope projection (ordinary,
+//   non-admin caller) FILTERS assignments to `employee_id = caller` — an
+//   ordinary employee filling in "Я в отпуске" cannot see who ELSE holds
+//   their own role, so it cannot answer "does the nominated stand-in hold
+//   role X" without a false negative. This route stays deliberately minimal
+//   (role_id + substitute_employee_id in, a boolean + count out — no holder
+//   identities leak) and is gated the SAME minimal bar as registerSelfAbsence's
+//   own WRITE (extractActor + resolveTenant, no admin gate) — self-service
+//   parity: an ordinary employee must be able to read this to see the warning
+//   on their OWN self-absence declaration, same as they can already WRITE one.
+//
+//   REUSES T-0744's substituteProvidesCoverage (src/core/substitution.ts) —
+//   the SAME invariant the router/claim-gate/owner-claim already share — no
+//   second definition of "does this stand-in provide coverage". Called with
+//   ttlGrantId: null (a not-yet-declared rule has no grant), so it reduces to
+//   roleHolders.has(substituteEmployeeId): does the nominated stand-in
+//   PERSONALLY already hold role_id via their own role_assignment. The holder
+//   set query mirrors the SAME predicate registerSubstitute/registerSelfAbsence
+//   already use twice in this file for tier determination (confirmed,
+//   in-window role_assignment rows) — MINUS the absent/substitute exclusion
+//   (here we ask "does substitute hold it", not "does a THIRD party hold it"),
+//   so the warning agrees with what the write path will actually decide.
+// ===========================================================================
+
+function registerSubstitutionCoverage(
+  router: Router,
+  pool: pg.Pool,
+  resolveActorTenant?: ActorTenantResolver,
+): void {
+  router.register("GET", "/api/rights/intents/substitution-coverage", withAuth(async (req, res) => {
+    const actorId = await extractActor(req, pool);
+    const tenantId = await resolveTenant(actorId, resolveActorTenant);
+    const nowMs = Date.now();
+
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const roleId = url.searchParams.get("role_id");
+    const substituteEmployeeId = url.searchParams.get("substitute_employee_id");
+    if (!roleId || !substituteEmployeeId) {
+      throw new HttpError(400, "VALIDATION", "role_id and substitute_employee_id query params are required");
+    }
+    assertUuidShape(roleId, "role_id");
+    assertUuidShape(substituteEmployeeId, "substitute_employee_id");
+
+    const holderIds = await withTenantTx(pool, tenantId, async (client) => {
+      const { rows } = await client.query<{ employee_id: string }>(
+        `SELECT employee_id FROM choros.role_assignment
+          WHERE tenant_id = $1 AND role_id = $2
+            AND confirmed_by IS NOT NULL
+            AND (valid_until IS NULL OR valid_until > $3)`,
+        [tenantId, roleId, nowMs],
+      );
+      return rows.map((r) => r.employee_id);
+    });
+    const holderSet = new Set<string>(holderIds);
+    const providesCoverage = substituteProvidesCoverage(
+      { ttlGrantId: null, substituteEmployeeId },
+      holderSet,
+    );
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        role_id: roleId,
+        substitute_employee_id: substituteEmployeeId,
+        provides_coverage: providesCoverage,
+        holder_count: holderSet.size,
       }),
     );
   }));

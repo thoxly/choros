@@ -234,6 +234,62 @@ function FireForm({ dir }) {
 }
 
 /* ---- Подмена: X замещает Y до даты (делегированное подмножество) ---- */
+
+/**
+ * useSubstitutionCoverage — T-0745 (design: docs/tasks/T-0745.spec.md §2/§3).
+ * Pre-submit READ: whenever BOTH `roleId` and `substituteId` are chosen,
+ * asks GET /api/rights/intents/substitution-coverage whether the nominated
+ * stand-in already holds that role (server reuses T-0744's
+ * substituteProvidesCoverage — the SAME invariant the router/claim-gate/
+ * owner-claim share; this hook does not re-derive "holds the role" client-
+ * side, it only renders the server's answer). Returns:
+ *   null  — unknown (incomplete selection, still loading, or the read
+ *           failed — advisory only, never treated as "does not hold").
+ *   true  — the stand-in personally holds the role now (no warning).
+ *   false — the stand-in does NOT hold it (drives the warning banner).
+ * Never blocks the form — a failed/slow read just means no banner shows.
+ */
+function useSubstitutionCoverage(roleId, substituteId) {
+  const [providesCoverage, setProvidesCoverage] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setProvidesCoverage(null);
+    if (!roleId || !substituteId) return undefined;
+    const qs = new URLSearchParams({ role_id: roleId, substitute_employee_id: substituteId });
+    fetch(`/api/rights/intents/substitution-coverage?${qs.toString()}`, { headers: { ...authHeaders() } })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(formatError(r.status)))))
+      .then((d) => { if (alive) setProvidesCoverage(d?.provides_coverage === false ? false : true); })
+      .catch(() => { if (alive) setProvidesCoverage(null); });
+    return () => { alive = false; };
+  }, [roleId, substituteId]);
+  return providesCoverage;
+}
+
+/**
+ * substituteCoverageWarning — T-0745, pure (design: T-0729.assessment.md §3
+ * variant б, §4 wording discipline; T-0745.spec.md §4). Given the server's
+ * `providesCoverage` signal (useSubstitutionCoverage above) and a human role
+ * label, returns the warning banner text, or null when there is nothing to
+ * warn about — coverage true, OR the signal is not yet known (advisory:
+ * never renders a false "does not hold" while unresolved).
+ *
+ * Text reflects the REAL post-T-0744 behaviour: when the covering pool
+ * empties, the orphaned task goes to the tenant owner (owner-claim,
+ * T-0744 §3-в2) — NOT to this stand-in — unless `force_tier2` is checked
+ * (the checkbox below this banner in both forms), which mints a scoped
+ * temporary grant right away. Same no-"Tier-N"-jargon discipline as
+ * substituteResultMessage/selfAbsenceResultMessage.
+ */
+export function substituteCoverageWarning({ providesCoverage, roleLabel }) {
+  if (providesCoverage !== false) return null;
+  const role = roleLabel ? `«${roleLabel}»` : 'выбранную роль';
+  return `Замещающий сейчас не держит ${role} — пока роль покрыта другими держателями, `
+    + 'подмена сработает в рамках его собственных прав. Если все держатели станут '
+    + 'недоступны, задачи роли уйдут не к нему, а владельцу тенанта (роль будет '
+    + 'считаться незаполненной). Чтобы доступ получил именно этот сотрудник — '
+    + 'включите ниже «выдать собственный временный доступ».';
+}
+
 /**
  * Обязательность полей (T-0639): все 5 полей ниже требуются сервером
  * (POST /api/rights/intents/substitute 400 VALIDATION без любого из них) —
@@ -336,16 +392,57 @@ export function selfAbsenceResultMessage(data) {
   return `Отсутствие объявлено${data?.ttl_grant_id ? ' (с временным грантом для замещающего)' : ''} — маршрутизатор перенаправит ваши задачи замещающему.`;
 }
 
+/**
+ * SubstitutionCoverageHint — T-0745. Shared presentational block used by BOTH
+ * SubstituteForm and SelfAbsenceForm, so the two forms stay textually
+ * identical for the same concept (no jargon drift, matching the project's
+ * established R-1/R-2 discipline for the two forms' other static notes):
+ *   - the coverage warning banner (substituteCoverageWarning, above) —
+ *     rendered ONLY when non-null, never blocks submit (advisory);
+ *   - the `force_tier2` opt-in checkbox (T-0745 §1.2) — pipes the ALREADY
+ *     EXISTING API param (rights-intents.ts registerSubstitute:744,
+ *     registerSelfAbsence:1231) into the form; rendered unconditionally once
+ *     a substitute is picked (a deliberate opt-in for immediate access is a
+ *     legitimate choice even without the warning, e.g. an admin who wants a
+ *     stand-in ready ahead of time).
+ */
+function SubstitutionCoverageHint({ warning, forceTier2, onForceTier2Change }) {
+  return (
+    <>
+      {warning && (
+        <p className="chs-hint chs-hint--warning" role="status" data-testid="coverage-warning">
+          <KitIcon name="alert" /> {warning}
+        </p>
+      )}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text)' }}>
+        <input type="checkbox" checked={forceTier2} onChange={(e) => onForceTier2Change(e.target.checked)} />
+        Выдать замещающему собственный временный доступ сразу
+      </label>
+      <p className="chs-section2__note">
+        Замещающий получит ограниченный временный грант (не шире прав замещаемой роли) немедленно — независимо от того, есть ли другие держатели роли.
+      </p>
+    </>
+  );
+}
+
 export function SubstituteForm({ dir }) {
   const [absentId, setAbsentId] = useState('');
   const [substituteId, setSubstituteId] = useState('');
   const [roleId, setRoleId] = useState('');
   const [until, setUntil] = useState('');
   const [orgNodeId, setOrgNodeId] = useState('');
+  const [forceTier2, setForceTier2] = useState(false);
   const [result, setResult] = useState(null);
 
   const missing = missingSubstituteFields({ absentId, substituteId, roleId, until, orgNodeId });
   const canSubmit = missing.length === 0;
+
+  // T-0745: pre-submit coverage signal for the "stand-in does not hold the
+  // role" warning (see useSubstitutionCoverage/substituteCoverageWarning
+  // above) — server-decided, client only renders it.
+  const providesCoverage = useSubstitutionCoverage(roleId, substituteId);
+  const roleLabel = dir.roles.find((r) => r.id === roleId)?.label;
+  const coverageWarning = substituteCoverageWarning({ providesCoverage, roleLabel });
 
   const submit = async () => {
     setResult('loading');
@@ -356,6 +453,7 @@ export function SubstituteForm({ dir }) {
       role_id: roleId,
       valid_until: validUntil,
       org_scope: { kind: 'node', hierarchy: 'org', nodeId: orgNodeId, nodeLevel: 'department' },
+      force_tier2: forceTier2,
     });
     setResult(r.ok ? { ...r, message: substituteResultMessage(r.data), tier: r.data?.tier } : r);
   };
@@ -383,6 +481,9 @@ export function SubstituteForm({ dir }) {
         Права замещающего не шире прав замещаемой роли — попытка расширить будет отклонена сервером.
         Если замещение покрывается пулом (есть держатель, отличный от замещаемого и от самого замещающего), временный грант не выпускается; иначе замещающему выпускается ограниченный временный грант.
       </p>
+      {substituteId && (
+        <SubstitutionCoverageHint warning={coverageWarning} forceTier2={forceTier2} onForceTier2Change={setForceTier2} />
+      )}
       <div className="chs-intent__bar">
         <Button variant="primary" size="sm" loading={result === 'loading'} disabled={result === 'loading' || !canSubmit} onClick={submit}>
           Объявить подмену
@@ -416,7 +517,16 @@ function SelfAbsenceForm({ dir }) {
   const [from, setFrom] = useState('');
   const [until, setUntil] = useState('');
   const [orgNodeId, setOrgNodeId] = useState('');
+  const [forceTier2, setForceTier2] = useState(false);
   const [result, setResult] = useState(null);
+
+  // T-0745: same pre-submit coverage signal as SubstituteForm (see
+  // useSubstitutionCoverage/substituteCoverageWarning above) — here roleId is
+  // the role the ABSENT actor (self) holds, and we ask whether the nominated
+  // substitute ALSO already holds it (identical check, identical endpoint).
+  const providesCoverage = useSubstitutionCoverage(roleId, substituteId);
+  const roleLabel = dir.roles.find((r) => r.id === roleId)?.label;
+  const coverageWarning = substituteCoverageWarning({ providesCoverage, roleLabel });
 
   const submit = async () => {
     setResult('loading');
@@ -428,6 +538,7 @@ function SelfAbsenceForm({ dir }) {
       ...(validFrom ? { valid_from: validFrom } : {}),
       valid_until: validUntil,
       org_scope: { kind: 'node', hierarchy: 'org', nodeId: orgNodeId, nodeLevel: 'department' },
+      force_tier2: forceTier2,
     });
     setResult(r.ok ? { ...r, message: selfAbsenceResultMessage(r.data), tier: r.data?.tier } : r);
   };
@@ -479,6 +590,9 @@ function SelfAbsenceForm({ dir }) {
         Права замещающего не шире ваших прав — попытка расширить будет отклонена сервером.
         Если роль покрывается пулом (есть держатель, отличный от вас и от самого замещающего), временный грант не выпускается; иначе замещающему выпускается ограниченный временный грант.
       </p>
+      {substituteId && (
+        <SubstitutionCoverageHint warning={coverageWarning} forceTier2={forceTier2} onForceTier2Change={setForceTier2} />
+      )}
       <div className="chs-intent__bar">
         <Button
           variant="primary"
