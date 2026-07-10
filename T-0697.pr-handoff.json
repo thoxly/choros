@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0697",
+  "status": "pr_open",
+  "branch": "task/T-0697",
+  "ci_local": {
+    "build": true,
+    "build_result": "web: npx vite build — 546 modules transformed, 0 errors. root: npx tsc --noEmit — 0 errors (backend TS untouched by this diff, run as a full-repo sanity check).",
+    "lint": true,
+    "lint_result": "npx eslint web/src --ext .jsx (root) — 107 pre-existing problems repo-wide (informational; web/package.json's own lint script is `... || true`, i.e. not a hard gate). The ONE finding inside the touched file (ra-intents.jsx:63 'selId' unused var) is pre-existing — confirmed via `git show HEAD:...` that it predates this task's diff (this task only touched lines ~409-425 in a different function, SelfAbsenceForm). Zero new lint findings introduced by this change.",
+    "types": true,
+    "types_result": "covered by tsc --noEmit above (root) and vite build's esbuild transform (web, JSX has no separate .ts typecheck in this repo — confirmed no web-scoped tsconfig.json exists).",
+    "tests": true,
+    "tests_result": "npx vitest run src/screens/rights/ra-intents.test.jsx (web) — 21/21 passed (18 pre-existing T-0639 tests + 3 new T-0697 tests). Also ran the full web vitest suite as a broader sanity check: 2093/2093 tests passed across 96/98 files; the 2 failing files (records-form.test.js, apps-schema.test.js) fail at collection time with 'Cannot find package ajv' — a pre-existing environment/dependency gap unrelated to this diff (confirmed: neither file imports ra-intents.jsx, and `ajv` is not a web/package.json dependency at all — root-only, not resolvable from web/node_modules after a bare `npm ci` inside web/).",
+    "fitness": true,
+    "fitness_result": "Full `npm run fitness` (~330 checks) intentionally NOT run per task instruction (mechanical UI-copy change scoped to one static JSX paragraph + its test — no data/API/security surface touched). Targeted substitute: bash ci/checks/ux/ux-g5-jargon-denylist.sh — PASS (informational mode; this gate's denylist does not include 'Tier' so it neither catches nor blocks this specific class of jargon, but confirms no OTHER dev-jargon token was introduced). git diff scoped to exactly 2 files (web/src/screens/rights/ra-intents.jsx, web/src/screens/rights/ra-intents.test.jsx) — no backend/data/migration/CI files touched, so the ~300+ backend-isolation/security/migration fitness checks have no surface to exercise."
+  },
+  "files_changed": [
+    "web/src/screens/rights/ra-intents.jsx",
+    "web/src/screens/rights/ra-intents.test.jsx",
+    "T-0697.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "No ADR for this task (mechanical UI-copy follow-up from T-0639, epic T-0585). Scope followed literally: only the static hint paragraph in SelfAbsenceForm (~lines 409-412) was translated, matching T-0639's terminology for the analogous paragraph in SubstituteForm. Did NOT extend the honest tier-branch post-submit feedback pattern (substituteResultMessage-equivalent) to SelfAbsenceForm — that is a separate, larger scope (SelfAbsenceForm doesn't currently pass `tier` into ResultBanner at all, unlike SubstituteForm since T-0639) and was explicitly out of this task's mandate. Left as an open note in the new JSX comment for a future follow-up if desired."
+  ],
+  "open_questions": [
+    "SelfAbsenceForm's ResultBanner does not receive a `tier` prop (unlike SubstituteForm post-T-0639) — the backend (src/http/rights-intents.ts, registerSelfAbsence) already returns tier: \"tier1\"|\"tier2\" in the POST /api/rights/intents/self-absence response body, but the frontend post-submit message is the same generic 'Отсутствие объявлено...' regardless of tier. Whether to mirror T-0639's substituteResultMessage pattern here (honest tier-branch feedback) is a separate product decision, not part of T-0697's mechanical-copy scope."
+  ],
+  "live_proof_plan": [
+    "1. On the dev stand (currently offline), log in as a non-owner employee and open Rights → Бытовые операции прав (/rights/intents).",
+    "2. Locate the 'Я в отпуске' (SelfAbsenceForm) section and read its static explanatory paragraph below the field grid.",
+    "3. Expected: the paragraph reads 'Права замещающего строго ограничены подмножеством ваших прав — расширение прав невозможно и отклоняется сервером. Если роль покрывается пулом (есть другие активные держатели), временный грант не выпускается; иначе замещающему выпускается ограниченный временный грант.' — with NO visible 'Tier-1'/'Tier-2' tokens anywhere in the rendered text.",
+    "4. Cross-check terminology consistency: open the 'Подмена' (SubstituteForm) section directly above it and confirm both paragraphs use the same human vocabulary ('покрывается пулом', 'временный грант не выпускается', 'расширение прав невозможно и отклоняется сервером') — a reader should not notice they were written at different times.",
+    "5. Regression: submit the self-absence form with a substitute + role + org-node + until date filled; confirm the submit flow, the post-submit banner text, and the underlying POST /api/rights/intents/self-absence call are all unchanged from pre-T-0697 behavior (this task touched only static prose, not the submit/result path)."
+  ],
+  "friction_events": []
+}
