@@ -118,11 +118,24 @@ describe('SubstituteForm source — required fields are visibly marked, disabled
 // ---------------------------------------------------------------------------
 
 describe('substituteResultMessage — honest tier-aware feedback (T-0588 §1.3/FR-6)', () => {
-  it('tier 1 (role already covered) → says nothing changes right now, no false "получил доступ" claim', () => {
+  it('tier 1 (role already covered) → says no temporary access was issued, substitute acts within THEIR OWN rights, no false "получил доступ" claim', () => {
     const msg = substituteResultMessage({ tier: 1, rule_id: 'rule-1', ttl_grant_id: null, valid_until: 123 });
-    expect(msg).toMatch(/ничего не меняется/);
-    expect(msg).toMatch(/вступит в силу/);
+    expect(msg).toMatch(/не выпускался/);
+    expect(msg).toMatch(/в рамках его собственных прав/);
     expect(msg).not.toMatch(/получил временный доступ/);
+  });
+
+  it('T-0731 regression lock (mirrors T-0720 B1): tier1 message promises NO auto-escalation — the system has no tier1→tier2 re-mint mechanism', () => {
+    // Судейский блок T-0720 B1 нашёл этот же overpromise в selfAbsenceResultMessage
+    // и заблокировал его: «...вступит в силу автоматически, если этот держатель
+    // станет недоступен» — механизма авто-эскалации/ре-минта гранта при
+    // опустошении пула НЕТ (tier1 ttl_grant_id остаётся NULL навсегда; claim-гейт
+    // inbox.ts resolveTier2SubstitutionClaim даёт tier1-заместителю без
+    // собственной роли 403 NOT_ELIGIBLE). Тот же overpromise жил нетронутым в
+    // substituteResultMessage (T-0639) — T-0731 закрывает его тем же способом.
+    const msg = substituteResultMessage({ tier: 1, rule_id: 'rule-1', ttl_grant_id: null, valid_until: 123 });
+    expect(msg).not.toMatch(/автоматически/);
+    expect(msg).not.toMatch(/вступит в силу/);
   });
 
   it('tier 2 (sole holder → grant minted) → says the substitute has access now', () => {
@@ -369,6 +382,28 @@ describe('selfAbsenceResultMessage — honest tier-aware feedback (T-0720, close
     // opposite outcome.
     expect(subTier1).not.toMatch(/получил временный доступ/);
     expect(selfTier1).not.toMatch(/выпущен ограниченный временный/);
+  });
+
+  it('T-0731: tier1 messages of both forms now share the SAME honest vocabulary word-for-word (не выпускался / в рамках ... собственных прав), stricter than "not the opposite claim"', () => {
+    // T-0731 mirrored T-0720's B1 fix into substituteResultMessage using the
+    // exact same phrasing selfAbsenceResultMessage already shipped — a reader
+    // who has seen one tier1 banner should not notice the two forms were
+    // fixed in different tasks.
+    const subTier1 = substituteResultMessage({ tier: 1 });
+    const selfTier1 = selfAbsenceResultMessage({ tier: 'tier1' });
+    for (const phrase of ['временный доступ', 'не выпускался', 'в рамках', 'собственных прав']) {
+      expect(subTier1).toContain(phrase);
+      expect(selfTier1).toContain(phrase);
+    }
+  });
+
+  it('T-0731 cross-form regression lock: NEITHER tier1 message promises auto-escalation (mirrors T-0720 B1 for both forms)', () => {
+    const subTier1 = substituteResultMessage({ tier: 1 });
+    const selfTier1 = selfAbsenceResultMessage({ tier: 'tier1' });
+    for (const msg of [subTier1, selfTier1]) {
+      expect(msg).not.toMatch(/автоматически/);
+      expect(msg).not.toMatch(/вступит в силу/);
+    }
   });
 });
 

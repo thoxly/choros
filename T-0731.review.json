@@ -1,0 +1,31 @@
+{
+  "task_id": "T-0731",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/screens/rights/ra-intents.jsx:258 (substituteResultMessage JSDoc, top block, touched by this diff) vs :286 (return string)",
+      "issue": "JSDoc-объяснение говорит «роль покрыта другим держателем» (единственное число), а сам возвращаемый tier1-текст говорит «покрыта другими держателями» (множественное — дословно скопировано из selfAbsenceResultMessage по требованию консистентности). Обе строки правились в этом же диффе, разъезд не пред-существующий. Не искажает смысл (registerSubstitute/registerSelfAbsence проверяют «есть ли хотя бы один другой держатель», LIMIT 1 — множественное число технически необязательно, но и не ложно) и не влияет на регресс-лок/тесты.",
+      "suggestion": "Косметика: привести JSDoc к тому же числу, что и prose (\"держателями\"), либо наоборот. Не блокирует — чистый intra-comment wobble, тот же класс, что builder уже сам отметил в open_questions (заместитель/замещающему)."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "tier1-текст substitute не обещает несуществующей авто-эскалации tier1→tier2", "covered": true },
+    { "ac": "tier1-текст дословно совпадает с selfAbsenceResultMessage (кроме вступительной фразы события)", "covered": true },
+    { "ac": "Регресс-лок: /автоматически|вступит в силу/ не матчит tier1-сообщение ни одной из форм", "covered": true },
+    { "ac": "tier2-ветка и defensive fallback не тронуты (вне скоупа, уже честны)", "covered": true },
+    { "ac": "Гейты: tsc 0 / vitest ra-intents 41/41 / vite build 0 / rights-ui-no-new-write+anti-case+frozen-write PASS / ux-g5 PASS", "covered": true },
+    { "ac": "Диф скоуплен (только jsx+test+handoff, сервер байт-не-менялся)", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Сверено против сервера, не против handoff: src/http/rights-intents.ts:772-921 (registerSubstitute) — tier2 = forceTier2 || poolRows.length === 0 (LIMIT 1 запрос), ttlGrantId остаётся null во всей tier1-ветке (присваивается только внутри if(tier2)), ответ содержит tier: tier2 ? 2 : 1 (число) — совпадает с JSX `tier === 1`. Структурно идентично registerSelfAbsence (rights-intents.ts:1153+, тот же tier2=/ttlGrantId=null паттерн) — заявление «byte-identical tier-split shape» подтверждено чтением обеих функций, не переписано с доверием к хэндоффу.",
+      "src/http/inbox.ts:1366-1403 (resolveTier2SubstitutionClaim) — r.ttlGrantId !== null фильтр подтверждён построчно; claim-гейт на POST /api/inbox/:id/claim (строка ~1905-1911) бросает 403 NOT_ELIGIBLE, когда прямой role-check миссит И resolveTier2SubstitutionClaim возвращает undefined (что для чистого tier1-правила гарантировано фильтром) — «задачи в рамках его собственных прав» это честно отражает, а не переформулирует под красивое.",
+      "grep по всему src/ на UPDATE ...substitution_rule / ttl_grant_id вне registerSubstitute/registerSelfAbsence — нет ни одного места, которое бы мутировало ttl_grant_id после создания правила (нет cron/job/executor-шага ре-минта) — подтверждает «механизма авто-эскалации НЕТ», не просто повтор коммит-месседжа.",
+      "Мутационная RE-VERIFY регресс-лока (не по памяти о T-0720-паттерне, воспроизведено здесь): вручную вернул старый overpromise-текст в substituteResultMessage (backup+restore, файл строителя не оставлен изменённым — git diff чист после), прогнал ra-intents.test.jsx → 4/41 RED (dedicated lock + оба cross-form lock + переписанный pre-existing тест), затем восстановил файл из бэкапа и подтвердил `git status`/`git diff` чисты; повторный прогон дал 41/41 GREEN. Лок реально кусается, не декоративный.",
+      "Гейты прогнаны живьём в worktree: tsc --noEmit 0 ошибок, npx vitest run ra-intents.test.jsx 41/41 (до и после мутационной проверки), npx vite build 0 ошибок, ci/checks/rights-ui-no-new-write.sh + rights-ui-anti-case.sh + rights-ui-frozen-write.sh все PASS (base=018d2ac8, совпадает с merge-base), ci/checks/ux/ux-g5-jargon-denylist.sh PASS (70 pre-existing informational находок, все вне диффа этой задачи), eslint web/src --ext .jsx: единственная находка ra-intents.jsx:63 'selId' unused var — вне диапазона диффа (256-298), пред-существующая.",
+      "git diff origin/dev...HEAD -- ci/checks/ пуст — ни один frozen-чек не тронут (T-0146 пре-чек reviewer.md §2.5)."
+  ]
+}
