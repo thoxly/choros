@@ -1,53 +1,65 @@
 {
   "task_id": "T-0720",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": { "green": true },
+  "reverify": {
+    "round": 2,
+    "builder_fix_commit": "2a4d6c0e",
+    "b1_status": "resolved",
+    "evidence": [
+      "Новый tier1-текст сверен с сервером по каждому утверждению: покрытие пулом (poolRows, rights-intents.ts:1285-1294), нет минта (ttl_grant_id NULL, s5), перенаправление реально (executor-resolver шаг 3 / inbox batch, DAO без ttl_grant_id-фильтра), «в рамках его собственных прав» = claim-гейт inbox.ts:1856 (myRoles.includes). Обещание авто-эскалации удалено полностью.",
+      "Мутационная проверка регресс-лока: временно возвращён старый текст «…вступит в силу автоматически» → 2/38 упали (B1-лок + позитивная tier1-проверка); файл строителя восстановлен байт-в-байт, дерево чистое.",
+      "Гейты повторены судьёй: tsc 0, vitest ra-intents 38/38, rights-ui-no-new-write/anti-case/frozen-write PASS (сервер байт-не-менялся), ux-g5 PASS (informational)."
+    ],
+    "known_issue_neighbor": "substituteResultMessage tier1 (SubstituteForm, T-0639, вне охвата T-0720) несёт тот же overpromise «подмена вступит в силу автоматически…» — строитель сам вскрыл в handoff open_questions; отдельная задача заведена оркестратором. НЕ blocking для T-0720."
+  },
   "findings": [
     {
       "id": "B1",
       "severity": "blocking",
       "axis": 1,
-      "location": "web/src/screens/rights/ra-intents.jsx:99-103 (selfAbsenceResultMessage, tier1 branch)",
-      "issue": "tier1-сообщение обещает «если все остальные держатели станут недоступны, замещение вступит в силу автоматически». Механизма нет: авто-эскалации tier1->tier2 / ре-минта гранта в системе нет (поиск по src/, executor-resolver шаг 5 SLA-escalation out-of-scope). При опустошении пула executor-resolver роутит задачу tier1-замещающему (DAO не фильтрует ttl_grant_id), но claim-гейт inbox.ts:1355 отсеивает tier1 (r.ttlGrantId !== null) — не-держатель-замещающий получает 403 NOT_ELIGIBLE и задача застревает (resolver уже вернул kind:substitution, на владельца не падает). Путь достижим: сервер (registerSelfAbsence) не проверяет, что замещающий держит роль; UI-пикер = все сотрудники (ra-intents.jsx:426). Обещание = ложь для нормального пути; исход хуже прежнего generic-сообщения. Регрессия честности tier-ветки — против самой цели задачи.",
-      "suggestion": "Смягчить текст до фактического поведения (только роутинг, без «вступит в силу», как в fallback-ветке и как было до T-0720); ЛИБО обусловить обещание тем, что замещающий держит роль; ЛИБО (отдельная серверная задача) закрыть разрыв: валидировать держание роли tier1-замещающим или минтить dormant standby-грант, активируемый при опустошении пула. Выбор фикса — за строителем; минимум: не заявлять авто-вступление в силу там, где сервер не авторизует не-держателя-замещающего."
+      "location": "web/src/screens/rights/ra-intents.jsx (selfAbsenceResultMessage, tier1 branch)",
+      "issue": "[RESOLVED в 2a4d6c0e] Первая редакция tier1-сообщения обещала «замещение вступит в силу автоматически», но механизма авто-эскалации tier1->tier2 / ре-минта гранта нет (tier1 ttl_grant_id NULL навсегда, s5; claim-гейт inbox.ts:1355 отсеивает tier1-замещающего без собственной роли -> 403). ФИКС: обещание удалено, новый текст «Задачи будут перенаправляться замещающему в рамках его собственных прав» сверен с сервером и честен; регресс-лок в тесте (не матчить /автоматически|вступит в силу/) мутационно подтверждён (2/38 падают при возврате старого текста).",
+      "suggestion": "Закрыто. Регресс-лок оставить навсегда."
     },
     {
       "id": "N1",
       "severity": "nit",
       "axis": 5,
-      "location": "web/src/screens/rights/ra-intents.jsx:105 (tier2, formatDate(valid_until))",
-      "issue": "formatDate в режиме по умолчанию даёт «1 авг 2026, 13:00» (короткое имя месяца + время), а не дд.мм.гггг, как предполагал хинт задачи. Человеко-читаемо; показ времени для конца окна отсутствия уместен.",
-      "suggestion": "Оставить как есть допустимо; при желании чисто-даты использовать formatShortDate."
+      "location": "web/src/screens/rights/ra-intents.jsx (tier2, formatDate(valid_until))",
+      "issue": "formatDate по умолчанию даёт «1 авг 2026, 13:00» (имя месяца + время), не дд.мм.гггг. Человеко-читаемо; строитель осознанно оставил и отметил в handoff (after_tier2_N1_note). Принято.",
+      "suggestion": "Ок как есть; при желании чисто-даты — formatShortDate."
     },
     {
       "id": "N2",
       "severity": "nit",
       "axis": 1,
       "location": "src/db/substitution-dao.ts (SUBST_SELECT) + src/http/inbox.ts:636-676 (pre-existing, вне скоупа T-0720)",
-      "issue": "getActiveSubstitutionsByRole не фильтрует ttl_grant_id, поэтому даже ДО опустошения пула tier1-замещающий добавляется в эффективный пул роли и появляется кандидатом в инбоксе, но 403-ится на claim (не-держатель). Серверный квирк, не введён T-0720, но усиливает нечестность tier1-сообщения (B1).",
-      "suggestion": "Follow-up: в роутинге/инбоксе не показывать tier1-не-держателя-замещающего кандидатом, пока он не авторизован, или согласовать модель авторизации tier1-замещения."
+      "issue": "tier1-не-держатель-замещающий появляется кандидатом в инбоксе, но 403-ится на claim. Pre-existing серверный квирк; после фикса B1 UI-сообщение о нём больше не врёт («в рамках его собственных прав»). Follow-up T-0729 заведён — здесь не сужу.",
+      "suggestion": "Follow-up T-0729."
     },
     {
       "id": "N3",
       "severity": "nit",
       "axis": 5,
       "location": "web/src/screens/rights/ra-intents.jsx:419-421 (интро-нота формы, не тронута задачей)",
-      "issue": "Пред-существующая нота «Задачи ... будут автоматически перенаправлены замещающему, пока вы отсутствуете» — та же оптимистичность для tier1-не-держателя (мягче: про роутинг/«перенаправлены»).",
-      "suggestion": "Follow-up вместе с B1: согласовать интро-ноту с реальной семантикой tier1."
+      "issue": "Pre-existing интро-нота «Задачи … будут автоматически перенаправлены замещающему» — оптимистичность для tier1-не-держателя (мягче: про роутинг). Follow-up T-0729 — здесь не сужу.",
+      "suggestion": "Follow-up T-0729 вместе с N2."
     }
   ],
   "acceptance_coverage": [
     { "ac": "R-3: SelfAbsenceForm пост-сабмит читает server tier и даёт tier-ветвлённый фидбек", "covered": true },
-    { "ac": "R-3 честность: tier1-сообщение не врёт про поведение сервера", "covered": false },
+    { "ac": "R-3 честность: tier1-сообщение не врёт про поведение сервера (после фикса B1)", "covered": true },
     { "ac": "R-3 честность: tier2-сообщение (грант/инбокс/«не шире»/«до <дата>»)", "covered": true },
     { "ac": "R-1: обе формы «не шире … попытка расширить будет отклонена»", "covered": true },
     { "ac": "R-2: обе формы называют обоих исключаемых из пула (совпадает с SQL)", "covered": true },
     { "ac": "Кросс-форм консистентность, нет «Tier-» в prose, fallback честно-generic", "covered": true },
-    { "ac": "Гейты: tsc 0 / vitest 37/37 / vite build 0 / rights-ui + ux-g5 PASS / сервер байт-не-менялся", "covered": true }
+    { "ac": "B1 регресс-лок реален (мутационно: 2/38 падают при возврате обещания)", "covered": true },
+    { "ac": "Гейты: tsc 0 / vitest 38/38 / rights-ui PASS / ux-g5 PASS / сервер байт-не-менялся", "covered": true }
   ],
   "role_gap_evidence": [
-    "Проверено против сервера, не против handoff: registerSelfAbsence (rights-intents.ts:1284-1393) + s5/s6 (rights-intents.self-absence.authz.test.ts) — tier/ttl_grant_id/valid_until реально в ответе; frozen-write гейт PASS подтверждает сервер байт-не-менялся.",
-    "executor-resolver.ts (шаг 3 + шаг 5 out-of-scope), substitution-dao.ts (SUBST_SELECT без ttl_grant_id фильтра), inbox.ts:1343-1379/1856-1862 (claim-гейт tier2-only) — прочитаны для трассировки авто-активации tier1: механизма нет.",
-    "Гейты прогнаны в worktree живьём: tsc 0, vitest 37/37, vite build 0, rights-ui-no-new-write/anti-case/frozen-write PASS, ux-g5 PASS."
+    "Раунд 1: проверено против сервера, не против handoff — registerSelfAbsence (rights-intents.ts:1284-1393) + s5/s6; executor-resolver/substitution-dao/inbox claim-гейт трассированы для авто-эскалации: механизма нет → B1 blocking.",
+    "Раунд 2 (RE-VERIFY): новый tier1-текст пере-сверен с теми же серверными точками; регресс-лок мутационно испытан (временная правка рабочего дерева, восстановлена байт-в-байт — D-007 не нарушен, коммитов в файлы строителя нет).",
+    "Гейты прогнаны судьёй в worktree живьём в обоих раундах: tsc 0, vitest 37/37 → 38/38, rights-ui три гейта PASS, ux-g5 PASS."
   ]
 }
