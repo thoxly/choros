@@ -1704,7 +1704,11 @@ export function registerInboxRoutes(
   //   - item: full inbox item (same shape as the list, including claimBy/mine/sla)
   //   - projection (optional): { inst, procKey, status, step, startedAt } — present only for
   //     instance-backed tasks (tasks whose id is the inbox_task_id of a process.started event).
-  // Errors: 401 UNAUTHENTICATED, 404 NOT_FOUND
+  // Authz (T-0750): visible iff item.mine === true, OR the actor holds the role the task is
+  //   addressed to (resolveRolesForActor — ACTOR_ACTIVE-gated, T-0738), OR the actor is the
+  //   tenant owner (isGenesisOwnerForTenant). Otherwise honest 404 (never a 403 — matches the
+  //   GET /api/records/:id · GET /api/processes/:id precedent, does not confirm existence).
+  // Errors: 401 UNAUTHENTICATED, 404 NOT_FOUND (not found OR not addressed to this actor)
   router.register("GET", "/api/inbox/:id", withAuth(async (req, res, params) => {
     // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
     const actor = await extractActorSlug(req, () => getOrgPool());
@@ -1773,6 +1777,58 @@ export function registerInboxRoutes(
     }
 
     if (!item) {
+      throw new HttpError(404, "NOT_FOUND", "task not found");
+    }
+
+    // T-0750 (substrate, ACTOR_ACTIVE security-wave finale): this DETAIL route
+    // previously reached ZERO authority-resolvers (T-0740 ADR §7 finding,
+    // confirmed by the T-0726/T-0740 judges; actor-active-route-coverage.sh
+    // FF-726-1) — findInboxItems(actor) is tenant-scoped only, so ANY tenant
+    // member (deactivated or not, addressed or not) could read ANY task by id.
+    // LIST closed the SAME class for `tab=pool`/badges via T-0738's hardened
+    // resolveRolesForActor (composes getRoleSlugsForActor, which carries
+    // ACTOR_ACTIVE_SQL on both lookups) — reused here VERBATIM, no second
+    // authority path (single-resolver discipline, T-0662 lesson).
+    //
+    // Visibility policy — an actor may open a task's detail iff:
+    //   - item.mine === true          — current claimant/assignee (mirrors the
+    //     "mine" tab; independent of role so a claim survives a later role
+    //     change, byte-identical to LIST's own inTab("mine") semantics).
+    //   - myRoles.includes(item.role) — holds the role the task is ADDRESSED
+    //     TO (see InboxItem.role's own doc comment). Unconditional on
+    //     item.pool: role-addressing is an invariant of the task, not of its
+    //     current claim state — the "pool" TAB's stricter `pool === true`
+    //     gate only decides CLAIM eligibility (T-0365), not read-visibility;
+    //     narrowing DETAIL to pool-only would 403 a role-holder viewing a
+    //     colleague's already-claimed task, and — critically — would 403 the
+    //     "all"/"esc" tab click-through this same UI drives for every row
+    //     regardless of pool state (screen-inbox.jsx renderTaskRow opens the
+    //     SAME detail endpoint from every tab), which is a real product
+    //     regression, not a security fix.
+    //   - isGenesisOwnerForTenant     — tenant-owner oversight bypass; the
+    //     SAME deactivation-safe predicate isOwnerOrphanClaimEligible already
+    //     reuses in this file (org.ts, no bespoke SQL). Fail-closed: a DB
+    //     error never grants the bypass.
+    //
+    // A deactivated actor is refused in BOTH branches: getRoleSlugsForActor's
+    // ACTOR_ACTIVE_SQL (T-0738) makes myRoles resolve to [] for a deactivated
+    // role-holder, and isGenesisOwnerForTenant independently carries its own
+    // `deactivated_at IS NULL` (T-0658) — so a deactivated addressee/owner
+    // with a still-live residual-window JWT (T-0702) gets the SAME honest
+    // 404 as an unrelated tenant member, not a 403 — matching the T-0570/
+    // T-0721 precedent (GET /api/records/:id, GET /api/processes/:id): never
+    // confirm the task's existence to an unauthorized or deactivated caller.
+    const detailTenantId = await resolveTenant(actor);
+    const myRoles = await resolveRolesForActor(actor, detailTenantId);
+    let isDetailOwner = false;
+    if (actor) {
+      try {
+        isDetailOwner = await isGenesisOwnerForTenant(getOrgPool(), detailTenantId, actor, Date.now());
+      } catch {
+        isDetailOwner = false; // fail-closed: DB error never grants the owner bypass.
+      }
+    }
+    if (item.mine !== true && !myRoles.includes(item.role) && !isDetailOwner) {
       throw new HttpError(404, "NOT_FOUND", "task not found");
     }
 
