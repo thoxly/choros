@@ -113,8 +113,11 @@ describe('screen-process-instance — detail polish (T-0735 / T-0654-b, spec §5
   it('AC-D3: the header carries «Имя процесса · Запись-источник» as a RecordRef link', () => {
     // RecordRef is promoted into the title row (gated on hasSourceRecord), not only the sidebar.
     const titleIdx = screenSrc.indexOf('deriveInstanceTitle(instance)');
-    const titleBlock = screenSrc.slice(titleIdx, titleIdx + 1200);
+    const titleBlock = screenSrc.slice(titleIdx, titleIdx + 1800);
     expect(titleBlock).toMatch(/hasSourceRecord\(instance\)/);
     expect(titleBlock).toMatch(/<RecordRef recordId=\{instance\.recordId\}/);
+    // T-0756: the header RecordRef now receives the server-resolved safe projection
+    // so «Запись-источник» renders the human title (no raw UUID) + honest open-link.
+    expect(titleBlock).toMatch(/projection=\{instance\.sourceRecord\}/);
   });
 });
