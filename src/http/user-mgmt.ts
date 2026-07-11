@@ -779,7 +779,86 @@ export function registerUserMgmtRoutes(
     }
 
     const ts = nowMs();
-    await withTenantTx(pool, tenantId, async (client) => {
+    const writeResult = await withTenantTx(pool, tenantId, async (client) => {
+      // T-0664 — ATOMIC LAST-OWNER GUARD. The early guard above (before the KC
+      // flip) is a fast-fail, but it runs in its OWN, separate READ COMMITTED
+      // transaction with no row lock. Two concurrent PATCH{active:false} on TWO
+      // DIFFERENT active owners each ran that early guard, each saw "the OTHER
+      // owner is still active" (neither write had landed yet), so BOTH passed —
+      // then both reached this write and, before this fix, both UPDATEd,
+      // leaving the tenant with ZERO active owners (the exact self-lockout the
+      // guard exists to prevent — found in T-0658 round-3 verification).
+      //
+      // FIX: on the deactivation path, re-assert the last-owner invariant HERE,
+      // in the SAME transaction as the deactivating write, UNDER a row lock.
+      // `SELECT ... FOR UPDATE OF e` locks EVERY active tenant-owner employee
+      // row for this tenant (ordered by e.id so concurrent deactivations lock
+      // in the same order — no deadlock). Two concurrent owner-deactivations
+      // therefore contend on the shared owner set and SERIALIZE: the second one
+      // blocks until the first commits, then re-reads — the just-deactivated
+      // owner drops out of the `e.deactivated_at IS NULL` set (READ COMMITTED
+      // EPQ re-check), so the remaining target is correctly seen as the LAST
+      // owner and refused. Result: at most one of any concurrent batch
+      // succeeds; the tenant ALWAYS keeps ≥1 active owner.
+      if (active === false) {
+        // Lock the active-owner set for this tenant (serialize concurrent
+        // owner deactivations on a shared, deterministically-ordered row set).
+        await client.query(
+          `SELECT e.id
+             FROM choros.employee e
+             JOIN choros.role_assignment ra ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+             JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+            WHERE e.tenant_id = $1
+              AND r.slug = 'tenant-owner'
+              AND ra.confirmed_by IS NOT NULL
+              AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
+              AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+              AND e.deactivated_at IS NULL
+            ORDER BY e.id
+            FOR UPDATE OF e`,
+          [tenantId, ts],
+        );
+
+        // Under the lock: is the TARGET still an active tenant-owner?
+        const { rows: targetOwnerRows } = await client.query<{ one: number }>(
+          `SELECT 1 AS one
+             FROM choros.role_assignment ra
+             JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+            WHERE ra.tenant_id = $1
+              AND ra.employee_id = $2
+              AND r.slug = 'tenant-owner'
+              AND ra.confirmed_by IS NOT NULL
+              AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+              AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+            LIMIT 1`,
+          [tenantId, employeeId, ts],
+        );
+        if (targetOwnerRows.length > 0) {
+          // Under the lock: is there any OTHER active (non-deactivated) owner?
+          const { rows: otherOwnerRows } = await client.query<{ one: number }>(
+            `SELECT 1 AS one
+               FROM choros.role_assignment ra
+               JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+               JOIN choros.employee e ON e.tenant_id = ra.tenant_id AND e.id = ra.employee_id
+              WHERE ra.tenant_id = $1
+                AND ra.employee_id <> $2
+                AND r.slug = 'tenant-owner'
+                AND ra.confirmed_by IS NOT NULL
+                AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+                AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+                AND e.deactivated_at IS NULL
+              LIMIT 1`,
+            [tenantId, employeeId, ts],
+          );
+          if (otherOwnerRows.length === 0) {
+            // Race lost: a concurrent deactivation removed the last OTHER owner
+            // between our early guard and this locked re-check. Refuse WITHOUT
+            // writing — leave deactivated_at untouched so the invariant holds.
+            return { raceLostLastOwner: true as const };
+          }
+        }
+      }
+
       // T-0727 (R-5) — the WHERE clause is guarded on the CURRENT state
       // (mirrors the pre-check above, but re-asserted at write time so a
       // narrow race — a concurrent PATCH landing between the read above and
@@ -803,7 +882,7 @@ export function registerUserMgmtRoutes(
       if (transitioned.length === 0) {
         // Lost a narrow race against a concurrent identical PATCH — the
         // state is already correct; do not write a second audit event.
-        return;
+        return { raceLostLastOwner: false as const };
       }
       await userMgmtAuditWriter.appendAuditEvent(client as unknown as PgClientLike, {
         id: randomUUID(),
@@ -819,7 +898,37 @@ export function registerUserMgmtRoutes(
         payload: kcSessionsRevoked === null ? {} : { kc_sessions_revoked: kcSessionsRevoked },
         occurred_at: ts,
       });
+      return { raceLostLastOwner: false as const };
     });
+
+    if (writeResult.raceLostLastOwner) {
+      // T-0664 — the atomic guard refused the deactivation (target became the
+      // last owner while we were mid-flight). We had already optimistically
+      // flipped the KC login to disabled (KC-first, N4) and revoked its
+      // sessions BEFORE the lock could reveal this. COMPENSATE: re-enable the
+      // KC login so a REFUSED deactivation leaves NO KC-disabled last owner —
+      // otherwise the very lockout this guard prevents would happen at the KC
+      // layer. The DB never marked them deactivated, so choros/PDP already
+      // treats them as active; this only restores the KC login side. If
+      // re-enable itself fails, the account stays PDP-active (DB authoritative)
+      // and the KC login can be recovered by repeating a reactivate PATCH
+      // (ADR-T0727 §3.2 recovery path) — so swallow rather than mask the 409.
+      try {
+        await kc.setUserEnabled(kcUserId, true);
+      } catch {
+        console.warn(
+          `[user-mgmt T-0664] compensating KC re-enable failed for last-owner ` +
+            `employee ${employeeId} (kcUserId=${kcUserId}) after a refused ` +
+            `concurrent deactivation; account remains PDP-active (DB authoritative), ` +
+            `KC login recoverable via a reactivate PATCH (ADR-T0727 §3.2).`,
+        );
+      }
+      throw new HttpError(
+        409,
+        "LAST_OWNER",
+        "нельзя деактивировать единственного владельца тенанта — сначала назначьте другого владельца",
+      );
+    }
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
