@@ -923,12 +923,16 @@ export function registerProcessesRoutes(
             // T-0721 resolves READ-visibility ONCE; T-0756 REUSES the SAME
             // {grants, ancestry} for the source-record projection's canOpen (no
             // second resolve). readVis stays undefined under honest-degrade.
+            // T-0756: ONE evaluation instant for the whole visibility decision —
+            // the DETAIL gate, the participant check, and the projection's canOpen
+            // all use the SAME nowMs (no grant-window skew between the two READ-PDP
+            // evaluations of detailVisible vs sourceRecord.canOpen).
+            const gateNowMs = Date.now();
             let detailVisible = true;
             let readVis:
               | { readonly grants: readonly Grant[]; readonly ancestry: AncestryOracle }
               | undefined;
             if (startDeps.resolveReadVisibility) {
-              const gateNowMs = Date.now();
               const { grants, ancestry } = await startDeps.resolveReadVisibility(
                 actorSlug,
                 tenantId,
@@ -957,7 +961,7 @@ export function registerProcessesRoutes(
                 tenantId,
                 instanceId,
                 actorSlug,
-                Date.now(),
+                gateNowMs,
               );
             }
             if (detailVisible || participant) {
@@ -980,7 +984,7 @@ export function registerProcessesRoutes(
                   tenantId,
                   match.recordId,
                   actorSlug,
-                  Date.now(),
+                  gateNowMs,
                   readVis,
                 );
               }
