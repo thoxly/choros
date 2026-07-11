@@ -114,6 +114,25 @@ async function deployAndStart(
   return { instanceId: startResult.instanceId };
 }
 
+/**
+ * T-0672: Raw REST read of the historic-activity-instance assignee for a userTask
+ * on this instance — the ENGINE-native "кто завершил шаг" field that
+ * getHistoricActivityInstances maps to processes.ts `completedBy`. Read directly
+ * (not through the client) so the proof is independent of our own mapping code.
+ * Returns null when no matching userTask activity exists or its assignee is unset.
+ */
+async function readUserTaskAssignee(instanceId: string, taskDefKey: string): Promise<string | null> {
+  const resp = await fetch(
+    `${FLOWABLE_BASE_URL}/history/historic-activity-instances?processInstanceId=${encodeURIComponent(instanceId)}`,
+    { headers: { Authorization: 'Basic ' + Buffer.from(`${FLOWABLE_ADMIN_USER}:${FLOWABLE_ADMIN_PASSWORD}`).toString('base64') } },
+  );
+  if (resp.status !== 200) throw new Error(`GET historic-activity-instances unexpected status ${resp.status}`);
+  const body = (await resp.json()) as { data?: Array<{ activityId?: string; activityType?: string; assignee?: string | null }> };
+  const items = body.data ?? [];
+  const act = items.find((a) => a.activityType === 'userTask' && a.activityId === taskDefKey);
+  return act?.assignee ?? null;
+}
+
 /** Raw REST check — is `taskDefKey` still an ACTIVE user-task on this instance? */
 async function isTaskStillActive(instanceId: string, taskDefKey: string): Promise<boolean> {
   const resp = await fetch(
@@ -482,6 +501,75 @@ describe('T-0571 FF-3/AC-6 — engine-drive completes a GENERIC process user-tas
       // correct one-shot-action contract (unrelated to the T-0571 engine-drive fix) —
       // asserted here so a future regression that silently double-approves is caught.
       expect(secondRepeat.statusCode).toBe(404);
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // T-0672 [процессы/история] — LIVE proof: completing a userTask through the REAL
+  // HTTP approve route records WHO completed it in the engine's history
+  // (act_hi_actinst.assignee), so GET /api/processes/:id can show `completedBy`.
+  //
+  // RED on the pre-T-0672 code: reconcileInstanceEngineDrive called completeUserTask
+  // WITHOUT first claiming the task, so Flowable stored a NULL assignee on the
+  // historic activity — the exact defect (process history "кто завершил шаг = —").
+  // Verified empirically against flowable/flowable-rest:7.1.0: a bare complete →
+  // assignee=null; claim-then-complete → assignee=<actor>. GREEN after the fix
+  // (setTaskAssignee(engineTaskId, actor) before complete).
+  // -------------------------------------------------------------------------
+  it(
+    'approve records the completing actor as the userTask assignee in engine history (completedBy != null)',
+    requireDbAndFlowable(async () => {
+      const processKey = `zakupkiWho${Date.now()}`;
+      const taskDefKey = 'zakupki-who-approve';
+      const { instanceId } = await deployAndStart(processKey, taskDefKey, ROLE_1);
+
+      // Sanity: BEFORE approve, no assignee is recorded (the task is unclaimed,
+      // candidate-group only) — this is the RED starting state.
+      expect(await readUserTaskAssignee(instanceId, taskDefKey)).toBeNull();
+
+      await withClient(migratorUrl(), async (c) => {
+        await c.query('BEGIN');
+        await c.query(`SET LOCAL choros.tenant_id = '${TENANT_1}'`);
+        await appendProcessStarted(c as unknown as PgClientLike, {
+          instanceId,
+          procKey: processKey,
+          actor: 'system:test-seed',
+          nowMs: Date.now(),
+          tenantId: TENANT_1,
+          approverRole: ROLE_1,
+        });
+        await c.query('COMMIT');
+      });
+      const { rows: startedRows } = await withClient(migratorUrl(), (c) =>
+        c.query<{ id: string }>(
+          `SELECT id FROM choros.audit_event
+            WHERE tenant_id = $1 AND type = 'process.started'
+            ORDER BY occurred_at DESC LIMIT 1`,
+          [TENANT_1],
+        ),
+      );
+      const taskId = startedRows[0]?.id;
+      expect(taskId).toBeDefined();
+
+      // The REAL HTTP approve route, as APPROVER_1 (the acting human).
+      const r = await makeRequest(
+        baseUrl,
+        'POST',
+        `/api/inbox/${taskId}/action`,
+        { action: 'approve' },
+        { 'x-dev-user': APPROVER_1 },
+      );
+      expect(r.statusCode).toBe(200);
+      expect((JSON.parse(r.body) as { engine: string }).engine).toBe('completed');
+
+      // Task genuinely completed (T-0571 no-regress).
+      expect(await isTaskStillActive(instanceId, taskDefKey)).toBe(false);
+
+      // THE PROOF (T-0672): the engine's historic activity now carries the acting
+      // actor as the assignee — this is EXACTLY the value getHistoricActivityInstances
+      // maps to `completedBy` (src/http/processes.ts: completedBy: a.assignee). RED
+      // (null) before the fix, GREEN (the actor slug) after.
+      expect(await readUserTaskAssignee(instanceId, taskDefKey)).toBe(APPROVER_1);
     }),
   );
 });
