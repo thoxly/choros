@@ -9,6 +9,7 @@
     "tests": true,
     "fitness": true
   },
+  "fitness_caveat": "npm run fitness exits 1 due to ONE PRE-EXISTING failure UNRELATED to T-0756: agent-instruction-runtime-dormant.sh flags two COMMENT lines in src/http/agents.ts (42, 178 — 'agent-instruction promote path'; the check's grep -rlE is comment-unaware). PROOF it is not mine: `git diff origin/dev..HEAD -- src/http/agents.ts` is EMPTY (byte-identical to origin/dev) and agents.ts is not in this task's diff. It fails identically on a clean dev checkout. Every fitness gate AFFECTED BY or RELEVANT TO T-0756 passes (build/tsc green; process-detail-read-gate, process-detail-single-resolver, anti-uuid-actor-render, read-pdp-anti-case, rights-ui-anti-case, anti-case-lock, actor-active-route-coverage all PASS).",
   "files_changed": [
     "docs/tasks/T-0756.spec.md",
     "docs/tasks/T-0756.pr-handoff.json",
@@ -57,6 +58,7 @@
   ],
   "friction_events": [
     "CONCURRENCY HAZARD (memory: 'два агента в одном worktree стирают незакоммиченное'): a concurrent session in this shared worktree ran an interleaving `git stash` that CONSUMED my `git stash push` of the 4 impl files mid-verification — my implementation was lost from git (not in any dangling commit) and an unrelated `src/http/applications.ts` (113-insertion WIP, NOT mine) appeared modified. Recovered by re-applying all 4 files from known content and committing each IMMEDIATELY (never stashing again). applications.ts left untouched/uncommitted. LESSON: never `git stash` in a shared worktree; commit atomically and often.",
+    "PRE-EXISTING dev-baseline fitness failure (NOT T-0756): agent-instruction-runtime-dormant.sh FAILs on two comment lines in src/http/agents.ts — byte-identical to origin/dev (git diff origin/dev..HEAD -- src/http/agents.ts is empty). Flagged as a separate follow-up; out of scope here.",
     "tsc --noEmit on this repo takes >2min; run in background."
   ]
 }
