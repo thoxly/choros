@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import React from 'react';
 import {
   validateDeadline,
   readTimerAttr,
@@ -17,8 +18,87 @@ import {
   deadlineHint,
   DEADLINE_KINDS,
   ESCALATION_TARGETS,
+  TimerDeadlinePanel,
 } from './timer-deadline-panel.jsx';
 import descriptor from './choros-moddle-extension.js';
+
+/* --------------------------------------------------------------------------
+   Minimal hooks-dispatcher render (node env, no DOM) — mirrors
+   message-correlation-panel.test.jsx. Settles once with initial state.
+   -------------------------------------------------------------------------- */
+function renderOnce(Component, props) {
+  const ReactInternals =
+    React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED ||
+    React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const prev = ReactInternals.ReactCurrentDispatcher.current;
+  ReactInternals.ReactCurrentDispatcher.current = {
+    useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+    useReducer: (reducer, init) => [init, () => {}],
+    useEffect: (fn) => { try { fn(); } catch (_) { /* ignore */ } },
+    useLayoutEffect: (fn) => { try { fn(); } catch (_) { /* ignore */ } },
+    useCallback: (fn) => fn,
+    useMemo: (fn) => fn(),
+    useRef: (init) => ({ current: init }),
+    useContext: () => undefined,
+    useId: () => 'id',
+  };
+  try {
+    return Component(props);
+  } finally {
+    ReactInternals.ReactCurrentDispatcher.current = prev;
+  }
+}
+
+/** Collect string props (value/placeholder/label/aria-label/title) + string children. */
+function collectText(node, out = []) {
+  if (node === null || node === undefined) return out;
+  if (Array.isArray(node)) { for (const c of node) collectText(c, out); return out; }
+  if (typeof node !== 'object') { if (typeof node === 'string') out.push(node); return out; }
+  const p = node.props || {};
+  for (const k of ['value', 'placeholder', 'label', 'aria-label', 'title']) {
+    if (typeof p[k] === 'string') out.push(p[k]);
+  }
+  if (p.children !== undefined) collectText(p.children, out);
+  return out;
+}
+
+/** Like collectText but EXCLUDES the machine `value` prop — only user-visible copy. */
+function collectVisibleText(node, out = []) {
+  if (node === null || node === undefined) return out;
+  if (Array.isArray(node)) { for (const c of node) collectVisibleText(c, out); return out; }
+  if (typeof node !== 'object') { if (typeof node === 'string') out.push(node); return out; }
+  const p = node.props || {};
+  for (const k of ['placeholder', 'label', 'aria-label', 'title']) {
+    if (typeof p[k] === 'string') out.push(p[k]);
+  }
+  if (p.children !== undefined) collectVisibleText(p.children, out);
+  return out;
+}
+
+/** Find the first element node whose props satisfy `pred` (depth-first). */
+function findElement(node, pred) {
+  if (node === null || node === undefined) return null;
+  if (Array.isArray(node)) {
+    for (const c of node) { const r = findElement(c, pred); if (r) return r; }
+    return null;
+  }
+  if (typeof node !== 'object') return null;
+  if (pred(node)) return node;
+  return findElement((node.props || {}).children, pred);
+}
+
+// Dummy chrome components — never invoked (collectText walks props.children).
+const PanelGroup = ({ children }) => children;
+const PPEntry = ({ children }) => children;
+
+/** A boundary timer shape attached to a step that has exactly one outgoing. */
+function makeBoundaryElement() {
+  const next = { id: 'End_1', businessObject: { $type: 'bpmn:EndEvent' }, outgoing: [] };
+  const host = { id: 'Task_1', businessObject: { $type: 'bpmn:UserTask' }, outgoing: [] };
+  host.outgoing = [{ id: 'Flow_1', type: 'bpmn:SequenceFlow', source: host, target: next }];
+  const bo = { $type: 'bpmn:BoundaryEvent', id: 'Boundary_1' };
+  return { bo, element: { id: 'Boundary_1', businessObject: bo, host, outgoing: [] } };
+}
 
 describe('validateDeadline', () => {
   it('accepts a valid ISO-8601 duration', () => {
@@ -98,5 +178,73 @@ describe('TimerDeadlineExtension moddle descriptor', () => {
       expect(p.isAttr).toBe(true);
       expect(p.type).toBe('String');
     }
+  });
+});
+
+/* --------------------------------------------------------------------------
+   T-0660 — panel render: interrupt-mode control + escalation-branch affordance.
+   -------------------------------------------------------------------------- */
+describe('T-0660 — TimerDeadlinePanel renders the interrupt + escalation-branch controls', () => {
+  it('shows the "останавливает шаг / работает параллельно" control for a BOUNDARY timer', () => {
+    const { bo, element } = makeBoundaryElement();
+    const tree = renderOnce(TimerDeadlinePanel, {
+      bo, modeler: null, element, PanelGroup, PPEntry, roles: [], rolesLoading: false,
+    });
+    const joined = collectText(tree).join(' | ');
+    // Human copy — NO jargon like cancelActivity / non-interrupting on screen.
+    expect(joined).toMatch(/останавливает текущий шаг/i);
+    expect(joined).toMatch(/работает параллельно/i);
+    // Jargon must not appear in ANY user-visible copy (labels/children/aria).
+    expect(collectVisibleText(tree).join(' | ')).not.toMatch(/cancelActivity|non-interrupting|boundary/i);
+    // The one-click affordance is offered.
+    expect(joined).toMatch(/собрать напоминание с эскалацией/i);
+  });
+
+  it('HIDES the interrupt control + build button for a free intermediate timer', () => {
+    const bo = { $type: 'bpmn:IntermediateCatchEvent', id: 'Timer_free' };
+    const tree = renderOnce(TimerDeadlinePanel, {
+      bo, modeler: null, element: { businessObject: bo }, PanelGroup, PPEntry, roles: [], rolesLoading: false,
+    });
+    const joined = collectText(tree).join(' | ');
+    expect(joined).not.toMatch(/останавливает текущий шаг/i);
+    expect(joined).not.toMatch(/собрать напоминание/i);
+    // The deadline + escalation-target controls still render.
+    expect(joined).toMatch(/тип срока/i);
+  });
+
+  it('reflects a non-interrupting timer (cancelActivity=false) as "работает параллельно"', () => {
+    const { element } = makeBoundaryElement();
+    const bo = { $type: 'bpmn:BoundaryEvent', id: 'Boundary_1', cancelActivity: false };
+    element.businessObject = bo;
+    const tree = renderOnce(TimerDeadlinePanel, {
+      bo, modeler: null, element, PanelGroup, PPEntry, roles: [], rolesLoading: false,
+    });
+    const sel = findElement(
+      tree,
+      (n) => n.type === 'select' && (n.props || {})['aria-label'] === 'Что делать с текущим шагом при срабатывании таймера',
+    );
+    expect(sel).toBeTruthy();
+    expect(sel.props.value).toBe('non-interrupting');
+  });
+
+  it('enables the build button when preconditions hold, disables with a reason when not', () => {
+    // Build-ready boundary (host with one outgoing).
+    const ready = makeBoundaryElement();
+    const okTree = renderOnce(TimerDeadlinePanel, {
+      bo: ready.bo, modeler: null, element: ready.element, PanelGroup, PPEntry, roles: [], rolesLoading: false,
+    });
+    const okBtn = findElement(okTree, (n) => n.type === 'button');
+    expect(okBtn).toBeTruthy();
+    expect(okBtn.props.disabled).toBe(false);
+
+    // Boundary already escalated (has an outgoing) → button disabled + reason surfaced.
+    const built = makeBoundaryElement();
+    built.element.outgoing = [{ id: 'Flow_out', type: 'bpmn:SequenceFlow', source: built.element, target: {} }];
+    const noTree = renderOnce(TimerDeadlinePanel, {
+      bo: built.bo, modeler: null, element: built.element, PanelGroup, PPEntry, roles: [], rolesLoading: false,
+    });
+    const noBtn = findElement(noTree, (n) => n.type === 'button');
+    expect(noBtn.props.disabled).toBe(true);
+    expect(collectText(noTree).join(' | ')).toMatch(/уже собрана/i);
   });
 });
