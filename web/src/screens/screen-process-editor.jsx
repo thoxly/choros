@@ -157,11 +157,66 @@ export function ValidationBanner({ result, onDismiss }) {
 }
 
 /* --------------------------------------------------------------------------
+   T-0659: publish-time lint violations arrive from the server as structured
+   objects (src/core/bpmn-linter.ts LintViolation: { type, elementId,
+   elementKind, message }) — NOT plain strings. Piping one of those through
+   formatJsonReadable() JSON.stringifies the whole envelope and then hard-caps
+   it at 120 characters, so the actionable "Fix: ..." guidance that lives at
+   the TAIL of a long .message (e.g. timer_escalation_no_convergence) gets
+   eaten by the {type,elementId,elementKind} prefix and never reaches the
+   builder. VIOLATION_TYPE_LABELS translates the machine `type` into a human
+   rule title; the .message itself is always rendered IN FULL below it —
+   never truncated. Additive: any LintViolationType not yet listed here still
+   renders (falls back to the raw type string), it just isn't translated.
+   -------------------------------------------------------------------------- */
+const VIOLATION_TYPE_LABELS = {
+  raw_object_binding: 'Несвязанный объект',
+  malformed_xml: 'Повреждённый XML',
+  binding_mismatch: 'Несовпадение привязки данных',
+  gateway_rule_mismatch: 'Несовпадение условия шлюза',
+  parallel_gateway_imbalance: 'Разветвление шлюза не сходится',
+  timer_malformed: 'Некорректно настроен таймер',
+  message_event_incoherent: 'Несогласованное событие-сообщение',
+  agent_task_incoherent: 'Несогласованно настроен агентский шаг',
+  timer_escalation_no_convergence: 'Ветка эскалации таймера не сходится с основным потоком',
+  app_binding_unpublished: 'Привязано неопубликованное приложение',
+  step_target_unresolved: 'Не определена цель результата шага',
+};
+
+/**
+ * Renders ONE publish/lint violation. Structured violations (anything with a
+ * string .message — the LintViolation shape) get a human rule title plus the
+ * element context, with the message rendered in full underneath — never
+ * truncated. Plain strings (e.g. legacy warning entries) render as-is.
+ * Anything else falls back to formatJsonReadable, matching prior behaviour
+ * for shapes the linter has never actually emitted.
+ */
+export function ViolationItem({ v }) {
+  if (typeof v === 'string') return <li>{v}</li>;
+  if (v && typeof v === 'object' && typeof v.message === 'string') {
+    const title = VIOLATION_TYPE_LABELS[v.type] || v.type || 'Нарушение проверки';
+    const elementLabel = v.elementId
+      ? `${v.elementKind ? v.elementKind + ' ' : ''}«${v.elementId}»`
+      : (v.elementKind || null);
+    return (
+      <li className="chs-banner__violation">
+        <div className="chs-banner__violation-title">
+          {title}
+          {elementLabel ? <span className="chs-banner__violation-element"> — {elementLabel}</span> : null}
+        </div>
+        <div className="chs-banner__violation-message">{v.message}</div>
+      </li>
+    );
+  }
+  return <li>{formatJsonReadable(v)}</li>;
+}
+
+/* --------------------------------------------------------------------------
    StatusBanner
    Shows transient status messages (save OK, load error, publish result, etc.)
    Auto-dismisses after 5 seconds.
    -------------------------------------------------------------------------- */
-function StatusBanner({ message, isError, violations, onDismiss }) {
+export function StatusBanner({ message, isError, violations, onDismiss }) {
   useEffect(() => {
     if (!message) return;
     const id = setTimeout(onDismiss, isError ? 8000 : 5000);
@@ -185,7 +240,7 @@ function StatusBanner({ message, isError, violations, onDismiss }) {
       </div>
       {violations && violations.length > 0 && (
         <ul className="chs-banner__list">
-          {violations.map((v, i) => <li key={i}>{typeof v === 'string' ? v : formatJsonReadable(v)}</li>)}
+          {violations.map((v, i) => <ViolationItem key={i} v={v} />)}
         </ul>
       )}
     </div>

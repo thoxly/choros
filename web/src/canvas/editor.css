@@ -184,6 +184,14 @@
 .chs-banner__list { margin: var(--chs-space-3) 0 0; padding-left: var(--chs-space-6); line-height: var(--chs-leading-snug); }
 .chs-banner__list--warning { color: var(--chs-color-warning); }
 
+/* T-0659: structured lint-violation entries (rule title + full, untruncated
+   message) — see ViolationItem in screen-process-editor.jsx. The message is
+   allowed to wrap onto multiple lines; it is never clipped or ellipsised. */
+.chs-banner__violation + .chs-banner__violation { margin-top: var(--chs-space-3); }
+.chs-banner__violation-title { font-weight: var(--chs-weight-semibold); }
+.chs-banner__violation-element { font-weight: var(--chs-weight-regular); opacity: 0.85; }
+.chs-banner__violation-message { white-space: pre-wrap; word-break: break-word; opacity: 0.92; }
+
 /* ============================================================================
    T-0096: REAL bpmn-js container
    BpmnModelerWrapper mounts into .chs-bpmn-real-container; bpmn-js appends

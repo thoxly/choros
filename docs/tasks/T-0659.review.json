@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0659",
+  "verdict": "approved",
+  "reviewer": "adversarial-judge",
+  "branch": "task/T-0659",
+  "base": "dev@3256f627ecfdb4f8d01214fefe5b14cdd47c477a",
+  "ci_seen": { "green": true },
+  "gates_rerun_by_judge": {
+    "tsc_noEmit": "exit 0, empty output (repo-root tsconfig include=[\"src\"] — this diff touches zero files under src/, web/ is JS/JSX and outside scope by design)",
+    "vite_build": "cd web && npx vite build — 548 modules transformed, 0 errors, built in 1m55s (only the pre-existing >500kB chunk-size advisory, unrelated to this diff)",
+    "vitest_targeted_6files": "cd web && npx vitest run screen-process-editor.test.jsx screen-process-editor.errorpanel.mount.test.jsx format.test.js process-editor-api.test.js screen-record-detail.test.jsx screen-record-detail.mount.test.jsx — 6 files, 83/83 pass (exact match to builder's claim)",
+    "anti_case_lock_sh": "PASS — Phase 1 delegates clean (base=3256f627); Phase 2 full D-064 §5 denylist aggregate 15 (baseline 16) — exact match to builder's claim",
+    "ux_g6_no_new_hardcode_sh": "PASS — 0 newly-added hardcode/inline-overlay findings",
+    "ux_g5_jargon_denylist_sh": "PASS informational — findings only T-id refs inside test describe() strings (screen-process-editor.errorpanel.mount.test.jsx, screen-process-editor.test.jsx), zero in production JSX/CSS",
+    "anti_uuid_actor_render_sh": "PASS — 0 bare raw-identifier renders under web/src/screens/",
+    "full_web_vitest_2852": "NOT re-run by judge (targeted 83/83 + tsc + build all exact-matched builder's numbers; full run judged not necessary to add confidence at the cost of ~9min runtime — not a gap, a proportionality call)"
+  },
+  "server_contract_scan": {
+    "src_touched": "ZERO — `git diff dev...HEAD --name-only` returns only files under web/ and docs/tasks/; confirmed no server/src file in the diff",
+    "LintViolationType_coverage": "read src/core/bpmn-linter.ts:58-83 directly — all 11 current LintViolationType string literals (raw_object_binding, malformed_xml, binding_mismatch, gateway_rule_mismatch, parallel_gateway_imbalance, timer_malformed, message_event_incoherent, agent_task_incoherent, timer_escalation_no_convergence, app_binding_unpublished, step_target_unresolved) have an exact-key match in VIOLATION_TYPE_LABELS — no drift, no typo",
+    "formatJsonReadable_MAX_JSON_LENGTH": "unchanged (still 120, still JSON.stringify+slice) — diff on format.js is a doc-comment addition only, confirmed by reading the full diff hunk",
+    "screen-record-detail.jsx_consumer": "untouched (0 diff), still calls formatJsonReadable(val) for its own unrelated generic field-value fallback; its 43 tests + 3 mount tests re-run green, no regression"
+  },
+  "mutation_probe": {
+    "setup": "reverted the fix by hand: `<div className=\"chs-banner__violation-message\">{v.message}</div>` -> `{formatJsonReadable(v)}` (piping the WHOLE structured object through the 120-char JSON truncator again, i.e. exactly the pre-fix bug — not a fake/weaker mutation piping only v.message, which formatJsonReadable would have returned unchanged since it passes strings through verbatim)",
+    "result": "RED as required — 4/18 tests failed across the two suites: both 'full message / Fix: hint' assertions (node-env ViolationItem test + jsdom StatusBanner mount test) failed with received text truncated to the JSON-stringified envelope prefix, and the mixed-violation-list mount test failed to find 'Приложение ещё не опубликовано.' (also swallowed by the same truncation). Confirms the tests genuinely pin the fix, not incidental green.",
+    "revert": "git checkout -- web/src/screens/screen-process-editor.jsx — working tree confirmed byte-identical to HEAD via `git status --short` (empty) and `git diff --stat` (empty) before proceeding"
+  },
+  "merge_conflict_scan": {
+    "vs_current_origin/dev (b50308be, ahead of the branch's own base 3256f627 by several commits)": "git merge-tree <merge-base> origin/dev task/T-0659 — no CONFLICT/<<<<<<< markers; clean 3-way merge",
+    "T-0660 (unmerged sibling, timer-escalation-canvas branch)": "git diff dev...task/T-0660 --stat — touches only NEW files (escalation-branch-builder.js, timer-deadline-panel.jsx, escalation-branch-*.test.js, docs/tasks/T-0660.*) — zero file overlap with T-0659's diff (screen-process-editor.jsx, editor.css, format.js). No conflict surface exists between the two branches regardless of merge order.",
+    "T-0641 (already in dev, xmlns:flowable chokepoint on publish mappers)": "server-side only (process-defs.ts + mapper files) — T-0659 makes zero server changes, so there is no shared-file or shared-contract surface with T-0641 either; LintViolation shape T-0659 renders is exactly what T-0641's publish path already produced pre- and post-merge"
+  },
+  "findings": [
+    {
+      "id": "T-0659-N1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/screen-process-editor.errorpanel.mount.test.jsx",
+      "issue": "The jsdom mount test asserts the full message text is present in the DOM (screen.getByText) and that the component doesn't throw, but jsdom does not perform real layout/reflow — it cannot verify that `white-space: pre-wrap; word-break: break-word` on .chs-banner__violation-message actually prevents horizontal overflow or a broken banner at 550+ chars in a real viewport. The pr-handoff's phrasing that the mount test 'covers' the pre-wrap layout claim is a bit strong — it covers crash-freedom and text-completeness, not visual layout.",
+      "suggestion": "Non-blocking. The CSS pattern itself (pre-wrap + word-break:break-word, no fixed width/overflow:hidden ancestor) is the textbook-correct fix for this exact failure mode and .chs-banner has no max-height/overflow clip, so risk is low. If wanted, a real-browser (Playwright) screenshot/overflow assertion in a future pass would close this gap; not required to merge."
+    },
+    {
+      "id": "T-0659-N2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/lib/format.js — formatJsonReadable doc-comment; ci/checks (no fitness:db-family gate ran)",
+      "issue": "Builder's pr-handoff marks fitness_full_backend as 'NOT run' since zero backend files changed. Correct call — judge independently confirmed 0 diff under src/, migrations/, ci/checks/ — there is no backend surface this diff could regress, so skipping the ~200-gate backend fitness suite for a web-render-only change is proportionate, not a gap.",
+      "suggestion": "None — informational only."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Publish-time lint violation .message rendered in FULL, never truncated to 120 chars", "covered": true },
+    { "ac": "Fix-hint text at the tail of long messages (e.g. timer_escalation_no_convergence) reaches the user", "covered": true },
+    { "ac": "Structured rendering: Russian rule title + element context + full message, not raw JSON", "covered": true },
+    { "ac": "All 11 current LintViolationType values have a Russian label; unmapped/future types fall back to raw type string additively (never blocks render)", "covered": true },
+    { "ac": "Plain-string violations (legacy role-warning shape) render exactly as before", "covered": true },
+    { "ac": "Unknown object shapes (no .message) fall back to prior formatJsonReadable behaviour — no regression for a shape the linter has never actually emitted", "covered": true },
+    { "ac": "Server contract (LintViolation shape, 422 envelope) untouched", "covered": true },
+    { "ac": "screen-record-detail.jsx's unrelated formatJsonReadable consumer unaffected", "covered": true }
+  ]
+}
