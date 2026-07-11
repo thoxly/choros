@@ -1,0 +1,29 @@
+{
+  "task": "T-0675",
+  "title": "defaultCheckReadGrant enforces grant-row dual-control (canonical parity)",
+  "type": "bug / substrate-security (столп 4)",
+  "changes_product": 0,
+  "root_cause": "defaultCheckReadGrant (src/http/report-page-render.ts) — the application-level read gate behind GET /api/report-pages/:id/render|data — queried application/read grants with a bespoke inline SQL query that checked NEITHER the grant row's own confirmed_by NOR the T-0397 dual-control (confirmed2_by via criticalGrantPredicate). The canonical resolver getGrantsForSubject (src/db/grants-dao.ts step 3) DOES enforce both. So an UNCONFIRMED application/read grant, or a CRITICAL read grant (carrying a sensitive/garbage clearance marker) confirmed by only ONE approver, PASSED the application-level gate the single authority path would reject. Dual-control was bypassable on the application-level read path (asymmetry found on T-0632).",
+  "fix_approach": "apply-predicate (via reuse of the EXPORTED canonical classifier — NOT a re-implementation)",
+  "fix_detail": "Exported criticalGrantPredicate from grants-dao.ts (single source of truth for the T-0397 criticality axes) and reused it verbatim in defaultCheckReadGrant's grant query as `AND (NOT ${criticalGrantPredicate(\"g\")} OR g.confirmed2_by IS NOT NULL)`. Also added `AND g.confirmed_by IS NOT NULL` (base confirmation) and aligned the assignment-active predicate to the canonical T-0605 form `AND (ra.confirmed2_by IS NOT NULL OR ra.proposed_by IS NULL)`. Did NOT fully route through getGrantsForSubject because actor-authority-deactivation-gate.sh registers defaultCheckReadGrant as authority resolver C and FF-0662-1 requires it to carry its own ACTOR_ACTIVE_SQL marker on an actor slug-lookup; full delegation (0 lookups, 0 marker) would have forced editing that frozen security-gate registry (reclassification = founder-class, out of a coder's lane). The inline actor lookup + marker are preserved; only the grant-row dual-control PREDICATE (the actual asymmetry) is unified to the canonical source.",
+  "files_changed": [
+    "src/db/grants-dao.ts (export criticalGrantPredicate + JSDoc)",
+    "src/http/report-page-render.ts (import criticalGrantPredicate; add confirmed_by + dual-control + canonical assignment predicate to the grant query; export defaultCheckReadGrant as a testing seam)",
+    "ci/checks/db/report_page_render_ac6.test.ts (seed a CONFIRMED grant — previously omitted confirmed_by, encoding the hole)",
+    "ci/checks/db/report_page_render_t0193.test.ts (seed a CONFIRMED grant — same)",
+    "ci/checks/db/read-grant-dual-control.db.test.ts (NEW mutation-proof)"
+  ],
+  "resolver_unification_note": "No 3rd bespoke resolver created. The dual-control/criticality classification now has ONE source (criticalGrantPredicate in grants-dao.ts), used by both getGrantsForSubject step 3 AND defaultCheckReadGrant. Confirmed the canonical resolver registry (actor-authority-deactivation-gate.sh AUTHORITY_RESOLVERS) is unchanged; defaultCheckReadGrant stays resolver C and still carries ACTOR_ACTIVE_SQL (FF-0662-1 PASS on its 1 lookup).",
+  "mutation_proof": "RED without fix / GREEN with fix — verified against real PG (:55432). With the three added grant-row predicates reverted, read-grant-dual-control.db.test.ts case (b) single-control critical grant and case (c) unconfirmed grant both FAIL (expected ok:false, received ok:true) — proving the pre-fix gate wrongly admitted them; case (a) stays green. With the fix restored all three pass.",
+  "db_tests": {
+    "new": "ci/checks/db/read-grant-dual-control.db.test.ts (3 tests: (a) confirmed dual-control critical read-grant ALLOWED; (b) single-control critical read-grant DENIED [mutation-proof]; (c) unconfirmed non-critical read-grant DENIED [mutation-proof]) — calls exported defaultCheckReadGrant directly against the RLS-enforced choros_app pool",
+    "regression": "report_page_render_ac6 (4), report_page_render_t0193 (4), report-page-render-read-pdp/T-0632 (4), grants-dao-dual-control (11), full report_page* db suite (81) — ALL GREEN",
+    "result": "green"
+  },
+  "verify": {
+    "tsc": "tsc --noEmit → exit 0",
+    "eslint": "eslint src → 0 errors (45 pre-existing no-console warnings, none in touched files)",
+    "gates": "read-pdp-anti-case.sh PASS, single-resolver.sh PASS, grant-resolver-isolation.sh PASS, dual-control-isolation.sh PASS, actor-authority-deactivation-gate.sh PASS (FF-0662-1 + FF-0662-2), report-page-render-isolation.sh PASS"
+  },
+  "notes": "Security predicate only — no case content added to src (read-pdp-anti-case green). Frozen core files (grant-lattice.ts/object-handle.ts/types.ts/grant-resolver.ts/dual-control.ts) untouched. The two updated tests literally encoded the vulnerability (seeded confirmed_by=NULL grants and expected the gate to pass); updating them to confirmed grants preserves their real intent (ac6 mgmt_object non-leak; t0193 scope-containment)."
+}
