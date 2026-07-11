@@ -345,7 +345,10 @@ function ProcessInstanceScreen() {
                         <>
                           <span aria-hidden="true" style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-lg)' }}>·</span>
                           <span style={{ fontSize: 'var(--chs-text-md)' }}>
-                            <RecordRef recordId={instance.recordId} headers={authHeaders()} />
+                            {/* T-0756: pass the server-resolved safe projection so the
+                                «Запись-источник» renders the human title + honest open-link
+                                for a participant, without a records/:id fetch that 404s. */}
+                            <RecordRef recordId={instance.recordId} projection={instance.sourceRecord} headers={authHeaders()} />
                           </span>
                         </>
                       )}
@@ -503,7 +506,8 @@ function ProcessInstanceScreen() {
               {hasSourceRecord(instance) && (
                 <div style={{ ...fieldRowStyle, borderBottom: 'none' }}>
                   <span style={labelStyle}>Запись-источник</span>
-                  <RecordRef recordId={instance.recordId} headers={authHeaders()} />
+                  {/* T-0756: server-resolved safe projection (title + honest canOpen). */}
+                  <RecordRef recordId={instance.recordId} projection={instance.sourceRecord} headers={authHeaders()} />
                 </div>
               )}
             </aside>

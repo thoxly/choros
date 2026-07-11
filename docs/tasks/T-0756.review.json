@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0756",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N1-deactivated-audit-actor-clause1-residual",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/process-projection.ts:isInstanceParticipant clause (1) (actors.has(actorSlug), lines ~1216-1218)",
+      "issue": "Participant clause (2) role-holder is ACTOR_ACTIVE-gated (verified: getRoleSlugsForActor applies ACTOR_ACTIVE_SQL to both primary+fallback employee lookup) and clause (3) owner is deactivation-safe, BUT clause (1) audit-actor match reads the append-only audit track and is NOT deactivation-gated. A user who was DEACTIVATED after having genuinely acted on the instance therefore still resolves as a participant during the residual ~300s access-JWT window (the T-0702/T-0726 window) and receives 200 skeleton + sourceRecord{title, canOpen:false}, whereas on current dev (T-0721) they would 404. Exposure is strictly bounded: canOpen is false (READ-PDP with their now-empty grants fails), no appId, NO variables/history/completedBy, NO record.data fields — the entire T-0721/T-0726 sensitive plane stays closed; only the record's human title label leaks, to someone who already legitimately acted on that instance, for ~5 min. Spec §1.2 acknowledges clause (1) is a past action (its reassurance 'denied the live record projection' is substantively true — canOpen:false, no openable record, no data — though the phrasing understates that a title-only projection IS returned).",
+      "suggestion": "Non-blocking. Consider a follow-up to either ACTOR_ACTIVE-gate the clause-(1) audit-actor set (align with clauses 2/3) or make the spec explicit that a deactivated former-actor retains title-only, canOpen:false skeleton visibility for the residual-JWT window. No sensitive-plane data is exposed, so this does not gate the merge."
+    },
+    {
+      "id": "N2-recordref-initial-render-appid-fallback",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/components/components.jsx:RecordRef useState(projLinkAppId || appId || null) (~line 305)",
+      "issue": "When a projection is present with canOpen:false, projLinkAppId is null, but the initial targetAppId useState falls back to the legacy `appId` prop (projLinkAppId || appId || null). A caller passing BOTH a legacy appId prop AND a canOpen:false projection would momentarily render an <a> link on the first render before the useEffect (same tick) resets targetAppId to null. No actual call site does this (the two screen-process-instance call sites pass only recordId+projection+headers, appId undefined), and clicking the transient link hits GET /api/records/:id which is independently PDP-gated, so there is no security impact — a display-only edge for a hypothetical dual-prop caller.",
+      "suggestion": "Non-blocking. If desired, initialize targetAppId from projLinkAppId alone when hasProjection is true, ignoring the legacy appId prop, to avoid the one-frame link flash for a mixed-prop caller."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1 reader unchanged + sourceRecord{canOpen:true,appId} on published", "covered": true },
+    { "ac": "AC-2 RED→GREEN participant safe projection, no 404, no variables/history (SRP-1; mutation 6/8 RED)", "covered": true },
+    { "ac": "AC-3 canOpen honest to sandbox/draft: reader-not-creator false, creator true (SRP-4)", "covered": true },
+    { "ac": "AC-4 fail-closed stranger → 404 (SRP-2)", "covered": true },
+    { "ac": "AC-5 no field leak: title present, SECRET absent, no variables/history (SRP-5)", "covered": true },
+    { "ac": "AC-6 cross-tenant → 404 (SRP-6)", "covered": true },
+    { "ac": "AC-7 record-less instance → no sourceRecord (unit; record-less unnarrowed)", "covered": true },
+    { "ac": "AC-8 frontend RecordRef renders projection title, link iff canOpen&&appId, no fetch (web 4/4 jsdom)", "covered": true },
+    { "ac": "AC-9 anti-case D-064: no case literals in src/web diff; fixtures generic (anti-case-lock, read-pdp-anti-case, rights-ui-anti-case PASS)", "covered": true },
+    { "ac": "AC-10 isolation gates green (process-detail-read-gate, process-detail-single-resolver, actor-active-route-coverage PASS)", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Independently re-ran (adversarial judge, not builder): tsc --noEmit exit 0.",
+    "Live-PG T-0756-source-record-projection.db.test.ts 8/8 GREEN solo (choros_app RLS role); earlier 6-fail run was a transient Postgres recovery-mode crash (57P03) amplified by 7 concurrent sibling-worktree tsc processes (load avg 40-65), NOT the code.",
+    "MUTATION reproduced: git checkout dev -- src/http/processes.ts → 6/8 RED (SRP-1/3/4x2/5/7), fail-closed controls SRP-2 and SRP-6 stay GREEN; restored via git checkout HEAD, tree clean.",
+    "Regression live-PG: processes-read-visibility (T-0721) 14/14, records-read-pdp 4/4, process-projection 7/7 = 25/25 GREEN.",
+    "Unit: processes-read-visibility.test.ts 22 + processes-live-instances.test.ts 35 = 57/57 GREEN.",
+    "Web: full suite 2847/2847 GREEN incl. record-ref-projection.test.jsx 4/4 (real jsdom mounts: link iff canOpen, no fetch, sentinel≠raw-UUID, backward-compat fetch path).",
+    "Targeted fitness PASS: process-detail-read-gate, process-detail-single-resolver, actor-active-route-coverage, ux/anti-uuid-actor-render, read-pdp-anti-case, anti-case-lock, rights-ui-anti-case, start-route-isolation, process-list-display-plane-isolation, single-resolver, grant-resolver-isolation.",
+    "Pre-existing fitness failure agent-instruction-runtime-dormant.sh confirmed UNRELATED: git diff dev...HEAD -- src/http/agents.ts is EMPTY (byte-identical to dev) and agents.ts is not in the T-0756 diff; comment-unaware grep flags a comment line. Follow-up T-0758, not scope.",
+    "Attack #3 (participant leak): participant body = projectionToInstance skeleton (id/name/procId/status/node/nodes/started/elapsed/progress/execs/recordId?/startedAtMs/starterId/starterType) + sourceRecord{id,title,typeLabel,canOpen,appId?} ONLY; no variables/history/completedBy, no nested record.data. Confirmed by code read + SRP-5.",
+    "Attack #5 (oracle): handler resolves `match` from listInstanceProjections(pool, ACTOR-tenant) BEFORE any visibility decision; cross-tenant/nonexistent id → match undefined → 404 before participant check runs; stranger to a real same-tenant instance → 404. No existence enumeration.",
+    "Attack #6 (canOpen honesty): sandbox predicate `tier !== 'draft'` is provably equivalent to records.ts sandboxReadPredicate `tier = 'published'` given application_tier_check CHECK(tier IN ('draft','published')) [migration 049] and Tier='draft'|'published'; actorIsPrivileged = isOwnerOrAdmin || hasAuthoringDraftGrant identical to records.ts; canOpen = isRecordReadable ∧ sandboxOpenable = exact GET /api/records/:id 200 predicate. Both directions pinned by SRP-3/SRP-4.",
+    "Attack #7 (T-0721 regression): reader path additive — sole new field is sourceRecord; variables/history/completedBy/starter byte-identical; T-0721 14/14 green; non-participant+no-READ still 404.",
+    "Merge-cleanliness: git merge-tree --write-tree dev(3256f627) HEAD → exit 0, single tree SHA, no conflict section. diff dev...HEAD = exactly the 9 claimed files, no strays. Tree clean after the orchestrator's applications.ts removal + my mutation restore."
+  ]
+}
