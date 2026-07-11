@@ -1511,7 +1511,7 @@ describe("T-0522 reconcileInstanceEngineDrive — direct unit (mock engine)", ()
     const engine: EngineDriveReconcilePort = {
       getActiveUserTasks: vi.fn(async () => {
         order.push("getActiveUserTasks");
-        return { ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "Согласовать", candidateGroups: ["role-approver"] }] };
+        return { ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "wf-step", name: "Шаг", candidateGroups: ["role-x"] }] };
       }),
       setTaskAssignee: vi.fn(async () => { order.push("setTaskAssignee"); return { ok: true as const }; }),
       completeUserTask: vi.fn(async () => { order.push("completeUserTask"); return { ok: true as const }; }),
@@ -1519,7 +1519,7 @@ describe("T-0522 reconcileInstanceEngineDrive — direct unit (mock engine)", ()
     };
 
     const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
-      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "wf-step",
       completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
     });
 
@@ -1544,7 +1544,7 @@ describe("T-0522 reconcileInstanceEngineDrive — direct unit (mock engine)", ()
       // Base step: taskDefKey omitted → resolve-by-instance picks the single active task.
       getActiveUserTasks: vi.fn(async () => {
         order.push("getActiveUserTasks");
-        return { ok: true as const, tasks: [{ id: "eng-generic", taskDefinitionKey: "zakupki-approve", name: "Согласовать закупку", candidateGroups: ["role-approver"] }] };
+        return { ok: true as const, tasks: [{ id: "eng-generic", taskDefinitionKey: "wf-generic-step", name: "Шаг процесса", candidateGroups: ["role-x"] }] };
       }),
       setTaskAssignee: vi.fn(async () => { order.push("setTaskAssignee"); return { ok: true as const }; }),
       completeUserTask: vi.fn(async () => { order.push("completeUserTask"); return { ok: true as const }; }),
@@ -1570,12 +1570,12 @@ describe("T-0522 reconcileInstanceEngineDrive — direct unit (mock engine)", ()
     // A port stub WITHOUT setTaskAssignee (the dozens of existing partial mocks) —
     // completion proceeds unchanged; completedBy simply stays unrecorded (pre-fix behaviour).
     const engine: EngineDriveReconcilePort = {
-      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "x", candidateGroups: ["role-approver"] }] })),
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "wf-step", name: "Шаг", candidateGroups: ["role-x"] }] })),
       completeUserTask: vi.fn(async () => ({ ok: true as const })),
       isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
     };
     const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
-      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "wf-step",
       completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
     });
     expect(res.ok).toBe(true);
@@ -1590,14 +1590,14 @@ describe("T-0522 reconcileInstanceEngineDrive — direct unit (mock engine)", ()
 
     const order: string[] = [];
     const engine: EngineDriveReconcilePort = {
-      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "x", candidateGroups: ["role-approver"] }] })),
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "wf-step", name: "Шаг", candidateGroups: ["role-x"] }] })),
       // Claim fails (transient engine error) — MUST NOT block the human's committed decision.
       setTaskAssignee: vi.fn(async () => { order.push("setTaskAssignee"); return { ok: false as const, code: "ENGINE_UNAVAILABLE" }; }),
       completeUserTask: vi.fn(async () => { order.push("completeUserTask"); return { ok: true as const }; }),
       isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
     };
     const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
-      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "wf-step",
       completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
     });
     // Non-fatal: completion proceeds; result is a normal success (NOT a 502).
@@ -1613,13 +1613,13 @@ describe("T-0522 reconcileInstanceEngineDrive — direct unit (mock engine)", ()
     await seedStarted(pool, D_TENANT, D_INST);
 
     const engine: EngineDriveReconcilePort = {
-      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "x", candidateGroups: ["role-approver"] }] })),
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "wf-step", name: "Шаг", candidateGroups: ["role-x"] }] })),
       setTaskAssignee: vi.fn(async () => ({ ok: true as const })),
       completeUserTask: vi.fn(async () => ({ ok: true as const })),
       isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
     };
     const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
-      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "wf-step",
       completeEngineTask: true, actor: "", pollTimeoutMs: 100, pollIntervalMs: 5,
     });
     expect(res.ok).toBe(true);
