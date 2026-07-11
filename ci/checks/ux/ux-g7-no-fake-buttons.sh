@@ -58,11 +58,23 @@
 #   (no false judgement on a truncated view).
 #
 #   This is still a heuristic, not a parser (portable bash 3.2 POSIX-ERE, no
-#   PCRE, no new deps): finding the tag-closing `>` is done by stripping the
-#   `=>`/`>=` two-char tokens (arrow functions / numeric comparisons) before
-#   testing for a leftover `>` — a bare `>` comparison inside a JSX expression
-#   (e.g. `{count > 5}`) can still misfire as a tag boundary; none of the
-#   controls this gate guards use that shape today.
+#   PCRE, no new deps): finding the tag-closing `>` is done by first erasing
+#   every `{...}` JSX-expression span (brace-depth tracked, so nested braces
+#   like `{(e) => e.preventDefault()}` erase as one unit) from a scratch copy
+#   of the block text, THEN stripping the `=>`/`>=` two-char tokens (defensive,
+#   for anything at depth 0), THEN testing for a leftover `>` (T-0730: this
+#   closed a two-sided hole — a bare `>` comparison inside a JSX expression,
+#   e.g. `{count > 5}`, used to (a) FALSE-POSITIVE an honest control whose
+#   reason marker lands on a later line, by closing the block early on the
+#   in-expression `>` before the reason marker was ever folded in, and (b)
+#   FALSE-NEGATIVE a genuine fake button, because the premature close judged
+#   an incomplete (reasonless AND inert-marker-less) block, found nothing,
+#   reset tracking, and then silently dropped the rest of the tag — including
+#   its real `aria-disabled` and closing `>` — since a continuation line that
+#   doesn't itself start a new `<Tag` is ignored outside block-tracking. The
+#   erase-braces-first pass means the scan never even sees a `>` that lives
+#   inside a `{...}` expression, so the block keeps accumulating until the
+#   REAL closing `>` outside any brace).
 #
 # MODE — INFORMATIONAL (default): prints findings, exits 0. Pass --required to
 # fail (exit 1) on any newly-added fake button.
@@ -103,11 +115,42 @@ judge_block() {
   fi
 }
 
+# strip_brace_exprs <text> — erases every `{...}` JSX-expression span from
+# <text> (brace-depth tracked, so a nested `{(e) => e.preventDefault()}` or
+# `{x > 5}` erases as one unit, whatever `>`/`{`/`}` characters it carries
+# inside). An expression left open at end-of-text (continues on a later diff
+# line) stays "open" — depth carries nothing across calls since each call
+# gets a fresh copy of the FULL accumulated block, so a still-unbalanced `{`
+# simply erases everything after it, which is safe: the real tag-closing `>`
+# can never live before its own attribute expression closes.
+strip_brace_exprs() {
+  local s="$1" out="" depth=0 ch i len
+  len=${#s}
+  for (( i = 0; i < len; i++ )); do
+    ch="${s:i:1}"
+    if [[ "${ch}" == "{" ]]; then
+      depth=$((depth + 1))
+      continue
+    fi
+    if [[ "${ch}" == "}" ]]; then
+      [[ "${depth}" -gt 0 ]] && depth=$((depth - 1))
+      continue
+    fi
+    [[ "${depth}" -eq 0 ]] && out+="${ch}"
+  done
+  printf '%s' "${out}"
+}
+
 # has_tag_close <text> — true iff <text> carries the `>` (or `/>`) that closes a
-# JSX opening tag, i.e. a `>` that survives stripping the two-char tokens `=>`
-# (arrow functions) and `>=` (numeric comparisons) first.
+# JSX opening tag. T-0730: a bare `>` comparison inside a `{...}` JSX
+# expression (e.g. `{count > 5}`) is NOT a tag boundary — so every `{...}`
+# span is erased FIRST (strip_brace_exprs), then the leftover `=>`/`>=`
+# two-char tokens (arrow functions / numeric comparisons that could still sit
+# at depth 0, defensive) are stripped, before testing for a leftover `>`.
 has_tag_close() {
-  local tmp="${1//=>/  }"
+  local tmp
+  tmp="$(strip_brace_exprs "$1")"
+  tmp="${tmp//=>/  }"
   tmp="${tmp//>=/  }"
   [[ "${tmp}" == *">"* ]]
 }
@@ -246,6 +289,35 @@ if [[ "${1:-}" == "--self-test" ]]; then
   fi
   echo "  [OK] T-0699: multi-line honest control (title on a different line) not flagged"
 
+  # --- T-0730 (closes N-3, T-0699 review): the two label-substring checks above
+  # are CROSS-MODE WEAK — they only assert the control's own LABEL text never
+  # appears in a finding. A regression to the pre-T-0699 line-local heuristic
+  # would still flag these SAME honest controls (it judges the bare
+  # `aria-disabled="true"` line and the bare `onClick={(e) => e.preventDefault()}`
+  # line each on their own, with no reason on either single line) — but the
+  # label lives on a THIRD line, so it never lands in that flagged text either,
+  # and the checks above would keep passing right through the regression
+  # (empirically confirmed: reverting to line-local scoring on this exact
+  # fixture set turns 3 findings into 8, entirely via these bare attribute
+  # lines from the two honest multi-line controls — the label-substring checks
+  # above do not move). Classify each honest control IN ISOLATION and require
+  # ZERO findings: this fails loudly (printing the bogus finding) on ANY
+  # regression that flags a fragment of the block, not only ones that happen
+  # to relabel the flagged text the same way line-local did.
+  honest_describedby_diff=$'+++ b/web/src/app-shell/shell.jsx\n+        <Button\n+          variant="secondary"\n+          size="sm"\n+          aria-disabled="true"\n+          aria-describedby="hint-multiline-ok"\n+          className="chs-btn--stub"\n+          onClick={(e) => e.preventDefault()}\n+        >ЧестнаяДискрайб</Button>'
+  honest_describedby_out="$(printf '%s\n' "${honest_describedby_diff}" | classify_added_lines)"
+  if [[ -n "${honest_describedby_out}" ]]; then
+    echo "SELF-TEST FAIL (T-0730/N-3): isolated multi-line honest control (aria-describedby on a different line) produced a finding when classified ALONE: ${honest_describedby_out}"; exit 2
+  fi
+  echo "  [OK] T-0730: isolated multi-line honest control (aria-describedby) yields ZERO findings — cross-mode-strengthened, catches a line-local regression the label-only check above would miss"
+
+  honest_title_diff=$'+++ b/web/src/app-shell/shell.jsx\n+        <Button\n+          variant="secondary"\n+          size="sm"\n+          aria-disabled="true"\n+          className="chs-btn--stub"\n+          title="Нет записей для экспорта"\n+          onClick={(e) => e.preventDefault()}\n+        >ЧестнаяТайтл</Button>'
+  honest_title_out="$(printf '%s\n' "${honest_title_diff}" | classify_added_lines)"
+  if [[ -n "${honest_title_out}" ]]; then
+    echo "SELF-TEST FAIL (T-0730/N-3): isolated multi-line honest control (title on a different line) produced a finding when classified ALONE: ${honest_title_out}"; exit 2
+  fi
+  echo "  [OK] T-0730: isolated multi-line honest control (title) yields ZERO findings — cross-mode-strengthened, catches a line-local regression the label-only check above would miss"
+
   # A tag that never closes before a hunk boundary must be dropped silently —
   # no false judgement on a truncated view, no crash.
   boundary_diff=$'+++ b/web/src/app-shell/shell.jsx\n@@ -1,3 +1,6 @@\n+        <Button\n+          aria-disabled="true"\n@@ -10,2 +13,2 @@\n+          onClick={(e) => e.preventDefault()}\n+        >ХвостБезГраницы</Button>'
@@ -254,6 +326,39 @@ if [[ "${1:-}" == "--self-test" ]]; then
     echo "SELF-TEST FAIL (T-0699): a tag truncated by a hunk boundary produced a finding instead of being dropped: ${boundary_out}"; exit 2
   fi
   echo "  [OK] T-0699: tag truncated at a hunk boundary is dropped, not judged"
+
+  # --- T-0730 (closes N-1, T-0699 review): bare `>` comparison inside a `{...}`
+  # JSX expression must NOT be mistaken for the tag-closing `>` — two-sided.
+  # Both fixtures put the inert marker (aria-disabled) BEFORE the `{x > 5}`
+  # expression line — that ordering is what actually exercises the bug: the
+  # old `has_tag_close` (no brace-awareness) sees the bare `>` survive its
+  # `=>`/`>=` stripping and treats the block as closed right there, so
+  # `judge_block` runs on a PARTIAL block that already carries aria-disabled
+  # but hasn't reached anything past the `{x > 5}` line yet.
+  #
+  # (a) HONEST control: reason marker (aria-describedby) lands AFTER the
+  #     `{x > 5}` line. Old bug: partial block = inert + no reason yet →
+  #     WRONGLY FLAGGED (verified empirically against the pre-T-0730 code).
+  bareexpr_honest_diff=$'+++ b/web/src/app-shell/shell.jsx\n+        <Button\n+          aria-disabled="true"\n+          data-count={x > 5}\n+          aria-describedby="cnt-hint"\n+        >ЧестнаяСравнение</Button>'
+  bareexpr_honest_out="$(printf '%s\n' "${bareexpr_honest_diff}" | classify_added_lines)"
+  if [[ -n "${bareexpr_honest_out}" ]]; then
+    echo "SELF-TEST FAIL (T-0730/N-1): a honest control with a bare '>' comparison ({x > 5}) BEFORE its reason marker was flagged: ${bareexpr_honest_out}"; exit 2
+  fi
+  echo "  [OK] T-0730: honest control (aria-disabled, then {x > 5}, then reason) not flagged"
+
+  # (b) FAKE button: no reason anywhere in the tag. Old bug: the SAME premature
+  #     close judges the partial block (inert, no reason YET — REASON_RE fails
+  #     same as a real miss) → prints NOTHING (not a false negative on this
+  #     partial judgement alone), resets tracking, and then silently drops
+  #     the rest of the tag (the closing '>' line doesn't itself start a new
+  #     '<Tag' so it's ignored outside block-tracking) — the fake button is
+  #     never flagged at all. Must still be flagged after the fix.
+  bareexpr_fake_diff=$'+++ b/web/src/app-shell/shell.jsx\n+        <Button\n+          aria-disabled="true"\n+          data-count={x > 5}\n+        >ФейкСравнение</Button>'
+  bareexpr_fake_out="$(printf '%s\n' "${bareexpr_fake_diff}" | classify_added_lines)"
+  if ! grep -q $'inert-control-no-visible-reason\t.*ФейкСравнение' <<<"${bareexpr_fake_out}"; then
+    echo "SELF-TEST FAIL (T-0730/N-1): missed a fake button whose bare '>' comparison ({x > 5}) precedes the tag close, with no reason anywhere: got [${bareexpr_fake_out}]"; exit 2
+  fi
+  echo "  [OK] T-0730: fake button (aria-disabled, then {x > 5}, no reason) still flagged"
 
   echo "[T-0652] ux-g7-no-fake-buttons: --self-test PASS"
   exit 0
