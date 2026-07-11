@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0743",
+  "verdict": "changes_requested",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "src/http/assistant.ts:1008-1113 (case apply_form_document_op, tier discriminant) + docs/tasks/T-0743.spec.md §4.4 mini-ADR + src/core/assistant-configurator.ts:317-347 (tool doc)",
+      "issue": "The mini-ADR's central safety claim — «тул пишет ТОЛЬКО когда процесс резолвится в приложение tier='draft' ... НИЧЕГО не меняет для published ... бот ⊂ человек» / SECURITY INVARIANT 1 «draft-only» — is FALSIFIED for the mixed-tier multi-binding topology, and it is completely untested. ROOT CAUSE (schema, confirmed): form_binding's natural key is (tenant_id, process_key, form_key) with NO application dimension (migration 045; the 075 comment states form_binding 'carries NO application linkage'), while process_app_binding UNIQUE(tenant_id, process_key, application_id) (migration 075) permits ONE process bound to MANY apps. The tier discriminant resolves the BOUND APPLICATION's tier, but the write (applyFormDocumentOp UPDATE, forms-document-ops.ts) and the runtime form-serving read (binding.ts:253 getBinding) are BOTH keyed only by (process_key, form_key) — a single shared form surface. PROVEN LIVE (adversarial probe, live PG): a process bound to APP_DRAFT(draft)+APP_PUB(published) sharing one form_binding row → pin=APP_DRAFT → tier gate PASSES → write SUCCEEDS (version 1→2). That same row is exactly what the PUBLISHED app APP_PUB renders to real users. So the autonomous LLM CAN change what a published application shows, with no human promote, by pinning a co-bound draft app — the precise outcome the configurator's DRAFT-ONLY architecture exists to prevent for a bot. The builder's AC-c fixtures are deliberately BOTH draft (T-0743-...db.test.ts:143-148); the draft+published multi-binding case is never exercised. NOTE: bot ⊆ human still holds on raw authority (the human /api/forms/document-ops route has NO tier gate and writes the same shared row with any/no pin), so this is not a privilege-escalation ABOVE human — but per the review mandate (attack 2b) a draft-pin write to a published-rendered surface via a shared document is blocking regardless, because the tool's stated invariant is false and a live/published surface is reachable by the LLM without a promote.",
+      "suggestion": "Close the leak: in the executor, when candidates.length > 1, refuse (fail-closed) if ANY co-bound application is not tier='draft' — a draft pin must NOT succeed while the same (process_key, form_key) surface is also served by a published app, because form_binding is not per-application. (applicationTier is already on every candidate, so this is a small guard over the existing candidates list, not new IO.) Add a mixed-tier AC to T-0743-...db.test.ts: process bound to one draft + one published app, pin the draft → expect refusal, form_binding untouched. Alternatively, if the founder decides an autonomous LLM MAY mutate a published-rendered form (within human authority), that is a product decision (see governance note) — then re-word §4.4 to drop the 'draft-only / published untouched' claim and lock the mixed-tier behavior with a test asserting it is intended."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "docs/tasks/T-0743.pr-handoff.json (live_proof_plan) + D-064 (epic=live-proof)",
+      "issue": "The user-facing capability (LLM actually calling apply_form_document_op at the right moment, and honestly ASKING on ambiguity instead of inventing an applicationId) is NOT lived — live_proof_plan says «NOT YET EXECUTED — непрожитым остаётся ТОЛЬКО LLM-звено». Server mechanics (schema, PURE op-validation, tier gate, role gate, ASK report, applyFormDocumentOp reuse) are genuinely proven via unit + live-PG, and live-proof was not a listed T-0743 gate (stand offline this wave), so this is not blocking — but under D-064 the tool's product promise remains unproven until the LLM link is exercised end-to-end.",
+      "suggestion": "When the stand returns, run the 4-step live_proof_plan (draft-form edit succeeds; published-form edit refused with human-readable text; multi-binding without pin → assistant names both candidates and asks). Fold into the E-FORMS live-proof batch."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/assistant.ts:1096-1100 (comment: «candidates.length === 0 → the shared function's own 404/409 fail-closed path handles it»)",
+      "issue": "The comment says the zero-binding case is handled by a 404/409 in the shared function; the actual fail-closed is a 409 WRONG_FLOOR from classifyLayoutSave (resolveLiveSchemaFieldKeys === null), verified live (AC-y). The behavior is correct and fail-closed, but the comment's «404/409» is imprecise about which code fires and why (it is not a NOT_FOUND — the form layout exists; it is WRONG_FLOOR because no live registry schema resolves).",
+      "suggestion": "Tighten the comment to name the 409 WRONG_FLOOR (unresolvable live schema) path specifically, matching AC-y's assertion, so a future reader is not misled into expecting a 404."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "applyFormDocumentOp EXTRACTED (not copied) from the route into forms-document-ops.ts; route is now a thin HTTP shell calling it — one function on both paths", "covered": true},
+    {"ac": "TOOL_APPLY_FORM_DOCUMENT_OP registered in CONFIGURATOR_TOOLS; processToolCall does structural validation only (JSON object with string kind), closed op vocabulary NOT duplicated (lives solely in applyDocumentOp)", "covered": true},
+    {"ac": "executor resolves tier via listProcessAppBindingCandidates(+applicationTier additive); ambiguous multi-binding NOT resolved locally → shared function's 422 AMBIGUOUS_APPLICATION becomes the honest ASK; checkRole (process_designer/owner) reused verbatim (bot ≤ human on the role axis — AC-f)", "covered": true},
+    {"ac": "Branch ordering: garbage/stale pin (real-but-unbound app) refused BEFORE ambiguity (AC-x); does not skip the tier check", "covered": true},
+    {"ac": "Mutation: neutralizing the tier check turns AC-d (published → refuse) RED — the tier gate is load-bearing and truly tested", "covered": true},
+    {"ac": "Gates re-run by judge: tsc 0; configurator 56/56; auth-gate db 8/8; regressions T-0725 5/5 + T-0711 7/7 + T-0724 2/2; anti-case aggregate 15<16; http-route-auth-coverage PASS; deactivation-gate PASS; frozen-check precheck clean; merge-tree vs dev@fd0ad0f7 clean (no overlap with T-0723)", "covered": true},
+    {"ac": "AUTH MODEL §4.4 — DRAFT-ONLY invariant actually holds for the tool (published/live surfaces unreachable by the autonomous LLM without a human promote)", "covered": false},
+    {"ac": "D-064 live-proof of the LLM invoking the tool end-to-end", "covered": false}
+  ],
+  "role_gap_evidence": [
+    "GOVERNANCE (founder flag, distinct from the code blocker R-1): the builder frames §4.4 as a purely MECHANICAL engineering narrowing («НЕ продуктовое решение ... бот ⊂ человек, никогда не шире»). Judge disagrees that it is purely mechanical AS BUILT. Because form_binding is a per-(process,step) shared surface, the tier discriminant does not confine the tool to draft/unpublished surfaces: an autonomous LLM can change what a PUBLISHED application renders to real users (via a co-bound draft pin) with no human promote. Whether that is acceptable is a PRODUCT/RISK decision (столп 4/5: agents-as-employees within a rights envelope; столп 7: safe rollout), not a self-evident narrowing — the configurator's entire DRAFT-ONLY design exists precisely to keep the LLM off live surfaces. Recommendation: the code blocker R-1 should be closed by fail-closing the mixed-tier case (engineering, no founder needed); IF instead the intent is to PERMIT the LLM to touch published-rendered forms, that specific permission is a founder call and must be recorded, not smuggled in under a 'mechanical narrowing' framing.",
+    "D-064 CATCH: this is a classic 'gate that does not mean what it claims' — a plausible tier discriminant whose stated invariant (draft-only) is falsified by the underlying shared-surface data model, invisible to the builder's own all-draft fixtures and only surfaced by an adversarial mixed-tier live probe."
+  ]
+}
