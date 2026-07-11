@@ -1,0 +1,36 @@
+{
+  "task": "T-0668",
+  "summary": "Structural anti-recurrence gate for the bare-fetch 401 class + remediation of the live holes the sweep found. A bare fetch('/api/…') without an auth header is rejected 401 by the keycloak Bearer-only gateway BEFORE identity resolves, so the screen silently falls to seed data. Unit tests mock fetch and never catch it (caught live twice: T-0648 ra-grant-trail, T-0649 fetchEmployees /api/org).",
+  "sweep_method": "Balanced-paren, comment/string-masked scan of every fetch( in web/src (206 total calls; 191 prod, 15 test). Classified each as authed (authHeaders/devHeaders/buildAuthHeaders/apiHeaders/headers-var-delegate/fetchWithAuthRetry) vs bare.",
+  "bare_fetch_sites_found": [
+    {"site": "web/src/screens/rights/ra-intents.jsx:680", "call": "fetch('/api/rights/dictionaries')", "verdict": "GENUINE HOLE — post-login rights screen; sibling call in screen-rights.jsx:134 sends authHeaders. REMEDIATED."},
+    {"site": "web/src/screens/screen-login.jsx:29", "call": "fetch('/api/users')", "verdict": "BARE (initial dev user-picker load). REMEDIATED (authHeaders() = {} pre-login in dev, behaviour preserved; removes a copy-able bare pattern)."},
+    {"site": "web/src/screens/screen-login.jsx:52", "call": "fetch('/api/users')", "verdict": "BARE (retry path, duplicate of :29). REMEDIATED."},
+    {"site": "web/src/app-shell/auth-mode.js:56", "call": "fetch('/api/auth-config')", "verdict": "NOT A HOLE — ALLOWLISTED. Public bootstrap route (src/http/auth.ts:518, no withAuth) that DISCOVERS the auth mode before it is known; importing authHeaders here would create a dev-auth<->auth-mode circular import."},
+    {"site": "web/src/app-shell/dev-auth.js:156,172", "call": "fetch(url, buildInit())", "verdict": "NOT A HOLE — ALLOWLISTED. This file DEFINES fetchWithAuthRetry; buildInit() merges authHeaders(). Canonical wrapper."},
+    {"site": "web/src/app-shell/keycloak-auth.js:343,437", "call": "fetch(endpoints(config).token, ...)", "verdict": "NOT A HOLE — ALLOWLISTED. OIDC token/refresh endpoint (external IdP, not /api/*); the request OBTAINS the Bearer so cannot carry one."},
+    {"site": "web/src/canvas/process-editor-api.js:47,94,128", "call": "fetch('/api/process-defs...', { headers: apiHeaders() })", "verdict": "NOT A HOLE — apiHeaders() is a local wrapper that spreads authHeaders(). Recognized by the gate."},
+    {"site": "web/src/screens/rights/ra-role-editor.jsx:217", "call": "fetch('/api/grants', { method, headers, body })", "verdict": "NOT A HOLE — headers var built from authHeaders() 4 lines above (line 213). Recognized by the gate's delegate-window path."}
+  ],
+  "sites_remediated": [
+    "web/src/screens/rights/ra-intents.jsx:680 — fetch('/api/rights/dictionaries', { headers: { ...authHeaders() } })",
+    "web/src/screens/screen-login.jsx:29 — fetch('/api/users', { headers: { ...authHeaders() } }) + import authHeaders",
+    "web/src/screens/screen-login.jsx:52 — fetch('/api/users', { headers: { ...authHeaders() } })"
+  ],
+  "gate_added": "ci/checks/web-fetch-auth-coverage.sh",
+  "gate_how_it_works": "Node-backed (temp-file heredoc, like package-json-no-dup-keys.sh). For each non-test web/src file it finds every bare fetch( (masks comments + string/template bodies so a // or ) inside a URL never fools paren-balancing; excludes obj.fetch and fetchWithAuthRetry). A call is AUTHED if its text references authHeaders|devHeaders|buildAuthHeaders|apiHeaders|Authorization|X-Dev-User|x-dev-user|Bearer, OR it delegates headers to a variable and a real helper CALL appears within the 12 masked lines above. Otherwise VIOLATION, UNLESS the URL is a string literal NOT containing /api (legit external), or the file is on the documented auth-infra allowlist (dev-auth.js, keycloak-auth.js, auth-mode.js). Wider than the two incident sites: also catches the split-line `const u='/api/x'; fetch(u)` opaque shape.",
+  "gate_self_test": true,
+  "gate_self_test_cases": "BAD (must flag): bare fetch('/api/x'); split-line opaque fetch(u); delegate-headers with only a COMMENT mentioning Authorization. GOOD (must pass): authHeaders inline; headers-var delegate with authHeaders() above; external https string literal; a *.test.js bare fetch (scope excludes tests).",
+  "gate_bites_evidence": "Planted-violation proof on the REAL tree: temporarily reverted ra-intents.jsx:680 to the bare form -> gate RED (rc=1, 'VIOLATION screens/rights/ra-intents.jsx:682 — bare fetch to /api without an auth header'); reverted the plant -> gate GREEN (rc=0). Plus --self-test PASS (rc=0) and normal run PASS on the remediated tree.",
+  "fitness_wiring": "Appended additively to the package.json fitness &&-chain: '... && bash ci/checks/web-fetch-auth-coverage.sh && bash ci/checks/web-fetch-auth-coverage.sh --self-test'. Chain step count 345 -> 347; package.json parses (node require OK); package-json-no-dup-keys.sh PASS.",
+  "web_tests": {
+    "before": {"files": 103, "tests": 2827, "status": "all pass"},
+    "after": {"files": 104, "tests": 2832, "status": "all pass"},
+    "delta": "+1 file, +5 tests = new web-fetch-auth-remediation.test.js (locks both remediated call strings + asserts the exact pre-fix bare forms are gone)"
+  },
+  "build": "npm run build (tsc) rc=0 — no .ts touched; server build unaffected.",
+  "eslint": "screen-login.jsx clean; ra-intents.jsx only the PRE-EXISTING selId:63 unused-var (line 63, unrelated to the edit at 680). No new lint errors introduced. (Repo baseline is noisy: missing react-hooks plugin config + assorted unused vars in untouched files.)",
+  "local_evidence_composition": "Behavioural render tests are not feasible (this repo's vitest runs node-env, no jsdom/DOM mount). Instead the header-flows proof is COMPOSED: (a) buildAuthHeaders/authHeaders is unit-tested in app-shell/auth-headers.test.js to emit dev->X-Dev-User and keycloak->Authorization: Bearer; (b) the gate + web-fetch-auth-remediation.test.js prove the call sites route through authHeaders(); therefore the header flows on every /api call.",
+  "deferred_live_proof": "changes_product=1 end-to-end browser proof is DEFERRED — the dev stand is OFFLINE this run. To confirm at stand-return: in keycloak mode open the Rights > 'Бытовые операции прав' (intents) screen and verify presets load from live dictionaries (not empty), and the dev-mode login user-picker lists real users. Both were the silent-401->seed/empty failure mode.",
+  "notes": "Anti-case discipline: pure infra, no case slugs/personas/thresholds in platform src. The gate favours detection (opaque-url and delegate-with-comment-only are flagged) per the 'no false-negatives that let a bare fetch through' requirement; the 3-file allowlist is the only escape hatch and each entry is documented in the script header. Did NOT push or merge."
+}

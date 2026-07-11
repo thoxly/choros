@@ -677,7 +677,9 @@ function IntentsScreen() {
   useEffect(() => {
     // Пресеты приходят из словарей (определения сидит T-0224). Этот экран НЕ
     // содержит пресет-данных — только ссылается по ключу.
-    fetch('/api/rights/dictionaries')
+    // T-0668: mode-aware auth header — a bare fetch() без Authorization/X-Dev-User
+    // отвергается keycloak bearer-only до резолва личности (401 → пустые пресеты).
+    fetch('/api/rights/dictionaries', { headers: { ...authHeaders() } })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(formatError(r.status)))))
       .then((d) => setPresets(d.presets || []))
       .catch((e) => setLoadErr(e.message));
