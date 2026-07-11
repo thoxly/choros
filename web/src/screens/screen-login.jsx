@@ -16,6 +16,12 @@
 
 import React, { useState, useEffect } from 'react';
 import { Button, ErrorState, LoadingState, EmptyState } from '../components/components.jsx';
+// T-0668: even the pre-login dev user-list must go through the shared mode-aware
+// header helper. authHeaders() returns {} before an identity is picked (dev) — so
+// behaviour is unchanged here — but routing through it (a) removes a bare-fetch
+// pattern a future dev could copy onto a protected route, and (b) keeps every
+// /api call uniform so the web-fetch-auth gate has one convention to enforce.
+import { authHeaders } from '../app-shell/dev-auth.js';
 
 function LoginScreen({ onLogin, keycloak = false, error: externalError = null }) {
   const [users, setUsers] = useState([]);
@@ -26,7 +32,7 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
     if (keycloak) return; // keycloak mode: no user list to fetch
     const fetchUsers = async () => {
       try {
-        const response = await fetch('/api/users');
+        const response = await fetch('/api/users', { headers: { ...authHeaders() } });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -49,7 +55,7 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
     setError(null);
     const fetchUsers = async () => {
       try {
-        const response = await fetch('/api/users');
+        const response = await fetch('/api/users', { headers: { ...authHeaders() } });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
