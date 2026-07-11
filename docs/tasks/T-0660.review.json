@@ -1,0 +1,59 @@
+{
+  "task_id": "T-0660",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "reviewer_ran": {
+    "web_targeted": "builder 19 + DI 2 + panel 18 = 39 PASS (solo)",
+    "web_full": "110 files / 2868 tests PASS (solo, no collateral breakage)",
+    "server_roundtrip": "timer-escalation-canvas-roundtrip 4/4 PASS (solo)",
+    "anti_case": "read-pdp-anti-case.sh PASS (base=merge-base 504312f1)",
+    "ux_gates": "G7/G6/G2/G4 PASS; G5/anti-uuid out of canvas scope but PASS",
+    "mutation_M1": "broke applyEscalationBranch step 5 (esc→next instead of esc→gateway) → builder convergence assertion RED, reverted — the builder test genuinely pins the converging topology, not a stub",
+    "mutation_M2_and_probe": "independent linter probe (own fixtures): non-interrupting+separate-ends FLAGGED (genuine zombie), interrupting+separate-ends convergence NOT flagged (correctly exempt), non-interrupting+shared-single-end NOT flagged (converges at end) — the publish gate is REAL and correctly scoped"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "branch task/T-0660 vs dev (merge-base 504312f1; dev now at 3256f627 with T-0641 merged)",
+      "issue": "Ветка СТАРЕЕ dev: она ответвлена ДО мержа сестры T-0641, которая переработала publishProcessByKey (перенос мапперов на publish-time + один ensureFlowableNamespace-chokepoint) и тронула ровно те серверные core-файлы, которые импортирует headline round-trip тест (timer-escalation-mapper/bpmn-linter/bpmn-deploy-normalizer/lane-role-mapper). Я сверил порядок конвейера dev (строки 823-966 dev:process-defs.ts): mapLanes→mapTimerEscalation→…→lintBpmn→normalizeBpmnForDeploy — тот же, что моделирует тест; добавленный T-0641 ensureFlowableNamespace — no-op на фикстуре (в ней уже объявлен xmlns:flowable). Так что доказательство не сломано, но проверено на СТАРОЙ версии сервера.",
+      "suggestion": "ОБЯЗАТЕЛЬНО перед мержем в dev: ребейз на dev и повторный прогон 4 round-trip + 39 web + tsc — потому что round-trip тест напрямую импортирует серверные core-функции, которые T-0641 переписал. Промоушн-гигиена, не дефект кода."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/canvas/escalation-branch-di.test.js, src/__tests__/timer-escalation-canvas-roundtrip.test.ts",
+      "issue": "DI-тест и round-trip-тест гоняют РУЧНУЮ фикстуру XML (BUILT_SHAPE/builtConvergingShape), а НЕ фактический вывод applyEscalationBranch. Механической связки между тем, что строит билдер, и тем, что доказывают downstream-тесты, нет — сцепка «по инспекции». Юнит-тест билдера (escalation-branch-builder.test.js) пиннит точную топологию modeling-вызовов (я подтвердил мутацией M1, что он краснеет при развале схождения), поэтому регресс билдера ловится ТАМ; но регресс фикстуры (дрейф от реального вывода) downstream-тесты пропустили бы. Приемлемо для headless-ограничения (живого bpmn-js нет), но честнее было бы генерировать фикстуру из mock-вывода билдера.",
+      "suggestion": "Follow-up (не blocking): собрать round-trip/DI фикстуру ИЗ последовательности modeling-вызовов applyEscalationBranch (сериализовать mock-граф в BPMN), чтобы regression билдера механически ломал и publish-gate доказательство."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__/timer-escalation-canvas-roundtrip.test.ts (builtConvergingShape/disconnectedEscalationShape)",
+      "issue": "Фикстуры round-trip предобъявляют xmlns:flowable в <definitions>. Реальный save-вывод bpmn-js граничного/шлюзового узла может НЕ содержать привязанный flowable-префикс (это ровно баг, который T-0641 закрыл chokepoint-ом). Тест поэтому не прогоняет namespace-injection путь реального модельера — но publish-time ensureFlowableNamespace (T-0641) его покрывает независимо. Не дефект T-0660 (граница сервера), фиксирую информационно.",
+      "suggestion": "После ребейза на dev round-trip проходит через ensureFlowableNamespace фактически; можно добавить вариант фикстуры БЕЗ xmlns:flowable, чтобы доказать сквозной путь. Вне скоупа UI-задачи."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/canvas/escalation-branch-builder.js writeInterruptMode (строки 72-86)",
+      "issue": "Прямой fallback bo.cancelActivity=… при отсутствии/исключении modeler. Проверил на класс fake-green: bpmn-js saveXML сериализует ИЗ businessObject, поэтому прямая запись даёт корректный XML — модель и опубликованный документ НЕ разъезжаются. В проде modeler+element всегда есть → используется modeling.updateProperties (undo+перерисовка границы). Fallback теряет только undo-запись и перерисовку в редком throw-пути — косметическая деградация, НЕ fake-green. applyEscalationBranch cancelActivity ставит через настоящий modeling API (строка 181), не через fallback.",
+      "suggestion": "Оставить; при желании логировать в catch, чтобы throw-путь был видимым, а не тихим."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC1: панель граничного таймера рендерит контрол interrupt-mode; переключение в «параллельно» пишет cancelActivity=false (panel-render тест + writeInterruptMode тест PASS)", "covered": true },
+    { "ac": "AC2: для промежуточного таймера контрол cancelActivity скрыт (panel HIDES тест PASS)", "covered": true },
+    { "ac": "AC3: кнопка собирает шаг→шлюз→следующий + таймер→Эскалация→шлюз, ставит non-interrupting, идемпотентна (builder тест PASS; мутация M1 доказала пиннинг схождения)", "covered": true },
+    { "ac": "AC4: собранная форма имеет node-DI (auto-layout) и импортируема bpmn-moddle (DI тест PASS)", "covered": true },
+    { "ac": "AC5: форма проходит lintBpmn без timer_escalation_no_convergence, normalizeBpmnForDeploy, candidateGroups на «Эскалация», cancelActivity=false доживает (round-trip тест PASS)", "covered": true },
+    { "ac": "AC6: старая форма (отдельный конец) флагуется — publish-gate РЕАЛЕН (negative control + мой независимый probe A подтвердили)", "covered": true },
+    { "ac": "AC7: язык человеческий, 0 кейс-контента в src/ и web/src/ (anti-case PASS; role-staff только в фикстурах)", "covered": true },
+    { "ac": "SEAM: живой edge-DI (BPMNEdge) для boundary+convergence не доказан headless — честно вынесен на LIVE_PROOF (стенд offline). Node-DI+re-import+publish-gate доказаны headless. Честный held-остаток, не fake-green.", "covered": false }
+  ],
+  "role_gap_evidence": []
+}
