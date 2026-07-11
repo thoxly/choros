@@ -1,0 +1,58 @@
+{
+  "task": "T-0753",
+  "title": "Committed deterministic BUILDER/authoring test user (e-configurator) for Конструктор-зона LIVE_PROOF",
+  "files_changed": [
+    "config/keycloak/realm-choros.json",
+    "docs/tasks/T-0753.adr.md",
+    "docs/tasks/T-0753.spec.md",
+    "T-0753.pr-handoff.json"
+  ],
+  "summary": "Added ONE additive KC user credential for the pre-existing DB-side builder persona e-configurator (migrations/088 + 104 already seed the full authoring_draft grant chain: employee -> role_assignment -> role-configurator -> grant(authoring_draft create/update), confirmed, non-owner). No new migration/seed needed. e-owner (founder tenant-owner) was NOT touched -- it stays out of the committed realm JSON per choros-founder-cred-lockout. Reused e-configurator over minting a new e-builder persona because the DB authority chain already existed and its own migration header calls it 'the test human persona to log in as' for exactly this authoring surface.",
+  "user": {
+    "username": "e-configurator",
+    "password": "dev-pw-configurator (dev fixture, labeled DEV ONLY in realm JSON, passes no-prod-secret/no-committed-secret gates)",
+    "actor_type": "human (single-valued SCALAR attribute, KC25 declarative-user-profile managed/admin-editable attribute per T-0734 fix -- confirmed present in realm JSON 'components' entry and round-tripped into the live JWT actor_type claim)",
+    "builder_capability_source": "choros-DB grant chain (migration 088: role-configurator -> authoring_draft create+update, confirmed_by='seed'), NOT a Keycloak realm role -- there is no KC role claim for this; resolution is preferred_username -> employee.slug='e-configurator' (kind='human') -> role_assignment -> grant, per src/db/org.ts resolveActorSlugFromAuth"
+  },
+  "gates": {
+    "realm_json": { "script": "ci/checks/kc/realm-json-exists.sh", "result": "PASS", "exit_code": 0 },
+    "fixture_users": { "script": "ci/checks/kc/fixture-users.sh", "result": "PASS", "exit_code": 0, "note": "checks the 7 fixed org.ts rank-and-file personas (e-kravtsova...e-belov); e-configurator is intentionally NOT in that fixed list (it is a distinct builder persona from migration 088, not an org.ts rank-and-file fixture) per task requirement 3" },
+    "user_profile_actor_type": { "script": "ci/checks/kc/user-profile-actor-type.sh", "result": "PASS", "exit_code": 0 },
+    "no_committed_secret": { "script": "ci/checks/no-committed-secret.sh", "result": "PASS", "exit_code": 0 },
+    "no_prod_secret": { "script": "ci/checks/kc/no-prod-secret.sh", "result": "PASS", "exit_code": 0 },
+    "kc_login_proof": {
+      "result": "PASS -- REAL, not surrogate",
+      "method": "ROPC (grant_type=password) POST http://localhost:8280/realms/choros/protocol/openid-connect/token, client_id=choros-api / client_secret=choros-api-dev-secret, username=e-configurator / password=dev-pw-configurator",
+      "http_status": 200,
+      "decoded_claims": {
+        "preferred_username": "e-configurator",
+        "actor_type": "human",
+        "email": "e-configurator@choros.dev",
+        "aud": "choros-api",
+        "iss": "http://localhost:8280/realms/choros"
+      }
+    },
+    "additional_kc_fitness_checks_run_against_live_instance": {
+      "realm-ready.sh": "PASS (KEYCLOAK_PORT=8280)",
+      "human-token.sh": "PASS (e-kravtsova ROPC, general fixture sanity)",
+      "agent-token.sh": "PASS (agent-orchestrator client_credentials, general fixture sanity)",
+      "jwt-claims.sh": "PASS (both human and agent token claim contracts)",
+      "ui-created-user-actor-type.sh": "PASS (T-0734 declarative-profile regression check, admin-REST created user carries actor_type in its token)",
+      "wait-ready.sh": "PASS but NOT MEANINGFUL for this container -- see notes: it hit an unrelated neighbor container's management port by default-port collision, not this task's KC instance. Superseded by the direct /realms/master and /realms/choros/.well-known/openid-configuration polling documented in notes, which did confirm this instance's real readiness."
+    }
+  },
+  "live_kc_available": true,
+  "verification_steps": [
+    "cd /Users/shoxy/Code/choros-wt/T-0753",
+    "bash ci/checks/kc/realm-json-exists.sh && bash ci/checks/kc/fixture-users.sh && bash ci/checks/kc/user-profile-actor-type.sh   # all exit 0",
+    "bash ci/checks/no-committed-secret.sh && bash ci/checks/kc/no-prod-secret.sh   # both exit 0",
+    "docker rm -f t-0753-kc   # a stale KC container (started BEFORE this branch's e-configurator commit) was found running from a prior session; H2 dev-mode import is IGNORE_EXISTING so a restart alone would NOT have picked up the new user -- had to recreate the container",
+    "docker run -d --name t-0753-kc -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin -e KC_HTTP_PORT=8180 -e KC_HOSTNAME_STRICT=false -e KC_HTTP_ENABLED=true -p 8280:8180 -v $(pwd)/config/keycloak:/opt/keycloak/data/import:ro quay.io/keycloak/keycloak:25.0.6 start-dev --import-realm",
+    "poll http://localhost:8280/realms/master until HTTP 200 (took ~184s)",
+    "docker logs t-0753-kc | grep -i import   -> confirms \"Realm 'choros' imported\" / \"Import finished successfully\"",
+    "curl -X POST http://localhost:8280/realms/choros/protocol/openid-connect/token -d grant_type=password -d client_id=choros-api -d client_secret=choros-api-dev-secret -d username=e-configurator -d password=dev-pw-configurator   -> HTTP 200, access_token issued",
+    "decode JWT payload (base64) -> actor_type=human, preferred_username=e-configurator, aud=choros-api, iss=http://localhost:8280/realms/choros",
+    "KEYCLOAK_PORT=8280 KEYCLOAK_REALM=choros bash ci/checks/kc/realm-ready.sh && bash ci/checks/kc/human-token.sh && bash ci/checks/kc/agent-token.sh && bash ci/checks/kc/jwt-claims.sh && bash ci/checks/kc/ui-created-user-actor-type.sh   # all exit 0"
+  ],
+  "notes": "Prior commit (0cd162e6, same branch, different session) already contained the full correct fix: one additive user block in config/keycloak/realm-choros.json (username=e-configurator, actor_type=[\"human\"] managed attribute, dev-pw-configurator credential) plus an ADR and spec explaining the reuse decision. Independent live verification in THIS session found it correct and complete -- no code changes were needed, only verification, so no new realm-JSON/code commit was added on top; this handoff file is the only new artifact. Deliberately did NOT reuse the existing t-0633-keycloak-1 container running on host port 8180 (belongs to another task's worktree/session; touching or reimporting into it would violate the 'do not touch other worktrees' boundary and could disrupt T-0633's own state) -- instead recreated the pre-existing, already-namespaced t-0753-kc container (originally started by a prior T-0753 session, bind-mounted read-only to THIS worktree's config/keycloak/, exposed on host port 8280) so the realm-import would pick up the new user. Keycloak 25 start-dev --import-realm uses strategy IGNORE_EXISTING, so an in-place restart of an already-imported realm does NOT pick up new users added after first import -- had to docker rm -f + docker run fresh to force a clean full import. The DB-side authority chain (migration 088/104: e-configurator -> role-configurator -> authoring_draft create/update, confirmed) was NOT re-verified live end-to-end against a running app+Postgres stack in this session (no such stack was brought up here) -- that remains DB-layer proof from migration 088/104's own prior review, not re-exercised here. What WAS newly, live-verified in this session is exactly the KC layer requested: the credential exists, resolves via preferred_username to the correct slug, and the actor_type=human claim survives the KC25 declarative-user-profile round-trip into the JWT. tsc --noEmit was not run: no .ts files were touched by this task (only realm JSON + docs + this handoff)."
+}
