@@ -39,6 +39,12 @@ import { findEmployee } from "./org.js";
 import { resolveActorSlugFromAuth, loadAdminContext } from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { decidePromote } from "../core/env-tier.js";
+// T-0645 [SECURITY]: agent-instruction promotion must require the SAME authority
+// as saving its draft — mgmt_object:agent/update over the OWNING agent. Reuse the
+// single shared predicate + the tenant ancestry oracle (no bespoke 3rd check).
+import { holdsAgentMgmtUpdate } from "../core/agent-mgmt-authority.js";
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
+import type { ScopeElement } from "../core/grant-lattice.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -119,15 +125,84 @@ async function withTenantTx<T>(
 
 export interface ArtifactAuthzDeps {
   /**
-   * Check whether `actorId` holds grant `mgmt_object:tier_promote` / `transition`
-   * in `tenantId`. Returns `{ ok: true }` or `{ ok: false; reason: string }`.
+   * Check whether `actorId` may promote the artifact identified by `ctx`.
+   *
+   * For every config table EXCEPT `agent_instruction`: the generic
+   * `mgmt_object:tier_promote` / `transition` authority (grant / registry_def /
+   * application — shared promotion capability, unchanged).
+   *
+   * For `agent_instruction` (T-0645 [SECURITY]): the SCOPED
+   * `mgmt_object:agent/update` authority over the OWNING agent — the SAME right
+   * `saveDraft` requires. This closes the T-0637 asymmetry where publishing an
+   * agent instruction (the live LLM system prompt) needed only the generic,
+   * agent-unbound `tier_promote` grant that grant/registry/app publishing shares.
+   *
+   * Returns `{ ok: true }` or `{ ok: false; reason: string }`.
    */
   checkTierPromoteGrant: (
     pool: pg.Pool,
     tenantId: string,
     actorId: string,
     nowMs: number,
+    ctx: { artifactTable: string; artifactId: string },
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
+}
+
+/**
+ * Resolve the org scope of the agent that OWNS the given agent_instruction row.
+ *
+ * Mirrors agents.ts::loadAgentOrgScope (employee → position → department). A row
+ * that is absent, or whose owning agent has no department, maps to the tenant-root
+ * org node — so only a root-covering delegation (or genesis-owner) admits it, and
+ * a non-existent instruction id can never be promoted by a merely department-scoped
+ * holder (fail-closed; promoteTier then returns the honest 404 for the missing row).
+ */
+async function loadOwningAgentOrgScope(
+  client: pg.PoolClient,
+  instructionId: string,
+  tenantId: string,
+): Promise<ScopeElement> {
+  const { rows } = await client.query<{ department_id: string | null }>(
+    `SELECT p.department_id
+       FROM choros.agent_instruction ai
+       JOIN choros.employee e
+         ON e.tenant_id = ai.tenant_id AND e.id = ai.employee_id
+       LEFT JOIN choros.position p
+         ON p.tenant_id = e.tenant_id AND p.id = e.position_id
+      WHERE ai.tenant_id = $1 AND ai.id = $2
+      LIMIT 1`,
+    [tenantId, instructionId],
+  );
+  const deptId = rows[0]?.department_id ?? null;
+  if (deptId) {
+    return { kind: "node", hierarchy: "org", nodeId: deptId, nodeLevel: "department" };
+  }
+  return { kind: "node", hierarchy: "org", nodeId: "org", nodeLevel: "department" };
+}
+
+/**
+ * T-0645 [SECURITY]: agent_instruction promotion authority = the SAME predicate as
+ * saving its draft (mgmt_object:agent/update over the owning agent), REPLACING the
+ * generic tier_promote gate for this artifact type ONLY. Reuses the shared
+ * `holdsAgentMgmtUpdate` resolver (genesis-owner short-circuit inside).
+ */
+async function checkAgentInstructionAuthority(
+  pool: pg.Pool,
+  tenantId: string,
+  actorId: string,
+  instructionId: string,
+  nowMs: number,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+  return withTenantTx(pool, tenantId, async (client) => {
+    const agentOrgScope = await loadOwningAgentOrgScope(client, instructionId, tenantId);
+    // Oracle from the tenant's REAL department tree (reuse this tx's client).
+    const oracle = await loadTenantOrgAncestry(client, tenantId);
+    if (holdsAgentMgmtUpdate(admin, agentOrgScope, oracle)) {
+      return { ok: true };
+    }
+    return { ok: false, reason: "no_agent_update_authority" };
+  });
 }
 
 async function defaultCheckTierPromoteGrant(
@@ -135,7 +210,16 @@ async function defaultCheckTierPromoteGrant(
   tenantId: string,
   actorId: string,
   nowMs: number,
+  ctx: { artifactTable: string; artifactId: string },
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // T-0645: agent_instruction is the live LLM system prompt — promoting it is the
+  // SAME management operation as authoring its draft, so it is gated on scoped
+  // agent/update authority over the OWNING agent (NOT the generic tier_promote that
+  // grant/registry/app publishing shares).
+  if (ctx.artifactTable === "agent_instruction") {
+    return checkAgentInstructionAuthority(pool, tenantId, actorId, ctx.artifactId, nowMs);
+  }
+
   const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
 
   // Genesis owner is the un-parented delegation root — always allowed (T-0029 §2 step 3).
@@ -429,8 +513,17 @@ export function registerArtifactRoutes(
     // 4. AUTHORITY CHECK (ADR §4.5 / T-0513 security fix):
     //    gate on mgmt_object:tier_promote / transition (mirrors report-pages.ts promote gate).
     //    Genesis-owner short-circuit; non-owners need an explicit delegated grant.
+    //    T-0645 [SECURITY]: for artifact_table='agent_instruction' the default gate
+    //    instead requires scoped mgmt_object:agent/update over the OWNING agent (the
+    //    SAME right saveDraft needs) — closing the T-0637 publish-weaker-than-draft gap.
     //    Fail-closed: 403 NO_PROMOTE_GRANT when the actor lacks authority.
-    const gateResult = await authzDeps.checkTierPromoteGrant(pool, tenantId, actor, Date.now());
+    const gateResult = await authzDeps.checkTierPromoteGrant(
+      pool,
+      tenantId,
+      actor,
+      Date.now(),
+      { artifactTable, artifactId },
+    );
     if (!gateResult.ok) {
       throw new HttpError(403, "NO_PROMOTE_GRANT", "mgmt_object:tier_promote/transition denied");
     }
