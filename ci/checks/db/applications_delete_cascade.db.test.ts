@@ -41,9 +41,17 @@ const TENANT_A = uuid();
 const TENANT_B = uuid();
 
 // actor-a → TENANT_A (owner/admin), actor-b → TENANT_B.
+// T-0690: actor-c → TENANT_A, actor-e → TENANT_A, actor-d → TENANT_B — NON-privileged
+// (no role_assignment seeded for them at all; resolveActorPrivilege fail-closes an
+// unknown actor to { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false }) —
+// the author-of-own-draft floor (T-0690) is exercised by plain application
+// authorship, not by any owner/admin/grant machinery.
 async function stubResolveActorTenant(slug: string): Promise<string> {
   if (slug === 'del-actor-a') return TENANT_A;
   if (slug === 'del-actor-b') return TENANT_B;
+  if (slug === 'del-actor-c') return TENANT_A;
+  if (slug === 'del-actor-e') return TENANT_A;
+  if (slug === 'del-actor-d') return TENANT_B;
   throw new Error(`unknown test actor: ${slug}`);
 }
 
@@ -180,6 +188,7 @@ afterAll(async () => {
       for (const tbl of [
         'file_version', 'file', 'record', 'cross_app_ref', 'registry_schema_history',
         'report_page_dep', 'template_dep', 'template_def', 'registry_def',
+        'doc_log', 'doc_ref', 'doc_page', 'list_view', 'report_page',
         'process_app_binding', 'application', 'audit_event', 'audit_head',
         'role_assignment', 'role', 'employee',
       ]) {
@@ -195,22 +204,43 @@ afterAll(async () => {
 
 // Seed an application + registry_def + N records + a process_app_binding, all directly
 // under the migrator (bypass RLS). Returns the ids for assertions.
+//
+// T-0690 opts:
+//   - appTier: 'draft' (default) | 'published' — the app's own tier.
+//   - appCreatedBy: the app row's created_by (author slug); null (default) mirrors
+//     the pre-T-0690 shape (unknown authorship).
+//   - withBindings: also seed a report_page + list_view + doc_page bound DIRECTLY
+//     to the application (app_id / application_id) — the T-0690 cascade-completeness
+//     probe (these three were NOT cascaded before T-0690's cascade extension).
 async function seedAppWithData(
   tenantId: string,
   ownerSlug: string,
   recordCount: number,
-): Promise<{ appId: string; regId: string; recordIds: string[]; procKey: string }> {
+  opts: { appTier?: 'draft' | 'published'; appCreatedBy?: string | null; withBindings?: boolean } = {},
+): Promise<{
+  appId: string;
+  regId: string;
+  recordIds: string[];
+  procKey: string;
+  reportPageId: string | null;
+  listViewId: string | null;
+  docPageId: string | null;
+}> {
+  const { appTier = 'draft', appCreatedBy = null, withBindings = false } = opts;
   const appId = uuid();
   const regId = uuid();
   const procKey = `proc-${uuid().slice(0, 8)}`;
   const recordIds: string[] = [];
+  let reportPageId: string | null = null;
+  let listViewId: string | null = null;
+  let docPageId: string | null = null;
   await withClient(migratorUrl(), async (c) => {
     await c.query('BEGIN');
     await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
     await c.query(
-      `INSERT INTO choros.application (tenant_id, id, slug, display_name, description, tier, created_at, updated_at)
-       VALUES ($1, $2, $3, $3, NULL, 'draft', 0, 0)`,
-      [tenantId, appId, `del-app-${appId.slice(0, 8)}`],
+      `INSERT INTO choros.application (tenant_id, id, slug, display_name, description, tier, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $3, NULL, $4, $5, 0, 0)`,
+      [tenantId, appId, `del-app-${appId.slice(0, 8)}`, appTier, appCreatedBy],
     );
     await c.query(
       `INSERT INTO choros.registry_def (tenant_id, id, application_id, slug, display_name, description, record_schema, created_at, updated_at)
@@ -231,9 +261,29 @@ async function seedAppWithData(
        VALUES ($1, $2, $3, $4, NULL, 0, 0)`,
       [tenantId, uuid(), procKey, appId],
     );
+    if (withBindings) {
+      reportPageId = uuid();
+      await c.query(
+        `INSERT INTO choros.report_page (tenant_id, id, app_id, slug, title, floor, tier, page_def, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $4, '1', $5, $6::jsonb, 0, 0)`,
+        [tenantId, reportPageId, appId, `del-rp-${reportPageId.slice(0, 8)}`, appTier, JSON.stringify({ blocks: [] })],
+      );
+      listViewId = uuid();
+      await c.query(
+        `INSERT INTO choros.list_view (tenant_id, id, application_id, type, name, is_default, config, created_at, updated_at, created_by, source)
+         VALUES ($1, $2, $3, 'list', $4, false, $5::jsonb, 0, 0, $6, 'records')`,
+        [tenantId, listViewId, appId, `del-lv-${listViewId.slice(0, 8)}`, JSON.stringify({}), ownerSlug],
+      );
+      docPageId = uuid();
+      await c.query(
+        `INSERT INTO choros.doc_page (tenant_id, id, slug, title, body, scope, app_id, authored_by, authored_at, updated_at)
+         VALUES ($1, $2, $3, $3, 'body', 'tenant', $4, $5, 0, 0)`,
+        [tenantId, docPageId, `del-dp-${docPageId.slice(0, 8)}`, appId, ownerSlug],
+      );
+    }
     await c.query('COMMIT');
   });
-  return { appId, regId, recordIds, procKey };
+  return { appId, regId, recordIds, procKey, reportPageId, listViewId, docPageId };
 }
 
 describe('applications API — cascade delete (T-0566)', () => {
@@ -306,5 +356,147 @@ describe('applications API — cascade delete (T-0566)', () => {
   it('DELETE unknown id in own tenant → 404', requireDb(async () => {
     const del = await request(baseUrl, 'DELETE', `/api/applications/${uuid()}`, 'del-actor-a');
     expect(del.statusCode, JSON.stringify(del.json)).toBe(404);
+  }));
+});
+
+// ---------------------------------------------------------------------------
+// T-0690: "draft = personal sandbox of the author" — a NON-privileged actor
+// (no owner/admin, no authoring_draft grant — del-actor-c/d/e hold NEITHER,
+// see stubResolveActorTenant) may delete an application THEY created THEMSELVES
+// while it is still draft. Every boundary is its own test (адверс-judge target):
+// own-draft → 204; own-published → 403; someone-else's-draft (same tenant) →
+// 403; authorship match across tenants → 404 (RLS wins, never leaks).
+// ---------------------------------------------------------------------------
+describe('applications API — author-of-own-draft delete floor (T-0690)', () => {
+  it("non-privileged author deletes THEIR OWN draft app → 204, full cascade incl. " +
+     'report_page/list_view/doc_page (no orphans)', requireDb(async () => {
+    const { appId, regId, recordIds, reportPageId, listViewId, docPageId } =
+      await seedAppWithData(TENANT_A, 'del-actor-c', 2, {
+        appTier: 'draft',
+        appCreatedBy: 'del-actor-c',
+        withBindings: true,
+      });
+
+    // del-actor-c has NO role_assignment / grant anywhere (only actor-a/actor-b
+    // are seeded as owners) — resolveActorPrivilege fail-closes them to
+    // { isOwnerOrAdmin: false, hasAuthoringDraftGrant: false }. Only the T-0690
+    // created_by=self AND tier=draft floor can let this succeed.
+    const del = await request(baseUrl, 'DELETE', `/api/applications/${appId}`, 'del-actor-c');
+    expect(del.statusCode, JSON.stringify(del.json)).toBe(204);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+
+      const app = await c.query(`SELECT 1 FROM choros.application WHERE tenant_id = $1 AND id = $2`, [TENANT_A, appId]);
+      expect(app.rowCount, 'application row must be gone').toBe(0);
+
+      const reg = await c.query(`SELECT 1 FROM choros.registry_def WHERE tenant_id = $1 AND id = $2`, [TENANT_A, regId]);
+      expect(reg.rowCount, 'registry_def must be gone').toBe(0);
+
+      const recs = await c.query(
+        `SELECT 1 FROM choros.record WHERE tenant_id = $1 AND id = ANY($2::uuid[])`,
+        [TENANT_A, recordIds],
+      );
+      expect(recs.rowCount, 'all records must be gone').toBe(0);
+
+      const bind = await c.query(
+        `SELECT 1 FROM choros.process_app_binding WHERE tenant_id = $1 AND application_id = $2`,
+        [TENANT_A, appId],
+      );
+      expect(bind.rowCount, 'process_app_binding rows for the app must be removed (unbind)').toBe(0);
+
+      // T-0690 cascade-completeness: report_page/list_view/doc_page bound DIRECTLY
+      // to the application (never touched by T-0566's original cascade) must be
+      // gone too — no orphans left by the newly-enabled self-service delete path.
+      const rp = await c.query(`SELECT 1 FROM choros.report_page WHERE tenant_id = $1 AND id = $2`, [TENANT_A, reportPageId]);
+      expect(rp.rowCount, 'report_page bound to the app must be gone').toBe(0);
+      const lv = await c.query(`SELECT 1 FROM choros.list_view WHERE tenant_id = $1 AND id = $2`, [TENANT_A, listViewId]);
+      expect(lv.rowCount, 'list_view bound to the app must be gone').toBe(0);
+      const dp = await c.query(`SELECT 1 FROM choros.doc_page WHERE tenant_id = $1 AND id = $2`, [TENANT_A, docPageId]);
+      expect(dp.rowCount, 'doc_page bound to the app must be gone').toBe(0);
+
+      const audit = await c.query<{ payload: unknown; actor: string }>(
+        `SELECT payload, actor FROM choros.audit_event
+          WHERE tenant_id = $1 AND type = 'application.deleted' AND subject = $2
+          ORDER BY occurred_at DESC LIMIT 1`,
+        [TENANT_A, appId],
+      );
+      expect(audit.rowCount, 'application.deleted audit event must exist').toBe(1);
+      expect(audit.rows[0]!.actor).toBe('del-actor-c');
+      const payload = audit.rows[0]!.payload as Record<string, unknown>;
+      expect(payload['records_removed']).toBe(2);
+      expect(payload['fieldsets_removed']).toBe(1);
+      expect(payload['report_pages_removed']).toBe(1);
+      expect(payload['list_views_removed']).toBe(1);
+      expect(payload['doc_pages_removed']).toBe(1);
+      expect(payload['processes_unbound']).toBe(1);
+
+      await c.query('COMMIT');
+    });
+  }));
+
+  it("non-privileged author's OWN app is PUBLISHED → 403 (self-service floor is draft-only)",
+    requireDb(async () => {
+    const { appId } = await seedAppWithData(TENANT_A, 'del-actor-c', 0, {
+      appTier: 'published',
+      appCreatedBy: 'del-actor-c',
+    });
+
+    const del = await request(baseUrl, 'DELETE', `/api/applications/${appId}`, 'del-actor-c');
+    expect(del.statusCode, JSON.stringify(del.json)).toBe(403);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      const app = await c.query(`SELECT 1 FROM choros.application WHERE tenant_id = $1 AND id = $2`, [TENANT_A, appId]);
+      await c.query('COMMIT');
+      expect(app.rowCount, "author's own PUBLISHED app must survive a non-privileged delete attempt").toBe(1);
+    });
+  }));
+
+  it("non-privileged actor CANNOT delete someone ELSE's draft app in the SAME tenant → 403",
+    requireDb(async () => {
+    // Drafted by 'del-actor-e' (also non-privileged); del-actor-c tries to delete it.
+    const { appId } = await seedAppWithData(TENANT_A, 'del-actor-e', 0, {
+      appTier: 'draft',
+      appCreatedBy: 'del-actor-e',
+    });
+
+    const del = await request(baseUrl, 'DELETE', `/api/applications/${appId}`, 'del-actor-c');
+    expect(del.statusCode, JSON.stringify(del.json)).toBe(403);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      const app = await c.query(`SELECT 1 FROM choros.application WHERE tenant_id = $1 AND id = $2`, [TENANT_A, appId]);
+      await c.query('COMMIT');
+      expect(app.rowCount, "another author's draft app must survive a non-owner delete attempt").toBe(1);
+    });
+  }));
+
+  it('authorship-slug match ALONE never crosses the tenant boundary → 404 (RLS wins)',
+    requireDb(async () => {
+    // A draft app in TENANT_B whose created_by happens to equal 'del-actor-c' (the
+    // SAME slug as the TENANT_A actor below) — an adversarial probe that the
+    // created_by=actor comparison is never reached for a row outside the caller's
+    // OWN RLS-scoped tenant; tenant resolution (resolveActorTenant) pins del-actor-c
+    // to TENANT_A only, so the SELECT ... WHERE tenant_id = TENANT_A never even
+    // sees this TENANT_B row.
+    const { appId } = await seedAppWithData(TENANT_B, 'del-actor-c', 0, {
+      appTier: 'draft',
+      appCreatedBy: 'del-actor-c',
+    });
+
+    const del = await request(baseUrl, 'DELETE', `/api/applications/${appId}`, 'del-actor-c');
+    expect(del.statusCode, JSON.stringify(del.json)).toBe(404);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_B}'`);
+      const app = await c.query(`SELECT 1 FROM choros.application WHERE tenant_id = $1 AND id = $2`, [TENANT_B, appId]);
+      await c.query('COMMIT');
+      expect(app.rowCount, 'a same-slug-authored app in a DIFFERENT tenant must survive').toBe(1);
+    });
   }));
 });
