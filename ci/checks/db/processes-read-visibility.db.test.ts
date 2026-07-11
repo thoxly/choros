@@ -23,10 +23,15 @@
 //     branch (there isn't one, mirroring records.ts), but via the SAME
 //     single grant-resolver path every other actor goes through.
 //
-//   Record-less fallback (T-0714 §5 phase-1 scope): an instance started
-//     WITHOUT a recordId (no create=start binding) stays visible to an
-//     actor with ZERO grants — this gate does not narrow it (deferred to a
-//     phase-3 follow-up).
+//   Record-less participant-tier (T-0723, supersedes the T-0714 §5 phase-1
+//     "stays tenant-default-open" posture): an instance started WITHOUT a
+//     recordId (no create=start binding) is now gated by PARTICIPANT status
+//     (isInstanceParticipant — acted on it / holds an addressed task role /
+//     tenant owner), NOT a blanket default-open. A non-participant zero-grant
+//     actor is denied (404); the actor who started the instance (or otherwise
+//     participates) sees it, skeleton-only (no variables/history — there is
+//     no source record, so there is no covering-grant basis for the full
+//     reader tier either). See docs/tasks/T-0723.spec.md §2.
 //
 //   Honest-degrade (NF-2): a server registered WITHOUT resolveReadVisibility
 //     wired serves the SAME DETAIL to every tenant member as pre-T-0721
@@ -507,26 +512,50 @@ describe.skipIf(!hasDb)('T-0721: tenant-owner (via the standard default-open gra
 });
 
 // ---------------------------------------------------------------------------
-// Record-less fallback (T-0714 §5 phase-1 scope): an instance started WITHOUT
-// a recordId is NOT narrowed by this gate — visible to ANY tenant member,
-// even one with zero grants.
+// T-0723 (D-064 anti-case): record-less instances are now gated by
+// PARTICIPANT-tier, NOT the T-0714 §5 phase-1 "stays tenant-default-open"
+// posture — a non-participant zero-grant actor is denied; the actor who
+// started the instance sees it (skeleton-only, no variables/history).
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!hasDb)('T-0721: record-less instance stays tenant-default-open (phase-1 scope)', () => {
-  it('200 for an actor with ZERO grants when the instance carries no recordId', async () => {
+describe.skipIf(!hasDb)('T-0723: record-less instance is gated by participant-tier, not tenant-default-open', () => {
+  it('404 for a non-participant actor with ZERO grants when the instance carries no recordId', async () => {
     const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
     await withTenantTx(TENANT_A, (tx) =>
       appendProcessStarted(tx, {
         instanceId,
         procKey: 'telLinear',
-        actor: 'a-starter',
+        actor: 'a-starter-recless',
         nowMs: Date.now(),
         // no recordId — explicit-launch instance.
       }),
     );
 
-    const detail = await getInstanceDetail(basePostGate, instanceId, 'a-zero-grant-actor-2');
+    const detail = await getInstanceDetail(basePostGate, instanceId, 'a-zero-grant-recless-stranger');
+    expect(detail.statusCode).toBe(404);
+  });
+
+  it('200 (participant skeleton, NO variables/history) for the actor who STARTED the record-less instance', async () => {
+    const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
+    const starter = `a-starter-recless-${uuid().slice(0, 8)}`;
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: 'telLinear',
+        actor: starter,
+        nowMs: Date.now(),
+        // no recordId — explicit-launch instance.
+      }),
+    );
+
+    const detail = await getInstanceDetail(basePostGate, instanceId, starter);
     expect(detail.statusCode).toBe(200);
+    expect(detail.body['id']).toBe(instanceId);
+    // Participant-tier for a record-less instance NEVER carries the reader-tier
+    // variables/history — there is no source record, so there is no
+    // covering-grant basis for the full reader tier at all (T-0723).
+    expect(detail.body['variables']).toBeUndefined();
+    expect(detail.body['history']).toBeUndefined();
   });
 });
 
@@ -645,20 +674,38 @@ describe.skipIf(!hasDb)('T-0722 FF-INST-VIS list-b: actor WITH READ on the sourc
   });
 });
 
-describe.skipIf(!hasDb)('T-0722: record-less instance stays in LIST for a zero-grant actor (phase-1/2 scope)', () => {
-  it('the record-less instance IS present in instances[] even with zero grants', async () => {
+describe.skipIf(!hasDb)('T-0723: LIST — record-less instance is gated by participant-tier, not tenant-default-open', () => {
+  it('the record-less instance is ABSENT from instances[] for a non-participant zero-grant actor', async () => {
     const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
     await withTenantTx(TENANT_A, (tx) =>
       appendProcessStarted(tx, {
         instanceId,
         procKey: 'telLinear',
-        actor: 'a-starter',
+        actor: 'a-starter-recless-list',
         nowMs: Date.now(),
         // no recordId — explicit-launch instance.
       }),
     );
 
-    const list = await getInstanceList(basePostGate, 'a-zero-grant-list-actor');
+    const list = await getInstanceList(basePostGate, 'a-zero-grant-recless-list-stranger');
+    expect(list.statusCode).toBe(200);
+    expect(list.instances.some((i) => i['id'] === instanceId)).toBe(false);
+  });
+
+  it('the record-less instance IS present in instances[] for the actor who STARTED it (participant)', async () => {
+    const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
+    const starter = `a-starter-recless-list-${uuid().slice(0, 8)}`;
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: 'telLinear',
+        actor: starter,
+        nowMs: Date.now(),
+        // no recordId — explicit-launch instance.
+      }),
+    );
+
+    const list = await getInstanceList(basePostGate, starter);
     expect(list.statusCode).toBe(200);
     expect(list.instances.some((i) => i['id'] === instanceId)).toBe(true);
   });

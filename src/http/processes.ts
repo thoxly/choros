@@ -830,6 +830,10 @@ export function registerProcessesRoutes(
               grants,
               ancestry,
               gateNowMs,
+              // T-0723: record-less rows are now participant-gated (isInstanceParticipantBatch)
+              // instead of unconditionally kept — actorSlug is the SAME identity already
+              // resolved above for resolveReadVisibility/the ?mine= filter (no second resolve).
+              actorSlug,
             );
           }
           // Map the PDP-visible projections (cheap, no engine I/O yet) so the pure
