@@ -35,10 +35,13 @@ import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth, resolveActorTenant } from "../db/org.js";
-import { isNarrowerOrEqual, type ScopeElement, type AncestryOracle } from "../core/grant-lattice.js";
+import { type ScopeElement } from "../core/grant-lattice.js";
 import { validateSecretHandleShape } from "../core/secret-handle-validator.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
-import type { AdminContext } from "../core/scoped-admin.js";
+// T-0645: the SINGLE shared agent-management authority predicate. saveDraft
+// (PUT /api/agents/:id/instruction) and the agent-instruction promote path
+// (artifacts.ts) gate on THIS one resolver — no per-file fork.
+import { holdsAgentMgmtUpdate } from "../core/agent-mgmt-authority.js";
 import { getLlmConnection } from "../db/llm-connection-dao.js";
 import { setAgentLlmConnection } from "../db/agent-llm-connection-dao.js";
 import {
@@ -172,28 +175,14 @@ async function lookupPositionOrgScope(
 // T-0498 [E-AGENTS]: bind an agent to a NAMED llm_connection profile.
 //
 // Authz — THE SAME class/predicate as the secret-handle lifecycle
-// (POST /api/agents/:id/secret-handle, secret-handle.ts::holdsAgentMgmtUpdate):
-// genesis-owner OR a confirmed, in-window, delegable mgmt_object:agent/update
-// grant covering the agent's org scope (isNarrowerOrEqual). Fail-closed: a plain
-// member with neither → 403. Binding the LLM connection is the SAME management
-// operation as binding the secret handle (it points the agent at where its key
-// lives), so it MUST NOT be a weaker gate.
+// (POST /api/agents/:id/secret-handle) AND the agent-instruction promote path
+// (artifacts.ts, T-0645): genesis-owner OR a confirmed, in-window, delegable
+// mgmt_object:agent/update grant covering the agent's org scope (isNarrowerOrEqual).
+// Fail-closed: a plain member with neither → 403. Binding the LLM connection is the
+// SAME management operation as binding the secret handle (it points the agent at
+// where its key lives), so it MUST NOT be a weaker gate. `holdsAgentMgmtUpdate` is
+// the SINGLE shared predicate imported from ../core/agent-mgmt-authority.js.
 // ---------------------------------------------------------------------------
-
-function holdsAgentMgmtUpdate(
-  admin: AdminContext,
-  agentOrgScope: ScopeElement,
-  oracle: AncestryOracle,
-): boolean {
-  if (admin.isGenesisOwner) return true;
-  return admin.adminGrants.some(
-    (g) =>
-      g.resourceType === "mgmt_object:agent" &&
-      g.operation === "update" &&
-      g.delegable &&
-      isNarrowerOrEqual(agentOrgScope, g.scope as ScopeElement, oracle),
-  );
-}
 
 /**
  * Resolve the agent's org placement (department) for the gate's scope check.
