@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0748",
+  "verdict": "approved",
+  "_scope": "Text-only error-attribution fix (NF-1 from T-0741's own review). Zero new UI elements, zero new styling: display_name's error hint now reaches this ONE new code path (NAME_INVALID_CHARACTERS) through the screen's PRE-EXISTING generic field-anchor mechanism (CreateUserModal's `mapped.field` -> `setFieldErrors` -> Field's `invalid`/`hint` props, screen-users.jsx:119-120,174-175) — the exact same channel EMAIL_TAKEN/login already use. Judged proportionate to the diff: server-side field disambiguation (admin-port.ts/user-mgmt.ts) + one new message string + one new web-layer if-branch (users-form.js mapUserError) + tests.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/ux-g5-jargon-denylist.sh -> exit 0, informational PASS; the only T-0748-attributable hit is the test describe()/it() name 'T-0748' in screen-users.mount.test.jsx (test metadata, not visible product text — same pattern as every other T-id in this file's neighbors, e.g. T-0715/T-0742/T-0651)",
+      "ci/checks/ux/ux-g6-no-new-hardcode.sh -> exit 0, 0 newly-added hardcode/overlay findings (no new inline styles or hardcoded colors in the diff)"
+    ]
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "n/a-delta-text-only, verified rather than assumed: the new NAME_INVALID_CHARACTERS branch renders through the pre-existing themed Field component (invalid/hint props) already used by every other field error on this form (login/email/password) — zero new JSX, zero new inline styles, zero new CSS. No real-click theme-toggle proof needed for a text-string addition into an already-themed, already-proven channel.",
+  "pattern_sources": [
+    {
+      "element": "Отображаемое имя field error hint (NAME_INVALID_CHARACTERS)",
+      "pattern": "existing generic field-anchor mechanism: CreateUserModal.submit -> mapUserError(status,body) -> mapped.field -> setFieldErrors -> <Field invalid={!!fieldErrors.display_name} hint={fieldErrors.display_name || <default hint>} /> (screen-users.jsx:119-120,171-176) — the SAME channel used by EMAIL_TAKEN->email, LOGIN taken->login. Judge live-mounted the real component (see review.json acceptance_coverage) and confirmed aria-invalid=true lands on the Отображаемое имя input specifically, not a generic banner.",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "root": "B",
+      "location": "src/http/user-mgmt.ts:462 (NAME_INVALID_CHARACTERS Russian message)",
+      "issue": "Message: «отображаемое имя содержит недопустимые символы — уберите спецсимволы (<, &, #, кавычки, скобки) и попробуйте снова». Judge live-verified this exact character list against the real KC person-name-prohibited-characters validator (t-0633-keycloak-1): <, &, #, \", ( all independently reproduced a 400 with this validator's messageKey; apostrophe (') and hyphen (-) — NOT named in the message — both independently verified to PASS (KC accepts them), so the message does not over-claim. Human, jargon-free, names the actual problem field, gives a concrete example of what to remove, ends with an actionable next step («попробуйте снова»). No dev/internal terms (\"KC\", \"person-name\", \"validator\", error codes) leak into the visible string.",
+      "suggestion": "None required — flagged only to record the live character-list verification for the record, not because anything is wrong."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/users-form.js:117 mapUserError + admin-port.ts isPersonNameCharacterError",
+      "issue": "When BOTH email and display_name are invalid in the same submit (KC's {errors:[...]} multi-field shape, live-confirmed), the fix surfaces only the name problem first (AP-9 case 3) — the owner fixes the name, resubmits, and only then discovers the (separately genuine) bad email as a second round trip. Not misleading (the name message is entirely honest and true), just not maximally complete in one pass. Consistent with this form's existing single-error-per-response model (EMAIL_TAKEN/LOGIN_TAKEN are likewise one code per response, never aggregated) — not a new deviation introduced by this task.",
+      "suggestion": "Non-blocking. Acceptable as-is given the existing single-field-error convention across this entire form; aggregating multiple field errors into one response would be a broader form-wide redesign out of scope for a NF-1 attribution fix."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "Honest field attribution: NAME_INVALID_CHARACTERS anchors on Отображаемое имя, not Email", "covered": true},
+    {"ac": "Old misleading email text ('email must be a valid email address') fully absent from this path (byte-string absence asserted by mount test + regex in users-form.test.js)", "covered": true},
+    {"ac": "Russian, human, jargon-free message naming the real problem with actionable next step", "covered": true},
+    {"ac": "Ordinary ФИО (incl. two-word Cyrillic, live-verified hyphenated surname) unaffected — no new friction on the happy path", "covered": true},
+    {"ac": "No new UI element / no new styling — reuses the pre-existing generic field-anchor + themed Field component (G2/G5/G6 all clean, informational and required alike)", "covered": true},
+    {"ac": "Real DOM mount proof (not source-grep) that the hint actually lands on the right input with aria-invalid=true and the email field is NOT marked invalid", "covered": true}
+  ]
+}
