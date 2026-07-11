@@ -46,7 +46,11 @@ import {
 } from "../core/process-name-policy.js";
 import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
 import { mapTimerEscalation } from "../core/timer-escalation-mapper.js";
-import { mapAgentTaskToExternal, extractAgentTaskConfigs } from "../core/agent-task-external-mapper.js";
+import {
+  mapAgentTaskToExternal,
+  extractAgentTaskConfigs,
+  ensureFlowableNamespace,
+} from "../core/agent-task-external-mapper.js";
 import { mapUserTaskRoleToCandidateGroups } from "../core/user-task-role-mapper.js";
 import { normalizeBpmnForDeploy, InvalidProcessKeyForDeployError } from "../core/bpmn-deploy-normalizer.js";
 import { lintBpmn, type LintViolation } from "../core/bpmn-linter.js";
@@ -509,35 +513,25 @@ export function registerProcessDefsRoutes(
       throw new HttpError(400, "VALIDATION", "bpmnXml must be a non-empty string");
     }
 
-    // T-0457 [D8-R2]: lane → role wiring. Before persisting, map each visual
-    // swimlane to the candidateGroups of the userTasks inside it (spec §3.3):
-    // a userTask in lane «Бухгалтер» gets flowable:candidateGroups="<lane-role>".
-    // Idempotent and additive — userTasks with an explicit role are left as-is,
-    // and a diagram with no lanes is returned unchanged. The persisted draft
-    // therefore carries the role binding the executor-resolver consumes.
-    const lanedBpmnXml = mapLanesToCandidateGroups(rawBpmnXml);
-
-    // T-0458 [D8-R3]: timer/deadline → escalation wiring. After lanes, materialise the
-    // native <timerEventDefinition> body from the typed choros:timerDeadline* config
-    // (so Flowable actually schedules the timer) and stamp the escalation-target
-    // userTask's flowable:candidateGroups from choros:escalateTo (so the firing
-    // projection addresses the right pool — manager/owner/role). Idempotent and
-    // additive: hand-authored bodies and explicit roles are preserved; a diagram with
-    // no timer events is returned unchanged. Runs BEFORE lint so the linter validates
-    // the materialised body.
-    const bpmnXml = mapTimerEscalation(lanedBpmnXml);
-
-    // T-0635 [P0-4 / LIVE_PROOF T-0586] fix: mapAgentTaskToExternal is DELIBERATELY
-    // NOT applied here. It used to run at draft-save time and its transformed output
-    // (carrying flowable:type/flowable:topic/<flowable:field> — attributes the
-    // modeler's choros-only moddle extension does not know) was persisted straight
-    // into choros.process_definition.bpmn_xml. The next time the SAME draft was
-    // opened in the modeler, importXML() choked on the unrecognised flowable:field
-    // extension content ("unparsable content") — publishing silently corrupted the
-    // draft. The draft must stay the AUTHOR's XML (choros:* only); the agent-step
-    // externalisation is a publish-time-only concern now, applied in
-    // publishProcessByKey (right before lint/deploy) on a local variable that is
-    // never written back to bpmn_xml. See agent-task-external-mapper.ts header.
+    // T-0641 [follow-up T-0635]: lane→role (T-0457) and timer→escalation (T-0458)
+    // wiring are DELIBERATELY NOT applied here. They used to run at draft-save time
+    // (mapLanesToCandidateGroups / mapTimerEscalation over rawBpmnXml) and their
+    // transformed output — carrying bare `flowable:candidateGroups` / native
+    // `<timeDuration>`/`<timeDate>` bodies WITHOUT any `xmlns:flowable` declaration
+    // (the modeler's choros-only moddle extension never emits one — see
+    // agent-task-external-mapper.ts header) — was persisted straight into
+    // choros.process_definition.bpmn_xml. TWO defects followed: (1) a lane-only or
+    // timer-only process (no agentTask) published with an UNBOUND `flowable` prefix
+    // — Flowable's deploy-time SAX parser rejects that with AttributePrefixUnbound,
+    // even though the pure linter/mapper unit tests never caught it (their fixtures
+    // hand-declare xmlns:flowable); (2) the draft itself was mutated at save-time,
+    // unlike every other publish-transform mapper. Both wiring passes are now
+    // publish-time-only, applied in publishProcessByKey (same seam as
+    // mapAgentTaskToExternal / mapUserTaskRoleToCandidateGroups) on a LOCAL variable
+    // that is never written back to bpmn_xml — the draft the modeler re-opens stays
+    // the AUTHOR's XML (choros:* only). See agent-task-external-mapper.ts header and
+    // docs/tasks/T-0641.spec.md.
+    const bpmnXml = rawBpmnXml;
 
     // T-0377: resolve the final key — explicit or auto-generated.
     let resolvedKey: string;
@@ -813,6 +807,22 @@ export async function publishProcessByKey(
     };
   }
 
+  // T-0641 [follow-up T-0635]: lane→role (T-0457) and timer→escalation (T-0458)
+  // wiring, applied HERE (publish time) instead of at draft-save time — same
+  // relocation discipline as T-0635 did for mapAgentTaskToExternal below. A userTask
+  // in lane «Бухгалтер» gets flowable:candidateGroups from the lane name; a timer
+  // event's typed choros:timerDeadline* config materialises into a native
+  // <timeDuration>/<timeDate> body and its choros:escalateTo target userTask gets
+  // flowable:candidateGroups. Idempotent + additive: an explicit author role, a
+  // diagram with no lanes, and a diagram with no timer events are all left
+  // unchanged. Both are LOCAL-variable transforms — never persisted back onto
+  // row.bpmn_xml, so the draft the modeler re-opens stays the AUTHOR's XML
+  // (choros:* only). Runs BEFORE the agent-task transform (disjoint element sets —
+  // userTask vs serviceTask — order does not matter for correctness, kept for
+  // continuity with the prior draft-save pipeline order).
+  const lanedXml = mapLanesToCandidateGroups(row.bpmn_xml);
+  const timedXml = mapTimerEscalation(lanedXml);
+
   // T-0635 [P0-4]: agentTask → live agent-step external task, applied HERE
   // (publish time) instead of at draft-save time. Convert each authored agent
   // serviceTask (choros:executorType="agent") into a Flowable external task on the
@@ -826,7 +836,7 @@ export async function publishProcessByKey(
   // ran at draft-save time and its output (carrying flowable:* the modeler's
   // choros-only moddle extension cannot parse back) was persisted straight into the
   // draft, so re-opening a published draft failed with "unparsable content".
-  const agentWiredXml = mapAgentTaskToExternal(row.bpmn_xml);
+  const agentWiredXml = mapAgentTaskToExternal(timedXml);
 
   // Step 1.5 [T-0642, столп1/P0, LIVE_PROOF T-0586]: userTask assignedRoleId →
   // candidateGroups. The properties panel lets an author assign a role
@@ -847,10 +857,33 @@ export async function publishProcessByKey(
   // candidateGroups-wired XML. Non-blocking: an assignedRoleId that does not
   // resolve (deleted role / cross-tenant collision) leaves that userTask
   // without candidateGroups rather than failing publish.
-  const publishXml = await mapUserTaskRoleToCandidateGroups(agentWiredXml, async (roleId) => {
+  const roleWiredXml = await mapUserTaskRoleToCandidateGroups(agentWiredXml, async (roleId) => {
     const resolved = await resolveRoleSlugsByIds(pool, tenantId, [roleId]);
     return resolved.get(roleId) ?? null;
   });
+
+  // T-0641 [chokepoint, follow-up T-0635]: single, centralized xmlns:flowable
+  // guarantee AFTER every publish-time mapper (lane / timer / agent-task /
+  // userTask-role) has had a chance to inject flowable:* content, and BEFORE
+  // lint/normalizeBpmnForDeploy see the document. This replaces relying on each
+  // mapper to carry its OWN "did I just emit new flowable:* content? then
+  // guarantee the namespace" guard (mapAgentTaskToExternal / user-task-role-
+  // mapper.ts each still carry one, kept as harmless defense-in-depth — calling
+  // ensureFlowableNamespace twice is a no-op) — a call this task would otherwise
+  // have had to COPY into lane-role-mapper.ts AND timer-escalation-mapper.ts too
+  // (three near-identical guards spread across three files, the exact shape of
+  // bug T-0641 fixes). One idempotent call here covers every mapper, including:
+  //   - lane-role-mapper.ts / timer-escalation-mapper.ts, which inject bare
+  //     flowable:candidateGroups / native timer bodies with NO namespace guard
+  //     of their own (a lane-only or timer-only process, no agentTask, would
+  //     otherwise deploy with an unbound `flowable` prefix — AttributePrefixUnbound);
+  //   - the "wired=false" edge case: every authored agentTask already external
+  //     (mapAgentTaskToExternal's own guard never fires) while an EARLIER mapper
+  //     in this chain (lane/timer) DID emit flowable:* content — still covered
+  //     here even though no single mapper's local guard would have caught it.
+  // ensureFlowableNamespace no-ops when xmlns:flowable is already declared, so
+  // this call is always safe to make unconditionally.
+  const publishXml = ensureFlowableNamespace(roleWiredXml);
 
   // Step 2: Lint — fail-closed gate (T-0027). Load published rule tables (advisory).
   let ruleTables: import("../core/dmn-middle.js").DmnRuleTable[] | undefined;
@@ -961,8 +994,13 @@ export async function publishProcessByKey(
     );
   });
 
-  // Step 5: unfilled-role warnings (advisory, never block).
-  const roleWarnings = await buildUnfilledRoleWarnings(pool, tenantId, row.bpmn_xml);
+  // Step 5: unfilled-role warnings (advisory, never block). T-0641: reads the
+  // FULLY publish-wired XML (publishXml — lane/timer/agent-task/userTask-role all
+  // resolved), not the raw persisted row.bpmn_xml. Lane/timer candidateGroups no
+  // longer land in row.bpmn_xml (relocated to publish-time-only, this task), and
+  // userTask assignedRoleId candidateGroups (T-0642) never did either — checking
+  // the raw draft would silently miss unfilled-role warnings for all three sources.
+  const roleWarnings = await buildUnfilledRoleWarnings(pool, tenantId, publishXml);
 
   return {
     status: "published",

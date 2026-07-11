@@ -1,0 +1,64 @@
+{
+  "task_id": "T-0641",
+  "verdict": "approved",
+  "reviewer": "adversarial-judge",
+  "branch": "task/T-0641",
+  "base": "dev@504312f11f527c539e252d26a2b0fc6a7a22307c",
+  "ci_seen": { "green": true },
+  "gates_rerun_by_judge": {
+    "tsc_noEmit": "exit 0 (0 type errors)",
+    "new_test_process-defs.lanetimer-publish": "7/7 pass",
+    "targeted_regressions": "105/105 pass across 7 suites (agent-task-external-mapper 27, lane-role-mapper 16, timer-escalation-mapper 20, user-task-role-mapper 21, process-defs.agentxml-draft 7, process-defs.usertask-role 7, bpmn-linter.agent-task 7)",
+    "anti_case_lock": "PASS exit 0 — aggregate 15 < baseline 16, no individual literal regressed",
+    "note_full_suite": "full vitest NOT re-run wall-to-wall by judge; the one builder-reported failure (forms-from-schema SP-1) reproduced & characterized below as pre-existing/unrelated"
+  },
+  "mutation_probes": {
+    "chokepoint_removed (publishXml = roleWiredXml)": "gate1 + gate2 + gate4 RED (3 failed / 4 passed) — invariant is genuinely enforced; also independently proves the adjacent already-external+lane document deploys with UNBOUND flowable prefix without the chokepoint",
+    "draft_save_re-mutated (mapLanesToCandidateGroups reintroduced in POST path)": "gate3 RED (2 failed) — byte-identity invariant genuinely enforced",
+    "both_reverted": "working tree restored byte-identical to HEAD, confirmed via git status --porcelain (clean)"
+  },
+  "independent_derivations": {
+    "risk3_adjacent_already_external": "DISPROVEN as a defect. Read agent-task-external-mapper.ts: alreadyExternal cfgs hit `continue` so `wired` stays false and the mapper's OWN ensureFlowableNamespace never fires; lane-role-mapper.ts + timer-escalation-mapper.ts inject bare flowable:candidateGroups / native timer bodies with NO namespace guard of their own. The MIXED fixture (already-external agentTask + lane) therefore needs the CENTRAL chokepoint — gate4 mutation confirms it deploys unbound without it. Chokepoint correctly covers it.",
+    "deploy_chain_order": "Verified: publishXml = ensureFlowableNamespace(roleWiredXml) runs AFTER all 4 mappers (lane→timer→agent→userTask-role) and BEFORE lintBpmn / normalizeBpmnForDeploy; deployBpmn receives normalizeBpmnForDeploy(publishXml), and the tests assert xmlns:flowable on the POST-normalize deploy argument (mock.calls[0][0]) — proves the namespace survives normalization.",
+    "buildUnfilledRoleWarnings_switch": "MANDATORY, not cosmetic. It calls extractCandidateGroupsFromBpmn(bpmnXml); post-relocation row.bpmn_xml carries ZERO candidateGroups (lane/timer publish-only, userTask-role T-0642 never persisted), so reading row.bpmn_xml would silently yield 0 warnings for ALL sources — a live advisory regression. Reading publishXml restores + extends coverage."
+  },
+  "consumer_scan": {
+    "GET /api/process-defs/:key (process-defs.ts:640)": "returns row.bpmn_xml to the modeler — now the clean AUTHOR XML (choros:* only). This is the intended win (importXML-safe re-open), not a regression.",
+    "buildUnfilledRoleWarnings": "correctly switched to publishXml (see above).",
+    "runtime candidateGroups consumers (flowable-client / process-catalog-view / process-projection / executor-resolver)": "read from the LIVE Flowable engine's active user-tasks, which was deployed from publishXml (fully mapped). No dependency on the stored draft.",
+    "process-gen-validator.groundProcess (extractLaneRoleBindings)": "reads the raw <lane name=...> structure, NOT flowable:candidateGroups; operates on the in-memory AI draft (process-gen-loop), never on the persisted+re-read row. Unaffected by relocation.",
+    "conclusion": "No side-consumer regression. No GET/export/viewer/runtime path depended on lane/timer candidateGroups living in the persisted draft."
+  },
+  "resolved_builder_risks": {
+    "risk4_proxy_deploy_mock": "PROXY SUFFICIENT — non-blocking. Asserting xmlns:flowable on the (post-normalize) string handed to deployBpmn is a faithful proxy for real-Flowable AttributePrefixUnbound: the root <definitions> declaration binds the prefix document-wide, which is exactly what the SAX parser needs. Same mock-arg discipline as T-0635/T-0642 regressions. Real deploy is correctly deferred to the LIVE_PROOF phase on the stand.",
+    "risk3_warnings_no_direct_test": "FOLLOW-UP (non-blocking) — advisory path (never blocks publish); the switch to publishXml is functionally forced and the path IS exercised (indirectly) by gate1/gate2 publishes. Missing a direct assertion on result.warnings is a coverage gap, not a correctness defect."
+  },
+  "sp1_flake": "forms-from-schema SP-1 reproduced RED in isolation (hard 10s hang, not load — persists even with --testTimeout=30000). T-0641 does NOT touch forms.ts / forms-from-schema.test.ts (git diff dev..HEAD = only process-defs.ts + new test + 2 docs); both files byte-identical to dev, so this is PRE-EXISTING on dev, NOT a branch regression. D-056 signal (systemic test-timeout), tracked separately, non-blocking for T-0641.",
+  "findings": [
+    {
+      "id": "T-0641-N1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__/process-defs.lanetimer-publish.test.ts / publishProcessByKey Step 5",
+      "issue": "buildUnfilledRoleWarnings was repointed from row.bpmn_xml to publishXml (a functionally-necessary side-fix, since row.bpmn_xml no longer carries candidateGroups) but no test asserts on the returned result.warnings. Builder self-disclosed. Advisory path, never blocks publish.",
+      "suggestion": "Follow-up: add one assertion that publishing LANE_ONLY_XML with zero role holders (mock already returns []) yields a warnings entry for 'buhgalter' — locks the publishXml source against silent regression to 0 warnings."
+    },
+    {
+      "id": "T-0641-N2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "publishProcessByKey deploy path (deployBpmn mocked in unit tests)",
+      "issue": "The AttributePrefixUnbound invariant is verified only via the mocked deployBpmn argument (proxy), not a live Flowable SAX deploy. Judged sufficient for the merge gate (faithful proxy, same discipline as T-0635/T-0642).",
+      "suggestion": "No code change required. LIVE_PROOF phase on the stand must publish a lane-only AND a timer-only process live to close the proxy with a real Flowable deploy."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Mappers removed from POST /api/process-defs — draft-save persists XML verbatim (byte-identity)", "covered": true },
+    { "ac": "publishProcessByKey chain: row.bpmn_xml -> laned -> timed -> agentWired -> roleWired -> single unconditional idempotent ensureFlowableNamespace -> lint/normalize/deploy", "covered": true },
+    { "ac": "Chokepoint AFTER all mappers, BEFORE normalizeBpmnForDeploy", "covered": true },
+    { "ac": "lane-only process publishes without AttributePrefixUnbound", "covered": true },
+    { "ac": "timer-only process publishes without AttributePrefixUnbound", "covered": true },
+    { "ac": "adjacent case (agentTask already-external + lane) still gets xmlns:flowable via the chokepoint", "covered": true },
+    { "ac": "idempotent — exactly one xmlns:flowable declaration, no double-injection", "covered": true }
+  ]
+}
