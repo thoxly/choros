@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0660",
+  "verdict": "changes_requested",
+  "gate_seen": {
+    "green": true,
+    "red_rules": []
+  },
+  "themes_checked": [],
+  "steward_note": "UX honest-gates G2/G4/G6/G7 зелёные (прогнаны соло); токены обеих тем существуют, жаргон в видимом тексте отсутствует, disabled всегда с человеческой причиной. НО: (1) blocking-находка ниже (undo-неатомарность) и (2) живой real-click в ОБЕИХ темах НЕ выполнен — bpmn-js модельер headless-недоступен, стенд offline, поэтому themes_checked=[]. Обе темы проверены СТАТИЧЕСКИ (токены+G2), не живым кликом. По контракту D-062 (обе темы обязаны быть real-click) это часть того же LIVE_PROOF-шва, что и живой edge-DI.",
+  "findings": [
+    {
+      "id": "U-1",
+      "severity": "blocking",
+      "root": "B",
+      "location": "web/src/canvas/escalation-branch-builder.js applyEscalationBranch (строки 168-214)",
+      "issue": "Один клик «Собрать напоминание с эскалацией» выпускает ~8 РАЗДЕЛЬНЫХ modeling-команд (updateProperties cancelActivity, appendShape escTask, updateProperties name, appendShape gateway, updateProperties name, removeConnection hostFlow, connect gateway→next, connect escTask→gateway) БЕЗ композитной обёртки — я подтвердил grep-ом: ни commandStack, ни composite/transaction в билдере нет. В bpmn-js каждый высокоуровневый modeling-вызов = отдельная запись в стеке undo. Значит откат ОДНОГО клика headline-аффорданса «одним движением» требует ~8 нажатий Ctrl+Z, при которых собранная форма разваливается по кускам. Постановка задачи прямо предобъявляет это дефектом: «N undo-шагов для отката одной кнопки = UX-дефект». Спека §D2 продаёт «один клик собирает» — обратимость обязана быть симметричной. Это ровно класс OBLIK/reversibility, который стюард заворачивает (ср. T-0656 DnD, завёрнут 2× за UX).",
+      "suggestion": "Обернуть все modeling-операции applyEscalationBranch в ОДНУ композитную команду (bpmn-js commandStack: кастомный command-handler, выполняющий последовательность как единый undoable-юнит), чтобы один клик = одна запись undo = один Ctrl+Z для полного отката. Правка чисто в билдере (сервер/спека не трогаются). Живая проверка симметрии undo — на том же LIVE_PROOF-канвасе, что и edge-DI."
+    },
+    {
+      "id": "U-2",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/canvas/timer-deadline-panel.jsx (interrupt-mode select строка 264; escalation-target select строка 283)",
+      "issue": "Панель позволяет выставить «Работает параллельно» (non-interrupting) НЕЗАВИСИМО от кнопки сборки ветки — то есть пользователь может создать зомби-форму (non-interrupting + вручную нарисованная эскалация в отдельный конец) в обход аффорданса. Это НЕ дыра: publish-linter (timer_escalation_no_convergence) — реальный backstop (я проверил живьём независимым probe). Defense-in-depth корректен: аффорданс строит ХОРОШУЮ форму, гейт блокирует ПЛОХУЮ. Фиксирую как осознанный выбор, не дефект.",
+      "suggestion": "Опционально: если пользователь вручную ставит non-interrupting без схождения — показать inline-подсказку в панели (мягкое предупреждение до publish), чтобы ошибка всплывала раньше 422 на публикации. Не blocking."
+    },
+    {
+      "id": "U-3",
+      "severity": "nit",
+      "root": "A",
+      "location": "web/src/canvas/timer-deadline-panel.jsx (пред-существующие select-ы Тип срока/Срок/Кому эскалация)",
+      "issue": "Только НОВЫЙ interrupt-mode select (T-0660) несёт aria-label; пред-существующие select-ы панели (Тип срока, Кому эскалация — из T-0458) опираются на визуальный label через PPEntry без htmlFor/id-ассоциации. Это пред-существующий паттерн панели, НЕ регресс T-0660 — T-0660 свой контрол озвучил правильно (aria-label + role=status на note + aria-disabled+причина на кнопке).",
+      "suggestion": "Follow-up вне T-0660: протянуть htmlFor/id или aria-label на все select-ы панели bpmn-properties. Не blocking для этой задачи."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    { "ac": "AC7-язык: ноль жаргона в видимом тексте (cancelActivity/boundary/non-interrupting/gateway отсутствуют; человеческие «Останавливает шаг»/«Работает параллельно (напоминание)»/«Продолжить»/«Эскалация»)", "covered": true },
+    { "ac": "Токены обеих тем: все --chs-* существуют, G2 theme-pairing PASS, 0 хардкод-цветов в диффе", "covered": true },
+    { "ac": "Фокус/ARIA: interrupt-select aria-label, кнопка aria-disabled+aria-label+человеческая причина, buildNote role=status", "covered": true },
+    { "ac": "Кнопка не «мёртвая»: disabled ВСЕГДА с человеческой причиной (canBuildEscalationBranch возвращает reason на каждой ветке ok:false)", "covered": true },
+    { "ac": "Дисклоужер: interrupt-контрол и кнопка скрыты для промежуточного (свободного) таймера", "covered": true },
+    { "ac": "Undo одного клика откатывает ЦЕЛИКОМ (одна modeling-транзакция)", "covered": false },
+    { "ac": "Живой real-click в обеих темах (D-062 контракт)", "covered": false }
+  ]
+}
