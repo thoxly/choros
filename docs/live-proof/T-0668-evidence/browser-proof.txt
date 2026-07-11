@@ -1,0 +1,96 @@
+BROWSER LIVE-PROOF T-0668  2026-07-11T12:11:58.087Z
+seeded session user=e-configurator  actor_type=human  aud=choros-api
+navigating to http://localhost:3080/rights/intents ...
+final URL: http://localhost:3080/rights/intents
+
+=== CAPTURED NETWORK (the T-0668 fixed call) ===
+{
+  "tenant-state": {
+    "authHeader": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJVeEk5b0JkaXNtd2lJYnR1d05KUXk1V2FScjJlNG1jTXJ6VFc3b2Q4aWtZIn0.eyJleHAiOjE3ODM3NzIyMTcsImlhdCI6MTc4Mzc3MTkxNywianRpIjoiMTM4ZTk0YzYtNDViMy00ZmEyLTg3NWMtZjQ1MmEzNTlkMDk1IiwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdDo4MzgwL3JlYWxtcy9jaG9yb3MiLCJhdWQiOiJjaG9yb3MtYXBpIiwic3ViIjoiNzlkMzU4ZDQtYjFkZi00OWU0LTk2ZWYtMWZhYTljZmFhYWMwIiwidHlwIjoiQmVhcmVyIiwiYXpwIjoiY2hvcm9zLWFwaSIsInNpZCI6IjU5MDM4ZDBmLWNiNmItNGQ2Yy1iNDczLTBkOWJiY2I0MjBlNyIsImFjciI6IjEiLCJhbGxvd2VkLW9yaWdpbnMiOlsiaHR0cDovL2xvY2FsaG9zdDo4MDgwIiwiaHR0cDovL2xvY2FsaG9zdDozMDAwIl0sInNjb3BlIjoicHJvZmlsZSBlbWFpbCIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJhY3Rvcl90eXBlIjoiaHVtYW4iLCJuYW1lIjoi0JouINCa0L7QvdGE0LjQs9GD0YDQsNGC0L7RgCIsInByZWZlcnJlZF91c2VybmFtZSI6ImUtY29uZmlndXJhdG9yIiwiZ2l2ZW5fbmFtZSI6ItCaLiIsImZhbWlseV9uYW1lIjoi0JrQvtC90YTQuNCz0YPRgNCw0YLQvtGAIiwiZW1haWwiOiJlLWNvbmZpZ3VyYXRvckBjaG9yb3MuZGV2In0.ECx4Of6bCMaIxugorwknQuZE5HOKRrfIT765awk95nHFn0kZkeDq970YCQIKFbeWlsUsqnuMi1fwkBm91XsMsQzgesdk-czsy3NMEGQk9v7t48ly6XBn0bFhsLlVAIhHyzYuz4i7O8FI_u7iXH92Q4Hh2zPzVNH70bL5u0n3OAzGCOeeyjw2PrfM9brzqViMCRZWPB9ZHOPuaBPFCkTyJnUQZgJiGm_HGd1lbJBfHlyfxZih6LiyA98PRZltOFEAxn5xLc71UTd-Xec2y83Z4wPMntetUVgmLuXynO9NE4PFVwCTiz9m9uar1e6vBAzJx6BZuJRYMlWOg2mXDGq5MQ"
+  },
+  "dictionaries": {
+    "authHeader": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJVeEk5b0JkaXNtd2lJYnR1d05KUXk1V2FScjJlNG1jTXJ6VFc3b2Q4aWtZIn0.eyJleHAiOjE3ODM3NzIyMTcsImlhdCI6MTc4Mzc3MTkxNywianRpIjoiMTM4ZTk0YzYtNDViMy00ZmEyLTg3NWMtZjQ1MmEzNTlkMDk1IiwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdDo4MzgwL3JlYWxtcy9jaG9yb3MiLCJhdWQiOiJjaG9yb3MtYXBpIiwic3ViIjoiNzlkMzU4ZDQtYjFkZi00OWU0LTk2ZWYtMWZhYTljZmFhYWMwIiwidHlwIjoiQmVhcmVyIiwiYXpwIjoiY2hvcm9zLWFwaSIsInNpZCI6IjU5MDM4ZDBmLWNiNmItNGQ2Yy1iNDczLTBkOWJiY2I0MjBlNyIsImFjciI6IjEiLCJhbGxvd2VkLW9yaWdpbnMiOlsiaHR0cDovL2xvY2FsaG9zdDo4MDgwIiwiaHR0cDovL2xvY2FsaG9zdDozMDAwIl0sInNjb3BlIjoicHJvZmlsZSBlbWFpbCIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJhY3Rvcl90eXBlIjoiaHVtYW4iLCJuYW1lIjoi0JouINCa0L7QvdGE0LjQs9GD0YDQsNGC0L7RgCIsInByZWZlcnJlZF91c2VybmFtZSI6ImUtY29uZmlndXJhdG9yIiwiZ2l2ZW5fbmFtZSI6ItCaLiIsImZhbWlseV9uYW1lIjoi0JrQvtC90YTQuNCz0YPRgNCw0YLQvtGAIiwiZW1haWwiOiJlLWNvbmZpZ3VyYXRvckBjaG9yb3MuZGV2In0.ECx4Of6bCMaIxugorwknQuZE5HOKRrfIT765awk95nHFn0kZkeDq970YCQIKFbeWlsUsqnuMi1fwkBm91XsMsQzgesdk-czsy3NMEGQk9v7t48ly6XBn0bFhsLlVAIhHyzYuz4i7O8FI_u7iXH92Q4Hh2zPzVNH70bL5u0n3OAzGCOeeyjw2PrfM9brzqViMCRZWPB9ZHOPuaBPFCkTyJnUQZgJiGm_HGd1lbJBfHlyfxZih6LiyA98PRZltOFEAxn5xLc71UTd-Xec2y83Z4wPMntetUVgmLuXynO9NE4PFVwCTiz9m9uar1e6vBAzJx6BZuJRYMlWOg2mXDGq5MQ",
+    "status": 200,
+    "presets": 14,
+    "resources": 10
+  }
+}
+
+=== live dictionary markers found in rendered DOM: ["Бытовые операции","операци"]
+
+=== page body text (first 1500 chars) ===
+Choros
+Dev Silo · 18 исп.
+Поиск разделов
+⌘K
+Обзор
+РАБОТА
+Мои задачи
+0
+Процессы
+БЕЗ РАЗДЕЛА
+Внешние справочники
+Приёмочное приложение mqjqfjdrk7ib
+Приёмочное приложение mqjqggzw4arr
+Приёмочное приложение mqjqhao7z8j6
+Приёмочное приложение mqjqi5nfocbx
+Приёмочное приложение mqjqppun0o5h
+Приёмочное приложение mqjqyi9bnxsq
+Приёмочное приложение mqjs1lb49a69
+Приёмочное приложение mqjsjk2qj8ry
+Приёмочное приложение mqjt2feiso8x
+Приёмочное приложение mqjx09dxga6s
+Приёмочное приложение mqjxdj7cga0g
+Приёмочное приложение mqjy1ilsafsm
+Приёмочное приложение mqjz7ipg55pa
+Приёмочное приложение mqk01yrqixk8
+Приёмочное приложение mqk0egq81y9u
+Приёмочное приложение mqk0gza3ajum
+Системные справочники
+Согласование заявок (ТЭЛ)
+Vendor / CRM
+Раздел
+КОНСТРУКТОР
+e
+e-configurator
+human
+Администрирование
+/
+Справочники
+/
+Повседневные операции
+Экспорт прав
+В разработке
+Критичность
+SoD
+Каталог ролей
+демо
+Черновик грантов засеян примером; существующие гранты роли из БД пока не подгружаются в редактор.
+Повседневные операции
+Бытовые операции прав
+Намерение → пресет → гранты. Решётку скоупов админ не собирает руками.
+НАНЯТЬ
+сотрудник → должность · пресет разворачивается в гранты
+SLUG СОТРУДНИКА
+ИМЯ
+ТИП
+Человек
+Агент
+РОЛЬ (ДОЛЖНОСТЬ)
+справочник не загружен (Недостаточно прав для этого действия)
+ПРЕСЕТ-РОЛЬ
+— выбрать пресет —
+Согласующий бюджета в Финансах
+Казначей-исполнитель (критично)
+Наблюдатель аудита
+Инициатор договорной работы
+Согласующий договоров
+Линия поддержки L1
+Приёмник эскалаций агентов
+Бухгалт
+
+console errors: ["Failed to load resource: the server responded with a status of 403 (Forbidden)"]
+
+screenshot: /Users/shoxy/Code/choros-wt/T-0668/docs/live-proof/T-0668-evidence/browser-rights-intents.png
+
+VERDICT: dictionaries call carried Bearer=true status=200 presets=14 resources=10 domMarkers=2

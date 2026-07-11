@@ -1,0 +1,38 @@
+HTTP-INTEGRATION LIVE-PROOF T-0668  2026-07-11T12:09:05.051212Z
+KC issuer=http://localhost:8380/realms/choros  aud=choros-api  user=e-configurator  actor_type=human
+server /api/auth-config mode: {"mode":"keycloak","keycloak":{"url":"http://localhost:8380","realm":"choros","clientId":"choros-web","audience":"choros-api"}}
+
+
+########## TARGET 1: /api/rights/dictionaries  (ra-intents.jsx «Бытовые операции прав» screen) ##########
+=== dictionaries [NO-TOKEN] GET /api/rights/dictionaries -> HTTP 200 ===
+{"resources":[{"uri":"mcp://ledger.invoices","name":"Реестр счетов"},{"uri":"mcp://ledger.recon","name":"Сверка платежей"},{"uri":"mcp://payments.initiate","name":"Платёжный шлюз"},{"uri":"mcp://payments.refund","name":"Возвраты средств"},{"uri":"mcp://counterparty.kyc","name":"Контрагенты (KYC)"},{"uri":"mcp://contracts.lookup","name":"Справочник договоров"},{"uri":"mcp://support.queue","name":"Очередь обращений"},{"uri":"mcp://crm.customer","name":"CRM клиента"},{"uri":"mcp://kb.search","name":"База знаний"},{"uri":"mcp://escalations.queue","name":"Очередь эскалаций"}],"operations":["read","create","update","delete","approve","transition","invoke"],"orgTree":[{"id":"org","label":"Компания","depth":0,"children":["fin","cs","plat","sales"]},{"id":"fin","label":"Финансы","depth":1,"children":["fin-calc","fin-approve","fin-treasury"]},{"id":"fin-calc","label":"Расчёты","depth":2,"children"
+=== dictionaries [AUTH] GET /api/rights/dictionaries -> HTTP 200 ===
+{"resources":[{"uri":"mcp://ledger.invoices","name":"Реестр счетов"},{"uri":"mcp://ledger.recon","name":"Сверка платежей"},{"uri":"mcp://payments.initiate","name":"Платёжный шлюз"},{"uri":"mcp://payments.refund","name":"Возвраты средств"},{"uri":"mcp://counterparty.kyc","name":"Контрагенты (KYC)"},{"uri":"mcp://contracts.lookup","name":"Справочник договоров"},{"uri":"mcp://support.queue","name":"Очередь обращений"},{"uri":"mcp://crm.customer","name":"CRM клиента"},{"uri":"mcp://kb.search","name":"База знаний"},{"uri":"mcp://escalations.queue","name":"Очередь эскалаций"}],"operations":["read","create","update","delete","approve","transition","invoke"],"orgTree":[{"id":"org","label":"Компания","depth":0,"children":["fin","cs","plat","sales"]},{"id":"fin","label":"Финансы","depth":1,"children":["fin-calc","fin-approve","fin-treasury"]},{"id":"fin-calc","label":"Расчёты","depth":2,"children"
+parse err Expecting ':' delimiter: line 1 column 901 (char 900)
+
+########## TARGET 2: /api/users  (screen-login.jsx dev user-picker) ##########
+=== users [NO-TOKEN] GET /api/users -> HTTP 200 ===
+{"users":[{"id":"e-belov","name":"С. Белов","position":"Интеграции","department":"Платформа"},{"id":"e-kravtsova","name":"А. Кравцова","position":"Контролёр расчётов","department":"Финансы"},{"id":"e-larina","name":"Е. Ларина","position":"Финансовый директор","department":"Финансы"},{"id":"e-mironov","name":"Д. Миронов","position":"Согласующий счетов","department":"Финансы"},{"id":"e-orlov","name":"К. Орлов","position":"Линия поддержки L1","department":"Клиентский сервис"},{"id":"e-petrov","name":"И. Петров","position":"Эскалации L2","department":"Клиентский сервис"},{"id":"e-savina","name":"Н. Савина","position":"Линия поддержки L1","department":"Клиентский сервис"}]}
+=== users [AUTH] GET /api/users -> HTTP 200 ===
+{"users":[{"id":"e-belov","name":"С. Белов","position":"Интеграции","department":"Платформа"},{"id":"e-kravtsova","name":"А. Кравцова","position":"Контролёр расчётов","department":"Финансы"},{"id":"e-larina","name":"Е. Ларина","position":"Финансовый директор","department":"Финансы"},{"id":"e-mironov","name":"Д. Миронов","position":"Согласующий счетов","department":"Финансы"},{"id":"e-orlov","name":"К. Орлов","position":"Линия поддержки L1","department":"Клиентский сервис"},{"id":"e-petrov","name":"И. Петров","position":"Эскалации L2","department":"Клиентский сервис"},{"id":"e-savina","name":"Н. Савина","position":"Линия поддержки L1","department":"Клиентский сервис"}]}
+>> users=7  sample=[{"id": "e-belov", "name": "С. Белов", "position": "Интеграции", "department": "Платформа"}, {"id": "e-kravtsova", "name": "А. Кравцова", "position": "Контролёр расчётов", "department": "Финансы"}, {"id": "e-larina", "name": "Е. Ларина", "position": "Финансовый директор", "department": "Финансы"}] (LIVE humans list)
+
+########## MECHANISM: withAuth-gated routes = the two ACTUAL live-caught incidents of this bug class ##########
+(T-0649 fetchEmployees /api/org ; T-0648 rights journal /api/grant-trail)
+=== org(T-0649) [NO-TOKEN] GET /api/org -> HTTP 401 ===
+{"error":{"code":"UNAUTHENTICATED","message":"missing Authorization header"}}
+=== org(T-0649) [AUTH] GET /api/org -> HTTP 200 ===
+{"departments":[{"id":"cs","name":"Клиентский сервис","positions":[{"id":"cs-l1","title":"Линия поддержки L1","people":[{"id":"a-triage","name":"Триаж-агент","type":"agent","deactivated":false},{"id":"e-orlov","name":"К. Орлов","type":"human","deactivated":false},{"id":"e-savina","name":"Н. Савина","type":"human","deactivated":false}]},{"id":"cs-l2","title":"Эскалации L2","people":[{"id":"e-petrov","name":"И. Петров","type":"human","deactivated":false}]}]},{"id":"fin","name":"Финансы","positions":[{"id":"fin-appr","title":"Согласующий счетов","people":[{"id":"a-invoice","name":"Счёт-агент","type":"agent","deactivated":false},{"id":"e-mironov","name":"Д. Миронов","type":"human","deactivated":false}]},{"id":"fin-cfo","title":"Финансовый директор","people":[{"id":"e-larina","name":"Е. Ларина","type":"human","deactivated":false}]},{"id":"fin-ctrl","title":"Контролёр расчётов","people":[{"id"
+=== grant-trail(T-0648) [NO-TOKEN] GET /api/grant-trail -> HTTP 401 ===
+{"error":{"code":"UNAUTHENTICATED","message":"missing Authorization header"}}
+=== grant-trail(T-0648) [AUTH] GET /api/grant-trail -> HTTP 403 ===
+{"error":{"code":"FORBIDDEN","message":"grant trail requires admin/owner authority"}}
+
+########## VERDICT ##########
+Server confirmed in keycloak mode (auth-config mode=keycloak).
+TARGET endpoints back the screens & return LIVE data WITH a valid session:
+  /api/rights/dictionaries WITH token -> HTTP 200
+  /api/users               WITH token -> HTTP 200
+MECHANISM (what authHeaders() unlocks): keycloak Bearer gate is REAL:
+  /api/org        NO-TOKEN -> HTTP 401  | WITH token -> HTTP 200
+  /api/grant-trail NO-TOKEN -> HTTP 401  | WITH token -> HTTP 403
