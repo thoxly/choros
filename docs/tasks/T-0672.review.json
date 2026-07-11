@@ -3,7 +3,7 @@
   "verdict": "approved",
   "reviewer": "adversarial-judge",
   "branch": "task/T-0672",
-  "base": "merge-base dev@504312f11f527c539e252d26a2b0fc6a7a22307c (branch is BEHIND current dev — see staleness finding N1)",
+  "base": "r2: rebased onto dev@b50308be (T-0756 merge); 5 commits atop, HEAD 828cf76e. r1 was reviewed at merge-base 504312f1 (staleness N1 — RESOLVED by the rebase).",
   "ci_seen": { "green": true },
   "scope_of_change": {
     "note": "The T-0672 commits (504312f1..HEAD) touch ONLY 7 files: src/core/flowable-client.ts, src/http/process-projection.ts, src/__tests__/inbox-engine-drive.test.ts, ci/checks/db/engine-drive-completedby.db.test.ts (new), ci/checks/db/engine-drive-generic.db.test.ts (+T-0672 test), docs/tasks/T-0672.spec.md, docs/tasks/T-0672.pr-handoff.json. Verified with `git diff --stat 504312f1..HEAD`.",
@@ -52,14 +52,35 @@
     "evidence": "engine-drive-generic.db.test.ts returns 403 (expected 403 to be 200) for ALL 4 tests on the branch — including the 3 ORIGINAL T-0571 tests. Ran the SAME file from the main checkout on clean dev (b50308be, which does NOT contain the T-0672 test): the 3 original T-0571 tests fail identical 403. Root cause = the HTTP approve authz harness (resolveRolesForActor over seedApproverGrant) needs full-CI role/grant seeding absent in the local db lane. The completedBy fix itself is proven live by engine-drive-completedby.db.test.ts which drives the reconcile seam DIRECTLY, bypassing the HTTP authz layer.",
     "recommendation": "Deserves its OWN task (local db-lane approver-grant seeding so engine-drive-generic HTTP tests run locally). Orchestrator to file. Does not block T-0672."
   },
+  "re_verify_r2": {
+    "trigger": "Post-merge gate saw 14 handler tests of inbox-engine-drive.test.ts fail 403-vs-200 on the T-0672 x T-0756 combination; builder claimed a FAKE conflict (ambient DATABASE_URL, not code) fixed by a hermetic env pin + rebase onto b50308be. Judge re-verified independently.",
+    "branch_state_verified": "task/T-0672 = 5 commits atop b50308be (merge-base confirmed b50308be), HEAD 828cf76e. Integration commit 828cf76e touches ONLY src/__tests__/inbox-engine-drive.test.ts (file-level beforeAll save+delete / afterAll restore of DATABASE_URL) + docs/tasks/T-0672.pr-handoff.json. PRODUCT CODE UNTOUCHED by the integration fix. T-0672 src hunks byte-identical to the r1-reviewed versions (flowable-client.ts identical; process-projection.ts differs from r1 HEAD ONLY by the T-0756 dev-side hunks ~51/~996-1233; diff b50308be..HEAD on that file = exactly the T-0672 interface+claim hunks ~2025/~2320).",
+    "four_quadrant_matrix_my_own_runs": {
+      "rebased_tree_WITH_ambient_DATABASE_URL": "53/53 PASS (hermetic pin works under ambient env)",
+      "rebased_tree_WITHOUT_DATABASE_URL": "53/53 PASS",
+      "dev_side_WITH_ambient_DATABASE_URL": "14 failed / 34 passed (48) — the exact same 'expected 403 to be 200/502' failures. Ran on dev tip bfef9575 (descendant of b50308be, contains NO T-0672 code and NO hermetic pin); verified harness-relevant files (inbox.ts, inbox-engine-drive.test.ts, process-projection.ts, flowable-client.ts) are BYTE-IDENTICAL between b50308be and bfef9575 (the range is client-only T-0659/T-0660), so this run is equivalent to b50308be.",
+      "dev_side_WITHOUT_DATABASE_URL": "48/48 PASS",
+      "conclusion": "Redness is 100% determined by ambient DATABASE_URL, 0% by the tree — builder's fake-conflict forensics CONFIRMED. No semantic T-0672 x T-0756 conflict; no live regression."
+    },
+    "mechanism_verified": "hasDb() = Boolean(process.env['DATABASE_URL']) confirmed at src/http/inbox.ts:529-531; with ambient URL the handlers' authz plane resolves eligibility via getOrgPool() against the REAL database where the in-memory personas hold no role_assignment rows -> 403 NOT_ELIGIBLE. Product path is deliberate fail-closed (T-0331 NF-3) — correct to leave untouched.",
+    "hermetization_weakening_assessment": "Does NOT weaken the suite. (a) The file is memory-mode BY DESIGN (header: 'all run without a live Flowable or Postgres'; FakeAuditDb pools) — under ambient env it never tested anything meaningful, it just failed; the pin restores its designed mode. (b) The pattern mirrors processes-live-instances.test.ts, which pins env in the OPPOSITE direction (sets a fake DATABASE_URL in beforeAll, restores in afterAll) for its hasDb()-branch tests — both files now control env explicitly instead of inheriting ambient. Symmetry verified by reading both files. (c) The 'handler under real-DB authz' class is the domain of the db lane (engine-drive-generic.db.test.ts), which is exactly the pre-existing local 403 gap already tracked as N3 — no NEW coverage lost. Residual class 'unit handler files whose verdict depends on ambient DATABASE_URL may exist elsewhere in src/__tests__' = non-blocking follow-up (builder self-disclosed in pr-handoff note_for_followup); see N4.",
+    "gates_rerun_by_judge_on_rebased_tree": {
+      "tsc_noEmit": "exit 0, 0 errors (my run)",
+      "inbox-engine-drive.test.ts": "53/53 PASS WITH ambient DATABASE_URL AND 53/53 WITHOUT (both my runs) — includes the 5 T-0672 claim-before-complete unit tests, intact",
+      "flowable-client suites": "flowable-client 42/42 + adversarial 3 pass/1 skip (45 pass / 5 skip across the 3 files, my run)",
+      "T-0756-source-record-projection.db.test.ts": "8/8 PASS on live PG (my run) — T-0756 unharmed by the rebase",
+      "process-projection db": "7/7 PASS on live PG (my run)",
+      "engine-drive-completedby.db.test.ts LIVE": "3/3 PASS on the REBASED tree against real Flowable 7.1.0 (:8082, judge-started) + real Postgres (:55432) — FRESH re-run, not carried over from r1. GREEN 61.2s / RED 6.6s / idempotent 16.0s with --testTimeout=180000. NOTE: GREEN again exceeded 60s — reinforces N2 (default vitest timeout == driveDeadlineMs, zero headroom)."
+    }
+  },
   "findings": [
     {
       "id": "T-0672-N1",
       "severity": "nit",
       "axis": 1,
       "location": "branch task/T-0672 topology vs dev",
-      "issue": "Branch is STALE: merge-base with dev is 504312f1; dev has since advanced (T-0641 merge 3256f627, T-0756 36e1cf3b, tip b50308be). `git diff dev..HEAD` therefore shows process-defs.ts reverted + 4 T-0641 files deleted — a two-dot-diff artifact, NOT a change this task makes. The gated artifact (branch in isolation) is missing T-0641 and T-0756, so the merge result is not exactly what was tested.",
-      "suggestion": "Rebase task/T-0672 onto current dev before the final promotion gate, then re-run tsc + the two db suites on the rebased tree. Verified SAFE: T-0756's process-projection.ts hunks (lines ~51 imports, ~996-1233 filterProjectionsByReadVisibility) do not overlap T-0672's edit regions (~1785 interface, ~2080 claim block); dev made no change to flowable-client.ts since merge-base; T-0641 files are disjoint. Rebase applies cleanly, no T-0641 revert."
+      "issue": "[RESOLVED in r2] r1: branch was STALE (merge-base 504312f1, dev had advanced with T-0641 + T-0756); `git diff dev..HEAD` misleadingly showed T-0641 reverted (two-dot artifact). r2: branch rebased onto b50308be, gates re-run green on the rebased tree (see re_verify_r2). T-0641 and T-0756 both intact.",
+      "suggestion": "Done — no action remains. (dev has since moved to bfef9575 with client-only T-0659/T-0660; no overlap with T-0672 files, routine merge.)"
     },
     {
       "id": "T-0672-N2",
@@ -76,6 +97,14 @@
       "location": "ci/checks/db/engine-drive-generic.db.test.ts (new T-0672 HTTP-approve test)",
       "issue": "The completedBy proof at the REAL HTTP approve route cannot be exercised in the local db lane — it returns 403 like the 3 pre-existing T-0571 tests in the same file (confirmed pre-existing on clean dev). So the HTTP-route layer of the fix is unverified locally; only the direct-seam live proof (engine-drive-completedby) runs.",
       "suggestion": "Track the local approver-grant seeding gap as its own task (orchestrator). The direct-seam live proof is sufficient for THIS merge gate; the HTTP-route test will pass in full CI where grants are seeded. Non-blocking for T-0672."
+    },
+    {
+      "id": "T-0672-N4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__ (handler-level HTTP unit files beyond inbox-engine-drive.test.ts)",
+      "issue": "The r2 forensics exposed a CLASS: any memory-mode unit file exercising HTTP handlers whose authz plane branches on global hasDb()=Boolean(env.DATABASE_URL) has an env-dependent verdict when run with an ambient DATABASE_URL. The integration fix pins only inbox-engine-drive.test.ts (the file the gate exposed); sibling files may carry the same latent non-hermeticity. Builder self-disclosed (pr-handoff note_for_followup).",
+      "suggestion": "Follow-up task (orchestrator): sweep src/__tests__ for handler-level suites that neither pin nor fake DATABASE_URL, apply the same save/delete/restore pin (or a shared vitest setup helper). Additionally consider a DURABLE process rule: post-merge gate and per-side forensic runs must execute under IDENTICAL ambient env. Non-blocking for T-0672."
     }
   ],
   "acceptance_coverage": [
