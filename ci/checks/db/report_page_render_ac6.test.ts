@@ -132,11 +132,16 @@ async function seedApplicationReadGrant(
   await c.query('BEGIN');
   await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
   await c.query(
+    // T-0675: grant is CONFIRMED (confirmed_by='seed'). Previously this seed
+    // omitted confirmed_by (defaulting NULL = unconfirmed) yet expected the read
+    // gate to PASS — encoding the exact T-0675 hole (defaultCheckReadGrant did not
+    // check the grant's confirmed_by). The gate now requires it, so the seed must
+    // supply a confirmed grant to exercise the intended AC-6 allow path.
     `INSERT INTO choros."grant"
        (tenant_id, id, role_id, resource_type, resource_facet,
         operation, scope, "constraint", delegable,
-        granted_by, valid_from, valid_until, created_at)
-     VALUES ($1, $2, $3, 'application', NULL, 'read', $4::jsonb, NULL, false, 'seed', NULL, NULL, 0)`,
+        granted_by, confirmed_by, valid_from, valid_until, created_at)
+     VALUES ($1, $2, $3, 'application', NULL, 'read', $4::jsonb, NULL, false, 'seed', 'seed', NULL, NULL, 0)`,
     [tenantId, id, roleId, scope],
   );
   await c.query('COMMIT');

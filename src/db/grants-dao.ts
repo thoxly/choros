@@ -116,8 +116,16 @@ function assertUuid(value: string, label: string): void {
  * Build the CRITICAL-grant SQL predicate for a given column alias (e.g. "g" or
  * "" for the bare grant query). Returns a boolean SQL expression. Pure string
  * builder — no interpolation of user data (alias is a hard-coded caller constant).
+ *
+ * T-0675 (security, столп 4): EXPORTED so the report-page application-level read
+ * gate (defaultCheckReadGrant, src/http/report-page-render.ts) enforces the SAME
+ * T-0397 grant-row dual-control as this canonical resolver — a SINGLE source for
+ * the criticality classification, not a bespoke re-implementation. The prior read
+ * gate queried `application/read` grants WITHOUT any `confirmed_by`/`confirmed2_by`
+ * predicate, so an UNCONFIRMED (or single-control critical) grant passed the
+ * application-level gate that this canonical path (step 3 below) would reject.
  */
-function criticalGrantPredicate(alias: string): string {
+export function criticalGrantPredicate(alias: string): string {
   const p = alias ? `${alias}.` : "";
   // Clearance marker, constraint-first with resource_facet fallback ONLY when
   // constraint carries no `clearance` key (mirrors grantClearance constraint-first).
