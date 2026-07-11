@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0757",
+  "status": "pr_open",
+  "branch": "task/T-0757",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/__tests__/forms-from-schema.test.ts",
+    "docs/tasks/T-0757.spec.md (NEW)",
+    "docs/tasks/T-0757.pr-handoff.json (NEW)"
+  ],
+  "summary": "SP-1 в forms-from-schema.test.ts таймаутил ровно на СВОЁМ per-test литерале it(fn, 10000) — этот литерал ВСЕГДА побеждает глобальный vitest.config.ts testTimeout (60000), поэтому попытка поднять глобальный конфиг объективно не могла подействовать (ложно выглядело как настоящий дедлок). Инструментация (console.error с Date.now() в теле теста, http/forms.ts, http/auth.ts, http/router.ts) показала: ни одна метка внутри обработки HTTP-запроса не печаталась — зависание было РАНЬШЕ, в await import('../server.js'). Бисекция графа импортов server.ts (~90 модулей: все registerXRoutes, Keycloak admin-port, LLM-адаптеры, pg.Pool wiring) + решающий эксперимент (временный подъём таймаута до 60000, ДИАГНОСТИКА, не финальный фикс) показали: холодная транспиляция+evaluation ~90-модульного графа заняла 33514 из 34686ms (96.6%) прогона; всё ПОСЛЕ импорта (listen/connect/dispatch/auth/handler/persist/response) — под 700ms. Никакого незакрытого handle, нерезолвленного промиса или дедлока в persist-пути — реальный HTTP round-trip мгновенный.",
+  "fix": "Классификация: тест-артефакт, не продуктовый баг. Файл сам декларирует doctrine в шапке ('DATABASE_URL-free: pure unit tests — no pg.Pool, no live DB, no env reads, FE-s27-0002 discipline') — SP-1 нарушал эту же доктрину, безусловно импортируя весь server.ts (включая pg, Keycloak admin-port, LLM-адаптеры) ради проверки memory-mode fallback ОДНОГО роута. Соседний forms-submit.e2e.test.ts импортирует server.js СТАТИЧЕСКИ (оплата на фазе collect, без узкого per-test бюджета) — SP-1 единственный использовал await import(...) ВНУТРИ тела теста, перенося холодную стоимость точно в 10s-окно. Фикс (src/__tests__/forms-from-schema.test.ts, SP-1 only): заменил createServer(undefined, undefined, 'memory') на прямое связывание ТОЙ ЖЕ функции registerFormsRoutes с ТЕМ ЖЕ классом Router (import('../http/router.js') + import('../http/forms.js')) — идентичная продакшн-обвязка для этого одного роута (см. server.ts buildRouter(), grantsPool==null ветка), без остальных 89 несвязанных регистраторов. server.ts больше не импортируется в SP-1 → не тянет pg/Keycloak/LLM-адаптеры. Снизил per-test override 10000→5000 (СНИЖЕНИЕ, не поднятие — x3-6 запас над наблюдаемыми 200-1800ms, регресс-лок: будущий возврат к тяжёлому импорту ловится теперь БЫСТРО assertion/timeout-фейлом теста, а не проявляется как ещё один 10s+ hang). Продуктовый код (src/http/forms.ts, auth.ts, router.ts, server.ts) не тронут — временная диагностическая инструментация полностью отревертирована git checkout -- перед финальным коммитом.",
+  "deviations_from_adr": [],
+  "live_proof_plan": "Не применимо — чисто тестовая инфраструктура (D-056 fitness gate), никакого продуктового поведения/HTTP-контракта не менялось. SP-1 проверяет тот же контракт, что и раньше (POST /api/forms/purchase/submit без deps → 200 {ok,recordId}, _getRecordForTests()===undefined), только через более узкую (но байт-идентичную по факту) обвязку роутера.",
+  "tests_added": [
+    {
+      "file": "src/__tests__/forms-from-schema.test.ts",
+      "covers": "Регресс-лок на СКОРОСТЬ, не новое поведение: SP-1 теперь падает БЫСТРО (5s budget, наблюдаемо 200-1800ms) если кто-то в будущем снова подцепит SP-1 к тяжёлому import-графу (например вернёт createServer()). Мутационно проверено: временно сломал memoryPersist() в src/http/forms.ts (recordId '' вместо randomUUID()) → SP-1 упал за 984ms точным AssertionError (expected 0 to be greater than 0), не hang — подтверждает, что тест по-прежнему ловит своё поведение после рефакторинга обвязки. Мутация отревертирована."
+    }
+  ],
+  "gates": {
+    "sp1_isolated_before": "RED — npx vitest run src/__tests__/forms-from-schema.test.ts -t \"SP-1\": 10052ms, 'Test timed out in 10000ms' (3/3 повторных запусков воспроизвели идентично)",
+    "sp1_isolated_after": "GREEN — 4 повторных запуска: 1801ms / 275ms / 842ms / 678ms (все < 5000ms budget)",
+    "sp1_mutation": "RED (ожидаемо, быстро) — memoryPersist recordId='' → 984ms AssertionError 'expected 0 to be greater than 0' (не hang/timeout); мутация отревертирована, GREEN восстановлен",
+    "forms_from_schema_full_suite": "GREEN — npx vitest run src/__tests__/forms-from-schema.test.ts: 36/36 passed, 9.40s total (до фикса файл не мог пройти целиком — SP-1 таймаутил и блокировал остальные тесты в очереди воркера)",
+    "forms_neighbors": "GREEN — npx vitest run forms-from-schema.test.ts forms-document-ops-application-id.test.ts forms-document-ops-wire.test.ts forms-submit.e2e.test.ts: 62/62 passed, 30.69s",
+    "eslint_targeted": "green — npx eslint src/__tests__/forms-from-schema.test.ts: 0 errors/0 warnings",
+    "tsc_noemit": "green — npx tsc --noEmit -p ., exit 0, 0 ошибок",
+    "diagnostic_instrumentation_reverted": "verified — git diff dev...task/T-0757 затрагивает ТОЛЬКО src/__tests__/forms-from-schema.test.ts + docs/tasks/T-0757.*; временные console.error в src/http/forms.ts, src/http/auth.ts, src/http/router.ts отревертированы git checkout -- (git status --short подтверждает 0 диффа в этих 3 файлах + src/server.ts)"
+  },
+  "blocked_reason": "",
+  "friction_events": [
+    "Инфраструктурное (не относится к коду задачи): macOS не имеет /usr/bin/timeout или gtimeout из коробки — использовал `perl -e 'alarm N; exec @ARGV'` как обёртку для таймаутов при воспроизведении. Первая попытка `npx tsc --noEmit -p .` под perl-alarm 120s была убита по таймеру, НО дочерний процесс tsc (запущенный через npx) не унаследовал сигнал и остался сиротой (PPID=1), продолжая жрать CPU параллельно с последующим легитимным background-прогоном tsc — обнаружено через `ps aux`, убито вручную (`kill -9`) перед финальным зелёным прогоном. Для будущих задач: `perl alarm + exec npx <tool>` не убивает грандчайлдов npx — либо использовать `npx --no-install`/прямой бинарник из node_modules/.bin, либо process-group kill."
+  ]
+}
