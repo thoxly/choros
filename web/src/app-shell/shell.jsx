@@ -914,18 +914,21 @@ function AccountMenu({ user, theme, setTheme, onLogout, onNavigate, orgLabel }) 
 
           <div className="chs-account-menu__divider" />
 
-          {/* Профиль — скоро */}
+          {/* Профиль — скоро. T-0730: aria-describedby связывает кнопку с
+              видимой причиной программно (не только визуально соседним
+              спаном) — доступно и зрячим, и скринридеру. */}
           <button
             type="button"
             role="menuitem"
             className="chs-account-menu__item chs-account-menu__item--disabled"
             aria-disabled="true"
+            aria-describedby="account-menu-profile-hint"
           >
             <Icon name="org" className="chs-account-menu__icon" />
             <span>Профиль</span>
             <span className="chs-account-menu__badge">скоро</span>
           </button>
-          <span className="chs-account-menu__reason">Страница профиля в разработке</span>
+          <span id="account-menu-profile-hint" className="chs-account-menu__reason">Страница профиля в разработке</span>
 
           {/* Мои настройки — скоро */}
           <button
@@ -933,12 +936,13 @@ function AccountMenu({ user, theme, setTheme, onLogout, onNavigate, orgLabel }) 
             role="menuitem"
             className="chs-account-menu__item chs-account-menu__item--disabled"
             aria-disabled="true"
+            aria-describedby="account-menu-settings-hint"
           >
             <Icon name="apps" className="chs-account-menu__icon" />
             <span>Мои настройки</span>
             <span className="chs-account-menu__badge">скоро</span>
           </button>
-          <span className="chs-account-menu__reason">Пользовательские настройки в разработке</span>
+          <span id="account-menu-settings-hint" className="chs-account-menu__reason">Пользовательские настройки в разработке</span>
 
           {/* Уведомления */}
           <button
@@ -981,11 +985,12 @@ function AccountMenu({ user, theme, setTheme, onLogout, onNavigate, orgLabel }) 
             role="menuitem"
             className="chs-account-menu__item chs-account-menu__item--disabled"
             aria-disabled="true"
+            aria-describedby="account-menu-org-hint"
           >
             <Icon name="org" className="chs-account-menu__icon" />
             <span>Сменить организацию</span>
           </button>
-          <span className="chs-account-menu__reason">Несколько организаций недоступно в вашем тарифе</span>
+          <span id="account-menu-org-hint" className="chs-account-menu__reason">Несколько организаций недоступно в вашем тарифе</span>
 
           <div className="chs-account-menu__divider" />
 
