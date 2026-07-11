@@ -2025,6 +2025,19 @@ export interface EngineDriveReconcilePort {
   completeUserTask(
     engineTaskId: string,
   ): Promise<{ ok: true } | { ok: false; code: string }>;
+  /**
+   * T-0672 [процессы/история]: claim the engine user-task for the acting actor
+   * BEFORE completeUserTask, so the engine records WHO completed the step in its
+   * history (act_hi_actinst.assignee → getHistoricActivityInstances → processes.ts
+   * `completedBy`). OPTIONAL — a port stub without it (the many partial test mocks,
+   * and the reconcile-on-read net where completion is skipped) simply leaves the
+   * completer unrecorded, exactly the pre-fix behaviour. Best-effort: a claim
+   * failure NEVER blocks the completion (the human's decision is already committed).
+   */
+  setTaskAssignee?(
+    engineTaskId: string,
+    assignee: string,
+  ): Promise<{ ok: true } | { ok: false; code: string }>;
   isInstanceEnded(
     instanceId: string,
   ): Promise<
@@ -2307,6 +2320,38 @@ export async function reconcileInstanceEngineDrive(
     }
 
     if (engineTaskId) {
+      // T-0672 [процессы/история]: CLAIM the task for the acting actor BEFORE
+      // completing it, so the engine records WHO completed the step
+      // (act_hi_actinst.assignee) — read back by getHistoricActivityInstances →
+      // processes.ts `completedBy`. Empirically (flowable-rest:7.1.0), a bare
+      // complete leaves the historic assignee NULL (the T-0672 defect: process
+      // history shows "кто завершил = —"); claim-then-complete records it.
+      //
+      // Best-effort + non-fatal: the human's decision (task.approved) is ALREADY
+      // committed upstream, and completion must not be held hostage to the audit
+      // "who" write. A claim failure degrades to the pre-fix NULL completedBy
+      // (never worse than today) and is logged, not surfaced as a 502. Guarded on
+      // presence of the optional port method AND a non-empty actor slug (the
+      // reconcile-on-read net does not complete, so never reaches here). Same-actor
+      // re-claim is idempotent (HTTP 200), so a re-driven approve does not fail.
+      if (engine.setTaskAssignee && typeof args.actor === "string" && args.actor.length > 0) {
+        const assignResult = await callWithBudget(
+          () => engine.setTaskAssignee!(engineTaskId as string, args.actor),
+          deadlineAt,
+        );
+        if (assignResult === BUDGET_EXHAUSTED) {
+          return { ok: false, code: ENGINE_DRIVE_TIMEOUT, stage: "complete" };
+        }
+        if (!assignResult.ok) {
+          // Non-fatal: proceed to complete regardless. completedBy degrades to the
+          // pre-T-0672 NULL (== today's behaviour) rather than blocking the step.
+          console.warn(
+            `[engine-drive T-0672 setTaskAssignee] claim failed code=${assignResult.code} ` +
+              `(task ${engineTaskId}, actor ${args.actor}) — completing anyway; ` +
+              `process history 'completedBy' will be unrecorded for this step`,
+          );
+        }
+      }
       // T-0591 (FF-1): budget-race the completion call too — this is THE call
       // whose outcome the timeout semantics are most about (§2.2 NF-1 of the
       // spec): if the budget wins here, the completeUserTask request may still

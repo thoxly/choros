@@ -15,7 +15,7 @@
  */
 
 import * as http from "node:http";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { makeFlowableClient } from "../core/flowable-client.js";
 import { Router } from "../http/router.js";
 import { registerInboxRoutes, _resetClaimStateForTests } from "../http/inbox.js";
@@ -68,6 +68,40 @@ function mockResp(status: number, body?: unknown): Response {
 
 beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
 afterEach(() => { vi.unstubAllGlobals(); });
+
+// ---------------------------------------------------------------------------
+// T-0672 integration forensics (post-merge gate, 2026-07-11): HERMETIC ENV PIN.
+//
+// This file is MEMORY-MODE by design (header: "all run without a live Flowable
+// or Postgres") — every DB interaction goes through an injected FakeAuditDb pool.
+// But the HTTP approve/claim handlers' AUTHZ plane branches on the GLOBAL
+// `hasDb()` = Boolean(process.env.DATABASE_URL) (inbox.ts, T-0331 NF-3
+// fail-closed): with an ambient DATABASE_URL present, eligibility is resolved
+// via getRoleSlugsForActor(getOrgPool()) against the REAL database — where these
+// tests' in-memory personas (USER_ROLES fixture) hold no role_assignment rows —
+// and every handler-level test flips 200→403 NOT_ELIGIBLE.
+//
+// That made the whole file's verdict depend on ambient env, NOT on the tree:
+// proven red on 504312f1 (before T-0672 AND T-0756), on b50308be (T-0756 only),
+// on T-0672-only, and on the combination — red IFF DATABASE_URL is set. The
+// post-merge gate first observed it on the T-0672×T-0756 merge only because its
+// runs' ambient env differed; neither task changed this behaviour.
+//
+// The product path is CORRECT (fail-closed grants-from-live-DB when a DB is
+// configured is deliberate, T-0331 NF-3); the defect was the harness's
+// non-hermeticity. Pin: run this file with DATABASE_URL unset (the mode it was
+// written for), restore afterwards (same save/restore discipline as
+// processes-live-instances.test.ts, which pins the env in the opposite
+// direction for its live-DB harness).
+// ---------------------------------------------------------------------------
+let prevDatabaseUrl: string | undefined;
+beforeAll(() => {
+  prevDatabaseUrl = process.env["DATABASE_URL"];
+  delete process.env["DATABASE_URL"];
+});
+afterAll(() => {
+  if (prevDatabaseUrl !== undefined) process.env["DATABASE_URL"] = prevDatabaseUrl;
+});
 
 // ---------------------------------------------------------------------------
 // 1. getActiveUserTasks wire-shape
@@ -1492,6 +1526,141 @@ describe("T-0522 reconcileInstanceEngineDrive — direct unit (mock engine)", ()
     });
     expect(res.ok).toBe(true); // NOT_FOUND tolerated → proceed to reconcile
     expect(db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE)).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // T-0672 [процессы/история]: the post-approve drive CLAIMS the engine task for
+  // the acting actor BEFORE completing it, so Flowable records WHO completed the
+  // step (act_hi_actinst.assignee → processes.ts `completedBy`). Without the claim,
+  // a bare complete leaves the historic assignee NULL — the exact defect (process
+  // history "кто завершил шаг = —"). Empirically confirmed against flowable-rest:
+  // 7.1.0 (see ci/checks/db/engine-drive-completedby.db.test.ts for the LIVE proof).
+  // -------------------------------------------------------------------------
+  it("T-0672: claims the resolved engine task for the acting actor BEFORE completing (literal-defKey path)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const order: string[] = [];
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => {
+        order.push("getActiveUserTasks");
+        return { ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "wf-step", name: "Шаг", candidateGroups: ["role-x"] }] };
+      }),
+      setTaskAssignee: vi.fn(async () => { order.push("setTaskAssignee"); return { ok: true as const }; }),
+      completeUserTask: vi.fn(async () => { order.push("completeUserTask"); return { ok: true as const }; }),
+      isInstanceEnded: vi.fn(async () => { order.push("isInstanceEnded"); return { ok: true as const, ended: true }; }),
+    };
+
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "wf-step",
+      completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
+    });
+
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.completed).toBe(true);
+    // The claim records the acting actor (the slug the reader resolves to a name)
+    // against the SAME engine task id that is then completed.
+    expect(engine.setTaskAssignee).toHaveBeenCalledWith("eng-base", ACTOR);
+    // ORDER: claim (setTaskAssignee) strictly BEFORE complete — the whole point:
+    // Flowable only records the assignee onto history if it is set at complete time.
+    expect(order.indexOf("setTaskAssignee")).toBeLessThan(order.indexOf("completeUserTask"));
+    expect(order.indexOf("setTaskAssignee")).toBeGreaterThan(-1);
+  });
+
+  it("T-0672: resolve-by-instance base step (no defKey) also claims the actor before complete", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const order: string[] = [];
+    const engine: EngineDriveReconcilePort = {
+      // Base step: taskDefKey omitted → resolve-by-instance picks the single active task.
+      getActiveUserTasks: vi.fn(async () => {
+        order.push("getActiveUserTasks");
+        return { ok: true as const, tasks: [{ id: "eng-generic", taskDefinitionKey: "wf-generic-step", name: "Шаг процесса", candidateGroups: ["role-x"] }] };
+      }),
+      setTaskAssignee: vi.fn(async () => { order.push("setTaskAssignee"); return { ok: true as const }; }),
+      completeUserTask: vi.fn(async () => { order.push("completeUserTask"); return { ok: true as const }; }),
+      isInstanceEnded: vi.fn(async () => { order.push("isInstanceEnded"); return { ok: true as const, ended: true }; }),
+    };
+
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, /* approvedTaskDefKey omitted → resolve-by-instance */
+      completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
+    });
+
+    expect(res.ok).toBe(true);
+    // Claims the actor against the live-resolved (non-literal) engine task id.
+    expect(engine.setTaskAssignee).toHaveBeenCalledWith("eng-generic", ACTOR);
+    expect(order.indexOf("setTaskAssignee")).toBeLessThan(order.indexOf("completeUserTask"));
+  });
+
+  it("T-0672: setTaskAssignee ABSENT (optional port) still completes — backward compatible", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    // A port stub WITHOUT setTaskAssignee (the dozens of existing partial mocks) —
+    // completion proceeds unchanged; completedBy simply stays unrecorded (pre-fix behaviour).
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "wf-step", name: "Шаг", candidateGroups: ["role-x"] }] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "wf-step",
+      completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.completed).toBe(true);
+    expect(engine.completeUserTask).toHaveBeenCalledWith("eng-base");
+  });
+
+  it("T-0672: a claim FAILURE is NON-FATAL — the step still completes (completedBy degrades, never blocks)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const order: string[] = [];
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "wf-step", name: "Шаг", candidateGroups: ["role-x"] }] })),
+      // Claim fails (transient engine error) — MUST NOT block the human's committed decision.
+      setTaskAssignee: vi.fn(async () => { order.push("setTaskAssignee"); return { ok: false as const, code: "ENGINE_UNAVAILABLE" }; }),
+      completeUserTask: vi.fn(async () => { order.push("completeUserTask"); return { ok: true as const }; }),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "wf-step",
+      completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
+    });
+    // Non-fatal: completion proceeds; result is a normal success (NOT a 502).
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.completed).toBe(true);
+    expect(order).toEqual(["setTaskAssignee", "completeUserTask"]);
+    expect(db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE)).toHaveLength(1);
+  });
+
+  it("T-0672: an empty actor slug is NOT claimed (guard) — completion still proceeds", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "wf-step", name: "Шаг", candidateGroups: ["role-x"] }] })),
+      setTaskAssignee: vi.fn(async () => ({ ok: true as const })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "wf-step",
+      completeEngineTask: true, actor: "", pollTimeoutMs: 100, pollIntervalMs: 5,
+    });
+    expect(res.ok).toBe(true);
+    // No actor to attribute → skip the claim (never claim to an empty/blank assignee),
+    // but still complete the task (never block on a missing actor).
+    expect(engine.setTaskAssignee).not.toHaveBeenCalled();
+    expect(engine.completeUserTask).toHaveBeenCalledWith("eng-base");
   });
 });
 

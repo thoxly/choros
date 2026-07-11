@@ -164,6 +164,18 @@ export type CompleteUserTaskResult =
   | { ok: false; code: FlowableErrorCode };
 
 /**
+ * T-0672 [процессы/история]: result of setTaskAssignee — claim a Flowable user
+ * task on behalf of the acting human/agent BEFORE completing it, so the engine
+ * records WHO completed the step in its history (act_hi_actinst.assignee, read
+ * back by getHistoricActivityInstances → processes.ts `completedBy`). Without a
+ * prior claim, Flowable completes the task with a NULL assignee and the process
+ * history shows "кто завершил шаг = —" (the exact defect this fixes).
+ */
+export type SetTaskAssigneeResult =
+  | { ok: true }
+  | { ok: false; code: FlowableErrorCode };
+
+/**
  * T-0536: result of correlateMessage — signal a parked message-catch in the live
  * engine. { ok: true } when the engine accepted the message-event trigger (the
  * catch fired and the token advanced); { ok: false, code } on engine error so the
@@ -381,6 +393,25 @@ export interface FlowableClient {
    * Flowable endpoint: POST {baseUrl}/runtime/tasks/{taskId}  body: {"action":"complete"}
    */
   completeUserTask(taskId: string): Promise<CompleteUserTaskResult>;
+  /**
+   * T-0672 [процессы/история]: claim a Flowable user task on behalf of `assignee`
+   * (the acting human/agent slug) so that a subsequent completeUserTask records
+   * WHO completed the step in the engine's history. Empirically verified against
+   * flowable/flowable-rest:7.1.0: a task completed WITHOUT a prior claim carries
+   * `assignee: null` on its historic-activity-instance; a task claimed then
+   * completed carries the claimed assignee. Same-assignee re-claim is idempotent
+   * (HTTP 200), so a re-driven approve does not fail.
+   *
+   * Flowable endpoint: POST {baseUrl}/runtime/tasks/{taskId}
+   *   body: {"action":"claim","assignee":"<slug>"}
+   *
+   * OPTIONAL on the interface (mirrors getHistoric* below) so the dozens of
+   * existing partial FlowableClient/engine-port test stubs need no change — the
+   * engine-drive seam checks for presence and honest-degrades (leaves the
+   * completer unrecorded, never worse than the pre-fix behaviour) when absent.
+   * The real makeFlowableClient factory always provides it.
+   */
+  setTaskAssignee?(taskId: string, assignee: string): Promise<SetTaskAssigneeResult>;
   /**
    * T-0443: Get ALL active user tasks for a process instance.
    * Unlike getFirstActiveUserTask (size=1), this returns the full list so the
@@ -1055,6 +1086,40 @@ export function makeFlowableClient(
   }
 
   // -------------------------------------------------------------------------
+  // T-0672 [процессы/история]: setTaskAssignee — claim the task for the acting
+  // actor so the engine records "who completed the step" (act_hi_actinst.assignee).
+  //
+  // Flowable 7's task-action verb is POST (same as complete — see the completeUserTask
+  // doc-comment for the empirical POST-vs-PUT diagnosis). Body {action:"claim",assignee}.
+  // Empirically (flowable/flowable-rest:7.1.0): claim-then-complete populates the
+  // historic-activity-instance assignee that getHistoricActivityInstances reads; a
+  // bare complete leaves it null. Re-claiming with the SAME assignee is idempotent
+  // (HTTP 200), so a re-driven approve never fails on the claim step.
+  // -------------------------------------------------------------------------
+  async function setTaskAssignee(
+    taskId: string,
+    assignee: string,
+  ): Promise<SetTaskAssigneeResult> {
+    return withRetry(async () => {
+      const resp = await globalThis.fetch(
+        `${resolved.baseUrl}/runtime/tasks/${encodeURIComponent(taskId)}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: auth,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ action: "claim", assignee }),
+        },
+      );
+      if (resp.status === 200 || resp.status === 204) {
+        return { ok: true as const };
+      }
+      return { ok: false, code: httpStatusToCode(resp.status) };
+    }, resolved) as Promise<SetTaskAssigneeResult>;
+  }
+
+  // -------------------------------------------------------------------------
   // FR-8: getActiveUserTasks — T-0443 defKey-resolution seam
   //
   // GET {baseUrl}/runtime/tasks?processInstanceId={id}
@@ -1395,6 +1460,7 @@ export function makeFlowableClient(
     failTask,
     getFirstActiveUserTask,
     completeUserTask,
+    setTaskAssignee,
     getActiveUserTasks,
     getMessageCatchWaits,
     getHistoricVariableInstances,
