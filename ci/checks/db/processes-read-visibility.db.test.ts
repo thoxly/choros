@@ -538,6 +538,11 @@ describe.skipIf(!hasDb)('T-0723: record-less instance is gated by participant-ti
   it('200 (participant skeleton, NO variables/history) for the actor who STARTED the record-less instance', async () => {
     const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
     const starter = `a-starter-recless-${uuid().slice(0, 8)}`;
+    // T-0759: clause (1) (audit-actor match) is now ACTOR_ACTIVE-gated — the
+    // starter must resolve to a REAL, currently-active `choros.employee` row
+    // (previously an arbitrary unseeded slug string sufficed, since clause (1)
+    // never checked employee existence at all).
+    await withClient(migratorUrl(), (c) => seedEmployee(c, TENANT_A, starter));
     await withTenantTx(TENANT_A, (tx) =>
       appendProcessStarted(tx, {
         instanceId,
@@ -556,6 +561,36 @@ describe.skipIf(!hasDb)('T-0723: record-less instance is gated by participant-ti
     // covering-grant basis for the full reader tier at all (T-0723).
     expect(detail.body['variables']).toBeUndefined();
     expect(detail.body['history']).toBeUndefined();
+  });
+
+  it('T-0759 (RED→GREEN, N1 из ревью T-0756 §1.2): 404 for a DEACTIVATED former participant — a past audit-track action alone no longer grants the skeleton', async () => {
+    const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
+    const starter = `a-starter-recless-deact-${uuid().slice(0, 8)}`;
+    const empId = await withClient(migratorUrl(), (c) => seedEmployee(c, TENANT_A, starter));
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: 'telLinear',
+        actor: starter,
+        nowMs: Date.now(),
+        // no recordId — explicit-launch instance.
+      }),
+    );
+
+    // Sanity: BEFORE deactivation, the starter is a participant (200 skeleton) —
+    // proves the 404 below is caused by deactivation, not a fixture mistake.
+    const before = await getInstanceDetail(basePostGate, instanceId, starter);
+    expect(before.statusCode).toBe(200);
+
+    await withClient(migratorUrl(), (c) =>
+      c.query(`UPDATE choros.employee SET deactivated_at = $1 WHERE id = $2`, [Date.now(), empId]),
+    );
+
+    // AFTER deactivation: the SAME actor, SAME past audit-track action (they
+    // genuinely started this instance) — clause (1) must now deny. This is the
+    // residual-JWT window a still-live access token would ride (T-0702).
+    const after = await getInstanceDetail(basePostGate, instanceId, starter);
+    expect(after.statusCode).toBe(404);
   });
 });
 
@@ -695,6 +730,9 @@ describe.skipIf(!hasDb)('T-0723: LIST — record-less instance is gated by parti
   it('the record-less instance IS present in instances[] for the actor who STARTED it (participant)', async () => {
     const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
     const starter = `a-starter-recless-list-${uuid().slice(0, 8)}`;
+    // T-0759: isInstanceParticipantBatch's clause (1) is now ACTOR_ACTIVE-gated
+    // too — the starter must be a REAL, currently-active employee row.
+    await withClient(migratorUrl(), (c) => seedEmployee(c, TENANT_A, starter));
     await withTenantTx(TENANT_A, (tx) =>
       appendProcessStarted(tx, {
         instanceId,
@@ -708,6 +746,34 @@ describe.skipIf(!hasDb)('T-0723: LIST — record-less instance is gated by parti
     const list = await getInstanceList(basePostGate, starter);
     expect(list.statusCode).toBe(200);
     expect(list.instances.some((i) => i['id'] === instanceId)).toBe(true);
+  });
+
+  it('T-0759 (RED→GREEN, LIST path — isInstanceParticipantBatch equivalence with DETAIL): the record-less instance is ABSENT from instances[] for a DEACTIVATED former participant', async () => {
+    const instanceId = `flw-piv-${uuid().slice(0, 8)}`;
+    const starter = `a-starter-recless-list-deact-${uuid().slice(0, 8)}`;
+    const empId = await withClient(migratorUrl(), (c) => seedEmployee(c, TENANT_A, starter));
+    await withTenantTx(TENANT_A, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: 'telLinear',
+        actor: starter,
+        nowMs: Date.now(),
+        // no recordId — explicit-launch instance.
+      }),
+    );
+
+    // Sanity: BEFORE deactivation, the starter sees the instance on LIST — the
+    // 404-equivalent (absence) below is caused by deactivation alone.
+    const before = await getInstanceList(basePostGate, starter);
+    expect(before.instances.some((i) => i['id'] === instanceId)).toBe(true);
+
+    await withClient(migratorUrl(), (c) =>
+      c.query(`UPDATE choros.employee SET deactivated_at = $1 WHERE id = $2`, [Date.now(), empId]),
+    );
+
+    const after = await getInstanceList(basePostGate, starter);
+    expect(after.statusCode).toBe(200);
+    expect(after.instances.some((i) => i['id'] === instanceId)).toBe(false);
   });
 });
 

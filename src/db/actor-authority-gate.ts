@@ -41,6 +41,15 @@
  *                                        must not receive even a boolean/count role-membership fact via
  *                                        their residual live JWT; INDEPENDENT of D's own inline lookup,
  *                                        not a shared helper, so D's own FF-0662-1 accounting is untouched)
+ *     H  isInstanceParticipant          src/http/process-projection.ts (T-0759: participant-tier
+ *                                        clause (1), audit-actor match — a PAST audit-track action alone
+ *                                        no longer grants the T-0756 process-detail participant skeleton +
+ *                                        safe source-record projection; the matched identity must be
+ *                                        CURRENTLY active, closing N1 from T-0756's review)
+ *     I  isInstanceParticipantBatch     src/http/process-projection.ts (T-0759: the SAME clause-(1)
+ *                                        closure, batched — used by the GET /api/processes LIST
+ *                                        record-less filter, T-0723; actor-level active status resolved
+ *                                        ONCE for the whole page, same as clauses (2)/(3))
  *
  * WHAT IS **NOT** AN AUTHORITY RESOLVER (this predicate MUST NOT be added — see
  * ADR-T0658 §3.4 / T-0662 ADR §1.1):

@@ -76,10 +76,24 @@ function startedRow(inst: string, recordId?: string, id = "audit-evt-1"): Record
  * `opts.startedRows` (each row's `actor` + `payload.task_role` become that
  * instance's participant signal), for EITHER the single-instance shape
  * (`payload->>'inst' = $2`) or the batched shape (`= ANY($2::text[])`).
+ *
+ * T-0759 ADDS: a bare `FROM choros.employee ... slug = $2 ... LIMIT 1` lookup
+ * WITHOUT a `role_assignment` reference is the "is this slug a CURRENTLY
+ * active employee" shape — shared, byte-identical, by getRoleSlugsForActor's
+ * OWN employeeId-resolve (clause (2)'s role check) AND isInstanceParticipant/
+ * Batch's NEW clause-(1) active-check (this task). Answered TRUE (active) for
+ * any slug the test names, UNLESS it appears in `opts.deactivatedSlugs` — so
+ * every PRE-EXISTING test in this file (none of whose actors are meant to be
+ * deactivated) keeps passing unchanged, and a NEW test can flip one slug to
+ * "deactivated" without touching this shared fake pool's other routing. This
+ * is a DIFFERENT shape from isGenesisOwnerForTenant's owner-check (which nests
+ * the SAME bare lookup INSIDE a `role_assignment` JOIN) — that shape is left
+ * on the old unconditional-`{rows:[]}` ("not owner") branch below, unaffected.
  */
 function makeFakePool(opts: {
   startedRows: Array<Record<string, unknown>>;
   recordExists?: boolean;
+  deactivatedSlugs?: string[];
 }): import("pg").Pool {
   const fakeClient = {
     query: async (text: string, values?: unknown[]) => {
@@ -121,6 +135,20 @@ function makeFakePool(opts: {
             };
           });
         return { rows };
+      }
+      // T-0759: bare employee-active lookup (no role_assignment JOIN) — the
+      // "is this slug a currently-active employee" shape shared by
+      // getRoleSlugsForActor's employeeId-resolve and isInstanceParticipant/
+      // Batch's clause-(1) active-check. MUST be checked BEFORE the generic
+      // fallback below (isGenesisOwnerForTenant's owner-check ALSO touches
+      // choros.employee, but nested inside a role_assignment JOIN — that shape
+      // keeps falling into the unconditional `{rows:[]}` branch, "not owner").
+      if (/FROM\s+choros\.employee/i.test(text) && !/role_assignment/i.test(text)) {
+        const slugArg = Array.isArray(values) ? values[1] : undefined;
+        if (typeof slugArg === "string" && !(opts.deactivatedSlugs ?? []).includes(slugArg)) {
+          return { rows: [{ id: `emp-${slugArg}` }] };
+        }
+        return { rows: [] };
       }
       if (/FROM\s+choros\.employee/i.test(text)) return { rows: [] };
       const type = Array.isArray(values) ? values[0] : undefined;
@@ -169,9 +197,14 @@ function makeDeps(opts: {
   startedRows: Array<Record<string, unknown>>;
   recordExists?: boolean;
   resolveReadVisibility?: StartInstanceDeps["resolveReadVisibility"];
+  deactivatedSlugs?: string[];
 }): StartInstanceDeps {
   return {
-    pool: makeFakePool({ startedRows: opts.startedRows, recordExists: opts.recordExists }),
+    pool: makeFakePool({
+      startedRows: opts.startedRows,
+      recordExists: opts.recordExists,
+      deactivatedSlugs: opts.deactivatedSlugs,
+    }),
     flowable: {} as unknown as StartInstanceDeps["flowable"],
     resolveActorTenant: async () => TENANT_ID,
     ...(opts.resolveReadVisibility ? { resolveReadVisibility: opts.resolveReadVisibility } : {}),
@@ -369,6 +402,30 @@ describe("T-0721 · GET /api/processes/:id gated by READ-visibility of the sourc
     }
   });
 
+  // T-0759 [security/PDP P3, N1 из ревью T-0756 §1.2]: clause (1) (audit-actor
+  // match) is now ACTOR_ACTIVE-gated — a DEACTIVATED former participant's PAST
+  // audit-track action alone no longer grants the skeleton. Pure-unit mirror
+  // of the live-PG RED→GREEN in ci/checks/db/processes-read-visibility.db.test.ts.
+  it("T-0759: a DEACTIVATED former participant is denied (404), not the participant skeleton", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0759-deactivated-audit-actor";
+    try {
+      const deps = makeDeps({
+        startedRows: [startedRow(LIVE_INST)], // no record_id; actor=ACTOR acted on it
+        resolveReadVisibility: makeResolver([]), // zero covering grants — participant-tier is the ONLY door
+        deactivatedSlugs: [ACTOR], // ACTOR genuinely acted, but is now deactivated
+      });
+      await withServer(deps, async (baseUrl) => {
+        const { status } = await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, {
+          "x-dev-user": ACTOR,
+        });
+        expect(status).toBe(404);
+      });
+    } finally {
+      if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = prevDbUrl;
+    }
+  });
+
   // T-0722 [superseded]: this test used to assert LIST was UNAFFECTED by the
   // DETAIL gate ("phase-1 scope is DETAIL only"). T-0722 (phase 2 of T-0714
   // §5) closes that gap — see the "T-0722 · GET /api/processes LIST narrowed"
@@ -521,6 +578,31 @@ describe("T-0722 · GET /api/processes LIST narrowed by READ-visibility of each 
     }
   });
 
+  // T-0759, LIST path (isInstanceParticipantBatch clause (1), equivalence with
+  // the DETAIL test above): a DEACTIVATED former participant's past audit-track
+  // action no longer keeps the record-less instance on LIST.
+  it("T-0759: a DEACTIVATED former participant's record-less instance is ABSENT from LIST", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0759-list-deactivated-audit-actor";
+    try {
+      const deps = makeDeps({
+        startedRows: [startedRow(LIVE_INST)], // no record_id; actor=ACTOR acted on it
+        resolveReadVisibility: makeResolver([]), // zero covering grants — participant-tier is the ONLY door
+        deactivatedSlugs: [ACTOR],
+      });
+      await withServer(deps, async (baseUrl) => {
+        const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, {
+          "x-dev-user": ACTOR,
+        });
+        expect(status).toBe(200);
+        const data = json as { instances: Array<Record<string, unknown>> };
+        expect(data.instances.some((i) => i.id === LIVE_INST)).toBe(false);
+      });
+    } finally {
+      if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = prevDbUrl;
+    }
+  });
+
   it("honest-degrade: resolveReadVisibility absent → LIST unchanged (byte-identical pre-T-0722)", async () => {
     process.env["DATABASE_URL"] = "postgres://fake/T-0722-list-degrade";
     try {
@@ -653,6 +735,23 @@ describe("T-0722/T-0723 · filterProjectionsByReadVisibility (process-projection
     expect(visible.map((p) => p.inst)).toEqual(["inst-recordless"]);
   });
 
+  it("T-0759: a record-less projection is DROPPED for a DEACTIVATED former participant (direct isInstanceParticipantBatch unit coverage)", async () => {
+    const projections = [fakeProjection({ inst: "inst-recordless" })];
+    const visible = await filterProjectionsByReadVisibility(
+      makeFakePool({
+        startedRows: [startedRow("inst-recordless")], // ACTOR acted on it (audit `actor` field)
+        deactivatedSlugs: [ACTOR], // but is now deactivated
+      }),
+      TENANT_ID,
+      projections,
+      [], // zero grants — participant-tier is the ONLY door, and it is now closed
+      rootAncestry,
+      Date.now(),
+      ACTOR,
+    );
+    expect(visible).toEqual([]);
+  });
+
   it("a covering grant keeps a record-bound projection", async () => {
     const projections = [fakeProjection({ inst: "inst-a", recordId: RECORD_ID })];
     const visible = await filterProjectionsByReadVisibility(
@@ -743,6 +842,11 @@ describe("T-0722/T-0723 · filterProjectionsByReadVisibility (process-projection
               .filter((inst) => wanted.has(inst))
               .map((inst) => ({ inst, actor: ACTOR, confirmed_by: null, task_role: null }));
             return { rows };
+          }
+          // T-0759: clause (1)'s active-check — ACTOR is active in this fixture.
+          if (/FROM\s+choros\.employee/i.test(text) && !/role_assignment/i.test(text)) {
+            const slugArg = Array.isArray(values) ? values[1] : undefined;
+            return slugArg === ACTOR ? { rows: [{ id: "emp-actor" }] } : { rows: [] };
           }
           return { rows: [] };
         },

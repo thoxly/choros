@@ -91,6 +91,8 @@ AUTHORITY_RESOLVERS=(
   "src/http/rights-change-requests.ts:assertApproverIsHuman"
   "src/http/binding.ts:checkRole"
   "src/http/rights-intents.ts:resolveActiveActorEmployeeId"
+  "src/http/process-projection.ts:isInstanceParticipant"
+  "src/http/process-projection.ts:isInstanceParticipantBatch"
 )
 
 # ---------------------------------------------------------------------------
