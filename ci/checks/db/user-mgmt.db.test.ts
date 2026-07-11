@@ -49,12 +49,66 @@ import { Router } from '../../../src/http/router.js';
 import { registerUserMgmtRoutes } from '../../../src/http/user-mgmt.js';
 import { registerTenant } from '../../../src/core/register.js';
 import { InMemoryKeycloakUserPort } from '../../../src/keycloak/fake-user-port.js';
+import type { KeycloakUserPort, KcHumanUserSpec } from '../../../src/keycloak/admin-port.js';
 import { getGrantsForSubject } from '../../../src/db/grants-dao.js';
 import { resolveActorTenant } from '../../../src/db/org.js';
 import { RESOURCE_ROOT_NODE_ID } from '../../../src/core/read-visibility.js';
 
 const LIVE = !!process.env['DATABASE_URL'];
 const NOW = () => Date.now();
+
+/**
+ * T-0664 — a KeycloakUserPort wrapper that inserts a rendezvous barrier at the
+ * `setUserEnabled` call. In the PATCH deactivation flow, `setUserEnabled` runs
+ * AFTER the (separate, unlocked) EARLY last-owner guard but BEFORE the write
+ * transaction. By making two concurrent requests rendezvous here, we
+ * DETERMINISTICALLY force the exact interleaving that reproduces the race the
+ * fix closes: both requests finish their early guard (each sees the OTHER owner
+ * still active) BEFORE EITHER performs its deactivating write. Without the
+ * atomic FOR UPDATE guard, both writes then land → the tenant is left with ZERO
+ * active owners (self-lockout). With the fix, the write-tx FOR UPDATE serializes
+ * them → exactly one succeeds, the other is refused 409 LAST_OWNER.
+ *
+ * Only the FIRST `parties` arrivals rendezvous; any later `setUserEnabled` call
+ * (e.g. the fix's compensating re-enable on the refused branch) passes straight
+ * through. A safety timeout guarantees the suite can never wedge if — for any
+ * reason — fewer than `parties` requests reach the barrier.
+ */
+class BarrierKcPort implements KeycloakUserPort {
+  private arrived = 0;
+  private releasers: Array<() => void> = [];
+  constructor(
+    private readonly inner: InMemoryKeycloakUserPort,
+    private readonly parties: number,
+  ) {}
+  createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }> {
+    return this.inner.createHumanUser(spec);
+  }
+  deleteUser(userId: string): Promise<void> {
+    return this.inner.deleteUser(userId);
+  }
+  revokeUserSessions(userId: string): Promise<{ revoked: boolean }> {
+    return this.inner.revokeUserSessions(userId);
+  }
+  async setUserEnabled(userId: string, enabled: boolean): Promise<void> {
+    if (this.arrived < this.parties) {
+      this.arrived++;
+      if (this.arrived >= this.parties) {
+        for (const r of this.releasers) r();
+        this.releasers = [];
+      } else {
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, 5000); // safety valve — never wedge the suite
+          this.releasers.push(() => {
+            clearTimeout(t);
+            resolve();
+          });
+        });
+      }
+    }
+    return this.inner.setUserEnabled(userId, enabled);
+  }
+}
 
 interface Registered {
   tenantId: string;
@@ -877,6 +931,162 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     const res2 = await patchUser(owner2Id, { active: false }, owner2Slug);
     expect(res2.status, JSON.stringify(res2.json)).toBe(409);
     expect(res2.json.error?.code ?? res2.json.code).toBe('LAST_OWNER');
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0664 — RACE in the last-owner guard. The EARLY guard (before the KC
+  // flip) and the deactivating write ran in SEPARATE READ COMMITTED
+  // transactions with no row lock. Two concurrent PATCH{active:false} on TWO
+  // DIFFERENT owners each passed the early guard (each saw the other still
+  // active), then both wrote → the tenant ended with ZERO active owners
+  // (self-lockout — found in T-0658 round-3 final verification). The fix
+  // re-asserts the invariant inside the write tx under `SELECT ... FOR UPDATE`
+  // on the active-owner rows, so concurrent owner-deactivations SERIALIZE.
+  //
+  // DETERMINISTIC mutation-proof: a BarrierKcPort rendezvous at setUserEnabled
+  // (which sits AFTER the early guard, BEFORE the write) forces both requests
+  // to clear the early guard before EITHER writes — the worst-case
+  // interleaving, every run. Without the FOR UPDATE fix this test is RED (both
+  // 200 → 0 owners); with it, GREEN (one 200, one 409, ≥1 owner always).
+  // ---------------------------------------------------------------------
+
+  /** Grant an EXISTING employee the tenant-owner role (confirmed, in-window). */
+  async function grantTenantOwner(tenantId: string, granteeId: string, seedOwnerId: string): Promise<void> {
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+      const { rows: roleRows } = await c.query<{ id: string }>(
+        `SELECT id FROM choros.role WHERE tenant_id=$1 AND slug='tenant-owner' LIMIT 1`,
+        [tenantId],
+      );
+      const ownerRoleId = roleRows[0]!.id;
+      const { rows: scopeRows } = await c.query<{ org_scope: unknown }>(
+        `SELECT org_scope FROM choros.role_assignment
+          WHERE tenant_id=$1 AND role_id=$2 AND employee_id=$3 LIMIT 1`,
+        [tenantId, ownerRoleId, seedOwnerId],
+      );
+      const ownerScope = scopeRows[0]!.org_scope;
+      await c.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, $3, $4::jsonb,
+                 NULL, NULL, 'seed', 'seed', NULL, 'seed', NULL, 0, 0)`,
+        [tenantId, granteeId, ownerRoleId, JSON.stringify(ownerScope)],
+      );
+      await c.query('COMMIT');
+    });
+  }
+
+  /** Count active (deactivated_at IS NULL) confirmed in-window tenant-owners. */
+  async function countActiveOwners(tenantId: string): Promise<number> {
+    return withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+      const now = Date.now();
+      const { rows } = await c.query<{ n: string }>(
+        `SELECT COUNT(DISTINCT e.id) AS n
+           FROM choros.employee e
+           JOIN choros.role_assignment ra ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+           JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+          WHERE e.tenant_id = $1
+            AND r.slug = 'tenant-owner'
+            AND ra.confirmed_by IS NOT NULL
+            AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
+            AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+            AND e.deactivated_at IS NULL`,
+        [tenantId, now],
+      );
+      await c.query('COMMIT');
+      return Number(rows[0]!.n);
+    });
+  }
+
+  it('T-0664: two concurrent deactivations of two different owners never leave 0 active owners (exactly one succeeds)', async () => {
+    const t = await registerOne('t0664race');
+    kc.reset();
+    const owner1Id = await ownerEmployeeId(t.tenantId, t.ownerSlug);
+    const owner1Slug = t.ownerSlug;
+
+    // Create a SECOND human account and promote it to tenant-owner → two active
+    // owners. postUsers goes through the SHARED server (shared `kc`); its slug
+    // (= KC userId) is the actor identity dev-mode auth uses.
+    const create2 = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `t0664-owner2-${Date.now()}`,
+        email: `t0664-owner2-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Owner Two',
+      },
+      owner1Slug,
+    );
+    expect(create2.status, JSON.stringify(create2.json)).toBe(201);
+    const owner2Id = create2.json.employee_id as string;
+    const owner2Slug = kc.created[kc.created.length - 1].userId;
+    await grantTenantOwner(t.tenantId, owner2Id, owner1Id);
+    expect(await countActiveOwners(t.tenantId)).toBe(2);
+
+    // Stand up a SECOND server whose KC port rendezvous-barriers setUserEnabled,
+    // forcing both concurrent deactivations to clear their early guard before
+    // either writes. Wired exactly like production (server.ts): same migPool,
+    // resolveActorTenant over the same pool. Its own kc-capture is irrelevant to
+    // the DB invariant — the barrier's job is only the deterministic interleave.
+    const barrierInner = new InMemoryKeycloakUserPort();
+    const barrierKc = new BarrierKcPort(barrierInner, 2);
+    const raceRouter = new Router();
+    registerUserMgmtRoutes(raceRouter, migPool, barrierKc, (slug: string) =>
+      resolveActorTenant(migPool, slug),
+    );
+    const raceServer = http.createServer((req, res) => raceRouter.dispatch(req, res));
+    const raceBase = await new Promise<string>((resolve) => {
+      raceServer.listen(0, '127.0.0.1', () => {
+        const a = raceServer.address();
+        resolve(a && typeof a !== 'string' ? `http://127.0.0.1:${a.port}` : '');
+      });
+    });
+
+    const racePatch = (employeeId: string, actor: string) =>
+      fetch(`${raceBase}/api/users/${employeeId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'x-dev-user': actor },
+        body: JSON.stringify({ active: false }),
+      }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) }));
+
+    try {
+      // Fire BOTH deactivations concurrently — each owner deactivates THEMSELF,
+      // the realistic self-lockout scenario. The barrier guarantees both reach
+      // the write only after both cleared the early guard.
+      const [r1, r2] = await Promise.all([
+        racePatch(owner1Id, owner1Slug),
+        racePatch(owner2Id, owner2Slug),
+      ]);
+
+      // INVARIANT: exactly one deactivation succeeded, the other was refused
+      // with 409 LAST_OWNER — never both 200 (which would be 0 owners).
+      const statuses = [r1.status, r2.status].sort((a, b) => a - b);
+      expect(statuses, `expected one 200 + one 409, got ${JSON.stringify([r1, r2])}`).toEqual([200, 409]);
+      const refused = r1.status === 409 ? r1 : r2;
+      expect(refused.json.error?.code ?? refused.json.code).toBe('LAST_OWNER');
+
+      // The load-bearing invariant: the tenant STILL has ≥1 active owner (here
+      // exactly 1 — the loser stays active). Without the fix this is 0.
+      expect(await countActiveOwners(t.tenantId)).toBe(1);
+
+      // COMPENSATION proof: the refused branch re-enabled the last owner's KC
+      // login (setUserEnabled(...,true)) so the refused deactivation leaves no
+      // KC-disabled last owner. All setUserEnabled calls are captured by the
+      // barrier's inner port regardless of whether the user was "created" there.
+      expect(
+        barrierInner.setEnabledCalls.some((c) => c.enabled === true),
+        `expected a compensating KC re-enable; saw ${JSON.stringify(barrierInner.setEnabledCalls)}`,
+      ).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => raceServer.close(() => resolve()));
+    }
   });
 
   // ---------------------------------------------------------------------
