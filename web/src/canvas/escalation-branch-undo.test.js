@@ -187,6 +187,11 @@ async function makeLiveModeler() {
 
 const isSeqFlow = (c) => c.type === 'bpmn:SequenceFlow';
 
+// Instantiating a full bpmn-js Modeler + importXML takes ~3-5s alone and slower
+// under a parallel suite — the vitest default 5s testTimeout flakes exactly like
+// the known fitness:db class (concurrency amplifies). Explicit generous timeout.
+const HEAVY_TIMEOUT_MS = 30000;
+
 describe('T-0660 U-1 — one click = ONE undo entry (real bpmn-js CommandStack)', () => {
   it('a single commandStack.undo() removes the whole built branch and restores the original topology', async () => {
     const modeler = await makeLiveModeler();
@@ -227,7 +232,7 @@ describe('T-0660 U-1 — one click = ONE undo entry (real bpmn-js CommandStack)'
     expect(boundary.outgoing.filter(isSeqFlow)).toHaveLength(0);
     // cancelActivity restored to its pre-build value (absent/true = interrupting).
     expect(boundary.businessObject.cancelActivity).not.toBe(false);
-  });
+  }, HEAVY_TIMEOUT_MS);
 
   it('a single commandStack.redo() replays the whole build (one entry both ways)', async () => {
     const modeler = await makeLiveModeler();
@@ -250,5 +255,5 @@ describe('T-0660 U-1 — one click = ONE undo entry (real bpmn-js CommandStack)'
     // And it is again a single entry: one undo clears it completely.
     commandStack.undo();
     expect(commandStack.canUndo()).toBe(false);
-  });
+  }, HEAVY_TIMEOUT_MS);
 });
