@@ -1,0 +1,40 @@
+{
+  "task_id": "T-0748",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/screen-users.mount.test.jsx:84 (15000ms per-test budget, both new tests)",
+      "issue": "Reproduced the exact contention-class flake the builder's own friction_events already documented (and correctly diagnosed): a fresh, independent full `npx vitest run` of the web/ suite (114 files) FAILED — the new 'a KC NAME_INVALID_CHARACTERS 400...' test timed out at 15000ms under full-suite parallel CPU load (file itself took 23956ms wall-clock with contention), leaving 2887/2888 not 2888/2888. An immediate re-run of the identical full suite passed clean at 114/114 files, 2888/2888. Solo, the file is reliably fast (2/2 in 1963ms total, ~1787ms for the slow test — ~8x margin under the 15000ms budget). This is the SAME systemic class already recorded as durable project lore (memory: 'конкур-нагрузка амплифицирует таймауты→валидация СОЛО') and already independently observed by the builder on the pre-existing, untouched screen-record-detail.mount.test.jsx. Not a logic defect in the new test or the fix — purely dev-machine worker-contention variance. The pr-handoff.json gate line 'web_full_suite: GREEN — 2888/2888' is accurate for a typical run but is not a deterministic guarantee; judge's own two full runs went 1-fail-then-1-pass.",
+      "suggestion": "Non-blocking (matches T-0757.review.json R-1 precedent for the identical flake class on this same codebase). Optional systemic follow-up, out of scope for T-0748 itself: raise the global mount-test timeout class or reduce full-suite worker parallelism, tracked separately rather than re-litigated per new mount test file."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/keycloak/admin-port.ts:isPersonNameCharacterError (substring match on 'person-name'); src/http/user-mgmt.ts NAME_INVALID_CHARACTERS branch",
+      "issue": "Live-probed a case explicitly OUT of this task's stated scope (spec.md §7 'Out of scope' only disclaims re-implementing the character set, not the length validator): an over-length firstName (300 chars, single-token display_name so splitDisplayName duplicates it into both firstName and lastName) produces a live KC 400 body `{\"field\":\"firstName\",\"errorMessage\":\"error-invalid-length-too-long\",...}` — this messageKey does NOT contain the substring 'person-name', so isPersonNameCharacterError correctly returns false and the request falls through to the UNCHANGED EMAIL_INVALID default (exactly as designed — no false positive). But that means the SAME class of bug this task fixes (a firstName/lastName-caused 400 misattributed as an email problem) still reproduces for KC's length validator, not just its character validator. Practically low-risk: web/src/screens/users-form.js's own client-side DISPLAY_NAME_MAX=256 caps display_name length before it ever reaches the server, and it takes a single-TOKEN (no-space) display_name near that 256-char boundary to exceed KC's independent 255-char per-field cap (a two-word name of the same total length splits the load across firstName+lastName and stays under 255 each). Pre-existing since T-0741 (unchanged by this diff either direction — this exact messageKey already fell to EMAIL_INVALID before T-0748 and still does after).",
+      "suggestion": "Non-blocking follow-up candidate, not required for T-0748: extend extractKcFieldErrors' consumer to also disambiguate error-invalid-length* on firstName/lastName (or tighten DISPLAY_NAME_MAX to KC's 255 boundary for the no-space case) — narrow edge case, out of this task's stated scope (§7), and not a regression introduced here."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1 single-object {field,errorMessage} on firstName/lastName -> NAME_INVALID_CHARACTERS", "covered": true},
+    {"ac": "AC-2 {errors:[...]} mixed array (email+firstName both bad) -> still NAME_INVALID_CHARACTERS, name problem not masked by email", "covered": true},
+    {"ac": "AC-3 (regression) genuine email 400 -> unchanged EMAIL_INVALID", "covered": true},
+    {"ac": "AC-4 (regression) unparseable/empty body -> unchanged EMAIL_INVALID safe default", "covered": true},
+    {"ac": "AC-5 (regression) unrelated-field 400 (e.g. username) -> EMAIL_INVALID, no over-broad matching (field-equality gate before substring)", "covered": true},
+    {"ac": "AC-6 POST /api/users honest Russian message naming 'имя'+'символ', not the email text", "covered": true},
+    {"ac": "AC-7 (regression) KC-side EMAIL_INVALID defense-in-depth path byte-identical prior message", "covered": true},
+    {"ac": "AC-8 (regression) ordinary two-word display_name still 201", "covered": true},
+    {"ac": "AC-9 (web) mapUserError anchors NAME_INVALID_CHARACTERS on display_name field", "covered": true},
+    {"ac": "Live KC body shapes match spec §3 verbatim (judge independently re-probed against the live t-0633-keycloak-1 container, byte-identical)", "covered": true},
+    {"ac": "Mutation: reverting admin-port.ts reproduces exactly 3/6 AP-9 RED, restore -> 30/30 GREEN (judge reproduced directly, no git stash/checkout -- used — pre-fix content extracted via git show + write, restored via git show HEAD + write, diff empty after restore)", "covered": true},
+    {"ac": "No orphan KC users left behind by any RED probe (judge's own 6 additional live probes cross-checked: 0 remaining)", "covered": true},
+    {"ac": "Anti-case D-064: 'Bot #1'/'A&B' literals appear only in test files and doc comments, never as a hardcoded branch condition in production code (grep-verified); anti-case-lock.sh aggregate 15<=16 baseline, erodes-or-steady, PASS", "covered": true},
+    {"ac": "UX message honesty: judge live-probed the exact character set the Russian message names (<, &, #, quotes, parens) against real KC — all 5 reject, apostrophe and hyphen (not claimed as bad) both pass — message does not over- or under-claim", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
