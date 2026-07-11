@@ -51,9 +51,18 @@ import {
 } from "../core/message-correlation.js";
 import { fallbackDefinitionName } from "../core/process-catalog-view.js";
 import { selectEngineProcessNames } from "../db/engine-process-name.js";
-import { findEmployeeById } from "../db/org.js";
+import { findEmployeeById, isGenesisOwnerForTenant } from "../db/org.js";
 import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
 import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
+// T-0756 [E16 §6, capstone T-0691 P1]: the safe source-record projection + the
+// per-hop-ACL participant check reuse the ALREADY-MERGED authority resolvers —
+// NO second grant/lattice math (FF-INST-VIS-2): getRoleSlugsForActor
+// (role-eligibility, ACTOR_ACTIVE-gated T-0738), resolveActorPrivilege (the SAME
+// sandbox-privilege resolver records.ts falls back to, T-0557), pickTitleFieldKey
+// (schema-aware title picker, T-0613), isGenesisOwnerForTenant (owner, T-0658).
+import { getRoleSlugsForActor } from "../db/grants-dao.js";
+import { resolveActorPrivilege } from "../db/sandbox-gate-dao.js";
+import { pickTitleFieldKey } from "../core/registry-title-field.js";
 
 // ---------------------------------------------------------------------------
 // Audit event types (free-text `type` column; no enum constraint — migrations/006).
@@ -994,6 +1003,237 @@ export async function filterProjectionsByReadVisibility(
     if (rowAncestry === undefined) return false; // malformed / deleted / foreign → honest-deny
     return isRecordReadable(rowAncestry, grants, ancestry, nowMs);
   });
+}
+
+// ---------------------------------------------------------------------------
+// T-0756 (D-064, P1 из live-proof T-0691 — E16 §6 links) · per-hop ACL
+// read-through projection of a process instance's SOURCE RECORD.
+//
+// THE DEFECT (T-0691 finding P1): the process card «ЗАПИСЬ-ИСТОЧНИК» rendered a
+// RAW UUID and its GET /api/records/:id 404'd for the acting participant (the
+// approver) — the person who just acted on the process could neither name nor
+// open the record it is about. Cause: the source app is draft-tier (the
+// sandbox gate T-0558 hides the record card from non-creators) AND/OR the actor
+// lacks a READ grant. E16 §6: a participant sees a SAFE read-through projection
+// (human title + type), never a hard 404, never a raw UUID; the full record
+// stays under RLS + sandbox + READ-PDP.
+//
+// SINGLE-AUTHORITY (FF-INST-VIS-2): READ-PDP containment is ONLY isRecordReadable
+// (read-visibility.ts); sandbox privilege is ONLY resolveActorPrivilege
+// (sandbox-gate-dao.ts, the SAME resolver records.ts falls back to); role
+// eligibility is ONLY getRoleSlugsForActor; owner is ONLY isGenesisOwnerForTenant.
+// No bespoke grant/lattice math, no raw choros."grant" SQL in this module.
+// ---------------------------------------------------------------------------
+
+/**
+ * The SAFE, minimal projection of a source record surfaced on a process card
+ * (T-0756). Carries ONLY the human title + type + an honest openability flag —
+ * NEVER the record's other `data` fields (those stay behind GET /api/records/:id
+ * with RLS + sandbox + READ-PDP + field-visibility).
+ */
+export interface SourceRecordProjection {
+  /** The source record's id (the same value the card already shows as a link target). */
+  readonly id: string;
+  /**
+   * Human title — the registry's SCHEMA-DESIGNATED title field value
+   * (pickTitleFieldKey: explicit x-title-field → title-like key → first plain
+   * textual property), or a neutral «{typeLabel} · <id8>» when the schema has no
+   * derivable title. Deliberately ONE designated field, never an arbitrary
+   * data-order scan — no incidental field value leaks to a participant.
+   */
+  readonly title: string;
+  /** The record's TYPE — the governing registry_def.display_name (generic, never a case literal). */
+  readonly typeLabel: string;
+  /**
+   * True iff GET /api/records/:id would actually return 200 for this actor =
+   * READ-PDP (isRecordReadable) AND sandbox-openable (privileged OR the owning
+   * app is not draft OR the actor is the record's creator). The UI offers the
+   * navigable «открыть» link ONLY when true — so it never dead-ends in a 404.
+   */
+  readonly canOpen: boolean;
+  /** Owning application id — present ONLY when `canOpen` (the nav target the link needs). */
+  readonly appId?: string;
+}
+
+function isPlainRecordObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * Derive the SAFE human title of a record: the schema-designated title field's
+ * value (via pickTitleFieldKey — the SAME picker the assistant digest uses,
+ * T-0613), else a neutral `«{typeLabel} · <id8>»`. NEVER scans data in key order
+ * for an arbitrary first field (that could surface a non-title/sensitive value
+ * to a participant who lacks READ) — only the deliberately designated field.
+ */
+function deriveSafeRecordTitle(
+  data: unknown,
+  recordSchema: unknown,
+  recordId: string,
+  typeLabel: string,
+): string {
+  const obj = isPlainRecordObject(data) ? data : {};
+  const key = pickTitleFieldKey(recordSchema);
+  if (key !== null) {
+    const v = obj[key];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  const short = recordId.length >= 8 ? recordId.slice(0, 8) : recordId;
+  return typeLabel.length > 0 ? `${typeLabel} · ${short}` : short;
+}
+
+/** Generic fallback type label — a domain-neutral noun, not a case literal (D-064). */
+const GENERIC_RECORD_TYPE_LABEL = "Запись";
+
+/**
+ * T-0756: resolve the safe source-record projection for ONE record, tenant-scoped.
+ *
+ * `readVisibility` is the SAME `{grants, ancestry}` the T-0721 DETAIL gate resolves
+ * once per request (NF-1). When it is `undefined` (resolveReadVisibility not wired —
+ * honest-degrade, NF-2), READ-PDP is treated as open (matching records.ts's degrade)
+ * and `canOpen` is decided by the sandbox gate alone.
+ *
+ * Returns `null` when the record no longer resolves in this tenant (deleted / foreign) —
+ * the caller then omits `sourceRecord` (never a fabricated projection).
+ */
+export async function resolveSourceRecordProjection(
+  pool: pg.Pool,
+  tenantId: string,
+  recordId: string,
+  actorSlug: string,
+  nowMs: number,
+  readVisibility: { readonly grants: readonly Grant[]; readonly ancestry: AncestryOracle } | undefined,
+): Promise<SourceRecordProjection | null> {
+  const row = await withTenant(pool, tenantId, async (client) => {
+    const res = await client.query<{
+      id: string;
+      registry_id: string;
+      application_id: string;
+      tier: string;
+      created_by: string | null;
+      data: unknown;
+      record_schema: unknown;
+      type_label: string | null;
+    }>(
+      `SELECT r.id, r.registry_id, rd.application_id, a.tier, r.created_by,
+              r.data, rd.record_schema, rd.display_name AS type_label
+         FROM choros.record r
+         JOIN choros.registry_def rd
+           ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
+         JOIN choros.application a
+           ON a.tenant_id = rd.tenant_id AND a.id = rd.application_id
+        WHERE r.tenant_id = $1 AND r.id = $2`,
+      [tenantId, recordId],
+    );
+    return res.rows[0] ?? null;
+  });
+  if (row === null) return null;
+
+  // READ-PDP: the ONE containment predicate (isRecordReadable), fed the SAME
+  // grants/ancestry the DETAIL gate uses. Absent resolver ⇒ honest-degrade open.
+  const rowAncestry: RowAncestry = {
+    recordId: row.id,
+    registryId: row.registry_id,
+    applicationId: row.application_id,
+  };
+  const readPdpOk =
+    readVisibility === undefined
+      ? true
+      : isRecordReadable(rowAncestry, readVisibility.grants, readVisibility.ancestry, nowMs);
+
+  // Sandbox openability (mirrors getRecordDetail's sandboxReadPredicate, T-0558):
+  // a draft-tier record is hidden from a caller who is neither privileged nor its
+  // creator. Only pay for the privilege resolve when a draft row would otherwise
+  // be hidden (the branch that actually needs it).
+  let actorIsPrivileged = false;
+  if (row.tier === "draft" && row.created_by !== actorSlug) {
+    const priv = await resolveActorPrivilege(pool, tenantId, actorSlug, nowMs);
+    actorIsPrivileged = priv.isOwnerOrAdmin || priv.hasAuthoringDraftGrant;
+  }
+  const sandboxOpenable = actorIsPrivileged || row.tier !== "draft" || row.created_by === actorSlug;
+  const canOpen = readPdpOk && sandboxOpenable;
+
+  const typeLabel =
+    typeof row.type_label === "string" && row.type_label.trim().length > 0
+      ? row.type_label.trim()
+      : GENERIC_RECORD_TYPE_LABEL;
+  const title = deriveSafeRecordTitle(row.data, row.record_schema, row.id, typeLabel);
+
+  return {
+    id: row.id,
+    title,
+    typeLabel,
+    canOpen,
+    ...(canOpen ? { appId: row.application_id } : {}),
+  };
+}
+
+/**
+ * T-0756 per-hop ACL: is `actorSlug` a PARTICIPANT of instance `instanceId`?
+ * A participant is entitled to the safe source-record projection even without a
+ * READ grant on the source record (E16 §6). Tenant-scoped, fail-closed, reusing
+ * merged authority only:
+ *   (1) the actor APPEARS as an actor in this instance's append-only audit track
+ *       (started / approved / claimed / next_task) — they ACTED on it; OR
+ *   (2) the actor HOLDS the role of a task ever addressed on this instance
+ *       (getRoleSlugsForActor ∩ the instance's audit task_role set) — eligible to
+ *       act; ACTOR_ACTIVE-gated, so a deactivated role-holder resolves []; OR
+ *   (3) the actor is the tenant OWNER (isGenesisOwnerForTenant, deactivation-safe).
+ * A DB error in any resolver denies (never grants).
+ */
+export async function isInstanceParticipant(
+  pool: pg.Pool,
+  tenantId: string,
+  instanceId: string,
+  actorSlug: string,
+  nowMs: number,
+  fallbackSlug?: string,
+): Promise<boolean> {
+  if (!actorSlug) return false;
+
+  const { actors, roles } = await withTenant(pool, tenantId, async (client) => {
+    const res = await client.query<{
+      actor: string | null;
+      confirmed_by: string | null;
+      task_role: string | null;
+    }>(
+      `SELECT actor, confirmed_by, payload->>'task_role' AS task_role
+         FROM choros.audit_event
+        WHERE tenant_id = $1 AND payload->>'inst' = $2`,
+      [tenantId, instanceId],
+    );
+    const actorSet = new Set<string>();
+    const roleSet = new Set<string>();
+    for (const r of res.rows) {
+      if (r.actor) actorSet.add(r.actor);
+      if (r.confirmed_by) actorSet.add(r.confirmed_by);
+      if (r.task_role) roleSet.add(r.task_role);
+    }
+    return { actors: actorSet, roles: roleSet };
+  });
+
+  // (1) acted on the instance.
+  if (actors.has(actorSlug)) return true;
+  if (fallbackSlug && fallbackSlug !== actorSlug && actors.has(fallbackSlug)) return true;
+
+  // (2) holds the role of a task addressed on this instance (ACTOR_ACTIVE-gated).
+  if (roles.size > 0) {
+    try {
+      const myRoles = await getRoleSlugsForActor(pool, tenantId, actorSlug, nowMs, fallbackSlug);
+      if (myRoles.some((r) => roles.has(r))) return true;
+    } catch {
+      /* fail-closed: a role-resolution error never grants participant status */
+    }
+  }
+
+  // (3) tenant owner (deactivation-safe).
+  try {
+    if (await isGenesisOwnerForTenant(pool, tenantId, actorSlug, nowMs)) return true;
+  } catch {
+    /* fail-closed */
+  }
+  return false;
 }
 
 interface StartedRow {
