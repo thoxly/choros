@@ -21,7 +21,7 @@
 // F-9:  Tenant isolation: RECONCILE on tenant A does not write to tenant B.
 // F-10: No new grant/tool/table rows; DEFAULT_TENANT constant static.
 
-import { describe, it, expect, afterAll, vi } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -51,12 +51,10 @@ import { DEFAULT_TENANT, DOCS_AUTHOR_ACTOR } from '../../../scripts/doc-reconcil
 // T-0646: runRegen/runReconcile below faithfully replicate the production
 // per-page write loop in scripts/doc-regen.ts / scripts/doc-reconcile.ts
 // (upsertDocPage → setDocRefs → appendDocLog per page, sequential — real
-// operator behavior, not a test-only inefficiency). The volume is the WHOLE
-// live repo doc snapshot (assembleStaticSnapshot) and grows with the
-// codebase, so several tests here legitimately exceed vitest's 5000ms
-// default testTimeout (several call runRegen/runReconcile more than once).
-// Raise the budget for this file only; assertions are unchanged.
-vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
+// operator behavior). The volume is the WHOLE live repo doc snapshot
+// (assembleStaticSnapshot) and grows with the codebase; several tests call
+// runRegen/runReconcile more than once and legitimately exceed the old 5000ms
+// default. Covered by the suite-wide testTimeout/hookTimeout in vitest.config.js.
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..', '..');

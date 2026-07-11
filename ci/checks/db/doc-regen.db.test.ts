@@ -20,7 +20,7 @@
 //       known_tenant_tables.txt unchanged (static).
 //       STATIC: script DEFAULT_TENANT constant === dev-tenant UUID.
 
-import { describe, it, expect, afterAll, vi } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -46,12 +46,11 @@ import { DEFAULT_TENANT, DOCS_AUTHOR_ACTOR } from '../../../scripts/doc-regen.js
 
 // T-0646: runRegen below faithfully replicates the production per-page write
 // loop in scripts/doc-regen.ts (upsertDocPage → setDocRefs → appendDocLog per
-// page, sequential — real operator behavior, not a test-only inefficiency).
-// The volume is the WHOLE live repo doc snapshot (assembleStaticSnapshot) and
-// grows with the codebase; F-2/F-3 call runRegen twice, doubling the
-// round-trips, and legitimately exceed vitest's 5000ms default testTimeout.
-// Raise the budget for this file only; assertions are unchanged.
-vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
+// page, sequential — real operator behavior). The volume is the WHOLE live
+// repo doc snapshot (assembleStaticSnapshot) and grows with the codebase;
+// F-2/F-3 call runRegen twice, doubling the round-trips, and legitimately
+// exceed the old 5000ms default. Covered by the suite-wide
+// testTimeout/hookTimeout in vitest.config.js.
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..', '..');
