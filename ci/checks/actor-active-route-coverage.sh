@@ -80,11 +80,49 @@
 # above); findings are printed but do not fail the process. `--self-test`
 # exits non-zero on any assertion failure (the self-test itself is a real gate
 # on the MECHANISM, not on the live tree's content).
+#
+# ---------------------------------------------------------------------------
+# STATUS UPDATE (T-0752, 2026-07-11): PROMOTED TO REQUIRED.
+# ---------------------------------------------------------------------------
+# The "informational" language in the header block above (status note item 5,
+# and the "Exit 0 always" paragraph directly above this update) describes the
+# gate's status BEFORE this task and is left byte-frozen (frozen-checks-
+# immutable ownership: this file's line-2 T-ID is T-0726, not T-0752 — this
+# task holds an auto_additive frozen-sanction, see
+# ci/checks/data/frozen-sanctions.jsonl, task:"T-0752") — it is now STALE and
+# SUPERSEDED by this block.
+#
+# Trigger for promotion: the ACTOR_ACTIVE wave (T-0736..T-0751) closed the
+# live FINDINGS count 13 → 0 (docs/design/T-0152-security-invariants-catalog.md
+# §7.7). T-0752 independently re-verified 5 consecutive live runs at 0
+# findings / 78 GET routes audited / 23 marker-covered / 55 whitelisted, no
+# flakiness in route discovery (see T-0752.pr-handoff.json stability_runs).
+#
+# New behaviour (live run, no --self-test): if FINDINGS > 0 the process now
+# EXITS NON-ZERO (see the new `if [[ ${FINDINGS} -gt 0 ]]; then ... exit 1;
+# fi` block inserted directly before the pre-existing `exit 0` near the end of
+# this file — that `exit 0` line is preserved byte-identical and remains the
+# live exit path ONLY when FINDINGS is 0; it is unreachable dead code on any
+# red run). This is now wired into `npm run fitness` (package.json), making a
+# new GET route without an ACTOR_ACTIVE marker or ROUTE_WHITELIST entry a hard
+# CI barrier, not merely a printed FINDING. `--self-test` gained a new
+# integration case (T-0752-BITE) that invokes this script as a real
+# subprocess against a planted fixture to prove the exit code itself reddens,
+# not just that the detection helper flags the route.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 HTTP_DIR="${ROOT}/src/http"
+# T-0752 · HTTP_DIR override hook — self-test-only. When set,
+# T0752_HTTP_DIR_OVERRIDE replaces HTTP_DIR for this run; used EXCLUSIVELY by
+# the --self-test "T-0752-BITE" integration case below, which re-invokes this
+# same script as a real subprocess against a planted fixture directory to
+# prove the REQUIRED-mode exit code end-to-end. Never set in a live/CI
+# invocation — HTTP_DIR keeps its original value above when the override is
+# unset (default-expansion fallthrough), so this line changes nothing on any
+# normal run.
+HTTP_DIR="${T0752_HTTP_DIR_OVERRIDE:-${HTTP_DIR}}"
 
 # ---------------------------------------------------------------------------
 # ACTIVE_MARKERS (ADR §3): every identifier whose PRESENCE in a route's own
@@ -421,6 +459,54 @@ EOF
     fi
   done <<< "$routes"
 
+  # -------------------------------------------------------------------------
+  # (5) T-0752 REQUIRED-promotion integration test ("does it bite"): re-invoke
+  # this SAME script file as a real subprocess (not just the extract_routes /
+  # block_has_marker helpers exercised by cases 1-4 above) against a planted
+  # fixture HTTP_DIR containing ONE unmarked, non-whitelisted GET route, via
+  # the T0752_HTTP_DIR_OVERRIDE hook. Proves the PROCESS EXIT CODE itself goes
+  # non-zero end-to-end — the thing that actually reddens `npm run fitness` —
+  # not merely that the detection helper flags the route in isolation.
+  # -------------------------------------------------------------------------
+  BITE_DIR="$(mktemp -d /tmp/actor-active-route-bite-XXXXXX)"
+  cat > "${BITE_DIR}/probe-bite.ts" <<'EOF'
+export function registerProbeRoutes(router) {
+  router.register("GET", "/api/_t0752_bite_probe", withAuth(async (req, res) => {
+    const tenantId = await resolveActorTenant(actor);
+    const rows = await pool.query("SELECT * FROM choros.t0752_bite_probe WHERE tenant_id = $1", [tenantId]);
+    res.end(JSON.stringify(rows));
+  }));
+}
+EOF
+  if T0752_HTTP_DIR_OVERRIDE="${BITE_DIR}" bash "${SCRIPT_DIR}/actor-active-route-coverage.sh" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL [T-0752-BITE]: planted unmarked/non-whitelisted GET route did NOT redden the real process exit code — required-mode is not biting"
+    rm -rf "${BITE_DIR}"
+    exit 2
+  else
+    echo "PASS [T-0752-BITE]: planted unmarked GET route reddens the real process exit code (required-mode bites end-to-end)"
+  fi
+
+  # Positive control: same fixture directory, but the route now carries a
+  # marker → the required gate must NOT trip (a genuinely covered route stays
+  # green under REQUIRED, same as it did under informational).
+  cat > "${BITE_DIR}/probe-bite.ts" <<'EOF'
+export function registerProbeRoutes(router) {
+  router.register("GET", "/api/_probe_bite_ok", withAuth(async (req, res) => {
+    const tenantId = await resolveActorTenant(actor);
+    const grants = await getGrantsForSubject(pool, tenantId, actor, Date.now());
+    res.end(JSON.stringify(grants));
+  }));
+}
+EOF
+  if T0752_HTTP_DIR_OVERRIDE="${BITE_DIR}" bash "${SCRIPT_DIR}/actor-active-route-coverage.sh" >/dev/null 2>&1; then
+    echo "PASS [T-0752-BITE-OK]: covered GET route does not trip the required gate (exit 0, positive control)"
+  else
+    echo "SELF-TEST FAIL [T-0752-BITE-OK]: covered GET route incorrectly reddened the required gate"
+    rm -rf "${BITE_DIR}"
+    exit 2
+  fi
+  rm -rf "${BITE_DIR}"
+
   echo "SELF-TEST PASS: actor-active-route-coverage — unmarked/marked/method-scope/whitelist all detect correctly"
   exit 0
 fi
@@ -476,5 +562,17 @@ if [[ ${FINDINGS} -gt 0 ]]; then
   echo "STATUS: informational (see ADR-T0726 §5) — ${FINDINGS} pre-existing findings, not fixed by this gate."
 else
   echo "STATUS: clean — candidate for promotion to required (see ADR-T0726 §5)."
+fi
+# T-0752 · REQUIRED promotion (see STATUS UPDATE comment block near top of
+# file): a FINDING is now a hard CI barrier. Exit non-zero HERE, before the
+# pre-existing informational `exit 0` below is ever reached on a red run —
+# that line is preserved byte-identical (frozen-checks-immutable A-1) and
+# stays the live exit path only when FINDINGS is 0.
+if [[ ${FINDINGS} -gt 0 ]]; then
+  echo "FAIL [FF-726-1]: ${FINDINGS} finding(s) — actor-active-route-coverage is REQUIRED (T-0752, npm run fitness)."
+  echo "                 A new GET route without an ACTOR_ACTIVE marker or ROUTE_WHITELIST entry reddens"
+  echo "                 the build. Triage each FINDING above: add the marker citation, or a documented"
+  echo "                 ROUTE_WHITELIST entry (§D for verified-but-invisible wrappers, §A/B/C/E otherwise)."
+  exit 1
 fi
 exit 0
