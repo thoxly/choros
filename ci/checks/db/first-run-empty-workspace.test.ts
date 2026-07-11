@@ -40,6 +40,10 @@ const NOW = () => Date.now();
 
 // Контент-плоскость конструктора + все демо-несущие таблицы. Свежий тенант ДОЛЖЕН
 // иметь 0 строк в каждой. Все они tenant-scoped (known_tenant_tables.txt, RLS).
+// section/list_view/engine_process_name — контент-таблицы миграций 113/123/131
+// (nav-разделы, сохранённые представления, имена движковых процессов);
+// @demo-seed 132 пишет engine_process_name ТОЛЬКО в Dev-Silo — свежий тенант
+// обязан иметь 0 и там.
 const CONTENT_TABLES = [
   "choros.application",
   "choros.registry_def",
@@ -50,6 +54,9 @@ const CONTENT_TABLES = [
   "choros.form_binding",
   "choros.cross_app_ref",
   "choros.matrix_lookup_table",
+  "choros.section",
+  "choros.list_view",
+  "choros.engine_process_name",
 ];
 
 interface Registered {
