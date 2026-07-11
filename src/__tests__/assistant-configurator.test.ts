@@ -1255,3 +1255,134 @@ describe("T-0600 — runConfiguratorLoop honest error text (no raw provider body
     expect(result.text).not.toContain("OpenAI API");
   });
 });
+
+// ---------------------------------------------------------------------------
+// AC-T743 (E-FORMS, столпы 2+5, follow-up T-0725): apply_form_document_op —
+// the configurator tool wrapper over POST /api/forms/document-ops.
+// PURE-core coverage (schema shape, args pass-through, malformed-op honesty).
+// The DRAFT-ONLY-via-application-tier gate + AMBIGUOUS_APPLICATION-as-ASK
+// live in executeApprovedOpAsDraft (src/http/assistant.ts) — covered by
+// ci/checks/db/T-0743-document-ops-tool-auth-gate.db.test.ts (live PG).
+// ---------------------------------------------------------------------------
+
+describe("AC-T743-1: apply_form_document_op is declared in the configurator toolset", () => {
+  it("the configurator's first LLM call declares apply_form_document_op with an optional applicationId param", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Что изменить в форме?" });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("измени форму процесса", ctx);
+
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{
+      function?: { name?: string; parameters?: { properties?: Record<string, unknown>; required?: string[] } };
+    }>;
+    const tool = tools.find((t) => t.function?.name === "apply_form_document_op");
+    expect(tool).toBeDefined();
+    const props = tool!.function!.parameters!.properties!;
+    expect(props).toHaveProperty("processKey");
+    expect(props).toHaveProperty("stepKey");
+    expect(props).toHaveProperty("op");
+    expect(props).toHaveProperty("applicationId");
+    // applicationId must stay OPTIONAL — mirrors T-0700's targetRegistrySlug.
+    const required = tool!.function!.parameters!.required!;
+    expect(required).not.toContain("applicationId");
+  });
+});
+
+describe("AC-T743-2: apply_form_document_op tool call → ApprovedOp with args pass-through", () => {
+  it("a well-formed op JSON string → ApprovedOp.args.op is the PARSED object, tier='draft'", async () => {
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "t0743-proc",
+      stepKey: "t0743-step",
+      op: JSON.stringify({ kind: "insert", containerPath: [], node: { type: "divider" } }),
+      humanReadableReason: "Добавить разделитель",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("добавь разделитель в форму", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps).toHaveLength(1);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("apply_form_document_op");
+    expect(op.tier).toBe("draft");
+    expect(op.args["processKey"]).toBe("t0743-proc");
+    expect(op.args["stepKey"]).toBe("t0743-step");
+    expect(op.args["op"]).toEqual({ kind: "insert", containerPath: [], node: { type: "divider" } });
+    expect(op.args["applicationId"]).toBeUndefined();
+  });
+
+  it("WITH applicationId → ApprovedOp.args.applicationId carries it verbatim (mirrors T-0700 targetRegistrySlug pass-through)", async () => {
+    const APP_ID = "a3000000-0000-0000-0000-000000000009";
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "t0743-proc-multi",
+      stepKey: "t0743-step",
+      op: JSON.stringify({ kind: "remove", containerPath: [], index: 0 }),
+      applicationId: APP_ID,
+      humanReadableReason: "Убрать поле из формы приложения A",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("убери поле из формы для этого приложения", ctx);
+
+    expect(result.approvedOps).toHaveLength(1);
+    expect(result.approvedOps[0]!.args["applicationId"]).toBe(APP_ID);
+  });
+});
+
+describe("AC-T743-3: apply_form_document_op with a malformed op → blocked, NOT approved (core stays PURE, no vocabulary duplication)", () => {
+  it("op is not valid JSON → BlockedOp(pending_human_confirm), zero ApprovedOp", async () => {
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "t0743-proc",
+      stepKey: "t0743-step",
+      op: "{not valid json",
+      humanReadableReason: "Попытка сломанного JSON",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("измени форму", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(1);
+    expect(result.blockedOps[0]!.kind).toBe("pending_human_confirm");
+  });
+
+  it("op parses but carries no string `kind` → BlockedOp, zero ApprovedOp", async () => {
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "t0743-proc",
+      stepKey: "t0743-step",
+      op: JSON.stringify({ containerPath: [] }), // no `kind`
+      humanReadableReason: "Без kind",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("измени форму", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(1);
+  });
+
+  it("missing processKey/stepKey → BlockedOp, zero ApprovedOp", async () => {
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "",
+      stepKey: "t0743-step",
+      op: JSON.stringify({ kind: "insert", containerPath: [], node: { type: "divider" } }),
+      humanReadableReason: "Без processKey",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("измени форму", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(1);
+  });
+
+  // NOTE (D-064 anti-case, N1 discipline): this test deliberately does NOT assert
+  // on an *unknown-but-well-formed* kind (e.g. "delete") — that check is NOT
+  // duplicated in the pure core (see the case's own comment): it is caught once,
+  // at execution time, by applyDocumentOp (src/core/form-document-op-apply.ts).
+});
+
+describe("AC-T743-4: apply_form_document_op is gated by the SAME authoring_draft grant ceiling as every other tool", () => {
+  it("no authoring_draft grant → refused before any tool dispatch (no chat call at all)", async () => {
+    const stub = new StubChatLlmPort();
+    const ctx = makeContext([], stub); // no grant
+    const result = await runConfigurator("поправь форму процесса", ctx);
+
+    expect(stub.chatCalls).toHaveLength(0);
+    expect(result.approvedOps).toHaveLength(0);
+  });
+});

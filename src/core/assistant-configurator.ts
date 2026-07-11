@@ -314,6 +314,78 @@ const TOOL_EMIT_FORM: ToolDeclaration = {
   },
 };
 
+/**
+ * apply_form_document_op — T-0743 (E-FORMS, столпы 2+5, follow-up T-0725):
+ * apply ONE form-document mutation (insert/remove/reorder/update/move) to an
+ * EXISTING form layout — the SAME op vocabulary + content gate the human
+ * canvas (FormDesigner.jsx) and the agent HTTP seam (POST /api/forms/
+ * document-ops, T-0656/T-0725) already share. This tool is the LLM-facing
+ * registration ADR-T0656 §4.4 deferred as a FINDING — the machine seam
+ * existed as raw HTTP but was NOT reachable from the configurator's tool
+ * loop.
+ *
+ * AUTH MODEL (docs/tasks/T-0743.spec.md §4.4 mini-ADR): `form_binding` (the
+ * table this op ultimately writes) carries NO draft/published tier — a human
+ * process_designer's FormDesigner save is ALWAYS live, immediately. Every
+ * OTHER configurator tool's DRAFT-ONLY invariant (file header, SECURITY
+ * INVARIANT 1) is enforced via a `tier='draft'` column on the table it
+ * writes; this op has no such column to gate on. The executor
+ * (src/http/assistant.ts, case "apply_form_document_op") substitutes the
+ * BOUND APPLICATION's tier as the discriminant instead: the tool may patch a
+ * form only when the process resolves (pinned or single-binding) to a
+ * DRAFT-tier application. This is STRICTLY NARROWER than what a human
+ * process_designer may do via the UI (unrestricted by application tier) —
+ * bot ≤ human, never the reverse — and changes NOTHING about the human path
+ * or the existing HTTP route's contract.
+ *
+ * applicationId mirrors T-0700's targetRegistrySlug pattern: optional, only
+ * needed when the process is bound to 2+ applications. Omitting it on an
+ * ambiguous process is NOT a silent guess — the executor surfaces the
+ * route's existing 422 AMBIGUOUS_APPLICATION (T-0725) as an honest per-op
+ * failure naming every candidate, which reads as the assistant ASKING which
+ * application, not failing outright (buildHonestOpsReport, T-0607 в2).
+ */
+const TOOL_APPLY_FORM_DOCUMENT_OP: ToolDeclaration = {
+  type: "function",
+  function: {
+    name: "apply_form_document_op",
+    description:
+      "Изменить ОДНИМ действием уже существующую форму процесса — вставить, удалить, " +
+      "переместить, обновить или переупорядочить блок. Это ТА ЖЕ операция, что делает " +
+      "канвас конструктора форм. Форма должна УЖЕ существовать (создать форму с нуля — " +
+      "инструмент emit_form). Работает ТОЛЬКО для приложений в статусе ЧЕРНОВИК " +
+      "(неопубликованных) — форму уже опубликованного приложения меняет человек через " +
+      "конструктор форм, этим инструментом это недоступно. Если процесс привязан к " +
+      "НЕСКОЛЬКИМ приложениям, укажи applicationId — иначе система честно попросит " +
+      "уточнить, какое приложение имеется в виду, вместо того чтобы угадывать.",
+    parameters: {
+      type: "object",
+      properties: {
+        processKey: { type: "string", description: "Ключ процесса, форма которого меняется." },
+        stepKey: { type: "string", description: "Ключ шага/формы (form_key) внутри процесса." },
+        op: {
+          type: "string",
+          description:
+            "JSON-строка ОДНОЙ операции: {kind, ...}. kind ∈ insert | remove | reorder | update | move. " +
+            "insert: {containerPath, node, index?, tabIndex?}; remove: {containerPath, index, tabIndex?}; " +
+            "reorder: {containerPath, fromIndex, toIndex, tabIndex?}; update: {containerPath, index, patch, tabIndex?}; " +
+            "move: {fromPath, toPath, fromTab?, toTab?}.",
+        },
+        applicationId: {
+          type: "string",
+          description:
+            "Необязательно: UUID приложения, чью привязку процесса использовать — нужно, " +
+            "только если процесс привязан к НЕСКОЛЬКИМ приложениям (иначе система честно " +
+            "попросит уточнить, а не угадает). Приложение должно быть в статусе черновик — " +
+            "опубликованные формы этим инструментом не редактируются.",
+        },
+        humanReadableReason: { type: "string", description: "Зачем меняется форма (для журнала)." },
+      },
+      required: ["processKey", "stepKey", "op", "humanReadableReason"],
+    },
+  },
+};
+
 /** author_dmn — create or update a DMN decision table in DRAFT tier. */
 const TOOL_AUTHOR_DMN: ToolDeclaration = {
   type: "function",
@@ -464,6 +536,12 @@ export const CONFIGURATOR_DEFAULT_SYSTEM_PROMPT =
   "СНАЧАЛА вызови list_registries (реестры того приложения), чтобы узнать РЕАЛЬНЫЕ slug'и, и только " +
   "потом вызывай author_binding с targetRegistrySlug из этого списка. Никогда не угадывай slug реестра. " +
   "list_registries ничего не пишет — только показывает то, что видит человек в своём пикере. " +
+  // T-0743 (столп 2+5): apply_form_document_op — patch an EXISTING form via
+  // the closed op vocabulary; draft-application-only, honest ask on ambiguity.
+  "Если нужно изменить УЖЕ существующую форму процесса (добавить/убрать/переместить/обновить блок) — " +
+  "используй apply_form_document_op ОДНИМ действием на операцию. Он работает только для форм " +
+  "приложений в статусе ЧЕРНОВИК; если процесс привязан к нескольким приложениям, укажи applicationId " +
+  "или система честно попросит уточнить, какое приложение имеется в виду. " +
   "Если пользователь описывает ПРОЦЕСС/маршрут словами (подача → согласование → если сумма большая → доп. согласование) — " +
   "используй generate_process: система соберёт BPMN циклом генерация→проверка→починка, заземлит условия и роли на реальные поля, " +
   "и положит черновик в Модельер на ревью (без авто-публикации). " +
@@ -486,6 +564,9 @@ const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
   TOOL_AUTHOR_BINDING,
   TOOL_EDIT_JSONSCHEMA,
   TOOL_EMIT_FORM,
+  // T-0743: patches an EXISTING form (emit_form above creates one) — declared
+  // right after emit_form to mirror that create-then-edit ordering.
+  TOOL_APPLY_FORM_DOCUMENT_OP,
   TOOL_AUTHOR_DMN,
   TOOL_GENERATE_PROCESS,
   TOOL_REQUEST_PROMOTE,
@@ -510,6 +591,7 @@ export interface ApprovedOp {
     | "author_binding"
     | "edit_jsonschema_non_destructive"
     | "emit_form"
+    | "apply_form_document_op"
     | "author_dmn"
     | "generate_process";
   /** Human-readable one-liner for the changelog. */
@@ -1119,6 +1201,96 @@ function processToolCall(
           formKey: args["formKey"],
           applicationId: args["applicationId"],
           tier: "draft",
+        }),
+      };
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_form_document_op — T-0743: patch an EXISTING form via the SAME op
+    // vocabulary the human canvas / HTTP seam use. PURE structural validation
+    // only (no IO here — the file stays PURE, per its own header): the op is
+    // JSON-parsed and required to be an object carrying a string `kind`, but
+    // the CLOSED vocabulary check (insert|remove|reorder|update|move) and the
+    // real shape validation are NOT duplicated here — they live solely in
+    // applyDocumentOp (src/core/form-document-op-apply.ts), run once, at
+    // execution time (src/http/assistant.ts), so there is exactly one place
+    // that decides what a valid op is. A garbled kind still reaches
+    // execution and fails there with an honest per-op error (T-0607 в2) —
+    // fail-closed, not fail-fast-and-silently-wrong.
+    // -----------------------------------------------------------------------
+    case "apply_form_document_op": {
+      const processKey = typeof args["processKey"] === "string" ? args["processKey"].trim() : "";
+      const stepKey = typeof args["stepKey"] === "string" ? args["stepKey"].trim() : "";
+      const applicationIdArg =
+        typeof args["applicationId"] === "string" ? args["applicationId"].trim() : "";
+      const rawOp = args["op"];
+
+      if (!processKey || !stepKey) {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description: `apply_form_document_op: не указан processKey или stepKey.`,
+          toolName: call.name,
+          requiredAction: "Укажите processKey и stepKey и повторите.",
+        };
+        return {
+          blocked,
+          changelogLine: `⚠ [ЗАБЛОКИРОВАНО] apply_form_document_op: нет processKey/stepKey`,
+          toolResultContent: `error: missing processKey or stepKey`,
+        };
+      }
+
+      let parsedOp: Record<string, unknown> | null = null;
+      if (typeof rawOp === "string") {
+        try {
+          const candidate = JSON.parse(rawOp) as unknown;
+          if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+            parsedOp = candidate as Record<string, unknown>;
+          }
+        } catch {
+          parsedOp = null;
+        }
+      }
+      const opKind = parsedOp && typeof parsedOp["kind"] === "string" ? parsedOp["kind"] : "";
+      if (!parsedOp || !opKind) {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description: `apply_form_document_op: op не разобран (ожидается JSON-объект с полем kind).`,
+          toolName: call.name,
+          requiredAction: "Передайте op валидным JSON-объектом с полем kind.",
+        };
+        return {
+          blocked,
+          changelogLine: `⚠ [ЗАБЛОКИРОВАНО] apply_form_document_op: невалидный op`,
+          toolResultContent: `error: op must be a JSON object with a string "kind"`,
+        };
+      }
+
+      const approved: ApprovedOp = {
+        kind: "apply_form_document_op",
+        description:
+          `Изменение формы процесса «${processKey}» (шаг «${stepKey}», операция «${opKind}»)` +
+          `${applicationIdArg ? `, приложение=«${applicationIdArg}»` : ""} ` +
+          `[только для приложений-черновиков]: ${reason}`,
+        args: {
+          processKey,
+          stepKey,
+          op: parsedOp,
+          ...(applicationIdArg ? { applicationId: applicationIdArg } : {}),
+        },
+        tier: "draft",
+      };
+      return {
+        approved,
+        changelogLine: `✓ [DRAFT] apply_form_document_op: ${approved.description}`,
+        toolResultContent: JSON.stringify({
+          status: "queued",
+          processKey,
+          stepKey,
+          opKind,
+          note:
+            "Изменение будет применено, только если процесс однозначно резолвится в приложение-" +
+            "ЧЕРНОВИК; для опубликованных приложений и неоднозначной привязки без applicationId " +
+            "система честно откажет/попросит уточнить, а не выполнит вслепую.",
         }),
       };
     }
