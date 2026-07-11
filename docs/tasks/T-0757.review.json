@@ -1,0 +1,27 @@
+{
+  "task_id": "T-0757",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__/forms-from-schema.test.ts:462 (5000ms regression-lock)",
+      "issue": "Under artificial 4-process concurrent load (4 vitest CLI processes competing for 8 cores: 2x this file + forms-submit.e2e.test.ts + inbox-form-submit.adversarial.test.ts) SP-1 took 2625-2764ms — margin over the 5000ms budget shrinks from ~4-7x solo to ~1.8x under contention. Not blocking: still passes with real headroom, and the full 318-file / 5967-test suite (npx vitest run, vitest's own internal worker concurrency) ran 100% green in 231.57s with zero timeouts, so this is not an observed regression risk on this machine/CI profile.",
+      "suggestion": "If CI workers are meaningfully more contended than this dev machine (fewer cores per worker, more parallel files), consider 8000ms as spec.md's own 'что атаковать' note #3 already flags — optional, not required for this merge."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "Root-cause fix (not skip / not raising the global or per-test timeout as a band-aid)", "covered": true},
+    {"ac": "Honest GREEN restored for SP-1 without masking (D-056)", "covered": true},
+    {"ac": "Diff scoped to test file + docs only, zero product-code changes (src/http/*, src/server.ts untouched)", "covered": true},
+    {"ac": "New wiring (bare Router + registerFormsRoutes) is production-equivalent to createServer()'s grantsPool==null path, not a weaker/divergent test double", "covered": true},
+    {"ac": "Regression-lock timeout (10000ms -> 5000ms) is a tightening with real margin, not a new flake source", "covered": true},
+    {"ac": "Mutation coverage preserved after the wiring refactor (SP-1 still catches a broken memoryPersist)", "covered": true},
+    {"ac": "Full forms-from-schema.test.ts file passes end-to-end (36/36)", "covered": true},
+    {"ac": "Neighboring forms tests unaffected", "covered": true},
+    {"ac": "tsc/eslint clean", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
