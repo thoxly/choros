@@ -56,6 +56,11 @@ import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
 // T-0662: single NAMED deactivation predicate. defaultCheckReadGrant (below,
 // non-owner branch) is authority resolver C — it carries ACTOR_ACTIVE_SQL.
 import { ACTOR_ACTIVE_SQL } from "../db/actor-authority-gate.js";
+// T-0675 (security, столп 4): the CANONICAL T-0397 grant-row dual-control
+// classifier, shared with getGrantsForSubject (src/db/grants-dao.ts step 3) so
+// the application-level read gate below enforces the IDENTICAL confirmed_by /
+// confirmed2_by predicate — one source of truth, not a bespoke re-implementation.
+import { criticalGrantPredicate } from "../db/grants-dao.js";
 import {
   isNarrowerOrEqual,
   type Grant,
@@ -221,7 +226,10 @@ export type ReportAggReadVisibilityResolver = (
   nowMs: number,
 ) => Promise<{ grants: Grant[]; ancestry: AncestryOracle }>;
 
-async function defaultCheckReadGrant(
+// T-0675: exported (testing seam) so the dual-control mutation-proof db test can
+// exercise the application-level read gate directly against a real Postgres — the
+// same pattern as resetRenderPoolForTesting. Not a new route/authority path.
+export async function defaultCheckReadGrant(
   pool: pg.Pool,
   tenantId: string,
   actorId: string,
@@ -280,8 +288,27 @@ async function defaultCheckReadGrant(
     }
     const employeeId = empRows[0]!.id;
 
-    // Load candidate grants: confirmed role_assignment + application/read + in-window.
+    // Load candidate grants: ACTIVE role_assignment + ACTIVE application/read + in-window.
     // Fetch scope column for containment check (T-0193 R-6).
+    //
+    // T-0675 [security/системный, столп 4] — bring this application-level read
+    // gate to the SAME grant-row activation standard as the canonical resolver
+    // getGrantsForSubject (grants-dao.ts step 2/3). The asymmetry (found on
+    // T-0632): this bespoke inline grant query used to check NEITHER the grant's
+    // own `confirmed_by` NOR the T-0397 dual-control (`confirmed2_by`) — so an
+    // UNCONFIRMED `application/read` grant, or a CRITICAL one (a `read` grant
+    // carrying a sensitive/garbage clearance marker) with only ONE approver,
+    // passed this gate even though getGrantsForSubject — the single authority
+    // path every other PDP consumer uses — would reject it. Dual-control was
+    // bypassable on the application-level read path.
+    //
+    // The fix mirrors the canonical predicate EXACTLY (no bespoke re-implementation):
+    //   assignment-active (T-0605, canonical): confirmed_by IS NOT NULL
+    //       AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)
+    //   grant-active (T-0397, canonical step 3): confirmed_by IS NOT NULL, in-window,
+    //       AND (NOT <criticalGrantPredicate> OR confirmed2_by IS NOT NULL).
+    // `criticalGrantPredicate("g")` is the SAME exported classifier grants-dao.ts
+    // interpolates into its own grant read — one source of truth for "critical".
     const { rows: grantRows } = await client.query<{ id: string; scope: unknown }>(
       `SELECT g.id, g.scope
          FROM choros."grant" g
@@ -290,12 +317,18 @@ async function defaultCheckReadGrant(
         WHERE g.tenant_id = $1
           AND ra.employee_id = $2
           AND ra.confirmed_by IS NOT NULL
+          AND (ra.confirmed2_by IS NOT NULL OR ra.proposed_by IS NULL)
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
           AND g.resource_type = 'application'
           AND g.operation = 'read'
+          AND g.confirmed_by IS NOT NULL
           AND (g.valid_from  IS NULL OR g.valid_from  <= $3)
-          AND (g.valid_until IS NULL OR g.valid_until  > $3)`,
+          AND (g.valid_until IS NULL OR g.valid_until  > $3)
+          AND (
+                NOT ${criticalGrantPredicate("g")}
+                OR g.confirmed2_by IS NOT NULL
+              )`,
       [tenantId, employeeId, nowMs],
     );
     await client.query("COMMIT");
