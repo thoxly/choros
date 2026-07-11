@@ -1,0 +1,55 @@
+{
+  "task_id": "T-0723",
+  "status": "pr_open",
+  "branch": "task/T-0723",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/tasks/T-0723.spec.md",
+    "docs/tasks/T-0723.pr-handoff.json",
+    "src/http/process-projection.ts",
+    "src/http/processes.ts",
+    "src/__tests__/processes-read-visibility.test.ts",
+    "ci/checks/db/processes-read-visibility.db.test.ts",
+    "ci/checks/db/T-0723-engine-variables-minimal.db.test.ts"
+  ],
+  "summary": "P3+hardening из оценки T-0714 (приоритет 28). (а) Record-less instance visibility (T-0714 §5 phase-1/2 'stays tenant-default-open' gap): isInstanceDetailVisible now returns false unconditionally for recordId===undefined (was true) — hands control to the ALREADY-wired T-0756 participant-tier fallback in processes.ts's DETAIL route (no other code change needed there); filterProjectionsByReadVisibility (LIST) gains actorSlug/fallbackSlug params and a new batched isInstanceParticipantBatch sibling, so record-less LIST rows are now participant-gated instead of unconditionally kept. Mini-ADR (docs/tasks/T-0723.spec.md §a) chose participant-reuse over starter-only/owner-only: isInstanceParticipant already covers both as subset-cases (acted-on-instance ∪ addressed-task-role ∪ tenant-owner), is already live-proofed (T-0756, 8/8), and avoids a second authority path. (б) Emit-site review of every flowable.startInstance/completeTask/correlateMessage call site (spec §b, full map): the codebase is ALREADY minimal-by-design at each real site (field_mapping opt-in scalar allow-list at create=start; human-approve's completeUserTask takes no variables at all; agent-dispatch emits only {source,outcome} correlation markers; assertVariableValue structurally rejects any raw-record-shaped value at both startInstance/completeTask regardless of source) — no src/ narrowing was needed or safe to make without risking authored gateway conditions (explicit task constraint). Locked the invariant with a new anti-case regression test (VM-1/VM-2/VM-3) instead.",
+  "test_evidence": {
+    "unit": "src/__tests__/processes-read-visibility.test.ts 25/25 GREEN (fake-pool, extended to answer isInstanceParticipant(Batch)'s confirmed_by-shaped audit query; 2 pre-existing tests fixed to query as a true non-participant instead of the audit-track actor, which was a latent fake-pool gap the more-accurate harness surfaced, not a behavior regression).",
+    "regression_live_pg": "ci/checks/db/processes-read-visibility.db.test.ts 16/16 GREEN (was 14; net +2 from splitting each old 'record-less stays open' test into participant/non-participant pairs — T-0721 DETAIL reader-tier and T-0722 LIST record-bound behavior are byte-identical, verified unchanged). ci/checks/db/T-0756-source-record-projection.db.test.ts 8/8 GREEN, unmodified. ci/checks/db/process-projection.test.ts 7/7 GREEN, unmodified.",
+    "new_hardening_live_pg": "ci/checks/db/T-0723-engine-variables-minimal.db.test.ts 3/3 GREEN — VM-1 (mapped field reaches variables, branching consumer intact), VM-2 (D-064 anti-case: unmapped sensitive field absent from variables as both key and value), VM-3 (object-shaped field dropped even when explicitly field_mapping'd).",
+    "broader_regression": "src/__tests__/processes.e2e.test.ts + processes-list-query.test.ts + processes-live-instances.test.ts + process-instance-resolver.test.ts + inbox-process-ref.test.ts: 83/83 GREEN.",
+    "types": "tsc --noEmit: 0 errors."
+  },
+  "fitness_gates_run": [
+    "process-detail-read-gate.sh PASS (FF-INST-VIS-1a/b/c/d unchanged)",
+    "process-detail-single-resolver.sh PASS (FF-INST-VIS-2a/b/c/d — single authority path held; isInstanceParticipantBatch reuses the SAME getRoleSlugsForActor/isGenesisOwnerForTenant/audit_event track, no second grant math)",
+    "process-list-display-plane-isolation.sh PASS (FF-INST-VIS-3 — processes.ts still pg/src-db-free)",
+    "process-list-tenant-scope-additive.sh PASS (FF-INST-VIS-4 — the new participant batch query is tenant-scoped via withTenant + explicit tenant_id, additive on top of the already tenant-scoped projection)"
+  ],
+  "security_notes": [
+    "Record-less DETAIL/LIST visibility is now ALWAYS decided by isInstanceParticipant(Batch) — never a blanket tenant-default-open — closing the T-0714 §5 phase-1/2 gap this task targeted.",
+    "isInstanceDetailVisible's record-less branch (recordId===undefined → false) is the FIRST line of the function, unconditional — structurally impossible for the reader (full variables/history) tier to open for a record-less instance; only the participant skeleton tier can.",
+    "isInstanceParticipantBatch is a NEW function, not a refactor of the already-live-proofed isInstanceParticipant (T-0756, 8/8) — deliberately avoids touching a proven code path; it reads the SAME audit_event track + role/owner resolvers, batched.",
+    "Emit-site review (part b) found no live gap: the ONE configurable channel (field_mapping) is an explicit author allow-list of scalars (RECORD_IN_PAYLOAD, T-0351), and assertVariableValue (FF-G3 Layer C) structurally blocks any raw record-shaped value at every startInstance/completeTask call regardless of source, independent of this task's changes."
+  ],
+  "deviations_from_adr": [
+    "T-0714 §5 assessment scoped record-less visibility to a future 'Фаза 3 (could) — process-definition-scoped read grant'. T-0723's task framing (explicit candidate list: participation/starter/owner) intentionally does NOT build that grant type — participant-reuse was chosen as the honest, proportionate closure of the phase-1/2 gap instead, per D-064 ('не строй лишнего'). Process-definition-scoped grants for record-less instances remain a follow-up if a future need surfaces beyond participant-tier."
+  ],
+  "follow_ups": [
+    "T-0714 §5 phase-3 (process-definition-scoped read grant for record-less instances, e.g. 'role sees the types of processes it runs even without ever acting on a specific instance') — deliberately out of scope here; participant-tier already closes the D-064 anti-case ('видно всем').",
+    "step-applier.ts's step_applied outbox payload.variables (= formData) is a durably-stored, currently UNCONSUMED (no deliver handler) copy of human-submitted form values sitting in the outbox table — documented in the spec's emit-site map as out-of-scope (not a Flowable variable, never reaches the engine), but flagged for awareness: if a future consumer is wired to step_applied, it should NOT forward formData verbatim into Flowable variables (would reopen the same F2 concern this task closed elsewhere)."
+  ],
+  "judge_attack_surface": [
+    "Try to make isInstanceParticipant(Batch) resolve true for a non-participant by forging an unrelated audit_event's payload->>'inst'/task_role — same perimeter T-0756 already attacked (SRP-2 fail-closed control), not new.",
+    "Try to reach the reader (full variables/history) tier for a record-less instance — should be structurally impossible; isInstanceDetailVisible's FIRST branch is the unconditional record-less false.",
+    "Check isInstanceParticipantBatch is called ONCE per LIST page, not once per record-less instance (N+1) — grep confirms a single call site inside filterProjectionsByReadVisibility, gated behind recordlessInstanceIds.length > 0.",
+    "Part (b): try to find a REAL (not hypothetical) emit site the map missed — verify the DMN/gateway path (preComputeGatewayVariable / evaluateGatewayAtTriage) only ever returns DERIVED routing values, never raw bindings, into the stored variables map.",
+    "Try VM-2's anti-case with a renamed/aliased sensitive field to see if the test's 'not in ANY value' check has a blind spot (it currently only checks Object.values(start.variables), not nested structures — acceptable because projectEngineVariables only ever produces a flat Record<string, scalar>, never nests)."
+  ]
+}

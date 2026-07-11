@@ -832,12 +832,27 @@ async function withTenant<T>(
 // process instance only carries `recordId`, so one extra tenant-scoped
 // single-row fetch is unavoidable (T-0714 §5 "Против" — anticipated).
 //
-// RECORD-LESS INSTANCES (T-0714 §5 phase 1 fallback): an instance started
-// WITHOUT create=start (no `recordId` — e.g. the explicit /api/processes/start
-// launch affordance) is NOT narrowed by this gate — visibility stays
-// tenant-default-open, unchanged from pre-T-0721 behaviour. Narrowing that
-// case needs a process-definition-scoped read grant (T-0714 §5 phase 3,
-// follow-up, out of scope here).
+// RECORD-LESS INSTANCES (T-0723, supersedes the T-0721/T-0722 phase-1
+// tenant-default-open fallback): an instance started WITHOUT create=start (no
+// `recordId` — e.g. the explicit /api/processes/start launch affordance) has
+// no source record, so isRecordReadable has NOTHING to check — it can never
+// honestly return "true because of a covering grant" for such an instance.
+// T-0714 §5 phase-1 papered over that gap with an unconditional `true`
+// ("stays tenant-default-open") — T-0723 closes it: isInstanceDetailVisible
+// now returns `false` for a record-less instance, UNCONDITIONALLY (never a
+// covering-grant basis to check), which hands control to the CALLER's
+// existing participant-tier fallback (processes.ts's `!detailVisible` branch,
+// T-0756's `isInstanceParticipant`) — the SAME per-hop-ACL authority
+// (acted-on-instance / holds an addressed task role / tenant owner) that
+// already gates a record-BOUND instance's participant tier. A record-less
+// instance is therefore visible (participant-tier skeleton: status/step/
+// progress/starter, NEVER variables/history/completedBy*) to a legitimate
+// participant, and honest-404 to everyone else — never a blanket
+// tenant-wide-open default. See docs/tasks/T-0723.spec.md §2 (mini-ADR) for
+// why participant-reuse was chosen over a starter-only or owner-only
+// predicate, and process-projection.ts's `filterProjectionsByReadVisibility`
+// below for the LIST-side symmetric fix (T-0723 also closes there via the
+// batched `isInstanceParticipantBatch`).
 //
 // Display-plane isolation (FF-INST-VIS-3 / FF-7-3): this predicate lives HERE
 // (process-projection.ts already imports pg for the projection read-path) —
@@ -875,13 +890,21 @@ async function loadRecordRowAncestry(
 }
 
 /**
- * T-0721: decide whether the DETAIL plane (`variables`/`history`/`completedBy*`)
- * of ONE instance is visible to the actor whose covering READ grants are
- * `grants` (already resolved ONCE per request by the injected
- * ProcessReadVisibilityResolver — NF-1, mirrors records.ts).
+ * T-0721 (record-less branch narrowed by T-0723): decide whether the DETAIL
+ * plane (`variables`/`history`/`completedBy*`) of ONE instance is visible to
+ * the actor whose covering READ grants are `grants` (already resolved ONCE
+ * per request by the injected ProcessReadVisibilityResolver — NF-1, mirrors
+ * records.ts).
  *
- * - `recordId === undefined` (record-less instance) → `true` (phase-1 scope:
- *   NOT narrowed, see module doc-comment above).
+ * - `recordId === undefined` (record-less instance) → `false`, ALWAYS
+ *   (T-0723: there is no source record, so this predicate has no
+ *   covering-grant basis to check — it can never honestly answer `true`).
+ *   The caller (processes.ts DETAIL route) falls back to the SAME
+ *   participant-tier check (`isInstanceParticipant`, T-0756) a record-bound
+ *   instance denied by this predicate already uses — a legitimate
+ *   participant still sees the instance (skeleton tier, no
+ *   variables/history); a stranger gets honest-404. This function itself
+ *   NEVER grants the full reader tier for a record-less instance.
  * - `recordId` present but the record no longer resolves in this tenant
  *   (deleted, or — defensively — a foreign id) → `false` (honest-deny).
  * - Otherwise → `isRecordReadable(rowAncestry, grants, ancestry, nowMs)`, the
@@ -895,7 +918,7 @@ export async function isInstanceDetailVisible(
   ancestry: AncestryOracle,
   nowMs: number,
 ): Promise<boolean> {
-  if (recordId === undefined) return true;
+  if (recordId === undefined) return false;
   const rowAncestry = await loadRecordRowAncestry(pool, tenantId, recordId);
   if (rowAncestry === null) return false;
   return isRecordReadable(rowAncestry, grants, ancestry, nowMs);
@@ -954,10 +977,17 @@ async function loadRecordRowAncestryBatch(
  * mirrors isInstanceDetailVisible/records.ts's LIST filter) may see, per the
  * READ-visibility of each instance's SOURCE RECORD.
  *
- * - Record-less instances (`recordId === undefined`) are NEVER narrowed —
- *   kept unconditionally (phase-1/2 scope, byte-identical to
- *   isInstanceDetailVisible's record-less branch and to pre-T-0722 LIST
- *   behaviour for those rows; see module doc-comment above §T-0721).
+ * - Record-less instances (`recordId === undefined`) are narrowed by
+ *   PARTICIPANT-tier, NOT kept unconditionally (T-0723 supersedes the T-0722
+ *   phase-1/2 "stays tenant-default-open" posture — see module doc-comment
+ *   above §T-0721/T-0723 and isInstanceDetailVisible's doc-comment): kept iff
+ *   `actorSlug` is a participant of that instance per
+ *   `isInstanceParticipantBatch` (acted on it / holds an addressed task role
+ *   / tenant owner — the SAME per-hop-ACL authority DETAIL's record-less
+ *   fallback and T-0756's record-bound participant tier already use).
+ *   Batched in ONE extra `audit_event` query, only when the page actually
+ *   carries record-less rows (skipped entirely otherwise, mirroring the
+ *   ancestry-batch skip below).
  * - A non-UUID-shaped recordId (malformed/legacy row) is treated as
  *   unresolvable WITHOUT touching the DB (dropped — see below for why this
  *   pre-validation exists here but not on isInstanceDetailVisible's
@@ -969,9 +999,10 @@ async function loadRecordRowAncestryBatch(
  *   the EXACT SAME predicate DETAIL and records.ts already gate on.
  *
  * Pure filter over the input array (preserves order, never re-fetches beyond
- * the ONE batched ancestry SELECT). Tenant/RLS additive-only (FF-INST-VIS-4):
- * this NARROWS an already tenant-scoped array — it is never the tenant
- * boundary itself, and the batched ancestry SELECT is itself tenant-scoped.
+ * the ONE batched ancestry SELECT + the ONE batched participant SELECT).
+ * Tenant/RLS additive-only (FF-INST-VIS-4): this NARROWS an already
+ * tenant-scoped array — it is never the tenant boundary itself, and both
+ * batched SELECTs are themselves tenant-scoped.
  */
 export async function filterProjectionsByReadVisibility(
   pool: pg.Pool,
@@ -980,6 +1011,8 @@ export async function filterProjectionsByReadVisibility(
   grants: readonly Grant[],
   ancestry: AncestryOracle,
   nowMs: number,
+  actorSlug: string,
+  fallbackSlug?: string,
 ): Promise<InstanceProjection[]> {
   // Only UUID-shaped recordIds are queried — a malformed recordId can never
   // resolve against choros.record's `uuid` column, so pre-filtering here
@@ -997,8 +1030,17 @@ export async function filterProjectionsByReadVisibility(
   const ancestryByRecordId =
     recordIds.length > 0 ? await loadRecordRowAncestryBatch(pool, tenantId, recordIds) : new Map<string, RowAncestry>();
 
+  // T-0723: record-less rows are no longer unconditionally kept — resolve
+  // participant status for exactly those rows, batched in ONE query (skipped
+  // entirely when the page has no record-less rows at all).
+  const recordlessInstanceIds = projections.filter((p) => p.recordId === undefined).map((p) => p.inst);
+  const participantIds =
+    recordlessInstanceIds.length > 0
+      ? await isInstanceParticipantBatch(pool, tenantId, recordlessInstanceIds, actorSlug, nowMs, fallbackSlug)
+      : new Set<string>();
+
   return projections.filter((p) => {
-    if (p.recordId === undefined) return true; // record-less: unnarrowed (phase-1/2 scope)
+    if (p.recordId === undefined) return participantIds.has(p.inst); // T-0723: participant-tier, not blanket-open
     const rowAncestry = ancestryByRecordId.get(p.recordId);
     if (rowAncestry === undefined) return false; // malformed / deleted / foreign → honest-deny
     return isRecordReadable(rowAncestry, grants, ancestry, nowMs);
@@ -1234,6 +1276,121 @@ export async function isInstanceParticipant(
     /* fail-closed */
   }
   return false;
+}
+
+/**
+ * T-0723 (D-064, P3+hardening из T-0714 assessment §5 phase-3 — security/PDP):
+ * BATCHED sibling of `isInstanceParticipant` above — used by
+ * `filterProjectionsByReadVisibility` to decide the LIST-visibility of
+ * RECORD-LESS instances (no source record ⇒ `isRecordReadable` has nothing to
+ * check) in ONE extra `audit_event` query instead of one round-trip per
+ * record-less instance, mirroring how `loadRecordRowAncestryBatch` batches
+ * `loadRecordRowAncestry` for the SAME reason (LIST can carry up to
+ * `readEvents`'s row cap).
+ *
+ * Returns the SUBSET of `instanceIds` the actor participates in, per the
+ * EXACT SAME three-case authority `isInstanceParticipant` applies per-instance
+ * (kept as a SEPARATE function — not a refactor of isInstanceParticipant — so
+ * the already-tested, already-in-prod single-instance path, T-0756, is not
+ * touched by this change):
+ *   (1) acted on the instance (audit `actor`/`confirmed_by`); OR
+ *   (2) holds the role of a task ever addressed on the instance
+ *       (`getRoleSlugsForActor`, ACTOR_ACTIVE-gated — computed ONCE for the
+ *       whole batch, since role eligibility is actor-level, not
+ *       instance-level); OR
+ *   (3) is the tenant owner (`isGenesisOwnerForTenant`, computed ONCE).
+ * A resolver error denies (never grants) — fail-closed, same posture as
+ * `isInstanceParticipant`.
+ */
+export async function isInstanceParticipantBatch(
+  pool: pg.Pool,
+  tenantId: string,
+  instanceIds: readonly string[],
+  actorSlug: string,
+  nowMs: number,
+  fallbackSlug?: string,
+): Promise<Set<string>> {
+  const participantIds = new Set<string>();
+  if (!actorSlug || instanceIds.length === 0) return participantIds;
+
+  const { actorsByInst, rolesByInst, anyRoles } = await withTenant(pool, tenantId, async (client) => {
+    const res = await client.query<{
+      inst: string | null;
+      actor: string | null;
+      confirmed_by: string | null;
+      task_role: string | null;
+    }>(
+      `SELECT payload->>'inst' AS inst, actor, confirmed_by, payload->>'task_role' AS task_role
+         FROM choros.audit_event
+        WHERE tenant_id = $1 AND payload->>'inst' = ANY($2::text[])`,
+      [tenantId, instanceIds],
+    );
+    const actorsByInst = new Map<string, Set<string>>();
+    const rolesByInst = new Map<string, Set<string>>();
+    let anyRoles = false;
+    for (const r of res.rows) {
+      if (!r.inst) continue;
+      if (r.actor) {
+        const s = actorsByInst.get(r.inst) ?? new Set<string>();
+        s.add(r.actor);
+        actorsByInst.set(r.inst, s);
+      }
+      if (r.confirmed_by) {
+        const s = actorsByInst.get(r.inst) ?? new Set<string>();
+        s.add(r.confirmed_by);
+        actorsByInst.set(r.inst, s);
+      }
+      if (r.task_role) {
+        const s = rolesByInst.get(r.inst) ?? new Set<string>();
+        s.add(r.task_role);
+        rolesByInst.set(r.inst, s);
+        anyRoles = true;
+      }
+    }
+    return { actorsByInst, rolesByInst, anyRoles };
+  });
+
+  // (2) role eligibility — actor-level, resolved ONCE for the whole batch
+  // (only when at least one instance in the batch has an addressed task role).
+  let myRoles: string[] = [];
+  if (anyRoles) {
+    try {
+      myRoles = await getRoleSlugsForActor(pool, tenantId, actorSlug, nowMs, fallbackSlug);
+    } catch {
+      /* fail-closed: a role-resolution error never grants participant status */
+    }
+  }
+
+  // (3) tenant owner — actor-level, resolved ONCE.
+  let isOwner = false;
+  try {
+    isOwner = await isGenesisOwnerForTenant(pool, tenantId, actorSlug, nowMs);
+  } catch {
+    /* fail-closed */
+  }
+
+  for (const instanceId of instanceIds) {
+    if (isOwner) {
+      participantIds.add(instanceId);
+      continue;
+    }
+    // (1) acted on the instance.
+    const actors = actorsByInst.get(instanceId);
+    if (
+      actors &&
+      (actors.has(actorSlug) || (fallbackSlug !== undefined && fallbackSlug !== actorSlug && actors.has(fallbackSlug)))
+    ) {
+      participantIds.add(instanceId);
+      continue;
+    }
+    // (2) holds the role of a task addressed on THIS instance.
+    const roles = rolesByInst.get(instanceId);
+    if (roles && myRoles.some((r) => roles.has(r))) {
+      participantIds.add(instanceId);
+    }
+  }
+
+  return participantIds;
 }
 
 interface StartedRow {

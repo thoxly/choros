@@ -1,0 +1,51 @@
+{
+  "task_id": "T-0723",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N1-recordless-blanket-open-removed-fail-closed",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/process-projection.ts isInstanceDetailVisible:921 (recordId===undefined → false) + filterProjectionsByReadVisibility:1043 (record-less → participantIds.has)",
+      "issue": "OVER-CLOSURE ATTACK (primary), adjudicated ACCEPTABLE fail-closed, NOT blocking. Before T-0723, in a PDP-WIRED deployment a NON-participant tenant member could see a record-less instance in LIST + open its DETAIL (the unconditional `true`/keep). After the flip only a participant (acted / holds an addressed task role / tenant owner=clause 3) sees it; a non-participant 'glance-only' colleague no longer does. This is NOT a regression of legitimate work because: (1) blast radius is EXACTLY the two callers — GET /api/processes (LIST) and GET /api/processes/:id (DETAIL); each flipped function has precisely ONE caller (verified). (2) The T-0742 catalog counters read listInstanceProjections DIRECTLY (process-catalog.ts:344), BYPASSING filterProjectionsByReadVisibility, so the flip cannot change any catalog/analytics count — verified by caller map. (3) Record-BOUND instances (the create=start norm) were ALREADY READ-PDP-gated by T-0721/T-0722; a non-participant colleague already could not see them, so the pre-flip blanket-openness made record-LESS instances MORE visible than record-bound — an accidental asymmetry the spec correctly calls a 'papered-over gap' (unconditional true), not a designed capability. (4) Record-less instances are created ONLY via /api/processes/start explicit-launch, which has ZERO web UI callers (grep web/ = 0) → an API-only edge, not a normal flow. (5) The legitimate participant (starter/addressed-role/owner) stays fully visible (DETAIL skeleton + LIST presence, db-proven); the 'boss' is the owner (clause 3). (6) Honest-degrade (resolver unwired) is byte-identical to pre-T-0721 — the flip only bites where record-bound is already gated, keeping a consistent posture. Contrast with FF-INST-VIS-4 (T-0722): that narrowed WITHIN tenant scope without breaking work; this closes a blanket-open default down to the SAME participant floor T-0756 already established as legitimate-work-preserving.",
+      "suggestion": "No action required — this is the intended fail-closed hardening. If any real deployment ever depended on colleagues browsing all record-less instances, that would be a process-definition-scoped read grant (T-0714 §5 phase-3, explicitly deferred), not a reason to keep blanket-open."
+    },
+    {
+      "id": "N2-batch-clause1-audit-actor-not-actor-active-gated-inherited",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/process-projection.ts isInstanceParticipantBatch clause (1) actors.has(actorSlug) ~line 1381 (mirrors isInstanceParticipant clause 1, T-0756 N1)",
+      "issue": "isInstanceParticipantBatch faithfully mirrors isInstanceParticipant, INCLUDING the same residual that T-0756 review flagged (N1): clause (1) audit-actor match reads the append-only audit track and is NOT ACTOR_ACTIVE-gated (clauses 2/role and 3/owner ARE deactivation-safe). So a user DEACTIVATED after genuinely acting on a record-less instance still resolves as a participant during the ~300s access-JWT window, keeping that instance in their LIST and returning a DETAIL skeleton — exactly the same bounded exposure T-0756 already ships for record-BOUND instances. Exposure is strictly the skeleton tier (status/step/progress/starter) — NO variables/history/completedBy*, and (record-less) no sourceRecord at all. The batch introduces no NEW leakage beyond the single-instance path it copies.",
+      "suggestion": "Non-blocking, inherited. Fold into the existing T-0756 N1 follow-up (either ACTOR_ACTIVE-gate clause-1 audit-actor sets across BOTH isInstanceParticipant and isInstanceParticipantBatch, or document the residual-JWT-window title-less skeleton visibility). No sensitive plane is exposed, so it does not gate this merge."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "(a) DETAIL record-less non-participant zero-grant → 404 (RVIS record-less non-participant; mutation-RED confirmed)", "covered": true },
+    { "ac": "(a) DETAIL record-less STARTER/participant → 200 SKELETON, no variables/history (mutation-RED confirmed: return-true leaks full reader tier)", "covered": true },
+    { "ac": "(a) LIST record-less non-participant → ABSENT from instances[] (mutation-RED confirmed)", "covered": true },
+    { "ac": "(a) LIST record-less STARTER/participant → PRESENT in instances[]", "covered": true },
+    { "ac": "(a) DETAIL/LIST agree for the same actor+record-less instance (isInstanceParticipant vs isInstanceParticipantBatch semantically identical) — no split-brain", "covered": true },
+    { "ac": "(a) record-BOUND T-0721 DETAIL + T-0722 LIST unchanged (16/16 incl. tenant-isolation + honest-degrade + post-PDP total)", "covered": true },
+    { "ac": "(a) honest-degrade (resolver unwired) byte-identical pre-security posture — record-less stays open, no gate called", "covered": true },
+    { "ac": "(b) VM-1: field_mapping-mapped scalar 'amount' reaches startInstance variables with real value (branching consumer intact)", "covered": true },
+    { "ac": "(b) VM-2 anti-case: unmapped sensitive 'ssn' absent as key AND as value (mutation-RED confirmed: adding ssn to field_mapping fixture → VM-2 RED)", "covered": true },
+    { "ac": "(b) VM-3: object-shaped field dropped even when named in field_mapping (RECORD_IN_PAYLOAD/T-0351)", "covered": true },
+    { "ac": "anti-case D-064: diff = EXACTLY the 7 claimed files, no case literals in src; VM fixtures generic (amount/ssn/profile)", "covered": true },
+    { "ac": "isolation gates: FF-INST-VIS-1/2/3/4 PASS (isRecordReadable single-resolver intact; participant tier is the separate T-0756 authority, not a second grant-math path)", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Independently re-ran (adversarial judge, not builder) with env-discipline, all SOLO: tsc --noEmit exit 0; eslint src/http/process-projection.ts src/http/processes.ts exit 0.",
+    "Unit (NO DATABASE_URL): src/__tests__/processes-read-visibility.test.ts 25/25 GREEN.",
+    "Live-PG (postgres://choros_migrator@localhost:55432/choros, --no-file-parallelism): processes-read-visibility.db.test.ts 16/16 GREEN (incl. the 4 new T-0723 record-less participant/non-participant pairs); T-0756-source-record-projection.db.test.ts 8/8 GREEN UNCHANGED; process-projection.test.ts 7/7 GREEN; T-0723-engine-variables-minimal.db.test.ts 3/3 GREEN (VM-1/2/3).",
+    "Targeted fitness PASS: process-detail-read-gate (FF-INST-VIS-1), process-detail-single-resolver (FF-INST-VIS-2), process-list-display-plane-isolation (FF-INST-VIS-3), process-list-tenant-scope-additive (FF-INST-VIS-4).",
+    "MUTATION #4 (revert the flip): set isInstanceDetailVisible record-less → true AND filter record-less → true → processes-read-visibility 3/16 RED = {DETAIL non-participant 404, LIST non-participant absent, AND DETAIL participant-starter} — the starter test also reddens because return-true leaks the FULL reader tier (variables/history) instead of the participant skeleton, proving the test asserts the skeleton threshold not mere presence. Restored via git checkout; tree clean.",
+    "MUTATION #5 (VM-2 anti-case bite): add {ssn:'ssn'} to the on_create field_mapping fixture → VM-2 RED (hasOwnProperty(variables,'ssn') expected false, got true) while VM-1/VM-3 stay GREEN — the anti-case genuinely catches sensitive-field leakage into engine variables. Restored via git checkout; tree clean.",
+    "OVER-CLOSURE containment verified by caller map: filterProjectionsByReadVisibility has ONE src caller (processes.ts:826 LIST); isInstanceDetailVisible has ONE src caller (processes.ts:946 DETAIL). The T-0742 catalog/analytics counters read listInstanceProjections DIRECTLY (process-catalog.ts:344), inbox at inbox.ts:1757/1843/2212, catalog-view fold — NONE routes through the flipped filter, so instance COUNTS on those surfaces are unchanged by T-0723. No UI caller for /api/processes/start (grep web/ = 0) → record-less instances are an explicit-launch API edge.",
+    "BATCH ≡ SINGLE (attack #3, no second authority): isInstanceParticipantBatch SQL is byte-equivalent to isInstanceParticipant modulo `payload->>'inst' = ANY($2::text[])` vs `= $2` (+ selecting inst for grouping); same three-case authority; same resolvers getRoleSlugsForActor (ACTOR_ACTIVE-gated) + isGenesisOwnerForTenant; same fail-closed try/catch. Owner is checked FIRST in the batch vs LAST in the single, but the three cases are OR-combined so the per-instance verdict is identical. Role eligibility (actor-level) is resolved ONCE per page (only when the page carries an addressed-role instance), owner ONCE per page → NOT N+1 (one audit_event query with = ANY, one role resolve, one owner resolve). FF-INST-VIS-2 stays PASS because it targets the isRecordReadable grant-math path; the participant tier is the deliberately-separate T-0756 per-hop ACL reading the SAME audit_event track — no second grant-math resolver.",
+    "FORGING (attack, under-closure): participant clause (1) matches actor/confirmed_by rows of choros.audit_event scoped to tenant_id + payload->>'inst'; the audit track is the SAME append-only, system-stamped perimeter T-0756 established — actor is not caller-controlled, so no self-forged participation. No new attack surface vs T-0756.",
+    "ANTI-CASE D-064: git diff b70ec7df..HEAD = EXACTLY the 7 claimed files (process-projection.ts, processes.ts, 2 db test files, 1 unit test, spec.md, pr-handoff.json) — no strays. VM fixtures use generic amount/ssn/profile, no scenario literals in src.",
+    "pr-handoff (builder did NOT validate): validate_file(json.load(T-0723.pr-handoff.json), schemas/pr-handoff.schema.json) → NO errors, schema-valid.",
+    "SP-1 broad-sweep fail (builder-claimed pre-existing on base b70ec7df, resolved by later-merged T-0757): NOT attributable to T-0723 — none of the 7 changed files touches that suite; full 5987-test sweep not independently re-run (out of scope), but the diff cannot introduce it."
+  ]
+}

@@ -69,7 +69,13 @@ function startedRow(inst: string, recordId?: string, id = "audit-evt-1"): Record
  * `type` = $1 arg, same convention as processes-live-instances.test.ts's
  * makeProjectionPool) AND the T-0721 record-ancestry SELECT
  * (`FROM choros.record r JOIN choros.registry_def rd ...`), routed by table
- * name since it carries no `type` arg.
+ * name since it carries no `type` arg. T-0723 ADDS: the isInstanceParticipant /
+ * isInstanceParticipantBatch audit-track query (distinguished by the
+ * `confirmed_by` column it alone selects — neither the readEvents queries nor
+ * the ancestry SELECT touch that column) — synthesized directly from
+ * `opts.startedRows` (each row's `actor` + `payload.task_role` become that
+ * instance's participant signal), for EITHER the single-instance shape
+ * (`payload->>'inst' = $2`) or the batched shape (`= ANY($2::text[])`).
  */
 function makeFakePool(opts: {
   startedRows: Array<Record<string, unknown>>;
@@ -85,6 +91,37 @@ function makeFakePool(opts: {
         };
       }
       if (/FROM\s+choros\.process_definition/i.test(text)) return { rows: [] };
+      // T-0723: isInstanceParticipant(Batch)'s audit-track query — the ONLY query
+      // in this module selecting `confirmed_by` — checked BEFORE the generic
+      // `FROM choros.employee` branch below (isGenesisOwnerForTenant's query also
+      // touches choros.employee as a subquery and must keep falling into that
+      // branch, resolving non-owner; it never selects confirmed_by).
+      if (/confirmed_by/i.test(text)) {
+        const instArg = Array.isArray(values) ? values[1] : undefined;
+        const wanted = new Set<string>(
+          Array.isArray(instArg)
+            ? (instArg as string[])
+            : instArg !== undefined
+              ? [instArg as string]
+              : [],
+        );
+        const rows = opts.startedRows
+          .filter((r) => {
+            const payload = r["payload"] as Record<string, unknown> | undefined;
+            const inst = payload?.["inst"];
+            return typeof inst === "string" && wanted.has(inst);
+          })
+          .map((r) => {
+            const payload = r["payload"] as Record<string, unknown>;
+            return {
+              inst: payload["inst"],
+              actor: (r["actor"] as string | undefined) ?? null,
+              confirmed_by: null,
+              task_role: (payload["task_role"] as string | undefined) ?? null,
+            };
+          });
+        return { rows };
+      }
       if (/FROM\s+choros\.employee/i.test(text)) return { rows: [] };
       const type = Array.isArray(values) ? values[0] : undefined;
       if (type === PROCESS_STARTED_TYPE) return { rows: opts.startedRows };
@@ -94,6 +131,11 @@ function makeFakePool(opts: {
   };
   return { connect: async () => fakeClient as unknown as import("pg").PoolClient } as unknown as import("pg").Pool;
 }
+
+/** T-0723: a tenant-member actor with NO audit-track entry on any synthetic
+ * instance in this file (never `startedRow`'s `actor`, never a role holder,
+ * never owner) — the honest non-participant control for record-less tests. */
+const NON_PARTICIPANT_ACTOR = "e-non-participant";
 
 /** A grant covering EVERY record in the tenant (RESOURCE_ROOT sentinel, the
  * default-open shape migration 117 backfills). */
@@ -240,8 +282,13 @@ describe("T-0721 · GET /api/processes/:id gated by READ-visibility of the sourc
         resolveReadVisibility: makeResolver([]), // zero covering grants
       });
       await withServer(deps, async (baseUrl) => {
+        // T-0723: query as a TRUE stranger — ACTOR is startedRow's audit actor
+        // (the "started it" participant, T-0756), so querying as ACTOR here would
+        // exercise the (separate, pre-existing) participant-tier fallback instead
+        // of this test's actual target (the READ-grant-only denial with ZERO
+        // participant relationship).
         const { status } = await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, {
-          "x-dev-user": ACTOR,
+          "x-dev-user": NON_PARTICIPANT_ACTOR,
         });
         expect(status).toBe(404);
       });
@@ -260,8 +307,9 @@ describe("T-0721 · GET /api/processes/:id gated by READ-visibility of the sourc
         resolveReadVisibility: makeResolver([wideReadGrant()]),
       });
       await withServer(deps, async (baseUrl) => {
+        // T-0723: same non-participant rationale as the test above.
         const { status } = await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, {
-          "x-dev-user": ACTOR,
+          "x-dev-user": NON_PARTICIPANT_ACTOR,
         });
         expect(status).toBe(404);
       });
@@ -271,18 +319,49 @@ describe("T-0721 · GET /api/processes/:id gated by READ-visibility of the sourc
     }
   });
 
-  it("a record-less instance (no recordId) stays visible even to a zero-grant actor (phase-1 scope)", async () => {
-    process.env["DATABASE_URL"] = "postgres://fake/T-0721-recordless";
+  // T-0723 (D-064 anti-case): a record-less instance used to stay visible to
+  // ANY zero-grant tenant member ("phase-1 scope"/default-open). That default
+  // is now REPLACED by participant-tier: honest-404 for a stranger, skeleton
+  // (no variables/history) for a genuine participant. See
+  // docs/tasks/T-0723.spec.md §2 for the mini-ADR.
+  it("T-0723: a record-less instance is DENIED to a non-participant zero-grant actor (honest-404, not default-open)", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0723-recordless-deny";
     try {
       const deps = makeDeps({
-        startedRows: [startedRow(LIVE_INST)], // no record_id in payload
+        startedRows: [startedRow(LIVE_INST)], // no record_id in payload; actor=ACTOR started it
         resolveReadVisibility: makeResolver([]), // zero covering grants
       });
       await withServer(deps, async (baseUrl) => {
         const { status } = await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, {
+          "x-dev-user": NON_PARTICIPANT_ACTOR,
+        });
+        expect(status).toBe(404);
+      });
+    } finally {
+      if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = prevDbUrl;
+    }
+  });
+
+  it("T-0723: a record-less instance is visible (participant-tier skeleton, NO variables/history) to the actor who started it", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0723-recordless-participant";
+    try {
+      const deps = makeDeps({
+        startedRows: [startedRow(LIVE_INST)], // no record_id; actor=ACTOR — the audit-track "acted" case
+        resolveReadVisibility: makeResolver([]), // zero covering grants — participant-tier is the ONLY door
+      });
+      await withServer(deps, async (baseUrl) => {
+        const { status, json } = await httpReq("GET", `${baseUrl}/api/processes/${LIVE_INST}`, {
           "x-dev-user": ACTOR,
         });
         expect(status).toBe(200);
+        const body = json as Record<string, unknown>;
+        expect(body["id"]).toBe(LIVE_INST);
+        // Participant-tier NEVER carries the reader-tier variables/history —
+        // record-less instances have no source record, so there is no
+        // covering-grant basis for the full reader tier at all (T-0723).
+        expect(body["variables"]).toBeUndefined();
+        expect(body["history"]).toBeUndefined();
       });
     } finally {
       if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
@@ -348,13 +427,16 @@ describe("T-0722 · GET /api/processes LIST narrowed by READ-visibility of each 
     }
   });
 
-  it("mixed visibility: record-less instance stays, record-bound (denied) instance is dropped — count reflects ONLY the visible instance", async () => {
+  it("mixed visibility: record-less instance stays (ACTOR is its participant — T-0723), record-bound (denied) instance is dropped — count reflects ONLY the visible instance", async () => {
     process.env["DATABASE_URL"] = "postgres://fake/T-0722-list-mixed";
     const RECORDLESS_INST = "eng-inst-rv-recordless";
     try {
       const deps = makeDeps({
         startedRows: [
           startedRow(LIVE_INST, RECORD_ID, "audit-evt-bound"),
+          // T-0723: startedRow's `actor` is ACTOR — the querying actor below IS
+          // this record-less instance's participant (the "acted on it" case),
+          // which is now the ONLY reason it stays in LIST (not a blanket default).
           startedRow(RECORDLESS_INST, undefined, "audit-evt-recordless"),
         ],
         resolveReadVisibility: makeResolver([]), // zero covering grants — denies the record-bound one
@@ -397,12 +479,12 @@ describe("T-0722 · GET /api/processes LIST narrowed by READ-visibility of each 
     }
   });
 
-  it("a record-less instance stays on LIST even for a zero-grant actor (phase-1/2 scope)", async () => {
+  it("T-0723: a record-less instance stays on LIST for the actor who started it (participant-tier), not for a stranger", async () => {
     process.env["DATABASE_URL"] = "postgres://fake/T-0722-list-recordless";
     try {
       const deps = makeDeps({
-        startedRows: [startedRow(LIVE_INST)], // no record_id in payload
-        resolveReadVisibility: makeResolver([]), // zero covering grants
+        startedRows: [startedRow(LIVE_INST)], // no record_id in payload; actor=ACTOR
+        resolveReadVisibility: makeResolver([]), // zero covering grants — participant-tier is the ONLY door
       });
       await withServer(deps, async (baseUrl) => {
         const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, {
@@ -411,6 +493,27 @@ describe("T-0722 · GET /api/processes LIST narrowed by READ-visibility of each 
         expect(status).toBe(200);
         const data = json as { instances: Array<Record<string, unknown>> };
         expect(data.instances.some((i) => i.id === LIVE_INST)).toBe(true);
+      });
+    } finally {
+      if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
+      else process.env["DATABASE_URL"] = prevDbUrl;
+    }
+  });
+
+  it("T-0723 (D-064 anti-case): a record-less instance is ABSENT from LIST for a non-participant zero-grant actor (not default-open)", async () => {
+    process.env["DATABASE_URL"] = "postgres://fake/T-0723-list-recordless-deny";
+    try {
+      const deps = makeDeps({
+        startedRows: [startedRow(LIVE_INST)], // no record_id in payload; actor=ACTOR started it
+        resolveReadVisibility: makeResolver([]), // zero covering grants
+      });
+      await withServer(deps, async (baseUrl) => {
+        const { status, json } = await httpReq("GET", `${baseUrl}/api/processes`, {
+          "x-dev-user": NON_PARTICIPANT_ACTOR,
+        });
+        expect(status).toBe(200);
+        const data = json as { instances: Array<Record<string, unknown>> };
+        expect(data.instances.some((i) => i.id === LIVE_INST)).toBe(false);
       });
     } finally {
       if (prevDbUrl === undefined) delete process.env["DATABASE_URL"];
@@ -446,16 +549,16 @@ describe("T-0722 · GET /api/processes LIST narrowed by READ-visibility of each 
 // ---------------------------------------------------------------------------
 
 describe("T-0721 · isInstanceDetailVisible (process-projection.ts)", () => {
-  it("record-less (recordId undefined) is always visible, regardless of grants", async () => {
+  it("T-0723: record-less (recordId undefined) is NEVER visible via this predicate, regardless of grants — no covering-grant basis exists; participant-tier is decided separately by the caller (isInstanceParticipant)", async () => {
     const visible = await isInstanceDetailVisible(
       makeFakePool({ startedRows: [] }),
       TENANT_ID,
       undefined,
-      [],
+      [wideReadGrant()],
       rootAncestry,
       Date.now(),
     );
-    expect(visible).toBe(true);
+    expect(visible).toBe(false);
   });
 
   it("a covering grant makes an existing record visible", async () => {
@@ -521,16 +624,31 @@ function fakeProjection(overrides: Partial<InstanceProjection> & { inst: string 
   };
 }
 
-describe("T-0722 · filterProjectionsByReadVisibility (process-projection.ts)", () => {
-  it("record-less projections are always kept, regardless of grants", async () => {
+describe("T-0722/T-0723 · filterProjectionsByReadVisibility (process-projection.ts)", () => {
+  it("T-0723 (D-064 anti-case): a record-less projection is DROPPED for a non-participant actor, even with zero DB audit trail (no default-open)", async () => {
     const projections = [fakeProjection({ inst: "inst-recordless" })];
     const visible = await filterProjectionsByReadVisibility(
-      makeFakePool({ startedRows: [] }),
+      makeFakePool({ startedRows: [] }), // no audit trail at all for inst-recordless
       TENANT_ID,
       projections,
-      [],
+      [wideReadGrant()], // even a WIDE grant is irrelevant — no source record to apply it to
       rootAncestry,
       Date.now(),
+      NON_PARTICIPANT_ACTOR,
+    );
+    expect(visible).toEqual([]);
+  });
+
+  it("T-0723: a record-less projection is KEPT for the actor who is its participant (acted on it), regardless of grants", async () => {
+    const projections = [fakeProjection({ inst: "inst-recordless" })];
+    const visible = await filterProjectionsByReadVisibility(
+      makeFakePool({ startedRows: [startedRow("inst-recordless")] }), // ACTOR acted on it (audit `actor` field)
+      TENANT_ID,
+      projections,
+      [], // zero grants — participant-tier is the ONLY door
+      rootAncestry,
+      Date.now(),
+      ACTOR,
     );
     expect(visible.map((p) => p.inst)).toEqual(["inst-recordless"]);
   });
@@ -544,6 +662,7 @@ describe("T-0722 · filterProjectionsByReadVisibility (process-projection.ts)", 
       [wideReadGrant()],
       rootAncestry,
       Date.now(),
+      NON_PARTICIPANT_ACTOR, // irrelevant for a record-bound row — READ-PDP is the only gate
     );
     expect(visible.map((p) => p.inst)).toEqual(["inst-a"]);
   });
@@ -557,6 +676,7 @@ describe("T-0722 · filterProjectionsByReadVisibility (process-projection.ts)", 
       [],
       rootAncestry,
       Date.now(),
+      NON_PARTICIPANT_ACTOR,
     );
     expect(visible).toEqual([]);
   });
@@ -570,6 +690,7 @@ describe("T-0722 · filterProjectionsByReadVisibility (process-projection.ts)", 
       [wideReadGrant()],
       rootAncestry,
       Date.now(),
+      NON_PARTICIPANT_ACTOR,
     );
     expect(visible).toEqual([]);
   });
@@ -593,17 +714,36 @@ describe("T-0722 · filterProjectionsByReadVisibility (process-projection.ts)", 
       [wideReadGrant()],
       rootAncestry,
       Date.now(),
+      NON_PARTICIPANT_ACTOR,
     );
     expect(visible).toEqual([]);
+    // A malformed recordId is NOT record-less (`p.recordId !== undefined`), so it
+    // never reaches the T-0723 participant-batch path either — confirmed by the
+    // absence of any query in this tracker beyond the pre-validation short-circuit.
     expect(queried).toBe(false);
   });
 
-  it("no record-bound projections at all → the batched ancestry query is skipped entirely", async () => {
-    let queried = false;
+  it("no record-bound projections at all → the batched ANCESTRY query is skipped (the participant query still runs for the record-less rows)", async () => {
+    let ancestryQueried = false;
+    let participantQueried = false;
     const trackingPool = {
       connect: async () => ({
-        query: async (text: string) => {
-          if (/^\s*SELECT/i.test(text) && /FROM\s+choros\.record\s+r/i.test(text)) queried = true;
+        query: async (text: string, values?: unknown[]) => {
+          if (!/^\s*SELECT/i.test(text)) return { rows: [] };
+          if (/FROM\s+choros\.record\s+r/i.test(text)) {
+            ancestryQueried = true;
+            return { rows: [] };
+          }
+          if (/confirmed_by/i.test(text)) {
+            participantQueried = true;
+            // Both record-less instances have ACTOR as their audit-track actor —
+            // preserves this test's original "both kept" intent under T-0723.
+            const wanted = new Set(Array.isArray(values?.[1]) ? (values![1] as string[]) : []);
+            const rows = ["inst-recordless-1", "inst-recordless-2"]
+              .filter((inst) => wanted.has(inst))
+              .map((inst) => ({ inst, actor: ACTOR, confirmed_by: null, task_role: null }));
+            return { rows };
+          }
           return { rows: [] };
         },
         release: () => {},
@@ -617,24 +757,27 @@ describe("T-0722 · filterProjectionsByReadVisibility (process-projection.ts)", 
       [],
       rootAncestry,
       Date.now(),
+      ACTOR,
     );
     expect(visible.map((p) => p.inst)).toEqual(["inst-recordless-1", "inst-recordless-2"]);
-    expect(queried).toBe(false);
+    expect(ancestryQueried).toBe(false);
+    expect(participantQueried).toBe(true);
   });
 
   it("preserves input order across mixed record-bound and record-less projections", async () => {
     const projections = [
       fakeProjection({ inst: "inst-1", recordId: RECORD_ID }),
-      fakeProjection({ inst: "inst-2" }),
+      fakeProjection({ inst: "inst-2" }), // record-less — needs an audit trail to stay kept (T-0723)
       fakeProjection({ inst: "inst-3", recordId: RECORD_ID }),
     ];
     const visible = await filterProjectionsByReadVisibility(
-      makeFakePool({ startedRows: [], recordExists: true }),
+      makeFakePool({ startedRows: [startedRow("inst-2")], recordExists: true }),
       TENANT_ID,
       projections,
       [wideReadGrant()],
       rootAncestry,
       Date.now(),
+      ACTOR, // ACTOR is inst-2's participant (audit actor) AND covered by wideReadGrant for inst-1/inst-3
     );
     expect(visible.map((p) => p.inst)).toEqual(["inst-1", "inst-2", "inst-3"]);
   });
