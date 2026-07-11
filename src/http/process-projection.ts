@@ -2138,6 +2138,16 @@ export async function reconcileInstanceEngineDrive(
     return { ok: false, code: endedResult.code, stage: "ended" };
   }
 
+  // T-0441 [analytics contract — DO NOT drop this guard]: `instance.ended` is emitted
+  // from this ONE call site and ONLY when the engine confirms the instance actually
+  // ended (endedResult.ended). The "not really ended" signal — a post-gateway
+  // `process.next_task` still live / !isInstanceEnded — falls through to step 3 below,
+  // which surfaces the next step instead of ending. Emitting `instance.ended` on the
+  // approve of an INTERMEDIATE step of a BRANCHING process (base → DMN gateway →
+  // extra-approve) would write a PHANTOM completion into the transition journal,
+  // distorting the process_transition_journal / cycle-time analytics
+  // (src/db/transition-journal.ts). Pinned live (real Postgres, mutation-proof) by
+  // ci/checks/db/T-0441-branching-instance-ended-guard.db.test.ts.
   if (endedResult.ended) {
     // Engine confirms done. Emit instance.ended ONLY if not already present, so a
     // re-run (on-read net after the post-approve already ended it) does not pile up
