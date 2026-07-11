@@ -1,0 +1,73 @@
+{
+  "task": "T-0691",
+  "epic": "E16 — UI-binding: triggers / entry-points / step-outcomes / links",
+  "date": "2026-07-11",
+  "session": "poehali-w6 live-proof (dev-stand OFFLINE surrogate)",
+  "scenario": "CRM/столп2 equivalent seeded scenario: create «Заявка» (purchases) → on_create starts telLinear «Согласование» → approve → step-outcome entity + record↔process links",
+  "method": "REAL BROWSER (Playwright headless chromium, seeded chs-kc-session, ROPC fixtures). Full local stack: fresh Keycloak (:8480) + fresh throwaway DB choros_lp (:55432) + Flowable 7.1.0 (:8482) + choros server keycloak-mode (:3090) + web SPA.",
+  "actors": {
+    "e-orlov": "role-initiator (creates the заявка) — К. Орлов",
+    "e-larina": "role-approver (approves «Согласование») — Е. Ларина"
+  },
+  "journey_steps": [
+    {
+      "step": "1. Create a record starts a process (create = start, on_create)",
+      "ui_path": "login e-orlov → /app-records/<tel-approval> → select набор полей «Заявки» → «Создать запись» drawer → fill Тема/Сумма/Инициатор → submit",
+      "result": "pass",
+      "evidence": "POST /api/records → 201 (record a79e2602). Record card /apps/<app>/records/<rec> «ПРОЦЕССЫ ПО ЭТОЙ ЗАПИСИ» shows the started «Канонический линейный ТЭЛ» (telLinear) with status ОЖИДАНИЕ. Flowable confirms a telLinear instance (a68df920) started on record create. Screenshots A1-A4. ZERO bypass."
+    },
+    {
+      "step": "2. Action on the object (approve the bound step from the UI)",
+      "ui_path": "login e-larina → /inbox (tab «Все»/«Из пула») → row «Согласование» / process «Канонический линейный ТЭЛ» → «Взять» (claim pool task) → «Согласовать»",
+      "result": "pass",
+      "evidence": "POST /api/inbox/<id>/claim → 200; POST /api/inbox/<id>/action {action:approve} → 200 body {status:done, outcome:approve, engine:completed}. Screenshots B1-B3. The approve action ITSELF was zero-bypass. CAVEAT: reaching this approvable state required the P0 triage bypass below — the instance parked at «Триаж» after create and would never surface «Согласование» without it."
+    },
+    {
+      "step": "3. Step outcomes visible",
+      "ui_path": "process card /processes/<inst> after approve",
+      "result": "pass",
+      "evidence": "Process card shows ЗАВЕРШЕНО, «Текущий шаг: Завершено», «Прогресс 1/1», full «История переходов» (Начало→Подача заявки→Триаж→Согласование→«Нужно доп. согласование?» gateway→end) with node types. Step-outcome ENTITY confirmed in DB: a «Согласование» record (a319a149) was created by the step-applier carrying purchase_ref=a79e2602 (the source заявка) and outcome=approve. Screenshot B5. ZERO bypass (browser)."
+    },
+    {
+      "step": "4. Links work (record↔process resolve to human names, navigate, no raw UUID)",
+      "ui_path": "record card «ПРОЦЕССЫ ПО ЭТОЙ ЗАПИСИ» (e-orlov) + process card «ЗАПИСЬ-ИСТОЧНИК» (e-larina)",
+      "result": "fail",
+      "evidence": "PARTIAL: (a) record→process reverse link resolves to human name «Канонический линейный ТЭЛ» for the CREATOR e-orlov, no UUID (A4). (b) КЕМ ЗАПУЩЕН on the process card resolves to «К. Орлов» (B5). BUT forward link FAILS: process card «ЗАПИСЬ-ИСТОЧНИК» renders a RAW UUID `a79e2602-65d6-4098-bcaf-26fc3a77a7c0` (not the record's human title «LP T-0691 браузер-заявка»), AND GET /api/records/<заявка> returns 404 for the acting approver e-larina (200 for e-orlov) → the record-source link is unnavigable for the actor who just acted on the process. Screenshot B5."
+    }
+  ],
+  "bypasses": [
+    {
+      "what": "Complete the «Триаж» agent external-task (topic=tel-intake) to advance the create=start instance from «Триаж» to the human-approvable «Согласование» step.",
+      "why": "The seeded telLinear triage step (serviceTask, flowable:type=external, topic=tel-intake) has NO runtime completer in the running/deployed stack. The lifecycle bridge fetch-and-locks it into choros.job (state=CREATED), but the agent-dispatch loop only processes AGENT_TOPICS=agent-step (explicitly NOT tel-intake, per T-0460 ADR), and there is no separate triage/smoke worker service. So the instance parks at «Триаж» forever and «Согласование» never appears in any inbox. Only the TEST harness bridge-smoke-runner produces the tel-intake task_completed.",
+      "had_to_do": "Inserted the missing `task_completed` outbox row (aggregate_kind=job, idempotency_key=complete:<jobId>, state=pending) that the absent worker should produce — exactly the shape bridge-smoke-runner.ts uses — then let the RUNNING server's own deliver loop completeTask in Flowable (running evaluateGatewayAtTriage → approvalRequired injected). Done once per instance (HTTP smoke + browser instance)."
+    }
+  ],
+  "p0_findings": [
+    {
+      "what": "P0 — Create=start process PARKS at the «Триаж» agent step and never reaches the human step. The seeded telLinear triage (topic=tel-intake) has no runtime completer: bridge fetches it into choros.job (CREATED) but nothing produces its task_completed. AGENT_TOPICS=agent-step (dispatcher) excludes tel-intake; no triage worker service in docker-compose.yml. Likely root cause: the canonical telLinear BPMN's agent serviceTask uses the LEGACY topic `tel-intake` while the current agent-dispatch runtime (T-0460) only drives topic `agent-step` (AGENT_STEP_TOPIC). Net effect on столп 2: a user creating a record starts a process that silently stalls before any человек can act — 'green in CI, dead live'.",
+      "expected_ui": "After create=start, the process should auto-advance through the DORMANT/deterministic «Триаж» agent step and present «Согласование» in the approver's inbox with no operator intervention.",
+      "had_to_do": "Injected the tel-intake completion (see bypass). Without it the journey cannot progress past step 1."
+    },
+    {
+      "what": "P1 — record↔process link broken for the ACTING user. On the process card «ЗАПИСЬ-ИСТОЧНИК» shows the source record as a RAW UUID (no human title) and GET /api/records/<заявка> returns 404 for the approver e-larina (200 for the creator e-orlov). So the actor who just approved the process cannot open the source record from the process card — the link both leaks a UUID and dead-ends in 404 (likely PDP/read-grant masking: the approver has no read grant on the initiator's заявка record).",
+      "expected_ui": "«ЗАПИСЬ-ИСТОЧНИК» should render the record's human title and navigate to a readable record card for any user entitled to act on the process (столп 2/§6: read-through projection with per-hop ACL, not a hard 404).",
+      "had_to_do": "Observed only; recorded. e-orlov can navigate; e-larina cannot."
+    }
+  ],
+  "minor_findings": [
+    "P2 — coarse current-step projection: right after create the record card + inbox-less state shows «Текущий шаг: Подача заявки / ОЖИДАНИЕ», but the instance is actually past «Подача заявки» (auto-completed via skip-submit) parked at the «Триаж» serviceTask. Same class as T-0709/T-0718 stale-projection.",
+    "P3 — record card «ПРОЦЕССЫ ПО ЭТОЙ ЗАПИСИ» shows the raw process key `telLinear` next to the human name «Канонический линейный ТЭЛ» (T-0717 class — human name present, so acceptable, but the bare key is shown).",
+    "record detail header/breadcrumb shows the record's own id as a raw UUID (a79e2602-…) — common record-detail header pattern."
+  ],
+  "overall": "red",
+  "overall_rationale": "3 of 4 journey steps passed IN-BROWSER (create=start, approve, step-outcomes visible incl. the step-outcome entity + cross-ref pointer). BUT the epic is NOT proven zero-bypass: step 2/3 were only reachable via a P0 bypass (no runtime completer for the triage agent step → process stalls before any human can act), and step 4 (links) FAILS for the acting user (process→record link is a raw UUID + 404). Two blocking product gaps.",
+  "stack_up": {
+    "keycloak": "fresh container t0691-kc-lp on :8480 (committed realm config/keycloak/realm-choros.json; all rank-and-file fixtures incl. e-orlov/e-larina login 200 — no credential gap this wave)",
+    "database": "throwaway choros_lp on shared PG :55432, migrate + demo seed (118 files, CHOROS_SEED_DEMO on) + flowable schema",
+    "flowable": "fresh container t0691-flowable flowable/flowable-rest:7.1.0 on :8482 → choros_lp flowable schema; telLinear BPMN deployed via REST (config/flowable/processes/tel-linear.bpmn20.xml)",
+    "server": "dist/index.js CHOROS_AUTH_MODE=keycloak on :3090, FLOWABLE_REST_BASE_URL/FLOWABLE_BASE_URL=:8482, FLOWABLE_TOPICS=tel-intake,agent-step, DATABASE_URL=choros_lp",
+    "web": "web/dist served by the server (SPA fallback); Playwright seeded chs-kc-session to skip PKCE",
+    "seeded_e16_data": "tel-approval app + «Заявки»(purchases)/«Согласование»(soglasovanie) registries; process_app_binding telLinear=on_create,submit_task_key=task-submit,target=soglasovanie (migrations 076/085/087/119/121); cross_app_ref soglasovanie→purchases ref_field=purchase_ref (089)",
+    "boundaries_respected": "did NOT touch e-owner, t-0633-keycloak-1(:8180), t-0633-postgres-1, or write to shared choros DB; all writes on throwaway choros_lp"
+  }
+}
