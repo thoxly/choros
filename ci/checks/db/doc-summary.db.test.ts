@@ -14,7 +14,7 @@
 // FS-4: additive migration — existing rows without summary are accepted (NULL is valid).
 // FS-5: readDocIndex ORDER BY slug (stable ordering).
 
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import {
   migratorUrl,
   appUrl,
@@ -35,6 +35,18 @@ import type { AuditEventInput } from '../../../src/core/audit-grant-encoder.js';
 import { makePgAuditWriter } from '../../../src/db/audit-writer.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+
+// T-0646: runRegen below faithfully replicates the production per-page write
+// loop in scripts/doc-regen.ts (upsertDocPage → setDocRefs → appendDocLog per
+// page, sequential — real operator behavior, not a test-only inefficiency).
+// The volume is the WHOLE live repo doc snapshot (assembleStaticSnapshot) and
+// grows with the codebase; FS-3 calls runRegen twice. This file is a
+// documented recurring flake at the vitest 5000ms default testTimeout
+// boundary under load (docs/handoff/T-0607.test-report.json: "5000ms
+// testTimeout exceeded under fitness:db parallel load", 5/5 pass at
+// testTimeout=60000). Raise the budget for this file only; assertions
+// are unchanged.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..', '..');

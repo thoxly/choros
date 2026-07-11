@@ -275,28 +275,39 @@ describe("FF-5 / AC-15: idx_outbox_pending partial index + EXPLAIN no Seq Scan",
 
   it("EXPLAIN of phase-2 candidate select with 1000 dispatched + 10 pending → uses index, no full Seq Scan", async () => {
     // Seed 1000 dispatched + 10 pending for TENANT_A.
+    //
+    // T-0646: this was previously 1010 sequential single-row INSERT round-trips
+    // on one connection — pure test-fixture seeding (no store/product function
+    // in the loop), so it is safe to collapse into one multi-row INSERT per
+    // state via unnest() without touching any production code path. Same
+    // columns, same values, same row count — only the round-trip count changes
+    // (was right on the vitest 5000ms default testTimeout boundary; T-0646 brief).
     await withClient(migratorUrl(), async (c) => {
       await c.query("BEGIN");
-      for (let i = 0; i < 1000; i++) {
-        await c.query(
-          `INSERT INTO choros.outbox
-             (tenant_id, id, aggregate_kind, aggregate_id, event_type, payload,
-              state, idempotency_key, attempts, created_at, available_at, dispatched_at)
-           VALUES ($1, $2, 't', $3, 'e', '{}'::jsonb,
-                   'dispatched', $4, 0, 0, 0, 0)`,
-          [TENANT_A, uuid(), uuid(), `idk-d-${i}-${uuid()}`]
-        );
-      }
-      for (let i = 0; i < 10; i++) {
-        await c.query(
-          `INSERT INTO choros.outbox
-             (tenant_id, id, aggregate_kind, aggregate_id, event_type, payload,
-              state, idempotency_key, attempts, created_at, available_at)
-           VALUES ($1, $2, 't', $3, 'e', '{}'::jsonb,
-                   'pending', $4, 0, 0, 0)`,
-          [TENANT_A, uuid(), uuid(), `idk-p-${i}-${uuid()}`]
-        );
-      }
+      const dispatchedIds = Array.from({ length: 1000 }, () => uuid());
+      const dispatchedAggIds = Array.from({ length: 1000 }, () => uuid());
+      const dispatchedIdks = dispatchedIds.map((id, i) => `idk-d-${i}-${id}`);
+      await c.query(
+        `INSERT INTO choros.outbox
+           (tenant_id, id, aggregate_kind, aggregate_id, event_type, payload,
+            state, idempotency_key, attempts, created_at, available_at, dispatched_at)
+         SELECT $1, x.id, 't', x.aggregate_id, 'e', '{}'::jsonb,
+                'dispatched', x.idempotency_key, 0, 0, 0, 0
+           FROM unnest($2::uuid[], $3::uuid[], $4::text[]) AS x(id, aggregate_id, idempotency_key)`,
+        [TENANT_A, dispatchedIds, dispatchedAggIds, dispatchedIdks]
+      );
+      const pendingIds = Array.from({ length: 10 }, () => uuid());
+      const pendingAggIds = Array.from({ length: 10 }, () => uuid());
+      const pendingIdks = pendingIds.map((id, i) => `idk-p-${i}-${id}`);
+      await c.query(
+        `INSERT INTO choros.outbox
+           (tenant_id, id, aggregate_kind, aggregate_id, event_type, payload,
+            state, idempotency_key, attempts, created_at, available_at)
+         SELECT $1, x.id, 't', x.aggregate_id, 'e', '{}'::jsonb,
+                'pending', x.idempotency_key, 0, 0, 0
+           FROM unnest($2::uuid[], $3::uuid[], $4::text[]) AS x(id, aggregate_id, idempotency_key)`,
+        [TENANT_A, pendingIds, pendingAggIds, pendingIdks]
+      );
       await c.query("COMMIT");
       await c.query("ANALYZE choros.outbox");
     });
