@@ -149,6 +149,7 @@ export interface ApplicationRow {
   section_name: string | null; // T-0551: denormalized section.name (LEFT JOIN), for nav/list.
   sort_order: number; // T-0651: manual position within a section (sidebar DnD/▲▼).
   tier: string;
+  created_by: string | null; // T-0690: actor slug of the creator; NULL for pre-migration rows.
   created_at: string | number; // bigint comes back as a string from node-postgres
   updated_at: string | number;
 }
@@ -164,6 +165,7 @@ function serializeApplication(row: ApplicationRow): Record<string, unknown> {
     section_name: row.section_name ?? null, // T-0551: имя раздела (для нав/списка без доп.запроса).
     sort_order: Number(row.sort_order ?? 0), // T-0651: позиция внутри раздела.
     tier: row.tier,
+    created_by: row.created_by ?? null, // T-0690: author slug (NULL = unknown/pre-migration).
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
   };
@@ -174,7 +176,8 @@ function serializeApplication(row: ApplicationRow): Record<string, unknown> {
 // = «Без раздела». INSERT/UPDATE re-select via this fragment to populate section_name.
 const APP_READ_SELECT = `
   SELECT a.id, a.slug, a.display_name, a.description, a.section,
-         a.section_id, s.name AS section_name, a.sort_order, a.tier, a.created_at, a.updated_at
+         a.section_id, s.name AS section_name, a.sort_order, a.tier, a.created_by,
+         a.created_at, a.updated_at
     FROM choros.application a
     LEFT JOIN choros.section s
       ON s.tenant_id = a.tenant_id AND s.id = a.section_id`;
@@ -207,18 +210,19 @@ async function createApplication(args: {
   displayName: string;
   description: string | null;
   section: string | null;  // T-0540
+  actor: string; // T-0690: recorded as created_by — the author-of-own-draft delete floor.
   nowMs: number;
 }): Promise<ApplicationRow> {
-  const { pool, tenantId, slug, displayName, description, section, nowMs } = args;
+  const { pool, tenantId, slug, displayName, description, section, actor, nowMs } = args;
 
   const insertOne = (candidateSlug: string): Promise<ApplicationRow> =>
     withTenantTx(pool, tenantId, async (client) => {
       const id = randomUUID();
       await client.query(
         `INSERT INTO choros.application
-           (tenant_id, id, slug, display_name, description, section, tier, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $7)`,
-        [tenantId, id, candidateSlug, displayName, description, section, nowMs],
+           (tenant_id, id, slug, display_name, description, section, tier, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $8, $8)`,
+        [tenantId, id, candidateSlug, displayName, description, section, actor, nowMs],
       );
       // Re-select with the section JOIN so section_name is populated (T-0551).
       const row = await selectAppByIdTx(client, tenantId, id);
@@ -348,23 +352,45 @@ async function getApplication(
 // ---------------------------------------------------------------------------
 
 /**
- * Outcome of the cascade delete: not-found (→404), FK-conflict (→409, honest
- * message), or success with the removed counts (→204 + audit).
+ * Outcome of the cascade delete: not-found (→404), forbidden (→403, T-0690
+ * ownership floor), FK-conflict (→409, honest message), or success with the
+ * removed counts (→204 + audit).
  */
 type DeleteAppOutcome =
   | { kind: "not_found" }
+  | { kind: "forbidden" }
   | { kind: "conflict"; message: string }
   | { kind: "deleted"; recordsRemoved: number; fieldsetsRemoved: number };
 
 /**
- * Cascade hard-delete an application in ONE tenant-scoped tx (T-0566).
+ * Cascade hard-delete an application in ONE tenant-scoped tx (T-0566, cascade
+ * extended T-0690 §2).
+ *
+ * AUTHZ (T-0690 столп-5 — "draft = personal sandbox of the author"): a
+ * config-privileged actor (owner/admin OR the `authoring_draft` grant) may
+ * delete ANY application, exactly as before. A NON-privileged actor may
+ * additionally delete an application they created themselves, but ONLY while
+ * it is still `tier = 'draft'` — the ownership floor is `created_by = actor AND
+ * tier = 'draft'`, mirroring the identical floor already shipped for records
+ * (T-0623, deleteRecord in records.ts). A published application, or a draft
+ * authored by someone else, stays 403 for a non-privileged caller. The
+ * existence check, the ownership/tier read, and the delete are ALL inside one
+ * `FOR UPDATE`-locked read in this single tx — no separate pre-read, so there
+ * is no TOCTOU window between "is this mine and still draft" and "delete it".
+ * A non-existent id stays an honest 404 (never a 403 that would otherwise leak
+ * existence to a non-privileged caller probing random ids).
  *
  * Removes, in FK-safe order, everything the application owns:
  *   - records of the app's registry_defs (+ their files/file_versions);
  *   - the app's registry_defs (+ their dependents that have no ON DELETE CASCADE:
  *     cross_app_ref, registry_schema_history, report_page_dep, template_dep/def);
- *   - process_app_binding rows for the app (UNBIND — the process definitions and
- *     report/doc pages are NOT deleted here);
+ *   - report_page / list_view / doc_page rows bound directly to the application
+ *     (T-0690: these three FK the application with NO ON DELETE action and were
+ *     NOT cascaded before — a latent orphan risk for ANY app delete, owner or
+ *     self-service; their own dependents — report_page_dep, doc_log, doc_ref —
+ *     already cascade automatically once the parent row is gone);
+ *   - process_app_binding rows for the app (UNBIND — the process definitions
+ *     are NOT deleted here);
  *   - the application row itself.
  *
  * Published rows are locked by the tier_published_locked trigger (migration
@@ -382,22 +408,36 @@ async function deleteApplicationCascade(args: {
   tenantId: string;
   id: string;
   actor: string;
+  actorIsConfigPrivileged: boolean;
   nowMs: number;
 }): Promise<DeleteAppOutcome> {
-  const { pool, tenantId, id, actor, nowMs } = args;
+  const { pool, tenantId, id, actor, actorIsConfigPrivileged, nowMs } = args;
   try {
     return await withTenantTx(pool, tenantId, async (client) => {
       // Unlock tier-locked (published) rows for this delete tx (sanctioned lifecycle
       // op; RLS tenant scope is untouched). Same GUC promoteTier uses.
       await client.query("SET LOCAL choros.promoting = '1'");
 
-      // 1. Confirm the application exists in the caller's tenant (RLS-scoped).
-      const appRes = await client.query<{ id: string }>(
-        `SELECT id FROM choros.application WHERE tenant_id = $1 AND id = $2`,
+      // 1. Confirm the application exists in the caller's tenant (RLS-scoped) and
+      //    lock the row (FOR UPDATE) so the ownership/tier check below is atomic
+      //    with the delete — no TOCTOU window (T-0690).
+      const appRes = await client.query<{ id: string; tier: string; created_by: string | null }>(
+        `SELECT id, tier, created_by FROM choros.application
+          WHERE tenant_id = $1 AND id = $2
+          FOR UPDATE`,
         [tenantId, id],
       );
       if (appRes.rowCount === 0) {
         return { kind: "not_found" as const };
+      }
+
+      // 1a. AUTHZ (T-0690): non-privileged actor may delete ONLY their own,
+      // still-draft application. Checked AFTER existence (honest 404 for unknown
+      // ids) and BEFORE any row is touched.
+      const appRow = appRes.rows[0]!;
+      const isOwnDraft = appRow.tier === "draft" && appRow.created_by === actor;
+      if (!actorIsConfigPrivileged && !isOwnDraft) {
+        return { kind: "forbidden" as const };
       }
 
       // 2. Collect the app's registry_defs (fieldsets) — the schemas whose records
@@ -474,7 +514,30 @@ async function deleteApplicationCascade(args: {
         );
       }
 
-      // 4. UNBIND processes: remove process_app_binding rows for this app. The
+      // 4. Delete report_page / list_view / doc_page rows bound DIRECTLY to the
+      //    application (T-0690: these FK application with NO ON DELETE action and
+      //    were never cascaded — a latent orphan risk pre-dating this task for ANY
+      //    app delete, owner or self-service). Their own dependents already cascade
+      //    once the parent row is gone (report_page_dep ON DELETE CASCADE from
+      //    report_page; doc_log/doc_ref ON DELETE CASCADE from doc_page; list_view
+      //    has no dependents). list_view rows scoped by registry_def_id (rather than
+      //    application_id) were already removed by its own ON DELETE CASCADE when
+      //    the registry_def was deleted in step 3d — deleting by application_id here
+      //    additionally catches list_view rows scoped directly to the app.
+      const reportPageDel = await client.query(
+        `DELETE FROM choros.report_page WHERE tenant_id = $1 AND app_id = $2`,
+        [tenantId, id],
+      );
+      const listViewDel = await client.query(
+        `DELETE FROM choros.list_view WHERE tenant_id = $1 AND application_id = $2`,
+        [tenantId, id],
+      );
+      const docPageDel = await client.query(
+        `DELETE FROM choros.doc_page WHERE tenant_id = $1 AND app_id = $2`,
+        [tenantId, id],
+      );
+
+      // 5. UNBIND processes: remove process_app_binding rows for this app. The
       //    process DEFINITIONS are NOT deleted — only the app↔process link.
       const bindingDel = await client.query(
         `DELETE FROM choros.process_app_binding
@@ -482,13 +545,13 @@ async function deleteApplicationCascade(args: {
         [tenantId, id],
       );
 
-      // 5. Delete the application row itself.
+      // 6. Delete the application row itself.
       await client.query(
         `DELETE FROM choros.application WHERE tenant_id = $1 AND id = $2`,
         [tenantId, id],
       );
 
-      // 6. Append ONE audit event (application.deleted) with the removal counts,
+      // 7. Append ONE audit event (application.deleted) with the removal counts,
       //    inside the same tx (T-0016 / T-0068 hash-chain) — a ROLLBACK undoes the
       //    delete AND the audit entry atomically.
       const writer = makePgAuditWriter();
@@ -505,6 +568,9 @@ async function deleteApplicationCascade(args: {
           application_id: id,
           records_removed: recordsRemoved,
           fieldsets_removed: registryDefIds.length,
+          report_pages_removed: reportPageDel.rowCount ?? 0,
+          list_views_removed: listViewDel.rowCount ?? 0,
+          doc_pages_removed: docPageDel.rowCount ?? 0,
           processes_unbound: bindingDel.rowCount ?? 0,
         },
         occurred_at: nowMs,
@@ -528,23 +594,6 @@ async function deleteApplicationCascade(args: {
       };
     }
     throw err;
-  }
-}
-
-/**
- * Authz for DELETE (T-0566): same privilege level as editing config artifacts —
- * owner/admin OR the authoring_draft grant (resolveActorPrivilege, T-0557). A caller
- * without it gets 403. Mirrors the solution-publish / sandbox-gate privilege posture.
- */
-async function assertMayDeleteConfig(
-  pool: pg.Pool,
-  tenantId: string,
-  actor: string,
-  nowMs: number,
-): Promise<void> {
-  const priv = await resolveActorPrivilege(pool, tenantId, actor, nowMs);
-  if (!priv.isOwnerOrAdmin && !priv.hasAuthoringDraftGrant) {
-    throw new HttpError(403, "FORBIDDEN", "not permitted to delete this application");
   }
 }
 
@@ -635,6 +684,7 @@ export function registerApplicationRoutes(
       displayName,
       description,
       section,
+      actor,
       nowMs: Date.now(),
     });
 
@@ -787,11 +837,15 @@ export function registerApplicationRoutes(
   );
 
   // DELETE /api/applications/:id — T-0566: cascade hard-delete the application and
-  // everything it owns (its registry_defs + those defs' records + dependents), and
-  // UNBIND its processes (remove process_app_binding rows; the process defs stay).
+  // everything it owns (its registry_defs + those defs' records + dependents +,
+  // T-0690, report_page/list_view/doc_page bound to it), and UNBIND its processes
+  // (remove process_app_binding rows; the process defs stay).
   //   204 on success (+ application.deleted audit with removed counts);
   //   404 if the app is not in the caller's tenant (RLS-filtered or absent);
-  //   403 if the caller lacks the config-edit privilege (owner/admin | authoring_draft);
+  //   403 if the caller lacks the config-edit privilege (owner/admin | authoring_draft)
+  //       AND is not the author of their OWN still-draft application (T-0690: the
+  //       "draft = personal sandbox of the author" floor — a published application,
+  //       or a draft authored by someone else, stays 403 for a non-privileged caller);
   //   409 if a hard FK (e.g. a record referenced by another record's relation) blocks it.
   router.register(
     "DELETE",
@@ -804,11 +858,30 @@ export function registerApplicationRoutes(
       const tenantId = await resolveActorTenant(actor);
       const nowMs = Date.now();
 
-      await assertMayDeleteConfig(pool, tenantId, actor, nowMs);
+      // Authz (T-0566 + T-0690): config privilege (owner/admin OR authoring_draft)
+      // may delete ANY application; a non-privileged actor may additionally delete
+      // ONLY an application they created themselves, and ONLY while it is still
+      // draft. That per-row ownership/tier decision is made INSIDE
+      // deleteApplicationCascade (atomic with the FOR UPDATE read — no TOCTOU, and a
+      // non-existent id stays an honest 404 rather than leaking existence via 403).
+      // We resolve the config privilege here via the SAME resolveActorPrivilege path
+      // the sandbox gate uses.
+      const priv = await resolveActorPrivilege(pool, tenantId, actor, nowMs);
+      const actorIsConfigPrivileged = priv.isOwnerOrAdmin || priv.hasAuthoringDraftGrant;
 
-      const outcome = await deleteApplicationCascade({ pool, tenantId, id, actor, nowMs });
+      const outcome = await deleteApplicationCascade({
+        pool,
+        tenantId,
+        id,
+        actor,
+        actorIsConfigPrivileged,
+        nowMs,
+      });
       if (outcome.kind === "not_found") {
         throw new HttpError(404, "NOT_FOUND", "application not found");
+      }
+      if (outcome.kind === "forbidden") {
+        throw new HttpError(403, "FORBIDDEN", "not permitted to delete this application");
       }
       if (outcome.kind === "conflict") {
         throw new HttpError(409, "CONFLICT", outcome.message);
