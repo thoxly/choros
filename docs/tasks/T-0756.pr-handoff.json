@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0756",
+  "status": "pr_open",
+  "branch": "task/T-0756",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/tasks/T-0756.spec.md",
+    "docs/tasks/T-0756.pr-handoff.json",
+    "src/http/process-projection.ts",
+    "src/http/processes.ts",
+    "web/src/components/components.jsx",
+    "web/src/screens/screen-process-instance.jsx",
+    "web/src/screens/screen-process-instance.test.jsx",
+    "web/src/components/record-ref-projection.test.jsx",
+    "ci/checks/db/T-0756-source-record-projection.db.test.ts"
+  ],
+  "summary": "E16 §6 per-hop ACL read-through projection for the process card «Запись-источник» (live-proof T-0691 P1). GET /api/processes/:id gains (1) a PARTICIPANT tier — a caller who acts on the instance (holds its task role / acted on it / owner) but lacks source-record READ now gets the instance skeleton + a SAFE sourceRecord projection {id,title,typeLabel,canOpen,appId?} with NO variables/history, instead of the T-0721 404; (2) an embedded sourceRecord on the reader tier. RecordRef renders the server title directly (no records/:id fetch → no raw-UUID fallback); the «открыть» link is offered ONLY when canOpen (READ-PDP ∧ sandbox-openable), so it never dead-ends in a 404. Reader tier (T-0721 variables/history) is byte-identical; non-participant+no-READ still 404 (fail-closed).",
+  "test_evidence": {
+    "red_green_live_pg": "ci/checks/db/T-0756-source-record-projection.db.test.ts (8/8 GREEN on real choros_app RLS). RED proven: reverting the participant-tier src (git stash of the 4 impl files) flips 6 of 8 to RED — SRP-1 participant 404 (was: 200 + safe projection), SRP-3/4 no sourceRecord, SRP-5/7 404 — while the fail-closed control (SRP-2) and cross-tenant (SRP-6) stay GREEN (unchanged).",
+    "regression_live_pg": "T-0721 processes-read-visibility.db.test.ts 14/14 (reader tier intact); records-read-pdp.db.test.ts 4/4; process-projection.test.ts 7/7.",
+    "unit": "src/__tests__/processes-read-visibility.test.ts + processes-live-instances.test.ts 57/57.",
+    "web": "web RecordRef/screen tests: record-ref-projection.test.jsx 4/4 (title, link iff canOpen, no fetch, sentinel≠raw-UUID) + screen-process-instance/inbox/processes + actor-chip 144/144."
+  },
+  "fitness_gates_run": [
+    "process-detail-read-gate.sh PASS (FF-INST-VIS-1a/b/c/d — isInstanceDetailVisible still precedes fetchInstanceHistoryDetail; honest-404 fallthrough intact)",
+    "process-detail-single-resolver.sh PASS (FF-INST-VIS-2a/b/c/d — single authority path; no bespoke grant math/SQL in the 3 process modules)",
+    "ux/anti-uuid-actor-render.sh PASS (0 bare raw-id renders)",
+    "read-pdp-anti-case.sh PASS + rights-ui-anti-case.sh PASS + anti-case-lock.sh PASS (no D-064 case literals added)",
+    "actor-active-route-coverage.sh PASS (78 GET routes, 0 findings)"
+  ],
+  "security_notes": [
+    "Safe projection exposes ONLY {id, title, typeLabel, canOpen, appId?}; record.data (all other fields) never serialized on the participant path; variables/history stay reader-only (T-0721 threat surface unchanged).",
+    "title = schema-designated title field (pickTitleFieldKey, T-0613) or neutral «{type}·id8» — never an arbitrary data-order scan, so no incidental field value leaks (SECRET_VALUE asserted absent in SRP-5).",
+    "canOpen = isRecordReadable (READ-PDP, T-0570) AND sandbox-openable (resolveActorPrivilege, T-0557 — the SAME resolver records.ts uses); the link never over-promises a records/:id that would 404.",
+    "Participant = getRoleSlugsForActor (ACTOR_ACTIVE-gated, T-0738) ∪ instance-audit-actor ∪ isGenesisOwnerForTenant (deactivation-safe, T-0658); deactivated actors fail-closed. Tenant/RLS untouched; every new read tenant-scoped."
+  ],
+  "deviations_from_adr": [
+    "ADR §1.5 chose the entry point AS the process detail response (embed sourceRecord + participant tier) over a separate /api/records/:id/projection endpoint — reuses the merged T-0721 authority path in-place and delivers the projection PRE-RESOLVED so RecordRef makes no records/:id fetch. Matches the task's 'предпочти ту, что реюзает уже смерженный authority-путь T-0721'.",
+    "canOpen additionally accounts for the sandbox/draft gate (not only READ-PDP as the task wording literally states): live-proof analysis (spec §0.1) proves the observed 404 is the sandbox gate (the acting approver HAS READ-PDP — she saw the full process card, which T-0721 gates on READ — so her records/:id 404 is draft-tier masking). canOpen must reflect real openability or the «открыть» link dead-ends."
+  ],
+  "follow_ups": [
+    "The P0 triage-parking finding of T-0691 (create=start stalls at the agent step) is T-0755, out of scope here.",
+    "Process-definition-scoped read grants for record-LESS instances (T-0714 §5 phase 3) remain a follow-up; a record-less instance carries no sourceRecord (unchanged)."
+  ],
+  "judge_attack_surface": [
+    "Try a non-participant tenant member with no READ on a record-bound instance → must stay 404 (SRP-2).",
+    "Try to read record.data fields (beyond the single designated title) or variables/history via the participant tier → must be absent (SRP-5).",
+    "Try a deactivated role-holder / deactivated owner → participant resolvers are ACTOR_ACTIVE/deactivation-gated → must fail-closed.",
+    "Try canOpen:true on a draft-tier record you can't actually open → SRP-4 pins canOpen:false for the non-creator reader.",
+    "Cross-tenant instance id → 404 (SRP-6)."
+  ],
+  "friction_events": [
+    "CONCURRENCY HAZARD (memory: 'два агента в одном worktree стирают незакоммиченное'): a concurrent session in this shared worktree ran an interleaving `git stash` that CONSUMED my `git stash push` of the 4 impl files mid-verification — my implementation was lost from git (not in any dangling commit) and an unrelated `src/http/applications.ts` (113-insertion WIP, NOT mine) appeared modified. Recovered by re-applying all 4 files from known content and committing each IMMEDIATELY (never stashing again). applications.ts left untouched/uncommitted. LESSON: never `git stash` in a shared worktree; commit atomically and often.",
+    "tsc --noEmit on this repo takes >2min; run in background."
+  ]
+}
