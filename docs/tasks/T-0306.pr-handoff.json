@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0306",
+  "status": "pr_open",
+  "branch": "task/T-0306",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/tasks/T-0306.spec.md",
+    "docs/tasks/T-0306.pr-handoff.json",
+    "web/src/screens/screen-overview.jsx",
+    "web/src/screens/screen-overview.test.jsx",
+    "web/src/screens/screen-overview.mount.test.jsx",
+    "ci/checks/db/first-run-empty-workspace.test.ts"
+  ],
+  "revision": "r3 — хирургический фикс F1-r2 поверх r2. r2: ветка пересажена со стало́й базы fed0b962 на свежий dev@3256f627 (reset --hard dev + cherry-pick содержательного); FirstRunPanel снят как дубликат T-0598 FirstStepsStrip; правка nav-config.test.js выкинута. r3 (только mount-тест): waitFor больше НЕ поллит getAllByRole(img,{name}) — accessible-name вычислялся на каждый тик и детерминированно пробивал дефолтные 5s под конкур-нагрузкой (класс w6/w7 «timeout-маска», теперь в web-тире); probe = querySelectorAll('.chs-state--loading')===0 (НЕ зависит от stepMarkerState: StepRow ветвится на литерале `loading ? (` — мутация decision-функции не подвешивает ожидание), маркеры «недоступно» — attribute-селектор [title=...], a11y-контракт — разовые проверки атрибутов role/aria-label; per-test timeout 10000 на A/B (глобальный web/vitest.config.js НЕ тронут)",
+  "mutation_check_r3": "stepMarkerState сломан (unknown→todo) → сценарий B красный за 377ms чистым assertion «expected to have a length of 1 but got +0» (expect(markers).toHaveLength(1)), НЕ таймаутом; мутация откатана (grep MUTATION-PROBE = 0, git diff чист)",
+  "gates_run": {
+    "types": "npx tsc --noEmit → 0 ошибок",
+    "web_tests_full": "cd web && npx vitest run (соло, после r3) → 109 файлов / 2854 теста PASS, 0 таймаутов; вкл. 32 в screen-overview.test.jsx (24 существующих T-0598 + 8 новых T-0306) и 3/3 jsdom mount (соло: A 2.2s / B 0.4s / C 0.25s — в дефолтном 5s-лимите)",
+    "db_regression_solo": "DATABASE_URL=postgres://...:55432/choros; setup-template (hash 9c398948, 118 миграций); vitest --dir ci/checks/db --no-file-parallelism: first-run-empty-workspace 2/2 PASS (12 контент-таблиц) + register-tenant-isolation.adversarial 3/3 PASS",
+    "web_build": "cd web && npx vite build → OK за 30.7s (pre-existing chunk-size warning)",
+    "ux_gates": "ux-g6 0 новых хардкодов; ux-g2 PASS; ux-g4 0 новых state-веток; ux-g5 informational (0 новых от T-0306) → все exit 0",
+    "anti_case_D064": "bash ci/checks/anti-case-lock.sh → PASS (aggregate 15, baseline 16, erodes-or-steady); прицельный grep по изменённым файлам → 0 матчей"
+  },
+  "consolidation_decision": {
+    "kept": [
+      "DB-regression ci/checks/db/first-run-empty-workspace.test.ts (на dev не существовал) — расширен контент-таблицами dev-миграций 113/123/131: section, list_view, engine_process_name; итого 12 таблиц",
+      "honest-degrade гейтинг — перенесён В FirstStepsStrip (T-0598): у strip его не было (сбой сигнала рендерился как пустой todo-круг, неотличимо от «не сделано»); теперь signal null-после-загрузки → пунктирный маркер «Статус шага недоступен» (role=img). Чистая decision-функция stepMarkerState экспортирована и покрыта unit'ами",
+      "REAL jsdom mount-тест OverviewScreen (конвенция T-0715, jsdom+testing-library уже на dev): сценарии свежий-пустой/деградация/всё-пройдено"
+    ],
+    "dropped": [
+      "FirstRunPanel + isFirstRun (r1) — дубликат FirstStepsStrip: тот же CTA «Создать приложение» на том же экране; после переноса honest-degrade в strip не добавлял ничего",
+      "правка web/src/app-shell/nav-config.test.js (r1) — стало-базовая, на dev ALLOWED_NEW_IDS уже полный",
+      "судейский вердикт-коммит a7096ee1 — относился к старой ревизии"
+    ],
+    "not_a_second_block": "на «Обзоре» остался ОДИН онбординг-слой (FirstStepsStrip); видимость полосы и состав шагов T-0598 (AC-6/AC-7) не менялись; существующие 24 теста T-0598 не тронуты и зелёные, литерал AC-8 сохранён"
+  },
+  "deviations_from_adr": [
+    "Спека эпика docs/specs/E14-self-serve-onboarding.spec.md в репо отсутствует и на свежем dev; разведка сделана по коду (register.ts на dev дополнен T-0574 agent_card / T-0570 default-READ / T-0666 process_designer — контент-плоскость по-прежнему не сеется).",
+    "Серверный provisioning и миграции не тронуты: инвариант «0 мок-данных» уже выполнялся по построению — T-0306 закрепляет его машинным гейтом и чинит честность деградации в уже доставленном онбординге."
+  ],
+  "friction_events": [
+    "provision переиспользовал июньскую ветку → r1 строился на базе в 976+ коммитах позади dev и продублировал T-0598; лечение: reset --hard dev + cherry-pick. Сигнал фабрике: provision_worktree должен проверять свежесть merge-base против dev.",
+    "После пересадки обязательны npm install в корне И в web/ (web получил jsdom/@testing-library с T-0715; web/node_modules не symlink) и пересборка DB-шаблона (hash миграций сменился ebccb59f→9c398948).",
+    "Существующий тест AC-8 T-0598 матчит литерал исходника `loading ? (` — реализация StepRow сохранила литерал, чтобы не трогать чужой тест (loading-ветка эквивалентна stepMarkerState==='loading').",
+    "fitness=true — прицельные гейты изменения (types, полный web, fitness:db соло, vite build, UX G2/G4/G5/G6, anti-case-lock); монолитный npm run fitness (сотни несвязанных чеков) не гонялся end-to-end."
+  ]
+}

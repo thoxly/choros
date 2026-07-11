@@ -35,8 +35,11 @@
        рендерится ТОЛЬКО при can_manage:true (иначе структурно отсутствует —
        тот же принцип, что ADR T-0572 применяет к формам выдачи/отзыва); не
        участвует в критерии скрытия полосы.
-   Деградация: любой сбой (сеть/HTTP/парсинг) на шагах 1-3 оставляет шаг БЕЗ
-   чека (не error state, не красный экран) — CTA-ссылка остаётся рабочей.
+   Деградация (T-0306, honest-degrade): любой сбой (сеть/HTTP/парсинг) на
+   шагах 1-3 рендерит маркер «статус недоступен» (пунктирный прочерк), а НЕ
+   пустой todo-круг — «не знаем» ≠ «не сделано» (принцип E14 first-run:
+   пустой workspace утверждаем только при подтверждённом apps===0, не при
+   упавшем фетче). CTA-ссылка остаётся рабочей в любом состоянии.
    Полоса целиком скрывается только когда шаги 1-3 ВСЕ подтверждённо true —
    производное от данных состояние, без localStorage/dismiss.
 
@@ -209,6 +212,17 @@ const stepMarkerTodoStyle = {
   borderRadius: 'var(--chs-radius-full, 999px)',
   border: '1px solid var(--chs-color-border)',
 };
+// T-0306: маркер «статус недоступен» — пунктирный круг с прочерком. Визуально
+// отличим и от галки (done), и от пустого круга (todo): сбой сигнала — это НЕ
+// «шаг не сделан», это «мы не знаем» (honest-degrade, principles.md §6).
+const stepMarkerUnknownStyle = {
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  width: '20px', height: '20px', flex: '0 0 auto',
+  borderRadius: 'var(--chs-radius-full, 999px)',
+  border: '1px dashed var(--chs-color-border)',
+  color: 'var(--chs-color-text-muted)',
+  fontSize: 'var(--chs-text-2xs)',
+};
 const stepTextStyle = {
   flex: '1 1 auto',
   fontSize: 'var(--chs-text-sm)',
@@ -220,17 +234,51 @@ const stepTextDoneStyle = {
 };
 
 /**
- * StepRow — одна строка чек-листа: маркер состояния (галка/пусто/загрузка) +
- * текст шага + CTA-ссылка в соответствующий раздел. Всегда кликабельна,
- * независимо от того, загрузился ли чек (навигация не зависит от статуса).
+ * stepMarkerState — ЧИСТАЯ decision-функция маркера шага (T-0306, honest-degrade).
+ * Экспортирована для unit-теста. Приоритет состояний:
+ *   loading → 'loading'   (сигнал ещё грузится — спиннер, не преждевременный чек)
+ *   done    → 'done'      (подтверждённо сделан — галка)
+ *   unknown → 'unknown'   (сигнал ЗАГРУЖЕН, но недоступен: сбой сети/HTTP/парсинга —
+ *                          прочерк, НЕ пустой todo-круг: «не знаем» ≠ «не сделано»)
+ *   иначе   → 'todo'      (подтверждённо не сделан — пустой круг)
+ *
+ * Это перенос first-run гейтинга T-0306 (изначально isFirstRun: hero только при
+ * apps===0 загружено-без-ошибки) В канонический онбординг-слой T-0598: тот же
+ * принцип «пусто/не сделано ≠ не загрузилось», применённый к маркерам шагов.
+ *
+ * @param {{loading?: boolean, done?: boolean, unknown?: boolean}} s
+ * @returns {'loading'|'done'|'unknown'|'todo'}
  */
-function StepRow({ label, done, loading, ctaLabel, onGo }) {
+export function stepMarkerState({ loading, done, unknown } = {}) {
+  if (loading) return 'loading';
+  if (done) return 'done';
+  if (unknown) return 'unknown';
+  return 'todo';
+}
+
+/**
+ * StepRow — одна строка чек-листа: маркер состояния (галка/пусто/прочерк/загрузка)
+ * + текст шага + CTA-ссылка в соответствующий раздел. Всегда кликабельна,
+ * независимо от того, загрузился ли чек (навигация не зависит от статуса).
+ * T-0306: маркер выбирается через stepMarkerState; проп `unknown` = сигнал
+ * загружен, но недоступен (деградация) — рендерится честный прочерк.
+ * Экспортирован для mount-теста (T-0715 convention).
+ */
+export function StepRow({ label, done, loading, unknown, ctaLabel, onGo }) {
+  const marker = stepMarkerState({ loading, done, unknown });
   return (
     <div style={stepRowStyle}>
       {loading ? (
         <LoadingState compact label="" />
-      ) : done ? (
+      ) : marker === 'done' ? (
         <span style={stepMarkerDoneStyle} aria-hidden="true"><KitIcon name="check" /></span>
+      ) : marker === 'unknown' ? (
+        <span
+          style={stepMarkerUnknownStyle}
+          role="img"
+          aria-label="Статус шага недоступен"
+          title="Статус шага недоступен"
+        >—</span>
       ) : (
         <span style={stepMarkerTodoStyle} aria-hidden="true" />
       )}
@@ -313,13 +361,25 @@ function useFirstStepsSignals() {
  * Скрывается целиком (return null), когда шаги 1-3 ВСЕ подтверждённо true.
  * Пока сигналы грузятся или деградировали (null), полоса остаётся видимой —
  * скрытие требует явного true, не просто «не false» (AC-6/AC-7).
+ *
+ * T-0306 (консолидация first-run): единственный онбординг-слой «Обзора».
+ * Honest-degrade маркеров: сигнал null ПОСЛЕ загрузки = недоступен (сбой) →
+ * прочерк «статус недоступен», НЕ пустой todo-круг. Для шага 1 это различие
+ * «apps===0 (первый запуск, шаг честно не сделан)» vs «apps===null (фетч упал —
+ * не утверждаем, что приложений нет)». Экспортирован для mount-теста.
  */
-function FirstStepsStrip({ apps, appsLoading, navigate }) {
+export function FirstStepsStrip({ apps, appsLoading, navigate }) {
   const { llmConnected, assistantUsed, canManage, loadingExtra } = useFirstStepsSignals();
 
   const step1Done = typeof apps === 'number' && apps > 0;
   const step2Done = llmConnected === true;
   const step3Done = assistantUsed === true;
+
+  // T-0306: «недоступен» = сигнал ЗАГРУЖЕН и null (fetchCount/useFirstStepsSignals
+  // деградируют любой сбой до null; подтверждённые значения — число/boolean).
+  const step1Unknown = !appsLoading && apps === null;
+  const step2Unknown = !loadingExtra && llmConnected === null;
+  const step3Unknown = !loadingExtra && assistantUsed === null;
 
   // Скрытие: только когда все три обязательных сигнала подтверждённо true
   // (не когда appsLoading/loadingExtra ещё в процессе — тогда step*Done ещё
@@ -334,6 +394,7 @@ function FirstStepsStrip({ apps, appsLoading, navigate }) {
         label="Создайте приложение"
         done={step1Done}
         loading={appsLoading}
+        unknown={step1Unknown}
         ctaLabel="Создать приложение"
         onGo={() => navigate('/apps')}
       />
@@ -341,6 +402,7 @@ function FirstStepsStrip({ apps, appsLoading, navigate }) {
         label="Подключите LLM-ключ"
         done={step2Done}
         loading={loadingExtra}
+        unknown={step2Unknown}
         ctaLabel="Подключить ключ"
         onGo={() => navigate('/llm-connections')}
       />
@@ -348,6 +410,7 @@ function FirstStepsStrip({ apps, appsLoading, navigate }) {
         label="Спросите ассистента"
         done={step3Done}
         loading={loadingExtra}
+        unknown={step3Unknown}
         ctaLabel="Спросить ассистента"
         onGo={() => navigate('/assistant')}
       />

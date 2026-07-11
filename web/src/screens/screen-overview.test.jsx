@@ -157,3 +157,56 @@ describe('screen-overview — kit primitives + token-only styles (ux-g4/g6)', ()
     expect(body).toMatch(/var\(--chs-color-success/);
   });
 });
+
+/* ============================================================================
+   T-0306 — honest-degrade маркеров «Первых шагов» (unit, чистая функция).
+   «не знаем» (сигнал недоступен) ≠ «не сделано» (подтверждённый todo):
+   сбой фетча НЕ должен рендерить шаг как несделанный, а первый запуск
+   (apps===0, загружено без ошибки) — честный todo с CTA.
+   ============================================================================ */
+
+import { stepMarkerState } from './screen-overview.jsx';
+
+describe('stepMarkerState — decision-таблица маркера шага (T-0306)', () => {
+  it('loading → "loading" (независимо от остальных флагов)', () => {
+    expect(stepMarkerState({ loading: true })).toBe('loading');
+    expect(stepMarkerState({ loading: true, done: true })).toBe('loading');
+    expect(stepMarkerState({ loading: true, unknown: true })).toBe('loading');
+  });
+
+  it('done → "done" (побеждает unknown: подтверждённый чек не гасится сбоем другого сигнала)', () => {
+    expect(stepMarkerState({ loading: false, done: true })).toBe('done');
+    expect(stepMarkerState({ loading: false, done: true, unknown: true })).toBe('done');
+  });
+
+  it('unknown (загружено, сигнал недоступен) → "unknown", НЕ "todo"', () => {
+    expect(stepMarkerState({ loading: false, done: false, unknown: true })).toBe('unknown');
+  });
+
+  it('подтверждённый первый запуск (не loading, не unknown, не done) → "todo"', () => {
+    expect(stepMarkerState({ loading: false, done: false, unknown: false })).toBe('todo');
+  });
+
+  it('пустой/отсутствующий аргумент → "todo" (fail-safe, не рушится)', () => {
+    expect(stepMarkerState()).toBe('todo');
+    expect(stepMarkerState({})).toBe('todo');
+  });
+});
+
+describe('screen-overview — unknown-маркер честной деградации (T-0306, source-wiring)', () => {
+  it('FirstStepsStrip вычисляет unknown-флаги «загружено и null» для трёх шагов', () => {
+    expect(src).toMatch(/step1Unknown\s*=\s*!appsLoading && apps === null/);
+    expect(src).toMatch(/step2Unknown\s*=\s*!loadingExtra && llmConnected === null/);
+    expect(src).toMatch(/step3Unknown\s*=\s*!loadingExtra && assistantUsed === null/);
+  });
+  it('StepRow рендерит доступный текст «Статус шага недоступен» для unknown', () => {
+    expect(src).toContain('Статус шага недоступен');
+  });
+  it('unknown-маркер стилизован только --chs-* токенами (G6)', () => {
+    const idx = src.indexOf('stepMarkerUnknownStyle');
+    expect(idx).toBeGreaterThan(-1);
+    const body = src.slice(idx, idx + 400);
+    expect(body).toMatch(/var\(--chs-color-text-muted\)/);
+    expect(body).not.toMatch(/#[0-9a-fA-F]{3,8}|rgba?\(/);
+  });
+});
