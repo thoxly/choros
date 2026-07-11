@@ -48,6 +48,14 @@ import type { AuditEventInput } from '../../../src/core/audit-grant-encoder.js';
 import type { LiveSnapshot } from '../../../src/core/doc-ref-lint.js';
 import { DEFAULT_TENANT, DOCS_AUTHOR_ACTOR } from '../../../scripts/doc-reconcile.js';
 
+// T-0646: runRegen/runReconcile below faithfully replicate the production
+// per-page write loop in scripts/doc-regen.ts / scripts/doc-reconcile.ts
+// (upsertDocPage → setDocRefs → appendDocLog per page, sequential — real
+// operator behavior). The volume is the WHOLE live repo doc snapshot
+// (assembleStaticSnapshot) and grows with the codebase; several tests call
+// runRegen/runReconcile more than once and legitimately exceed the old 5000ms
+// default. Covered by the suite-wide testTimeout/hookTimeout in vitest.config.js.
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..', '..');
 

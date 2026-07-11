@@ -44,6 +44,14 @@ import { makePgAuditWriter } from '../../../src/db/audit-writer.js';
 import type { AuditEventInput } from '../../../src/core/audit-grant-encoder.js';
 import { DEFAULT_TENANT, DOCS_AUTHOR_ACTOR } from '../../../scripts/doc-regen.js';
 
+// T-0646: runRegen below faithfully replicates the production per-page write
+// loop in scripts/doc-regen.ts (upsertDocPage → setDocRefs → appendDocLog per
+// page, sequential — real operator behavior). The volume is the WHOLE live
+// repo doc snapshot (assembleStaticSnapshot) and grows with the codebase;
+// F-2/F-3 call runRegen twice, doubling the round-trips, and legitimately
+// exceed the old 5000ms default. Covered by the suite-wide
+// testTimeout/hookTimeout in vitest.config.js.
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..', '..');
 

@@ -36,6 +36,14 @@ import { makePgAuditWriter } from '../../../src/db/audit-writer.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+// T-0646: runRegen below faithfully replicates the production per-page write
+// loop in scripts/doc-regen.ts (upsertDocPage → setDocRefs → appendDocLog per
+// page, sequential — real operator behavior). FS-3 calls runRegen twice. This
+// file is a documented recurring flake at the old 5000ms testTimeout boundary
+// under load (docs/handoff/T-0607.test-report.json: "5000ms testTimeout
+// exceeded under fitness:db parallel load", 5/5 pass at testTimeout=60000).
+// Covered by the suite-wide testTimeout/hookTimeout in vitest.config.js.
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..', '..');
 
