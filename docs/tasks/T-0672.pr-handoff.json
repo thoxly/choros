@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0672",
+  "status": "pr_open",
+  "branch": "task/T-0672",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/flowable-client.ts",
+    "src/http/process-projection.ts",
+    "src/__tests__/inbox-engine-drive.test.ts (EXTENDED +5 tests)",
+    "ci/checks/db/engine-drive-generic.db.test.ts (EXTENDED +1 test)",
+    "ci/checks/db/engine-drive-completedby.db.test.ts (NEW, live Flowable+PG)",
+    "docs/tasks/T-0672.spec.md (NEW)",
+    "docs/tasks/T-0672.pr-handoff.json (NEW)"
+  ],
+  "summary": "completedBy:null сразу после реального UI-завершения userTask. Читатель (src/http/processes.ts fetchInstanceHistoryDetail: completedBy: a.assignee из getHistoricActivityInstances → act_hi_actinst.assignee) и рендер (T-0648) КОРРЕКТНЫ; разрыв ВЫШЕ — на записи. reconcileInstanceEngineDrive (src/http/process-projection.ts) звал engine.completeUserTask БЕЗ предварительного claim/set-assignee — Flowable пишет act_hi_actinst.assignee только если задача assigned на момент complete; голый complete кандидат-групповой (не-assigned) задачи → assignee NULL. ФИКС: перед completeUserTask — claim на действующего актора (args.actor = extractActorSlug(req), ровно тот slug что резолвит читатель). Новый OPTIONAL метод порта FlowableClient.setTaskAssignee(taskId, assignee) → POST /runtime/tasks/{id} body {action:'claim',assignee}. Best-effort + NON-FATAL (провал claim не блокирует уже-закоммиченное решение человека; completedBy деградирует к до-фиксовому NULL, логируется, НЕ 502 — сохраняет контракт T-0571). Идемпотентность re-click цела (claim только при активной engine-task; тот же actor re-claim=HTTP 200). Инвариант T-0441 не задет. Единая точка: обе ветки (literal-defKey и resolve-by-instance) сходятся к if(engineTaskId). OPTIONAL на порту → десятки частичных тест-стабов и reconcile-on-read (без completion) не требуют изменений.",
+  "live_proof": {
+    "engine": "flowable/flowable-rest:7.1.0 (isolated H2, port 8082) + Postgres :55432 (template-isolated clone)",
+    "red_green_mutation": "ci/checks/db/engine-drive-completedby.db.test.ts — 3/3 PASS: GREEN (real client claims→completes → historic assignee == actor == completedBy) + RED-mutation (SAME drive со снятым setTaskAssignee → assignee NULL, доказывает что claim — load-bearing строка) + idempotent (re-drive завершённого → alreadyEnded, assignee не затирается). Прогонка в ОДНОМ ране (не fake-green).",
+    "empirical_rest_probe": "bare POST {action:complete} → historic assignee null; POST {action:claim,assignee} затем complete → assignee=<slug>; same-actor re-claim → HTTP 200 (идемпотентно).",
+    "reader_field_tie": "getHistoricActivityInstances(...).assignee (объект, потребляемый processes.ts) несёт actor в GREEN-тесте → completedBy резолвится."
+  },
+  "gates": {
+    "tsc": "0 errors (npx tsc --noEmit, full project)",
+    "unit_engine_drive": "src/__tests__/inbox-engine-drive.test.ts 53/53 PASS (+5 T-0672: claim-before-complete order literal+resolve-by-instance, optional-absent backward-compat, non-fatal claim-failure, empty-actor guard)",
+    "flowable_client_bridge_suite": "flowable-client(.adversarial/.integration)/flowable-error-http/externalTaskBridge/lifecycle-bridge/processes-live-instances/processes-read-visibility = 155 PASS, 5 skip",
+    "flowable_bridge_contract": "ci/checks/flowable-bridge-contract.sh PASS (FF-G3)",
+    "process_projection_db": "ci/checks/db/process-projection.test.ts 7/7 PASS",
+    "engine_drive_completedby_db": "ci/checks/db/engine-drive-completedby.db.test.ts 3/3 PASS (live)",
+    "anti_case_lock": "ci/checks/anti-case-lock.sh PASS (D-064; тест-слаги нейтральны role-x/wf-step)",
+    "related_fitness": "engine-drive-no-literal-defkey / detel-base-task-from-engine / candidategroups-role-slug-linter PASS",
+    "lint": "eslint src — 0 errors, 1 no-console warning (matches inbox.ts engine-drive logging convention; lint gate has no --max-warnings)"
+  },
+  "deviations_from_adr": [
+    "Порт-метод setTaskAssignee сделан OPTIONAL (как getHistoric*), а не required — чтобы не трогать десятки частичных FlowableClient/EngineDriveReconcilePort стабов. Реальный makeFlowableClient всегда реализует.",
+    "REST-операция — CLAIM (POST {action:claim,assignee}), не PUT-update: эмпирически (flowable-rest:7.1.0) claim идемпотентен для того же актора (HTTP 200) и надёжно проставляет историк-assignee; выбрано после живого зондирования обоих."
+  ],
+  "risks_for_judge": [
+    "ЛОЖНОЕ ЗЕЛЁНОЕ: убедиться, что RED-мутация реально красная — снятие setTaskAssignee в engine-drive-completedby.db.test.ts даёт assignee NULL (доказано), а не потому что тест не доходит до чтения. Проверить и обратную мутацию: если удалить строку claim из process-projection.ts, live GREEN-тест обязан покраснеть.",
+    "Не-фатальность: claim-провал НЕ должен превращаться в 502 (сохранение T-0571). Атаковать: сделать setTaskAssignee → {ok:false} и проверить, что approve всё равно 200 и шаг завершён (покрыто non-fatal unit-тестом).",
+    "Идемпотентность re-click: повторное завершение не должно падать и не должно затирать ранее записанного актора (покрыто idempotent live-тестом; тот же actor re-claim=200).",
+    "Defer-путь агента (T-0638): actor там = человек-резолвер; проверить что completedBy на downstream userTask = именно он.",
+    "ПРЕДСУЩЕСТВУЮЩЕЕ (не в scope T-0672): HTTP-approve authz-харнесс в engine-drive-generic.db.test.ts возвращает 403 локально (resolveRolesForActor не резолвит seedApproverGrant вне полного CI-окружения) — ломает и оригинальные T-0571 тесты идентично, ВЫШЕ по потоку от engine-drive. Поэтому основной live-proof T-0672 гоняет reconcileInstanceEngineDrive НАПРЯМУЮ (изолирует шов, читает точное историк-поле). Мой +completedBy assertion в engine-drive-generic наследует этот пред-существующий 403 локально."
+  ],
+  "friction_events": [
+    "СТЕНД суррогат: поднял изолированный Flowable (H2, :8082) как live-proof когда общий dev-стенд offline (w7 паттерн). Первый deploy на ARM-эмуляции медленный (JIT warmup) → client timeoutMs=60000 и driveDeadlineMs=60000 в live-тесте (прод x86 отвечает в мс).",
+    "driveDeadlineMs дефолт 10s: extra claim round-trip на медленном эмулированном движке впервые превысил бюджет → ENGINE_DRIVE_TIMEOUT (не логический баг). В проде claim ~мс. В live-тесте поднял бюджет.",
+    "ПРЕД-СУЩЕСТВУЮЩЕЕ: HTTP-approve 403 (см. risks) — обошёл прямым драйвом шва."
+  ]
+}
