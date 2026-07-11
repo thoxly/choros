@@ -1,0 +1,86 @@
+{
+  "task_id": "T-0690",
+  "verdict": "approved",
+  "reviewer": "adversarial-judge",
+  "branch": "task/T-0690",
+  "head": "571b3078d41f6fa0ec3732414c2943031a071f5d",
+  "base": "dev@504312f11f527c539e252d26a2b0fc6a7a22307c",
+  "dev_tip": "3256f627ecfdb4f8d01214fefe5b14cdd47c477a",
+  "ci_seen": { "green": true },
+  "summary": "Author-of-own-draft delete floor. A non-privileged actor may now DELETE only an application they created themselves AND only while tier='draft'; owner/admin/authoring_draft unchanged; published or someone-else's-draft stays 403; cross-tenant stays 404 (existence never leaks). created_by is written server-side from the authenticated actor, never from the body, and no mutation path can rewrite created_by or flip tier. Cascade extended to cover a genuine pre-existing gap (report_page/list_view/doc_page FK application with no ON DELETE action). All verification re-run independently by the judge — GREEN. No blocking findings.",
+  "tree_integrity": {
+    "incident": "Builder reported a cross-worktree git-stash swap with task/T-0756 during RED/GREEN verification.",
+    "git_status": "clean (git status --porcelain empty at review start and after all judge mutations were reverted via git checkout — git stash NEVER used).",
+    "three_dot_diff_dev...HEAD": "EXACTLY the 5 claimed files: migrations/133_application_created_by.sql (A), src/http/applications.ts (M), ci/checks/db/applications_delete_cascade.db.test.ts (M), docs/tasks/T-0690.spec.md (A), docs/tasks/T-0690.pr-handoff.json (A). No process-projection.ts / processes.ts / components.jsx / screen-process-instance.jsx — zero trace of the T-0756 incident files.",
+    "two_dot_artifact_explained": "dev..HEAD additionally shows T-0641.* deleted + process-defs.ts/process-defs.lanetimer-publish.test.ts changed — these are dev's OWN commits (66bfcbb1/d559ff6d/c0bd9a0b) landed after the merge-base; the branch never touched them (confirmed via three-dot diff = empty for those paths).",
+    "staleness": "branch is 6 commits behind dev (T-0641 merged since branch point). Non-blocking; rebase onto dev tip before promote.",
+    "verdict": "INTEGRITY CLEAN — the incident left no residue; the working tree contains only T-0690's own additive changes."
+  },
+  "gates_rerun_by_judge": {
+    "tsc_noEmit": "exit 0 — 0 type errors (npx tsc --noEmit, run to completion in background).",
+    "vitest_db_applications_delete_cascade_SOLO": "7/7 pass (DATABASE_URL=...55432/choros APP_DATABASE_URL=choros_app, --dir ci/checks/db --no-file-parallelism). 3 pre-existing T-0566 + 4 new T-0690 (own-draft 204+full cascade, own-published 403, other's-draft-same-tenant 403, cross-tenant-same-slug 404).",
+    "vitest_db_regression_crud": "21/21 pass (applications_crud 11 + sections_crud 10) — created_by additive to ApplicationRow/APP_READ_SELECT/serializeApplication does NOT alter the CRUD contract.",
+    "anti_case_lock": "PASS exit 0 — Phase 1 delegates clean; Phase 2 aggregate 15 <= baseline 16, no individual literal regressed.",
+    "migration_template": "created_by verified in template choros_test_template_560ca80c: information_schema = text / is_nullable=YES / column_default=NULL (additive nullable, NO bare default).",
+    "note_full_fitness": "the ~300-check full fitness suite was NOT re-run wall-to-wall (targeted single-endpoint change); the gates touching the changed code (anti-case-lock, tsc, db-tier for applications) were re-run GREEN by the judge."
+  },
+  "mutation_probes": {
+    "predicate_weakened (remove tier==='draft' from isOwnDraft)": "own-published-403 test went RED as required — 'expected 204 to be 403' (the non-priv author's PUBLISHED app got deleted). Proves the draft-only floor is genuinely enforced by the test, not vacuously green. Reverted via `git checkout -- src/http/applications.ts`; predicate restored byte-identical; git status clean."
+  },
+  "forging_probes": {
+    "created_by_source": "written ONLY server-side. createApplication receives actor from the POST route's extractActor (Keycloak sub->slug via resolveActorSlugFromAuth, or dev x-dev-user header) — NEVER from req.body. INSERT column list is fixed; body cannot inject created_by.",
+    "update_path_scan": "the sole UPDATE choros.application in the codebase (updateApplication) uses a strict column allowlist {section, section_id, display_name, description, sort_order} — created_by and tier are NOT settable. No PATCH/PUT forge vector.",
+    "tier_flip": "the ONLY writer of application.tier is promoteTier (artifacts.ts), draft->published only, itself authz-gated; there is NO demote (published->draft) path anywhere, and the tier_published_locked trigger blocks published rows. A non-priv actor cannot flip a foreign published app back to draft to make it deletable. No two-step escalation.",
+    "verdict": "No forge path to gain delete rights over a non-owned or published application."
+  },
+  "toctou_probe": {
+    "finding": "The existence read, the tier/created_by read, and the DELETE are all in ONE withTenantTx. The read is `SELECT id, tier, created_by ... FOR UPDATE`, holding the row lock for the whole tx. A concurrent promoteTier either commits before the lock (read sees 'published' -> 403) or blocks until this tx commits (row gone -> promote 404). No window between the ownership decision and the delete.",
+    "verdict": "No TOCTOU."
+  },
+  "existence_leak_probe": {
+    "finding": "rowCount===0 returns {kind:'not_found'} (-> 404) BEFORE the ownership/forbidden branch is reached. RLS scopes the SELECT to the caller's tenant, so a foreign-tenant row is invisible and yields 404, never a 403 that would confirm existence. The cross-tenant-same-slug test (created_by='del-actor-c' in TENANT_B, probed by the TENANT_A del-actor-c) pins 404 and that the TENANT_B row survives.",
+    "verdict": "No existence leak; 404-before-403 ordering correct and pinned."
+  },
+  "cascade_completeness": {
+    "fk_children_of_application": "Enumerated live via pg_constraint on template DB: exactly 4 tables FK choros.application(tenant_id,id) — registry_def(application_id), report_page(app_id), doc_page(app_id), list_view(application_id). ALL FOUR now handled: registry_def by step 3 (pre-existing), report_page/doc_page/list_view by the new explicit DELETEs (step 4).",
+    "no_action_note": "these 4 FKs are confdeltype='a' (NO ACTION). Precisely: pre-T-0690 an app-delete with any such child would have been REJECTED (23503 / 409), not silently orphaned — the pr-handoff/comment framing of 'latent orphan risk' is slightly imprecise (blocker, not orphan). Immaterial to correctness: the fix deletes children first so the parent delete succeeds.",
+    "dependents_cascade": "Verified live: report_page_dep->report_page, doc_log->doc_page, doc_ref->doc_page are all ON DELETE CASCADE ('c'); list_view has no dependents; list_view rows scoped by registry_def_id are removed by list_view->registry_def ON DELETE CASCADE in step 3. No orphans, no secondary 409.",
+    "no_shared_resource_over_delete": "report_page/doc_page/list_view each reference a single application (single app_id/application_id) — no cross-application sharing, so nothing belonging to another app is removed. DELETE order (children in step 4 before the application row in step 6) is FK-safe.",
+    "empirical": "the own-draft test seeds report_page + list_view + doc_page (withBindings) and asserts all three rows gone after 204 + audit payload counters report_pages_removed/list_views_removed/doc_pages_removed = 1 each."
+  },
+  "migration_probe": {
+    "shape": "ADD COLUMN IF NOT EXISTS created_by text NULL — additive, idempotent, nullable, no DEFAULT, no FK, no RLS/PK change. known_tenant_tables.txt not in the diff (unchanged).",
+    "null_semantics": "the ownership comparison is JS strict equality (appRow.created_by === actor); a legacy NULL comes back as JS null and null===<slug> is false, so pre-migration rows stay owner/admin/authoring_draft-only. No SQL NULL-comparison pitfall (the compare is in TS, not SQL). No composite-FK SET NULL class risk (migration 116) — this is a plain scalar column, no FK."
+  },
+  "dead_code": "assertMayDeleteConfig fully removed (grep src/ ci/ = 0 refs); the DELETE route resolves resolveActorPrivilege inline (same path) and passes actorIsConfigPrivileged into the cascade. 403 message byte-identical ('not permitted to delete this application').",
+  "acceptance_coverage": [
+    { "ac": "non-privileged author deletes own draft app -> 204 + full cascade (no orphans)", "covered": true },
+    { "ac": "own published app -> 403 (self-service floor is draft-only)", "covered": true },
+    { "ac": "someone else's draft in same tenant -> 403", "covered": true },
+    { "ac": "authorship-slug match across tenants -> 404 (RLS wins, no existence leak)", "covered": true },
+    { "ac": "owner/admin/authoring_draft behaviour unchanged (deletes foreign/legacy created_by=NULL apps)", "covered": true },
+    { "ac": "created_by written from authenticated actor, not body; no update path rewrites created_by/tier", "covered": true },
+    { "ac": "cascade covers all FK children of application; dependents cascade; FK-safe order", "covered": true }
+  ],
+  "findings": [
+    {
+      "id": "T-0690-N1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/http/applications.ts deleteApplicationCascade doc-comment / docs/tasks/T-0690.pr-handoff.json fix",
+      "issue": "report_page/list_view/doc_page FK application with confdeltype='a' (NO ACTION), so pre-T-0690 an app-delete with any such child would be REJECTED with a 409/23503, not silently orphaned. The comment/handoff call it a 'latent orphan risk'; it is a latent delete-blocker. Immaterial to correctness — the fix (delete children first) is right either way.",
+      "suggestion": "Optional wording fix: 'latent orphan risk' -> 'latent FK-conflict/409 blocker (children of NO-ACTION FKs)'. No code change."
+    },
+    {
+      "id": "T-0690-N2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "verification scope",
+      "issue": "Full ~300-check fitness suite not run wall-to-wall (P2 targeted change). Change is confined to src/http/applications.ts + migration 133 + one db test; judge re-ran the gates that touch this code (tsc, anti-case-lock, db-tier applications/CRUD) GREEN.",
+      "suggestion": "Run the full fitness suite once as part of the dev->main promote batch; also rebase the branch (6 behind dev) before promote."
+    }
+  ],
+  "role_gap_evidence": [
+    "LIVE_PROOF deferred: no stand this session (offline 2nd run per w7); builder ran against local PG:55432. The self-service delete floor is proven at the HTTP+RLS layer live (choros_app NOBYPASSRLS role, real RLS), but the human-in-UI path (non-priv author creates a draft in the constructor, sees/uses a delete affordance) is NOT exercised end-to-end. Close on stand return per the builder's live_proof_plan (create draft as rank-and-file -> DELETE own draft 204 -> publish another -> DELETE 403)."
+  ]
+}
