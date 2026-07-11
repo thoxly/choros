@@ -151,6 +151,36 @@ describe('mapUserError', () => {
     expect(r.message).toMatch(/создание учётки/);
     expect(r.message).toMatch(/418/);
   });
+
+  // T-0748 (NF-1 from T-0741's own review): a display_name with characters
+  // Keycloak's person-name validator forbids (e.g. "Bot #1", "A&B") used to
+  // fall through to the generic 400 branch below with the server's raw
+  // EMAIL_INVALID text — misdirecting the owner to "fix" a perfectly valid
+  // email. This must now anchor on display_name with the server's own
+  // honest Russian message, NOT the email text.
+  it('T-0748: maps 400 NAME_INVALID_CHARACTERS to a display_name field error with the server\'s Russian message', () => {
+    const r = mapUserError(400, {
+      error: {
+        code: 'NAME_INVALID_CHARACTERS',
+        message: 'отображаемое имя содержит недопустимые символы — уберите спецсимволы (<, &, #, кавычки, скобки) и попробуйте снова',
+      },
+    });
+    expect(r.field).toBe('display_name');
+    expect(r.message).toContain('недопустимые символы');
+    expect(r.message).not.toMatch(/email/i);
+  });
+
+  it('T-0748: NAME_INVALID_CHARACTERS with no server message falls back to an honest Russian default (still anchored on display_name)', () => {
+    const r = mapUserError(400, { error: { code: 'NAME_INVALID_CHARACTERS' } });
+    expect(r.field).toBe('display_name');
+    expect(r.message).toMatch(/символ/);
+  });
+
+  it('T-0748 regression: a plain 400 (e.g. EMAIL_INVALID) still falls to the generic field-less fallback, unaffected by the new NAME_INVALID_CHARACTERS case', () => {
+    const r = mapUserError(400, { error: { code: 'VALIDATION', message: 'email must be a valid email address (e.g. name@company.ru)' } });
+    expect(r.field).toBeUndefined();
+    expect(r.message).toBe('email must be a valid email address (e.g. name@company.ru)');
+  });
 });
 
 describe('accountStatusMeta', () => {

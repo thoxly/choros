@@ -441,6 +441,27 @@ export function registerUserMgmtRoutes(
       if (code === "EMAIL_INVALID") {
         throw new HttpError(400, "VALIDATION", "email must be a valid email address (e.g. name@company.ru)");
       }
+      // T-0748 (NF-1 from T-0741's own review): T-0741 started deriving
+      // Keycloak firstName/lastName from `display_name` (splitDisplayName). A
+      // display_name containing characters KC's person-name validator
+      // forbids (e.g. "Bot #1", "A&B") now reaches THIS catch as
+      // NAME_INVALID_CHARACTERS (admin-port.ts disambiguates it from a
+      // genuine bad email — see its own comment on the 400 branch). BEFORE
+      // this branch existed, the port folded that same 400 into
+      // EMAIL_INVALID (its only 400 code), so this exact case fell into the
+      // branch just above and the owner was told "email must be a valid
+      // email address" for a perfectly valid email — the real problem (the
+      // display name) was never named. Surface the honest Russian reason
+      // instead, anchored on the field the owner actually needs to fix
+      // (web/src/screens/users-form.js mapUserError anchors this code to
+      // `display_name`).
+      if (code === "NAME_INVALID_CHARACTERS") {
+        throw new HttpError(
+          400,
+          "NAME_INVALID_CHARACTERS",
+          "отображаемое имя содержит недопустимые символы — уберите спецсимволы (<, &, #, кавычки, скобки) и попробуйте снова",
+        );
+      }
       throw new HttpError(503, "AUTH_UNAVAILABLE", "account service unavailable — try again later");
     }
 

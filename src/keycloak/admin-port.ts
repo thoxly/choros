@@ -139,6 +139,12 @@ export interface KeycloakUserPort {
    *   this must surface as an honest 400, NOT be folded into
    *   AUTH_UNAVAILABLE/503 like every other non-201/409 status). T-0628:
    *   `username` is free-form and NOT subject to this check.
+   * Throws err.code="NAME_INVALID_CHARACTERS" (T-0748) if `displayName`
+   *   produced a firstName/lastName Keycloak rejects for containing
+   *   characters its `person-name-prohibited-characters` validator forbids
+   *   (e.g. "Bot #1", "A&B") — disambiguated from EMAIL_INVALID by the KC
+   *   error body's field-level messageKey so the owner is told the NAME is
+   *   the problem, not the (perfectly valid) email.
    * Throws HttpError(503, "AUTH_UNAVAILABLE") if KC is unreachable.
    */
   createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }>;
@@ -267,6 +273,80 @@ function extractKcErrorMessage(body: string): string {
   } catch {
     return "";
   }
+}
+
+/** One field-level validation failure from Keycloak's declarative user-profile validator. */
+interface KcFieldError {
+  field?: string;
+  errorMessage?: string;
+}
+
+/**
+ * extractKcFieldErrors — T-0748 (NF-1 from T-0741's own review): parse Keycloak's
+ * declarative-user-profile 400 body for the field-level validator that failed,
+ * so createHumanUser's 400 branch (below) can tell a firstName/lastName
+ * character-validator rejection apart from a genuine bad `email`.
+ *
+ * LIVE-CONFIRMED shapes (KC 25.0.6, local `t-0633-keycloak-1`, 2026-07-11 —
+ * see the T-0748 spec for the full transcript):
+ *   Single field failing:
+ *     {"field":"lastName","errorMessage":"error-person-name-invalid-character","params":["lastName"]}
+ *   Multiple fields failing (e.g. email AND firstName both bad in the same request):
+ *     {"errors":[{"field":"email","errorMessage":"error-invalid-email",...},
+ *                {"field":"firstName","errorMessage":"error-person-name-invalid-character",...}]}
+ * Returns [] on an empty/unparseable/unrecognized body — the caller's default
+ * (EMAIL_INVALID) is then used, so a parse miss NEVER changes behavior for any
+ * body shape this function doesn't recognize (mirrors extractKcErrorMessage's
+ * own safe-default contract just above).
+ */
+function extractKcFieldErrors(body: string): KcFieldError[] {
+  if (!body) return [];
+  try {
+    const j = JSON.parse(body) as {
+      field?: unknown;
+      errorMessage?: unknown;
+      errors?: unknown;
+    };
+    if (Array.isArray(j.errors)) {
+      return j.errors
+        .filter((e): e is Record<string, unknown> => !!e && typeof e === "object")
+        .map((e) => ({
+          field: typeof e["field"] === "string" ? e["field"] : undefined,
+          errorMessage: typeof e["errorMessage"] === "string" ? e["errorMessage"] : undefined,
+        }));
+    }
+    if (typeof j.field === "string" || typeof j.errorMessage === "string") {
+      return [
+        {
+          field: typeof j.field === "string" ? j.field : undefined,
+          errorMessage: typeof j.errorMessage === "string" ? j.errorMessage : undefined,
+        },
+      ];
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * T-0748: true iff the parsed field errors show a KC declarative user-profile
+ * "person name" character-validator failure on firstName or lastName — the
+ * SAME `person-name-prohibited-characters` validator realm-choros.json
+ * declares (see splitDisplayName's own doc comment above), which KC's error
+ * body names via the messageKey `error-person-name-invalid-character` (live-
+ * confirmed). Matched by substring ("person-name") rather than the exact key
+ * so a KC point-release that appends/reorders suffix text on the same
+ * validator still matches — narrow enough that it can only fire on
+ * firstName/lastName, never on `email` or any other field.
+ */
+function isPersonNameCharacterError(fieldErrors: KcFieldError[]): boolean {
+  return fieldErrors.some(
+    (fe) =>
+      (fe.field === "firstName" || fe.field === "lastName") &&
+      typeof fe.errorMessage === "string" &&
+      fe.errorMessage.includes("person-name"),
+  );
 }
 
 async function getAdminToken(cfg: KcAdminConfig): Promise<string> {
@@ -516,7 +596,32 @@ export function makeHttpKeycloakUserPort(cfg?: KcRegistrarConfig): KeycloakUserP
       // defense-in-depth for any other caller of the port and for KC-side
       // validation drift. `username` is free-form since T-0628 and is not
       // expected to trigger this branch.)
+      //
+      // T-0748 (NF-1 from T-0741's own review): T-0741 started sending
+      // firstName/lastName (derived from the caller's free-text
+      // display_name), and Keycloak's declarative user-profile validates
+      // BOTH with `person-name-prohibited-characters` (realm-choros.json).
+      // A display_name with characters that validator rejects (e.g. "Bot #1",
+      // "A&B") now ALSO produces a 400 from this same POST — but it is a
+      // name-shape problem, not an email-shape one. Before this fix, EVERY
+      // 400 here (including this new class) was folded into EMAIL_INVALID,
+      // so user-mgmt.ts told the owner "email must be a valid email address"
+      // for a perfectly valid email — a misattributed error pointing the
+      // owner at the wrong field entirely. Disambiguate by the KC error
+      // body's field-level messageKey (extractKcFieldErrors /
+      // isPersonNameCharacterError above, LIVE-CONFIRMED against KC 25.0.6)
+      // and surface the honest NAME_INVALID_CHARACTERS code instead. Any 400
+      // that does NOT carry a firstName/lastName person-name error — an
+      // actual bad email, an unparseable/empty body, or any other KC-side
+      // validation drift — falls through to the EXACT prior default
+      // (EMAIL_INVALID), so the existing email-error path is unchanged.
       if (createResp.status === 400) {
+        const fieldErrors = extractKcFieldErrors(createResp.body);
+        if (isPersonNameCharacterError(fieldErrors)) {
+          const err = new Error("NAME_INVALID_CHARACTERS");
+          (err as NodeJS.ErrnoException).code = "NAME_INVALID_CHARACTERS";
+          throw err;
+        }
         const err = new Error("EMAIL_INVALID");
         (err as NodeJS.ErrnoException).code = "EMAIL_INVALID";
         throw err;

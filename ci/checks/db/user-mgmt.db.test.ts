@@ -1714,4 +1714,107 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
     expect(msg).toContain('email');
     expect(msg).not.toBe('an account with that email already exists');
   });
+
+  // ---------------------------------------------------------------------
+  // T-0748 (NF-1 from T-0741's own review): T-0741 started sending KC
+  // firstName/lastName derived from display_name. A display_name with
+  // characters Keycloak's person-name validator forbids (e.g. "Bot #1",
+  // "A&B") triggers a KC 400 that — before this fix — was folded into the
+  // SAME code as a genuinely bad email (EMAIL_INVALID), so the owner was
+  // told "email must be a valid email address" while the email was fine and
+  // the display name was the real problem. RED→GREEN: honest attribution.
+  // ---------------------------------------------------------------------
+  it('T-0748: KC person-name-invalid-character (display_name="Bot #1") → 400 NAME_INVALID_CHARACTERS with an honest Russian message, NOT the misleading email message', async () => {
+    const t = await registerOne('name-invalid-chars');
+    kc.reset();
+    kc.failOnNameInvalid = true; // next createHumanUser throws NAME_INVALID_CHARACTERS (KC person-name validator)
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-invalid-${Date.now()}`,
+        email: `name-invalid-${Date.now()}@example.com`, // a perfectly valid email — NOT the problem
+        password: 'password12345',
+        display_name: 'Bot #1', // the actual anti-case from T-0748
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('NAME_INVALID_CHARACTERS');
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+    // Honest Russian attribution — points at the name, not the email.
+    expect(msg).toContain('имя');
+    expect(msg).toContain('символ');
+    expect(msg).not.toContain('email must be a valid email address');
+    // KC was reached (email/display_name both passed our own pre-KC checks) then reported the name problem.
+    expect(kc.createCallCount).toBe(1);
+    // No orphan employee row — KC create never truly succeeded.
+    const accounts = await getAccounts(t.ownerSlug);
+    expect(accounts.json?.accounts?.some((a: { display_name: string }) => a.display_name === 'Bot #1')).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0748 regression guard: a display_name with an ordinary space (a real
+  // two-word name, "И. Петров"-shaped per T-0741) must still create
+  // successfully — this fix does not touch the happy path.
+  // ---------------------------------------------------------------------
+  it('T-0748 regression: an ordinary display_name (no special characters) still creates 201, unaffected by the new NAME_INVALID_CHARACTERS branch', async () => {
+    const t = await registerOne('name-ordinary');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-ordinary-${Date.now()}`,
+        email: `name-ordinary-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Иван Петров',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    expect(kc.created[kc.created.length - 1]?.spec.displayName).toBe('Иван Петров');
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0748 regression guard: the EMAIL_INVALID mapping (T-0625 defense-in-
+  // depth — KC itself rejects the email) must remain completely unaffected
+  // by the new NAME_INVALID_CHARACTERS branch added just above it.
+  // ---------------------------------------------------------------------
+  it('T-0748 regression: KC-side EMAIL_INVALID (defense-in-depth) still maps to 400 VALIDATION with the email message, unchanged', async () => {
+    const t = await registerOne('email-invalid-kc-side');
+    kc.reset();
+    // Force the PORT layer to report EMAIL_INVALID directly (models a KC
+    // 400 that IS a genuine email problem — the client-side EMAIL_RE check
+    // in user-mgmt.ts's own validateCreateBody cannot be bypassed via the
+    // public request shape, so this exercises the port-level catch branch
+    // the same way a KC-side validation drift would).
+    const spy = kc.createHumanUser.bind(kc);
+    kc.createHumanUser = async (spec) => {
+      void spec;
+      const err = new Error('EMAIL_INVALID');
+      (err as NodeJS.ErrnoException).code = 'EMAIL_INVALID';
+      throw err;
+    };
+    try {
+      const res = await postUsers(
+        {
+          tenant_id: t.tenantId,
+          login: `email-invalid-kc-${Date.now()}`,
+          email: `email-invalid-kc-${Date.now()}@example.com`,
+          password: 'password12345',
+          display_name: 'Regular Name',
+        },
+        t.ownerSlug,
+      );
+      expect(res.status, JSON.stringify(res.json)).toBe(400);
+      expect(res.json?.error?.code ?? res.json?.code).toBe('VALIDATION');
+      const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+      expect(msg).toContain('email must be a valid email address');
+    } finally {
+      kc.createHumanUser = spy;
+    }
+  });
 });

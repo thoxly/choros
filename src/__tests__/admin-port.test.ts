@@ -710,3 +710,130 @@ describe("AP-8b — createHumanUser payload carries firstName/lastName from disp
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// AP-9 [T-0748, NF-1 from T-0741's own review]: createHumanUser's 400 branch
+// disambiguates a Keycloak person-name-character rejection (firstName/
+// lastName, triggered by T-0741's own new firstName/lastName payload) from a
+// genuine bad `email` — instead of folding EVERY 400 into EMAIL_INVALID (the
+// prior behavior, which told the owner "email must be a valid email address"
+// for a display_name like "Bot #1" or "A&B"; the email was never the
+// problem). Body shapes below are LIVE-CONFIRMED against a real KC 25.0.6
+// (t-0633-keycloak-1, 2026-07-11) — see docs/tasks/T-0748.spec.md for the
+// full transcript.
+// ---------------------------------------------------------------------------
+
+/**
+ * Stub that answers the token endpoint with a valid token, then answers the
+ * FIRST /users POST with HTTP 400 carrying `body400`. Drives createHumanUser's
+ * 400 branch deterministically without a live KC.
+ */
+function startUser400Stub(body400: string): Promise<{
+  cfg: KcRegistrarConfig;
+  close: () => Promise<void>;
+}> {
+  const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+    const path = req.url ?? "";
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      if (path.includes("/protocol/openid-connect/token")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ access_token: "stub-token" }));
+      } else if (path.includes("/users") && req.method === "POST") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(body400);
+      } else {
+        res.writeHead(500);
+        res.end();
+      }
+    });
+    req.on("error", () => { res.writeHead(500); res.end(); });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+      resolve({
+        cfg: {
+          baseUrl: `http://127.0.0.1:${port}`,
+          realm: "choros",
+          clientId: "choros-registrar",
+          clientSecret: "stub-secret",
+        },
+        close: () => new Promise<void>((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+describe("AP-9 — createHumanUser 400 person-name-vs-email disambiguation (T-0748)", () => {
+  it("KC 400 {field:'lastName', errorMessage:'error-person-name-invalid-character'} -> NAME_INVALID_CHARACTERS (live shape: displayName='Bot #1')", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({ field: "lastName", errorMessage: "error-person-name-invalid-character", params: ["lastName"] }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("NAME_INVALID_CHARACTERS");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("KC 400 {field:'firstName', errorMessage:'error-person-name-invalid-character'} -> NAME_INVALID_CHARACTERS (live shape: displayName='A&B')", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({ field: "firstName", errorMessage: "error-person-name-invalid-character", params: ["firstName"] }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("NAME_INVALID_CHARACTERS");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("KC 400 {errors:[...]} multi-field shape (email AND firstName both bad) -> NAME_INVALID_CHARACTERS (live shape, name problem still surfaces honestly)", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({
+        errors: [
+          { field: "email", errorMessage: "error-invalid-email", params: ["email", "not-an-email"] },
+          { field: "firstName", errorMessage: "error-person-name-invalid-character", params: ["firstName"] },
+        ],
+      }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("NAME_INVALID_CHARACTERS");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("REGRESSION: KC 400 {field:'email', errorMessage:'error-invalid-email'} -> EMAIL_INVALID (unchanged, live shape)", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({ field: "email", errorMessage: "error-invalid-email", params: ["email", "not-an-email"] }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("EMAIL_INVALID");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("REGRESSION: KC 400 with an unparseable/empty body -> EMAIL_INVALID (safe default, no regression)", async () => {
+    const stub = await startUser400Stub("not-json");
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("EMAIL_INVALID");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("REGRESSION: KC 400 on an unrelated field (e.g. 'username') -> EMAIL_INVALID (safe default — only firstName/lastName person-name errors map to NAME_INVALID_CHARACTERS)", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({ field: "username", errorMessage: "error-username-invalid-character", params: ["username"] }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("EMAIL_INVALID");
+    } finally {
+      await stub.close();
+    }
+  });
+});

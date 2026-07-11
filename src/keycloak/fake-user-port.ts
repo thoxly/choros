@@ -82,6 +82,15 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
    */
   failOnAuth = false;
 
+  /**
+   * T-0748: if true, the NEXT createHumanUser call throws
+   * NAME_INVALID_CHARACTERS — models a real KC 400 whose body carries a
+   * firstName/lastName `person-name-prohibited-characters` validator failure
+   * (e.g. displayName="Bot #1"/"A&B", see admin-port.ts
+   * isPersonNameCharacterError). One-shot, mirrors failOnLoginTaken.
+   */
+  failOnNameInvalid = false;
+
   /** Counter incremented on each call — useful for asserting call count. */
   createCallCount = 0;
 
@@ -131,6 +140,21 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
     if (!FAKE_EMAIL_RE.test(spec.email)) {
       const err = new Error("EMAIL_INVALID");
       (err as NodeJS.ErrnoException).code = "EMAIL_INVALID";
+      throw err;
+    }
+
+    // T-0748 (fake-fidelity): a real KC realm's declarative user-profile
+    // validates firstName/lastName's characters (person-name-prohibited-
+    // characters, realm-choros.json) in the SAME structural pass as the
+    // email-format check above — before any state-based outcome. This is a
+    // test-controlled switch rather than a re-implementation of KC's
+    // person-name regex (that would risk drifting from the real validator;
+    // admin-port.ts's own doc says KC itself is the authority on legal
+    // characters, not this codebase).
+    if (this.failOnNameInvalid) {
+      this.failOnNameInvalid = false;
+      const err = new Error("NAME_INVALID_CHARACTERS");
+      (err as NodeJS.ErrnoException).code = "NAME_INVALID_CHARACTERS";
       throw err;
     }
 
@@ -234,6 +258,7 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
     this.failOnCreate = false;
     this.failOnLoginTaken = false;
     this.failOnAuth = false;
+    this.failOnNameInvalid = false;
     this.failOnSetEnabled = false;
     this.failOnRevokeSessions = false;
     this.createCallCount = 0;

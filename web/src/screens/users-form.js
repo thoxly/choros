@@ -108,6 +108,18 @@ export function mapUserError(status, body, entity = 'операцию') {
   if (status === 409) {
     return { field: 'login', message: 'Учётка с таким логином уже существует в этом тенанте.' };
   }
+  // T-0748 (NF-1 from T-0741's own review): a display_name with characters
+  // Keycloak's person-name validator forbids (e.g. "Bot #1", "A&B") used to
+  // surface here as the generic 400 fallback below with the misleading
+  // server text "email must be a valid email address" — the owner was sent
+  // to fix a field that was never wrong. Anchor on `display_name` (the field
+  // that IS wrong) with the server's own honest Russian message.
+  if (status === 400 && code === 'NAME_INVALID_CHARACTERS') {
+    return {
+      field: 'display_name',
+      message: serverMsg || 'Отображаемое имя содержит недопустимые символы — уберите спецсимволы (<, &, #, кавычки, скобки).',
+    };
+  }
   if (status === 403) {
     return {
       message:
