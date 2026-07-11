@@ -290,13 +290,36 @@ function deriveRecordRefLabel(record) {
   return typeof record.id === "string" ? record.id.slice(0, 8) + "…" : null;
 }
 
-function RecordRef({ recordId, appId, headers, fetchImpl }) {
-  const [state, setState] = useState("loading"); // 'loading'|'resolved'|'denied'
-  const [label, setLabel] = useState(null);
-  const [targetAppId, setTargetAppId] = useState(appId || null);
+// T-0756 (E16 §6, capstone T-0691 P1): `projection` — a SERVER-provided safe
+// source-record projection { id, title, typeLabel, canOpen, appId? }. When present
+// it is AUTHORITATIVE: RecordRef renders `title` directly and issues NO
+// /api/records/:id fetch — the fetch is exactly what 404'd for the acting
+// participant (the record is draft-hidden / not READ-granted), collapsing to the
+// raw-UUID <MonoId> fallback this closes. The «открыть» link is offered ONLY when
+// `canOpen` (the record actually opens for this actor); otherwise the human title
+// is shown as plain text, never a dead link and never a raw UUID.
+function RecordRef({ recordId, appId, headers, fetchImpl, projection }) {
+  const hasProjection = projection !== null && typeof projection === "object";
+  const projTitle =
+    hasProjection && typeof projection.title === "string" && projection.title.trim().length > 0
+      ? projection.title.trim()
+      : null;
+  const projLinkAppId = hasProjection && projection.canOpen && projection.appId ? projection.appId : null;
+  const projTargetId = (hasProjection && typeof projection.id === "string" && projection.id) || recordId;
+
+  const [state, setState] = useState(hasProjection ? "resolved" : "loading"); // 'loading'|'resolved'|'denied'
+  const [label, setLabel] = useState(projTitle);
+  const [targetAppId, setTargetAppId] = useState(projLinkAppId || appId || null);
   const doFetch = fetchImpl || (typeof fetch !== "undefined" ? fetch : undefined);
 
   useEffect(() => {
+    // T-0756: a server projection is authoritative — never fetch/override it.
+    if (hasProjection) {
+      setLabel(projTitle);
+      setTargetAppId(projLinkAppId); // null unless canOpen — no dead link
+      setState("resolved");
+      return undefined;
+    }
     if (!recordId || !doFetch) {
       setState("denied");
       return undefined;
@@ -324,21 +347,28 @@ function RecordRef({ recordId, appId, headers, fetchImpl }) {
       .catch(() => { if (!cancelled) setState("denied"); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recordId, appId]);
+  }, [recordId, appId, hasProjection, projTitle, projLinkAppId]);
 
   if (state === "loading") {
     return <span className="chs-recordref chs-recordref--loading">…</span>;
   }
   if (state === "denied" || !label) {
     // Honest sentinel (D2) — never fall back to rendering the raw id bare.
+    // T-0756: a projection with no derivable title still shows a human sentinel,
+    // never the raw UUID.
+    if (hasProjection) {
+      return <span className="chs-recordref chs-recordref--unresolved">Запись недоступна</span>;
+    }
     return recordId ? <MonoId chip>{recordId}</MonoId> : <span>—</span>;
   }
-  const href = targetAppId ? `/apps/${targetAppId}/records/${recordId}` : undefined;
+  const href = targetAppId ? `/apps/${targetAppId}/records/${projTargetId}` : undefined;
   if (!href) {
+    // No open affordance (projection canOpen=false, or no known app): show the
+    // human title as PLAIN TEXT — orientation without a dead link (E16 §6).
     return <span className="chs-recordref">{label}</span>;
   }
   return (
-    <a className="chs-recordref chs-recordref--link" href={href} title={`Открыть запись · ${recordId}`}>
+    <a className="chs-recordref chs-recordref--link" href={href} title={`Открыть запись · ${projTargetId}`}>
       {label}
     </a>
   );
