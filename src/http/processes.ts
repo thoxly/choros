@@ -26,7 +26,13 @@ import {
   listInstanceProjections,
   isInstanceDetailVisible,
   filterProjectionsByReadVisibility,
+  // T-0756 [E16 §6, capstone T-0691 P1]: per-hop-ACL source-record projection +
+  // participant check. Both live in process-projection.ts (which carries pg) so
+  // THIS module stays display-plane-pure (FF-DISPLAY-4) — it only calls them.
+  resolveSourceRecordProjection,
+  isInstanceParticipant,
   type InstanceProjection,
+  type SourceRecordProjection,
 } from "./process-projection.js";
 import {
   overlayLiveSteps,
@@ -34,6 +40,11 @@ import {
   type CatalogEnginePort,
 } from "../core/process-catalog-view.js";
 import type { FlowableClient } from "../core/flowable-client.js";
+// T-0756: type-only import (Grant/AncestryOracle) to thread the READ-visibility
+// object into resolveSourceRecordProjection. Types erase at compile — this is NOT
+// the lattice math (isNarrowerOrEqual/isEffective), which stays out of this module
+// (FF-INST-VIS-2b, single-resolver: containment is resolved only in read-visibility.ts).
+import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 
 // T-0709-R-P2-1 (judge): same per-request budget the catalog uses. Re-declared here
 // (a plain number, not an import) so this display-plane module keeps importing ONLY from
@@ -909,7 +920,13 @@ export function registerProcessesRoutes(
             // absent ⇒ skip, byte-identical to pre-T-0721. Record-less instances (no
             // recordId) are NEVER narrowed here (phase-1 scope — see process-projection.ts's
             // isInstanceDetailVisible doc-comment; process-def-scoped narrowing is a follow-up).
+            // T-0721 resolves READ-visibility ONCE; T-0756 REUSES the SAME
+            // {grants, ancestry} for the source-record projection's canOpen (no
+            // second resolve). readVis stays undefined under honest-degrade.
             let detailVisible = true;
+            let readVis:
+              | { readonly grants: readonly Grant[]; readonly ancestry: AncestryOracle }
+              | undefined;
             if (startDeps.resolveReadVisibility) {
               const gateNowMs = Date.now();
               const { grants, ancestry } = await startDeps.resolveReadVisibility(
@@ -917,6 +934,7 @@ export function registerProcessesRoutes(
                 tenantId,
                 gateNowMs,
               );
+              readVis = { grants, ancestry };
               detailVisible = await isInstanceDetailVisible(
                 startDeps.pool,
                 tenantId,
@@ -926,7 +944,23 @@ export function registerProcessesRoutes(
                 gateNowMs,
               );
             }
-            if (detailVisible) {
+            // T-0756 [E16 §6, capstone T-0691 P1]: PARTICIPANT tier. A caller who
+            // ACTS on this instance (holds its task role / acted on it / tenant
+            // owner) but lacks source-record READ still gets the SKELETON + a SAFE
+            // source-record projection (NO variables/history). Only computed when
+            // the T-0721 DETAIL gate denied — a reader is already fully visible.
+            // Single per-hop-ACL authority (isInstanceParticipant); no bespoke math.
+            let participant = false;
+            if (!detailVisible) {
+              participant = await isInstanceParticipant(
+                startDeps.pool,
+                tenantId,
+                instanceId,
+                actorSlug,
+                Date.now(),
+              );
+            }
+            if (detailVisible || participant) {
               // T-0709-R-P0-1: overlay THIS instance's LIVE active node (step/role/
               // concurrentSteps) so the detail screen's node/nodes reflect the token's
               // real position — the SAME live source the catalog reads. Overlaying only
@@ -934,31 +968,60 @@ export function registerProcessesRoutes(
               // `match` byte-unchanged on its snapshot (overlayLiveSteps no-ops).
               const [displayMatch] = await overlayDetailLiveSteps(startDeps.flowable, [match]);
               const overlaid = displayMatch ?? match;
-              // T-0609: variables + detailed transition history, read from the SAME
-              // Flowable client already threaded into startDeps. Best-effort: an engine
-              // error degrades to empty arrays + historyAvailable:false, never a 500.
-              //
-              // T-0654 [part A / UX-study §5.3, rebase+recompose]: pass the starter id so
-              // the starter NAME for «Запущен: <Имя>» resolves in the SAME single batch as
-              // the step completers (no extra query — T-0648 one-call-per-request invariant
-              // kept). CRITICAL: this whole body — INCLUDING the starter resolve — runs ONLY
-              // inside `if (detailVisible)`, so no raw variables/history/completedBy AND no
-              // starter identity is ever resolved or emitted for a PDP-hidden instance
-              // (the T-0721 P1 gate is preserved around the added starter-fold).
-              const { starterDisplay, ...historyDetail } = await fetchInstanceHistoryDetail(
-                startDeps.flowable,
-                match.inst,
-                tenantId,
-                startDeps.resolveActorsDisplay,
-                overlaid.starterActorId,
-              );
+              // T-0756: the SAFE source-record projection (human title + type + honest
+              // canOpen), delivered PRE-RESOLVED so RecordRef renders the title without a
+              // records/:id fetch that would 404 → no raw-UUID fallback. canOpen reuses the
+              // SAME READ-PDP grants/ancestry above + the sandbox gate — the link is offered
+              // ONLY when GET /api/records/:id would actually 200 (never a dead «открыть»).
+              let sourceRecord: SourceRecordProjection | null = null;
+              if (match.recordId !== undefined) {
+                sourceRecord = await resolveSourceRecordProjection(
+                  startDeps.pool,
+                  tenantId,
+                  match.recordId,
+                  actorSlug,
+                  Date.now(),
+                  readVis,
+                );
+              }
+              const sourceRecordKey = sourceRecord !== null ? { sourceRecord } : {};
+              if (detailVisible) {
+                // T-0609: variables + detailed transition history, read from the SAME
+                // Flowable client already threaded into startDeps. Best-effort: an engine
+                // error degrades to empty arrays + historyAvailable:false, never a 500.
+                //
+                // T-0654 [part A / UX-study §5.3, rebase+recompose]: pass the starter id so
+                // the starter NAME for «Запущен: <Имя>» resolves in the SAME single batch as
+                // the step completers (no extra query — T-0648 one-call-per-request invariant
+                // kept). CRITICAL: this whole body — INCLUDING the starter resolve — runs ONLY
+                // inside `if (detailVisible)`, so no raw variables/history/completedBy AND no
+                // starter identity is ever resolved or emitted for a PDP-hidden instance
+                // (the T-0721 P1 gate is preserved around the added starter-fold).
+                const { starterDisplay, ...historyDetail } = await fetchInstanceHistoryDetail(
+                  startDeps.flowable,
+                  match.inst,
+                  tenantId,
+                  startDeps.resolveActorsDisplay,
+                  overlaid.starterActorId,
+                );
+                const detailInstance = projectionToInstance(overlaid);
+                const withStarter = starterDisplay
+                  ? { ...detailInstance, starterName: starterDisplay.name, starterType: starterDisplay.type }
+                  : detailInstance;
+                res.statusCode = 200;
+                res.setHeader("Content-Type", "application/json");
+                res.end(JSON.stringify({ ...withStarter, ...historyDetail, ...sourceRecordKey }));
+                return;
+              }
+              // T-0756 PARTICIPANT SKELETON: status/step/progress/starter (the inbox
+              // already shows a participant these — T-0750 precedent) + the safe
+              // source-record projection. NO variables/history/completedBy* — those
+              // stay reader-only, so the T-0721 threat surface is UNCHANGED for a
+              // participant who cannot READ the source record.
               const detailInstance = projectionToInstance(overlaid);
-              const withStarter = starterDisplay
-                ? { ...detailInstance, starterName: starterDisplay.name, starterType: starterDisplay.type }
-                : detailInstance;
               res.statusCode = 200;
               res.setHeader("Content-Type", "application/json");
-              res.end(JSON.stringify({ ...withStarter, ...historyDetail }));
+              res.end(JSON.stringify({ ...detailInstance, ...sourceRecordKey }));
               return;
             }
             // else: fall through to the honest 404 below (T-0570 precedent,
