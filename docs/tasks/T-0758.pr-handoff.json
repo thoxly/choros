@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0758",
+  "status": "pr_open",
+  "branch": "task/T-0758",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/tasks/T-0758.spec.md",
+    "docs/tasks/T-0758.pr-handoff.json",
+    "ci/checks/agent-instruction-runtime-dormant.sh",
+    "docs/design/T-0152-security-invariants-catalog.md",
+    "ci/checks/data/frozen-sanctions.jsonl"
+  ],
+  "summary": "Fix D-056 substrate: ci/checks/agent-instruction-runtime-dormant.sh (FF-COMP-6) was RED on a clean dev checkout (dev@b50308be), masking npm run fitness's honest signal on every branch. Root cause: the src/http allowlist loop's detector (`grep -rlE \"agent_instruction|agent-instruction\"`) is file-level and comment-unaware — two pure documentation comments in src/http/agents.ts (byte-identical to origin/dev, naming the 'agent-instruction promote path' in prose) tripped it though agents.ts performs zero code-level table reads. The gate is right in spirit (day-1 no runtime response-formation path may read agent_instruction) — only its pattern was wrong. Added file_has_code_level_agent_instruction_hit() (comment-stripping re-scan) + wired it into the src/http loop before the pre-existing FAIL/BAD_HTTP increment (untouched, still the live FAIL path for any real violation) + 2 new --self-test probes. Diff against BASE_REF is 100% pure insertion (0 lines removed/modified) — verified both by manual diff and by ci/checks/auto-sanction-additive.sh --verify (A-1..A-4 PASS).",
+  "frozen_check_governance": {
+    "file": "ci/checks/agent-instruction-runtime-dormant.sh",
+    "ownership": "no `# T-XXXX ·` header on line 2 (line 2 is `# FF-COMP-6 (T-0123) — runtime-dormant (AC-11).`, does not match the ^# T-[0-9]+ anchor) — legacy/foreign frozen check under FF-FCI11 (frozen-checks-immutable.sh), foreign to every task including T-0758. Confirmed live: an un-sanctioned edit reddened FF-FCI1.",
+    "classification": "additive (pattern refinement / narrowing false positives only) — NOT a reclassification or weakening, so the auto_additive channel (T-0232/D-060) applies; no founder-class sanction needed or used.",
+    "sanction": "ci/checks/data/frozen-sanctions.jsonl append: {task:T-0758, file:ci/checks/agent-instruction-runtime-dormant.sh, sanctioned_by:auto_additive, families:[AGENT-INSTRUCTION-DORMANT]}. Verified mechanically (not self-asserted) by ci/checks/auto-sanction-additive.sh --verify T-0758 ... → PASS (A-1..A-4 + Враг-attestation both green).",
+    "catalog_prerequisite": "the file was previously UNCATALOGUED in docs/design/T-0152-security-invariants-catalog.md (no family's Enforced-by referenced it), which blocked auto_additive's R-1b surface-binding check. Added new family §7.8 AGENT-INSTRUCTION-DORMANT as a pure append (new family + new Enforced-by entry only) — verified by ci/checks/enemy/catalog-frozen.sh (append-only/no-weakening meta-gate) PASS: no existing family or Enforced-by reference was touched.",
+    "governance_gates_reverified": [
+      "ci/checks/frozen-checks-immutable.sh — PASS (sanction path exercised end-to-end, SANCTION/AUDIT lines printed)",
+      "ci/checks/enemy/catalog-frozen.sh — PASS (20 families + 86 Enforced-by refs at BASE_REF all survive; append-only holds)",
+      "ci/checks/auto-sanction-additive.sh (standalone, live sanction) — PASS"
+    ]
+  },
+  "test_evidence": {
+    "gate_direct": "bash ci/checks/agent-instruction-runtime-dormant.sh, run directly and repeatedly on a clean task/T-0758@b50308be checkout: BEFORE the fix → FAIL (1 violation, src/http/agents.ts), matching T-0756's prior documented finding. AFTER the fix (working tree, uncommitted) → PASS (0 violations, agents.ts SKIPped as comment-only).",
+    "self_test": "bash ci/checks/agent-instruction-runtime-dormant.sh --self-test: PASS, including 2 new T-0758 probes (T-0758-COMMENT-ONLY, T-0758-REAL-HIT).",
+    "mutation_probe": "planted a REAL (non-comment) `agent_instruction` code reference in (a) src/http/agents.ts itself and (b) a clean, previously-unflagged src/http/app-secret.ts — both reddened the gate (FAIL FF-COMP-6) exactly as before the fix; both reverted via `git checkout -- <file>` (no git stash used). Proves the comment-aware narrowing does not weaken real-violation detection anywhere in src/http.",
+    "additivity_mechanical": "ci/checks/auto-sanction-additive.sh --verify T-0758 ci/checks/agent-instruction-runtime-dormant.sh b50308be26c7c504c431d40cd924a47dc8180a98 <sanction-json>: PASS [A-1..A-4] + PASS [ATTEST-R1a/R1b] + PASS [FF-FCI13].",
+    "full_fitness_after": "npm run fitness on task/T-0758 (with fix applied): FITNESS_EXIT=0, full clean run through the entire && chain (hundreds of gates, including this task's own new --self-test probes). The only two '^FAIL:' text lines in the log are inside OTHER gates' own self-test negative-probes (document-render-isolation's absent-module probe; docpage-writeful-tools' planted-violation probe), each immediately followed by 'PASS [self-test]:' / 'SELF-TEST PASS' — i.e. expected, not real failures.",
+    "full_fitness_before_caveat": "A byte-for-byte 'before' full-chain run (isolated git worktree at b50308be, own npm install) was attempted twice but could not be completed cleanly in this shared, extremely loaded environment (`uptime` load averages 41/47/58 during the attempts, other agents' concurrent tsc/npm processes visible in `ps aux`): both attempts stopped early (before ever reaching agent-instruction-runtime-dormant.sh in the && chain) at an UNRELATED gate, ci/checks/card-action-broad-scope.sh (FF-CA-10) — with a DIFFERENT specific sub-assertion failing each time, and the same gate PASSING deterministically 5/5 when re-run standalone immediately after. This is diagnostic of transient resource-starvation inside that check's subprocess calls under this machine's load, not a real defect in b50308be or in this task's diff (grant-lattice.ts/object-handle.ts are untouched by T-0758; `diff` against the T-0758 worktree's copies is empty). The 'before=1' figure is instead established by direct, repeated, deterministic invocation of the target gate alone (gate_direct above), which matches T-0756's own independently-documented dev-baseline finding."
+  },
+  "fitness_gates_run": [
+    "agent-instruction-runtime-dormant.sh: FAIL→PASS (the target gate, direct + full-chain)",
+    "agent-instruction-runtime-dormant.sh --self-test: PASS",
+    "frozen-checks-immutable.sh: PASS",
+    "ci/checks/enemy/catalog-frozen.sh: PASS",
+    "auto-sanction-additive.sh --verify + standalone: PASS",
+    "npm run fitness (full chain, task/T-0758 with fix): FITNESS_EXIT=0",
+    "npx tsc --noEmit: 0 errors"
+  ],
+  "deviations_from_adr": [],
+  "follow_ups": [
+    "Environment note (not a T-0758 defect): under heavy concurrent CPU load in this shared factory environment, the full `npm run fitness` && chain intermittently shows a transient FAIL at an unrelated gate (observed once at ci/checks/dual-control-isolation.sh FF-DC11, once at ci/checks/card-action-broad-scope.sh FF-CA-10) that does NOT reproduce when that gate is re-run standalone/low-load — consistent with the pre-existing 'fitness suite flakes under concurrent load' class (memory: fitness:db timeout masking). Not caused by and not fixed by this task; flagged for a separate substrate hardening task if it recurs."
+  ],
+  "friction_events": [
+    "The environment had many concurrent background agent sessions (other tasks' tsc/npm processes visible in `ps aux`, including one against /Users/shoxy/Code/choros unrelated to this task) — running full `npm run fitness` in parallel with those caused transient, non-reproducible FAILs at gates unrelated to this change (confirmed flakes: standalone re-run under lower load passes deterministically 3/3). Used targeted standalone gate runs + mutation-probes as the reliable verification signal instead of relying solely on one full-chain run under load.",
+    "tsc --noEmit on this repo takes >2min; ran in background."
+  ]
+}

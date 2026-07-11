@@ -33,7 +33,37 @@ RUNTIME_PATHS=(
 # agent_instruction (narrow unpark — the only live skill gate at day-1).
 ALLOWED_RE='src/db/agent-instruction-store\.ts|src/core/agent-instruction\.ts|src/http/artifacts\.ts|src/runtime/legal-precheck/|__tests__|\.test\.ts'
 
+# T-0758 (FF-COMP-6 comment-aware refinement, additive/narrowing only): a bare
+# `grep -rl` hit also matches documentation COMMENTS that merely NAME
+# "agent-instruction" in prose (e.g. cross-referencing the promote path
+# implemented in another file) — that is not a runtime read of the table and
+# must not trip AC-11. This helper re-scans a candidate file with comment
+# lines (#, //, and /* */-continuation `*` lines) stripped; only a hit
+# surviving that strip is a genuine code-level read. Narrows FALSE positives
+# ONLY — every non-comment (code) hit is still detected exactly as before.
+file_has_code_level_agent_instruction_hit() {
+  local target="$1"
+  grep -vE '^[[:space:]]*(#|//|/\*|\*)' "${target}" 2>/dev/null | grep -qE "agent_instruction|agent-instruction"
+}
+
 if [[ "${1:-}" == "--self-test" ]]; then
+  # T-0758: comment-aware detector self-test — prove the refinement narrows
+  # FALSE positives (doc comments naming agent-instruction) without weakening
+  # TRUE positives (genuine code-level table reads in a disallowed file).
+  SELFTEST_TMP="$(mktemp -d)"
+  trap 'rm -rf "${SELFTEST_TMP}"' EXIT
+  printf '// see the agent-instruction promote path for details\nexport const x = 1;\n' > "${SELFTEST_TMP}/comment_only.ts"
+  if file_has_code_level_agent_instruction_hit "${SELFTEST_TMP}/comment_only.ts"; then
+    echo "FAIL self-test [T-0758-COMMENT-ONLY]: comment-only reference to agent-instruction was WRONGLY classified as a code-level hit"
+    exit 1
+  fi
+  echo "PASS self-test [T-0758-COMMENT-ONLY]: comment-only reference correctly classified as non-code (SKIP, not FAIL)"
+  printf '// unrelated comment\nconst rows = await db.query("select * from choros.agent_instruction");\n' > "${SELFTEST_TMP}/real_hit.ts"
+  if ! file_has_code_level_agent_instruction_hit "${SELFTEST_TMP}/real_hit.ts"; then
+    echo "FAIL self-test [T-0758-REAL-HIT]: genuine code-level agent_instruction read was NOT detected — guard WEAKENED"
+    exit 1
+  fi
+  echo "PASS self-test [T-0758-REAL-HIT]: genuine code-level read still detected (guard NOT weakened)"
   if printf 'SELECT * FROM choros.agent_instruction\n' | grep -qE "agent_instruction"; then
     echo "PASS self-test: agent_instruction read pattern is detectable"
     exit 0
@@ -65,6 +95,10 @@ if [[ -d "${SRC}/http" ]]; then
   while IFS= read -r f; do
     [[ -z "${f}" ]] && continue
     if printf '%s' "${f}" | grep -qE "${ALLOWED_RE}"; then
+      continue
+    fi
+    if ! file_has_code_level_agent_instruction_hit "${f}"; then  # T-0758
+      echo "SKIP FF-COMP-6: ${f} — hit is comment-only (documentation reference), not a runtime code read (T-0758)"
       continue
     fi
     echo "FAIL FF-COMP-6: response-forming http handler reads agent_instruction: ${f}"

@@ -442,6 +442,26 @@ corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
   дрейф между волнами; следующий новый GET-роут может открыть новую находку
   до следующего ручного прогона.
 
+### 7.8 AGENT-INSTRUCTION-DORMANT — агентная инструкция не читается в рантайм-пути формирования ответа
+- **Инвариант:** день-1 НЕТ рантайм-пути формирования ответа (движок/воркер/
+  bridge/adapters), который читает `agent_instruction`; в `src/http` чтение
+  допустимо ТОЛЬКО в authoring-DAO, чистом core-модуле типов/changelog,
+  audit/promote-регистрации (`artifacts.ts` `CONFIG_TABLES`) и тестах — никогда
+  в response-forming-хендлере (ADR §4 FF-COMP-6).
+- **Enforced by:** `ci/checks/agent-instruction-runtime-dormant.sh` (T-0123,
+  FF-COMP-6, есть `--self-test`).
+- **Покрытие: PARTIAL** (static grep-скан путей + allowlist на `src/http`; нет
+  runtime-кейса).
+- **T-0758 (comment-aware narrowing, additive-only):** исходный детектор был
+  `grep`-comment-unaware — ЛЮБОЕ упоминание строки `agent-instruction` в
+  ДОКУМЕНТАЦИОННОМ комментарии `src/http` (не read самой таблицы) ложно
+  красило гейт на чистом dev (2 comment-строки в `src/http/agents.ts`,
+  byte-identical dev/origin). Фикс добавил `file_has_code_level_agent_instruction_hit()`
+  — строки `#`/`//`/`/* */`-комментариев исключаются ПЕРЕД повторной проверкой
+  паттерна; ни один реальный код-уровневый read не перестаёт ловиться
+  (self-test + мутационная проверка это доказывают). Диф — чисто аддитивный
+  (0 удалённых/изменённых строк BASE_REF, A-1..A-4 verified).
+
 ---
 
 ## 8. Сводная таблица покрытия
