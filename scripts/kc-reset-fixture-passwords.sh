@@ -280,8 +280,8 @@ kc() {
 # temporary=false, and re-applies attributes.actor_type="human" as a SCALAR
 # (T-0638 lesson: realm-reimport strips this single-valued profile attribute —
 # it must be restored as a bare string, not an array, on every reset).
-declare -A RESULT_PASSWORDS
-declare -a SKIPPED_NOT_FOUND
+RESULT_PASSWORDS=()
+SKIPPED_NOT_FOUND=()
 
 reset_user_password() {
   local username="$1"
