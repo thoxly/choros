@@ -77,7 +77,31 @@ function makeMockModeler() {
       calls.push({ op: 'removeConnection', id: connection.id });
     },
   };
-  return { get: (name) => (name === 'modeling' ? modeling : undefined), calls };
+  // Minimal commandStack mimicking diagram-js semantics: registerHandler
+  // instantiates the handler class ($inject: ['modeling']) and execute() runs
+  // its phases. Every execute is RECORDED — the atomicity pin asserts the whole
+  // build issues exactly ONE commandStack.execute (the composite command);
+  // grouping of the nested modeling ops into that one undo entry is proven
+  // against the REAL CommandStack in escalation-branch-undo.test.jsx.
+  const handlers = {};
+  const commandStack = {
+    registerHandler(command, HandlerCls) {
+      calls.push({ op: 'registerHandler', command });
+      handlers[command] = new HandlerCls(modeling);
+    },
+    execute(command, context) {
+      calls.push({ op: 'commandStack.execute', command });
+      const h = handlers[command];
+      if (!h) throw new Error(`no handler for ${command}`);
+      if (h.preExecute) h.preExecute(context);
+      if (h.execute) h.execute(context);
+      if (h.postExecute) h.postExecute(context);
+    },
+  };
+  return {
+    get: (name) => (name === 'modeling' ? modeling : name === 'commandStack' ? commandStack : undefined),
+    calls,
+  };
 }
 
 /* --------------------------------------------------------------------------
@@ -193,6 +217,18 @@ describe('applyEscalationBranch — builds the converging shape', () => {
 
     expect(res.applied).toBe(true);
     const { calls } = modeler;
+
+    // U-1 ATOMICITY: the entire build is issued as exactly ONE composite
+    // commandStack.execute — all modeling ops are NESTED inside it (one undo
+    // entry; single-undo behaviour is pinned against the real CommandStack in
+    // escalation-branch-undo.test.jsx).
+    const executes = calls.filter((c) => c.op === 'commandStack.execute');
+    expect(executes).toHaveLength(1);
+    expect(executes[0].command).toBe('choros.escalationBranch.build');
+    // No modeling op happened OUTSIDE the composite execute.
+    const executeIdx = calls.findIndex((c) => c.op === 'commandStack.execute');
+    const modelingOps = ['updateProperties', 'appendShape', 'connect', 'removeConnection'];
+    expect(calls.findIndex((c) => modelingOps.includes(c.op))).toBeGreaterThan(executeIdx);
 
     // 1. timer → non-interrupting
     expect(calls).toContainEqual({
