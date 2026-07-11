@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0306",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": false },
+  "_r2_note": "АДВЕРС-RE-VERIFY r2 после исполнения вердикта r1. Оба blocking r1 ЗАКРЫТЫ и проверены живьём: (1) merge-base dev..HEAD == dev tip 3256f627, дифф ровно 6 заявленных файлов, nav-config.test.js в диффе ОТСУТСТВУЕТ, вердикт-коммит r1 не перенесён; (2) стало-базовая правка allowlist выкинута; (3) дубль снят — FirstRunPanel/isFirstRun в коде отсутствуют (grep: 1 упоминание в doc-комменте), единственный онбординг-слой = FirstStepsStrip T-0598. Остаётся ОДИН новый blocking: свежий mount-тест сам по себе flaky-under-load — web-гейт краснеет (см. F1-r2).",
+  "findings": [
+    {
+      "id": "F1-r2-mount-A-timeout-flake",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "web/src/screens/screen-overview.mount.test.jsx (сценарий A, частично B) + web/vitest.config.js (нет testTimeout)",
+      "issue": "Заявление «web полный 109 файлов/2854 PASS» НЕ воспроизводится: на этой машине (нагрузка wave-7, LA~60, но vitest СОЛО single-thread) полный прогон = 2853 PASS / 1 FAIL — единственный красный это НОВЫЙ сценарий A этого mount-теста ('Test timed out in 5000ms'). 3 прогона с дефолтным таймаутом: A красный 3/3, B красный 1/3. С --testTimeout=30000 — 3/3 GREEN, сценарий A занимает ~9.9s: логика ВЕРНА, зависания нет, но тест детерминированно медленный — waitFor поллит getAllByRole('img',{name}) (вычисление accessible-name по всему DOM на каждый тик) и пробивает дефолтные 5s под нагрузкой. Sibling mount-тесты T-0715 (inbox/processes/record-detail) укладываются в лимит. Это ровно системный класс w6/w7 «timeout-маска мигрирует, конкур-нагрузка амплифицирует» (fitness:db уже лечили suite-wide testTimeout) — теперь внесён в web-тир. Красный-под-нагрузкой гейт = ложные блокировки следующих задач волны и эрозия доверия к красному (анти-D-064).",
+      "suggestion": "Один из: (а) явный per-test timeout сценариям A/B (третий аргумент it(..., 20000)) как минимум; (б) лучше — testTimeout в web/vitest.config.js суре-wide (урок w6 fitness:db); (в) удешевить probe — поллить дешёвый маркер (queryByText/testid) вместо role+name, тяжёлую role-проверку делать один раз после waitFor. После фикса — полный web-прогон на этой же машине должен быть 2854/2854."
+    },
+    {
+      "id": "F2-r2-content-table-list-maintenance",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/first-run-empty-workspace.test.ts (CONTENT_TABLES, 12 таблиц)",
+      "issue": "Список 12 сверен с живыми миграциями: section(113)/list_view(123)/engine_process_name(131) включены, @demo-seed 132 пишет только Dev-Silo — корректно. matrix_lookup_cell не в списке, но покрыта транзитивно (составной FK (tenant_id,table_id) → matrix_lookup_table, 0 таблиц ⇒ 0 ячеек). Из 65 tenant-scoped таблиц вне списка остаются контент-смежные mcp_tool/doc_page/report_page/file — все их сиды Dev-Silo-литеральные, кросс-тенант закрыт RLS (A3 register-isolation), поэтому не blocking. Но список статичен: будущая контент-таблица (миграция 133+) в него сама не попадёт.",
+      "suggestion": "Follow-up: генерировать/сверять CONTENT_TABLES с known_tenant_tables.txt (denylist каркасных) или добавить fitness-напоминание при новой CREATE TABLE в миграциях."
+    },
+    {
+      "id": "F3-r2-t0598-count-discrepancy",
+      "severity": "nit",
+      "axis": 6,
+      "location": "заявление строителя «все 22 теста T-0598 зелёные»",
+      "issue": "Мелкая неточность отчётности: на dev screen-overview.test.jsx несёт 24 it() (не 22); на ветке 32 (24 старых + 8 новых T-0306), все 32 зелёные в моём полном прогоне. Существу не вредит.",
+      "suggestion": "Нет действия; отмечено для точности."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "База: ветка от текущего dev tip 3256f627, дифф = 6 файлов, nav-config.test.js отсутствует", "covered": true },
+    { "ac": "Консолидация: один онбординг-слой (FirstStepsStrip), FirstRunPanel/isFirstRun сняты", "covered": true },
+    { "ac": "Honest-degrade перенесён в strip: stepMarkerState unit 5/5 + source-wiring 3/3; unknown-маркер только при !loading && signal===null", "covered": true },
+    { "ac": "DB-regression 12 контент-таблиц: fitness:db соло 2/2 (live-PG, шаблон 9c398948 с миграциями до 132) + register-isolation 3/3", "covered": true },
+    { "ac": "REAL jsdom mount OverviewScreen: A/B/C логически верны (3/3 при 30s), НО A flaky при дефолтных 5s под нагрузкой — гейт красный", "covered": false },
+    { "ac": "T-0598 без регресса: 24 старых теста зелёные, AC-8 литерал жив, видимость/состав шагов AC-6/7 не тронуты диффом, скрытие полосы mount-доказано (C)", "covered": true },
+    { "ac": "tsc 0; vite build (r2 фоновый прогон); G2/G5/G6 exit 0; анти-кейс чист (1 hit = role-configurator, платформенный слаг); pr-handoff schema-VALID", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Мутация stepMarkerState (unknown → 'todo') поймана ДВУМЯ слоями: unit decision-таблица RED + mount сценарий B RED быстрым assertion-фейлом за 1747ms (не таймаутом). Ревертнуто git checkout --, дерево чисто (git stash не использовался).",
+    "Полный web-прогон судьи (single-thread): 109 файлов, 2853 passed / 1 failed — падение ТОЛЬКО в новом mount-сценарии A по таймауту; с --testTimeout=30000 тот же файл 3/3 GREEN (A=9867ms). Логика верна, дедлайн — нет.",
+    "register.ts на новой базе по-прежнему сеет только каркас: tenant/role/employee/role_assignment/grant + agent_card (T-0574, ассистент) — 0 вставок в контент-таблицы.",
+    "fitness:db соло: first-run 2/2 (AC-1 767→9415ms, AC-2 под choros_app NOBYPASSRLS), register-isolation 3/3 — на СВЕЖЕМ шаблоне 9c398948 (миграции 113-132 включены).",
+    "tsc exit 0 (фон, лог tsc-r2.log); pr-handoff.json валиден по pr-handoff.schema.json (module-API валидация, негативный контроль validate.py подтверждён в r1)."
+  ]
+}
