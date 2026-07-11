@@ -80,23 +80,37 @@ describe('OverviewScreen — REAL mount, first-run сценарии (T-0306)', (
     globalThis.localStorage = originalLocalStorage;
   });
 
+  // F1-r2: probe «загрузка завершена» — дешёвый class-селектор (LoadingState
+  // рендерит .chs-state--loading; покрывает и плитки, и строки полосы). НЕ
+  // зависит от stepMarkerState (StepRow ветвится на `loading ? (` литерале) —
+  // мутация decision-функции не подвесит ожидание: probe завершится, а упадёт
+  // БЫСТРЫЙ assertion по маркерам. Поллинг getAllByRole(img,{name}) из r2
+  // вычислял accessible-name на каждый тик waitFor и детерминированно пробивал
+  // дефолтные 5s под конкур-нагрузкой (класс w6/w7 «timeout-маска», теперь в
+  // web-тире); замена — attribute/class-селекторы + разовые проверки атрибутов;
+  // per-test timeout 10000 на A/B — подстраховка.
+  async function waitLoaded() {
+    await waitFor(() => {
+      expect(document.querySelectorAll('.chs-state--loading')).toHaveLength(0);
+    });
+  }
+  const UNKNOWN_MARKER_SEL = '[title="Статус шага недоступен"]';
+
   it('A: свежий пустой workspace → «Первые шаги» видимы, CTA «Создать приложение» рабочая, 0 маркеров «недоступно»', async () => {
     renderOverview();
     // Полоса и шаг 1 присутствуют сразу (полоса не ждёт сигналов, чтобы показаться).
     expect(screen.getByText('Первые шаги')).toBeTruthy();
     expect(screen.getByText('Создайте приложение')).toBeTruthy();
-    // Дождаться завершения обеих загрузок (плитки + сигналы полосы).
-    await waitFor(() => {
-      expect(screen.queryAllByRole('img', { name: 'Статус шага недоступен' })).toHaveLength(0);
-      // Счётчик приложений на плитке «Конструктор» загрузился (0, а не спиннер).
-      expect(screen.getAllByText('0').length).toBeGreaterThan(0);
-    });
-    // CTA шага 1 — настоящая кнопка (кликабельность = роль button, не мёртвый текст).
+    // Дождаться завершения ВСЕХ загрузок (плитки + сигналы полосы) дёшево.
+    await waitLoaded();
+    // Пустой workspace = подтверждённый todo: ни одного «недоступно» после загрузки.
+    expect(document.querySelectorAll(UNKNOWN_MARKER_SEL)).toHaveLength(0);
+    // Счётчик приложений на плитке «Конструктор» загрузился (0, а не спиннер).
+    expect(screen.getAllByText('0').length).toBeGreaterThan(0);
+    // CTA шага 1 — настоящая кнопка (разовый getAllByRole ВНЕ waitFor — не поллинг).
     const ctas = screen.getAllByRole('button', { name: 'Создать приложение' });
     expect(ctas.length).toBeGreaterThan(0);
-    // Пустой workspace = подтверждённый todo: ни одного «недоступно» после загрузки.
-    expect(screen.queryAllByRole('img', { name: 'Статус шага недоступен' })).toHaveLength(0);
-  });
+  }, 10000);
 
   it('B: /api/applications 500 → шаг 1 показывает честный маркер «Статус шага недоступен» (сбой ≠ пусто)', async () => {
     globalThis.fetch = async (url) => {
@@ -105,14 +119,19 @@ describe('OverviewScreen — REAL mount, first-run сценарии (T-0306)', (
       return freshTenantFetch(url);
     };
     renderOverview();
-    await waitFor(() => {
-      const unknownMarkers = screen.getAllByRole('img', { name: 'Статус шага недоступен' });
-      expect(unknownMarkers).toHaveLength(1); // ровно шаг 1; шаги 2-3 загрузились честно
-    });
+    await waitLoaded();
+    // Ровно один честный маркер — шаг 1 (шаги 2-3 загрузились честно). Сломанный
+    // stepMarkerState (unknown→todo) даёт 0 → МГНОВЕННЫЙ assertion-fail, не таймаут:
+    // waitLoaded ветвится на `loading ? (` литерале StepRow, не на decision-функции.
+    const markers = document.querySelectorAll(UNKNOWN_MARKER_SEL);
+    expect(markers).toHaveLength(1);
+    // a11y-контракт маркера — прямые атрибуты (без вычисления accessible-name).
+    expect(markers[0].getAttribute('role')).toBe('img');
+    expect(markers[0].getAttribute('aria-label')).toBe('Статус шага недоступен');
     // Полоса при деградации остаётся видимой, CTA рабочая (AC-6 T-0598 сохранён).
     expect(screen.getByText('Первые шаги')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Создать приложение' }).length).toBeGreaterThan(0);
-  });
+  }, 10000);
 
   it('C: все три шага подтверждённо пройдены → полоса скрыта целиком (mount-подтверждение AC-7)', async () => {
     globalThis.fetch = async (url) => {

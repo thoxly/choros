@@ -17,10 +17,11 @@
     "web/src/screens/screen-overview.mount.test.jsx",
     "ci/checks/db/first-run-empty-workspace.test.ts"
   ],
-  "revision": "r2 — после changes_requested: ветка пересажена со стало́й базы fed0b962 на свежий dev@3256f627 (git reset --hard dev + cherry-pick содержательного); FirstRunPanel из r1 снят как дубликат T-0598 FirstStepsStrip; правка nav-config.test.js из r1 полностью выкинута (на dev тест зелёный)",
+  "revision": "r3 — хирургический фикс F1-r2 поверх r2. r2: ветка пересажена со стало́й базы fed0b962 на свежий dev@3256f627 (reset --hard dev + cherry-pick содержательного); FirstRunPanel снят как дубликат T-0598 FirstStepsStrip; правка nav-config.test.js выкинута. r3 (только mount-тест): waitFor больше НЕ поллит getAllByRole(img,{name}) — accessible-name вычислялся на каждый тик и детерминированно пробивал дефолтные 5s под конкур-нагрузкой (класс w6/w7 «timeout-маска», теперь в web-тире); probe = querySelectorAll('.chs-state--loading')===0 (НЕ зависит от stepMarkerState: StepRow ветвится на литерале `loading ? (` — мутация decision-функции не подвешивает ожидание), маркеры «недоступно» — attribute-селектор [title=...], a11y-контракт — разовые проверки атрибутов role/aria-label; per-test timeout 10000 на A/B (глобальный web/vitest.config.js НЕ тронут)",
+  "mutation_check_r3": "stepMarkerState сломан (unknown→todo) → сценарий B красный за 377ms чистым assertion «expected to have a length of 1 but got +0» (expect(markers).toHaveLength(1)), НЕ таймаутом; мутация откатана (grep MUTATION-PROBE = 0, git diff чист)",
   "gates_run": {
     "types": "npx tsc --noEmit → 0 ошибок",
-    "web_tests_full": "cd web && npx vitest run → 109 файлов / 2854 теста PASS (полный прогон на новой базе; вкл. 32 в screen-overview.test.jsx из них +8 новых T-0306, и 3/3 нового jsdom mount)",
+    "web_tests_full": "cd web && npx vitest run (соло, после r3) → 109 файлов / 2854 теста PASS, 0 таймаутов; вкл. 32 в screen-overview.test.jsx (24 существующих T-0598 + 8 новых T-0306) и 3/3 jsdom mount (соло: A 2.2s / B 0.4s / C 0.25s — в дефолтном 5s-лимите)",
     "db_regression_solo": "DATABASE_URL=postgres://...:55432/choros; setup-template (hash 9c398948, 118 миграций); vitest --dir ci/checks/db --no-file-parallelism: first-run-empty-workspace 2/2 PASS (12 контент-таблиц) + register-tenant-isolation.adversarial 3/3 PASS",
     "web_build": "cd web && npx vite build → OK за 30.7s (pre-existing chunk-size warning)",
     "ux_gates": "ux-g6 0 новых хардкодов; ux-g2 PASS; ux-g4 0 новых state-веток; ux-g5 informational (0 новых от T-0306) → все exit 0",
@@ -37,7 +38,7 @@
       "правка web/src/app-shell/nav-config.test.js (r1) — стало-базовая, на dev ALLOWED_NEW_IDS уже полный",
       "судейский вердикт-коммит a7096ee1 — относился к старой ревизии"
     ],
-    "not_a_second_block": "на «Обзоре» остался ОДИН онбординг-слой (FirstStepsStrip); видимость полосы и состав шагов T-0598 (AC-6/AC-7) не менялись; существующие 22 теста T-0598 не тронуты и зелёные, литерал AC-8 сохранён"
+    "not_a_second_block": "на «Обзоре» остался ОДИН онбординг-слой (FirstStepsStrip); видимость полосы и состав шагов T-0598 (AC-6/AC-7) не менялись; существующие 24 теста T-0598 не тронуты и зелёные, литерал AC-8 сохранён"
   },
   "deviations_from_adr": [
     "Спека эпика docs/specs/E14-self-serve-onboarding.spec.md в репо отсутствует и на свежем dev; разведка сделана по коду (register.ts на dev дополнен T-0574 agent_card / T-0570 default-READ / T-0666 process_designer — контент-плоскость по-прежнему не сеется).",
