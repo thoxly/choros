@@ -27,11 +27,23 @@
  *   The CrossAppHopFetcher impl (makeHopFetcher below) fetches the target record
  *   inside the SAME tenant-scoped TX (RLS enforced). A missing record → not_found;
  *   cross-tenant target → cross_tenant denial (structurally impossible via RLS, but
- *   treated as a denial to uphold the "fail-closed" contract). Since we have no
- *   field-level PDP here (no grant resolver threaded to this route), the hop fetcher
- *   returns all fields as-stored; field-level redaction is a future wiring point
- *   (marked // FUTURE: field-level PDP below). The structural ACL (can the caller
- *   see the target record at all) is enforced by the tenant RLS predicate.
+ *   treated as a denial to uphold the "fail-closed" contract).
+ *
+ *   T-0747 (security P3, столп 4 — NB-2): the linked TARGET record is now RECORD-level
+ *   READ-PDP checked per hop. Previously RLS was the ONLY gate on a hop, so any
+ *   grant-holder who could read the SOURCE record (T-0739) also saw the fields of
+ *   EVERY linked target inside the tenant — even targets they had no READ grant on
+ *   (an intra-tenant per-record leak: the link revealed a hidden record's fields and
+ *   its id). The hop fetcher now applies the SAME `isRecordReadable` predicate the
+ *   source gate uses; a target the caller cannot READ is collapsed to the SAME
+ *   `not_found` denial as an absent record (FR-5 indistinguishability — existence is
+ *   NOT leaked via a distinct reason, and the denied hop's redacted projection carries
+ *   label/id-of-the-DEFINITION only, never the target record's id or field values).
+ *   Honest-degrade (NF-2): resolver absent (test-only) → per-hop gate skipped.
+ *
+ *   FIELD-level redaction WITHIN a readable target (individual field masking via
+ *   T-0081 roleFieldVisibility) remains a future wiring point (marked
+ *   // FUTURE: field-level PDP below) — orthogonal to this record-level gate.
  *
  * DB-untested paths: DB round-trips (steps 2–4) require server PG. Unit tests
  *   cover the pure core (cross-app-ref.ts) and the grouping/redaction helpers
@@ -66,11 +78,27 @@ import { listCrossAppRefsForSource } from "../db/cross-app-ref-dao.js";
 // (records.ts GET /api/records/:id) and T-0632 (report-page-render.ts) already
 // use — single-resolver, NOT a second authority path (NF-1).
 import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
+import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 // Reuse records.ts's resolver TYPE verbatim (structurally identical to
 // report-page-render.ts's ReportAggReadVisibilityResolver) — server.ts wires
 // ONE composed instance and passes the SAME function reference to every
 // consumer (ADR-T0739 §2, single source of truth).
 import type { ReadVisibilityResolver } from "./records.js";
+
+/**
+ * T-0747 (security P3, столп 4 — NB-2): the per-request READ-visibility a hop
+ * fetch is gated against. Carries the SAME `{ grants, ancestry }` the source
+ * gate resolved ONCE (via `resolveReadVisibility`, NF-1) plus the request
+ * `nowMs`, so a linked TARGET record is checked with `isRecordReadable` — the
+ * canonical single resolver — before its fields are ever projected. Bundled
+ * (not three loose args) so the fetcher signature stays honest-degrade-friendly
+ * (absent ⇒ per-hop gate skipped, byte-identical to pre-T-0747 behavior).
+ */
+export interface HopReadVisibility {
+  readonly grants: readonly Grant[];
+  readonly ancestry: AncestryOracle;
+  readonly nowMs: number;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -212,20 +240,35 @@ async function fetchSourceRecord(
 // Fetches the target record from choros.record inside the SAME tenant-scoped TX.
 // RLS enforces tenant isolation; a missing row → not_found.
 //
+// T-0747 (NB-2): per-hop RECORD-level READ-PDP. When `hopVisibility` is present
+//   the target record must ALSO pass `isRecordReadable` (the SAME canonical
+//   predicate the source gate uses) — a target the caller cannot READ is
+//   collapsed to the SAME `not_found` denial as an absent record so its
+//   existence, id, and fields never leak (FR-5). Honest-degrade: absent → skip.
+//
 // FUTURE: field-level PDP (grant resolver) would be wired here so that
-//   individual fields within the target record are redacted by T-0081 roleFieldVisibility.
-//   For now, all accessible fields are returned (structural ACL only via RLS).
+//   individual fields WITHIN a readable target record are redacted by T-0081
+//   roleFieldVisibility. Orthogonal to the record-level gate above.
 // ---------------------------------------------------------------------------
 
-function makeHopFetcher(client: pg.PoolClient, tenantId: string): CrossAppHopFetcher {
+function makeHopFetcher(
+  client: pg.PoolClient,
+  tenantId: string,
+  hopVisibility?: HopReadVisibility,
+): CrossAppHopFetcher {
   return {
     async fetchHop({ targetRegistryId, targetRecordId }) {
       // Structural ACL: RLS ensures the caller's tenant cannot see other tenants' rows.
       // Cross-tenant protection: if the target_registry_id doesn't belong to the same
       // tenant (impossible via RLS but we check registry ownership for defense).
-      const res = await client.query<{ data: unknown; registry_id: string }>(
-        `SELECT r.data, r.registry_id
+      // T-0747: JOIN registry_def for application_id — RowAncestry needs it, mirrors
+      // fetchSourceRecord's own JOIN (INNER; every record has a valid registry FK, so
+      // the JOIN never drops a row — behavior for the honest-degrade path is unchanged).
+      const res = await client.query<{ data: unknown; registry_id: string; application_id: string }>(
+        `SELECT r.data, r.registry_id, rd.application_id
            FROM choros.record r
+           JOIN choros.registry_def rd
+             ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
           WHERE r.tenant_id = $1
             AND r.id = $2`,
         [tenantId, targetRecordId],
@@ -239,6 +282,29 @@ function makeHopFetcher(client: pg.PoolClient, tenantId: string): CrossAppHopFet
         // The ref def points to a different registry than the actual record's registry.
         // Treat as cross_tenant since the pointer is structurally mismatched.
         return { ok: false, reason: "cross_tenant" };
+      }
+      // T-0747 (NB-2): per-hop RECORD-level READ-PDP. The linked target must pass the
+      // SAME isRecordReadable predicate the source record passed (T-0739). A target the
+      // caller cannot READ is collapsed to `not_found` — indistinguishable from an
+      // absent record (FR-5): existence/id/fields are NOT leaked (the denied hop's
+      // redacted projection carries only the DEFINITION label/refField, never the
+      // target's id or data). Honest-degrade (NF-2): hopVisibility absent → skipped.
+      if (hopVisibility !== undefined) {
+        const rowAncestry: RowAncestry = {
+          recordId: targetRecordId,
+          registryId: row.registry_id,
+          applicationId: row.application_id,
+        };
+        if (
+          !isRecordReadable(
+            rowAncestry,
+            hopVisibility.grants,
+            hopVisibility.ancestry,
+            hopVisibility.nowMs,
+          )
+        ) {
+          return { ok: false, reason: "not_found" };
+        }
       }
       // FUTURE: apply field-level PDP here (T-0081 roleFieldVisibility via grant resolver).
       const fields: Record<string, unknown> =
@@ -269,18 +335,22 @@ export async function resolveLinksForRecord(
   // register() call site, see fetchSourceRecord) is irrelevant here, so
   // pre-existing callers/fixtures that don't carry it keep compiling.
   record: Pick<SourceRecordRow, "id" | "registry_id" | "data">,
-  nowMs?: number, // reserved for future snapshot timestamping (unused)
+  // T-0747 (NB-2): OPTIONAL per-hop READ-visibility. Present ⇒ every linked
+  // TARGET record is gated with isRecordReadable before its fields project
+  // (closes the intra-tenant per-record link leak). Absent ⇒ honest-degrade,
+  // byte-identical to pre-T-0747 behavior (the pre-existing 3-arg callers /
+  // pure unit tests keep compiling and exercising the un-gated path).
+  hopVisibility?: HopReadVisibility,
 ): Promise<LinkProjection[]> {
-  void nowMs;
-
   // Step 1: list cross_app_ref definitions for this record's registry.
   const refDefs = await listCrossAppRefsForSource(client, tenantId, record.registry_id);
   if (refDefs.length === 0) {
     return [];
   }
 
-  // Step 2: build the hop fetcher (single PDP path via RLS-gated DB).
-  const fetcher = makeHopFetcher(client, tenantId);
+  // Step 2: build the hop fetcher (single PDP path via RLS-gated DB + per-hop
+  // READ-PDP when hopVisibility is present — T-0747 NB-2).
+  const fetcher = makeHopFetcher(client, tenantId, hopVisibility);
   const deps: CrossAppRefDeps = { fetcher };
 
   // Step 3: resolve 1-hop for each ref def (parallel — hops are independent per §6).
@@ -386,8 +456,19 @@ export function registerRecordLinksRoutes(
           }
         }
 
-        // Step 3: resolve 1-hop links for each cross_app_ref definition.
-        const links = await resolveLinksForRecord(client, tenantId, record);
+        // Step 3 (T-0747, NB-2): resolve 1-hop links for each cross_app_ref
+        // definition, gating EACH linked target with the SAME visibility the
+        // source passed (NF-1 — resolved ONCE above, reused per hop). A target
+        // the caller cannot READ is redacted (denied hop, no fields/id) instead
+        // of leaking. Honest-degrade (NF-2): resolver absent → un-gated hops.
+        const links = await resolveLinksForRecord(
+          client,
+          tenantId,
+          record,
+          visibility !== undefined
+            ? { grants: visibility.grants, ancestry: visibility.ancestry, nowMs }
+            : undefined,
+        );
         return { record_id: id, links } satisfies RecordLinksResponse;
       });
 
