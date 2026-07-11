@@ -15,7 +15,7 @@
  */
 
 import * as http from "node:http";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { makeFlowableClient } from "../core/flowable-client.js";
 import { Router } from "../http/router.js";
 import { registerInboxRoutes, _resetClaimStateForTests } from "../http/inbox.js";
@@ -68,6 +68,40 @@ function mockResp(status: number, body?: unknown): Response {
 
 beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
 afterEach(() => { vi.unstubAllGlobals(); });
+
+// ---------------------------------------------------------------------------
+// T-0672 integration forensics (post-merge gate, 2026-07-11): HERMETIC ENV PIN.
+//
+// This file is MEMORY-MODE by design (header: "all run without a live Flowable
+// or Postgres") — every DB interaction goes through an injected FakeAuditDb pool.
+// But the HTTP approve/claim handlers' AUTHZ plane branches on the GLOBAL
+// `hasDb()` = Boolean(process.env.DATABASE_URL) (inbox.ts, T-0331 NF-3
+// fail-closed): with an ambient DATABASE_URL present, eligibility is resolved
+// via getRoleSlugsForActor(getOrgPool()) against the REAL database — where these
+// tests' in-memory personas (USER_ROLES fixture) hold no role_assignment rows —
+// and every handler-level test flips 200→403 NOT_ELIGIBLE.
+//
+// That made the whole file's verdict depend on ambient env, NOT on the tree:
+// proven red on 504312f1 (before T-0672 AND T-0756), on b50308be (T-0756 only),
+// on T-0672-only, and on the combination — red IFF DATABASE_URL is set. The
+// post-merge gate first observed it on the T-0672×T-0756 merge only because its
+// runs' ambient env differed; neither task changed this behaviour.
+//
+// The product path is CORRECT (fail-closed grants-from-live-DB when a DB is
+// configured is deliberate, T-0331 NF-3); the defect was the harness's
+// non-hermeticity. Pin: run this file with DATABASE_URL unset (the mode it was
+// written for), restore afterwards (same save/restore discipline as
+// processes-live-instances.test.ts, which pins the env in the opposite
+// direction for its live-DB harness).
+// ---------------------------------------------------------------------------
+let prevDatabaseUrl: string | undefined;
+beforeAll(() => {
+  prevDatabaseUrl = process.env["DATABASE_URL"];
+  delete process.env["DATABASE_URL"];
+});
+afterAll(() => {
+  if (prevDatabaseUrl !== undefined) process.env["DATABASE_URL"] = prevDatabaseUrl;
+});
 
 // ---------------------------------------------------------------------------
 // 1. getActiveUserTasks wire-shape
