@@ -1,0 +1,61 @@
+{
+  "task_id": "T-0249",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "reviewer_runs": {
+    "tsc_noemit": "0 errors (exit 0)",
+    "completion_effect_unit": "6/6 PASS (no ambient DATABASE_URL)",
+    "live_pg_chain_solo": "3/3 PASS (DATABASE_URL solo, --no-file-parallelism, real PG :55432)",
+    "inbox_engine_drive": "53/53 PASS on branch, no env (T-0672 claim-block seam intact)",
+    "inbox_action": "10/10 PASS (the /action seam surface)",
+    "anti_case_gate": "PASS + --self-test PASS; independent grep confirms 0 generic-plane case literals",
+    "mutation_a_writeback_removed": "db chain went RED (circuit_id undefined vs recordId) — write-back genuinely guarded, not theatre; restored via git checkout",
+    "mutation_b_foreign_activity": "covered by unit: resolve('P','step-B')/resolve('Q','step-A') both undefined -> foreign-activity binding no-ops",
+    "merge_tree_vs_dev_7e56f958": "clean, RC=0, zero conflicts (T-0672 already in base d5557afd; /action seam layered above it)"
+  },
+  "axis_legend": {
+    "1": "correctness / reachability / completeness",
+    "2": "security / PDP / privilege",
+    "3": "anti-case / D-064 discipline",
+    "4": "idempotency / robustness",
+    "5": "migration / data",
+    "6": "integration / merge"
+  },
+  "findings": [
+    {
+      "id": "CE-1",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "src/server.ts:531 (registerInboxRoutes — completionEffectRegistry not passed) + src/composition/customer-onboarding-effects.ts:85 (makeCustomerOnboardingEffectBindings never called) + src/http/inbox.ts:2593 (if(completionEffectRegistry) always false)",
+      "issue": "Новый примитив НЕ достижим в проде: реестр эффектов нигде не строится. grep по всему репо (искл. тесты/самоопределения) по makeCompletionEffectRegistry / makeCustomerOnboardingEffectBindings / EMPTY_COMPLETION_EFFECT_REGISTRY = 0 совпадений; sibling issue-key-live.ts не ссылается на эффект; server.ts:531 не передаёт completionEffectRegistry -> сим при inbox.ts:2593 всегда no-op. Итог: кейс-шаг «Выпустить активационный ключ» не может сработать через реальный POST /api/inbox/:id/action. Отсрочка ДИСКЛОУЗНУТА честно (pr-handoff.json:31 «server-root wire = последний провод по возврату стенда»), НО реестр можно собрать СЕЙЧАС без стенда — стенд нужен лишь для живого Flowable-прогона, не для инъекции. Отсутствие провода + отсутствие red-lock теста = D-064 «зелёное над мёртвым контуром»: эпик (кейс-доказательство) не выполнен, и ничего не падает, пока провод не подключат.",
+      "suggestion": "Собрать реестр в server.ts (makeCustomerOnboardingEffectBindings -> makeCompletionEffectRegistry) и прокинуть в registerInboxRoutes под тем же env-гейтом CUSTOMER_ONBOARDING_LIVE (byte-identical no-op когда unset -> dormant порт вернёт ok:false, write-back не произойдёт). Добавить композиционный/unit тест, который ПАДАЕТ пока registry не прокинут под live-гейтом (red-lock). ТОЛЬКО живой userTask->Flowable->effect прогон оставить отложенным до возврата стенда (или доказать суррогатом local-stack по docs/live-proof/local-stack-recipe.md)."
+    },
+    {
+      "id": "CE-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/composition/customer-onboarding-effects.ts:88 (handler игнорирует IssueKeyOutcome) + src/http/inbox.ts:2612 (runCompletionEffect) + src/runtime/customer-onboarding/issue-key-effect.ts:119",
+      "issue": "Тихое продвижение на ok:false. Хендлер зовёт applyIssueKeyStep и НЕ проверяет возвращённый IssueKeyOutcome; только throw -> ROLLBACK. Значит на pdp_denied / dormant / bad_transition write-back не делается (это верно), НО approve-tx коммитит task.approved + applyStepResult, движок продвигает токен, юзер получает 200 «done» БЕЗ выпущенного ключа — провал виден только в audit (card_action.denied / customer.key_issue_failed). db-тест бьёт applyIssueKeyStep напрямую и НЕ покрывает маршрутный контракт /action. Латентно, пока CE-1 не завайрен; станет живым в тот же момент.",
+      "suggestion": "До вооружения решить контракт ключевого шага: провал выдачи (pdp_denied/dormant/bad_transition) должен эскалировать/сигналить (напр. не отдавать «done» молча), а не тихо коммитить. Покрыть route-тестом (200 vs surfaced-failure), когда CE-1 подключат."
+    },
+    {
+      "id": "CE-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/runtime/customer-onboarding/issue-key.ts (step 4 port.issueEntitlement ДО step 5a isAllowedTransition) vs src/http/inbox.ts:2213 (findWaitingInstanceTask)",
+      "issue": "Идемпотентность: последовательный ре-клик БЕЗОПАСЕН (findWaitingInstanceTask=null -> ветка «already» engine:'already', эффект не запускается; плюс active->active не разрешён transition-таблицей -> второй прогон вернул бы bad_transition без write-back/без второго key_issued). Остаточное окно: два ОДНОВРЕМЕННЫХ approve, оба прошедшие findWaitingInstanceTask, вызовут port.issueEntitlement дважды (второй orphan-license в сторе) ДО guard перехода; порчи record нет (JSONB-merge идемпотентен, transition guard держит статус). Предсуществующее свойство approve-seam, эффект его наследует; низкая severity.",
+      "suggestion": "Опционально: серилизовать завершение шага claim-lock'ом (T-0672 chokepoint) или дедупить issueEntitlement по circuit_id в T0242-порте, чтобы закрыть конкурентное окно двойной выдачи."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Anti-case: generic plane 0 case-literals (records/inbox/list-views/grant-resolver/completion-effect)", "covered": true },
+    { "ac": "completion-effect.ts primitive case-free (opaque keys, no pg/http/env)", "covered": true },
+    { "ac": "Live-PG write-back circuit_id/activation_key_issued_at/status=active re-read from PG + customer.key_issued on real hash-chain", "covered": true },
+    { "ac": "Anti-theatre: dormant entitlement + PDP-deny write NOTHING (mutation-verified RED on removal)", "covered": true },
+    { "ac": "Dispatcher: no-op unregistered / duplicate throws / handler-throw propagates (unit 6/6)", "covered": true },
+    { "ac": "Migration 134 additive+idempotent (ON CONFLICT DO NOTHING, zero DDL, trigger_registry_id pinned)", "covered": true },
+    { "ac": "Additive seam no-op: existing inbox behaviour byte-identical (inbox-engine-drive 53/53, inbox-action 10/10)", "covered": true },
+    { "ac": "KEYSTONE: case-step fires through real POST /api/inbox/:id/action (create=start -> issue-key -> effect) in the running product", "covered": false }
+  ],
+  "summary": "Примитив completion-effect чист, generic, case-free и unit-доказан (6/6). Кейс-хендлер issue-key-effect (write-back + audit) LIVE-PG доказан (3/3) и mutation-verified (снятие circuit_id -> RED). Анти-кейс дисциплина ВЫПОЛНЕНА на уровне литералов: generic-плоскость 0 совпадений (независимый grep), примитив case-free, кейс в seed(mig134)/quarantine(runtime|composition), гейт customer-crm-anti-case.sh корректен и НЕ само-легализует дыру (composition/adapters были домом кейса уже на базе d5557afd через issue-key-live.ts). Права эффекта: write-back гейтится PDP resolveFor(subject=завершитель,'update') в runIssueKey — НЕ чистый system-bypass; завершитель обязан (а) держать approver-роль (inbox-гейт) И (б) пройти PDP-update на записи; системные поля пишутся напрямую как 'system'-актор (обход field-mask by design, задокументирован, аудирован record.update+completed_by). BLOCKING (CE-1): реестр эффектов НИГДЕ не строится в проде -> примитив мёртв, кейс-шаг недостижим через реальный /action, red-lock отсутствует; провод env-gated можно написать без стенда. Merge БЕЗОПАСЕН (мёртвый сим, clean merge-tree vs dev 7e56f958, все виденные гейты зелёные), но TRUE done требует server-root провода + red-lock + решения контракта ok:false (CE-2)."
+}
