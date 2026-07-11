@@ -378,9 +378,26 @@ describe("form-schema-derive: single source verification", () => {
 
 // ---------------------------------------------------------------------------
 // SP-1 – SP-2: FormPersistPort wiring
-// Use createServer() (same as the existing forms-submit.e2e.test.ts) to avoid
-// raw Router API differences. SP-1 uses memory mode (no deps); SP-2 injects a
-// stub persist port via the server's composition root (deps-gated path).
+//
+// T-0757 (D-056): SP-1 used to build its HTTP server via server.ts's
+// createServer() — the FULL composition root (~90 route registrars: grants,
+// LLM adapters, Keycloak admin port, pg.Pool wiring, ...). That graph directly
+// VIOLATES this file's own header doctrine ("DATABASE_URL-free ... never
+// construct pg.Pool in a pure unit test") and, on a cold vitest worker, took
+// 30s+ just to transform+evaluate — starving the test's explicit 10s
+// sub-timeout and presenting as a hard hang that masked the honest signal on
+// every branch (fitness-mask). It was never a deadlock: everything AFTER the
+// import resolved (listen/connect/dispatch/handler/persist/respond) completed
+// in well under a second.
+//
+// Root fix: wire registerFormsRoutes DIRECTLY onto a bare Router — the exact
+// same Router class + dispatch() + registerFormsRoutes() that createServer()
+// itself uses internally for this one route (see server.ts buildRouter()),
+// without pulling in the other 89 unrelated registrars. This is NOT "raw
+// Router API" divergence — it is the identical production wiring for the
+// forms route, just without the rest of the app's import graph.
+// SP-1 uses memory mode (no deps); SP-2 injects a stub persist port directly
+// (function-level, no HTTP server at all).
 // ---------------------------------------------------------------------------
 
 describe("forms.ts: FormPersistPort wiring", () => {
@@ -390,13 +407,17 @@ describe("forms.ts: FormPersistPort wiring", () => {
     //   - The HTTP response is still { ok: true, formId, value, recordId } (contract unchanged).
     //   - _getRecordForTests returns undefined because memoryPersist does NOT write to an
     //     authoritative in-process Map — lost-on-restart state must not be source of truth.
-    const { _getRecordForTests, _resetRecordStoreForTests } = await import("../http/forms.js");
-    const { createServer } = await import("../server.js");
+    const { registerFormsRoutes, _getRecordForTests, _resetRecordStoreForTests } = await import("../http/forms.js");
+    const { Router } = await import("../http/router.js");
     const http = await import("node:http");
 
     _resetRecordStoreForTests();
 
-    const server = createServer(undefined, undefined, "memory");
+    const router = new Router();
+    // No deps → memoryPersist no-op fallback (identical to
+    // createServer(undefined, undefined, "memory") for this route, T-0757).
+    registerFormsRoutes(router);
+    const server = http.createServer(router.dispatch.bind(router));
     await new Promise<void>((r) => server.listen(0, "localhost", r));
     const addr = server.address() as { port: number };
     const baseUrl = `http://localhost:${addr.port}`;
@@ -441,7 +462,10 @@ describe("forms.ts: FormPersistPort wiring", () => {
     expect(stored).toBeUndefined();
 
     _resetRecordStoreForTests();
-  }, 10000 /* allow 10s for server startup */);
+  }, 5000 /* T-0757: bare Router + registerFormsRoutes (no server.ts composition
+             root) — observed 200-1800ms cold; 5s keeps a real margin for CI
+             load while still catching a future regression back to a heavy
+             import graph fast instead of masking it as a 10s+ "hang". */);
 
   it("SP-2: FormPersistPort is called when provided; RECORDS Map stays empty", async () => {
     // Verify the port contract: when a FormPersistPort is injected, it is called
