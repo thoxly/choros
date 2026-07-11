@@ -28,6 +28,14 @@
    ============================================================================ */
 
 import React, { useState, useCallback, useEffect } from 'react';
+import {
+  INTERRUPT_MODES,
+  isBoundaryEventBo,
+  readInterruptMode,
+  writeInterruptMode,
+  canBuildEscalationBranch,
+  applyEscalationBranch,
+} from './escalation-branch-builder.js';
 
 /* --------------------------------------------------------------------------
    Pure helpers — unit-testable without DOM or bpmn-js.
@@ -126,12 +134,19 @@ export function TimerDeadlinePanel({ bo, modeler, element, PanelGroup, PPEntry, 
   // escalateTo can be "manager" | "owner" | a role slug. We split the UI into a
   // target SELECT and (when "role") a role picker; the stored value is the slug.
   const [escalateRaw, setEscalateRaw] = useState(() => readTimerAttr(bo, 'escalateTo', 'choros:escalateTo', 'manager'));
+  // T-0660: interrupting vs non-interrupting (cancelActivity). Only meaningful for a
+  // BOUNDARY timer (a timer attached to a step). BPMN default = interrupting.
+  const [interruptMode, setInterruptMode] = useState(() => readInterruptMode(bo));
+  // T-0660: feedback for the «собрать ветку эскалации» affordance.
+  const [buildNote, setBuildNote] = useState('');
 
   // Re-sync when a different timer event is selected.
   useEffect(() => {
     setKind(readTimerAttr(bo, 'timerDeadlineKind', 'choros:timerDeadlineKind', 'duration'));
     setDeadline(readTimerAttr(bo, 'timerDeadline', 'choros:timerDeadline', ''));
     setEscalateRaw(readTimerAttr(bo, 'escalateTo', 'choros:escalateTo', 'manager'));
+    setInterruptMode(readInterruptMode(bo));
+    setBuildNote('');
   }, [bo && bo.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fireChanged = useCallback(() => {
@@ -160,6 +175,26 @@ export function TimerDeadlinePanel({ bo, modeler, element, PanelGroup, PPEntry, 
     fireChanged();
   }, [bo, fireChanged]);
 
+  // T-0660: commit interrupting/non-interrupting via the native cancelActivity
+  // attribute (modeling.updateProperties → undo/redo + border re-render).
+  const commitInterruptMode = useCallback((mode) => {
+    setInterruptMode(mode);
+    writeInterruptMode({ bo, modeler, element }, mode);
+  }, [bo, modeler, element]);
+
+  // T-0660: one-click «собрать ветку эскалации» — builds the converging shape on
+  // the canvas (timer→Эскалация→шлюз and шаг→шлюз→следующий), sets the timer to
+  // non-interrupting. Idempotent-guarded; leaves a human note on the outcome.
+  const handleBuildEscalation = useCallback(() => {
+    const res = applyEscalationBranch({ modeler, boundaryElement: element });
+    if (res.applied) {
+      setInterruptMode('non-interrupting');
+      setBuildNote('Готово: добавлены шаг «Эскалация» и шлюз «Продолжить» — ветки сходятся.');
+    } else {
+      setBuildNote(res.reason || 'Не удалось собрать ветку эскалации.');
+    }
+  }, [modeler, element]);
+
   // Which top-level escalation option is selected: manager / owner / role.
   const escalateSelect =
     escalateRaw === 'manager' || escalateRaw === 'owner' ? escalateRaw : 'role';
@@ -179,6 +214,12 @@ export function TimerDeadlinePanel({ bo, modeler, element, PanelGroup, PPEntry, 
     { value: '', label: '— выберите роль —' },
     ...(roles || []).map((r) => ({ value: r.label, label: r.label })),
   ];
+
+  // T-0660: the interrupt-mode control + the escalation-branch affordance are only
+  // meaningful for a BOUNDARY timer (a timer attached to a step). A free-floating
+  // intermediate timer has no cancelActivity concept and no step to escalate from.
+  const isBoundary = isBoundaryEventBo(bo);
+  const buildGuard = isBoundary ? canBuildEscalationBranch(element) : { ok: false };
 
   return (
     <PanelGroup title="Срок и эскалация" defaultOpen>
@@ -215,6 +256,26 @@ export function TimerDeadlinePanel({ bo, modeler, element, PanelGroup, PPEntry, 
           </p>
         )}
       </PPEntry>
+
+      {/* T-0660: interrupting vs non-interrupting — only for a boundary timer. */}
+      {isBoundary && (
+        <PPEntry label="Что делать с текущим шагом">
+          <div className="bio-properties-panel-select">
+            <select
+              value={interruptMode}
+              aria-label="Что делать с текущим шагом при срабатывании таймера"
+              onChange={(e) => commitInterruptMode(e.target.value)}
+            >
+              {INTERRUPT_MODES.map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+          </div>
+          <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-2)' }}>
+            {(INTERRUPT_MODES.find((m) => m.value === interruptMode) || {}).hint || ''}
+          </p>
+        </PPEntry>
+      )}
 
       {/* Escalation target */}
       <PPEntry label="Кому эскалация при срабатывании">
@@ -256,6 +317,45 @@ export function TimerDeadlinePanel({ bo, modeler, element, PanelGroup, PPEntry, 
           с предзаполненной формой. Соедините таймер стрелкой с шагом эскалации.
         </p>
       </PPEntry>
+
+      {/* T-0660: one-click «собрать ветку эскалации» — only for a boundary timer. */}
+      {isBoundary && (
+        <PPEntry label="Собрать ветку эскалации">
+          <button
+            type="button"
+            disabled={!buildGuard.ok}
+            aria-disabled={!buildGuard.ok}
+            aria-label="Собрать ветку эскалации на схеме"
+            onClick={handleBuildEscalation}
+            style={{
+              fontSize: 'var(--chs-text-sm)',
+              color: buildGuard.ok ? 'var(--chs-color-accent-fg)' : 'var(--chs-color-text-muted)',
+              background: buildGuard.ok ? 'var(--chs-color-accent)' : 'var(--chs-color-surface-raised)',
+              border: '1px solid var(--chs-color-border-strong)',
+              borderRadius: 'var(--chs-radius-sm)',
+              padding: 'var(--chs-space-2) var(--chs-space-4)',
+              cursor: buildGuard.ok ? 'pointer' : 'not-allowed',
+              textAlign: 'left',
+            }}
+          >
+            Собрать напоминание с эскалацией
+          </button>
+          <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-2)' }}>
+            {buildGuard.ok
+              ? 'Добавит шаг «Эскалация» и шлюз «Продолжить»: обе ветки — обычная и эскалация — сойдутся в один поток, чтобы процесс корректно завершался.'
+              : (buildGuard.reason || '')}
+          </p>
+          {buildNote && (
+            <p
+              className="bio-properties-panel-description"
+              role="status"
+              style={{ marginTop: 'var(--chs-space-1)', color: 'var(--chs-color-success)' }}
+            >
+              {buildNote}
+            </p>
+          )}
+        </PPEntry>
+      )}
     </PanelGroup>
   );
 }
