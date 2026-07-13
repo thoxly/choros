@@ -16,6 +16,12 @@ import { HttpError } from "../http/router.js";
 // loadAdminContext (below) are authority resolvers B1/B2 — they carry
 // ACTOR_ACTIVE_SQL in their inner actor slug→employee subqueries.
 import { ACTOR_ACTIVE_SQL } from "./actor-authority-gate.js";
+// T-0767: single NAMED assignment-active dual-control predicate (T-0605 ADR
+// §2, canonical home src/db/grants-dao.ts). isGenesisOwnerForTenant and
+// loadAdminContext resolve role_assignment activity the SAME way
+// getRoleSlugsForActor/getGrantsForSubject do — see the T-0767 comment on
+// each query below for why this was previously missing here.
+import { assignmentActiveDualControlPredicate } from "./grants-dao.js";
 
 const { Pool } = pg;
 
@@ -742,6 +748,20 @@ export async function resolveTenantBySlug(
 // gate (T-0658 getGrantsForSubject step 1) does NOT cover this path because
 // the short-circuit runs first. Mirrors the same predicate already applied in
 // grants-dao.ts findTenantOwnerSlug / findTenantOwnerEmployeeId.
+//
+// T-0767 [security/dual-control, столп 4] — the role_assignment activation
+// check below carried ONLY `confirmed_by IS NOT NULL`, omitting the T-0605
+// canonical disjunct `(confirmed2_by IS NOT NULL OR proposed_by IS NULL)` that
+// getRoleSlugsForActor/getGrantsForSubject (grants-dao.ts) already enforce.
+// Real but DORMANT (T-0764 audit: no live INSERT sets role_assignment.
+// proposed_by non-null today) — a future assignment-level proposal/escalation
+// feature would otherwise silently inherit an owner-authority hole (a
+// proposed-but-not-second-confirmed tenant-owner grant would short-circuit
+// full owner authority on ONE approver). Now sourced from the single named
+// fragment (assignmentActiveDualControlPredicate, grants-dao.ts) — no bespoke
+// re-derivation. NO-OP for every CURRENT production row: proposed_by is NULL
+// on all live assignments, so the added disjunct is vacuously true for them
+// (proven live in ci/checks/db/T-0767-owner-admin-assignment-dual-control.db.test.ts).
 // ---------------------------------------------------------------------------
 
 export async function isGenesisOwnerForTenant(
@@ -766,6 +786,7 @@ export async function isGenesisOwnerForTenant(
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND ${assignmentActiveDualControlPredicate("ra")}
         LIMIT 1`,
       [tenantId, actorEmployeeId, nowMs],
     );
@@ -794,6 +815,16 @@ export async function isGenesisOwnerForTenant(
 // their delegable mgmt_object:* grants. Same rationale as isGenesisOwnerForTenant
 // above; kept in sync so no third path resolves a deactivated subject to
 // authority.
+//
+// T-0767 [security/dual-control, столп 4] — BOTH step 1 (owner-check) and
+// step 2 (assignment-load) below carried ONLY `confirmed_by IS NOT NULL` on
+// role_assignment, omitting the T-0605 canonical disjunct
+// `(confirmed2_by IS NOT NULL OR proposed_by IS NULL)`. Same dormant hole as
+// isGenesisOwnerForTenant above (see its T-0767 comment) — now closed via the
+// same named fragment (assignmentActiveDualControlPredicate, grants-dao.ts),
+// keeping all three role_assignment-activity resolvers (this file's two +
+// grants-dao.ts's two) on one source of truth. NO-OP for every current row
+// (proposed_by always NULL in production today).
 // ---------------------------------------------------------------------------
 
 export async function loadAdminContext(
@@ -819,6 +850,7 @@ export async function loadAdminContext(
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND ${assignmentActiveDualControlPredicate("ra")}
         LIMIT 1`,
       [tenantId, actorEmployeeId, nowMs],
     );
@@ -840,7 +872,8 @@ export async function loadAdminContext(
               )
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
-          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)`,
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND ${assignmentActiveDualControlPredicate("ra")}`,
       [tenantId, actorEmployeeId, nowMs],
     );
 
