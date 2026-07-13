@@ -456,10 +456,21 @@ corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
   `grep`-comment-unaware — ЛЮБОЕ упоминание строки `agent-instruction` в
   ДОКУМЕНТАЦИОННОМ комментарии `src/http` (не read самой таблицы) ложно
   красило гейт на чистом dev (2 comment-строки в `src/http/agents.ts`,
-  byte-identical dev/origin). Фикс добавил `file_has_code_level_agent_instruction_hit()`
-  — строки `#`/`//`/`/* */`-комментариев исключаются ПЕРЕД повторной проверкой
-  паттерна; ни один реальный код-уровневый read не перестаёт ловиться
-  (self-test + мутационная проверка это доказывают). Диф — чисто аддитивный
+  byte-identical dev/origin). Фикс: `strip_comment_substrings()` — string-aware
+  посимвольный сканер (awk) вырезает КОММЕНТ-ПОДСТРОКИ (inline и многострочные
+  `/* */`-спаны, хвостовые `//` вне строковых литералов, full-line `#`),
+  сохраняя строковые литералы — в т.ч. `//` внутри URL-строки и
+  `this.#agent_instruction`-private-field; паттерн повторно применяется к
+  остатку через `file_has_code_level_agent_instruction_hit()`. **История R1
+  (судья, blocking, исправлено в той же задаче T-0758):** первая ревизия фикса
+  стрипала ЦЕЛЫЕ физические строки по лидирующей открывашке коммента — код-хит
+  после `/* note */` на той же строке становился невидим гейту (новый false
+  negative, судья воспроизвёл живьём на чистом src/http-файле); заменено на
+  вырезание подстрок, R1-шейпы закреплены как постоянные `--self-test` пробы
+  (10 проб T-0758) и перепроверены живыми мутациями (4 RED, включая точный
+  судейский шейп). Каждое решение стриппера ошибается в сторону СОХРАНЕНИЯ
+  текста (false positive: гейт краснеет, человек смотрит), а не удаления
+  (false negative: нарушение проплывает). Диф — чисто аддитивный
   (0 удалённых/изменённых строк BASE_REF, A-1..A-4 verified).
 
 ---
@@ -479,6 +490,7 @@ corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
 | 7.4 | EGRESS-POLICY | ✅ | — | — | PARTIAL | runtime-проверка политики egress |
 | 7.5 | FROZEN-CHECKS | ✅ + probe | — | hostile-probe | STRONG | держит конституцию; T-0155 вешает сюда каталог |
 | 7.7 | ACTOR-ACTIVE | ✅ registry+accounting | ✅ 7 live-PG | — | STRONG | route-coverage (T-0726) 0 находок на T-0751 (было 1: `GET /api/rights/intents/substitution-coverage`, T-0745 пост-волновой дрейф); гейт остаётся информационным — новый GET-роут может открыть новую находку до следующего ручного прогона |
+| 7.8 | AGENT-INSTRUCTION-DORMANT | ✅ + self-test (10 проб T-0758) | — | 4 живые мутации T-0758 (вкл. R1-шейпы судьи) | PARTIAL | нет runtime-кейса; static comment-aware grep (строковые литералы сохраняются) |
 
 ---
 
