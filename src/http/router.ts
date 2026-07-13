@@ -194,6 +194,34 @@ function sendErrorEnvelope(
 export { sendErrorEnvelope };
 
 // ---------------------------------------------------------------------------
+// T-0763: server-side logging for unexpected (non-HttpError) exceptions
+// ---------------------------------------------------------------------------
+
+/**
+ * T-0763 (follow-up to T-0249 CE-1 live-wire finding): before this task, every
+ * non-HttpError thrown by a handler fell straight into the generic
+ * `sendErrorEnvelope(res, 500, "INTERNAL", ...)` branches below with ZERO
+ * server-side trace — a live 22P02 (slug written into a UUID column) would
+ * have surfaced as a mute 500, discoverable only by a standalone repro script
+ * (see docs/tasks/T-0249.spec.md "Живая находка провода"). This function logs
+ * the diagnostic detail SERVER-SIDE, immediately before the generic envelope
+ * is sent to the client — the client-facing response is UNCHANGED (still
+ * generic INTERNAL, no message/stack ever reaches the HTTP response body).
+ *
+ * SAFE surface: only the HTTP method, the pathname (query string and request
+ * body are NEVER read here — this function receives no body/query/headers),
+ * and the error's own name/message/stack are written to the log. Handlers
+ * that need to keep secrets (e.g. LLM keys, passwords) out of `Error` messages
+ * remain responsible for that themselves (unchanged from today) — this
+ * function does not invent a new secret-bearing surface, it only stops
+ * discarding what a thrown Error already carries.
+ */
+function logUnexpectedError(method: string, pathname: string, err: unknown): void {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  console.error(`[router] unhandled non-HttpError on ${method} ${pathname}: ${detail}`);
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -306,6 +334,9 @@ export class Router {
             if (err instanceof HttpError) {
               sendErrorEnvelope(res, err.statusCode, err.code, err.message);
             } else {
+              // T-0763: log the diagnostic server-side BEFORE the generic
+              // envelope goes out — the response body itself stays unchanged.
+              logUnexpectedError(method, pathname, err);
               sendErrorEnvelope(res, 500, "INTERNAL", "internal server error");
             }
           });
@@ -324,6 +355,8 @@ export class Router {
         if (err instanceof HttpError) {
           sendErrorEnvelope(res, err.statusCode, err.code, err.message);
         } else {
+          // T-0763: same server-side logging for the fallback's sync path.
+          logUnexpectedError(method, pathname, err);
           sendErrorEnvelope(res, 500, "INTERNAL", "internal server error");
         }
         return;
@@ -334,6 +367,8 @@ export class Router {
           if (err instanceof HttpError) {
             sendErrorEnvelope(res, err.statusCode, err.code, err.message);
           } else {
+            // T-0763: same server-side logging for the fallback's async path.
+            logUnexpectedError(method, pathname, err);
             sendErrorEnvelope(res, 500, "INTERNAL", "internal server error");
           }
         });
