@@ -462,6 +462,29 @@ export function registerUserMgmtRoutes(
           "отображаемое имя содержит недопустимые символы — уберите спецсимволы (<, &, #, кавычки, скобки) и попробуйте снова",
         );
       }
+      // T-0762 (R-2 follow-up from T-0748's own review): T-0748 fixed the
+      // CHARACTER-validator misattribution above but explicitly scoped out
+      // the sibling LENGTH-validator class (spec.md §7). A display_name near
+      // the client's DISPLAY_NAME_MAX=256 (users-form.js) with NO space
+      // (single token) still trips Keycloak's independent 255-char-per-field
+      // cap — splitDisplayName duplicates an unbroken name into BOTH
+      // firstName and lastName (see its own doc comment), and both then
+      // exceed 255. admin-port.ts disambiguates this from both
+      // NAME_INVALID_CHARACTERS and a genuine bad email via the KC error
+      // body's field-level messageKey (`error-invalid-length-too-long`,
+      // live-confirmed against KC 25.0.6, t-0633-keycloak-1, 2026-07-13).
+      // Before this branch existed, this same 400 fell to the generic
+      // EMAIL_INVALID branch above, misleading the owner with "email must be
+      // a valid email address" for a perfectly valid email. Anchored on
+      // `display_name` the same way as NAME_INVALID_CHARACTERS
+      // (web/src/screens/users-form.js mapUserError).
+      if (code === "NAME_TOO_LONG") {
+        throw new HttpError(
+          400,
+          "NAME_TOO_LONG",
+          "отображаемое имя слишком длинное — Keycloak допускает не более 255 символов на имя или фамилию; сократите имя и попробуйте снова",
+        );
+      }
       throw new HttpError(503, "AUTH_UNAVAILABLE", "account service unavailable — try again later");
     }
 

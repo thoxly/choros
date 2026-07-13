@@ -120,6 +120,18 @@ export function mapUserError(status, body, entity = 'операцию') {
       message: serverMsg || 'Отображаемое имя содержит недопустимые символы — уберите спецсимволы (<, &, #, кавычки, скобки).',
     };
   }
+  // T-0762 (R-2 follow-up from T-0748's own review): a single-token
+  // display_name near DISPLAY_NAME_MAX (e.g. no spaces, ~256 chars) trips
+  // Keycloak's independent 255-char-per-field firstName/lastName cap — a
+  // DIFFERENT KC validator than the character one above, honestly named
+  // instead of falling to the generic 400 fallback / the old misleading
+  // email text. Same field anchor (display_name) as NAME_INVALID_CHARACTERS.
+  if (status === 400 && code === 'NAME_TOO_LONG') {
+    return {
+      field: 'display_name',
+      message: serverMsg || 'Отображаемое имя слишком длинное — Keycloak допускает не более 255 символов на имя или фамилию.',
+    };
+  }
   if (status === 403) {
     return {
       message:

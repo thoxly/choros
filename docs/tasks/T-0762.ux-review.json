@@ -1,0 +1,49 @@
+{
+  "task_id": "T-0762",
+  "verdict": "approved",
+  "_scope": "Text-only error-attribution fix, sibling to T-0748 (R-2 follow-up from T-0748's own review). Zero new UI elements, zero new styling: display_name's error hint now reaches this ONE new code path (NAME_TOO_LONG) through the SAME pre-existing generic field-anchor mechanism T-0748 already proved (CreateUserModal's mapped.field -> setFieldErrors -> Field's invalid/hint props, screen-users.jsx:119-120,174-175) — the exact same channel NAME_INVALID_CHARACTERS/EMAIL_TAKEN/login already use. Judged proportionate to the diff: one new server-side field disambiguation branch (admin-port.ts/user-mgmt.ts) + one new message string + one new web-layer if-branch (users-form.js mapUserError) + tests.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/ux-g5-jargon-denylist.sh -> exit 0, informational PASS; the only T-0762-attributable hit is the test describe()/it() name 'T-0762' in screen-users.mount.test.jsx (test metadata, not visible product text — identical pattern to T-0748's own gate finding for this same file)",
+      "ci/checks/ux/ux-g6-no-new-hardcode.sh -> exit 0, 0 newly-added hardcode/overlay findings (no new inline styles or hardcoded colors in the diff)"
+    ]
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "n/a-delta-text-only, verified rather than assumed: the new NAME_TOO_LONG branch renders through the pre-existing themed Field component (invalid/hint props) T-0748 already live-mounted and proved — zero new JSX, zero new inline styles, zero new CSS in this diff. No real-click theme-toggle proof needed for a second text-string addition into an already-themed, already-proven channel.",
+  "pattern_sources": [
+    {
+      "element": "Отображаемое имя field error hint (NAME_TOO_LONG)",
+      "pattern": "existing generic field-anchor mechanism: CreateUserModal.submit -> mapUserError(status,body) -> mapped.field -> setFieldErrors -> <Field invalid={!!fieldErrors.display_name} hint={fieldErrors.display_name || <default hint>} /> (screen-users.jsx:119-120,171-176) — the SAME channel used by NAME_INVALID_CHARACTERS (T-0748), EMAIL_TAKEN->email, LOGIN taken->login. Judge live-mounted the real component (npx vitest run web/src/screens/screen-users.mount.test.jsx, 3/3 green) and independently confirmed the hint text and aria-invalid=true land on the Отображаемое имя input specifically, not a generic banner, and that the pre-fix misleading email text is absent from the whole dialog.",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "root": "B",
+      "location": "src/http/user-mgmt.ts:485 (NAME_TOO_LONG Russian message)",
+      "issue": "Message: «отображаемое имя слишком длинное — Keycloak допускает не более 255 символов на имя или фамилию; сократите имя и попробуйте снова». The word 'Keycloak' leaks a backend/vendor implementation name into user-visible product text — a minor internal-terminology leak (the message otherwise names the real problem, gives the concrete numeric limit, and ends with an actionable next step). T-0748's own sibling message ('отображаемое имя содержит недопустимые символы...') avoided naming 'KC'/'Keycloak'/'validator' entirely per its own ux-review F-1 finding, which explicitly called out that no dev/internal terms leak into the visible string as a positive property — this task's message does not hold that same bar as tightly.",
+      "suggestion": "Non-blocking. Could read 'отображаемое имя слишком длинное — допускается не более 255 символов на имя или фамилию; сократите имя и попробуйте снова' (drop 'Keycloak' — the numeric limit is the actionable fact, not which backend enforces it) as a follow-up polish; not required for this task given it is proportionate to T-0748's own established message style for the same field and the number itself is accurate and load-bearing."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/users-form.js:132 mapUserError NAME_TOO_LONG default fallback string",
+      "issue": "Same 'Keycloak' vendor-name leak repeated in the client-side default fallback message (used only when the server response carries no message — a defense-in-depth path, not the normal one since user-mgmt.ts always sends a message). Consistent with F-1 above, not a new independent issue.",
+      "suggestion": "Non-blocking, same disposition as F-1 — fix both together if ever addressed."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "Honest field attribution: NAME_TOO_LONG anchors on Отображаемое имя, not Email", "covered": true},
+    {"ac": "Old misleading email text ('email must be a valid email address') fully absent from this path (byte-string absence asserted by mount test + regex in users-form.test.js, judge reran both green)", "covered": true},
+    {"ac": "Russian, actionable message naming the real problem (имя/длин) with a concrete numeric limit and a next step — F-1/F-2 nits are a minor vendor-name leak, not a jargon/honesty failure", "covered": true},
+    {"ac": "Ordinary two-word display_name unaffected — no new friction on the happy path (db regression test + AP-10 regression case both green)", "covered": true},
+    {"ac": "No new UI element / no new styling — reuses the pre-existing generic field-anchor + themed Field component (G5/G6 both clean, informational and required alike, judge reran both)", "covered": true},
+    {"ac": "Real DOM mount proof (not source-grep) that the hint lands on the right input with aria-invalid=true and the email field is NOT marked invalid — judge reran screen-users.mount.test.jsx directly, 3/3 green", "covered": true},
+    {"ac": "Character-class (T-0748) and length-class (T-0762) hints do not visually cross-contaminate — mapUserError regression test confirms NAME_INVALID_CHARACTERS's own message text is untouched by the new branch", "covered": true}
+  ]
+}

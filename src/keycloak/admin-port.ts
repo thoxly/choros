@@ -145,6 +145,11 @@ export interface KeycloakUserPort {
    *   (e.g. "Bot #1", "A&B") — disambiguated from EMAIL_INVALID by the KC
    *   error body's field-level messageKey so the owner is told the NAME is
    *   the problem, not the (perfectly valid) email.
+   * Throws err.code="NAME_TOO_LONG" (T-0762, follow-up on T-0748's own R-2
+   *   review finding) if `displayName` produced a firstName/lastName
+   *   Keycloak rejects for exceeding its declarative `length:{max:255}`
+   *   validator (messageKey `error-invalid-length-too-long`) — the sibling
+   *   class T-0748 explicitly scoped out, disambiguated the same way.
    * Throws HttpError(503, "AUTH_UNAVAILABLE") if KC is unreachable.
    */
   createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }>;
@@ -346,6 +351,43 @@ function isPersonNameCharacterError(fieldErrors: KcFieldError[]): boolean {
       (fe.field === "firstName" || fe.field === "lastName") &&
       typeof fe.errorMessage === "string" &&
       fe.errorMessage.includes("person-name"),
+  );
+}
+
+/**
+ * T-0762 (R-2 follow-up from T-0748's own review): true iff the parsed field
+ * errors show a KC declarative user-profile "length" validator failure on
+ * firstName or lastName. LIVE-CONFIRMED against KC 25.0.6 (t-0633-keycloak-1,
+ * :8180, 2026-07-13 — the same container/realm T-0748's own live probe used):
+ *
+ *   Only ONE field over the 255-char cap (e.g. a long first token, ordinary
+ *   second token — realm-choros.json declares `"length":{"max":255}` on both
+ *   firstName/lastName, see extractKcFieldErrors' own doc):
+ *     {"field":"firstName","errorMessage":"error-invalid-length-too-long","params":["firstName",null,255]}
+ *
+ *   BOTH fields over the cap in the SAME request — reproduced with a
+ *   single-token (no-space) displayName near DISPLAY_NAME_MAX=256
+ *   (web/src/screens/users-form.js), which splitDisplayName (above) DUPLICATES
+ *   into both firstName AND lastName when it contains no space:
+ *     {"errors":[{"field":"lastName","errorMessage":"error-invalid-length-too-long","params":["lastName",null,255]},
+ *                {"field":"firstName","errorMessage":"error-invalid-length-too-long","params":["firstName",null,255]}]}
+ *
+ * No orphan KC user was left behind by either probe (KC rolls the create back
+ * on validation failure — confirmed via GET .../users?username=... after
+ * each). Matched by substring ("invalid-length") for the same KC point-
+ * release-drift tolerance as isPersonNameCharacterError; narrow enough it can
+ * only fire on firstName/lastName, never on `email` or any other field. This
+ * check MUST run alongside (not instead of) isPersonNameCharacterError — a KC
+ * 400 can carry either failure class on the SAME two fields, and the two are
+ * disambiguated into DISTINCT error codes (NAME_INVALID_CHARACTERS vs
+ * NAME_TOO_LONG) so the owner sees the honest reason, not a generic one.
+ */
+function isPersonNameLengthError(fieldErrors: KcFieldError[]): boolean {
+  return fieldErrors.some(
+    (fe) =>
+      (fe.field === "firstName" || fe.field === "lastName") &&
+      typeof fe.errorMessage === "string" &&
+      fe.errorMessage.includes("invalid-length"),
   );
 }
 
@@ -615,11 +657,28 @@ export function makeHttpKeycloakUserPort(cfg?: KcRegistrarConfig): KeycloakUserP
       // actual bad email, an unparseable/empty body, or any other KC-side
       // validation drift — falls through to the EXACT prior default
       // (EMAIL_INVALID), so the existing email-error path is unchanged.
+      // T-0762 (R-2 follow-up from T-0748's own review, filed as this task):
+      // T-0748 fixed the CHARACTER-validator misattribution but explicitly
+      // left the sibling LENGTH-validator class unhandled (spec.md §7 only
+      // disclaimed re-implementing the character set, not the length cap).
+      // A display_name near DISPLAY_NAME_MAX=256 with NO space (single
+      // token) still trips KC's independent 255-char-per-field cap via
+      // splitDisplayName's own documented duplication rule — and, before
+      // this fix, fell to the SAME misleading EMAIL_INVALID default this
+      // whole file exists to avoid. Checked ALONGSIDE (not instead of)
+      // isPersonNameCharacterError — a firstName/lastName 400 is EITHER a
+      // character problem OR a length problem, never both on the wire, but
+      // both must be told apart from a genuine bad email.
       if (createResp.status === 400) {
         const fieldErrors = extractKcFieldErrors(createResp.body);
         if (isPersonNameCharacterError(fieldErrors)) {
           const err = new Error("NAME_INVALID_CHARACTERS");
           (err as NodeJS.ErrnoException).code = "NAME_INVALID_CHARACTERS";
+          throw err;
+        }
+        if (isPersonNameLengthError(fieldErrors)) {
+          const err = new Error("NAME_TOO_LONG");
+          (err as NodeJS.ErrnoException).code = "NAME_TOO_LONG";
           throw err;
         }
         const err = new Error("EMAIL_INVALID");

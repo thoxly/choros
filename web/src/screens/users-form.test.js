@@ -181,6 +181,42 @@ describe('mapUserError', () => {
     expect(r.field).toBeUndefined();
     expect(r.message).toBe('email must be a valid email address (e.g. name@company.ru)');
   });
+
+  // T-0762 (R-2 follow-up from T-0748's own review): a single-token
+  // display_name near DISPLAY_NAME_MAX (no spaces, ~256 chars) trips
+  // Keycloak's independent 255-char-per-field firstName/lastName LENGTH
+  // cap — a DIFFERENT KC validator than T-0748's character one, previously
+  // falling through to the generic 400 branch with the misleading email
+  // text. Must anchor on display_name with the server's own honest message.
+  it("T-0762: maps 400 NAME_TOO_LONG to a display_name field error with the server's Russian message", () => {
+    const r = mapUserError(400, {
+      error: {
+        code: 'NAME_TOO_LONG',
+        message: 'отображаемое имя слишком длинное — Keycloak допускает не более 255 символов на имя или фамилию; сократите имя и попробуйте снова',
+      },
+    });
+    expect(r.field).toBe('display_name');
+    expect(r.message).toContain('слишком длинное');
+    expect(r.message).not.toMatch(/email/i);
+  });
+
+  it('T-0762: NAME_TOO_LONG with no server message falls back to an honest Russian default (still anchored on display_name)', () => {
+    const r = mapUserError(400, { error: { code: 'NAME_TOO_LONG' } });
+    expect(r.field).toBe('display_name');
+    expect(r.message).toMatch(/длин/);
+  });
+
+  it('T-0762 regression: NAME_INVALID_CHARACTERS (T-0748\'s own class) is unaffected by the new NAME_TOO_LONG case — the two do not cross-map', () => {
+    const r = mapUserError(400, {
+      error: {
+        code: 'NAME_INVALID_CHARACTERS',
+        message: 'отображаемое имя содержит недопустимые символы — уберите спецсимволы (<, &, #, кавычки, скобки) и попробуйте снова',
+      },
+    });
+    expect(r.field).toBe('display_name');
+    expect(r.message).toContain('недопустимые символы');
+    expect(r.message).not.toMatch(/слишком длинное/);
+  });
 });
 
 describe('accountStatusMeta', () => {
