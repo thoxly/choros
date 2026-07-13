@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0760",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N1-ci-flowable-gap-not-closed-by-this-task",
+      "severity": "nit",
+      "axis": 1,
+      "location": ".github/workflows/ci.yml db job (lines ~136-179) vs flowable job (~187-233)",
+      "issue": "Confirmed by reading the workflow: the `db` job's `services:` block starts ONLY `postgres:16` (no Flowable) and its steps run `npm run fitness:db` with no FLOWABLE_PORT/FLOWABLE_REST_* env set. The separate `flowable` job runs `docker compose up -d postgres flowable` + its own static/smoke checks, but never calls `npm run fitness:db`. `requireDbAndFlowable()` in both engine-drive-*.db.test.ts files silently `console.log('[skip] Flowable not reachable...')` and returns without failing when unreachable. Net effect: ci/checks/db/engine-drive-generic.db.test.ts and engine-drive-completedby.db.test.ts have NEVER actually asserted anything in any automated GitHub Actions run to date — 'green in CI' for these two files has always meant 'silently skipped in CI', confirming the builder's diagnosis (1) exactly. This is a PRE-EXISTING CI-topology gap, not introduced or worsened by T-0760's test-only diff — T-0760 fixes the seed so the tests are honest LOCALLY, but does not (and was not scoped to) make them run in automated CI.",
+      "suggestion": "Non-blocking for T-0760. Follow-up candidate for the orchestrator to file: either (a) add Flowable as a service/compose dependency to the `db` job (or a new job) that actually runs `npm run fitness:db`, or (b) move the Flowable-dependent db-tier files into the `flowable` job's own test invocation, so this class of test stops being permanently CI-invisible."
+    },
+    {
+      "id": "N2-stale-seed-pattern-may-recur-elsewhere",
+      "severity": "nit",
+      "axis": 2,
+      "location": "ci/checks/db/*.db.test.ts — grep for 'proposed_by, confirmed_by, created_at' (no confirmed2_by column) matches ~14 other db-tier test files (e.g. T-0710-inbox-instance-filter, read-grant-dual-control, inbox-defer-escalation, approval-registry-guard, ...)",
+      "issue": "Not verified individually (out of scope for this review) — a grep for the same pre-T-0605 INSERT column list (proposed_by/confirmed_by without confirmed2_by) surfaces in ~14 other db-tier test files. Some of these may seed rows that never need to pass through getRoleSlugsForActor's activation predicate (so the shape is harmless there), but it is plausible a subset silently under-activates the same way T-0571's seed did, masked by the same requireDb(AndFlowable) skip-on-missing-service pattern. T-0760 correctly scoped itself to only the two files T-0672 flagged (anti-scope-creep discipline, consistent with D-064) — this is not a defect in T-0760's diff.",
+      "suggestion": "Non-blocking. Candidate follow-up: an automated grep-based audit (or a shared seed helper) across ci/checks/db/*.db.test.ts for role_assignment INSERTs missing confirmed2_by, to catch any other PDP-inactive-by-accident seeds before they cause another silently-skipped-then-mysteriously-403 class of bug."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Diff is test-only: zero lines changed in src/ (git diff dev...HEAD --stat = 2 test files + 2 docs, +244/-15)", "covered": true },
+    { "ac": "RED-control reproduces: reverting seedApproverGrant's proposed_by back to actorSlug (dropping confirmed2_by) on live Postgres+Flowable reproduces 'expected 403 to be 200' on all 4 generic tests; restoring the fix returns 4/4 GREEN", "covered": true },
+    { "ac": "Fix does not weaken dual-control: confirmed by reading src/db/grants-dao.ts:504-525 — the canonical T-0605 predicate `confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)` treats proposed_by=NULL as the direct/genesis-grant shape (no second signature required BY DESIGN, not a bypassed one); this is byte-identical to T-0750-inbox-detail-authority.db.test.ts's established seedAssignment helper (proposed_by NULL, confirmed_by 'seed', confirmed2_by NULL) — same pattern, not a novel weakening", "covered": true },
+    { "ac": "404->200 assertion update matches a real, judge-approved contract: src/http/inbox.ts ~2192-2223 (T-0688, commit fb367491, judge 3x approved per docs history) returns 200 {status:'done', engine:'already'} when findWaitingInstanceTask is null but the instance is confirmed done for that taskId — the updated test assertion (200 + status:'done' + engine:'already') matches this code exactly; this code is pre-existing on dev, not touched by T-0760", "covered": true },
+    { "ac": "Live re-run: engine-drive-generic.db.test.ts 4/4 PASS against real Postgres :55432 + real Flowable 7.1.0 :8082 (not skipped — full assertion runs observed, no '[skip]' lines)", "covered": true },
+    { "ac": "Live re-run: engine-drive-completedby.db.test.ts 3/3 PASS, run without any --testTimeout CLI override (per-test in-file timeout param takes effect over vitest.config.js's 60000 default) — actual durations 718ms/672ms/1378ms, far under both the old 60000 default and the new 120000/150000 budgets, no sign of a masked deadlock", "covered": true },
+    { "ac": "Neighbor regression check: process-projection.test.ts 7/7 PASS unchanged", "covered": true },
+    { "ac": "tsc --noEmit 0 errors", "covered": true },
+    { "ac": "CI-skip diagnosis confirmed by reading .github/workflows/ci.yml: db job has only a postgres:16 service, no Flowable, no FLOWABLE_PORT env; flowable job never runs fitness:db — requireDbAndFlowable in both target files silently skips when Flowable unreachable, so 'works in CI' for these two files was never actually true before this fix", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "git diff dev...HEAD --stat: ci/checks/db/engine-drive-completedby.db.test.ts (+20), ci/checks/db/engine-drive-generic.db.test.ts (+52/-15), docs/tasks/T-0760.pr-handoff.json (new), docs/tasks/T-0760.spec.md (new). Zero src/ lines. Confirmed via `git diff dev...HEAD --name-only`.",
+    "RED-control (independent, my own re-run, not carried over from builder): edited the committed INSERT back to `proposed_by, confirmed_by, created_at` / `$6::text, $6::text, $6::text` (dropping confirmed2_by), ran `DATABASE_URL=... FLOWABLE_PORT=8082 npx vitest run --dir ci/checks/db --no-file-parallelism engine-drive-generic.db.test.ts` against the SAME live Postgres :55432 + Flowable :8082 already running in this environment (t0760-flowable container, up 33h) → 4/4 FAILED, all 'expected 403 to be 200'. Reverted the edit via Edit tool back to the exact committed text; confirmed `git diff --quiet ci/checks/db/engine-drive-generic.db.test.ts` reports clean / identical to commit 92d9fbac.",
+    "GREEN re-run (post-restore, independent): engine-drive-generic.db.test.ts 4/4 PASS (7.21s total, individual tests 1653/955/833/618ms).",
+    "GREEN re-run: engine-drive-completedby.db.test.ts 3/3 PASS (4.41s total, individual tests 718/672/1378ms) — run with NO --testTimeout override, confirming the per-test in-file 120000/150000 params are what's in effect, not a CLI/global override.",
+    "GREEN re-run: process-projection.test.ts 7/7 PASS (5.16s total).",
+    "tsc --noEmit -p . → exit 0.",
+    "Dual-control predicate read directly from src/db/grants-dao.ts:504-525 (getRoleSlugsForActor) — matches the builder's quoted SQL verbatim: `confirmed_by IS NOT NULL AND (valid_from...) AND (valid_until...) AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)`. Cross-checked against T-0750-inbox-detail-authority.db.test.ts:122-133 seedAssignment — identical shape (proposed_by NULL, confirmed_by set, confirmed2_by NULL) already an established, judge-reviewed pattern in the codebase.",
+    "T-0688 contract read directly from src/http/inbox.ts ~2192-2223: findWaitingInstanceTask null -> listInstanceProjections lookup for a `done` row matching inboxTaskId -> 200 {instanceId, status:'done', action:'approve', outcome, engine:'already'}. This is pre-existing dev code (git log confirms commit fb367491 / merge 7a851851, T-0688, 'судья 3×approved'), not modified by T-0760 — the test assertion update tracks reality rather than changing it.",
+    "vitest.config.js:27 confirmed testTimeout: 60000 suite-wide, textually equal to driveDeadlineMs:60000 used in engine-drive-completedby.db.test.ts — zero margin, matching the builder's and T-0672 judge's diagnosis. Per-test third-arg timeout override (it(name, fn, timeoutMs)) is an established pattern already used elsewhere (list-view-registry.db.test.ts:339, 60_000), not a novel mechanism.",
+    ".github/workflows/ci.yml read directly: db job services block (~138-149) = postgres:16 ONLY; flowable job (~187-233) starts postgres+flowable via docker compose but its steps are wait-ready/static-checks/smoke/bridge-e2e-smoke/flowable-bridge-contract — never `npm run fitness:db`. requireDbAndFlowable in both target test files checks `flowableReachable` (probed at localhost:$FLOWABLE_PORT, default 8082) and skips with a console.log, not a failure, when unreachable — confirms these two files have always silently skipped in every automated CI run.",
+    "migrations/031 (referenced in migrations/109_dual_control_pdp_backfill.sql comment) confirmed confirmed2_by is a real, established schema column, not a typo/new column introduced by this diff.",
+    "No blocking findings. Two non-blocking follow-up candidates noted (CI Flowable-gap not closed by this task's scope; possible recurrence of the same stale-seed shape in ~14 other db-tier test files, unverified/out of scope here)."
+  ]
+}
