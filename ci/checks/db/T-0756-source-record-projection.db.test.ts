@@ -532,3 +532,49 @@ describe.skipIf(!hasDb)('T-0756 SRP-7: an actor who ACTED on the instance is a p
     expect(sr!.canOpen).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// SRP-8 (T-0759, D-064 anti-case — N1 из ревью T-0756 §1.2): a DEACTIVATED
+// former audit-actor no longer resolves as a participant. Before T-0759,
+// clause (1) of isInstanceParticipant read the append-only audit track only —
+// a PAST action alone was enough, regardless of the actor's CURRENT
+// deactivated_at state (unlike clause (2)'s role-holder check, which was
+// already ACTOR_ACTIVE-gated via getRoleSlugsForActor, T-0738). A deactivated
+// actor with a still-live ~300s access-JWT (T-0702) therefore still resolved
+// 200 + sourceRecord{title, canOpen:false} — a title-only leak of the record
+// this task closes.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!hasDb)('T-0756/T-0759 SRP-8: a DEACTIVATED former audit-actor is no longer a participant', () => {
+  it('RED→GREEN: 404 for a deactivated actor who genuinely acted on the instance (was 200 title-only before the fix)', async () => {
+    const instanceId = await startInstance(TENANT_A, pubRecordA);
+    const deactActorSlug = `a-actor-deact-${uuid().slice(0, 8)}`;
+    const empId = await withClient(migratorUrl(), (c) => seedEmployee(c, TENANT_A, deactActorSlug));
+    await withTenantTx(TENANT_A, (tx) =>
+      appendTaskApproved(tx, {
+        taskId: uuid(),
+        instanceId,
+        procKey: 'proc-under-test',
+        actor: deactActorSlug,
+        nowMs: Date.now(),
+        tenantId: TENANT_A,
+      }),
+    );
+
+    // Sanity: BEFORE deactivation, the SAME actor IS a participant (200 +
+    // safe projection) — mirrors SRP-7 exactly, proves the 404 below is
+    // caused by deactivation, not a fixture mistake.
+    const before = await getInstanceDetail(baseUrl, instanceId, deactActorSlug);
+    expect(before.statusCode).toBe(200);
+    const beforeSr = before.body['sourceRecord'] as SourceRecordShape | undefined;
+    expect(beforeSr?.title).toBe(TITLE_VALUE);
+
+    await withClient(migratorUrl(), (c) =>
+      c.query(`UPDATE choros.employee SET deactivated_at = $1 WHERE id = $2`, [Date.now(), empId]),
+    );
+
+    const after = await getInstanceDetail(baseUrl, instanceId, deactActorSlug);
+    expect(after.statusCode).toBe(404);
+    expect(after.raw).not.toContain(TITLE_VALUE); // no title-only leak survives
+  });
+});

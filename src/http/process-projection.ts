@@ -63,6 +63,12 @@ import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 import { getRoleSlugsForActor } from "../db/grants-dao.js";
 import { resolveActorPrivilege } from "../db/sandbox-gate-dao.js";
 import { pickTitleFieldKey } from "../core/registry-title-field.js";
+// T-0759 [security/PDP P3, N1 из ревью T-0756 §1.2]: `isInstanceParticipant`/
+// `isInstanceParticipantBatch` clause (1) (audit-actor match) is now itself an
+// authority actor-resolver — ACTOR_ACTIVE_SQL is the SAME named predicate
+// clause (2) already carries via getRoleSlugsForActor (T-0738); registered in
+// ci/checks/actor-authority-deactivation-gate.sh AUTHORITY_RESOLVERS.
+import { ACTOR_ACTIVE_SQL } from "../db/actor-authority-gate.js";
 
 // ---------------------------------------------------------------------------
 // Audit event types (free-text `type` column; no enum constraint — migrations/006).
@@ -1217,7 +1223,11 @@ export async function resolveSourceRecordProjection(
  * READ grant on the source record (E16 §6). Tenant-scoped, fail-closed, reusing
  * merged authority only:
  *   (1) the actor APPEARS as an actor in this instance's append-only audit track
- *       (started / approved / claimed / next_task) — they ACTED on it; OR
+ *       (started / approved / claimed / next_task) — they ACTED on it; ACTOR_ACTIVE
+ *       -gated (T-0759, closes N1 from T-0756's review: a PAST audit action alone
+ *       no longer grants — the matched identity must be CURRENTLY active, or a
+ *       deactivated actor's residual ~300s access-JWT (T-0702) still resolved the
+ *       participant skeleton + source-record title); OR
  *   (2) the actor HOLDS the role of a task ever addressed on this instance
  *       (getRoleSlugsForActor ∩ the instance's audit task_role set) — eligible to
  *       act; ACTOR_ACTIVE-gated, so a deactivated role-holder resolves []; OR
@@ -1255,9 +1265,32 @@ export async function isInstanceParticipant(
     return { actors: actorSet, roles: roleSet };
   });
 
-  // (1) acted on the instance.
-  if (actors.has(actorSlug)) return true;
-  if (fallbackSlug && fallbackSlug !== actorSlug && actors.has(fallbackSlug)) return true;
+  // (1) acted on the instance — ACTOR_ACTIVE-gated (T-0759, N1 from T-0756's
+  // review, docs/tasks/T-0756.spec.md §1.2): a PAST audit-track match alone is
+  // not enough — resolve WHICH identity matched (actorSlug or, failing that, the
+  // distinct fallbackSlug — T-0366 shape) and require that SPECIFIC identity to
+  // be CURRENTLY active. Reuses ACTOR_ACTIVE_SQL (actor-authority-gate.ts) — the
+  // SAME predicate clause (2) below already carries via getRoleSlugsForActor
+  // (T-0738), not a bespoke deactivation literal.
+  const auditMatchSlug = actors.has(actorSlug)
+    ? actorSlug
+    : fallbackSlug && fallbackSlug !== actorSlug && actors.has(fallbackSlug)
+      ? fallbackSlug
+      : undefined;
+  if (auditMatchSlug) {
+    try {
+      const { rows } = await withTenant(pool, tenantId, (client) =>
+        client.query<{ id: string }>(
+          `SELECT id FROM choros.employee
+             WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
+          [tenantId, auditMatchSlug],
+        ),
+      );
+      if (rows.length > 0) return true;
+    } catch {
+      /* fail-closed: an active-check error never grants participant status via clause (1) */
+    }
+  }
 
   // (2) holds the role of a task addressed on this instance (ACTOR_ACTIVE-gated).
   if (roles.size > 0) {
@@ -1293,7 +1326,12 @@ export async function isInstanceParticipant(
  * (kept as a SEPARATE function — not a refactor of isInstanceParticipant — so
  * the already-tested, already-in-prod single-instance path, T-0756, is not
  * touched by this change):
- *   (1) acted on the instance (audit `actor`/`confirmed_by`); OR
+ *   (1) acted on the instance (audit `actor`/`confirmed_by`) — ACTOR_ACTIVE
+ *       -gated (T-0759, same closure as `isInstanceParticipant`'s clause (1)):
+ *       `actorSlug`'s and `fallbackSlug`'s CURRENT active status is actor-level
+ *       (not instance-level), so it is resolved ONCE for the whole batch, same
+ *       as (2)/(3) below — a deactivated actor's past audit-track appearance no
+ *       longer participates; OR
  *   (2) holds the role of a task ever addressed on the instance
  *       (`getRoleSlugsForActor`, ACTOR_ACTIVE-gated — computed ONCE for the
  *       whole batch, since role eligibility is actor-level, not
@@ -1313,7 +1351,7 @@ export async function isInstanceParticipantBatch(
   const participantIds = new Set<string>();
   if (!actorSlug || instanceIds.length === 0) return participantIds;
 
-  const { actorsByInst, rolesByInst, anyRoles } = await withTenant(pool, tenantId, async (client) => {
+  const { actorsByInst, rolesByInst, anyActors, anyRoles } = await withTenant(pool, tenantId, async (client) => {
     const res = await client.query<{
       inst: string | null;
       actor: string | null;
@@ -1327,6 +1365,7 @@ export async function isInstanceParticipantBatch(
     );
     const actorsByInst = new Map<string, Set<string>>();
     const rolesByInst = new Map<string, Set<string>>();
+    let anyActors = false;
     let anyRoles = false;
     for (const r of res.rows) {
       if (!r.inst) continue;
@@ -1334,11 +1373,13 @@ export async function isInstanceParticipantBatch(
         const s = actorsByInst.get(r.inst) ?? new Set<string>();
         s.add(r.actor);
         actorsByInst.set(r.inst, s);
+        anyActors = true;
       }
       if (r.confirmed_by) {
         const s = actorsByInst.get(r.inst) ?? new Set<string>();
         s.add(r.confirmed_by);
         actorsByInst.set(r.inst, s);
+        anyActors = true;
       }
       if (r.task_role) {
         const s = rolesByInst.get(r.inst) ?? new Set<string>();
@@ -1347,8 +1388,48 @@ export async function isInstanceParticipantBatch(
         anyRoles = true;
       }
     }
-    return { actorsByInst, rolesByInst, anyRoles };
+    return { actorsByInst, rolesByInst, anyActors, anyRoles };
   });
+
+  // (1) actor-active check — ACTOR_ACTIVE-gated (T-0759), actor-level, resolved
+  // ONCE for the whole batch (same reasoning as (2)/(3) below): `actorSlug`'s
+  // and the distinct `fallbackSlug`'s CURRENT active status don't vary per
+  // instance. Only queried when the batch's audit rows carry ANY actor data at
+  // all (mirrors the `anyRoles` guard on (2) below). SAME query shape as
+  // `isInstanceParticipant`'s clause (1) (`slug = $2 AND ${ACTOR_ACTIVE_SQL}
+  // LIMIT 1`) — byte-equivalent predicate, kept as two separate point lookups
+  // (not a shared helper) for the same "don't touch the tested single-instance
+  // path" reason this whole function is separate from `isInstanceParticipant`.
+  let actorSlugActive = false;
+  let fallbackSlugActive = false;
+  if (anyActors) {
+    try {
+      const { rows } = await withTenant(pool, tenantId, (client) =>
+        client.query<{ id: string }>(
+          `SELECT id FROM choros.employee
+             WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
+          [tenantId, actorSlug],
+        ),
+      );
+      actorSlugActive = rows.length > 0;
+    } catch {
+      /* fail-closed: an active-check error never grants participant status via clause (1) */
+    }
+    if (fallbackSlug !== undefined && fallbackSlug !== actorSlug) {
+      try {
+        const { rows: fbRows } = await withTenant(pool, tenantId, (client) =>
+          client.query<{ id: string }>(
+            `SELECT id FROM choros.employee
+               WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
+            [tenantId, fallbackSlug],
+          ),
+        );
+        fallbackSlugActive = fbRows.length > 0;
+      } catch {
+        /* fail-closed */
+      }
+    }
+  }
 
   // (2) role eligibility — actor-level, resolved ONCE for the whole batch
   // (only when at least one instance in the batch has an addressed task role).
@@ -1374,11 +1455,14 @@ export async function isInstanceParticipantBatch(
       participantIds.add(instanceId);
       continue;
     }
-    // (1) acted on the instance.
+    // (1) acted on the instance — ACTOR_ACTIVE-gated (T-0759): the matched
+    // identity (actorSlug, or the distinct fallbackSlug) must be CURRENTLY
+    // active, not merely present in the past audit track.
     const actors = actorsByInst.get(instanceId);
     if (
       actors &&
-      (actors.has(actorSlug) || (fallbackSlug !== undefined && fallbackSlug !== actorSlug && actors.has(fallbackSlug)))
+      ((actors.has(actorSlug) && actorSlugActive) ||
+        (fallbackSlug !== undefined && fallbackSlug !== actorSlug && actors.has(fallbackSlug) && fallbackSlugActive))
     ) {
       participantIds.add(instanceId);
       continue;
