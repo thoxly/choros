@@ -80,6 +80,15 @@ import {
   validateAndFilterFormValues,
   type OutboxEnqueuePort,
 } from "../db/step-applier.js";
+// T-0249 (B-11): generic completion-effect seam — when the completed step has a
+// registered server-side effect (e.g. issue-key), run it in THIS approve tx. The
+// registry is CASE-FREE and empty by default (honest-degrade: no-op for every
+// step that has no registered effect — byte-identical to pre-T-0249).
+import {
+  runCompletionEffect,
+  type CompletionEffectRegistry,
+} from "../core/completion-effect.js";
+import { resolveInstanceTargetOnClient } from "../db/process-instance-resolver.js";
 import {
   AlreadyClaimedError,
   appendTaskClaimed,
@@ -482,6 +491,15 @@ export interface InboxWriteDeps {
    * linear audit-only behaviour (honest-degrade).
    */
   flowableClient?: FlowableClient;
+  /**
+   * T-0249 (B-11): OPTIONAL completion-effect registry. When present AND the
+   * completed step has a registered effect for its (procKey, activity), the
+   * effect runs inside the approve tx (fail-closed: a throw rolls the approve
+   * back). Absent / no registered effect ⇒ no-op (honest-degrade, byte-identical
+   * to pre-T-0249). Case-free: the registry keys off opaque strings; the concrete
+   * (process, step) → handler bindings are wired in the composition root.
+   */
+  completionEffectRegistry?: CompletionEffectRegistry;
 }
 
 const UUID_RE =
@@ -2133,7 +2151,7 @@ export function registerInboxRoutes(
   //   - actor must hold the role the task is addressed to (approve grant): 403 NOT_ELIGIBLE
   // Success: 200 { instanceId, status: "done", action: "approve" }
   if (writeDeps) {
-    const { pool, resolveActorTenant: resolveActorTenantDep, outboxStore, flowableClient: writeDepsFlowable } = writeDeps;
+    const { pool, resolveActorTenant: resolveActorTenantDep, outboxStore, flowableClient: writeDepsFlowable, completionEffectRegistry } = writeDeps;
 
     router.register("POST", "/api/inbox/:id/action", withAuth(async (req, res, params) => {
       // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
@@ -2562,6 +2580,52 @@ export function registerInboxRoutes(
             nowMs,
             outboxStore,
           });
+        }
+
+        // T-0249 (B-11): completion-effect seam. When the completed step has a
+        // registered server-side effect (matched by taskDefinitionKey OR step
+        // name — whichever the engine surfaced), run it in THIS approve tx. The
+        // keystone case: completing «Выпустить активационный ключ» fires the
+        // issue-key effect (runIssueKey + record write-back). Strictly gated:
+        // no registry, or no registered effect for this (procKey, activity),
+        // ⇒ nothing runs (byte-identical to pre-T-0249, NF). A registered
+        // effect that throws propagates → this tx ROLLBACKs (fail-closed).
+        if (completionEffectRegistry) {
+          const activity = [task.taskDefKey, task.step].find(
+            (a): a is string =>
+              typeof a === "string" &&
+              a.length > 0 &&
+              completionEffectRegistry.resolve(task.procKey, a) !== undefined,
+          );
+          if (activity !== undefined) {
+            const target = await resolveInstanceTargetOnClient(client, tenantId, task.inst);
+            if (target.kind === "resolved" && target.primaryRecordId) {
+              // Resolve the record's OWN registry_id (the process's primary
+              // registry may be a different one; the effect addresses the record
+              // that started the process).
+              const rr = await client.query(
+                `SELECT registry_id FROM choros.record WHERE tenant_id = $1 AND id = $2`,
+                [tenantId, target.primaryRecordId],
+              );
+              const recRegistryId = (rr.rows[0] as { registry_id?: string } | undefined)?.registry_id;
+              if (recRegistryId) {
+                await runCompletionEffect(
+                  client,
+                  {
+                    tenantId,
+                    applicationId: target.applicationId,
+                    registryId: recRegistryId,
+                    recordId: target.primaryRecordId,
+                    procKey: task.procKey,
+                    activity,
+                    actor,
+                    nowMs,
+                  },
+                  completionEffectRegistry,
+                );
+              }
+            }
+          }
         }
       });
 
