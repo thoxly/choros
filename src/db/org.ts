@@ -21,7 +21,11 @@ import { ACTOR_ACTIVE_SQL } from "./actor-authority-gate.js";
 // loadAdminContext resolve role_assignment activity the SAME way
 // getRoleSlugsForActor/getGrantsForSubject do — see the T-0767 comment on
 // each query below for why this was previously missing here.
-import { assignmentActiveDualControlPredicate } from "./grants-dao.js";
+// T-0768: single NAMED critical-grant classifier (T-0397 canonical, grants-
+// dao.ts). loadAdminContext step 3 (below) resolves grant-row dual-control the
+// SAME way getGrantsForSubject step 3 does — see the T-0768 comment there for
+// why this predicate was previously missing entirely.
+import { assignmentActiveDualControlPredicate, criticalGrantPredicate } from "./grants-dao.js";
 
 const { Pool } = pg;
 
@@ -825,6 +829,39 @@ export async function isGenesisOwnerForTenant(
 // keeping all three role_assignment-activity resolvers (this file's two +
 // grants-dao.ts's two) on one source of truth. NO-OP for every current row
 // (proposed_by always NULL in production today).
+//
+// T-0768 [security/dual-control P1, LIVE — from T-0767's review] — step 3
+// (below) carried NO `confirmed_by`/`confirmed2_by` predicate AT ALL on the
+// `grant` row (unlike step 1/2's role_assignment predicate, which at least had
+// `confirmed_by IS NOT NULL` before T-0767). This is the T-0397 grant-ROW dual-
+// control axis (distinct from T-0605's assignment-ROW axis above): a CRITICAL
+// mgmt_object:* grant (criticalGrantPredicate — e.g. `mgmt_object:tier_promote`
+// / `transition`, axis a) proposed via POST /api/grants lands SEMI-CONFIRMED
+// (confirmed_by = first approver, confirmed2_by = NULL — grants.ts's
+// escalating-path INSERT) — by the T-0397 contract this grant is NOT yet PDP-
+// active. getGrantsForSubject step 3 (grants-dao.ts) already enforces this
+// correctly:
+//   confirmed_by IS NOT NULL
+//   AND (NOT <criticalGrantPredicate> OR confirmed2_by IS NOT NULL)
+// but loadAdminContext step 3 skipped it entirely, so a semi-confirmed critical
+// mgmt_object grant reached adminGrants and every consumer that trusts it
+// (artifacts.ts tier-promote gate, secret-handle.ts, llm-config.ts, seed-
+// write.ts, agents.ts, user-mgmt.ts, rights-intents.ts — the ~11 mgmt paths
+// behind assertOrgObjectAuthority/validateAdminDelegation) authorized on ONE
+// confirmation instead of the required two — a LIVE single-confirmation
+// dual-control bypass, reachable end-to-end via /api/grants propose. REAL (not
+// dormant): the write path (grants.ts escalating branch) sets exactly this
+// shape today for any critical mgmt_object grant.
+//
+// Fix mirrors the T-0675 precedent (report-page-render.ts's application/read
+// gate) EXACTLY: reuse `criticalGrantPredicate("g")` — the SAME exported
+// classifier grants-dao.ts interpolates into its own canonical grant read — not
+// a bespoke re-derivation of the four escalation axes. Non-critical delegable
+// mgmt_object grants (confirmed_by set, confirmed2_by irrelevant) are
+// unaffected: `NOT criticalGrantPredicate` is TRUE for them, so the OR
+// short-circuits and confirmed2_by is never required — matches every existing
+// non-critical admin grant (e.g. T-0658/T-0767's `mgmt_object:employee`/
+// `update` fixture) unchanged.
 // ---------------------------------------------------------------------------
 
 export async function loadAdminContext(
@@ -903,7 +940,12 @@ export async function loadAdminContext(
             AND g.resource_type LIKE 'mgmt_object:%'
             AND g.delegable = true
             AND (g.valid_from  IS NULL OR g.valid_from  <= $3)
-            AND (g.valid_until IS NULL OR g.valid_until  > $3)`,
+            AND (g.valid_until IS NULL OR g.valid_until  > $3)
+            AND g.confirmed_by IS NOT NULL
+            AND (
+                  NOT ${criticalGrantPredicate("g")}
+                  OR g.confirmed2_by IS NOT NULL
+                )`,
         [tenantId, ra.role_id, nowMs],
       );
 

@@ -1252,11 +1252,14 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
       );
       const roleId = roleRows[0]!.id;
 
+      // T-0768: 'read' with no clearance marker is non-critical (criticalGrantPredicate)
+      // but loadAdminContext step 3 now requires confirmed_by IS NOT NULL (T-0397
+      // grant-row activation, matching getGrantsForSubject) — set it explicitly.
       await c.query(
         `INSERT INTO choros."grant"
            (tenant_id, id, role_id, resource_type, operation, scope, delegable,
-            granted_by, created_at)
-         VALUES ($1, gen_random_uuid(), $2, 'mgmt_object:employee', 'read', $3::jsonb, true, $4, $5)`,
+            granted_by, created_at, confirmed_by)
+         VALUES ($1, gen_random_uuid(), $2, 'mgmt_object:employee', 'read', $3::jsonb, true, $4, $5, $4)`,
         [t.tenantId, roleId, JSON.stringify(scope), t.ownerSlug, Date.now()],
       );
 
