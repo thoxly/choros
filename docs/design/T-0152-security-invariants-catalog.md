@@ -442,43 +442,6 @@ corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
   дрейф между волнами; следующий новый GET-роут может открыть новую находку
   до следующего ручного прогона.
 
-### 7.8 AGENT-INSTRUCTION-DORMANT — агентная инструкция не читается в рантайм-пути формирования ответа
-- **Инвариант:** день-1 НЕТ рантайм-пути формирования ответа (движок/воркер/
-  bridge/adapters), который читает `agent_instruction`; в `src/http` чтение
-  допустимо ТОЛЬКО в authoring-DAO, чистом core-модуле типов/changelog,
-  audit/promote-регистрации (`artifacts.ts` `CONFIG_TABLES`) и тестах — никогда
-  в response-forming-хендлере (ADR §4 FF-COMP-6).
-- **Enforced by:** `ci/checks/agent-instruction-runtime-dormant.sh` (T-0123,
-  FF-COMP-6, есть `--self-test`).
-- **Покрытие: PARTIAL** (static grep-скан путей + allowlist на `src/http`; нет
-  runtime-кейса).
-- **T-0758 (comment-aware narrowing, additive-only):** исходный детектор был
-  `grep`-comment-unaware — ЛЮБОЕ упоминание строки `agent-instruction` в
-  ДОКУМЕНТАЦИОННОМ комментарии `src/http` (не read самой таблицы) ложно
-  красило гейт на чистом dev (2 comment-строки в `src/http/agents.ts`,
-  byte-identical dev/origin). Фикс: `strip_comment_substrings()` — string-aware
-  посимвольный сканер (awk) вырезает КОММЕНТ-ПОДСТРОКИ (inline и многострочные
-  `/* */`-спаны, хвостовые `//` вне строковых литералов, full-line `#`),
-  сохраняя строковые литералы — в т.ч. `//` внутри URL-строки. `#`-стрип
-  **привязан к расширению файла**: для `.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs`
-  `#` в ЛЮБОЙ позиции = код (private class field), стрип отключён; для
-  shell-файлов full-line `#` = коммент. Паттерн повторно применяется к остатку
-  через `file_has_code_level_agent_instruction_hit()`. **История R1 (судья,
-  blocking):** первая ревизия фикса стрипала ЦЕЛЫЕ физические строки по
-  лидирующей открывашке коммента — код-хит после `/* note */` на той же строке
-  становился невидим гейту; заменено на вырезание подстрок. **История R2
-  (судья, второй blocking, тот же класс):** R1-ревизия сохраняла full-line
-  `#`-правило, которое дропало TS-строку с лидирующим приватным полем
-  `  #rows = q("...agent_instruction...")` — реальный read таблицы (судья
-  воспроизвёл живьём: SKIP + exit 0), прямо противореча собственному
-  обоснованию R1 (mid-line `#` = код ради приватных полей); `#`-стрип сделан
-  extension-gated. Все R1/R2-шейпы закреплены как постоянные `--self-test` пробы
-  (13 проб T-0758) и перепроверены живыми мутациями (включая точные судейские
-  шейпы обоих раундов, каждый RED). Каждое решение стриппера ошибается в сторону
-  СОХРАНЕНИЯ текста (false positive: гейт краснеет, человек смотрит), а не
-  удаления (false negative: нарушение проплывает). Диф — чисто аддитивный
-  (0 удалённых/изменённых строк BASE_REF, A-1..A-4 verified).
-
 ---
 
 ## 8. Сводная таблица покрытия
@@ -496,7 +459,6 @@ corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
 | 7.4 | EGRESS-POLICY | ✅ | — | — | PARTIAL | runtime-проверка политики egress |
 | 7.5 | FROZEN-CHECKS | ✅ + probe | — | hostile-probe | STRONG | держит конституцию; T-0155 вешает сюда каталог |
 | 7.7 | ACTOR-ACTIVE | ✅ registry+accounting | ✅ 7 live-PG | — | STRONG | route-coverage (T-0726) 0 находок на T-0751 (было 1: `GET /api/rights/intents/substitution-coverage`, T-0745 пост-волновой дрейф); гейт остаётся информационным — новый GET-роут может открыть новую находку до следующего ручного прогона |
-| 7.8 | AGENT-INSTRUCTION-DORMANT | ✅ + self-test (13 проб T-0758) | — | живые мутации T-0758 (вкл. R1+R2-шейпы судьи) | PARTIAL | нет runtime-кейса; static comment-aware grep (строковые литералы сохраняются; `#`-стрип extension-gated) |
 
 ---
 
