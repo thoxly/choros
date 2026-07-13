@@ -381,6 +381,29 @@ async function seedOnCreateBinding(
   tenantId: string,
   applicationId: string,
   processKey: string,
+  // T-0764: MUST be explicit, not left to NULL/"primary registry" inference.
+  // getOnCreateBinding (T-0606, migration 122) resolves a NULL trigger_registry_id
+  // against "the earliest-created non-system registry_def for this application"
+  // (ORDER BY created_at ASC, id ASC). Every registry_def row this file seeds
+  // carries a LITERAL created_at=0 (see seedChildRegistry/seedParentRegistry/
+  // seedEmbeddedRollupRegistry below) — so that ORDER BY ties on created_at and
+  // falls through to `id ASC`, i.e. WHICHEVER of the two registries' random
+  // uuid()s sorts alphabetically first — a COIN FLIP, not the intended parent
+  // registry, on every run. Leaving trigger_registry_id NULL (the pre-T-0764
+  // shape of this helper) therefore matched the binding to the PARENT registry
+  // (where records are actually posted) only by luck of UUID draw — silently
+  // never proven live because this whole file skips without a live Flowable
+  // (requireDbAndFlowable). Passing the caller's real registryId explicitly
+  // (the T-0606 canonical idiom — see approval-registry-guard.db.test.ts's own
+  // seedOnCreateBinding) makes the match deterministic regardless of UUID luck.
+  triggerRegistryId: string,
+  // T-0764: the rollup field key differs by flavor — 'totalAmount' for the
+  // child-records flavor (seedParentRegistry), 'total' for the embedded flavor
+  // (seedEmbeddedRollupRegistry). The pre-T-0764 hardcoded 'totalAmount' silently
+  // starved the embedded-flavor test's `amount` engine variable (the field never
+  // existed under that key on that registry) — never caught for the same reason
+  // as above.
+  fieldKey: string = 'totalAmount',
 ): Promise<void> {
   const id = uuid();
   await c.query('BEGIN');
@@ -398,9 +421,9 @@ async function seedOnCreateBinding(
   // forever, never reaching the gateway this test observes).
   await c.query(
     `INSERT INTO choros.process_app_binding
-       (tenant_id, id, process_key, application_id, trigger_type, field_mapping, submit_task_key, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, 'on_create', $5::jsonb, 'task-submit', 0, 0)`,
-    [tenantId, id, processKey, applicationId, JSON.stringify({ amount: 'totalAmount' })],
+       (tenant_id, id, process_key, application_id, trigger_type, field_mapping, submit_task_key, trigger_registry_id, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'on_create', $5::jsonb, 'task-submit', $6, 0, 0)`,
+    [tenantId, id, processKey, applicationId, JSON.stringify({ amount: fieldKey }), triggerRegistryId],
   );
   await c.query('COMMIT');
 }
@@ -491,7 +514,7 @@ describe('T-0575 FF-3/AC-5/AC-3 — computed rollup reaches startInstance variab
         seedParentRegistry(c, TENANT_ID, applicationId, 'rollup-parent', childRegistryId),
       );
       await withClient(migratorUrl(), (c) =>
-        seedOnCreateBinding(c, TENANT_ID, applicationId, processKey),
+        seedOnCreateBinding(c, TENANT_ID, applicationId, processKey, parentRegistryId),
       );
 
       // 3. PRE-SEED child records summing to MORE than 500000, keyed to a
@@ -564,7 +587,7 @@ describe('T-0575 FF-3/AC-5/AC-3 — computed rollup reaches startInstance variab
         seedParentRegistry(c, TENANT_ID, applicationId, 'rollup-parent-low', childRegistryId),
       );
       await withClient(migratorUrl(), (c) =>
-        seedOnCreateBinding(c, TENANT_ID, applicationId, processKey),
+        seedOnCreateBinding(c, TENANT_ID, applicationId, processKey, parentRegistryId),
       );
 
       const deterministicParentId = crypto.randomUUID();
@@ -633,7 +656,10 @@ describe('T-0603 — embedded rollup reaches startInstance variables + derived m
         seedEmbeddedRollupRegistry(c, TENANT_ID, applicationId, 'embedded-rollup-parent'),
       );
       await withClient(migratorUrl(), (c) =>
-        seedOnCreateBinding(c, TENANT_ID, applicationId, processKey),
+        // T-0764: embedded flavor's rollup field is named 'total' (see
+        // seedEmbeddedRollupRegistry above), NOT 'totalAmount' — the hardcoded
+        // default that matches only the child-records flavor (seedParentRegistry).
+        seedOnCreateBinding(c, TENANT_ID, applicationId, processKey, registryId, 'total'),
       );
 
       // HIGH-VALUE: Σ price×qty = 300000 + 250000 = 550000 > 500000.

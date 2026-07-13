@@ -73,11 +73,15 @@ async function seedTenant(c: pg.Client, tenantId: string, ownerSlug: string): Pr
      VALUES ($1, $2, 'tenant-owner', 'Tenant Owner', 0, 0)`,
     [tenantId, ownerRoleId],
   );
+  // T-0764: proposed_by MUST be NULL — direct/genesis grant, not a pending
+  // dual-control proposal (T-0605 canonical shape, эталон
+  // T-0750-inbox-detail-authority.db.test.ts). Harmless here (sole consumer
+  // isGenesisOwnerForTenant ignores proposed_by/confirmed2_by) but non-canonical.
   await c.query(
     `INSERT INTO choros.role_assignment
        (tenant_id, id, employee_id, role_id, org_scope, valid_from, valid_until,
         source, granted_by, proposed_by, confirmed_by, created_at, updated_at)
-     VALUES ($1, $2, $3::uuid, $4, $5::jsonb, NULL, NULL, 'genesis', $6::text, $6::text, $6::text, 0, 0)`,
+     VALUES ($1, $2, $3::uuid, $4, $5::jsonb, NULL, NULL, 'genesis', $6::text, NULL, $6::text, 0, 0)`,
     [
       tenantId,
       uuid(),

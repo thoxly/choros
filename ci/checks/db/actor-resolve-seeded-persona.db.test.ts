@@ -104,11 +104,18 @@ async function seedTenantWithOwnerAndMember(c: pg.Client): Promise<void> {
      VALUES ($1, $2, 'tenant-owner', 'Владелец', 0, 0)`,
     [TENANT, ownerRoleId],
   );
+  // T-0764: proposed_by MUST be NULL — a direct/genesis grant, not a pending
+  // dual-control proposal (T-0605 canonical shape, эталон
+  // T-0750-inbox-detail-authority.db.test.ts). The prior proposed_by=OWNER_SLUG
+  // (no confirmed2_by) read as "awaiting 2nd signature" under the canonical
+  // getRoleSlugsForActor/getGrantsForSubject predicate — harmless HERE only
+  // because this seed's sole consumer is isGenesisOwnerForTenant (org.ts),
+  // which keys off confirmed_by alone and ignores proposed_by/confirmed2_by.
   await c.query(
     `INSERT INTO choros.role_assignment
        (tenant_id, id, employee_id, role_id, org_scope, valid_from, valid_until,
         source, granted_by, proposed_by, confirmed_by, created_at, updated_at)
-     VALUES ($1, $2, $3::uuid, $4, $5::jsonb, NULL, NULL, 'genesis', $6::text, $6::text, $6::text, 0, 0)`,
+     VALUES ($1, $2, $3::uuid, $4, $5::jsonb, NULL, NULL, 'genesis', $6::text, NULL, $6::text, 0, 0)`,
     [
       TENANT,
       uuid(),
