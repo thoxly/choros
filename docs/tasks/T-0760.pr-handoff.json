@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0760",
+  "status": "pr_open",
+  "branch": "task/T-0760",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/db/engine-drive-generic.db.test.ts (MODIFIED — seedApproverGrant: proposed_by NULL not actorSlug, +confirmed2_by column; idempotent-repeat assertion updated 404->200{engine:already} per T-0688)",
+    "ci/checks/db/engine-drive-completedby.db.test.ts (MODIFIED — explicit per-test timeout: 120000/120000/150000, real headroom over driveDeadlineMs:60000)",
+    "docs/tasks/T-0760.spec.md (NEW)",
+    "docs/tasks/T-0760.pr-handoff.json (NEW)"
+  ],
+  "summary": "Оба дефекта отмечены T-0672 как 'вне scope' и делегированы сюда (T-0672.pr-handoff.json risks_for_judge[4] + note_for_followup). (а) engine-drive-generic.db.test.ts 403 локально на живом Flowable+Postgres: seedApproverGrant (T-0571-эра сид) писал role_assignment с proposed_by=actorSlug (НЕ NULL) и без confirmed2_by. T-0605 (смержен ПОСЛЕ T-0571) сделал канонический предикат getRoleSlugsForActor 'confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)' — строка с proposed_by set / confirmed2_by null читается как 'предложение ждёт 2й подписи' (dual-control T-0397) → PDP-неактивна → [] роли → 403 NOT_ELIGIBLE на approve. НЕ разница 'полный CI сидит иначе' — GitHub Actions db-job гоняет fitness:db БЕЗ Flowable, так что requireDbAndFlowable молча скипал этот файл в автоматическом CI всегда; только ручные LIVE_PROOF-сессии судей доходили до 403 и отложили фикс. Фикс: proposed_by=NULL (+явный confirmed2_by=NULL) — тот же прямой/genesis-грант паттерн, что уже используется в T-0750-inbox-detail-authority.db.test.ts's seedAssignment. Прод-authz (grants-dao.ts / inbox.ts) НЕ тронут — правка ограничена тестовым сид-хелпером. Побочно: фикс впервые дал control дойти до ВТОРОГО approve-вызова idempotent-теста, обнажив что его assertion(404) была stale pre-T-0688 (T-0688 fb367491, судья 3×approved, сделал повторный approve на уже-done шаге честным 200{engine:'already'} вместо вводящего в заблуждение 404) — assertion обновлена под текущий, задокументированный судейский контракт, продукт-код не тронут. (б) engine-drive-completedby.db.test.ts testTimeout==driveDeadlineMs (60000, ноль запаса) — судья T-0672 сам это поймал (2/3 timeout на холодном движке). Явный третий it()-параметр: 120000 на GREEN/RED-mutation (1 drive), 150000 на idempotent (2 последовательных drive).",
+  "root_cause_detail": {
+    "predicate_history": "T-0605 (f952c8b0, git log line 811) landed AFTER T-0571 (8b3de276, line 951) — confirmed via git log --oneline --all ordering.",
+    "canonical_predicate": "src/db/grants-dao.ts getRoleSlugsForActor ~line 515-525: confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)",
+    "broken_seed_shape": "proposed_by=actorSlug (non-null), confirmed2_by never inserted (defaults NULL) -> predicate FALSE -> row excluded from active assignments",
+    "fixed_seed_shape": "proposed_by=NULL, confirmed2_by=NULL explicit -> predicate TRUE -> matches T-0750-inbox-detail-authority.db.test.ts's seedAssignment pattern",
+    "ci_topology_note": ".github/workflows/ci.yml db-job runs `npm run fitness:db` with ONLY postgres:16 service, no Flowable — flowable-job is separate and does not run fitness:db, so this test SKIPS in every automated CI run and the seed bug never manifested there; only manual live-Flowable local/judge runs hit it"
+  },
+  "red_control": {
+    "method": "reverted ONLY the (a) seed fix (proposed_by back to actorSlug, dropped confirmed2_by column) on a live Postgres+Flowable, re-ran engine-drive-generic.db.test.ts, restored the fix, re-ran again",
+    "before_fix_result": "4/4 FAILED — 3x '403 to be 200' (tests 2/3/4) + 1x cold-engine client-timeout on deployBpmn (test 1, unrelated client default, resolved on warm rerun)",
+    "after_revert_result": "4/4 FAILED again — 403 reproduced on tests 1/2/3/4 (warm engine this time, so no cold-timeout noise): confirms the (a) fix is what closes the 403, not an unrelated env effect",
+    "after_restore_result": "4/4 PASS"
+  },
+  "gates": {
+    "engine_drive_generic_db_live": "ci/checks/db/engine-drive-generic.db.test.ts 4/4 PASS (live Postgres :55432 + live Flowable 7.1.0 :8082, isolated container t0760-flowable on choros_default network)",
+    "engine_drive_completedby_db_live": "ci/checks/db/engine-drive-completedby.db.test.ts 3/3 PASS, run WITHOUT any --testTimeout CLI override (proves the per-test in-file timeout takes effect over the vitest.config.js 60000 default)",
+    "process_projection_db_neighbor": "ci/checks/db/process-projection.test.ts 7/7 PASS (regression check, unrelated file)",
+    "tsc": "npx tsc --noEmit — 0 errors",
+    "full_fitness_db": "npm run fitness:db (whole ci/checks/db lane) — see friction_events for run note"
+  },
+  "deviations_from_adr": [],
+  "risks_for_judge": [
+    "Проверить, что 4/4 engine-drive-generic PASS живьём (не skip): вывод должен показать реальные assertion-прогоны, а не '[skip] Flowable not reachable' — подними Flowable по рецепту в spec.md/task-описании (образ flowable/flowable-rest:7.1.0 уже кэширован локально) и прогони НАПРЯМУЮ (без CI override флагов), чтобы увидеть, что per-test timeout из файла реально держит.",
+    "Атаковать (а)-фикс: временно верни proposed_by=$6::text (как было) — 403 должен вернуться на 3-4 тестах. Это RED-контроль, уже прогнан мной (см. red_control), но независимая проверка судьёй желательна.",
+    "Идемпотент-тест теперь ожидает 200{engine:'already'} вместо 404 — сверить с T-0688 (fb367491, src/http/inbox.ts ~2211-2227) что это ДЕЙСТВИТЕЛЬНО текущий, судьёй утверждённый контракт, а не ослабление проверки.",
+    "confirmed2_by=NULL в фикс-сиде — НЕ ослабление dual-control: это прямой/genesis-грант (одна authority), где proposed_by=NULL и есть канонический сигнал 'не через proposal-workflow' (см. T-0397/T-0605 предикат) — не 'обошли вторую подпись', а 'вторая подпись не требуется для этого пути вообще', ровно как в T-0750's эталонном сиде.",
+    "150000мс на idempotent-тесте (2 последовательных drive) — не полный теоретический потолок 2×driveDeadlineMs(60000)+запас=180000; выбран компромисс, т.к. второй re-drive на уже-ended инстансе на практике почти мгновенный. Если судья считает это недостаточным запасом — 180000 безопаснее, чисто количественный вопрос."
+  ],
+  "friction_events": [
+    "Локальный worktree был БЕЗ node_modules (npm install потребовался первым шагом) и БЕЗ живого Flowable — поднял изолированный контейнер flowable/flowable-rest:7.1.0 (image уже был локально закэширован, НЕ пуллил) на docker-сети choros_default (та же сеть, что choros-postgres-1 с alias 'postgres'), порт 8082->8080, те же креды/JDBC-схема 'flowable', что docker-compose.yml. Холодный старт JVM ~2.5 минуты (первый POST /management/engine ответил только после прогрева).",
+    "Первый прогон engine-drive-generic на ХОЛОДНОМ движке дополнительно уронил тест #1 клиентским TIMEOUT на deployBpmn (client default timeoutMs, отдельно от vitest testTimeout/driveDeadlineMs) — на тёплом движке (все последующие прогоны) не воспроизводится; не патчил (не в scope (а)/(б), клиентский default timeoutMs для deployBpmn — самостоятельный, отдельный от этой задачи вопрос).",
+    "Фикс (а) впервые дал тесту дойти до второго approve-вызова в idempotent-тесте, обнажив ВТОРУЮ, независимую от (а)/(б) staleness — assertion 404 vs текущий T-0688-контракт 200{engine:'already'}. Разобрано и зафиксировано как часть (а) (побочный эффект СИД-фикса, не отдельная задача) — см. summary/spec.md."
+  ]
+}
