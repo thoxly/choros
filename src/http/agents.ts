@@ -39,8 +39,8 @@ import { type ScopeElement } from "../core/grant-lattice.js";
 import { validateSecretHandleShape } from "../core/secret-handle-validator.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 // T-0645: the SINGLE shared agent-management authority predicate. saveDraft
-// (PUT /api/agents/:id/instruction) and the agent-instruction promote path
-// (artifacts.ts) gate on THIS one resolver — no per-file fork.
+// (PUT /api/agents/:id/instruction) and the instruction-promote path in
+// artifacts.ts gate on THIS one resolver — no per-file fork.
 import { holdsAgentMgmtUpdate } from "../core/agent-mgmt-authority.js";
 import { getLlmConnection } from "../db/llm-connection-dao.js";
 import { setAgentLlmConnection } from "../db/agent-llm-connection-dao.js";
@@ -175,8 +175,8 @@ async function lookupPositionOrgScope(
 // T-0498 [E-AGENTS]: bind an agent to a NAMED llm_connection profile.
 //
 // Authz — THE SAME class/predicate as the secret-handle lifecycle
-// (POST /api/agents/:id/secret-handle) AND the agent-instruction promote path
-// (artifacts.ts, T-0645): genesis-owner OR a confirmed, in-window, delegable
+// (POST /api/agents/:id/secret-handle) AND the instruction-promote path in
+// artifacts.ts (T-0645): genesis-owner OR a confirmed, in-window, delegable
 // mgmt_object:agent/update grant covering the agent's org scope (isNarrowerOrEqual).
 // Fail-closed: a plain member with neither → 403. Binding the LLM connection is the
 // SAME management operation as binding the secret handle (it points the agent at
