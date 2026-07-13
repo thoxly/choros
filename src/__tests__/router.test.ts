@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as http from "node:http";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
@@ -202,6 +202,144 @@ describe("HttpError", () => {
     // No stack trace in body
     expect(parsed.error.message).not.toContain("at fn");
     expect(parsed.error.message).not.toContain("file.ts");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0763: non-HttpError → server-side log, client response stays generic
+// ---------------------------------------------------------------------------
+//
+// Follow-up to T-0249 CE-1's live-wire finding: before this task a non-HttpError
+// thrown by a handler was discarded silently — the ONLY trace was the generic
+// {code:"INTERNAL"} envelope, which is indistinguishable for a genuine bug
+// (e.g. 22P02 invalid-uuid) vs. anything else. These tests pin BOTH halves of
+// the fix: (a) the server-side console.error now carries the error's message
+// AND stack (diagnosable), and (b) the HTTP response the client receives is
+// UNCHANGED — still the generic INTERNAL envelope, never the error message or
+// stack (no internals leak over the wire).
+describe("T-0763: non-HttpError server-side logging", () => {
+  let errSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
+
+  it("async handler non-HttpError: console.error carries message+stack; HTTP body stays generic", async () => {
+    const router = new Router();
+    router.register("GET", "/boom", async () => {
+      throw new Error("db write failed: invalid input syntax for type uuid");
+    });
+
+    const req = makeReq("GET", "/boom");
+    const { res, capture } = makeRes();
+    router.dispatch(req, res);
+    await new Promise((r) => setTimeout(r, 10));
+
+    // (a) server-side diagnostic was logged
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    const logged = errSpy.mock.calls[0]?.join(" ") ?? "";
+    expect(logged).toContain("db write failed: invalid input syntax for type uuid");
+    expect(logged).toContain("GET");
+    expect(logged).toContain("/boom");
+
+    // (b) HTTP response is still the generic envelope — no leak
+    expect(capture.statusCode).toBe(500);
+    const parsed = JSON.parse(capture.body) as { error: { code: string; message: string } };
+    expect(parsed.error.code).toBe("INTERNAL");
+    expect(parsed.error.message).toBe("internal server error");
+    expect(capture.body).not.toContain("invalid input syntax for type uuid");
+  });
+
+  it("sync handler throw (non-HttpError, caught via Promise.reject wrap): logged, response generic", async () => {
+    const router = new Router();
+    router.register("GET", "/boom-sync", () => {
+      throw new TypeError("cannot read property 'x' of undefined");
+    });
+
+    const req = makeReq("GET", "/boom-sync");
+    const { res, capture } = makeRes();
+    router.dispatch(req, res);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    const logged = errSpy.mock.calls[0]?.join(" ") ?? "";
+    expect(logged).toContain("cannot read property 'x' of undefined");
+
+    expect(capture.statusCode).toBe(500);
+    expect(capture.body).not.toContain("cannot read property");
+  });
+
+  it("HttpError path: console.error is NOT called (no log-spam on expected errors)", async () => {
+    const router = new Router();
+    router.register("GET", "/expected-fail", async () => {
+      throw new HttpError(409, "CONFLICT", "already locked");
+    });
+
+    const req = makeReq("GET", "/expected-fail");
+    const { res, capture } = makeRes();
+    router.dispatch(req, res);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(errSpy).not.toHaveBeenCalled();
+    expect(capture.statusCode).toBe(409);
+  });
+
+  it("fallback sync throw (non-HttpError): logged, response generic INTERNAL", () => {
+    const router = new Router();
+    router.setFallback(() => {
+      throw new Error("fallback exploded: secret-looking-but-not token=abc123");
+    });
+
+    const req = makeReq("GET", "/no-such-route");
+    const { res, capture } = makeRes();
+    router.dispatch(req, res);
+
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    const logged = errSpy.mock.calls[0]?.join(" ") ?? "";
+    expect(logged).toContain("fallback exploded");
+
+    expect(capture.statusCode).toBe(500);
+    const parsed = JSON.parse(capture.body) as { error: { code: string; message: string } };
+    expect(parsed.error.code).toBe("INTERNAL");
+    expect(capture.body).not.toContain("fallback exploded");
+    expect(capture.body).not.toContain("token=abc123");
+  });
+
+  it("fallback async rejection (non-HttpError): logged, response generic INTERNAL", async () => {
+    const router = new Router();
+    router.setFallback(async () => {
+      throw new Error("async fallback failure");
+    });
+
+    const req = makeReq("GET", "/no-such-route-async");
+    const { res, capture } = makeRes();
+    router.dispatch(req, res);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    const logged = errSpy.mock.calls[0]?.join(" ") ?? "";
+    expect(logged).toContain("async fallback failure");
+
+    expect(capture.statusCode).toBe(500);
+    expect(capture.body).not.toContain("async fallback failure");
+  });
+
+  it("fallback HttpError path: console.error is NOT called", () => {
+    const router = new Router();
+    router.setFallback(() => {
+      throw new HttpError(400, "VALIDATION", "bad request");
+    });
+
+    const req = makeReq("GET", "/no-such-route-httperror");
+    const { res, capture } = makeRes();
+    router.dispatch(req, res);
+
+    expect(errSpy).not.toHaveBeenCalled();
+    expect(capture.statusCode).toBe(400);
   });
 });
 
