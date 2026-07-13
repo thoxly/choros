@@ -232,6 +232,72 @@ jobs:
         if: always()
         run: docker compose stop flowable
 
+  # T-0764 (follow-up to T-0760): the `db` job above pins a BARE postgres:16
+  # service — no Flowable substrate. Five ci/checks/db/*.db.test.ts files
+  # (engine-drive-generic, engine-drive-completedby, detel-base-task-role,
+  # detel-rollup-to-variables, formula-derived) gate their live assertions
+  # behind a local requireDbAndFlowable() helper that does `console.log('[skip]
+  # Flowable not reachable ...')` and returns — NOT a fail — when no Flowable
+  # is reachable. In the `db` job that guard is ALWAYS true, so these tests have
+  # been silently no-op'ing in every automated CI run since they were written;
+  # T-0760 only discovered the underlying seed bug by running them BY HAND
+  # against a local Flowable. This job closes that gap by giving `npm run
+  # fitness:db` a REAL Flowable — same docker-compose substrate the
+  # `flowable`/`stack`/`kc`/`deploy-acceptance` jobs already use (the `flowable`
+  # Postgres schema is created by config/postgres/002-flowable-schema.sql on
+  # first Postgres init, identical to those jobs — no new provisioning needed).
+  #
+  # Deliberately re-runs the FULL `npm run fitness:db` suite rather than a
+  # hand-picked file list: a hardcoded "these are the Flowable-gated files"
+  # whitelist would itself rot the moment a new requireDbAndFlowable() test is
+  # added and this workflow isn't updated to match — exactly the silent-skip
+  # failure mode this task exists to close. The ~175 non-Flowable-gated files
+  # simply re-run redundantly here (same DATABASE_URL template-clone isolation
+  # as the `db` job, no Flowable dependency); only the 5 Flowable-gated ones
+  # newly execute for real.
+  #
+  # NOT added to deploy-dev.needs yet — same advisory-first discipline the
+  # deploy-acceptance job documents above (T-0274 EXACT FLIP-CONDITION): this
+  # job needs to be proven green in the actual GitHub/self-hosted runner at
+  # least once before it can safely gate dev auto-deploy. It binds the same
+  # fixed compose ports (55432/8082) as `flowable`/`stack`/`kc`/
+  # `deploy-acceptance` — safe only because the self-hosted runner already
+  # serializes job execution (T-0703). A follow-up task should flip it into
+  # deploy-dev.needs once verified green.
+  db-flowable:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
+      FLOWABLE_PORT: "8082"
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start Postgres + Flowable via compose
+        run: docker compose up -d postgres flowable
+      - name: Wait for Flowable readiness (FF-FL-1)
+        run: bash ci/checks/flowable/wait-ready.sh
+      # 1. Apply all migrations against the fresh compose DB, then re-run to
+      #    prove idempotency — same two-step pattern as the `db` job above.
+      - run: node migrations/run.mjs
+      - run: node migrations/run.mjs
+      # 2. Provision the per-migration-hash template DB the T-0147
+      #    db-isolation harness clones per-test DBs from (same requirement as
+      #    the `db` job; without this every test errors "template database ...
+      #    not found").
+      - run: npm run fitness:db:setup-template
+      # 3. Full live-db probe suite — WITH Flowable reachable this time, so the
+      #    requireDbAndFlowable()-gated engine-drive tests actually execute
+      #    instead of silently skipping (T-0764).
+      - run: npm run fitness:db
+      - name: Stop services
+        if: always()
+        run: docker compose stop flowable postgres
+
   # T-0061 · E0.6 · dev full-stack integration (FF-T61-12 / AC-13):
   # Starts the complete 4-service dev stack (postgres + keycloak + flowable + choros)
   # and verifies all services are healthy. Requires docker build (may take ~5 min on
