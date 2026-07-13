@@ -57,18 +57,36 @@ ALLOWED_RE='src/db/agent-instruction-store\.ts|src/core/agent-instruction\.ts|sr
 #   * string literals — double-quoted, single-quoted, and backtick template
 #     literals incl. multi-line state — are preserved verbatim (T-0758), with
 #     backslash-escape handling; comment markers inside them are inert;
-#   * a hash line-comment is honored ONLY when it opens the physical line
-#     (shell-style full-line comment); a MID-line hash is conservatively kept
-#     as code (T-0758) — TypeScript has no hash comments, and stripping hash
-#     tails would hide a real hit in a private class field
-#     (this.#agent_instruction) — never trade a new false negative for fewer
-#     false positives.
+#   * a hash comment is a SHELL construct; it is honored ONLY for non-.ts/.js
+#     files (see R2 below). TypeScript/JS has NO hash comments at all — a hash
+#     in ANY position, line-leading OR mid-line, is CODE (a private class field
+#     `#rows` / `this.#rows`), so for .ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs the
+#     hash rule is disabled entirely and never strips a line.
 # Every stripping decision errs toward KEEPING text (possible false positive:
 # the gate reds and a human looks) rather than dropping it (false negative: a
 # real violation sails through) — see the T-0758 --self-test probes for the
-# pinned adversarial shapes, including the judge-reproduced R1 evasions.
+# pinned adversarial shapes, including the judge-reproduced R1/R2 evasions.
+#
+# T-0758 R2 (second blocking judge finding, fixed here): the R1 revision kept a
+# full-line hash rule (`^[[:space:]]*# → drop the line`). In TypeScript a
+# line-leading hash is a VALID private-field declaration —
+# `  #rows = q("...agent_instruction...")` — so that rule dropped the whole
+# declaration line and hid a real table read (judge live-reproduced: SKIP +
+# exit 0 on a clean src/http/*.ts file). This contradicted R1's OWN stated
+# reasoning (mid-line hash kept as code for exactly this private-field case) —
+# the declaration form of the same case was still hidden. Fix: the hash rule is
+# now gated on file extension (STRIP_HASH), enabled ONLY for non-.ts/.js files
+# (e.g. shell). For the .ts/.tsx/.js/.jsx surface this gate actually scans
+# (src/http/*.ts), STRIP_HASH=0 → a leading OR mid-line hash is always code.
+# Passing an unknown/extensionless path defaults STRIP_HASH=1 (shell-safe), the
+# false-POSITIVE-leaning default.
 strip_comment_substrings() {
-  awk '
+  local target="$1"
+  local strip_hash=1
+  case "${target}" in
+    *.ts|*.tsx|*.js|*.jsx|*.mts|*.cts|*.mjs|*.cjs) strip_hash=0 ;;
+  esac
+  awk -v strip_hash="${strip_hash}" '
     BEGIN {
       DQ = sprintf("%c", 34); SQ = sprintf("%c", 39)
       BT = sprintf("%c", 96); BS = sprintf("%c", 92)
@@ -76,7 +94,7 @@ strip_comment_substrings() {
     }
     {
       line = $0
-      if (inblock == 0 && intpl == 0 && line ~ /^[[:space:]]*#/) { print ""; next }
+      if (strip_hash == 1 && inblock == 0 && intpl == 0 && line ~ /^[[:space:]]*#/) { print ""; next }
       out = ""; indq = 0; insq = 0
       i = 1; n = length(line)
       while (i <= n) {
@@ -105,7 +123,7 @@ strip_comment_substrings() {
       }
       print out
     }
-  ' "$1" 2>/dev/null
+  ' "${target}" 2>/dev/null
 }
 
 file_has_code_level_agent_instruction_hit() {
@@ -180,6 +198,34 @@ if [[ "${1:-}" == "--self-test" ]]; then
     exit 1
   fi
   echo "PASS self-test [T-0758-R1-PRIVATE-FIELD]: mid-line hash treated as code (TS private field hit detected)"
+  # T-0758 R2 adversarial probes (second judge blocking finding, now pinned):
+  # (и) LINE-LEADING hash — a private-field DECLARATION in TypeScript. The R1
+  # revision's full-line hash rule dropped this whole line; must now DETECT.
+  printf 'class Leak {\n  #rows = db.query("select 1 from choros.agent_instruction");\n}\n' > "${SELFTEST_TMP}/r2_private_field_decl.ts"
+  if ! file_has_code_level_agent_instruction_hit "${SELFTEST_TMP}/r2_private_field_decl.ts"; then
+    echo "FAIL self-test [T-0758-R2-PRIVATE-FIELD-DECL]: a LINE-LEADING TS private-field declaration (#rows = ...) was dropped as a shell comment — R2 evasion open"
+    exit 1
+  fi
+  echo "PASS self-test [T-0758-R2-PRIVATE-FIELD-DECL]: line-leading TS private-field declaration hit detected (R2 closed)"
+  # Control: the SAME line-leading hash IS a comment in a shell-style file
+  # (non-.ts/.js). A comment-only shell line must still be classified non-code,
+  # so the hash rule stays alive where it is correct.
+  printf '#!/usr/bin/env bash\n# mentions agent_instruction only in a shell comment\necho hello\n' > "${SELFTEST_TMP}/r2_shell_comment.sh"
+  if file_has_code_level_agent_instruction_hit "${SELFTEST_TMP}/r2_shell_comment.sh"; then
+    echo "FAIL self-test [T-0758-R2-SHELL-COMMENT]: a shell (#) comment-only mention was WRONGLY classified as a code-level hit (hash rule over-disabled)"
+    exit 1
+  fi
+  echo "PASS self-test [T-0758-R2-SHELL-COMMENT]: shell # comment still stripped for non-.ts/.js files (hash rule alive where correct)"
+  # (е) defense-in-depth nit: an UNCLOSED /* to EOF in a .ts file (tsc rejects
+  # this as TS1010, so it cannot reach runtime — a real hit inside it is
+  # unreachable) must NOT crash the scanner; and a hit BEFORE the unclosed
+  # opener is still detected.
+  printf 'const rows = q("choros.agent_instruction"); /* unterminated to end of file\nstill inside the comment\n' > "${SELFTEST_TMP}/r2_unclosed_block.ts"
+  if ! file_has_code_level_agent_instruction_hit "${SELFTEST_TMP}/r2_unclosed_block.ts"; then
+    echo "FAIL self-test [T-0758-R2-UNCLOSED-BLOCK]: scanner crashed OR hid a hit that PRECEDES an unclosed /* (TS1010 makes hits inside unreachable)"
+    exit 1
+  fi
+  echo "PASS self-test [T-0758-R2-UNCLOSED-BLOCK]: unclosed /* to EOF does not crash the scanner; a hit before it is still detected"
   if printf 'SELECT * FROM choros.agent_instruction\n' | grep -qE "agent_instruction"; then
     echo "PASS self-test: agent_instruction read pattern is detectable"
     exit 0
