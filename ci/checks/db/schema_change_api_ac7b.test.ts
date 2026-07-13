@@ -262,14 +262,17 @@ describe('AC-7b (T-0191 R-N1) — force=true + seeded non-owner apply-grant → 
       //    then defaultCheckDestructiveGrant checks adminGrants.some(
       //      g.resource_type==='mgmt_object:schema_destructive' &&
       //      (g.operation as string)==='apply').
+      //    T-0768: 'apply' is non-critical (criticalGrantPredicate) but
+      //    loadAdminContext step 3 now requires confirmed_by IS NOT NULL (T-0397
+      //    grant-row activation, matching getGrantsForSubject) — set it explicitly.
       await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
       await c.query(
         `INSERT INTO choros."grant"
            (tenant_id, id, role_id, resource_type, resource_facet, operation,
-            scope, "constraint", delegable, granted_by, valid_from, valid_until, created_at)
+            scope, "constraint", delegable, granted_by, valid_from, valid_until, created_at, confirmed_by)
          VALUES ($1, $2, $3, 'mgmt_object:schema_destructive', NULL, 'apply',
-                 $4::jsonb, NULL, true, 'ac7b-test', NULL, NULL, 0)`,
+                 $4::jsonb, NULL, true, 'ac7b-test', NULL, NULL, 0, 'ac7b-test')`,
         [tenantId, grantId, roleId, orgScope],
       );
       await c.query('COMMIT');

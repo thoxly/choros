@@ -123,18 +123,26 @@ async function seedAll(): Promise<void> {
     );
 
     // R_TP: ONLY generic tier_promote/transition (the escalation attacker's authority).
+    // T-0768: 'transition' is a CRITICAL op (criticalGrantPredicate axis a) —
+    // loadAdminContext step 3 now requires BOTH confirmed_by AND confirmed2_by
+    // (T-0397 grant-row dual-control) for this grant to be PDP-active, so the
+    // fixture must represent a FULLY dual-confirmed (not merely proposed)
+    // tier_promote delegation to stay a realistic "attacker already holds this
+    // authority" shape — same convention as T-0767's fully-dual-confirmed fixtures.
     await c.query(
       `INSERT INTO choros."grant"
-         (tenant_id, id, role_id, resource_type, resource_facet, operation, scope, "constraint", delegable, granted_by, valid_from, valid_until, created_at)
-       VALUES ($1,$2,$3,'mgmt_object:tier_promote',NULL,'transition',$4::jsonb,NULL,true,'seed',NULL,NULL,0)`,
+         (tenant_id, id, role_id, resource_type, resource_facet, operation, scope, "constraint", delegable, granted_by, valid_from, valid_until, created_at, proposed_by, confirmed_by, confirmed2_by)
+       VALUES ($1,$2,$3,'mgmt_object:tier_promote',NULL,'transition',$4::jsonb,NULL,true,'seed',NULL,NULL,0,'seed','seed','seed2')`,
       [DEV_TENANT_ID, uuid(), R_TP, DEPT_SET_SCOPE],
     );
 
     // R_AU: mgmt_object:agent/update over the fin org-set (covers the fin agent).
+    // T-0768: 'update' is non-critical — confirmed_by alone is required (T-0397
+    // grant-row activation), matching every other confirmed seed grant in this repo.
     await c.query(
       `INSERT INTO choros."grant"
-         (tenant_id, id, role_id, resource_type, resource_facet, operation, scope, "constraint", delegable, granted_by, valid_from, valid_until, created_at)
-       VALUES ($1,$2,$3,'mgmt_object:agent',NULL,'update',$4::jsonb,NULL,true,'seed',NULL,NULL,0)`,
+         (tenant_id, id, role_id, resource_type, resource_facet, operation, scope, "constraint", delegable, granted_by, valid_from, valid_until, created_at, confirmed_by)
+       VALUES ($1,$2,$3,'mgmt_object:agent',NULL,'update',$4::jsonb,NULL,true,'seed',NULL,NULL,0,'seed')`,
       [DEV_TENANT_ID, uuid(), R_AU, DEPT_SET_SCOPE],
     );
 

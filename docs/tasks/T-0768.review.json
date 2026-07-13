@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0768",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "F1-fixtures-orthogonal-restore-legit-active-state-no-security-assertion-masked",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/db/T-0645-agent-instruction-promote-scope.db.test.ts:135/146; ci/checks/db/schema_change_api_ac7b.test.ts:273-275; ci/checks/db/user-mgmt.db.test.ts:1258-1264",
+      "issue": "PRIMARY ATTACK SURFACE CLEARED. Each of the 3 fixture edits adds confirmed_by (and, only where the grant is CRITICAL, confirmed2_by) to a raw grant INSERT that previously omitted it and relied — unknowingly — on the exact bug T-0768 closes (loadAdminContext step 3 carrying NO grant-row confirmation predicate). All three tests assert the POSITIVE/authorized path (grant is HONORED -> 200 / grant is VISIBLE in adminGrants); NONE asserts behavior of an UNCONFIRMED grant, so restoring the grant to a legitimately-active shape does not change the meaning of any security assertion. PROVEN not by inspection alone: with the fix KEPT but the 3 fixtures reverted to their pre-fix (unconfirmed) form, ONLY the positive-path assertions redden (T-0645 'ALLOWS agent/update->200' + 'LEAVES application->200'; ac7b 'force_applied->200'; user-mgmt T-0630 'read-parity->200') while T-0645's SECURITY DENIAL assertion ('DENIES tier_promote-only actor promoting agent_instruction -> 403 NO_PROMOTE_GRANT', line 240) STILL PASSES — the escalation-denial does not depend on the tier_promote grant's confirmation state, so it cannot be masked by confirming it. Criticality classification is honest: T-0645 R_TP is operation='transition' = criticalGrantPredicate axis a = CRITICAL, so confirmed2_by='seed2' is REQUIRED (builder self-flagged this correctly); ac7b 'apply', T-0645 R_AU 'update', and user-mgmt 'read'-with-no-clearance are all non-critical (verified against all 4 axes), so confirmed_by alone is correct and confirmed2_by is deliberately absent. No fixture over-confirms or down-classifies to sneak a grant through.",
+      "suggestion": "None required. The fixture convention (confirmed_by/confirmed2_by = 'seed'/'seed2') matches the T-0658/T-0767 precedent and the real write-path shape."
+    },
+    {
+      "id": "F2-single-fix-covers-all-loadAdminContext-consumers",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/db/org.ts:934-950 (the ONLY mgmt_object:% grant query) vs ~25 loadAdminContext consumers (artifacts.ts, secret-handle.ts, llm-config.ts, seed-write.ts x15, agents.ts x5, user-mgmt.ts x4, grants.ts x4, rights-intents.ts x4, report-pages/report-page-render, registry-defs, notification-prefs, email-channel-config, assistant, rights-overview, rights-sod-admin, pdp-explain, audit, sandbox-gate-dao)",
+      "issue": "loadAdminContext has one step-3 grant query (grep 'resource_type LIKE ''mgmt_object' -> single hit at line 940). Every consumer authorizes on admin.adminGrants, which is produced solely by that query, so the fix is inherited by all of them with no per-consumer change needed. Consumers of the previously-leaking semi-confirmed critical grant (artifacts tier-promote gate, secret-handle, llm-config, seed-write, agents) neither lose legitimate access (non-critical + fully-confirmed grants still resolve — AC-2/AC-3 green) nor keep the bypass.",
+      "suggestion": "None."
+    },
+    {
+      "id": "F3-bundle-coherence-FF13-preexisting-concurrency-flake-unrelated",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/db/bundle-coherence.test.ts (resource_type=record; not in this diff)",
+      "issue": "Independently confirmed the sole full-suite fitness:db miss is a pre-existing concurrency flake, not a regression: bundle-coherence is NOT in the diff (touches resource_type=record, orthogonal to grant dual-control) and passes 3/3 when run standalone. Fails only under full-suite --no-file-parallelism contention.",
+      "suggestion": "None for T-0768; the flake is a separate hygiene item."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Fix reuses criticalGrantPredicate byte-identically: org.ts step 3 now carries `AND g.confirmed_by IS NOT NULL AND (NOT criticalGrantPredicate('g') OR g.confirmed2_by IS NOT NULL)` — same exported classifier grants-dao.ts uses (CRITICAL_GRANT_PREDICATE_BARE) and report-page-render.ts (T-0675) uses; exactly 3 prod call-sites, no bespoke re-derivation. Before the fix step 3 carried ZERO confirmation predicate (never-confirmed grants leaked).", "covered": true },
+    { "ac": "AC-1 (RED-before/GREEN-after): semi-confirmed CRITICAL mgmt_object:tier_promote/transition grant EXCLUDED from adminGrants. GREEN at fix; RED under mutation.", "covered": true },
+    { "ac": "AC-2 (regression control): non-critical confirmed mgmt_object grant remains visible. Green both directions (fix removes ONLY the escalating shape).", "covered": true },
+    { "ac": "AC-3 (regression control / perezakrytie): fully dual-confirmed CRITICAL grant remains visible. Green both directions.", "covered": true },
+    { "ac": "AC-4 (unity): loadAdminContext.adminGrants == getGrantsForSubject mgmt_object-delegable subset (same actor/role). Filter-then-compare is honest — it isolates the dual-control predicate as the only differing dimension over a shared domain, plus a positive membership pin [dualConfirmedCritical, nonCritical] that fails on any lockstep widening. RED under mutation (adminIds gains semi+never-confirmed while subjectIds does not).", "covered": true },
+    { "ac": "AC-5 (defence-in-depth / never-confirmed direction): never-confirmed (confirmed_by IS NULL) non-critical grant EXCLUDED — proves the fix closes the missing confirmed_by clause too, not just criticality. GREEN at fix; RED under mutation.", "covered": true },
+    { "ac": "Mutation reproduced BOTH directions: dropping the clause in org.ts step 3 -> tsc still 0, exactly 3/5 RED (AC-1/AC-4/AC-5), AC-2/AC-3 green; restored via `git checkout -- src/db/org.ts` (no git stash), working tree clean, clause intact (2 criticalGrantPredicate('g') refs).", "covered": true },
+    { "ac": "FIXTURE-MASKING PROBE (decisive): fix KEPT + 3 fixtures reverted to pre-fix (unconfirmed) form -> ONLY positive-path assertions redden (4 fails); T-0645's security DENIAL assertion (403 NO_PROMOTE_GRANT) still PASSES -> fixture edits restore legitimate active-grant state and mask NO security assertion. Fixtures restored via git checkout task/T-0768; tree clean.", "covered": true },
+    { "ac": "Fixture-by-fixture criticality honesty: T-0645 R_TP transition=CRITICAL(axis a)->confirmed2_by='seed2' required & set; R_AU update, ac7b apply, user-mgmt read-no-clearance all non-critical->confirmed_by only, confirmed2_by correctly absent. Verified against all 4 criticalGrantPredicate axes.", "covered": true },
+    { "ac": "Single fix covers all consumers: only ONE mgmt_object:% step-3 query exists; ~25 loadAdminContext consumers read admin.adminGrants -> all inherit; no per-consumer change.", "covered": true },
+    { "ac": "T-0768 db test 5/5 GREEN (independently run against live PG).", "covered": true },
+    { "ac": "3 fixtures + grants-dao-dual-control(11/11) + T-0767-owner-admin sibling(8/8) = 67/67 GREEN at fix; grants-dao unit 30/30 (no DB); tsc --noEmit exit 0.", "covered": true },
+    { "ac": "dual-control-isolation.sh PASS (FF-DC1..DC8, FF-DC11); actor-authority-deactivation-gate.sh PASS (fix only ADDED an AND clause, ACTOR_ACTIVE_SQL untouched).", "covered": true },
+    { "ac": "bundle-coherence FF-13 confirmed pre-existing flake (3/3 standalone, NOT in diff, resource_type=record).", "covered": true },
+    { "ac": "Diff = exactly org.ts + T-0768 db test + 3 fixtures + docs (T-0768.spec.md + T-0768.pr-handoff.json). No stray files (anti-case D-064). Working tree clean at start and end; no git stash used.", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "cd /Users/shoxy/Code/choros-wt/T-0768; git branch --show-current -> task/T-0768; HEAD 9dbbacbd; base dev@a4c1a95f; working tree clean at start and end.",
+    "git diff --stat a4c1a95f -> 7 files: org.ts (+42/-4), T-0768-mgmt-grant-dual-control.db.test.ts (+288), T-0645 fixture (+/-16), schema_change_api_ac7b (+/-7), user-mgmt.db.test.ts (+/-7), T-0768.pr-handoff.json (+59), T-0768.spec.md (+277).",
+    "Byte-identity: org.ts step 3 predicate = `AND g.confirmed_by IS NOT NULL AND (NOT criticalGrantPredicate('g') OR g.confirmed2_by IS NOT NULL)`; grants-dao.ts getGrantsForSubject step 3 = `AND confirmed_by IS NOT NULL AND (NOT CRITICAL_GRANT_PREDICATE_BARE OR confirmed2_by IS NOT NULL)` where CRITICAL_GRANT_PREDICATE_BARE=criticalGrantPredicate(''). Same exported function, alias-only difference. grep criticalGrantPredicate in src -> reused at grants-dao.ts, http/report-page-render.ts (T-0675), db/org.ts (T-0768) only.",
+    "tsc: npx tsc --noEmit -> exit 0.",
+    "GREEN: DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism T-0768-mgmt-grant-dual-control -> 5/5 passed.",
+    "Mutation (RED): Edit removed the two added AND clauses from org.ts step 3 -> re-ran T-0768 -> 3 failed | 2 passed; failures are exactly AC-1, AC-4, AC-5 (verified by name); AC-2/AC-3 pass. Restored via `git checkout -- src/db/org.ts`; grep confirms clause restored at line 946; git status clean.",
+    "Fixture-masking probe: `git checkout a4c1a95f -- <3 fixtures>` (fix kept) -> re-ran -> 4 failed | 44 passed. Failures: T-0645 'ALLOWS agent/update->200' + 'LEAVES application->200', ac7b 'force_applied->200', user-mgmt T-0630 'read-parity->200'. T-0645 'DENIES tier_promote-only -> 403' PASSES. Restored via `git checkout task/T-0768 -- <3 fixtures>`; git status clean.",
+    "Fixtures GREEN at fix: DATABASE_URL=... vitest run --dir ci/checks/db T-0645-agent-instruction-promote-scope schema_change_api_ac7b user-mgmt grants-dao-dual-control T-0767-owner-admin-assignment-dual-control -> 5 files, 67/67 passed.",
+    "grants-dao unit: env -u DATABASE_URL npx vitest run src/__tests__/grants-dao.test.ts -> 30/30 passed.",
+    "bash ci/checks/dual-control-isolation.sh -> PASS (FF-DC1..DC8, FF-DC11). bash ci/checks/actor-authority-deactivation-gate.sh -> PASS (FF-0662-1/2).",
+    "bundle-coherence flake: DATABASE_URL=... vitest run --dir ci/checks/db bundle-coherence x3 -> 3/3, 3/3, 3/3 passed. git diff --stat a4c1a95f | grep -i bundle -> NOT in diff.",
+    "Criticality axes verification (src/db/grants-dao.ts:128-170): axis a operation IN ('approve','transition') -> 'transition' CRITICAL (T-0645 R_TP), 'apply'/'update'/'read' NOT; axis b effect_resource+invoke -> none match; axis c/Q-2 read+clearance-present -> user-mgmt read grant has no constraint/resource_facet so clearancePresent=false -> non-critical. Confirms each fixture's confirmed_by/confirmed2_by choice.",
+    "Consumers: grep -rn 'loadAdminContext' src (excl org.ts) -> ~25 prod call-sites, all read admin.adminGrants; grep 'resource_type LIKE ''mgmt_object' src/db/org.ts -> single query at line 940 -> single fix inherited by all."
+  ]
+}
