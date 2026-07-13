@@ -161,6 +161,16 @@ describe('T-0672 — engine-drive records the completer as the userTask assignee
         expect(ut?.assignee).toBe(actor); // === processes.ts `completedBy`
       }
     }),
+    // T-0760: explicit per-test timeout with real headroom over driveDeadlineMs
+    // (60000 above). Judge T-0672 (docs/tasks/T-0672.review.json "N2") flagged
+    // that relying on vitest's bare default testTimeout (60000, set suite-wide
+    // in vitest.config.js) gives ZERO margin — it is numerically EQUAL to this
+    // test's own driveDeadlineMs, so a cold/emulated Flowable's first-deploy JIT
+    // warmup (empirically up to ~61s for this exact test) trips the vitest
+    // timeout BEFORE the drive's own deadline does, 2/3 times on that judge's
+    // first cold run. 120000 = driveDeadlineMs + 60s slack (the judge's own
+    // suggested fix), independent of the suite-wide default.
+    120_000,
   );
 
   it(
@@ -192,6 +202,8 @@ describe('T-0672 — engine-drive records the completer as the userTask assignee
       // The defect: the task completed, but WHO completed it is lost (null).
       expect(await rawHistoricAssignee(instanceId, taskDefKey)).toBeNull();
     }),
+    // T-0760: see the GREEN test above for why 120000 (driveDeadlineMs 60000 + 60s).
+    120_000,
   );
 
   it(
@@ -218,5 +230,13 @@ describe('T-0672 — engine-drive records the completer as the userTask assignee
       if (second.ok) { expect(second.completed).toBe(false); expect(second.alreadyEnded).toBe(true); }
       expect(await rawHistoricAssignee(instanceId, taskDefKey)).toBe(actor);
     }),
+    // T-0760: this test drives TWO sequential reconciles (first + re-drive), each
+    // with its own driveDeadlineMs:60000 — the second re-drive short-circuits fast
+    // (isInstanceEnded already true, no poll needed) in the normal case, but 120000
+    // alone gives zero margin if the FIRST drive alone were ever to approach its
+    // full 60s deadline (deploy+seed overhead still ahead of it). 150000 keeps real
+    // slack over the worst plausible single-drive-dominates case without inflating
+    // to the full 2×60000 theoretical ceiling.
+    150_000,
   );
 });

@@ -198,11 +198,25 @@ async function seedApproverGrant(
     [tenantId, actualEmpId, actualRoleId],
   );
   if (raExists.rowCount === 0) {
+    // T-0760: proposed_by MUST be NULL here, not actorSlug. T-0605 (landed AFTER
+    // this seed was first written for T-0571) made getRoleSlugsForActor's
+    // assignment-active predicate canonical:
+    //   confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)
+    // A row with proposed_by SET but confirmed2_by NULL reads as a dual-control
+    // proposal still awaiting its SECOND signature — PDP-inactive by design (the
+    // same predicate that closes the T-0397 dual-control hole). This seed is a
+    // direct/genesis grant (one authority, no proposal workflow), which the
+    // canonical predicate models as proposed_by=NULL — the SAME shape used by
+    // e.g. T-0750-inbox-detail-authority.db.test.ts's seedAssignment. Setting
+    // proposed_by=actorSlug (the pre-T-0605 seed) silently made this row
+    // PDP-inactive, so resolveRolesForActor returned [] and every approve here
+    // 403'd NOT_ELIGIBLE — reproduced locally against a live Flowable+Postgres
+    // (RED before this fix; see docs/tasks/T-0760.spec.md).
     await c.query(
       `INSERT INTO choros.role_assignment
          (tenant_id, id, employee_id, role_id, org_scope, valid_from, valid_until,
-          source, granted_by, proposed_by, confirmed_by, created_at, updated_at)
-       VALUES ($1, $2, $3::uuid, $4, $5::jsonb, NULL, NULL, 'genesis', $6::text, $6::text, $6::text, 0, 0)`,
+          source, granted_by, proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+       VALUES ($1, $2, $3::uuid, $4, $5::jsonb, NULL, NULL, 'genesis', $6::text, NULL, $6::text, NULL, 0, 0)`,
       [
         tenantId,
         uuid(),
@@ -483,24 +497,32 @@ describe('T-0571 FF-3/AC-6 — engine-drive completes a GENERIC process user-tas
       expect((JSON.parse(first.body) as { engine: string }).engine).toBe('completed');
 
       // The base row is now hidden (task.approved recorded) — findWaitingInstanceTask
-      // would 404 a SECOND HTTP approve against the SAME taskId (that is existing,
-      // unrelated-to-this-ADR behaviour: the inbox task itself is a one-shot action).
-      // AC-8's idempotency claim is about the ENGINE-DRIVE RECONCILE layer, not the
-      // HTTP action route being re-callable — proven directly at that layer in
+      // returns null for a SECOND HTTP approve against the SAME taskId. AC-8's
+      // idempotency claim is about the ENGINE-DRIVE RECONCILE layer, not the HTTP
+      // action route being re-callable — proven directly at that layer in
       // src/__tests__/inbox-engine-drive.test.ts (T-0522/T-0571 idempotent unit
-      // suites). Here we confirm the complementary live-engine fact: completing an
-      // already-completed Flowable task via completeUserTask again is tolerated
-      // (NOT_FOUND-idempotent) by re-driving the SAME reconcile function directly
-      // against the now-completed live instance.
+      // suites).
+      //
+      // T-0760: this assertion was `toBe(404)` (NOT_FOUND) — the pre-T-0688
+      // one-shot-action contract. T-0688 ("stale-drawer" fix, fb367491, judge
+      // 3×approved) landed AFTER this test and made findWaitingInstanceTask==null
+      // fall through to an "already done" check (listInstanceProjections, inbox.ts
+      // ~2195-2227) BEFORE the 404: when the instance is confirmed `done` for
+      // this exact taskId, the route now answers an HONEST 200 {engine:"already"}
+      // instead of a confusing "задача не найдена" 404 — the deliberate current
+      // contract (a background-completed step must not look like a client error).
+      // This assertion was NEVER actually exercised against a live engine before
+      // (the pre-T-0760 grant-seed bug 403'd on the FIRST call, so control never
+      // reached here) — updated to match the real, judge-approved behaviour rather
+      // than the stale pre-T-0688 shape.
       const secondRepeat = await makeRequest(
         baseUrl, 'POST', `/api/inbox/${taskId}/action`, { action: 'approve' },
         { 'x-dev-user': APPROVER_1 },
       );
-      // The task is already hidden from the projection (task.approved exists) →
-      // findWaitingInstanceTask returns null → 404 NOT_FOUND. This is the EXISTING,
-      // correct one-shot-action contract (unrelated to the T-0571 engine-drive fix) —
-      // asserted here so a future regression that silently double-approves is caught.
-      expect(secondRepeat.statusCode).toBe(404);
+      expect(secondRepeat.statusCode).toBe(200);
+      const secondBody = JSON.parse(secondRepeat.body) as { status: string; engine: string };
+      expect(secondBody.status).toBe('done');
+      expect(secondBody.engine).toBe('already');
     }),
   );
 
