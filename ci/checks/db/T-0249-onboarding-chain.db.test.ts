@@ -194,10 +194,14 @@ function makeDeps(args: {
   privKeyPem?: Buffer;
   store?: InMemoryLicenseStore;
   dataFetch: () => Promise<Record<string, unknown> | null>;
+  /** CE-3: optional port override (e.g. a call-counting wrapper). */
+  entitlementOverride?: import("../../../src/runtime/customer-onboarding/entitlement-port.js").EntitlementPort;
 }): IssueKeyDeps {
-  const entitlement = args.privKeyPem && args.store
-    ? new T0242EntitlementPort({ store: args.store, privKeyPem: args.privKeyPem, now: () => NOW })
-    : dormantEntitlementPort;
+  const entitlement =
+    args.entitlementOverride ??
+    (args.privKeyPem && args.store
+      ? new T0242EntitlementPort({ store: args.store, privKeyPem: args.privKeyPem, now: () => NOW })
+      : dormantEntitlementPort);
   return {
     entitlement,
     resolverDeps: allowResolverDeps(args.tenantId, args.recordId, args.dataFetch),
@@ -321,5 +325,92 @@ RUN("T-0249 · customer-onboarding chain (live-PG): issue-key effect + write-bac
     if (!outcome.ok) expect(outcome.reason).toBe("pdp_denied");
     const data = await readRecordData(tenantId, recordId);
     expect(data["circuit_id"]).toBeUndefined();
+  });
+
+  it("CE-3 anti-double-issue: two CONCURRENT completions → exactly ONE issuance (FOR UPDATE + pre-issuance guard)", async () => {
+    const tenantId = randomUUID();
+    const registryId = randomUUID();
+    const recordId = randomUUID();
+    await seedCustomerRecord({ tenantId, registryId, recordId, status: "trial" });
+
+    // Call-counting wrapper over the REAL Ed25519 port: the double-license
+    // symptom (review CE-3) is the port being invoked twice for one record.
+    const { privatePem } = makeKeypair();
+    const store = new InMemoryLicenseStore();
+    const realPort = new T0242EntitlementPort({ store, privKeyPem: privatePem, now: () => NOW });
+    let issueCalls = 0;
+    const countingPort: import("../../../src/runtime/customer-onboarding/entitlement-port.js").EntitlementPort = {
+      issueEntitlement: async (input) => {
+        issueCalls += 1;
+        return realPort.issueEntitlement(input);
+      },
+    };
+    const dataFetch = () => readRecordData(tenantId, recordId);
+    const mkDeps = () =>
+      makeDeps({ tenantId, recordId, live: true, dataFetch, entitlementOverride: countingPort });
+    const run = () =>
+      withTenantTx(tenantId, (client) =>
+        applyIssueKeyStep(
+          client as unknown as import("../../../src/db/audit-writer.js").PgClientLike,
+          mkDeps(),
+          { tenantId, registryId, recordId, actor: "e-owner", nowMs: NOW_MS },
+        ),
+      );
+
+    // TWO CONCURRENT transactions on the SAME record. FOR UPDATE serializes them:
+    // the loser blocks on the row lock, then (READ COMMITTED) re-reads the winner's
+    // COMMITTED status='active' → the pre-issuance guard rejects active→active
+    // WITHOUT reaching the port. Deterministic — enforced by the DB lock, not timing.
+    const [r1, r2] = await Promise.all([run(), run()]);
+
+    const oks = [r1, r2].filter((r) => r.ok);
+    const fails = [r1, r2].filter((r): r is Extract<typeof r, { ok: false }> => !r.ok);
+    expect(oks.length).toBe(1);
+    expect(fails.length).toBe(1);
+    expect(fails[0]!.reason).toBe("bad_transition");
+
+    // THE CE-3 PROOF: the entitlement port issued EXACTLY ONCE — no double license.
+    expect(issueCalls).toBe(1);
+    expect(store.getByCircuit(recordId)).not.toBeNull();
+
+    // Record converged to a single consistent issued state; one key_issued audit.
+    const data = await readRecordData(tenantId, recordId);
+    expect(data["status"]).toBe("active");
+    expect(data["circuit_id"]).toBe(recordId);
+    expect(await countKeyIssuedAudit(tenantId, "e-owner")).toBe(1);
+  });
+
+  it("CE-3 sequential re-complete (idempotent re-click): second call → bad_transition, port NOT called again", async () => {
+    const tenantId = randomUUID();
+    const registryId = randomUUID();
+    const recordId = randomUUID();
+    await seedCustomerRecord({ tenantId, registryId, recordId, status: "trial" });
+
+    const { privatePem } = makeKeypair();
+    const store = new InMemoryLicenseStore();
+    const realPort = new T0242EntitlementPort({ store, privKeyPem: privatePem, now: () => NOW });
+    let issueCalls = 0;
+    const countingPort: import("../../../src/runtime/customer-onboarding/entitlement-port.js").EntitlementPort = {
+      issueEntitlement: async (input) => {
+        issueCalls += 1;
+        return realPort.issueEntitlement(input);
+      },
+    };
+    const dataFetch = () => readRecordData(tenantId, recordId);
+    const run = () =>
+      withTenantTx(tenantId, (client) =>
+        applyIssueKeyStep(
+          client as unknown as import("../../../src/db/audit-writer.js").PgClientLike,
+          makeDeps({ tenantId, recordId, live: true, dataFetch, entitlementOverride: countingPort }),
+          { tenantId, registryId, recordId, actor: "e-owner", nowMs: NOW_MS },
+        ),
+      );
+
+    const first = await run();
+    expect(first.ok).toBe(true);
+    const second = await run();
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.reason).toBe("bad_transition");
+    expect(issueCalls).toBe(1); // the pre-guard blocked BEFORE the port
   });
 });

@@ -48,6 +48,10 @@ import type { PgClientLike } from "../../db/audit-writer.js";
 import { makePgAuditWriter } from "../../db/audit-writer.js";
 import type { ResourceRef, ResolveSubject } from "../../core/object-handle.js";
 import { makeHandle } from "../../core/object-handle.js";
+import {
+  isAllowedTransition,
+  isCustomerStatus,
+} from "../../core/customer-subscription/status-model.js";
 import { runIssueKey, type IssueKeyDeps, type IssueKeyOutcome } from "./issue-key.js";
 
 // ---------------------------------------------------------------------------
@@ -96,8 +100,46 @@ export async function applyIssueKeyStep(
 ): Promise<IssueKeyOutcome> {
   const { tenantId, registryId, recordId, actor, nowMs } = args;
 
-  // Resolve the circuit id: explicit arg → existing record field → recordId.
-  const circuitId = await resolveCircuitId(client, args);
+  // -------------------------------------------------------------------------
+  // ANTI-DOUBLE-ISSUE (T-0249 review CE-3): row-lock + pre-issuance transition
+  // guard, BEFORE any EntitlementPort call.
+  //
+  // Without this, two CONCURRENT completions of the issue-key step would both
+  // read status='trial' (neither tx committed yet), both call
+  // port.issueEntitlement (double license), and both pass runIssueKey's own
+  // transition guard — because that guard (issue-key.ts Step 5a) runs AFTER the
+  // issuance (Step 4) and each tx sees the pre-commit snapshot.
+  //
+  // FOR UPDATE serializes concurrent effect executions on the same record: the
+  // second tx BLOCKS here until the first commits, then (READ COMMITTED) re-reads
+  // the COMMITTED row — status is now 'active', active→active is not an allowed
+  // transition (CUSTOMER_TRANSITIONS), so the guard below returns bad_transition
+  // WITHOUT ever reaching the port. Exactly-once issuance per record, enforced
+  // by the database lock, not by caller discipline.
+  // -------------------------------------------------------------------------
+  const lockRes = await client.query(
+    `SELECT data FROM choros.record
+      WHERE tenant_id = $1 AND id = $2
+      FOR UPDATE`,
+    [tenantId, recordId],
+  );
+  const lockedRow = lockRes.rows[0] as { data?: Record<string, unknown> } | undefined;
+  if (!lockedRow || lockedRow.data === null || typeof lockedRow.data !== "object") {
+    return { ok: false, reason: "bad_record_data", detail: "record not found for issue-key step" };
+  }
+  const lockedData = lockedRow.data as Record<string, unknown>;
+  const lockedStatus = isCustomerStatus(lockedData["status"]) ? lockedData["status"] : null;
+  if (lockedStatus === null || !isAllowedTransition(lockedStatus, "active")) {
+    return {
+      ok: false,
+      reason: "bad_transition",
+      detail: `${String(lockedStatus)} → active not allowed (pre-issuance guard)`,
+    };
+  }
+
+  // Resolve the circuit id from the LOCKED row (single authoritative read):
+  // explicit arg → existing record field → recordId.
+  const circuitId = resolveCircuitId(lockedData, args);
 
   const ref: ResourceRef = {
     kind: "record",
@@ -172,24 +214,17 @@ export async function applyIssueKeyStep(
 }
 
 // ---------------------------------------------------------------------------
-// resolveCircuitId — arg → existing record field → recordId (fail-safe)
+// resolveCircuitId — arg → locked record field → recordId (fail-safe)
 // ---------------------------------------------------------------------------
 
-async function resolveCircuitId(
-  client: PgClientLike,
+function resolveCircuitId(
+  lockedData: Record<string, unknown>,
   args: ApplyIssueKeyStepArgs,
-): Promise<string> {
+): string {
   if (typeof args.circuitId === "string" && args.circuitId.trim() !== "") {
     return args.circuitId;
   }
-  const res = await client.query(
-    `SELECT data->>'circuit_id' AS circuit_id
-       FROM choros.record
-      WHERE tenant_id = $1 AND id = $2`,
-    [args.tenantId, args.recordId],
-  );
-  const row = res.rows[0] as { circuit_id?: string | null } | undefined;
-  const existing = row?.circuit_id;
+  const existing = lockedData["circuit_id"];
   if (typeof existing === "string" && existing.trim() !== "") {
     return existing;
   }

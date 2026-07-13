@@ -19,11 +19,14 @@
  * the IssueKeyDeps the effect needs, per invocation (resolver + actor-event writer
  * are tenant/actor-scoped, so they are built lazily from ctx).
  *
- * HONEST-DEGRADE: when the entitlement port is dormant (CUSTOMER_ONBOARDING_LIVE
- * unset — the default), the server root simply does not register these bindings
- * (empty registry ⇒ the inbox completion seam is a no-op). The effect activates
- * only under the SAME env gate that arms the rest of the customer-onboarding live
- * path (T-0246 §1.V-1), never silently.
+ * ALWAYS REGISTERED, FAIL-VISIBLE (T-0249 review CE-1/CE-2): the bindings are
+ * registered UNCONDITIONALLY in the composition root (completion-effects-root.ts →
+ * server.ts) — no env gate on the wire itself, because the seam is a strict no-op
+ * for every other (process, step). What the CUSTOMER_ONBOARDING_LIVE env gate
+ * controls is the ENTITLEMENT PORT (live vs dormant, T-0246 §1.V-1): with the
+ * dormant port, completing the issue-key step FAILS VISIBLY (422
+ * STEP_EFFECT_FAILED, approve tx rolled back, step stays open) — never a silent
+ * «done» without a key (T-0571 AC-7 fail-visible doctrine).
  */
 
 import type { PgClientLike, AuditWriter } from "../db/audit-writer.js";
@@ -33,6 +36,19 @@ import type { EntitlementPort } from "../runtime/customer-onboarding/entitlement
 import type { CompletionEffectBinding } from "../core/completion-effect.js";
 import { applyIssueKeyStep } from "../runtime/customer-onboarding/issue-key-effect.js";
 import type { IssueKeyDeps } from "../runtime/customer-onboarding/issue-key.js";
+// HttpError: sanctioned cross-layer import — router.ts has zero internal deps
+// (the same precedent src/db/step-applier.ts cites for StepTargetUnresolvedError).
+import { HttpError } from "../http/router.js";
+
+/**
+ * T-0249 review CE-2 (fail-VISIBLE, T-0571 AC-7 doctrine): the typed error code
+ * the /action route surfaces when the issue-key effect FAILS (pdp_denied /
+ * port_error incl. dormant / bad_record_data / bad_transition). The throw
+ * propagates out of runCompletionEffect → the approve tx ROLLBACKs (task.approved
+ * undone, the step stays OPEN, the record untouched — nothing half-done) and the
+ * route returns 422 with this code — never a silent «done»+200 without a key.
+ */
+export const STEP_EFFECT_FAILED = "STEP_EFFECT_FAILED";
 
 /**
  * The customer-onboarding process key (matches seed/vendor-crm/processes/
@@ -66,9 +82,11 @@ export interface CustomerOnboardingEffectDeps {
   /**
    * Per-invocation PDP resolver builder. The server root supplies the SAME
    * grant/record/ancestry wiring records.ts / inbox.ts already use (single
-   * resolver, T-0331). Built from ctx (tenant + actor) at completion time.
+   * resolver, T-0331). Built from ctx (tenant + actor) at completion time —
+   * async because the org-ancestry oracle is loaded from the DB per tenant
+   * (mirrors server.ts's resolveReadVisibility composition).
    */
-  readonly resolverDepsFor: (tenantId: string, actor: string) => ResolverDeps;
+  readonly resolverDepsFor: (tenantId: string, actor: string) => Promise<ResolverDeps>;
   /** Per-tenant actor-event writer builder (T-0019 guarded transition sink). */
   readonly actorEventWriterFor: (tenantId: string) => ActorEventWriter;
 }
@@ -88,18 +106,32 @@ export function makeCustomerOnboardingEffectBindings(
   const handler: CompletionEffectBinding["handler"] = async (client, ctx) => {
     const issueKeyDeps: IssueKeyDeps = {
       entitlement: deps.entitlement,
-      resolverDeps: deps.resolverDepsFor(ctx.tenantId, ctx.actor),
+      resolverDeps: await deps.resolverDepsFor(ctx.tenantId, ctx.actor),
       auditWriter: deps.auditWriter,
       actorEventWriter: deps.actorEventWriterFor(ctx.tenantId),
       liveEnabled: deps.liveEnabled,
     };
-    await applyIssueKeyStep(client as PgClientLike, issueKeyDeps, {
+    const outcome = await applyIssueKeyStep(client as PgClientLike, issueKeyDeps, {
       tenantId: ctx.tenantId,
       registryId: ctx.registryId,
       recordId: ctx.recordId,
       actor: ctx.actor,
       nowMs: ctx.nowMs,
     });
+
+    // CE-2 (fail-VISIBLE, T-0571 AC-7): a non-ok outcome must NEVER surface as a
+    // silent «done»+200 without a key. Throw a typed 422 → runCompletionEffect
+    // propagates → the approve tx ROLLBACKs (task.approved undone, record
+    // untouched, step stays OPEN for an honest retry) and the /action route
+    // returns the visible, typed error envelope.
+    if (!outcome.ok) {
+      throw new HttpError(
+        422,
+        STEP_EFFECT_FAILED,
+        `Выпуск активационного ключа не выполнен (${outcome.reason}` +
+          `${outcome.detail ? `: ${outcome.detail}` : ""}) — шаг остаётся открытым, решение не записано`,
+      );
+    }
   };
 
   return [

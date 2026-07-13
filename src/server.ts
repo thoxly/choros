@@ -9,6 +9,9 @@ import { PostgresOutboxStore } from "./core/postgres/pgOutboxStore.js";
 import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
 import { registerOrgRoutes } from "./http/org.js";
 import { registerInboxRoutes } from "./http/inbox.js";
+// T-0249 (review CE-1): production assembly of the completion-effect registry —
+// the live wire for the (procKey, activity) → step-effect primitive.
+import { buildCompletionEffectRegistry } from "./composition/completion-effects-root.js";
 import { registerMessageIngestRoutes, emitInternalSignal } from "./http/message-ingest.js";
 import { RECORD_STATUS_SIGNAL } from "./http/records.js";
 import { registerFormsRoutes } from "./http/forms.js";
@@ -543,6 +546,13 @@ function buildRouter(
           // T-0443: optional FlowableClient for engine-drive post-approve (defKey resolution
           // + reconcile). Absent ⇒ linear audit-only behaviour unchanged (honest-degrade).
           flowableClient: flowableClient ?? undefined,
+          // T-0249 (review CE-1): the completion-effect registry — LIVE wire of the
+          // (procKey, activity) → effect primitive. Built unconditionally when a pool
+          // exists (the seam is a strict no-op for steps without a registered effect);
+          // the entitlement port inside is env-gated (CUSTOMER_ONBOARDING_LIVE) and
+          // FAILS VISIBLY (422 STEP_EFFECT_FAILED) when dormant — see
+          // src/composition/completion-effects-root.ts.
+          completionEffectRegistry: buildCompletionEffectRegistry(grantsPool),
         }
       : undefined,
   );

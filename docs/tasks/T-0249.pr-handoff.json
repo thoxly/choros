@@ -12,48 +12,59 @@
   },
   "files_changed": [
     "src/core/completion-effect.ts (NEW)",
-    "src/runtime/customer-onboarding/issue-key-effect.ts (NEW)",
-    "src/composition/customer-onboarding-effects.ts (NEW)",
+    "src/runtime/customer-onboarding/issue-key-effect.ts (NEW; + CE-3 FOR UPDATE и pre-issuance гард)",
+    "src/composition/customer-onboarding-effects.ts (NEW; + CE-2 fail-visible throw STEP_EFFECT_FAILED)",
+    "src/composition/completion-effects-root.ts (NEW — CE-1 продакшн-сборка реестра + slug→UUID actor-event адаптер)",
+    "src/server.ts (MODIFY — CE-1 провод: completionEffectRegistry в inbox writeDeps)",
     "src/http/inbox.ts (MODIFY — additive completion-effect seam)",
     "migrations/134_vendor_crm_onboarding_binding.sql (NEW)",
     "ci/checks/customer-crm-anti-case.sh (NEW)",
-    "ci/checks/db/T-0249-onboarding-chain.db.test.ts (NEW)",
+    "ci/checks/completion-effect-wired.sh (NEW — CE-1 статик-лок провода)",
+    "ci/checks/db/T-0249-onboarding-chain.db.test.ts (NEW; + CE-3 конкурентный/секвенциальный double-issue)",
+    "ci/checks/db/T-0249-action-route-effect.db.test.ts (NEW — CE-1 RED-LOCK route-level + CE-2 pin)",
     "src/core/__tests__/completion-effect.test.ts (NEW)",
-    "package.json (MODIFY — register customer-crm-anti-case in fitness)",
+    "package.json (MODIFY — 2 гейта в fitness)",
     "docs/tasks/T-0249.spec.md (NEW)",
     "docs/tasks/T-0249.pr-handoff.json (NEW)"
   ],
-  "summary": "B-11: операционализация dogfood-CRM «клиенты-подписки» через СУЩЕСТВУЮЩИЕ примитивы (D-064 анти-кейс). Разведка T-0246 показала три boundary-заглушки: (1) record-CRUD REST — оказался ПОЛНОСТЬЮ generic (records.ts) + реестр засеян (073), нужен был только SEED-провод on_create; (2) UserTask→runIssueKey цепочка — runIssueKey существует, но Step 5c (запись circuit_id обратно в record) был отложен T-0244 как «B-11 boundary» и не тронут T-0246, а вызывающего из процесса не было; (3) CRM UI — generic грид T-0581 + list_view. Ни одного нового платформенного экрана/CRUD: кейс живёт в seed (migration 134: on_create binding + list_view «Клиенты»), плюс ОДИН недостающий generic-примитив (completion-effect: BPMN-шаг → серверный код-эффект) + case-handler в quarantine-namespace (issue-key-effect закрывает Step 5c write-back).",
-  "fix": "1) src/core/completion-effect.ts — generic case-free реестр (procKey,activity)->handler + runCompletionEffect (ключи непрозрачны, ноль pg/http/env). 2) src/runtime/customer-onboarding/issue-key-effect.ts — applyIssueKeyStep: runIssueKey (реальный Ed25519 T0242 адаптер) + на успехе JSONB-merge circuit_id/activation_key_issued_at/status='active' обратно в record.data как системный актор + audit record.update (ЗАКРЫВАЕТ Step 5c T-0244). 3) src/composition/customer-onboarding-effects.ts — case-quarantine биндинг customer-onboarding × task-issue-key/имя-шага -> эффект (инъекция deps). 4) src/http/inbox.ts — в approve-tx после applyStepResult вызывает runCompletionEffect (строго gated: нет реестра/нет эффекта -> no-op байт-идентично; throw -> ROLLBACK; матч по task.taskDefKey ИЛИ task.step). 5) migration 134 (@demo-seed, INSERT-only, zero DDL/ALTER -> нет dual-control/new-table relief): process_app_binding on_create (customer-onboarding<-vendor-crm, trigger_registry_id ОБЯЗАТЕЛЕН т.к. customer-subscription is_system=true -> NULL-fallback не сработал бы; submit_task_key='task-fill-card') + list_view «Клиенты» (source='records'+owner_actor=NULL, bare ON CONFLICT DO NOTHING т.к. name-uniq index expression-based после migration 130).",
+  "summary": "B-11: dogfood-CRM «клиенты-подписки» через существующие примитивы (кейс в seed: migration 134 on_create binding + list_view «Клиенты»; generic CRUD/грид/инбокс реюзаны без изменений) + ОДИН новый generic-примитив completion-effect (BPMN-шаг → серверный код-эффект) + case-handler issue-key-effect (закрывает Step 5c T-0244: write-back circuit_id/activation_key_issued_at/status=active). ПОСЛЕ судейского вердикта (changes_requested) доработано: CE-1 провод в продакшн composition root (server.ts безусловно строит реестр через buildCompletionEffectRegistry и передаёт в registerInboxRoutes; env-гейт на ПОРТЕ, не на проводе) + RED-LOCK route-тест + статик-лок гейт; CE-2 fail-visible (ok:false ⇒ 422 STEP_EFFECT_FAILED + ROLLBACK approve — шаг остаётся открыт, не тихое 200); CE-3 анти-double-issue (SELECT FOR UPDATE + transition-гард ДО issueEntitlement — exactly-once на БД-локе). ПРОВОД ОКУПИЛСЯ НЕМЕДЛЕННО живой находкой: runIssueKey (T-0244) пишет actor_event слагами, а продакшн-субстрат actor_event типизирует actor/role_at_event/on_behalf_of как UUID — все прежние тесты жили на in-memory сторе (22P02 на первом живом append); закрыто slug→UUID-адаптером в composition root (fail-closed).",
+  "fix": "CE-1: src/composition/completion-effects-root.ts — buildCompletionEffectRegistry(pool, env?): PDP-деки байт-идентичны server.ts resolveReadVisibility (makeDbGrantSource + tenant-scoped record-fetch + loadTenantOrgAncestry→makeResourceAncestryOracle, single-resolver), entitlement через makeEntitlementWiring(env), actor-event через slug→UUID адаптер над PgSodSource().writer; server.ts вызывает builder безусловно при pool и передаёт completionEffectRegistry в writeDeps (шов no-op для чужих activity — env-гейт на проводе не нужен, существующие тесты не тронуты: 69/69 без env). CE-2: makeCustomerOnboardingEffectBindings handler на ok:false бросает HttpError(422, STEP_EFFECT_FAILED) → runCompletionEffect пробрасывает → withTenantTx ROLLBACK (task.approved снят, запись не тронута, шаг открыт) → роут отвечает видимой 422. CE-3: applyIssueKeyStep начинает с SELECT data FROM record ... FOR UPDATE + isAllowedTransition(status,'active') ДО какого-либо вызова порта; конкурентный проигравший блокируется на локе, перечитывает committed 'active', получает bad_transition БЕЗ порта; circuit_id резолвится из залоченной строки (одно авторитетное чтение).",
   "deviations_from_adr": [
-    "Кейс-биндинг (process,step)->effect выражен как composition-регистрация (код в sanctioned quarantine namespace), а НЕ как data-конфиг в БД. Причина: data-driven binding-таблица потребовала бы ALTER known-tenant-таблицы process_app_binding + dual-control (FF-DC7) relief на frozen-check + auto-sanction — непропорционально для одного эффекта под offline-стенд. Вынесено как follow-up примитив (см. live_proof_plan / spec §4)."
+    "Кейс-биндинг (process,step)->effect — composition-регистрация (quarantine-код), не data-конфиг в БД: binding-таблица = отдельный будущий примитив (ALTER known-tenant-таблицы + dual-control relief непропорциональны здесь). Follow-up в spec §4.",
+    "CE-2 контракт: выбран «видимая 422 + полный ROLLBACK approve» (из двух предложенных судьёй). Следствие: audit-события неуспешного runIssueKey (key_issue_failed) откатываются вместе с tx — неуспех виден в HTTP-ответе и в отсутствии task.approved, не в audit-цепи. actor_event успешного пути пишется отдельным tx (pre-existing семантика PgActorEventWriter) — write-back-фейл после него откатил бы эффект, но не это событие (документировано в completion-effects-root.ts)."
   ],
-  "live_proof_plan": "LIVE-PG доказано (ci/checks/db/T-0249-onboarding-chain.db.test.ts, реальный PG :55432, 3/3 GREEN): свежий тенант -> запись клиента -> applyIssueKeyStep -> circuit_id/activation_key_issued_at/status=active ПЕРЕЧИТАНЫ ИЗ PG + audit_event(customer.key_issued) на реальной hash-цепи; анти-театр: dormant entitlement и PDP-deny НЕ пишут write-back. ЧЕСТНАЯ ГРАНИЦА (стенд/Flowable offline весь цикл — см. MEMORY choros-run-poehali-w7): полный HTTP userTask->Flowable->effect прогон вживую не выполнен — completion-seam завайрен в inbox.ts (additive) + composition, прогон через живой движок по возврату стенда (консистентно с недельным паттерном merged-cp1). PDP-live покрыт field-mask-guard.test.ts (T-0246). Server.ts НЕ populate-ит live-реестр этой сессии: эффект вооружается под тем же env-гейтом (CUSTOMER_ONBOARDING_LIVE) что и остальной live-путь онбординга — финальный server-root wire = последний провод по возврату стенда.",
+  "live_proof_plan": "ДОКАЗАНО ЖИВЬЁМ до HTTP-роута включительно (реальный PG :55432): (a) chain db 5/5 — write-back перечитан из PG, key_issued на реальной hash-цепи, анти-театр dormant/PDP-deny, CE-3 конкурентный (порт ровно 1 раз) + секвенциальный; (b) route db 3/3 — ПРОДАКШН-сборка реестра (та же, что server.ts) стреляет через реальный POST /api/inbox/:id/action с полным продакшн-PDP (реальные role_assignment+grant строки), негатив-контроль воспроизводит HEAD-без-провода (200 + запись не тронута), CE-2 422+ROLLBACK. RED-ДОКАЗАТЕЛЬСТВО (пост-коммит, git-манипуляция без stash): rm completion-effects-root.ts + git checkout HEAD~ -- src/server.ts → completion-effect-wired.sh FAIL + route-тест падает на импорте; восстановление git checkout HEAD → оба GREEN (точные выводы в финальном ответе кодера). ОСТАТОК честной границы: только живой Flowable-РАН (create=start → engine userTask → approve) — движковая половина шва (reconcileInstanceEngineDrive) этой задачей не менялась, покрыта T-0571/T-0672; по возврату стенда.",
   "tests_added": [
     {
       "file": "ci/checks/db/T-0249-onboarding-chain.db.test.ts",
-      "covers": "LIVE-PG (fitness:db, 3 теста): (1) issue-key step с живым entitlement -> circuit_id/activation_key_issued_at/status=active записаны обратно + key_issued audit persisted + license active в store; (2) анти-театр dormant -> шаг открыт, запись не тронута, 0 audit; (3) анти-театр PDP-deny (нет гранта) -> reason=pdp_denied, нет write-back. 3/3 GREEN, 750ms."
+      "covers": "LIVE-PG 5 тестов: write-back+audit; анти-театр dormant; анти-театр PDP-deny; CE-3 КОНКУРЕНТНЫЙ double-approve (Promise.all, 2 tx, считающий порт-враппер: ровно 1 issueEntitlement, 1 ok + 1 bad_transition, 1 key_issued, детерминизм через FOR UPDATE); CE-3 секвенциальный re-click (второй вызов bad_transition, порт не вызван)."
+    },
+    {
+      "file": "ci/checks/db/T-0249-action-route-effect.db.test.ts",
+      "covers": "CE-1 RED-LOCK route-level (реальный HTTP /action, реальный PG, продакшн buildCompletionEffectRegistry): (1) live env → 200 + circuit_id/status=active из PG; (2) НЕГАТИВ-КОНТРОЛЬ без реестра = точное HEAD-поведение (200, запись не тронута); (3) CE-2: dormant → 422 STEP_EFFECT_FAILED + 0 task.approved (approve откачен)."
     },
     {
       "file": "src/core/__tests__/completion-effect.test.ts",
-      "covers": "Unit (6 тестов, без DATABASE_URL): resolve по (procKey,activity) и не по чужому; throw на дубль-биндинге; один handler под двумя activity-ключами (defKey+name); dispatcher no-op когда не зарегистрировано; вызов handler с client+ctx когда зарегистрировано; проброс throw (fail-closed). 6/6 GREEN."
+      "covers": "Unit 6: resolve/miss, дубль-биндинг throw, один handler под 2 ключами, no-op dispatch, вызов с client+ctx, проброс throw."
     }
   ],
   "gates": {
-    "tsc_noemit": "GREEN — node_modules/.bin/tsc --noEmit exit 0 (полный проект, включая inbox.ts seam + completion-effect + issue-key-effect + composition + db-test)",
-    "live_pg_chain": "GREEN — vitest --dir ci/checks/db T-0249-onboarding-chain: 3/3 passed 750ms (реальный PG, template hash 1288cce2 пересобран под migration 134)",
-    "completion_effect_unit": "GREEN — vitest src/core/__tests__/completion-effect.test.ts: 6/6 passed (без ambient DATABASE_URL)",
-    "inbox_regression": "GREEN — vitest inbox-action + inbox-outcome + inbox-form-values + step-applier + inbox-step-target-unresolved: 43/43 passed (additive seam, no-op когда реестр пуст -> ноль изменений поведения существующих процессов)",
-    "customer_crm_anti_case": "GREEN — ci/checks/customer-crm-anti-case.sh + --self-test: generic-plane case-литералы = 0, кейс в seed/migrations, completion-effect.ts case-free",
-    "existing_gates_no_regress": "GREEN — customer-subscription-pdp-arbiter / no-killswitch-in-crm / entitlement-port-injectable / vendor-crm-seed-idempotent / field-mask-hookpoint / anti-case-lock / detel-literal-baseline: все PASS",
-    "eslint_new_files": "GREEN — 0 errors (4 warnings = pre-existing no-console в engine-drive error-путях inbox.ts, не в добавленном коде)",
-    "migration_134_applied": "GREEN — node migrations/run.mjs применил 134 чисто; seed проверен: process_app_binding(customer-onboarding, on_create, submit_task_key=task-fill-card, trigger_registry_id set) + list_view «Клиенты» is_default"
+    "tsc_noemit": "GREEN — exit 0 (полный проект, после CE-1/2/3 и адаптера)",
+    "chain_db_solo": "GREEN — vitest --dir ci/checks/db --no-file-parallelism (DATABASE_URL=migrator :55432): T-0249-onboarding-chain 5/5",
+    "route_db_redlock": "GREEN — T-0249-action-route-effect 3/3 (продакшн-сборка через реальный HTTP; негатив-контроль; CE-2 422+rollback)",
+    "unit_no_env": "GREEN — completion-effect 6/6 + inbox-action 10/10 + inbox-engine-drive 53/53 = 69/69 БЕЗ ambient DATABASE_URL",
+    "customer_crm_anti_case": "GREEN — + --self-test (4 детектора); generic-plane = 0 литералов",
+    "completion_effect_wired": "GREEN — + --self-test; (a)(b)(c)(d) все PASS; RED на дереве без провода",
+    "existing_gates_no_regress": "GREEN — anti-case-lock / customer-subscription-pdp-arbiter / no-killswitch-in-crm / entitlement-port-injectable / field-mask-hookpoint / vendor-priv-not-in-client-circuit: PASS",
+    "eslint_changed": "GREEN — 0 errors на completion-effects-root / customer-onboarding-effects / issue-key-effect / server.ts",
+    "migration_134_applied": "GREEN — применена и на dev-БД, и в fitness:db template (hash 1288cce2)"
   },
   "blocked_reason": "",
   "friction_events": [
-    "tsc --noEmit на полном проекте занимает >7 мин (большой граф) — запускал в фоне, не в foreground-таймауте.",
-    "migration 134 первая версия упала на ON CONFLICT(tenant_id,registry_def_id,name) для list_view: migration 130 (list_view_source_owner) переосмыслила уникальность имени как EXPRESSION-based index (COALESCE(...)) + добавила source/owner_actor колонки -> исправлено на bare ON CONFLICT DO NOTHING + source='records'/owner_actor=NULL.",
-    "fitness:db использует per-migrations-hash template-БД (T-0147 изоляция) — новая миграция сменила hash, потребовался npm run fitness:db:setup-template перед прогоном.",
-    "vitest root-config ИСКЛЮЧАЕТ ci/checks/db/** — прогон только через --dir ci/checks/db (как fitness:db); одиночный файл — позиционным фильтром пути, иначе грузятся все db-тесты (медленно, --no-file-parallelism)."
+    "Машина уснула посреди доработки — процесс оборвался с незакоммиченным деревом; восстановление из git-состояния (git status/diff) без потерь, урок: коммитить чаще во время ревью-доработок.",
+    "Живая находка провода: PgActorEventWriter ждёт UUID, runIssueKey шлёт слаги — router маскирует raw-ошибку в INTERNAL 500 без лога; вскрыто standalone-repro-скриптом (tsx, прямой вызов runCompletionEffect) — router.ts стоит научить логировать не-HttpError (follow-up кандидат).",
+    "grep -n (один файл) даёт line:content БЕЗ префикса имени файла — comment-strip анкер ':[0-9]+:' из -rn-скриптов молча не срабатывает; пофикшено '^[0-9]+:' в обоих новых гейтах (self-test это и поймал).",
+    "tsc --noEmit на полном проекте >7 мин — только фоном.",
+    "vitest root-config исключает ci/checks/db/** — прогон только через --dir ci/checks/db; фильтр по имени файла позиционным аргументом."
   ]
 }

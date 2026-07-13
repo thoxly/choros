@@ -82,7 +82,9 @@ count_in_file() {
     echo "FAIL [customer-crm-anti-case]: grep error (rc=${rc}) reading '${file}': ${raw}" >&2
     exit 2
   fi
-  filtered="$( (printf '%s\n' "${raw}" || true) | (grep -vE ':[0-9]+:[[:space:]]*(//|\*|/\*)' || true) )"
+  # NB: single-file `grep -n` output is `line:content` (no filename prefix), so
+  # the comment-strip anchor is ^line: — unlike the -rn variant in count_generic_code.
+  filtered="$( (printf '%s\n' "${raw}" || true) | (grep -vE '^[0-9]+:[[:space:]]*(//|\*|/\*)' || true) )"
   if [[ -z "${filtered}" ]]; then echo 0; else printf '%s\n' "${filtered}" | wc -l | tr -d '[:space:]'; fi
 }
 
