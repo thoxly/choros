@@ -1,0 +1,52 @@
+{
+  "task_id": "T-0759",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1-single-batch-clause1-fallback-tiebreak-divergence",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/process-projection.ts:isInstanceParticipant (auditMatchSlug tie-break, ~L1276-1289) vs isInstanceParticipantBatch (per-instance clause-1 OR, ~L1391-1465)",
+      "issue": "The two clause-(1) resolvers are NOT logically byte-equivalent for one input class. Single resolves ONE matched identity by priority (auditMatchSlug = actorSlug-if-in-track ELSE distinct-fallbackSlug-if-in-track) and gates THAT identity's active status. Batch gates BOTH independently and ORs them: (actors.has(actorSlug) && actorSlugActive) || (fallbackSlug distinct && actors.has(fallbackSlug) && fallbackSlugActive). They diverge exactly when actorSlug is in the audit track AND deactivated AND a distinct fallbackSlug is ALSO in the track AND active: DETAIL (single) DENIES via clause 1 (picks actorSlug by priority, which is dead), LIST (batch) GRANTS via the fallback branch. LIST being more permissive than DETAIL is the wrong direction for a security gate. HOWEVER this is UNREACHABLE in production: both call sites pass fallbackSlug=undefined (processes.ts:963 isInstanceParticipant with 5 positional args; processes.ts filterProjectionsByReadVisibility with 7 args -> isInstanceParticipantBatch fallbackSlug=undefined). Under fallbackSlug=undefined the two are PROVABLY byte-equivalent: grant = actorInTrack && actorActive on both paths (verified by case analysis over A/F/aActive/fActive). So this is a latent contract divergence in a currently-dead parameter, not a live authority-path split.",
+      "suggestion": "Non-blocking (unreachable via current callers). Before ever wiring a real fallbackSlug to either caller, align the batch tie-break to the single's matched-identity-priority (evaluate actorSlug-in-track first and only fall to fallbackSlug when actorSlug is NOT in the track), or document the deliberate 'any matched active identity' batch semantics. Equivalence for fallbackSlug=undefined (the shipped behavior) holds today."
+    },
+    {
+      "id": "R-2-unit-fake-pool-does-not-guard-ACTOR_ACTIVE_SQL-removal",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__/processes-read-visibility.test.ts:makeFakePool (T-0759 employee-active branch, ~L143-149) + the 3 new T-0759 unit cases",
+      "issue": "The pure-unit tier does NOT actually guard the fix. makeFakePool routes the active-check by regex on 'FROM choros.employee' && !role_assignment and answers active/inactive from opts.deactivatedSlugs matched on the slug ARGUMENT ($2), independent of whether the SQL text carries ${ACTOR_ACTIVE_SQL}. Empirically confirmed by adversarial mutation: stripping 'AND ${ACTOR_ACTIVE_SQL}' from all 3 point-lookups in process-projection.ts leaves processes-read-visibility.test.ts 28/28 GREEN. The genuine guards are the LIVE-PG db tests (the same mutation turns 3 db tests RED: T-0756 SRP-8 DETAIL, processes-read-visibility T-0759 DETAIL, T-0759 LIST) and the STATIC FF-0662 accounting gate (mutation -> FF-0662-1 RED 'isInstanceParticipantBatch has 2 slug-lookup(s) but only 0 deactivation predicate(s)').",
+      "suggestion": "Non-blocking: two independent real guards (live-PG db tests + FF-0662 static gate) do catch removal, so the invariant is protected. But the unit tier overstates its coverage; consider a comment noting the unit fake pool cannot see the SQL predicate, or (if the shape allowed) asserting on the emitted SQL text, so future readers don't trust the unit tests as the deactivation guard."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Clause (1) audit-actor match ACTOR_ACTIVE-gated in BOTH isInstanceParticipant (DETAIL) and isInstanceParticipantBatch (LIST)", "covered": true },
+    { "ac": "Gate REUSES named predicate ACTOR_ACTIVE_SQL ('deactivated_at IS NULL'), not a bespoke deactivation literal (verified: all 3 point-lookups carry ${ACTOR_ACTIVE_SQL}; same predicate clause (2) getRoleSlugsForActor and clause (3) already carry)", "covered": true },
+    { "ac": "Test: DEACTIVATED former audit-actor -> 404 on DETAIL (T-0756 SRP-8, RED->GREEN live-PG, 200+title before deactivation proves fixture)", "covered": true },
+    { "ac": "Test: DEACTIVATED former participant absent from LIST (processes-read-visibility T-0759 LIST, RED->GREEN live-PG, isInstanceParticipantBatch equivalence)", "covered": true },
+    { "ac": "404 body carries no title-only leak (SRP-8 asserts after.raw !contains TITLE_VALUE)", "covered": true },
+    { "ac": "Clauses (2) role-holder and (3) owner byte-untouched; owner (T-0658 isGenesisOwnerForTenant) deactivation-safe path not modified", "covered": true },
+    { "ac": "Re-closing preserved: active participant/starter/reader (SRP-1/3/7, T-0723 STARTED-it DETAIL+LIST) stay 200", "covered": true },
+    { "ac": "Batch active-check hoisted OUT of per-instance loop (guarded by anyActors, mirrors anyRoles) -> at most 2 point-lookups/page, no N+1", "covered": true },
+    { "ac": "Frozen-gate sanction: actor-authority-deactivation-gate.sh edit exactly additive (numstat 2/0, 0 legacy lines removed/modified) via FF-FCI13 auto_additive, T-0751 precedent", "covered": true },
+    { "ac": "frozen-sanctions.jsonl entry is a single compact JSON line (matcher grabla), schema-shaped {task,file,owner,sanctioned_by,vrag_attestation,additive_basis,note}", "covered": true },
+    { "ac": "Both functions registered in AUTHORITY_RESOLVERS (T-0662) + deactivation-gate accounting scan (FF-0662-1/2) green", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Independently re-ran (adversarial judge, not builder), env-disciplined, DB solo postgres://choros_migrator:...@localhost:55432/choros.",
+    "tsc: npm run build exit 0 (tsc + seed tsconfig).",
+    "Live-PG target files: processes-read-visibility.db.test.ts 18/18 + T-0756-source-record-projection.db.test.ts 9/9 = 27/27 GREEN, including the 3 RED->GREEN (SRP-8, T-0759 DETAIL, T-0759 LIST). process-projection.db.test.ts 7/7 GREEN.",
+    "Unit: processes-read-visibility.test.ts 28/28. Full unit suite (npx vitest run): 5982 passed / 17 skipped / 0 failed across 319 files (builder's pr-handoff said ~4761; actual higher, 0 failures either way).",
+    "ATTACK #3 MUTATION reproduced: perl-stripped 'AND ${ACTOR_ACTIVE_SQL}' from all 3 point-lookups -> (a) static FF-0662-1 accounting gate RED ('2 slug-lookup(s) but 0 deactivation predicate(s)'); (b) live-PG 3 tests RED in BOTH paths (SRP-8 DETAIL 200!=404, T-0759 DETAIL 200!=404, T-0759 LIST present!=absent). git checkout -- restored; grep count back to 3 markers; tree clean.",
+    "ATTACK #2 FALLBACKSLUG: clause-1 resolves the matched identity (actorSlug priority, else distinct in-track fallbackSlug) and gates THAT identity's deactivated_at. Deactivated actorSlug that acted -> auditMatchSlug=actorSlug -> active-check fails -> clause-1 denies (SRP-8/T-0759 live). Live fallbackSlug NOT in the track -> not selected -> no grant. Live fallbackSlug in track while actorSlug dead-and-not-in-track -> legitimately grants (the active identity that actually acted). Both production callers pass fallbackSlug=undefined, so the only residual concern is the R-1 latent tie-break (unreachable).",
+    "ATTACK #4 EQUIVALENCE: SQL byte-identical across all 3 lookups ('SELECT id FROM choros.employee WHERE tenant_id=$1 AND slug=$2 AND deactivated_at IS NULL LIMIT 1'). Logic equivalent for fallbackSlug=undefined (the shipped call shape) by full case analysis; single divergence class documented as R-1 (latent, unreachable). Not a live two-authority-path split -> not blocking.",
+    "ATTACK #5 N+1: batch active-checks (actorSlug + optional distinct fallbackSlug) are hoisted OUT of the per-instance loop under the anyActors guard (mirror of anyRoles for clause 2) -> <=2 point-lookups per page regardless of page size; per page total bounded (1 audit-track + <=2 active + <=1 roles + 1 record-ancestry batch). No per-instance active query. (No dedicated query-count instrumented-pool test exists; verified structurally by code read.)",
+    "ATTACK #6 SANCTION: git diff fd0ad0f7..HEAD --numstat ci/checks/actor-authority-deactivation-gate.sh = 2 add / 0 del (2 new AUTHORITY_RESOLVERS entries appended before the closing paren; 0 legacy lines touched). frozen-sanctions.jsonl = 1 add / 0 del, tail line parses as compact JSON. Gates: actor-authority-deactivation-gate.sh PASS + --self-test PASS (judge attacks a/b, window/alias/JOIN bypasses, N-1 missing-fn all detect); auto-sanction-additive.sh PASS + --self-test PASS (FF-ASA1..5 + R-1 adversarial); frozen-checks-immutable.sh PASS.",
+    "ATTACK #7 RE-CLOSING: clauses (2)/(3) not in the diff (only clause 1 + import + doc-comment). Owner path isGenesisOwnerForTenant(pool,tenantId,actorSlug,nowMs) unchanged, deactivation-safe (T-0658), so a deactivated tenant owner is handled by clause 3 exactly as before, untouched by T-0759. Active participant/starter/reader regressions GREEN (SRP-1/3/7, T-0723 STARTED-it DETAIL+LIST).",
+    "ATTACK #8 404 BODY: SRP-8 asserts after.statusCode===404 AND after.raw does NOT contain TITLE_VALUE (no title-only leak survives). The pre-deactivation sanity (200 + sourceRecord.title===TITLE_VALUE) proves the 404 is caused by deactivation, not a fixture miss.",
+    "Targeted fitness PASS: actor-active-route-coverage.sh (78 GET routes, 23 marker-covered, 55 whitelisted, 0 findings), process-detail-read-gate.sh, process-detail-single-resolver.sh.",
+    "PRE-EXISTING fitness red confirmed UNRELATED: agent-instruction-runtime-dormant.sh FF-COMP-6 reddens on src/http/agents.ts; git diff fd0ad0f7..HEAD -- src/http/agents.ts is EMPTY (agents.ts not in the 9-file T-0759 diff), so the gate fails identically on clean dev. Parallel T-0758, not T-0759 scope. pr-handoff.json fitness_caveat documents this honestly.",
+    "Scope: diff vs base = exactly the 9 claimed files (process-projection.ts, actor-authority-gate.ts doc-comment, 2 db tests, 1 unit test, deactivation-gate.sh, frozen-sanctions.jsonl, spec.md, pr-handoff.json). No strays. Working tree clean after all mutation-and-restore cycles (git status empty, git diff empty)."
+  ]
+}
