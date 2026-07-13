@@ -324,19 +324,25 @@ const TOOL_EMIT_FORM: ToolDeclaration = {
  * existed as raw HTTP but was NOT reachable from the configurator's tool
  * loop.
  *
- * AUTH MODEL (docs/tasks/T-0743.spec.md §4.4 mini-ADR): `form_binding` (the
- * table this op ultimately writes) carries NO draft/published tier — a human
- * process_designer's FormDesigner save is ALWAYS live, immediately. Every
- * OTHER configurator tool's DRAFT-ONLY invariant (file header, SECURITY
- * INVARIANT 1) is enforced via a `tier='draft'` column on the table it
- * writes; this op has no such column to gate on. The executor
+ * AUTH MODEL (docs/tasks/T-0743.spec.md §4.4 mini-ADR, r2): `form_binding`
+ * (the table this op ultimately writes) carries NO draft/published tier — a
+ * human process_designer's FormDesigner save is ALWAYS live, immediately.
+ * Every OTHER configurator tool's DRAFT-ONLY invariant (file header,
+ * SECURITY INVARIANT 1) is enforced via a `tier='draft'` column on the
+ * table it writes; this op has no such column to gate on. The executor
  * (src/http/assistant.ts, case "apply_form_document_op") substitutes the
- * BOUND APPLICATION's tier as the discriminant instead: the tool may patch a
- * form only when the process resolves (pinned or single-binding) to a
- * DRAFT-tier application. This is STRICTLY NARROWER than what a human
- * process_designer may do via the UI (unrestricted by application tier) —
- * bot ≤ human, never the reverse — and changes NOTHING about the human path
- * or the existing HTTP route's contract.
+ * BOUND APPLICATIONS' tiers as the discriminant instead — and because
+ * form_binding is keyed (tenant_id, process_key, form_key) with NO
+ * application dimension, EVERY application a process is bound to renders
+ * the SAME row. The gate is therefore over ALL bindings, not just the
+ * pinned one (r2 after the judge's live-PG adversarial probe: on a mixed
+ * draft+published process a valid draft pin would mutate the very layout
+ * the published app serves to real users): the tool may patch a form ONLY
+ * when EVERY application the process is bound to is DRAFT-tier. This is
+ * STRICTLY NARROWER than what a human process_designer may do via the UI
+ * (unrestricted by application tier) — bot ≤ human, never the reverse —
+ * and changes NOTHING about the human path or the existing HTTP route's
+ * contract.
  *
  * applicationId mirrors T-0700's targetRegistrySlug pattern: optional, only
  * needed when the process is bound to 2+ applications. Omitting it on an
@@ -353,11 +359,12 @@ const TOOL_APPLY_FORM_DOCUMENT_OP: ToolDeclaration = {
       "Изменить ОДНИМ действием уже существующую форму процесса — вставить, удалить, " +
       "переместить, обновить или переупорядочить блок. Это ТА ЖЕ операция, что делает " +
       "канвас конструктора форм. Форма должна УЖЕ существовать (создать форму с нуля — " +
-      "инструмент emit_form). Работает ТОЛЬКО для приложений в статусе ЧЕРНОВИК " +
-      "(неопубликованных) — форму уже опубликованного приложения меняет человек через " +
-      "конструктор форм, этим инструментом это недоступно. Если процесс привязан к " +
-      "НЕСКОЛЬКИМ приложениям, укажи applicationId — иначе система честно попросит " +
-      "уточнить, какое приложение имеется в виду, вместо того чтобы угадывать.",
+      "инструмент emit_form). Работает ТОЛЬКО когда ВСЕ приложения, к которым привязан " +
+      "процесс, в статусе ЧЕРНОВИК (неопубликованы): форма у процесса ОДНА на все его " +
+      "привязки, поэтому если хотя бы одно из привязанных приложений уже опубликовано — " +
+      "правка запрещена, её делает человек через конструктор форм. Если процесс привязан " +
+      "к НЕСКОЛЬКИМ приложениям (все черновики), укажи applicationId — иначе система " +
+      "честно попросит уточнить, какое приложение имеется в виду, вместо того чтобы угадывать.",
     parameters: {
       type: "object",
       properties: {
@@ -376,8 +383,9 @@ const TOOL_APPLY_FORM_DOCUMENT_OP: ToolDeclaration = {
           description:
             "Необязательно: UUID приложения, чью привязку процесса использовать — нужно, " +
             "только если процесс привязан к НЕСКОЛЬКИМ приложениям (иначе система честно " +
-            "попросит уточнить, а не угадает). Приложение должно быть в статусе черновик — " +
-            "опубликованные формы этим инструментом не редактируются.",
+            "попросит уточнить, а не угадает). ВСЕ привязанные приложения процесса должны " +
+            "быть черновиками — если хотя бы одно опубликовано, правка запрещена даже с " +
+            "указанным черновичным applicationId (форма общая на все привязки).",
         },
         humanReadableReason: { type: "string", description: "Зачем меняется форма (для журнала)." },
       },
@@ -537,10 +545,12 @@ export const CONFIGURATOR_DEFAULT_SYSTEM_PROMPT =
   "потом вызывай author_binding с targetRegistrySlug из этого списка. Никогда не угадывай slug реестра. " +
   "list_registries ничего не пишет — только показывает то, что видит человек в своём пикере. " +
   // T-0743 (столп 2+5): apply_form_document_op — patch an EXISTING form via
-  // the closed op vocabulary; draft-application-only, honest ask on ambiguity.
+  // the closed op vocabulary; ALL-bindings-draft-only (r2), honest ask on ambiguity.
   "Если нужно изменить УЖЕ существующую форму процесса (добавить/убрать/переместить/обновить блок) — " +
-  "используй apply_form_document_op ОДНИМ действием на операцию. Он работает только для форм " +
-  "приложений в статусе ЧЕРНОВИК; если процесс привязан к нескольким приложениям, укажи applicationId " +
+  "используй apply_form_document_op ОДНИМ действием на операцию. Он работает, только когда ВСЕ " +
+  "приложения, к которым привязан процесс, — ЧЕРНОВИКИ (форма у процесса одна на все привязки; " +
+  "если хотя бы одно привязанное приложение опубликовано — правка запрещена, её делает человек). " +
+  "Если процесс привязан к нескольким приложениям-черновикам, укажи applicationId " +
   "или система честно попросит уточнить, какое приложение имеется в виду. " +
   "Если пользователь описывает ПРОЦЕСС/маршрут словами (подача → согласование → если сумма большая → доп. согласование) — " +
   "используй generate_process: система соберёт BPMN циклом генерация→проверка→починка, заземлит условия и роли на реальные поля, " +
@@ -1288,9 +1298,10 @@ function processToolCall(
           stepKey,
           opKind,
           note:
-            "Изменение будет применено, только если процесс однозначно резолвится в приложение-" +
-            "ЧЕРНОВИК; для опубликованных приложений и неоднозначной привязки без applicationId " +
-            "система честно откажет/попросит уточнить, а не выполнит вслепую.",
+            "Изменение будет применено, только если ВСЕ приложения, к которым привязан процесс, — " +
+            "черновики (форма общая на все привязки); если хотя бы одно опубликовано — честный отказ " +
+            "даже с черновичным applicationId; неоднозначная привязка без applicationId — честная " +
+            "просьба уточнить, а не выполнение вслепую.",
         }),
       };
     }

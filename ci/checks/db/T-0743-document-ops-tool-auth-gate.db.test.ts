@@ -1,13 +1,18 @@
 // T-0743 (E-FORMS, столпы 2+5, follow-up T-0725) · apply_form_document_op —
 // configurator tool executor auth-model gate — live Postgres proof.
 //
-// docs/tasks/T-0743.spec.md §4.4 mini-ADR: form_binding carries NO tier
+// docs/tasks/T-0743.spec.md §4.4 mini-ADR (r2): form_binding carries NO tier
 // column (unlike application/registry_def) — the human FormDesigner save is
-// ALWAYS live/immediate. The tool substitutes the BOUND APPLICATION's tier
-// as the DRAFT-ONLY discriminant instead: it may write only when the
-// process resolves (pin or single binding) to a tier='draft' application.
-// A genuinely ambiguous process (2+ bindings, no pin) is handed to the
-// SAME shared function POST /api/forms/document-ops uses
+// ALWAYS live/immediate. The tool substitutes the BOUND APPLICATIONS' tiers
+// as the DRAFT-ONLY discriminant instead — and because form_binding is keyed
+// (tenant_id, process_key, form_key) with NO application dimension, EVERY
+// application a process is bound to renders the SAME row. r2 (judge's
+// live-PG adversarial probe): the tool writes ONLY when EVERY binding of
+// the process is tier='draft' — ANY co-bound published (or unverifiable)
+// application forbids the write EVEN on a valid draft pin, because a draft
+// pin does NOT isolate the write (the published app serves the same row).
+// A genuinely ambiguous ALL-DRAFT process (2+ bindings, no pin) is handed
+// to the SAME shared function POST /api/forms/document-ops uses
 // (applyFormDocumentOp, forms-document-ops.ts) — its EXISTING (T-0725) 422
 // AMBIGUOUS_APPLICATION becomes the tool's honest ASK.
 //
@@ -22,16 +27,26 @@
 //         POST /api/forms/document-ops route).
 //   AC-d: single binding, application tier='published' → refused BEFORE
 //         applyFormDocumentOp is ever called; form_binding untouched.
+//   AC-m (r2 — the judge's EXACT adversarial topology): one process bound to
+//         a DRAFT app + a PUBLISHED app, sharing ONE form_binding row —
+//     AC-m1: pin = the DRAFT app → REFUSED (under r1 this pin PASSED and
+//            wrote into the row the published app renders live — the
+//            judge's proven blocking; RED→GREEN is this refusal);
+//            form_binding untouched.
+//     AC-m2: no pin → REFUSED with the same mixed-tier reason, NOT
+//            AMBIGUOUS_APPLICATION (asking "which app?" is pointless when
+//            every answer would be refused); form_binding untouched.
 //   AC-c: 2 bindings (both tier='draft'), no applicationId → the shared
 //         function's own 422 AMBIGUOUS_APPLICATION surfaces as the error
 //         string, naming BOTH candidate applicationIds; form_binding
-//         untouched. WITH the pin → succeeds.
+//         untouched. WITH the pin → succeeds (all-draft multi still writes).
 //   AC-x: an applicationId pin that names no real binding of the process →
 //         refused ("cannot verify draft-tier scope"), NOT silently allowed
 //         and NOT the shared function's unrelated 409/404.
 //   AC-y: a process with ZERO process_app_binding rows → the tier gate is a
 //         no-op (candidates.length===0); the PRE-EXISTING fail-closed path
-//         (no live schema resolvable) still fires (409 WRONG_FLOOR) — not a
+//         (classifyLayoutSave: no live record_schema resolvable) still fires
+//         (409 WRONG_FLOOR — not 404: the layout row exists) — not a
 //         security bypass, not a crash.
 //   AC-f: keycloak auth mode, actor with NEITHER the owner short-circuit NOR
 //         the process_designer role → refused (checkRole, reused verbatim)
@@ -76,21 +91,29 @@ const APP_DRAFT = uuid();
 const APP_PUB = uuid();
 const APP_M1 = uuid();
 const APP_M2 = uuid();
+// r2 (judge's adversarial topology): ONE process bound to BOTH of these,
+// sharing ONE form_binding row — MXD is draft, MXP is published.
+const APP_MXD = uuid();
+const APP_MXP = uuid();
 
 const PROC_DRAFT = `t0743-proc-draft-${TENANT.slice(0, 8)}`;
 const PROC_PUB = `t0743-proc-pub-${TENANT.slice(0, 8)}`;
 const PROC_MULTI = `t0743-proc-multi-${TENANT.slice(0, 8)}`;
+const PROC_MIXED = `t0743-proc-mixed-${TENANT.slice(0, 8)}`;
 const PROC_NOBIND = `t0743-proc-nobind-${TENANT.slice(0, 8)}`;
 
 const FORM_DRAFT = 't0743-form-draft';
 const FORM_PUB = 't0743-form-pub';
 const FORM_MULTI = 't0743-form-multi';
+const FORM_MIXED = 't0743-form-mixed';
 const FORM_NOBIND = 't0743-form-nobind';
 
 const SLUG_DRAFT = `t0743-fields-draft-${TENANT.slice(0, 8)}`;
 const SLUG_PUB = `t0743-fields-pub-${TENANT.slice(0, 8)}`;
 const SLUG_M1 = `t0743-fields-m1-${TENANT.slice(0, 8)}`;
 const SLUG_M2 = `t0743-fields-m2-${TENANT.slice(0, 8)}`;
+const SLUG_MXD = `t0743-fields-mxd-${TENANT.slice(0, 8)}`;
+const SLUG_MXP = `t0743-fields-mxp-${TENANT.slice(0, 8)}`;
 
 // Empty-children layout — Floor-1 safe against ANY live schema (the "divider"
 // node below references no fieldKey either), so seeding never depends on
@@ -139,12 +162,15 @@ async function seed(c: pg.Client): Promise<void> {
     [TENANT, uuid(), NONOWNER, `Plain ${NONOWNER}`],
   );
 
-  // Four applications: DRAFT/PUB single-binding fixtures + M1/M2 (both draft, multi-binding).
+  // Six applications: DRAFT/PUB single-binding fixtures, M1/M2 (both draft,
+  // multi-binding), MXD/MXP (mixed-tier pair for the judge's r2 topology).
   for (const [appId, tier, suffix] of [
     [APP_DRAFT, 'draft', 'draft'],
     [APP_PUB, 'published', 'pub'],
     [APP_M1, 'draft', 'm1'],
     [APP_M2, 'draft', 'm2'],
+    [APP_MXD, 'draft', 'mxd'],
+    [APP_MXP, 'published', 'mxp'],
   ] as const) {
     await c.query(
       `INSERT INTO choros.application
@@ -159,6 +185,8 @@ async function seed(c: pg.Client): Promise<void> {
     [APP_PUB, SLUG_PUB],
     [APP_M1, SLUG_M1],
     [APP_M2, SLUG_M2],
+    [APP_MXD, SLUG_MXD],
+    [APP_MXP, SLUG_MXP],
   ] as const) {
     await c.query(
       `INSERT INTO choros.registry_def
@@ -192,12 +220,28 @@ async function seed(c: pg.Client): Promise<void> {
      VALUES ($1, $2, $3, $4, NULL, $5, 200, 200)`,
     [TENANT, uuid(), PROC_MULTI, APP_M2, SLUG_M2],
   );
+  // PROC_MIXED — the judge's r2 adversarial topology: TWO bindings, one to a
+  // DRAFT app (MXD, oldest), one to a PUBLISHED app (MXP) — both render the
+  // SAME form_binding row (FORM_MIXED below).
+  await c.query(
+    `INSERT INTO choros.process_app_binding
+       (tenant_id, id, process_key, application_id, form_key, target_registry_slug, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, NULL, $5, 100, 100)`,
+    [TENANT, uuid(), PROC_MIXED, APP_MXD, SLUG_MXD],
+  );
+  await c.query(
+    `INSERT INTO choros.process_app_binding
+       (tenant_id, id, process_key, application_id, form_key, target_registry_slug, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, NULL, $5, 200, 200)`,
+    [TENANT, uuid(), PROC_MIXED, APP_MXP, SLUG_MXP],
+  );
   // PROC_NOBIND: NO process_app_binding row at all.
 
   for (const [processKey, formKey] of [
     [PROC_DRAFT, FORM_DRAFT],
     [PROC_PUB, FORM_PUB],
     [PROC_MULTI, FORM_MULTI],
+    [PROC_MIXED, FORM_MIXED],
     [PROC_NOBIND, FORM_NOBIND],
   ] as const) {
     await c.query(
@@ -293,6 +337,33 @@ describe('T-0743: apply_form_document_op executor — DRAFT-ONLY-via-application
     expect(err).not.toContain('AMBIGUOUS_APPLICATION');
     expect(err).not.toContain('WRONG_FLOOR');
     const after = await currentVersion(PROC_PUB, FORM_PUB);
+    expect(after).toBe(before);
+  }));
+
+  it('AC-m1 (judge RED→GREEN): mixed-tier process (draft+published), pin = the DRAFT app → REFUSED (draft pin does NOT isolate the shared row); form_binding untouched', requireDb(async () => {
+    const before = await currentVersion(PROC_MIXED, FORM_MIXED);
+    const err = await executeApprovedOpAsDraft(
+      appPool, TENANT, opFor(PROC_MIXED, FORM_MIXED, APP_MXD), undefined, undefined, OWNER,
+    );
+    // Under r1 this pin PASSED (the pinned binding IS draft) and wrote into
+    // the very row the published app renders — the judge's proven blocking.
+    expect(err, 'expected a mixed-tier refusal, got success (the r1 hole)').not.toBeNull();
+    expect(err).toContain('опубликованным');
+    expect(err).not.toContain('AMBIGUOUS_APPLICATION');
+    expect(err).not.toContain('WRONG_FLOOR');
+    const after = await currentVersion(PROC_MIXED, FORM_MIXED);
+    expect(after).toBe(before);
+  }));
+
+  it('AC-m2: mixed-tier process, NO pin → REFUSED with the mixed-tier reason, NOT the AMBIGUOUS ASK (every answer would be refused anyway); form_binding untouched', requireDb(async () => {
+    const before = await currentVersion(PROC_MIXED, FORM_MIXED);
+    const err = await executeApprovedOpAsDraft(
+      appPool, TENANT, opFor(PROC_MIXED, FORM_MIXED), undefined, undefined, OWNER,
+    );
+    expect(err, 'expected a mixed-tier refusal').not.toBeNull();
+    expect(err).toContain('опубликованным');
+    expect(err).not.toContain('AMBIGUOUS_APPLICATION');
+    const after = await currentVersion(PROC_MIXED, FORM_MIXED);
     expect(after).toBe(before);
   }));
 

@@ -1010,14 +1010,21 @@ export async function executeApprovedOpAsDraft(
       // function POST /api/forms/document-ops calls (applyFormDocumentOp,
       // forms-document-ops.ts) — reuse, not a second implementation.
       //
-      // AUTH MODEL (docs/tasks/T-0743.spec.md §4.4): form_binding has no
-      // draft/published tier (unlike application/registry_def) — the human
-      // FormDesigner save is ALWAYS live. This tool substitutes the BOUND
-      // APPLICATION's tier as the DRAFT-ONLY discriminant: it may write only
-      // when the process resolves (pin or single-binding) to a tier='draft'
-      // application. Zero/unverifiable candidates fail closed (refuse, do
-      // NOT call the shared function) rather than assume draft. A genuinely
-      // ambiguous process (2+ bindings, no pin) is NOT resolved here — it is
+      // AUTH MODEL (docs/tasks/T-0743.spec.md §4.4, r2 after the judge's
+      // live-PG adversarial probe): form_binding has no draft/published tier
+      // (unlike application/registry_def) — the human FormDesigner save is
+      // ALWAYS live. This tool substitutes the bound APPLICATIONS' tiers as
+      // the DRAFT-ONLY discriminant — and because form_binding is keyed
+      // (tenant_id, process_key, form_key) WITH NO application dimension,
+      // every application a process is bound to renders the SAME row. The r1
+      // gate (check only the pinned/resolved binding's tier) was therefore a
+      // FALSE invariant on a mixed-tier process (draft + published bindings):
+      // a valid draft pin would mutate the very layout the PUBLISHED
+      // application serves to real users right now. r2 fail-close: the tool
+      // writes ONLY when EVERY binding of the process is tier='draft'; ANY
+      // co-bound non-draft (published, or unverifiable NULL) application
+      // forbids the write even on a valid draft pin. A genuinely ambiguous
+      // ALL-DRAFT process (2+ bindings, no pin) is NOT resolved here — it is
       // handed to the shared function, whose EXISTING 422
       // AMBIGUOUS_APPLICATION (T-0725) becomes an honest per-op failure that
       // buildHonestOpsReport (T-0607 в2) surfaces as the assistant naming
@@ -1065,36 +1072,48 @@ export async function executeApprovedOpAsDraft(
           client.release();
         }
 
-        const resolved = applicationId
-          ? candidates.find((c) => c.applicationId === applicationId)
-          : candidates.length === 1
-            ? candidates[0]
-            : undefined;
-
         if (candidates.length > 0) {
-          if (!resolved) {
-            if (!(candidates.length > 1 && !applicationId)) {
-              // A pin that names no real binding — cannot verify draft-tier
-              // scope. Fail closed rather than let the shared function's own
-              // (unrelated) 409 stand in for this refusal.
-              return (
-                `apply_form_document_op: applicationId "${applicationId}" is not a binding of ` +
-                `process "${processKey}" — cannot verify draft-tier scope, refusing.`
-              );
-            }
-            // else: candidates.length > 1 && no pin — genuinely ambiguous.
-            // Deliberately NOT resolved here; fall through to the shared
-            // function, whose own AMBIGUOUS_APPLICATION 422 is the ASK.
-          } else if (resolved.applicationTier !== "draft") {
+          // r2 (judge blocking, live-PG adversarial probe): form_binding is
+          // keyed WITHOUT an app dimension — a mixed-tier process (draft +
+          // published bindings) shares ONE row that the published app renders
+          // to real users. ANY non-draft co-binding (published, or an
+          // unverifiable NULL tier) forbids the write — EVEN on a valid
+          // draft pin. This check runs FIRST, before pin/ambiguity handling:
+          // asking "which application?" is pointless when every answer would
+          // be refused anyway.
+          const nonDraft = candidates.filter((c) => c.applicationTier !== "draft");
+          if (nonDraft.length > 0) {
+            const offenders = nonDraft
+              .map((c) => `«${c.applicationDisplayName ?? c.applicationSlug ?? c.applicationId}» (tier=${c.applicationTier ?? "unknown"})`)
+              .join("; ");
             return (
-              `apply_form_document_op: приложение «${resolved.applicationDisplayName ?? resolved.applicationSlug ?? resolved.applicationId}» ` +
-              `не в статусе черновик (tier=${resolved.applicationTier ?? "unknown"}) — ассистент может менять формы только ` +
-              `НЕОПУБЛИКОВАННЫХ приложений; такие изменения делает человек через конструктор форм.`
+              `apply_form_document_op: форма процесса «${processKey}» используется опубликованным ` +
+              `(или непроверяемым) приложением: ${offenders} — правка ассистентом запрещена ` +
+              `(form_binding общий для ВСЕХ привязок процесса, черновичный пин не изолирует запись); ` +
+              `правьте вручную через конструктор форм.`
             );
           }
+
+          // EVERY binding is tier='draft' from here on.
+          if (applicationId && !candidates.some((c) => c.applicationId === applicationId)) {
+            // A pin that names no real binding — cannot verify draft-tier
+            // scope. Fail closed rather than let the shared function's own
+            // (unrelated) 409 stand in for this refusal.
+            return (
+              `apply_form_document_op: applicationId "${applicationId}" is not a binding of ` +
+              `process "${processKey}" — cannot verify draft-tier scope, refusing.`
+            );
+          }
+          // No pin + 2+ (all-draft) bindings — genuinely ambiguous.
+          // Deliberately NOT resolved here; fall through to the shared
+          // function, whose own AMBIGUOUS_APPLICATION 422 is the ASK.
         }
-        // candidates.length === 0 → no binding at all; the shared function's
-        // own 404/409 fail-closed path handles it (unrelated to tier).
+        // candidates.length === 0 → no binding at all. The shared function
+        // still fails closed — not via this tier gate but via
+        // classifyLayoutSave: no process_app_binding → no live record_schema
+        // resolvable → 409 WRONG_FLOOR. (NOT the 404 path — the form_binding
+        // layout row itself may exist; 404 is only for a missing layout.)
+        // Pinned by AC-y in the T-0743 db suite.
 
         const docArgs: FormDocumentOpArgs = { processKey, stepKey, op: docOp, applicationId };
         try {
