@@ -39,6 +39,7 @@ import {
 } from "../http/process-projection.js";
 import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 import { RESOURCE_ROOT_NODE_ID } from "../core/read-visibility.js";
+import { ACTOR_ACTIVE_SQL } from "../db/actor-authority-gate.js";
 
 const TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const ACTOR = "e-test-actor";
@@ -89,6 +90,25 @@ function startedRow(inst: string, recordId?: string, id = "audit-evt-1"): Record
  * is a DIFFERENT shape from isGenesisOwnerForTenant's owner-check (which nests
  * the SAME bare lookup INSIDE a `role_assignment` JOIN) — that shape is left
  * on the old unconditional-`{rows:[]}` ("not owner") branch below, unaffected.
+ *
+ * T-0765 [fake-green fix, R-2 из ревью T-0759]: the T-0759 routing above
+ * decided "deactivated?" from `opts.deactivatedSlugs` alone, keyed ONLY by
+ * the query's SHAPE (bare `choros.employee`, no `role_assignment`) and the
+ * `$2` slug arg — it never looked at whether the SQL TEXT actually carried
+ * the `ACTOR_ACTIVE_SQL` (`deactivated_at IS NULL`) predicate. A mutant that
+ * deletes `AND ${ACTOR_ACTIVE_SQL}` from the prod point-lookup (T-0759's
+ * clause (1), process-projection.ts) still matches the SAME shape with the
+ * SAME `$2` slug, so the old fake pool kept denying a "deactivated" slug
+ * regardless — the mutant stayed invisible, all 28 tests green (see
+ * docs/tasks/T-0765.spec.md for the RED→GREEN mutation proof). Fixed by
+ * checking `text.includes(ACTOR_ACTIVE_SQL)`: a `deactivatedSlugs` entry is
+ * only filtered out when the query text ACTUALLY carries the predicate —
+ * mirroring real Postgres, where a deactivated employee's ROW still EXISTS
+ * (`deactivated_at` is SET, the row is never deleted) and only a WHERE
+ * clause that names the predicate excludes it. Drop the predicate from prod
+ * SQL → this fake pool now finds the row regardless of `deactivatedSlugs` →
+ * clause (1) grants → the T-0759 "deactivated actor denied" tests flip to a
+ * 200/visible result they assert against → RED.
  */
 function makeFakePool(opts: {
   startedRows: Array<Record<string, unknown>>;
@@ -145,10 +165,14 @@ function makeFakePool(opts: {
       // keeps falling into the unconditional `{rows:[]}` branch, "not owner").
       if (/FROM\s+choros\.employee/i.test(text) && !/role_assignment/i.test(text)) {
         const slugArg = Array.isArray(values) ? values[1] : undefined;
-        if (typeof slugArg === "string" && !(opts.deactivatedSlugs ?? []).includes(slugArg)) {
-          return { rows: [{ id: `emp-${slugArg}` }] };
-        }
-        return { rows: [] };
+        if (typeof slugArg !== "string") return { rows: [] };
+        // T-0765: only filter out a `deactivatedSlugs` entry when the query
+        // TEXT actually carries the ACTOR_ACTIVE_SQL predicate — see the
+        // module doc-comment above for why (fake-green fix, R-2).
+        const isDeactivated = (opts.deactivatedSlugs ?? []).includes(slugArg);
+        const carriesActiveGate = text.includes(ACTOR_ACTIVE_SQL);
+        if (isDeactivated && carriesActiveGate) return { rows: [] };
+        return { rows: [{ id: `emp-${slugArg}` }] };
       }
       if (/FROM\s+choros\.employee/i.test(text)) return { rows: [] };
       const type = Array.isArray(values) ? values[0] : undefined;
