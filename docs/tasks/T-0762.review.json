@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0762",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/keycloak/admin-port.ts createHumanUser 400 branch (isPersonNameCharacterError checked before isPersonNameLengthError, both via .some() over the full fieldErrors array)",
+      "issue": "If a single KC 400 body somehow carried BOTH a character-class error (e.g. firstName='Bot #1') AND a length-class error (e.g. lastName 300 chars) in the same {errors:[...]} array — a contrived but not provably impossible combination — isPersonNameCharacterError's .some() matches first and the request throws NAME_INVALID_CHARACTERS, never reaching the isPersonNameLengthError check at all. The owner would fix the character problem, resubmit, and only then discover the separately-genuine length problem as a second round trip. Not a regression introduced by this task and not incorrect (the NAME_INVALID_CHARACTERS message IS honest and true) — it is the exact same single-error-per-response limitation T-0748's own ux-review already flagged and accepted as non-blocking (T-0748.ux-review.json F-2), now extended by one more sibling class. judge could not construct a live KC body exhibiting both classes simultaneously on the same two fields to confirm this is reachable in practice (KC's declarative profile appears to run person-name-prohibited-characters and length as independent validators per field, but a single request only has 2 fields — firstName/lastName — so at most 2 distinct field-level errors, and this task's own live probes never produced a mixed character+length pair).",
+      "suggestion": "Non-blocking. Same disposition as T-0748's own F-2 precedent — aggregating multiple field errors into one response would be a form-wide redesign out of scope here."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 6,
+      "location": "docs/tasks/T-0762.pr-handoff.json AC-3 / src/__tests__/admin-port.test.ts AP-10 case 4 (mixed {errors:[email-bad, firstName-too-long]} shape)",
+      "issue": "Unlike AC-1/AC-2 (single-field and both-fields-over-cap), which the builder's spec.md §3 documents as directly live-probed against t-0633-keycloak-1 and which judge independently re-probed byte-identical (see acceptance_coverage below), the AC-3 mixed email+length {errors:[...]} shape is a synthesized test body, not an independently live-confirmed one — judge did not find a way to make KC itself reject both a malformed email AND an over-length name in the same POST (KC's email-format check appears to run in a different validation pass than the declarative user-profile length check, and judge's own attempts to combine them still only surfaced one error at a time in practice). The array *structure* itself (multiple {field,errorMessage} entries) IS live-confirmed (probe 2, both-fields-over-cap), so the parser codepath is real; only the specific mixed-content payload is unverified against a live realm.",
+      "suggestion": "Non-blocking — same evidentiary class as T-0748's own AC-2 (mixed shape asserted via constructed stub body, not independently reproduced live either). Flagged for the record only."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1 single-object {field,errorMessage} on firstName/lastName length -> NAME_TOO_LONG", "covered": true},
+    {"ac": "AC-2 {errors:[...]} both-fields-over-cap array shape -> NAME_TOO_LONG", "covered": true},
+    {"ac": "AC-3 mixed {errors:[...]} (email-bad + firstName-too-long) -> NAME_TOO_LONG, not masked by co-occurring email problem", "covered": true},
+    {"ac": "AC-4 (regression) character-class error still -> NAME_INVALID_CHARACTERS, not NAME_TOO_LONG — no cross-fire", "covered": true},
+    {"ac": "AC-5 (regression) genuine bad-email 400 -> unchanged EMAIL_INVALID", "covered": true},
+    {"ac": "AC-6 (regression) unparseable/empty body -> unchanged EMAIL_INVALID safe default", "covered": true},
+    {"ac": "AC-7 (regression) length error on unrelated field (username) -> EMAIL_INVALID, field-equality gate runs before substring match, no over-broad matching", "covered": true},
+    {"ac": "AC-8 POST /api/users honest Russian message naming 'имя'+'длин', not the email text", "covered": true},
+    {"ac": "AC-9 (regression) KC-side EMAIL_INVALID defense-in-depth path unchanged", "covered": true},
+    {"ac": "AC-10 (regression) ordinary two-word display_name still 201", "covered": true},
+    {"ac": "AC-11 (web) mapUserError anchors NAME_TOO_LONG on display_name field with server message", "covered": true},
+    {"ac": "AC-12 (web mount) real DOM mount shows honest hint on Отображаемое имя, aria-invalid=true, email field untouched, misleading email text absent from whole dialog", "covered": true},
+    {"ac": "Live KC body shapes byte-identical: judge independently obtained a client_credentials token (choros-registrar / config/keycloak/realm-choros.json dev secret) against the live t-0633-keycloak-1 container (:8180) and reproduced (1) single-field-over-cap -> {field:'firstName',errorMessage:'error-invalid-length-too-long',params:['firstName',null,255]}, (2) both-fields-over-cap -> {errors:[{field:'lastName',...},{field:'firstName',...}]}, (3) control ordinary two-word name -> 201, (4) character-class regression control ('Bot #1') -> {field:'firstName',errorMessage:'error-person-name-invalid-character',...} — all four byte-identical to spec.md §3 and the AP-10/AP-9 stub bodies", "covered": true},
+    {"ac": "Cross-fire structurally impossible, not just untested: 'error-person-name-invalid-character'.includes('invalid-length')===false and 'error-invalid-length-too-long'.includes('person-name')===false — verified directly (node -e), the two live KC messageKeys never share the matched substring under either direction", "covered": true},
+    {"ac": "No orphan KC users left by any of judge's own 4 live probes (GET by id + realm user-count before/after both confirm exactly the seeded 9 users survive; the one 201-control probe's user was independently deleted after GET-verification)", "covered": true},
+    {"ac": "Mutation 1 (admin-port.ts): judge removed the isPersonNameLengthError branch (Edit, no git stash) and reran admin-port.test.ts — exactly 4/38 failed (the 4 new AP-10 NAME_TOO_LONG-expecting cases), 34 stayed green; git checkout -- restored byte-identical (git status clean), rerun 38/38 green", "covered": true},
+    {"ac": "Mutation 2 (user-mgmt.ts): judge disabled the NAME_TOO_LONG branch via if(false&&...) (Edit, no git stash) and reran the DB suite solo against live PG (:55432) — exactly 1/43 failed, falling to 503 AUTH_UNAVAILABLE (not even EMAIL_INVALID), 42 stayed green; git checkout -- restored byte-identical, rerun 43/43 green", "covered": true},
+    {"ac": "Anti-case D-064: anti-case-lock.sh rerun by judge, all phases PASS, aggregate 15<=16 (baseline unchanged from T-0748's own gate state) — no new hardcoded persona/test literal used as a production branch condition", "covered": true},
+    {"ac": "Full src suite: judge's own independent run 320/322 files (2 skipped, pre-existing), 6009/6026 tests (17 skipped, pre-existing) — exact match to pr-handoff.json's claimed numbers", "covered": true},
+    {"ac": "tsc --noEmit: judge's own run, exit 0, 0 errors", "covered": true},
+    {"ac": "pr-handoff.json schema-valid: judge ran schemas/validate.py's validate_file(json.load(open(...)), schema_path) (the builder's own suggested invocation passed a raw path string, which is the WRONG call signature — validate_file takes the parsed instance object, not a path, per thin-slice/run_thin_slice.py's own usage; corrected invocation returns [] / VALID)", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
