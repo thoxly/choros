@@ -1,0 +1,71 @@
+{
+  "task_id": "T-0766",
+  "verdict": "approved",
+  "reviewer": "adversarial-judge",
+  "branch": "task/T-0766",
+  "base": "dev@095ae0d2a2f2494e8f578e0a40fe5f96ced9e0c4",
+  "ci_seen": {
+    "green": true
+  },
+  "scope_of_change": {
+    "prod_code_touched": false,
+    "evidence": "git diff 095ae0d2 HEAD --numstat = 4 files, 0 deletions anywhere: ci/checks/data/frozen-sanctions.jsonl (+1), ci/checks/worker-auth-public-surface.sh (+24), docs/tasks/T-0766.pr-handoff.json (+62), docs/tasks/T-0766.spec.md (+240). `git diff 095ae0d2 HEAD | grep -E '^-[^-]'` returns nothing — confirmed zero deletion/mutation lines across the whole diff. No src/*.ts, migration, or web/ file touched."
+  },
+  "live_reproduction": {
+    "vacuous_before_fix": "Checked out 095ae0d2 (detached), appended a comment line to src/http/router.ts, committed, ran `bash ci/checks/worker-auth-public-surface.sh`: printed '[OK] src/http/router.ts unchanged in this branch' (legacy fallback message — origin/dev diff was correctly non-quiet, fell into the buggy working-tree-vs-HEAD fallback) and exited 0 (PASS) despite the committed, undetected change. Reverted via `git reset --hard 095ae0d2` (no git stash used).",
+    "honest_after_fix": "Checked out task/T-0766 (176c8ccb), same probe (append+commit a line to router.ts), same gate: legacy block still printed its vacuous '[OK] ... unchanged in this branch', but the new T-0766 authoritative block printed 'FAIL: src/http/router.ts has been modified relative to merge-base (must not be touched, T-0766 authoritative check)' and the gate exited 1 (FAIL). Live-verified the legacy [OK] did NOT mask the new FAIL. Reverted via `git reset --hard 176c8ccb` (no git stash used); working tree confirmed clean afterward, `git status --short` empty.",
+    "false_positive_check": "Ran FF-5 on the clean fixed HEAD (router.ts untouched): all 6 checks print [OK] including both the legacy 'unchanged relative to origin/dev' line and the new 'unchanged relative to merge-base (T-0766 authoritative check)' line; exit 0. New block does not redden an innocent tree.",
+    "method_note": "Both probes used detached-HEAD checkout + commit + `git reset --hard` to revert, per the task's explicit prohibition on git stash. No dangling probe commits remain reachable from any branch after the two resets."
+  },
+  "gates_rerun_by_judge": {
+    "ff5_clean_tree": "bash ci/checks/worker-auth-public-surface.sh on clean HEAD -> PASS, exit 0, all 4 export checks + both router.ts checks [OK] (matches claim)",
+    "frozen_checks_immutable": "bash ci/checks/frozen-checks-immutable.sh -> exit 0. Live output: PASS [A-1..A-4] additive; PASS [ATTEST-R1b] family DEV-AUTH-PROD covers worker-auth-public-surface.sh in catalog; PASS [ATTEST-R1a] corpus_ref 095ae0d2... is ancestor of HEAD, corpus blob matches HEAD; SANCTION [FF-FCI13] auto-additive frozen-sanction GRANTED (matches claim)",
+    "auto_sanction_additive_self_test": "bash ci/checks/auto-sanction-additive.sh --self-test -> 14/14 PASS (FF-ASA1..FF-ASA5 + R-1/R2 adversarial cases), exit 0 (matches claim)",
+    "tsc": "npx tsc --noEmit -p . -> 0 errors (matches claim)",
+    "vitest_full": "npx vitest run (no DATABASE_URL) -> Test Files 320 passed | 2 skipped (322); Tests 6015 passed | 17 skipped (6032); 0 failures; exit 0 (matches claim '6015/0 fail' exactly)",
+    "npm_run_fitness_full_chain": "npm run fitness -> exit 0 (FITNESS_EXIT=0). Full ~3319-line log independently grepped: 21 lines contain the substring FAIL (excluding 2 unrelated PASS[ATTEST] lines whose enemy_segment prose text happens to contain the word 'FAILs'); manually inspected the context around every one of the 21 -- each belongs to a DIFFERENT pre-existing gate's own --self-test planted-violation probe (FF-COV3/4/5 substitution-coverage-invariant, document-render-isolation fail-closed probe, check-template-deps fail-closed probe, doc-coherence self-test (a), docpage-writeful-tools F-8 probe, FF-RP-7/FF-RP-8 read-pdp self-tests, FF-T0572-3/4/5/6/ANTICASE/BADGE/FROZEN rights-ui self-tests) and is immediately followed on the next 1-2 lines by that gate's own 'PASS self-test' / 'SELF-TEST PASS' acknowledgement confirming the plant was detected as designed. None is a real top-level chain failure -- matches builder's claim '21 mid-log FAIL = other gates' self-test probes with PASS' exactly (builder's approximate PASS-line count of 1432 vs judge's grep of 1293-1485 depending on pattern is a soft/approximate metric, not a substantive discrepancy)."
+  },
+  "invariant_comparison_ff5_vs_ffhire4": {
+    "claim_checked": "Builder chose fix (a) — patch FF-5's router.ts branch — over (b) dropping it in favor of FF-HIRE-4, on the grounds that FF-5 is stricter for router.ts and also guards 3 other invariants FF-HIRE-4 does not touch.",
+    "ff5_router_policy": "ci/checks/worker-auth-public-surface.sh line 2 comment + the diff --quiet check: router.ts must be FULLY UNCHANGED relative to base (any diff, additive or destructive, fails).",
+    "ffhire4_router_policy": "ci/checks/agent-hire-frozen-additive.sh treats src/http/router.ts (and auth.ts) as ADDITIVE-ONLY: `git diff BASE -- $F | grep -c '^-[^-]'` must be 0; new lines are explicitly permitted (comment: 'allowed additive additions').",
+    "verdict": "Confirmed FF-5's router.ts invariant is strictly STRONGER than FF-HIRE-4's for this file: FF-HIRE-4 would pass a pure-addition router.ts edit that FF-5 (correctly) rejects. Dropping FF-5's router.ts branch in favor of FF-HIRE-4 alone would silently weaken AC-19 from 'fully unchanged' to 'additive-only'. Also confirmed FF-5 independently guards 4 export invariants (DEV_USER_HEADER, registerExternalWorkerRoutes, registerAuthRoutes, createServer) that FF-HIRE-4 never checks -- dropping the whole file (not just the router.ts branch) was never actually on the table, and the builder correctly did not do so. Choice (a) is not merely defensible but the objectively correct scope call; (b) was never a valid alternative given FF-5's other 4 checks."
+  },
+  "fail_monotonicity": {
+    "claim_checked": "FAIL is never reset to 0 after any FAIL=1 assignment, so the legacy block's vacuous [OK] cannot mask the new block's real finding.",
+    "static_check": "grep -n 'FAIL=' ci/checks/worker-auth-public-surface.sh: FAIL=0 at line 12 (single init); FAIL=1 at lines 19, 27, 35, 43 (the 4 pre-existing export checks), 56 (pre-existing legacy router.ts branch), and 78 (new T-0766 block). No other assignment; no line anywhere sets FAIL back to 0. The final gate at line 84 is `if [[ $FAIL -ne 0 ]]; then exit 1; fi` -- any single FAIL=1 anywhere is terminal.",
+    "live_check": "Directly reproduced in the honest_after_fix probe above: legacy block printed [OK], new block printed FAIL, script exited 1 -- confirms the monotonic-OR behavior end-to-end, not just by static read.",
+    "nit_on_builder_wording": "pr-handoff.json's security_notes claims 'only two FAIL=1 assignment sites' file-wide, verified 'by grep across the whole file' -- this is imprecise: grep finds 6 FAIL=1 sites total (4 pre-existing export checks + 2 router.ts-related). The intended and substantively correct claim is that there are only two FAIL=1 sites in the ROUTER.TS branch specifically (the pre-existing legacy one and the new T-0766 one), which is what matters for the monotonicity argument and is true. Non-blocking wording nit, not a substantive defect -- the underlying monotonicity property was independently re-verified by the judge both statically and live."
+  },
+  "sanction_review": {
+    "class": "auto_additive",
+    "additivity": "git diff 095ae0d2 HEAD -- ci/checks/worker-auth-public-surface.sh: 24 insertions, 0 deletions (confirmed via numstat and via grep '^-[^-]' returning empty). All BASE_REF lines preserved byte-identical.",
+    "frozen_status_basis": "ci/checks/worker-auth-public-surface.sh line 2 ('# FF-5 (static-now, AC-19): ...') carries no T-XXXX header -- confirmed by reading frozen-checks-immutable.sh's FF-FCI11 rule (no-header legacy file treated as foreign to every task) -- correctly triggers the sanction requirement rather than a false claim of ownership.",
+    "family_binding": "docs/design/T-0152-security-invariants-catalog.md section 3 (DEV-AUTH-PROD), 'Прочее' sub-list at lines 160-162, explicitly lists `ci/checks/worker-auth-public-surface.sh` verbatim -- family binding is genuine, not fabricated or unbound.",
+    "corpus_ref_ancestry": "corpus_ref = 095ae0d2a2f2494e8f578e0a40fe5f96ced9e0c4, the branch's own merge-base with origin/dev -- live-verified ancestor of HEAD by frozen-checks-immutable.sh's own ATTEST-R1a check (PASS, corpus blob matches HEAD).",
+    "attestation_content": "enemy_segment describes the exact live probe (append+commit router.ts on task/T-0766, run FF-5, PASSed vacuously before / FAILs correctly after) -- matches the judge's own independently-reproduced live_reproduction above almost verbatim; not a generic/boilerplate attestation.",
+    "reclassification_check": "No existing sanctioned-line reclassification occurred (single new jsonl line appended, task=T-0766, file=worker-auth-public-surface.sh, no other line touched). Sanction is additive in both the code-diff sense and the sanctions-ledger sense.",
+    "verdict": "Sanction is legitimate: additive-only, correctly scoped to a genuinely-unowned legacy file, bound to a real catalog family, attested against a real live probe, and verified live via both frozen-checks-immutable.sh and auto-sanction-additive.sh --self-test in this review."
+  },
+  "findings": [
+    {
+      "id": "N1-failassign-count-wording",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docs/tasks/T-0766.pr-handoff.json security_notes (2nd bullet)",
+      "issue": "Claims 'only two FAIL=1 assignment sites' verified 'by grep across the whole file', but a literal whole-file grep for FAIL=1 finds 6 sites (4 pre-existing export-check assignments plus the 2 router.ts-related ones the sentence is actually about). The underlying monotonicity property (FAIL never reset to 0) is true and was independently re-verified by the judge both statically and via live probe -- this is a wording-precision nit, not a substantive defect.",
+      "suggestion": "Non-blocking: future revision could say 'two router.ts-branch FAIL=1 sites' instead of 'only two FAIL=1 assignment sites' to avoid a literal-grep mismatch."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "FF-5's committed-router.ts-change vacuity is real and reproducible: PASS before fix (095ae0d2), FAIL after fix (task/T-0766 HEAD), same probe", "covered": true},
+    {"ac": "Fix appends an independent merge-base-based check (same fallback chain as FF-HIRE-4) that sets FAIL=1 on its own finding", "covered": true},
+    {"ac": "FAIL is monotonic (never reset to 0) so the legacy block's vacuous OK cannot mask the new block's FAIL -- verified both statically (grep) and live (probe shows legacy [OK] + new FAIL coexisting, exit 1)", "covered": true},
+    {"ac": "Choice (a) fix-not-drop is justified: FF-5's router.ts policy (fully-unchanged) is strictly stronger than FF-HIRE-4's (additive-only), and FF-5 independently guards 4 export invariants FF-HIRE-4 never checks", "covered": true},
+    {"ac": "FF-5 does not false-positive on a clean/untouched router.ts tree", "covered": true},
+    {"ac": "Frozen-file sanction is legitimately additive (0 deletions), correctly scoped to a genuinely header-less legacy file, bound to a real catalog family (DEV-AUTH-PROD), with corpus_ref ancestry verified live", "covered": true},
+    {"ac": "tsc 0 errors; full vitest suite 320 files/6015 tests/0 fail; full npm run fitness exit 0 with all mid-log FAIL lines independently confirmed as other gates' self-test probes", "covered": true},
+    {"ac": "No git stash used at any point during judge's live reproduction; working tree clean after both probes reverted via git reset --hard", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
