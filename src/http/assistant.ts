@@ -127,6 +127,16 @@ import {
 } from "../db/grants-dao.js";
 // T-0383 (D5): per-tenant configurator system prompt loader (neutral import path).
 import { readPublishedAssistantPrompt } from "../db/assistant-prompt-dao.js";
+// T-0743: the configurator's apply_form_document_op tool executes through the
+// EXACT SAME function POST /api/forms/document-ops uses (T-0656/T-0725) — no
+// second implementation of the op-apply / ambiguity / Floor-gate logic.
+import { applyFormDocumentOp, type FormDocumentOpArgs } from "./forms-document-ops.js";
+// T-0743: DRAFT-ONLY discriminant for apply_form_document_op — form_binding
+// carries no tier column (unlike application/registry_def), so the tool's
+// auth model substitutes the bound APPLICATION's tier instead (see
+// docs/tasks/T-0743.spec.md §4.4). Reused verbatim — the SAME accessor
+// forms-document-ops.ts uses for its own AMBIGUOUS_APPLICATION pre-flight.
+import { listProcessAppBindingCandidates, type ProcessAppBindingCandidate } from "../db/live-form-schema.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -549,6 +559,16 @@ export async function executeApprovedOpAsDraft(
    * together. undefined → not part of a bundle (column stays NULL).
    */
   bundleId?: string,
+  /**
+   * T-0743: the ACTING user's identity (employee slug) — present only when
+   * op.kind === 'apply_form_document_op'. Required because that op reuses
+   * checkRole (binding.ts) — the SAME process_designer/owner role-check the
+   * human FormDesigner path enforces — which is keyed on an actor slug, not
+   * just tenantId. Every other op kind writes without a per-op role check
+   * (the earlier authoring_draft grant-ceiling gate already covers them), so
+   * this stays optional/unused for those kinds.
+   */
+  actorSlug?: string,
 ): Promise<string | null> {
   try {
     const nowMs = Date.now();
@@ -983,6 +1003,128 @@ export async function executeApprovedOpAsDraft(
           client.release();
         }
         return null;
+      }
+
+      // -----------------------------------------------------------------------
+      // apply_form_document_op — T-0743: patch an EXISTING form via the SAME
+      // function POST /api/forms/document-ops calls (applyFormDocumentOp,
+      // forms-document-ops.ts) — reuse, not a second implementation.
+      //
+      // AUTH MODEL (docs/tasks/T-0743.spec.md §4.4, r2 after the judge's
+      // live-PG adversarial probe): form_binding has no draft/published tier
+      // (unlike application/registry_def) — the human FormDesigner save is
+      // ALWAYS live. This tool substitutes the bound APPLICATIONS' tiers as
+      // the DRAFT-ONLY discriminant — and because form_binding is keyed
+      // (tenant_id, process_key, form_key) WITH NO application dimension,
+      // every application a process is bound to renders the SAME row. The r1
+      // gate (check only the pinned/resolved binding's tier) was therefore a
+      // FALSE invariant on a mixed-tier process (draft + published bindings):
+      // a valid draft pin would mutate the very layout the PUBLISHED
+      // application serves to real users right now. r2 fail-close: the tool
+      // writes ONLY when EVERY binding of the process is tier='draft'; ANY
+      // co-bound non-draft (published, or unverifiable NULL) application
+      // forbids the write even on a valid draft pin. A genuinely ambiguous
+      // ALL-DRAFT process (2+ bindings, no pin) is NOT resolved here — it is
+      // handed to the shared function, whose EXISTING 422
+      // AMBIGUOUS_APPLICATION (T-0725) becomes an honest per-op failure that
+      // buildHonestOpsReport (T-0607 в2) surfaces as the assistant naming
+      // every candidate — reads as an ASK, not a crash.
+      //
+      // This restriction is STRICTLY NARROWER than a human process_designer's
+      // capability via the UI (unrestricted by application tier) — bot ≤
+      // human — and the shared function ALSO re-runs checkRole (same
+      // process_designer/owner gate the human path enforces), so the tool
+      // cannot act for an actor who could not use FormDesigner either.
+      // -----------------------------------------------------------------------
+      case "apply_form_document_op": {
+        if (!actorSlug) {
+          return `apply_form_document_op: no actor identity wired`;
+        }
+        const args = op.args;
+        const processKey = typeof args["processKey"] === "string" ? args["processKey"] : null;
+        const stepKey = typeof args["stepKey"] === "string" ? args["stepKey"] : null;
+        const applicationId =
+          typeof args["applicationId"] === "string" && args["applicationId"].trim()
+            ? args["applicationId"].trim()
+            : null;
+        const docOp = args["op"];
+
+        if (!processKey || !stepKey || docOp === undefined || docOp === null) {
+          return `apply_form_document_op: missing processKey, stepKey, or op`;
+        }
+
+        // Resolve the tier discriminant BEFORE touching form_binding at all —
+        // reuses listProcessAppBindingCandidates (the SAME accessor the
+        // shared function's own ambiguity pre-flight uses), extended (T-0743)
+        // with applicationTier.
+        let candidates: ProcessAppBindingCandidate[] = [];
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+          candidates = await listProcessAppBindingCandidates(client, tenantId, processKey);
+          await client.query("COMMIT");
+        } catch {
+          await client.query("ROLLBACK").catch(() => {});
+          candidates = [];
+        } finally {
+          client.release();
+        }
+
+        if (candidates.length > 0) {
+          // r2 (judge blocking, live-PG adversarial probe): form_binding is
+          // keyed WITHOUT an app dimension — a mixed-tier process (draft +
+          // published bindings) shares ONE row that the published app renders
+          // to real users. ANY non-draft co-binding (published, or an
+          // unverifiable NULL tier) forbids the write — EVEN on a valid
+          // draft pin. This check runs FIRST, before pin/ambiguity handling:
+          // asking "which application?" is pointless when every answer would
+          // be refused anyway.
+          const nonDraft = candidates.filter((c) => c.applicationTier !== "draft");
+          if (nonDraft.length > 0) {
+            const offenders = nonDraft
+              .map((c) => `«${c.applicationDisplayName ?? c.applicationSlug ?? c.applicationId}» (tier=${c.applicationTier ?? "unknown"})`)
+              .join("; ");
+            return (
+              `apply_form_document_op: форма процесса «${processKey}» используется опубликованным ` +
+              `(или непроверяемым) приложением: ${offenders} — правка ассистентом запрещена ` +
+              `(form_binding общий для ВСЕХ привязок процесса, черновичный пин не изолирует запись); ` +
+              `правьте вручную через конструктор форм.`
+            );
+          }
+
+          // EVERY binding is tier='draft' from here on.
+          if (applicationId && !candidates.some((c) => c.applicationId === applicationId)) {
+            // A pin that names no real binding — cannot verify draft-tier
+            // scope. Fail closed rather than let the shared function's own
+            // (unrelated) 409 stand in for this refusal.
+            return (
+              `apply_form_document_op: applicationId "${applicationId}" is not a binding of ` +
+              `process "${processKey}" — cannot verify draft-tier scope, refusing.`
+            );
+          }
+          // No pin + 2+ (all-draft) bindings — genuinely ambiguous.
+          // Deliberately NOT resolved here; fall through to the shared
+          // function, whose own AMBIGUOUS_APPLICATION 422 is the ASK.
+        }
+        // candidates.length === 0 → no binding at all. The shared function
+        // still fails closed — not via this tier gate but via
+        // classifyLayoutSave: no process_app_binding → no live record_schema
+        // resolvable → 409 WRONG_FLOOR. (NOT the 404 path — the form_binding
+        // layout row itself may exist; 404 is only for a missing layout.)
+        // Pinned by AC-y in the T-0743 db suite.
+
+        const docArgs: FormDocumentOpArgs = { processKey, stepKey, op: docOp, applicationId };
+        try {
+          await applyFormDocumentOp(pool, tenantId, actorSlug, docArgs);
+          return null;
+        } catch (err) {
+          if (err instanceof HttpError) {
+            return `${err.code}: ${err.message}`;
+          }
+          throw err;
+        }
       }
 
       // -----------------------------------------------------------------------
@@ -2374,6 +2516,9 @@ export function registerAssistantRoutes(
               op.kind === "generate_process" ? genCtx : undefined,
               // Tag bundle-worthy ops with the shared id; others stay un-bundled.
               BUNDLE_OP_KINDS.has(op.kind) ? bundleId : undefined,
+              // T-0743: apply_form_document_op reuses checkRole (process_designer/
+              // owner) — needs the acting user's identity, not just tenantId.
+              actorSlug,
             );
             if (err === null) {
               opResults.push({ description: op.description, ok: true });

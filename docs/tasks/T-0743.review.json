@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0743",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/assistant.ts:1084 (nonDraft gate) — RESOLVED in r2 (commit 03f3db41)",
+      "issue": "[WAS r1 BLOCKING — CLOSED in r2; severity now nit as resolved/historical] The r1 tier discriminant checked only the pinned/resolved binding's tier, so on a mixed-tier process (draft + published bindings sharing ONE form_binding row keyed (tenant, process_key, form_key) with no app dimension) a valid draft pin PASSED and mutated the layout the published app renders live — the mini-ADR's 'draft-only / published untouched' claim was false and untested (all-draft fixtures). Proven live by the judge's adversarial probe (version 1->2). RESOLUTION (r2, re-verified live by the judge): a nonDraft = candidates.filter(tier !== 'draft') aggregate check runs FIRST — ANY co-bound published OR NULL-tier (unverifiable) application forbids the write EVEN on a valid draft pin; applyFormDocumentOp is not called; the refusal names the offending applications. New invariant: the tool mutates form_binding only when EVERY binding of the process is tier='draft'. Judge re-verify: (a) independent external probe — mixed draft+published draft-pin -> REFUSED, version unchanged (leak closed); NULL-tier orphan co-binding -> REFUSED (fail-closed for unknown); (b) mutation — neutralizing the nonDraft gate turns AC-m1 RED with the exact r1 scenario ('got success (the r1 hole)'), gate is load-bearing; (c) AC-c (all-draft multi, no pin) still -> AMBIGUOUS_APPLICATION, so honest ASK for legitimate all-draft ambiguity is preserved (nonDraft-first does not clobber it). spec §3.1 honestly retracts r1; deviations_from_adr filled; tool schema/prompt now state 'all bindings must be drafts'.",
+      "suggestion": "Closed. No further action."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "docs/tasks/T-0743.pr-handoff.json (live_proof_plan) + D-064",
+      "issue": "The LLM link is still not lived end-to-end (live_proof_plan: 'NOT YET EXECUTED — непрожитым остаётся ТОЛЬКО LLM-звено'): the model actually invoking apply_form_document_op at the right moment and honestly ASKING on all-draft ambiguity is unproven. Server mechanics (schema, PURE op-validation, mixed-tier fail-close, role gate, ASK report, applyFormDocumentOp reuse) are genuinely proven via unit + live-PG. Not blocking — live-proof was not a listed T-0743 gate and the stand was offline this wave — but under D-064 the tool's product promise remains unproven until the LLM link runs.",
+      "suggestion": "When the stand returns, run the 4-step live_proof_plan (draft-form edit succeeds; published/mixed-tier edit refused with human-readable text; all-draft multi-binding without pin -> assistant names both candidates and asks). Fold into the E-FORMS live-proof batch."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/assistant.ts (zero-binding comment) — RESOLVED in r2",
+      "issue": "[r1 nit — CLOSED in r2] The executor comment for candidates.length===0 previously said '404/409 fail-closed'; r2 tightened it to name the actual 409 WRONG_FLOOR from classifyLayoutSave (no live record_schema resolvable; NOT 404 — the layout row may exist), matching AC-y.",
+      "suggestion": "Closed."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "applyFormDocumentOp EXTRACTED (not copied) into forms-document-ops.ts; route is a thin shell — one function on both paths", "covered": true},
+    {"ac": "TOOL_APPLY_FORM_DOCUMENT_OP registered; processToolCall structural-only, closed op vocabulary not duplicated (lives in applyDocumentOp)", "covered": true},
+    {"ac": "executor reuses checkRole (bot <= human on role axis — AC-f) + listProcessAppBindingCandidates(+applicationTier); all-draft multi-binding ambiguity handed to shared 422 (AC-c)", "covered": true},
+    {"ac": "r2 AUTH MODEL — tool writes form_binding ONLY when EVERY process binding is tier='draft'; any published/NULL co-binding refuses even a valid draft pin (mixed-tier leak closed)", "covered": true},
+    {"ac": "Branch order: nonDraft check FIRST, then garbage/stale-pin (AC-x), then all-draft ambiguity (AC-c); NULL-tier co-binding fail-closed (judge probe B)", "covered": true},
+    {"ac": "Mutation: neutralizing the nonDraft gate turns AC-m1 RED with the exact r1 hole — gate load-bearing and truly tested", "covered": true},
+    {"ac": "Gates re-run by judge (r2): tsc 0; configurator 56/56; auth-gate db 10/10 solo (incl AC-m1/m2 mixed-tier); regressions T-0725 5/5 + T-0711 7/7 + T-0724 2/2; anti-case aggregate 15<16", "covered": true},
+    {"ac": "D-064 live-proof of the LLM invoking the tool end-to-end (R-2, non-blocking, stand offline)", "covered": false}
+  ],
+  "role_gap_evidence": [
+    "GOVERNANCE (r1 founder flag — WITHDRAWN in r2): the r1 verdict flagged that §4.4 as built let an autonomous LLM change what a PUBLISHED application renders (via a co-bound draft pin), which was a product/risk decision, not a clean mechanical narrowing. r2 closes the leak: the tool now refuses whenever ANY binding of the process is published (or NULL-tier), so the LLM cannot touch any published-rendered surface. The narrowing is now genuinely clean (bot confined to all-draft processes, strictly subset of human). Re-verified live (mixed-tier draft-pin REFUSED; mutation RED). No founder decision is required — the fail-close is the pure-engineering resolution the r1 review offered as option (a).",
+    "D-064 CATCH (recorded): a plausible tier discriminant whose stated invariant was falsified by the underlying shared-surface data model, invisible to the builder's own all-draft fixtures and surfaced only by an adversarial mixed-tier live probe — then closed with a matching aggregate fail-close + regression test + mutation proof."
+  ]
+}

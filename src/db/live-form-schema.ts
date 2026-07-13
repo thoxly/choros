@@ -321,6 +321,18 @@ export interface ProcessAppBindingCandidate {
   readonly applicationId: string;
   readonly applicationSlug: string | null;
   readonly applicationDisplayName: string | null;
+  /**
+   * T-0743: the bound application's `tier` ('draft' | 'published'). Additive
+   * field — existing consumers (the T-0725 ambiguity-message builder) ignore
+   * it. Populated for the configurator's `apply_form_document_op` tool, which
+   * has NO `form_binding.tier` to gate on (that table carries no draft/
+   * published split, migration 045/105) and instead enforces its DRAFT-ONLY
+   * invariant via the bound APPLICATION's tier (docs/tasks/T-0743.spec.md
+   * §4.4). `null` when the joined `application` row is missing (orphaned
+   * binding, LEFT JOIN) — callers must treat `null` as "cannot verify", not
+   * as `'draft'`.
+   */
+  readonly applicationTier: "draft" | "published" | null;
 }
 
 /**
@@ -348,8 +360,9 @@ export async function listProcessAppBindingCandidates(
     application_id: string;
     slug: string | null;
     display_name: string | null;
+    tier: string | null;
   }>(
-    `SELECT pab.application_id AS application_id, a.slug AS slug, a.display_name AS display_name
+    `SELECT pab.application_id AS application_id, a.slug AS slug, a.display_name AS display_name, a.tier AS tier
        FROM choros.process_app_binding pab
        LEFT JOIN choros.application a
               ON a.tenant_id = pab.tenant_id AND a.id = pab.application_id
@@ -362,5 +375,6 @@ export async function listProcessAppBindingCandidates(
     applicationId: r.application_id,
     applicationSlug: r.slug,
     applicationDisplayName: r.display_name,
+    applicationTier: r.tier === "draft" || r.tier === "published" ? r.tier : null,
   }));
 }

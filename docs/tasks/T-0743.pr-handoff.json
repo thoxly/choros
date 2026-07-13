@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0743",
+  "status": "pr_open",
+  "branch": "task/T-0743",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/assistant-configurator.ts",
+    "src/http/assistant.ts",
+    "src/http/forms-document-ops.ts",
+    "src/db/live-form-schema.ts",
+    "src/__tests__/assistant-configurator.test.ts",
+    "ci/checks/db/T-0743-document-ops-tool-auth-gate.db.test.ts (NEW)",
+    "docs/tasks/T-0743.spec.md (NEW, mini-ADR §4.4 r2)",
+    "docs/tasks/T-0743.pr-handoff.json (NEW)"
+  ],
+  "summary": "Столпы 2+5, follow-up T-0725 (эпик E-FORMS T-0479). Регистрирует document-ops (T-0656/T-0725) как ToolDeclaration конфигуратора — новый инструмент apply_form_document_op (src/core/assistant-configurator.ts). БЛОКЕР ADR-T0656 §4.4 (auth-модель тула DRAFT-only vs direct-patch) решён мини-ADR в docs/tasks/T-0743.spec.md §4.4, ДВЕ РЕДАКЦИИ: r1 проверял tier только у разрешённой привязки — судья доказал живым PG-пробником, что инвариант ЛОЖЕН на mixed-tier процессе (form_binding ключуется (tenant_id, process_key, form_key) БЕЗ app-измерения → процесс, привязанный к draft+published приложениям, рендерит ОДНУ строку в обоих; валидный draft-пин писал в форму, которую published-приложение отдаёт реальным пользователям). r2 (текущая, машинное fail-close-сужение по решению оркестратора, фаундер не привлекался): mixed-tier ЗАПРЕЩЁН — тул мутирует form_binding ТОЛЬКО когда ВСЕ привязки процесса tier='draft'; ЛЮБАЯ co-bound non-draft (published или непроверяемая NULL) привязка → честный отказ ДАЖЕ на валидный draft-пин («форма процесса используется опубликованным приложением — правка ассистентом запрещена, правьте вручную», с именами приложений-нарушителей); mixed-tier-отказ выполняется ПЕРВЫМ, до пина и до ambiguity (спрашивать «какое приложение?» бессмысленно, когда любой ответ — отказ). Нового IO не потребовалось: applicationTier уже в кандидатах (аддитивное расширение listProcessAppBindingCandidates). Остальное без изменений от r1: applyFormDocumentOp — извлечённая (не копия) общая функция в forms-document-ops.ts, вызывается И роутом (тонкая HTTP-обёртка, человеческий путь байт-в-байт как был), И исполнителем executeApprovedOpAsDraft case apply_form_document_op (assistant.ts); all-draft мульти-биндинг без пина → СУЩЕСТВУЮЩИЙ 422 AMBIGUOUS_APPLICATION (T-0725) общей функции как честный межходовой ASK через buildHonestOpsReport (T-0607 в2); checkRole (process_designer/владелец) переиспользован без изменений — вторая, независимая ось бот≤человек; processToolCall остаётся PURE (структурная валидация op только; закрытый словарь — единожды в applyDocumentOp).",
+  "gates": {
+    "types": "tsc --noEmit — 0 ошибок (финальный прогон после r2)",
+    "lint": "eslint на изменённых/новых файлах — 0 ошибок, 7 pre-existing no-console warnings (все вне строк этой задачи)",
+    "unit_targeted": "npx vitest run src/__tests__/assistant-configurator.test.ts — 56/56 после r2 (7 новых AC-T743-1..4: схема тула с applicationId не-required; well-formed op → ApprovedOp с распарсенным op + applicationId pass-through; malformed op ×3 → BlockedOp; отсутствие authoring_draft → отказ до диспетча)",
+    "unit_assistant_suite": "10 assistant-файлов — 154/154, ноль регрессий (после r2)",
+    "unit_forms_document_ops": "forms-document-ops-application-id.test.ts (T-0725, 5/5) + forms-document-ops-wire.test.ts (T-0656, 6/6) + live-form-schema-application-id.test.ts (7/7) — рефакторинг и applicationTier-расширение не регрессят (перегнаны после r2)",
+    "unit_full_suite": "npx vitest run (r1-прогон, без DATABASE_URL) — 319 файлов / 5983 тестов passed, 0 упавших; r2 менял только executor-кейс/комменты/тексты + db-тест — таргетные сьюты выше перегнаны на r2, все зелёные",
+    "db_targeted": "DATABASE_URL=:55432 (изолированная clone-БД T-0147), СОЛО: T-0743-document-ops-tool-auth-gate.db.test.ts — 10/10 (было 8/8 в r1; +2 mixed-tier): AC-e draft succeeds; AC-d published refused; AC-m1 — ТОЧНАЯ адверс-топология судьи (один процесс → APP_DRAFT+APP_PUB, общая form_binding-строка), пин на DRAFT-приложение → ОТКАЗ, форма не тронута; AC-m2 mixed-tier без пина → отказ той же причиной, НЕ AMBIGUOUS; AC-c all-draft мульти без пина → AMBIGUOUS_APPLICATION с обоими кандидатами (ASK); AC-c-cont all-draft с пином → succeeds; AC-x garbage-пин → отказ; AC-y ноль привязок → 409 WRONG_FLOOR fail-closed; AC-f keycloak без роли → отказ checkRole; no-actor → честный отказ. МУТАЦИОННОЕ ДОКАЗАТЕЛЬСТВО RED→GREEN: с временно отключённым mixed-tier-гейтом (r1-реплей) тот же файл — 3 failed (AC-m1: draft-пин ПРОШЁЛ и записал в общую строку — ровно blocking судьи; AC-m2; AC-d), 7 passed; с восстановленным гейтом — 10/10 GREEN. Регрессы (соло, зелёные без изменений): T-0725 5/5, T-0711 7/7, T-0724 2/2 (T-0700 1/1 в r1, файл не задет r2)",
+    "anti_case_lock": "bash ci/checks/anti-case-lock.sh (после r2) — PASS: aggregate 15 (baseline 16, не растёт), фикстуры t0743-*",
+    "http_route_auth_coverage": "bash ci/checks/http-route-auth-coverage.sh (r1) — PASS; r2 не регистрирует роутов и не трогает secret-handle.ts",
+    "actor_authority_deactivation_gate": "bash ci/checks/actor-authority-deactivation-gate.sh (r1) — PASS; r2 не вводит новых actor-authority резолверов",
+    "forms_schema_binding": "bash ci/checks/forms-schema-binding.sh (r1) — PASS; r2 не трогает форм-слой web"
+  },
+  "live_proof_plan": "Цель: ассистент, читая текст «измени форму процесса X», вызывает apply_form_document_op на форме процесса, ВСЕ привязки которого — черновики (успех, layout обновлён); для процесса с хотя бы одной published-привязкой (включая mixed-tier с явно названным черновичным приложением!) получает явный отказ («форма используется опубликованным приложением — правьте вручную») вместо тихой записи в живую форму; для неоднозначного all-draft процесса без указания приложения — честно переспрашивает. Стенд (Tailscale 100.121.76.86:3000) — доступность на момент сессии не проверялась (не входит в перечисленные гейты постановки). Шаги: (1) тенант с LLM-подключением; приложение-черновик с формой; процесс, привязанный к черновику И опубликованному приложению (общая форма); процесс с 2 черновичными привязками; (2) «добавь разделитель в форму <all-draft>» → вызов тула, layout обновлён; (3) «поправь форму <mixed-tier>, приложение <имя черновика>» → честный отказ с причиной про опубликованное приложение (НЕ запись — это ровно вектор судьи); (4) «поправь форму <2 черновика>» без приложения → ассистент называет оба кандидата и просит уточнить; ответ пользователя → повторный вызов с applicationId проходит. NOT YET EXECUTED — вся серверная механика включая mixed-tier fail-close доказана unit + live-PG (включая мутационный RED→GREEN r1-реплея); непрожитым остаётся ТОЛЬКО LLM-звено.",
+  "deviations_from_adr": [
+    "r1→r2 (changes_requested судьи, blocking доказан его live-PG адверс-пробником): r1-инвариант мини-ADR «тул не трогает published» был ЛОЖЕН для mixed-tier процесса — form_binding не имеет app-измерения в ключе, draft-пин не изолирует запись от published-приложения, r1-фикстуры (мульти-биндинг из двух draft) дыру не покрывали. r2 по решению оркестратора (машинное fail-close-сужение, фаундер не привлекался): mixed-tier запрещён — инвариант теперь «тул мутирует form_binding только если НИ ОДНА привязка процесса не published»; mixed-tier-проверка агрегатная по всем кандидатам и выполняется первой; отказ честный, с именами приложений-нарушителей, даже при валидном draft-пине. Спека §3 переписана (r1 отозвано и задокументировано в §3.1, r2-матрица в §3.2, компромисс признан); тест ровно адверс-топологии судьи добавлен (AC-m1/AC-m2) + мутационный RED→GREEN; комментарий executor про zero-binding уточнён до фактического 409 WRONG_FLOOR (R-3 nit)."
+  ],
+  "friction_events": [
+    "vitest.config.js исключает ci/checks/db/** из дефолтного прогона — таргетные db-тесты гоняются через `npx vitest run --dir ci/checks/db --no-file-parallelism <file>` (то же ограничение, что задокументировано в T-0700/T-0725's friction).",
+    "Первый прогон db-теста (r1) упал в afterAll cleanup: DELETE на published-приложение наткнулся на tier_published_locked триггер (миграция 049). Фикс: SET LOCAL choros.promoting='1' перед cleanup DELETE — тот же escape hatch, что используют другие db-suites (schema_change_api.test.ts).",
+    "Сессия r2 оборвалась (машина спала) после мутационного RED→GREEN и до коммита — восстановление из git-состояния (dirty-дифф цел, мутационный r1-реплей был откатан до обрыва, гейты перегнаны заново перед коммитом)."
+  ]
+}
