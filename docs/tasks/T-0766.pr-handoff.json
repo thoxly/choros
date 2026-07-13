@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0766",
+  "status": "pr_open",
+  "branch": "task/T-0766",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/tasks/T-0766.spec.md",
+    "docs/tasks/T-0766.pr-handoff.json",
+    "ci/checks/worker-auth-public-surface.sh",
+    "ci/checks/data/frozen-sanctions.jsonl"
+  ],
+  "summary": "R-1 follow-up from T-0763 review: ci/checks/worker-auth-public-surface.sh (FF-5, AC-19) does NOT protect src/http/router.ts from COMMITTED edits. Its router.ts branch first diffs against origin/dev (correct when reachable and un-advanced) but falls back, on ANY non-zero exit from that first diff (both 'origin/dev unreachable' AND 'origin/dev reachable and shows a real diff'), to `git diff HEAD -- router.ts` — working-tree-vs-own-HEAD, which is trivially empty for any COMMITTED change. Reproduced live: a committed router.ts edit PASSed the gate before this fix, FAILed after. Fix (a) (not (b), see rationale below): appended a new, independent, additive-only block that resolves BASE via the same merge-base fallback chain as ci/checks/agent-hire-frozen-additive.sh (FF-HIRE-4) — merge-base HEAD origin/dev -> merge-base HEAD dev -> HEAD~1 -- diffs router.ts against that BASE, and sets FAIL=1 on its own finding. FAIL is a script-global monotonic-OR variable never reset to 0 after init, so the legacy block's now-harmless vacuous OK can no longer mask the new block's real finding. The legacy block (lines 46-58) is left byte-identical and still executes -- restructuring it would require deleting/editing existing lines, which the auto_additive sanction constraint (A-1) forbids. Did NOT choose (b) (drop FF-5's router.ts branch in favor of FF-HIRE-4): FF-5 also guards 3 unrelated export invariants (DEV_USER_HEADER/registerExternalWorkerRoutes/registerAuthRoutes/createServer), and FF-HIRE-4's router.ts policy is strictly WEAKER (additive-only, permits new lines for T-0042 agent-hire routes) than FF-5's AC-19 invariant (router.ts must be fully unchanged) -- dropping FF-5's branch would silently reclassify/weaken AC-19, out of scope for an additive-only fix.",
+  "frozen_file_sanction": {
+    "file": "ci/checks/worker-auth-public-surface.sh",
+    "reason": "line 2 header carries no T-XXXX prefix (legacy, pre-T-0146 FF-FCI11 convention) so frozen-checks-immutable.sh treats it as foreign to every task, including this one",
+    "sanction_class": "auto_additive",
+    "sanction_entry_added": "ci/checks/data/frozen-sanctions.jsonl (1 new line, task=T-0766, family=DEV-AUTH-PROD)",
+    "verification": "ci/checks/auto-sanction-additive.sh --verify T-0766 ci/checks/worker-auth-public-surface.sh <merge-base 095ae0d2a2f2494e8f578e0a40fe5f96ced9e0c4> <sanction-json> => PASS (A-1..A-4 all green: 0 deleted/mutated lines confirmed via git diff grep -c '^-[^-]' = 0; ATTEST-R1b: family DEV-AUTH-PROD's catalog §3 Enforced-by-adjacent section lists this exact file path; ATTEST-R1a: corpus_ref = the branch's own merge-base commit, trivially an ancestor of HEAD with byte-identical corpus.jsonl blob since this task never touches the corpus)"
+  },
+  "test_evidence": {
+    "vacuity_before_fix": "At baseline commit 095ae0d2a2f2494e8f578e0a40fe5f96ced9e0c4 (pre-fix), appended+committed a test line to src/http/router.ts, ran `bash ci/checks/worker-auth-public-surface.sh`: printed '[OK] src/http/router.ts unchanged in this branch' (the message flip confirms the origin/dev branch correctly detected the diff and fell into the fallback) and exited 0 (PASS) despite the committed change. Proof commit reverted via `git reset --hard 095ae0d2...` before implementing the fix.",
+    "honesty_after_fix": "At fix commit 566cb66f, same exact probe (append+commit a test line to src/http/router.ts), same gate run: legacy line still prints its vacuous '[OK]... unchanged in this branch', but the new T-0766 authoritative block prints 'FAIL: src/http/router.ts has been modified relative to merge-base...' and the gate exits 1 (FAIL). Proof commit reverted via `git reset --hard 566cb66f` after capturing output; working tree confirmed clean and gate re-verified PASS on the actual fix.",
+    "types": "npx tsc --noEmit: 0 errors.",
+    "full_unit_suite": "npx vitest run (no DATABASE_URL, db-tier excluded by vitest.config.js default): 320 files passed + 2 skipped, 6015 tests passed + 17 skipped -- 0 failures, no collateral regressions (this task touches no src/*.ts, so this is a sanity re-run, not new coverage).",
+    "fitness_gates_run_individually": [
+      "worker-auth-public-surface.sh (FF-5) on clean fixed tree: PASS, exit 0, both the legacy origin/dev line AND the new T-0766 authoritative merge-base line print [OK]",
+      "agent-hire-frozen-additive.sh (FF-HIRE-4): PASS -- untouched by this task, unaffected",
+      "frozen-checks-immutable.sh (T-0146): PASS -- SANCTION [FF-FCI13] granted for worker-auth-public-surface.sh, auto_additive class, AUDIT line printed",
+      "auto-sanction-additive.sh --verify T-0766 ci/checks/worker-auth-public-surface.sh <merge-base> <sanction-json>: PASS -- A-1..A-4 + Враг-attestation all green",
+      "auto-sanction-additive.sh --self-test: PASS -- 14/14 cases (FF-ASA1..FF-ASA5 + R-1/R2 adversarial cases)"
+    ],
+    "npm_run_fitness_full_chain": "exit 0. Chain reaches its final command (actor-active-route-coverage.sh --self-test, the literal last invocation in package.json's fitness script) and completes with no npm error/Command failed output -- proves the full && chain succeeded end-to-end. 1432 PASS-classified lines. 21 FAIL-classified lines all belong to OTHER gates' self-test PLANTED-violation probes (T-0572 rights-editor gates, FF-COV3/4/5 substitution-coverage-invariant probes, doc-coherence/check-template-deps/docpage-writeful-tools self-tests) that appear well BEFORE the chain's later gates in the log and are each immediately followed by their own self-test PASS confirmation -- none of them is a real top-level script exit (verified: agent-instruction-runtime-dormant.sh FF-COMP-6, the ONE real pre-existing finding T-0763's own handoff had to caveat on src/http/agents.ts, is clean in this run)."
+  },
+  "security_notes": [
+    "The new authoritative check block reads only git metadata (merge-base, diff) already computed by the identical pattern in ci/checks/agent-hire-frozen-additive.sh (FF-HIRE-4) -- no new external input, no new file surface.",
+    "FAIL is a script-global bash variable initialized once to 0 and only ever assigned 1, never reset -- verified by grep across the whole file (only two 'FAIL=1' assignment sites now: the pre-existing legacy one, and the new T-0766 one). This is what makes the legacy block's continued vacuous OK harmless: it cannot un-set FAIL back to 0.",
+    "This fix does not touch src/http/router.ts, src/http/auth.ts, or any of the 4 frozen files ci/checks/agent-hire-frozen-additive.sh protects (grant-lattice.ts/grant-resolver.ts/mcp-tool-registry.ts/scoped-admin.ts) -- confirmed FF-HIRE-4 PASS, unaffected.",
+    "The auto_additive sanction is scoped to this exact {task, file} pair only (frozen-checks-immutable.sh's is_sanctioned() greps for BOTH the task and file tokens on the SAME jsonl line) -- it grants T-0766 no authority over any other frozen ci/checks/*.sh file."
+  ],
+  "deviations_from_adr": [],
+  "follow_ups": [
+    "The legacy vacuous fallback block (lines 46-58 of ci/checks/worker-auth-public-surface.sh) is now dead weight -- it still runs and can still print a misleading '[OK]... unchanged in this branch' on a real violation, even though FAIL correctly ends up set by the new block regardless. A future task with a founder-class (or a legitimately-scoped) sanction could delete/simplify it outright now that the new block is authoritative; not done here because that deletion is out of reach for an auto_additive-only thaw (A-1 forbids removing existing lines)."
+  ],
+  "judge_attack_surface": [
+    "Reproduce the vacuity yourself at commit 095ae0d2a2f2494e8f578e0a40fe5f96ced9e0c4 (pre-fix): commit a trivial router.ts edit, run worker-auth-public-surface.sh, confirm PASS/exit 0. Then reproduce at 566cb66f (fix commit): same probe, confirm FAIL/exit 1.",
+    "Confirm FF-5 really does guard 3 invariants besides router.ts (grep the 4 export-check blocks) and that FF-HIRE-4's router.ts policy really is additive-only (its own header states this) -- verify the (a)-vs-(b) scope call independently rather than taking spec.md's claim at face value.",
+    "git diff 095ae0d2a2f2494e8f578e0a40fe5f96ced9e0c4 HEAD -- ci/checks/worker-auth-public-surface.sh: confirm every hunk is a pure insertion, 0 deleted/mutated lines.",
+    "Independently verify the sanction's attestation: family DEV-AUTH-PROD's catalog section (docs/design/T-0152-security-invariants-catalog.md §3) lists ci/checks/worker-auth-public-surface.sh, and corpus_ref 095ae0d2a2f2494e8f578e0a40fe5f96ced9e0c4 is an ancestor of HEAD with a corpus.jsonl blob matching HEAD's.",
+    "grep -n 'FAIL=' ci/checks/worker-auth-public-surface.sh and confirm there is no path that resets FAIL to 0 after the new block runs -- i.e. the legacy block's vacuous OK genuinely cannot suppress the new block's FAIL=1.",
+    "Re-run npm run fitness yourself and confirm exit 0; spot-check a few of the mid-log FAIL lines to confirm each is immediately followed by its own self-test PASS acknowledgement, not a real failure."
+  ],
+  "friction_events": [
+    "worker-auth-public-surface.sh has no T-XXXX header (legacy, pre-T-0146), so frozen-checks-immutable.sh's FF-FCI11 rule ('no-header check is foreign to every task') applied and blocked the edit until an auto_additive sanction was added to ci/checks/data/frozen-sanctions.jsonl and independently verified via auto-sanction-additive.sh --verify.",
+    "auto-sanction-additive.sh's A-1 rule (every BASE_REF line, including comments, must survive byte-identical -- no deletion or in-place edit) ruled out the most direct fix (rewriting the buggy origin/dev/HEAD fallback in place to compute a correct BASE). Resolved by appending an independent new block that sets FAIL=1 on its own authoritative finding, leaving the legacy block untouched but functionally moot (FAIL is a monotonic OR, never reset)."
+  ]
+}
