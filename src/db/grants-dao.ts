@@ -175,6 +175,36 @@ export function criticalGrantPredicate(alias: string): string {
 const CRITICAL_GRANT_PREDICATE_BARE = criticalGrantPredicate("");
 
 // ---------------------------------------------------------------------------
+// T-0605 / T-0767 — single NAMED assignment-active dual-control predicate.
+//
+// A role_assignment row is dual-control-active iff EITHER it is routine
+// (proposed_by IS NULL — never went through the propose/escalate path, so one
+// confirm is sufficient) OR it is escalating AND a distinct second approver has
+// signed (confirmed2_by IS NOT NULL). This is the canonical fragment defined
+// in getGrantsForSubject/getRoleSlugsForActor below (T-0605 ADR §2) — extracted
+// to a named export (T-0767) so every authority resolver that reads
+// role_assignment activity uses the SAME text, not a bespoke re-derivation.
+//
+// T-0767 finding (review of T-0764): isGenesisOwnerForTenant/loadAdminContext
+// (src/db/org.ts) are a SECOND, PARALLEL authority path (owner/admin authority
+// short-circuits the grant PDP — see org.ts header comments) that resolved
+// role_assignment activity on `confirmed_by IS NOT NULL` ALONE, omitting this
+// disjunct entirely. Real but DORMANT: no INSERT in src/ currently sets
+// proposed_by non-null on role_assignment (T-0764's 58-seed-file audit), so the
+// gap was a structural landmine for a future assignment-level proposal feature,
+// not a live exploit. Exporting the fragment here and importing it into org.ts
+// closes the gap AT THE SOURCE instead of duplicating the literal a third time.
+//
+// alias MUST be the role_assignment table alias used by the caller's query
+// (e.g. "ra") — bare column names (alias === "") are valid too, for a
+// top-level un-aliased role_assignment query.
+// ---------------------------------------------------------------------------
+export function assignmentActiveDualControlPredicate(alias: string): string {
+  const p = alias ? `${alias}.` : "";
+  return `(${p}confirmed2_by IS NOT NULL OR ${p}proposed_by IS NULL)`;
+}
+
+// ---------------------------------------------------------------------------
 // withTenantReadTx — tenant-scoped read transaction (mirrors org.ts withTenant)
 // ---------------------------------------------------------------------------
 
@@ -310,7 +340,7 @@ export async function getGrantsForSubject(
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
-          AND (ra.confirmed2_by IS NOT NULL OR ra.proposed_by IS NULL)`,
+          AND ${assignmentActiveDualControlPredicate("ra")}`,
       [tenantId, employeeId, nowMs],
     );
     if (raRows.length === 0) {
@@ -522,7 +552,7 @@ export async function getRoleSlugsForActor(
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
           AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
-          AND (ra.confirmed2_by IS NOT NULL OR ra.proposed_by IS NULL)`,
+          AND ${assignmentActiveDualControlPredicate("ra")}`,
       [tenantId, employeeId, nowMs],
     );
     return rows.map((r) => r.slug);
