@@ -57,6 +57,30 @@ else
   fi
 fi
 
+# T-0766 fix: the legacy origin/dev/HEAD fallback above can vacuously PASS a
+# COMMITTED router.ts change. Once committed, the working tree equals HEAD,
+# so its inner fallback (comparing the working tree against its own HEAD)
+# is always quiet regardless of what actually changed relative to the branch
+# base. This block adds an independent, authoritative check that resolves a
+# real merge-base (same resolution order as the additive-only router.ts
+# check in ci/checks/agent-hire-frozen-additive.sh) and sets FAIL=1 on its
+# own, so a false "OK" from the legacy block above can no longer mask a real
+# violation. See docs/tasks/T-0766.spec.md.
+FF5_ROUTER_BASE=$(git merge-base HEAD origin/dev 2>/dev/null \
+  || git merge-base HEAD dev 2>/dev/null \
+  || git rev-parse HEAD~1 2>/dev/null \
+  || echo "")
+if [ -n "${FF5_ROUTER_BASE}" ]; then
+  if git diff --quiet "${FF5_ROUTER_BASE}" -- src/http/router.ts 2>/dev/null; then
+    echo "  [OK] src/http/router.ts unchanged relative to merge-base (T-0766 authoritative check)"
+  else
+    echo "  FAIL: src/http/router.ts has been modified relative to merge-base (must not be touched, T-0766 authoritative check)" >&2
+    FAIL=1
+  fi
+else
+  echo "  WARN: T-0766 authoritative merge-base check could not resolve a base commit; relying on the legacy check above" >&2
+fi
+
 if [[ $FAIL -ne 0 ]]; then
   echo "[FF-5] FAIL: public API surface invariant violated." >&2
   exit 1
