@@ -91,6 +91,17 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
    */
   failOnNameInvalid = false;
 
+  /**
+   * T-0762 (R-2 follow-up from T-0748's own review): if true, the NEXT
+   * createHumanUser call throws NAME_TOO_LONG — models a real KC 400 whose
+   * body carries a firstName/lastName `length:{max:255}` validator failure
+   * (messageKey `error-invalid-length-too-long`, e.g. a single-token
+   * displayName near DISPLAY_NAME_MAX=256 that splitDisplayName duplicates
+   * into both firstName and lastName — see admin-port.ts
+   * isPersonNameLengthError). One-shot, mirrors failOnNameInvalid.
+   */
+  failOnNameTooLong = false;
+
   /** Counter incremented on each call — useful for asserting call count. */
   createCallCount = 0;
 
@@ -155,6 +166,17 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
       this.failOnNameInvalid = false;
       const err = new Error("NAME_INVALID_CHARACTERS");
       (err as NodeJS.ErrnoException).code = "NAME_INVALID_CHARACTERS";
+      throw err;
+    }
+
+    // T-0762 (R-2 follow-up from T-0748's own review): same structural-
+    // validation-before-state-check ordering as failOnNameInvalid just
+    // above — a real KC realm's length validator runs in the same
+    // declarative-user-profile pass as the character validator.
+    if (this.failOnNameTooLong) {
+      this.failOnNameTooLong = false;
+      const err = new Error("NAME_TOO_LONG");
+      (err as NodeJS.ErrnoException).code = "NAME_TOO_LONG";
       throw err;
     }
 
@@ -259,6 +281,7 @@ export class InMemoryKeycloakUserPort implements KeycloakUserPort {
     this.failOnLoginTaken = false;
     this.failOnAuth = false;
     this.failOnNameInvalid = false;
+    this.failOnNameTooLong = false;
     this.failOnSetEnabled = false;
     this.failOnRevokeSessions = false;
     this.createCallCount = 0;

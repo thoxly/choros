@@ -1817,4 +1817,97 @@ describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
       kc.createHumanUser = spy;
     }
   });
+
+  // ---------------------------------------------------------------------
+  // T-0762 (R-2 follow-up from T-0748's own review): T-0748 fixed the
+  // CHARACTER-validator misattribution but explicitly scoped out the
+  // sibling LENGTH-validator class (spec.md §7). A display_name near the
+  // client's DISPLAY_NAME_MAX with no space (single token) still trips
+  // Keycloak's independent 255-char-per-field cap — before this fix, that
+  // 400 fell to the SAME misleading EMAIL_INVALID default T-0748 already
+  // fixed for the character class. RED→GREEN: honest attribution for the
+  // length class too.
+  // ---------------------------------------------------------------------
+  it('T-0762: KC person-name length-too-long (single-token display_name near the 255-char cap) → 400 NAME_TOO_LONG with an honest Russian message, NOT the misleading email message', async () => {
+    const t = await registerOne('name-too-long');
+    kc.reset();
+    kc.failOnNameTooLong = true; // next createHumanUser throws NAME_TOO_LONG (KC length validator)
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-too-long-${Date.now()}`,
+        email: `name-too-long-${Date.now()}@example.com`, // a perfectly valid email — NOT the problem
+        password: 'password12345',
+        display_name: 'A'.repeat(256), // single token, near DISPLAY_NAME_MAX — the actual anti-case from T-0762
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('NAME_TOO_LONG');
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+    // Honest Russian attribution — points at the name/length, not the email.
+    expect(msg).toContain('имя');
+    expect(msg).toContain('длин');
+    expect(msg).not.toContain('email must be a valid email address');
+    // KC was reached (email/display_name both passed our own pre-KC checks) then reported the length problem.
+    expect(kc.createCallCount).toBe(1);
+    // No orphan employee row — KC create never truly succeeded.
+    const accounts = await getAccounts(t.ownerSlug);
+    expect(accounts.json?.accounts?.some((a: { display_name: string }) => a.display_name === 'A'.repeat(256))).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0762 regression guard: T-0748's own NAME_INVALID_CHARACTERS class
+  // (character validator) must remain completely unaffected by the new
+  // NAME_TOO_LONG branch added alongside it — the two checks must not
+  // cross-fire.
+  // ---------------------------------------------------------------------
+  it('T-0762 regression: T-0748\'s NAME_INVALID_CHARACTERS (character validator) is unaffected by the new NAME_TOO_LONG branch', async () => {
+    const t = await registerOne('name-invalid-not-long');
+    kc.reset();
+    kc.failOnNameInvalid = true; // next createHumanUser throws NAME_INVALID_CHARACTERS (unchanged T-0748 path)
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-invalid-not-long-${Date.now()}`,
+        email: `name-invalid-not-long-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Bot #1',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('NAME_INVALID_CHARACTERS');
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+    expect(msg).toContain('символ');
+    expect(msg).not.toContain('длин');
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0762 regression guard: an ordinary display_name (well under the
+  // length cap) still creates 201, unaffected by the new NAME_TOO_LONG
+  // branch.
+  // ---------------------------------------------------------------------
+  it('T-0762 regression: an ordinary display_name (well under the length cap) still creates 201, unaffected by the new NAME_TOO_LONG branch', async () => {
+    const t = await registerOne('name-ordinary-length');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-ordinary-length-${Date.now()}`,
+        email: `name-ordinary-length-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Иван Петров',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    expect(kc.created[kc.created.length - 1]?.spec.displayName).toBe('Иван Петров');
+  });
 });

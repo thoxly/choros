@@ -837,3 +837,128 @@ describe("AP-9 — createHumanUser 400 person-name-vs-email disambiguation (T-07
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// AP-10 [T-0762, R-2 follow-up from T-0748's own review]: createHumanUser's
+// 400 branch ALSO disambiguates a Keycloak person-name LENGTH-validator
+// rejection (firstName/lastName exceeding the declarative `length:{max:255}`
+// cap, realm-choros.json) from a genuine bad `email` — T-0748 fixed the
+// CHARACTER-validator class but explicitly scoped this sibling class out
+// (spec.md §7). Body shapes below are LIVE-CONFIRMED against a real KC
+// 25.0.6 (t-0633-keycloak-1, :8180, 2026-07-13 — same container T-0748's own
+// live probe used, choros-registrar client_credentials): a single field over
+// the cap (ordinary two-word name where the first token alone is 300 chars)
+// produces the single-object shape; BOTH fields over the cap in the SAME
+// request (a single-TOKEN 300-char displayName, which splitDisplayName
+// duplicates into both firstName AND lastName — see its own doc comment)
+// produces the `{errors:[...]}` array shape. No orphan KC user was left by
+// either live probe (verified via GET .../users?username=...=exact after
+// each; a control 201 create with an ordinary two-word Cyrillic name was
+// also probed live and cleaned up).
+// ---------------------------------------------------------------------------
+
+describe("AP-10 — createHumanUser 400 person-name-length-vs-email disambiguation (T-0762)", () => {
+  it("KC 400 {field:'firstName', errorMessage:'error-invalid-length-too-long'} (single field over cap, live shape) -> NAME_TOO_LONG", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({
+        field: "firstName",
+        errorMessage: "error-invalid-length-too-long",
+        params: ["firstName", null, 255],
+      }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("NAME_TOO_LONG");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("KC 400 {field:'lastName', errorMessage:'error-invalid-length-too-long'} -> NAME_TOO_LONG", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({
+        field: "lastName",
+        errorMessage: "error-invalid-length-too-long",
+        params: ["lastName", null, 255],
+      }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("NAME_TOO_LONG");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("KC 400 {errors:[...]} BOTH firstName and lastName over cap (live shape: single-token 300-char displayName duplicated by splitDisplayName) -> NAME_TOO_LONG", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({
+        errors: [
+          { field: "lastName", errorMessage: "error-invalid-length-too-long", params: ["lastName", null, 255] },
+          { field: "firstName", errorMessage: "error-invalid-length-too-long", params: ["firstName", null, 255] },
+        ],
+      }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("NAME_TOO_LONG");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("KC 400 {errors:[...]} mixed shape (email invalid AND firstName too long) -> NAME_TOO_LONG (name-length problem not masked by co-occurring email problem)", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({
+        errors: [
+          { field: "email", errorMessage: "error-invalid-email", params: ["email", "not-an-email"] },
+          { field: "firstName", errorMessage: "error-invalid-length-too-long", params: ["firstName", null, 255] },
+        ],
+      }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("NAME_TOO_LONG");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("REGRESSION: a firstName/lastName CHARACTER error (T-0748's own class) still maps to NAME_INVALID_CHARACTERS, not NAME_TOO_LONG — the two length/character checks do not cross-fire", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({ field: "lastName", errorMessage: "error-person-name-invalid-character", params: ["lastName"] }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("NAME_INVALID_CHARACTERS");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("REGRESSION: KC 400 {field:'email', errorMessage:'error-invalid-email'} -> unchanged EMAIL_INVALID (length check does not over-fire on email)", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({ field: "email", errorMessage: "error-invalid-email", params: ["email", "not-an-email"] }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("EMAIL_INVALID");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("REGRESSION: KC 400 with an unparseable/empty body -> unchanged EMAIL_INVALID (safe default, no regression)", async () => {
+    const stub = await startUser400Stub("not-json");
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("EMAIL_INVALID");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("REGRESSION: a length error on an unrelated field (e.g. 'username') -> EMAIL_INVALID (safe default — only firstName/lastName length errors map to NAME_TOO_LONG)", async () => {
+    const stub = await startUser400Stub(
+      JSON.stringify({ field: "username", errorMessage: "error-invalid-length-too-long", params: ["username", null, 255] }),
+    );
+    try {
+      expect(await createExpectingCode(stub.cfg)).toBe("EMAIL_INVALID");
+    } finally {
+      await stub.close();
+    }
+  });
+});

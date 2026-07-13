@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * web/src/screens/screen-users.mount.test.jsx  (T-0748)
+ * web/src/screens/screen-users.mount.test.jsx  (T-0748, extended by T-0762)
  *
  * REAL DOM mount test — @testing-library/react + jsdom. See
  * web/src/forms/FormDesigner.mount.test.jsx for the full D-064 rationale (a
@@ -19,6 +19,10 @@
  * (users-form.js) actually reaches the "Отображаемое имя" field's hint text
  * in the live component tree, and that the misleading pre-fix email message
  * is NOT what the owner sees.
+ *
+ * T-0762 (R-2 follow-up from T-0748's own review) adds the sibling
+ * NAME_TOO_LONG case (KC's length validator, distinct messageKey from the
+ * character validator above) to the SAME real-DOM proof.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -122,6 +126,48 @@ describe('UsersScreen — CreateUserModal honest name-character attribution (T-0
     const emailInput = within(dialog).getByLabelText('Email');
     expect(emailInput.getAttribute('aria-invalid')).not.toBe('true');
   }, 15000); // real jsdom mount + interaction; default 5000ms budget flakes under full-suite parallel load (observed elsewhere, e.g. screen-record-detail.mount.test.jsx) — not this test's own logic (reliably <3.2s solo).
+
+  it('T-0762: a KC NAME_TOO_LONG 400 (single-token 256-char display_name) shows the honest Russian "слишком длинное" hint on Отображаемое имя — NOT the misleading email message', async () => {
+    const dialog = await openCreateModal();
+    fillCreateForm(dialog, {
+      login: 'too-long-name',
+      email: 'too-long-name@example.com', // a perfectly valid email — must NOT be blamed
+      password: 'password12345',
+      display_name: 'A'.repeat(256), // single token, near DISPLAY_NAME_MAX — the T-0762 anti-case
+    });
+
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      if (opts && opts.method === 'POST' && u === '/api/users') {
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({
+            error: {
+              code: 'NAME_TOO_LONG',
+              message: 'отображаемое имя слишком длинное — Keycloak допускает не более 255 символов на имя или фамилию; сократите имя и попробуйте снова',
+            },
+          }),
+        };
+      }
+      return bootFetch(u);
+    };
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Создать' }));
+
+    await waitFor(() => {
+      expect(within(dialog).getByText(/слишком длинное/)).toBeTruthy();
+    });
+    // The hint is attached to the Отображаемое имя field, not a generic banner.
+    const nameInput = within(dialog).getByLabelText('Отображаемое имя');
+    expect(nameInput.getAttribute('aria-invalid')).toBe('true');
+    // The pre-fix bug (before T-0748/T-0762): the SAME class of 400 used to
+    // surface as this misleading text. It must be absent from the whole dialog.
+    expect(within(dialog).queryByText(/email must be a valid email address/i)).toBeNull();
+    // The email field itself must NOT be flagged invalid — the email was fine.
+    const emailInput = within(dialog).getByLabelText('Email');
+    expect(emailInput.getAttribute('aria-invalid')).not.toBe('true');
+  }, 15000); // real jsdom mount + interaction; matches the 15000ms budget precedent set by the T-0748 test above (R-1: solo <3.2s, full-suite-parallel contention observed elsewhere).
 
   it('regression: an ordinary EMAIL_TAKEN 409 still anchors on Email (untouched by the T-0748 branch)', async () => {
     const dialog = await openCreateModal();
