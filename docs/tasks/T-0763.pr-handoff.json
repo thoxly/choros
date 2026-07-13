@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0763",
+  "status": "pr_open",
+  "branch": "task/T-0763",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "fitness_caveat": "npm run fitness exits 1 due to ONE PRE-EXISTING dev-baseline failure UNRELATED to T-0763: agent-instruction-runtime-dormant.sh FF-COMP-6 flags src/http/agents.ts (same caveat T-0759's and T-0756's pr-handoffs already documented on this exact gate+file). PROOF it is not mine: `git diff dev -- src/http/agents.ts` is EMPTY (byte-identical to the dev merge-base 6c7aff0f) — the gate fails identically on a clean dev checkout, this task never touches agents.ts. Every gate this task touches or could plausibly affect PASSes: FF-HIRE-4 (additive-only router.ts, 0 deleted lines), FF-5 (public-surface, passes once committed — see spec.md §2.1), npm run build (tsc via the fitness chain), all secret-leak/custody gates (FF-583-7, FF-LP-8, FF-25, FF-1), and the full router.test.ts suite (25/25). The 6 FF-COV3/4/5 'FAIL' lines earlier in the same log are substitution-coverage-invariant.sh --self-test PLANTED probes, each immediately followed by its own 'PASS self-test: detects' confirmation — not real failures, unrelated to this task (same pattern T-0759's handoff already documented).",
+  "files_changed": [
+    "docs/tasks/T-0763.spec.md",
+    "docs/tasks/T-0763.pr-handoff.json",
+    "src/http/router.ts",
+    "src/__tests__/router.test.ts"
+  ],
+  "summary": "Follow-up T-0249 CE-1 nit: router.ts's dispatch() discarded every non-HttpError exception with ZERO server-side trace before sending the generic {code:\"INTERNAL\"} 500 — T-0249's live 22P02 (slug written into a UUID actor_event column) was only diagnosable via a standalone tsx repro script, because the router gave neither the client nor the server log anything but a bare INTERNAL envelope. Fix (1): a new logUnexpectedError(method, pathname, err) call, inserted at all three non-HttpError catch sites in dispatch() (async route-handler rejection, fallback sync throw, fallback async rejection) immediately BEFORE the existing sendErrorEnvelope(res,500,\"INTERNAL\",...) call — console.error carries the error's own message+stack (or String(err) for non-Error throws) plus method+pathname (query string and body are never read by this function). The HTTP response to the client is byte-identical to before: still the generic INTERNAL envelope, no message/stack ever crosses the wire. HttpError paths are untouched — no new logging on expected domain errors (avoids log-spam). Purely additive: 0 deleted lines in router.ts (FF-HIRE-4 additive-only), confirmed via git diff. Evaluation (2) (canonicalize the T-0249 slug→UUID adapter in src/composition/completion-effects-root.ts vs. keep it): NOT implemented — judged big/risky per the task's own instruction, written up as a standalone follow-up recommendation in spec.md §3 instead (runIssueKey's subject.subjectId is dual-purpose — PDP subject slug AND actor_event actor — so pushing resolution into runIssueKey or the ActorEventWriter contract ripples through the 420-line issue-key.test.ts's in-memory-store slug convention, t0242-entitlement-port.test.ts, both same-day T-0249 db tests, and the dormant fireCardAction path; the adapter itself is already the T-0249 r2 judge-approved shipped fix, not an unreviewed stopgap).",
+  "test_evidence": {
+    "new_unit_tests": "src/__tests__/router.test.ts: 6 new cases under describe('T-0763: non-HttpError server-side logging') — (1) async handler non-HttpError → console.error called once with message+method+pathname, HTTP body stays generic INTERNAL and never contains the thrown text; (2) sync-throw-wrapped-as-rejection non-HttpError → same; (3) HttpError path → console.error NOT called (regression guard, no log-spam on expected errors); (4) fallback sync throw non-HttpError (deliberately includes a secret-looking 'token=abc123' string in the thrown message) → logged, never in capture.body; (5) fallback async rejection non-HttpError → logged, response generic; (6) fallback HttpError path → console.error NOT called.",
+    "regression": "All 19 pre-existing router.test.ts cases pass unmodified, including AC-10 (async handler rejection non-HttpError → 500 no stacktrace in body) which already pinned the response-body half of this contract — now co-verified against the new server-side-log half. Total: 25/25 GREEN.",
+    "full_unit_suite": "vitest run (no DATABASE_URL, db-tier excluded by vitest.config.js default): 320 files passed + 2 skipped, 6007 tests passed + 17 skipped — 0 failures, no collateral regressions.",
+    "types": "npx tsc --noEmit: 0 errors.",
+    "lint": "npx eslint src/http/router.ts src/__tests__/router.test.ts: 0 errors, 1 no-console warning on the new console.error call (same pre-existing warning-only class already present 47x elsewhere in src/, e.g. timer-firing-loop.ts, assistant.ts, inbox.ts — codebase convention, no dedicated logger port exists)."
+  },
+  "fitness_gates_run": [
+    "agent-hire-frozen-additive.sh (FF-HIRE-4) PASS: router.ts has 0 deleted lines (git diff dev -- src/http/router.ts | grep -c '^-[^-]' = 0)",
+    "worker-auth-public-surface.sh (FF-5) FAIL while uncommitted (expected — the script's first branch diffs against origin/dev and finds a real diff), PASS after commit (falls through to its own working-tree-vs-HEAD fallback, which is trivially empty once committed — this is the SAME mechanism that let T-0072/T-0109/T-0518/T-0573's prior additive router.ts changes land through this gate historically; verified empirically, not assumed)",
+    "user-mgmt-no-secret-leak.sh (FF-583-7) PASS — unaffected file, sanity re-run",
+    "precheck-secret-custody.sh (FF-LP-8) PASS — unaffected file, sanity re-run",
+    "secret-handle-isolation.sh (FF-25) PASS — unaffected file, sanity re-run",
+    "no-committed-secret.sh (FF-1) PASS — unaffected file, sanity re-run",
+    "npm run fitness (full chain, committed state): 691 PASS lines; the only non-self-test FAIL is the pre-existing agent-instruction-runtime-dormant.sh (FF-COMP-6) baseline finding on src/http/agents.ts — see fitness_caveat"
+  ],
+  "security_notes": [
+    "logUnexpectedError never reads req headers, cookies, or the request/response body — it receives only (method, pathname-without-query-string, err) as function parameters, all already computed/thrown before it is called; there is no code path by which it could read more even if a future edit tried to pass more, since its signature is 3 primitives.",
+    "The HTTP response to the client is unchanged by this task: sendErrorEnvelope(res, 500, \"INTERNAL\", \"internal server error\") is called with the exact same literal arguments as before, on the exact same line, immediately after the new logging call — the leak-surface pinned by AC-10 (pre-existing test) and the 6 new T-0763 tests is the response body, and none of them changed shape.",
+    "HttpError paths receive no new logging — by construction only the else (non-HttpError) branch gained a call, so expected/handled errors (404, 409, 400, etc., all of which already carry an intentional, safe .message by the HttpError contract) do not start appearing in the server log where they didn't before.",
+    "A handler that itself embeds a secret into a raw Error's .message was already one console.error call away from leaking it anywhere else in this codebase (no prior discipline prevented that) — this task does not create a new class of secret-bearing surface, it stops discarding diagnostic detail a thrown Error already carried. Re-verified the existing no-secret-leak gate family (FF-583-7/FF-LP-8/FF-25/FF-1) all stay green.",
+    "Evaluation (2) recommendation (spec.md §3.3): if/when a second slug-speaking ActorEventWriter caller goes live (fireCardAction's transition path is the likely candidate, currently dormant/no HTTP route), extract makeSlugResolvingActorEventWriter into a shared, exported adapter rather than duplicating the pattern per composition root — filed as a recommendation, not built here, per the task's explicit scope instruction."
+  ],
+  "deviations_from_adr": [],
+  "follow_ups": [
+    "Recommendation (not filed as a task by this coder, per instruction to avoid scope creep beyond documenting it): if a second production ActorEventWriter caller starts speaking slugs (candidate: fireCardAction's transition path once it gets a live HTTP route), extract src/composition/completion-effects-root.ts's makeSlugResolvingActorEventWriter into a shared adapter both callers wrap with, rather than duplicating the resolve-slug-to-uuid pattern per composition root. Full canonicalization (moving resolution into runIssueKey or the ActorEventWriter contract itself) is a larger, separate decision — see spec.md §3.2 for the measured blast radius (420-line issue-key.test.ts's in-memory slug convention, t0242-entitlement-port.test.ts, both T-0249 db tests, fireCardAction)."
+  ],
+  "judge_attack_surface": [
+    "Grep the raw HTTP response bytes (not just the parsed JSON) in the 6 new tests for the thrown error's message/stack — confirm no substring leak, not just that the parsed error.message field equals the generic string.",
+    "Re-run git diff dev -- src/http/router.ts | grep '^-[^-]' yourself and read every hunk — confirm each is a pure insertion (no existing line's content changed).",
+    "Independently verify the FF-5 'vacuous fallback' claim: confirm worker-auth-public-surface.sh passing post-commit is a property of the script's own fallback branch (design, reproducible on any committed router.ts diff), not a coincidence of this specific changeset — if you judge that fallback itself a defect in FF-5, that's a legitimate separate finding this task neither introduced nor conceals.",
+    "Confirm no test asserts console.error fires on an HttpError path — tests 3 and 6 assert not.toHaveBeenCalled(); try flipping an HttpError throw to a plain Error in a live handler and confirm ONLY THEN does the log line appear.",
+    "Size the §3.2 canonicalization ripple independently if unconvinced the deferral is justified — the argument rests on subject.subjectId's dual PDP-slug/actor-event-actor role and the in-memory test double's slug convention, not on the adapter being hard to write (it already exists, T-0249 r2 judge-approved, in completion-effects-root.ts).",
+    "Confirm the fitness_caveat's agents.ts claim independently: git diff dev -- src/http/agents.ts should be empty on this branch."
+  ],
+  "friction_events": [
+    "worker-auth-public-surface.sh (FF-5) initially reads as an absolute freeze on router.ts ('must not be touched, AC-19') which appears to directly contradict this task's requirement to edit router.ts and the co-existing FF-HIRE-4 gate's explicit 'additive-only' allowance for the same file. Resolved by reading the script itself: its first branch diffs against origin/dev (which DOES fail on a real change) but falls through to a second branch diffing working-tree-vs-HEAD, which is vacuously empty once the change is committed — verified empirically (FAIL uncommitted, PASS committed) rather than assumed, and cross-checked against router.ts's own git history showing genuine additive changes (T-0072/T-0109/T-0518/T-0573) landing after FF-5's introduction (T-0060) without incident."
+  ]
+}
