@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0765",
+  "verdict": "approved",
+  "reviewer": "adversarial-judge",
+  "branch": "task/T-0765",
+  "base": "dev@6c7aff0f",
+  "ci_seen": {
+    "green": true
+  },
+  "scope_of_change": {
+    "prod_code_touched": false,
+    "evidence": "git diff dev...HEAD -- src/http/process-projection.ts is EMPTY (byte-identical to dev@6c7aff0f). Committed diff is exactly 3 files: src/__tests__/processes-read-visibility.test.ts (+28/-4 net logic, plus doc-comment), docs/tasks/T-0765.spec.md, docs/tasks/T-0765.pr-handoff.json. No src/http, src/db, or migration files in the diff."
+  },
+  "gates_rerun_by_judge": {
+    "target_unit_file_baseline": "npx vitest run src/__tests__/processes-read-visibility.test.ts -> 28/28 GREEN on unmutated tree (matches claim)",
+    "tsc_noEmit": "0 errors (matches claim)",
+    "full_unit_suite": "npx vitest run (no DATABASE_URL) -> 320 files passed + 2 skipped (322), 6001 tests passed + 17 skipped, 0 failures (matches claim '320 files/6001/0 fail')",
+    "actor_authority_deactivation_gate_unmutated": "bash ci/checks/actor-authority-deactivation-gate.sh -> PASS (FF-0662-1/2 clean, both isInstanceParticipant and isInstanceParticipantBatch carry the predicate on all lookups)",
+    "working_tree_after_all_probes": "git status --short empty; no git stash used at any point (mutations applied via Edit, restored via `git checkout -- src/http/process-projection.ts`)"
+  },
+  "mutation_probes": [
+    {
+      "id": "A-detail-point-lookup",
+      "location": "process-projection.ts:isInstanceParticipant clause-(1) point-lookup, ~L1285 (`AND ${ACTOR_ACTIVE_SQL}` removed)",
+      "expected_by_builder": "27/28, 1 RED (T-0759 DETAIL anti-case)",
+      "judge_reproduced": "27/28, 1 RED: 'T-0721 · GET /api/processes/:id gated by READ-visibility of the source record > T-0759: a DEACTIVATED former participant is denied (404), not the participant skeleton' — expected 200 to be 404. EXACT MATCH.",
+      "reverted_clean": true
+    },
+    {
+      "id": "B-batch-primary-lookup",
+      "location": "process-projection.ts:isInstanceParticipantBatch primary actorSlug lookup, ~L1410 (`AND ${ACTOR_ACTIVE_SQL}` removed; sibling fallback lookup ~L1423 left intact)",
+      "expected_by_builder": "26/28, 2 RED (LIST HTTP-level + direct filterProjectionsByReadVisibility anti-cases)",
+      "judge_reproduced": "26/28, 2 RED: LIST-path T-0759 anti-case ('expected true to be false') AND 'T-0722/T-0723 · filterProjectionsByReadVisibility > T-0759: a record-less projection is DROPPED for a DEACTIVATED former participant' (expected [...] to deeply equal []). EXACT MATCH.",
+      "reverted_clean": true
+    },
+    {
+      "id": "C-batch-fallback-lookup-NEW-judge-probe",
+      "location": "process-projection.ts:isInstanceParticipantBatch FALLBACK-slug lookup, ~L1423 ONLY (primary ~L1410 left intact) — the path the builder itself flagged as un-mutated in committed evidence (pr-handoff.json follow_ups)",
+      "expected_by_builder": "pr-handoff.json follow_ups claims the fixed fake-pool 'covers it by construction (same text.includes(ACTOR_ACTIVE_SQL) check, same query shape)'",
+      "judge_reproduced": "28/28 GREEN — the target unit test file does NOT catch this mutation. The builder's 'covers it by construction' prediction is EMPIRICALLY WRONG for this specific committed test suite: no test in processes-read-visibility.test.ts ever passes a distinct `fallbackSlug` argument to isInstanceParticipant/isInstanceParticipantBatch/filterProjectionsByReadVisibility (grep confirms zero occurrences), so the `if (fallbackSlug !== undefined && fallbackSlug !== actorSlug)` branch containing the mutated lookup never executes regardless of fake-pool fidelity — it is a coverage gap in test INPUT SPACE, not a fake-pool routing defect.",
+      "mitigating_layer": "bash ci/checks/actor-authority-deactivation-gate.sh (FF-0662-1) DOES independently catch this exact mutation: 'FAIL [FF-0662-1]: src/http/process-projection.ts:isInstanceParticipantBatch has 2 actor slug-lookup(s) but only 1 deactivation predicate(s) — a lookup is un-gated.' This is a separate, pre-existing static text-accounting gate (not the fake-pool simulation) that fires on ANY predicate removal regardless of runtime reachability.",
+      "prod_reachability": "fallbackSlug is undefined at BOTH current production call sites (src/http/processes.ts:963 isInstanceParticipant called with 5 positional args, no fallbackSlug; src/http/processes.ts:826 filterProjectionsByReadVisibility called with actorSlug only, no fallbackSlug) — the fallback branch is dead code in production today. This matches T-0759.review.json's own prior R-1 finding (same case-analysis conclusion: single/batch are provably byte-equivalent when fallbackSlug=undefined).",
+      "reverted_clean": true
+    }
+  ],
+  "false_deny_check": {
+    "method": "Re-ran the FULL target file (28 tests, verbose reporter) with the fixed fake-pool against unmutated prod code.",
+    "result": "All 28 tests green, including every pre-T-0765 active-participant / non-deactivated-actor case (e.g. 'T-0723: a record-less instance is visible ... to the actor who started it', 'T-0723: a record-less projection is KEPT for the actor who is its participant ... regardless of grants', mixed-visibility case). No slug outside opts.deactivatedSlugs is affected by the new `carriesActiveGate` check — confirmed no false-deny introduced."
+  },
+  "sql_text_match_reliability": {
+    "claim": "text.includes(ACTOR_ACTIVE_SQL) is a reliable match because the fake pool's test file imports the SAME `ACTOR_ACTIVE_SQL` constant (src/db/actor-authority-gate.ts, value \"deactivated_at IS NULL\") that prod code interpolates via `${ACTOR_ACTIVE_SQL}` directly into the template-literal SQL string.",
+    "verified": "Confirmed: all 3 prod query sites use the identical `${ACTOR_ACTIVE_SQL}` interpolation (no bespoke literal). The fake pool's `query: async (text, values) => ...` receives the raw string argument straight from `client.query(sqlString, values)` with no intermediate SQL formatter/minifier/builder layer in withTenant (checked src/db/actor-resolver.ts) — so no whitespace-reformatting risk exists in this codebase's query path."
+  },
+  "findings": [
+    {
+      "id": "R-1-batch-fallback-lookup-still-fake-green-in-fast-unit-tier",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/process-projection.ts:isInstanceParticipantBatch fallback-slug lookup (~L1423); src/__tests__/processes-read-visibility.test.ts (no test ever supplies a distinct fallbackSlug)",
+      "issue": "T-0765 closes the fake-green gap (T-0715 class) for the DETAIL point-lookup and the batch PRIMARY lookup (mutations A/B both reproduce RED as claimed), but the batch FALLBACK-slug lookup remains invisible to this fast unit test file if its ACTOR_ACTIVE_SQL predicate were ever removed — not because the fake-pool's routing is wrong (the same `carriesActiveGate` check would apply if exercised) but because NO test in the file ever passes a fallbackSlug argument at all, so the branch containing that lookup is never entered. The builder's own pr-handoff.json follow_ups claims the fixed fake-pool 'covers it by construction' — judge's direct mutation (probe C above) shows this specific committed suite stays 28/28 GREEN, i.e. the claim is not accurate for the CURRENT test inputs.",
+      "suggestion": "Non-blocking: (1) fallbackSlug is undefined at both current production call sites, so this is currently dead code, matching the task's own stated resolution criterion; (2) an independent, pre-existing static gate (ci/checks/actor-authority-deactivation-gate.sh, FF-0662-1) DOES catch removal of this predicate regardless of unit-test reachability (judge reproduced the FAIL directly on the mutated tree). Recommend a follow-up task to either (a) add an explicit unit case that calls the batch fn with a distinct, deactivated fallbackSlug through the fixed fake-pool to get fast-tier RED coverage before fallbackSlug is ever wired to a real caller, or (b) narrow the pr-handoff.json/module-comment claim to state the fallback path's fast-tier guard is currently FF-0662-1 (static), not the fake-pool simulation, so future readers don't over-trust unit coverage there."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "Fake pool imports the SAME ACTOR_ACTIVE_SQL constant prod code imports (not a bespoke duplicate literal)", "covered": true},
+    {"ac": "Fake pool gates deactivatedSlugs filtering on text.includes(ACTOR_ACTIVE_SQL), mirroring real Postgres (row exists, only a WHERE-predicate excludes it)", "covered": true},
+    {"ac": "process-projection.ts (prod) is byte-identical to dev@6c7aff0f in the committed diff — git diff dev...HEAD -- src/http/process-projection.ts empty", "covered": true},
+    {"ac": "Mutation A (DETAIL point-lookup predicate removed) -> 27/28, 1 RED, exact test named and reproduced", "covered": true},
+    {"ac": "Mutation B (batch PRIMARY lookup predicate removed, fallback intact) -> 26/28, 2 RED, both tests named and reproduced", "covered": true},
+    {"ac": "Both mutations reverted via `git checkout --` (no git stash used) leaving working tree clean", "covered": true},
+    {"ac": "No false-deny introduced for non-deactivated / active-participant actors", "covered": true},
+    {"ac": "target file 28/28, full unit suite 320 files/6001 tests/0 fail, tsc 0 errors, deactivation-gate PASS", "covered": true},
+    {"ac": "Batch FALLBACK-slug lookup (~L1423) independently mutation-proven as committed unit-test evidence", "covered": false, "note": "See finding R-1: NOT caught by this fast unit file (builder's own follow_ups over-claimed 'covers it by construction'); IS caught by the pre-existing static FF-0662-1 gate. Judged non-blocking because fallbackSlug is dead code at both current prod call sites (matches task's stated nit-resolution criterion) and a real, independent guard already exists — but the acceptance criterion as literally stated in judge's brief is not met by this commit's evidence."}
+  ],
+  "role_gap_evidence": []
+}
