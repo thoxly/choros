@@ -58,11 +58,16 @@ import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 // per-hop-ACL participant check reuse the ALREADY-MERGED authority resolvers —
 // NO second grant/lattice math (FF-INST-VIS-2): getRoleSlugsForActor
 // (role-eligibility, ACTOR_ACTIVE-gated T-0738), resolveActorPrivilege (the SAME
-// sandbox-privilege resolver records.ts falls back to, T-0557), pickTitleFieldKey
-// (schema-aware title picker, T-0613), isGenesisOwnerForTenant (owner, T-0658).
+// sandbox-privilege resolver records.ts falls back to, T-0557), deriveSafeRecordTitle
+// (schema-aware title picker built on pickTitleFieldKey, T-0613; extracted to
+// registry-title-field.ts by T-0769 as the shared authority a SECOND caller,
+// record-resolver.ts, now also reuses), isGenesisOwnerForTenant (owner, T-0658).
 import { getRoleSlugsForActor } from "../db/grants-dao.js";
 import { resolveActorPrivilege } from "../db/sandbox-gate-dao.js";
-import { pickTitleFieldKey } from "../core/registry-title-field.js";
+import {
+  deriveSafeRecordTitle,
+  GENERIC_RECORD_TYPE_LABEL,
+} from "../core/registry-title-field.js";
 // T-0759 [security/PDP P3, N1 из ревью T-0756 §1.2]: `isInstanceParticipant`/
 // `isInstanceParticipantBatch` clause (1) (audit-actor match) is now itself an
 // authority actor-resolver — ACTOR_ACTIVE_SQL is the SAME named predicate
@@ -1102,37 +1107,6 @@ export interface SourceRecordProjection {
   /** Owning application id — present ONLY when `canOpen` (the nav target the link needs). */
   readonly appId?: string;
 }
-
-function isPlainRecordObject(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === "object" && !Array.isArray(v);
-}
-
-/**
- * Derive the SAFE human title of a record: the schema-designated title field's
- * value (via pickTitleFieldKey — the SAME picker the assistant digest uses,
- * T-0613), else a neutral `«{typeLabel} · <id8>»`. NEVER scans data in key order
- * for an arbitrary first field (that could surface a non-title/sensitive value
- * to a participant who lacks READ) — only the deliberately designated field.
- */
-function deriveSafeRecordTitle(
-  data: unknown,
-  recordSchema: unknown,
-  recordId: string,
-  typeLabel: string,
-): string {
-  const obj = isPlainRecordObject(data) ? data : {};
-  const key = pickTitleFieldKey(recordSchema);
-  if (key !== null) {
-    const v = obj[key];
-    if (typeof v === "string" && v.trim().length > 0) return v.trim();
-    if (typeof v === "number" && Number.isFinite(v)) return String(v);
-  }
-  const short = recordId.length >= 8 ? recordId.slice(0, 8) : recordId;
-  return typeLabel.length > 0 ? `${typeLabel} · ${short}` : short;
-}
-
-/** Generic fallback type label — a domain-neutral noun, not a case literal (D-064). */
-const GENERIC_RECORD_TYPE_LABEL = "Запись";
 
 /**
  * T-0756: resolve the safe source-record projection for ONE record, tenant-scoped.

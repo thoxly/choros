@@ -10,11 +10,11 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  ExecGlyph, ActorChip, NodeRef, MonoId, Mono, Button, Field, Select,
+  ExecGlyph, ActorChip, NodeRef, RecordRef, MonoId, Mono, Button, Field, Select,
   LoadingState, ErrorState, EmptyState,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
-import { execTypeOf, fmtTs, humanError, buildAuditUrl, isOrgNodeMoveAction } from './screen-audit.logic.js';
+import { execTypeOf, fmtTs, humanError, buildAuditUrl, isOrgNodeMoveAction, isRecordEventAction } from './screen-audit.logic.js';
 
 /**
  * T-0648 (D-064, UX-study §3): the actor used to render as a bare slug/UUID
@@ -46,6 +46,20 @@ import { execTypeOf, fmtTs, humanError, buildAuditUrl, isOrgNodeMoveAction } fro
  * instead of ActorChip for these two types; everything else (target=null, or
  * a resolver miss leaving targetDisplay=null) keeps the pre-existing MonoId
  * technical-id fallback, same fidelity `record.create`'s target chip has.
+ *
+ * T-0769 (столп 4 анти-UUID — the SAME acknowledged baseline the paragraph
+ * above describes `record.create`'s fallback as): `record.create`/
+ * `record.update`/`record.deleted` now ALSO get a resolved `ev.targetDisplay`
+ * — the server's record-resolver.ts batch-resolves the touched record through
+ * choros.record ⋈ choros.registry_def (a record is neither an actor nor an
+ * org-tree node — a THIRD `{id, title, typeLabel, canOpen, appId}` shape,
+ * matching RecordRef's existing `projection` prop verbatim, no reshaping
+ * here). `isRecordEventAction(ev.action)` picks RecordRef (resolved record
+ * TITLE, optionally a link when canOpen) instead of ActorChip/NodeRef for
+ * these three types. A resolver MISS (record hard-deleted, or a malformed/
+ * foreign id) leaves `targetDisplay` null — the row then falls through to the
+ * SAME pre-existing raw-id MonoId chip as before this change (honest
+ * degradation, never a fabricated title).
  */
 // Named export (additive) — T-0712: no hooks inside this component (pure
 // props → JSX), so it is directly callable/unit-testable without a DOM or a
@@ -56,6 +70,7 @@ export function AuditEventRow({ ev }) {
   const display = ev.actorDisplay;
   const targetDisplay = ev.targetDisplay;
   const nodeMove = isOrgNodeMoveAction(ev.action);
+  const recordEvent = isRecordEventAction(ev.action);
   return (
     <div className="chs-ev">
       <div className="chs-ev__time">{fmtTs(ev.ts)}</div>
@@ -69,6 +84,8 @@ export function AuditEventRow({ ev }) {
           {targetDisplay ? (
             nodeMove ? (
               <NodeRef kind={targetDisplay.kind} name={targetDisplay.name} id={targetDisplay.id} />
+            ) : recordEvent ? (
+              <RecordRef recordId={targetDisplay.id} projection={targetDisplay} />
             ) : (
               <ActorChip type={targetDisplay.type} name={targetDisplay.name} id={targetDisplay.id} deactivated={targetDisplay.deactivated} />
             )

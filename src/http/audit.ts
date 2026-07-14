@@ -58,6 +58,13 @@
  * those ids too, through node-resolver.ts (the ORG-TREE-NODE sibling of
  * actor-resolver.ts) — same O(1)-query-per-page discipline, folded into the
  * SAME response pass as the T-0648 actor batch below.
+ *
+ * T-0769 (столп 4 анти-UUID, same acknowledged baseline T-0712/T-0733 closed
+ * for actors/nodes): `record.create` (and its siblings `record.update` /
+ * `record.deleted`) targets are RECORD ids — resolved through
+ * record-resolver.ts (the THIRD sibling: actor-resolver.ts for employees,
+ * node-resolver.ts for org-tree nodes, record-resolver.ts for records), same
+ * O(1)-query-per-page discipline, folded into the SAME response pass.
  */
 import pg from "pg";
 import { HttpError, type Router } from "./router.js";
@@ -77,6 +84,7 @@ import {
 } from "../db/audit-read-dao.js";
 import { batchResolveActors, resolveActorDisplay, type ResolvedActor } from "../db/actor-resolver.js";
 import { batchResolveOrgNodes, resolveNodeDisplay, type ResolvedNode } from "../db/node-resolver.js";
+import { batchResolveRecords, resolveRecordDisplay, type ResolvedRecord } from "../db/record-resolver.js";
 import {
   runDemoLegalPrecheck,
   demoApproveDenied,
@@ -678,14 +686,41 @@ async function handleGetAuditLog(
     }
   }
 
+  // T-0769 (столп 4 анти-UUID): `record.create`/`record.update`/`record.deleted`
+  // targets are RECORD ids — audit-read-dao.ts's `safeTarget` falls back to the
+  // writer's `record_id` payload key for every `record.*` type (records.ts /
+  // form-record-persister.ts / step-applier.ts have always populated it) — so
+  // this is a pure read-side enrichment, retroactive over every existing row,
+  // exactly like T-0733's node batch above. Resolved through record-resolver.ts
+  // (the THIRD sibling batch, choros.record ⋈ choros.registry_def). A resolver
+  // error degrades to an empty map — same failure discipline as the actor/node
+  // batches (never turns a redacted read into a 500).
+  const distinctRecordIds = new Set<string>();
+  for (const item of page.items) {
+    if (item.action.startsWith("record.") && item.target) distinctRecordIds.add(item.target);
+  }
+  let recordResolved: Map<string, ResolvedRecord> = new Map();
+  if (distinctRecordIds.size > 0) {
+    try {
+      recordResolved = await batchResolveRecords(pool, tenantId, [...distinctRecordIds]);
+    } catch {
+      recordResolved = new Map();
+    }
+  }
+
   const events = page.items.map((item) => {
-    let targetDisplay: ResolvedActor | ResolvedNode | null = null;
+    let targetDisplay: ResolvedActor | ResolvedNode | ResolvedRecord | null = null;
     if (item.action === "employee.moved" && item.target) {
       targetDisplay = resolveActorDisplay(actorResolved, item.target);
     } else if (item.action === "department.moved" && item.target) {
       targetDisplay = resolveNodeDisplay(nodeResolved, item.target, "department");
     } else if (item.action === "position.moved" && item.target) {
       targetDisplay = resolveNodeDisplay(nodeResolved, item.target, "position");
+    } else if (item.action.startsWith("record.") && item.target) {
+      // resolveRecordDisplay returns null on a miss (deleted/foreign record) —
+      // the frontend then falls through to its pre-existing raw-id MonoId chip
+      // (see the module doc's "HONEST DEGRADATION" note in record-resolver.ts).
+      targetDisplay = resolveRecordDisplay(recordResolved, item.target);
     }
     return {
       ...item,

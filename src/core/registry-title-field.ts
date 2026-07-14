@@ -166,3 +166,44 @@ export function pickTitleFieldKey(recordSchema: unknown): string | null {
   // --- Step 4: no schema-derived candidate ---------------------------------
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// deriveSafeRecordTitle / GENERIC_RECORD_TYPE_LABEL — T-0756 [E16 §6], reused
+// verbatim by T-0769.
+//
+// Extracted from process-projection.ts (T-0756's original home) so this IS the
+// single authority for "what is this record's human title" — every reader that
+// needs a record's SAFE display title (never an arbitrary data-order scan)
+// calls THIS function, built on the SAME `pickTitleFieldKey` heuristic above.
+// T-0769 (столп 4 анти-UUID) reuses it unchanged for the audit journal's
+// record-resolver.ts batch (a SECOND caller, not a second heuristic) —
+// process-projection.ts's resolveSourceRecordProjection (per-record, PDP-aware)
+// remains the FIRST caller, now importing from here instead of holding its own
+// private copy.
+// ---------------------------------------------------------------------------
+
+/** Generic fallback type label — a domain-neutral noun, not a case literal (D-064). */
+export const GENERIC_RECORD_TYPE_LABEL = "Запись";
+
+/**
+ * Derive the SAFE human title of a record: the schema-designated title field's
+ * value (via pickTitleFieldKey), else a neutral `«{typeLabel} · <id8>»`. NEVER
+ * scans data in key order for an arbitrary first field (that could surface a
+ * non-title/sensitive value) — only the deliberately designated field.
+ */
+export function deriveSafeRecordTitle(
+  data: unknown,
+  recordSchema: unknown,
+  recordId: string,
+  typeLabel: string,
+): string {
+  const obj = isPlainObject(data) ? data : {};
+  const key = pickTitleFieldKey(recordSchema);
+  if (key !== null) {
+    const v = obj[key];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  const short = recordId.length >= 8 ? recordId.slice(0, 8) : recordId;
+  return typeLabel.length > 0 ? `${typeLabel} · ${short}` : short;
+}
