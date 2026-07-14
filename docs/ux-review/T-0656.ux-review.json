@@ -1,0 +1,68 @@
+{
+  "task_id": "T-0656",
+  "verdict": "changes_requested",
+  "reviewed_sha": "ca36f4e",
+  "gate_seen": {
+    "green": true,
+    "_note": "ux-g2-theme-pairing PASS (light/dark paired in tokens.css + form-theme.css; form-designer.css вводит только --chs-* переменные, включая dark-парные --chs-color-accent/--chs-color-accent-soft — hex/rgb литералов нет). ux-g5-jargon-denylist PASS (46 находок — все в *.test.jsx файлах, ни одна не в web/src/forms/**, ни одна не введена этим диффом; INFORMATIONAL-режим). ux-g6-no-new-hardcode PASS (0 новых хардкод-цветов в диффе). ux-g4-state-primitives PASS (0 новых hand-rolled state веток)."
+  },
+  "themes_checked": [],
+  "_themes_note": "Только чтение кода/CSS/тестов (LIVE_PROOF реальным браузером — отдельная фаза, не моя). Токен-парность проверена статически (gate + grep каждого --chs-* имени из form-designer.css в tokens.css: все резолвятся, accent/accent-soft имеют оба [data-theme] варианта).",
+  "pattern_sources": [
+    {"element": "DropIndicator / контейнер-подсветка / клавиатурный reorder", "pattern": "content-management/drag-and-drop (uxpatterns-MCP get_implementation_checklist)", "mcp_ref": "mcp__ux-patterns__get_implementation_checklist(pattern='drag-and-drop')", "applied": true}
+  ],
+  "findings": [
+    {
+      "id": "UX-1",
+      "severity": "blocking",
+      "root": "B",
+      "location": "web/src/forms/FormDesigner.jsx:247 (containerHighlighted), containerKey() строки 169-172",
+      "issue": "Подсветка контейнера-приёмника вычисляется через hoverKey.startsWith(containerKey(...)) — это ПРЕФИКСНОЕ совпадение строки, не точное. containerKey строит путь без разделителя между сегментами индекса (join('/') только между сегментами МАССИВА пути, а не после последнего числа). Из-за этого контейнер с индексом 1 (containerKey='1') подсвечивается ложно, когда драг реально находится ВНУТРИ контейнера с индексом 10, 11..19 (containerKey='10' и т.д., hoverKey='10:0'.startsWith('1') === true). Воспроизведено детерминированно (node-скрипт): containerKey([1])='1', containerKey([10])='10', '10:0'.startsWith('1')===true. То же самое на вложенных путях: containerKey([0,1])='0/1', containerKey([0,10])='0/10', '0/10:0'.startsWith('0/1')===true. Любая секция/columns/tabs-контейнер с 10+ однопорядковыми контейнерами-соседями (вполне реальная форма — например tabs с 10+ вкладками, или 10+ секций подряд) ловит ложную подсветку НЕ ТОГО контейнера. Это прямое нарушение заявленной цели T-0656 («плейсхолдер показывает РЕЗУЛЬТАТ, не догадку») — для контейнерной подсветки догадка как раз и происходит, только по ошибке движка, не по недостатку дизайна.",
+      "suggestion": "Сравнивать hoverKey с ключом контейнера через точное равенство сегмента, а не startsWith на сырой строке — например добавить терминирующий разделитель в containerKey (напр. `${cp}|`) и матчить `hoverKey.startsWith(containerKeyWithSep)`, либо хранить hoverKey как структуру {containerPath, tabIndex, insertAt} вместо конкатенированной строки и сравнивать массивы поэлементно. Юнит-тест на 10+ контейнеров-соседей must-have до мержа — сейчас ни один тест (component-level для FormDesigner.jsx отсутствует вовсе) это не ловит."
+    },
+    {
+      "id": "UX-2",
+      "severity": "blocking",
+      "root": "B",
+      "location": "web/src/forms/form-designer.css:39-48 (.chs-designer-canvas--fullscreen) + FormDesigner.jsx:882-884,943-959",
+      "issue": "Fullscreen ломает ровно то, что должен облегчать. Палитра (<aside className=\"chs-designer-palette\">) и инспектор (<aside className=\"chs-designer-inspector\">) — соседи канваса в ОДНОЙ CSS grid-строке (chs-form-designer, gridTemplateColumns: '240px 1fr 380px'), а не его дети. Когда канвасу присваивается .chs-designer-canvas--fullscreen (position:fixed; inset:0; z-index:var(--chs-z-overlay); background:var(--chs-color-bg)), он становится непрозрачным полноэкранным слоем ПОВЕРХ этих соседей — они не двигаются, не получают повышенный z-index, никак не переносятся в canvas. Результат: в fullscreen-режиме палитра и инспектор физически скрыты за канвасом — нельзя перетащить новый блок из палитры (её не видно), нельзя настроить свойства выбранного блока (Inspector не виден). Это НЕ соответствует собственному ADR задачи (docs/design/ADR-T0656-forms-dnd-canvas.md, п.6): там явно обещана «узкая боковая вкладка-переключатель («Показать поля» / «Показать свойства»)» внутри тулбара канваса в fullscreen — grep по «Показать поля»/«Показать свойства» в FormDesigner.jsx и form-designer.css даёт 0 совпадений, тумблер не реализован. Подсказка, которая РЕАЛЬНО показывается пользователю в fullscreen-режиме («Палитра и свойства — по краям экрана. Esc — выйти.», FormDesigner.jsx:955-957) — ложное обещание: ничего не «по краям», обе панели просто не видны. Это ровно тот класс находки G5/честности, который OBLIK ловит («обещание ≠ действие»), плюс прямой удар по заказу фаундера «чтобы было реально удобно моделировать» — самый крупный канвас (fullscreen) оказывается РЕЖИМОМ ТОЛЬКО ПРОСМОТРА/РЕОРГАНИЗАЦИИ УЖЕ РАЗМЕЩЁННЫХ БЛОКОВ, без добавления новых и без настройки свойств.",
+      "suggestion": "Либо (а) реализовать обещанный в ADR боковой tab-переключатель «Показать поля»/«Показать свойства» внутри fullscreen-тулбара (простая toggle-панель, оверлей поверх канваса своим z-index выше --chs-z-overlay, как и было спроектировано), либо (б) если это не успевает в объём T-0656 — убрать вводящую в заблуждение подсказку «Палитра и свойства — по краям экрана» и явно предупредить, что fullscreen — режим только для перестановки уже добавленных блоков (плюс убрать это из ADR как unimplemented, либо пометить follow-up). Не блокировать релиз ложной строкой текста, которая обещает то, чего нет."
+    },
+    {
+      "id": "UX-3",
+      "severity": "nit",
+      "root": "A",
+      "location": "web/src/forms/FormDesigner.jsx — отсутствие component-level теста для FormDesigner.jsx",
+      "issue": "T-0656 добавил два хорошо протестированных pure-helper модуля (canvas-a11y.test.js, canvas-autoscroll.test.js), но ни одного теста НА САМ FormDesigner.jsx — ни на клавиатурный reorder end-to-end, ни на cut/paste интеграцию, ни на handleDrop dispatch (reorder/field/palette ветки), ни на containerHighlighted (которая и оказалась сломана, находка UX-1). Вся визуальная/интеграционная логика канваса непроверена автотестами.",
+      "suggestion": "Добавить хотя бы дымовой component-тест FormDesigner.test.jsx: рендер с initialDocument/initialFields, симуляция dragover/drop через синтетические события на DropIndicator, ArrowUp/ArrowDown на выбранном узле, Cmd+X/Cmd+V. Это разом ловит UX-1 и защищает от регрессий в handleDrop/moveNodeUp/moveNodeDown."
+    },
+    {
+      "id": "UX-4",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/forms/canvas-autoscroll.js + FormDesigner.jsx:840-870 (useEffect автоскролла)",
+      "issue": "Автоскролл не проверяет prefers-reduced-motion — при 48px-зоне у края и максимум 18px/фрейм это не «убегает» резким прыжком, скорость плавно растёт к краю (computeAutoscrollDelta пропорционален proximity), так что риска дезориентации немного; но чистый rAF-скролл — это тоже движение, которое некоторые reduced-motion пользователи ожидают приглушённым или отключённым. Не нашёл проверки matchMedia('(prefers-reduced-motion: reduce)') нигде в hook'e.",
+      "suggestion": "Не блокирует (скорость невелика, направление предсказуемо, поведение — не декоративная анимация, а функциональный скролл). Опционально: снизить AUTOSCROLL_MAX_SPEED_PX или отключить автоскролл целиком при matchMedia reduced-motion, оставив клавиатурный reorder как альтернативу (она уже есть и полна)."
+    },
+    {
+      "id": "UX-5",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/forms/FormDesigner.jsx:255-268 (handleKeyDown), 820-838 (window keydown)",
+      "issue": "Хорошая находка на честность: голый ArrowUp/ArrowDown (без Alt) на выбранном узле в CanvasNode работает как реордер ТОЛЬКО когда фокус на самом узле (data-node-key div, tabIndex=0) — это правильно, т.к. window-level слушатель (820-838) обрабатывает только Cmd/Ctrl+Z/Y/X/V и явно исключает ввод в INPUT/TEXTAREA/SELECT (`inField` guard). Но ArrowUp/ArrowDown-реордер НЕ имеет inField-guard на уровне CanvasNode — если чей-то родительский контейнер случайно перехватит bubbling до текстового поля инспектора (что архитектурно не должно происходить, т.к. это разные React-поддеревья), это не аффектит. Проверено: onKeyDown повешен ЛОКАЛЬНО на div узла (не window), так что нет риска перехвата ввода в Inspector-полях — ложная тревога, но стоило явно перепроверить, т.к. в промпте это прямо спрашивалось.",
+      "suggestion": "Нет действия — поведение корректно и безопасно. Оставляю как явную проверку (не блокирует)."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "DropIndicator показывает результат (плейсхолдер-бар по позиции курсора), не гадает", "covered": true, "note": "полноширинная полоса, box-shadow-акцент, активируется точным hoverKey на insertAt — корректно на уровне insertion-point"},
+    {"ac": "Подсветка целевого контейнера очевидна и корректна", "covered": false, "note": "механизм подсветки (startsWith на конкатенированной строке) даёт ложные срабатывания при 10+ контейнерах-соседях — UX-1, blocking"},
+    {"ac": "Перенос размещённых блоков между секциями/колонками/вкладками", "covered": true, "note": "moveNode/reorderNode вызовы корректны по сигнатурам; cross-container drop через moveNode проверен по коду handleDrop"},
+    {"ac": "Автоскролл у краёв, не «убегает»", "covered": true, "note": "плавно нарастающая скорость (proximity-based), максимум ограничен AUTOSCROLL_MAX_SPEED_PX=18px/frame; юнит-тесты покрывают монотонность и границы"},
+    {"ac": "Клавиатура — полная альтернатива мыши (можно собрать форму без мыши)", "covered": true, "note": "Alt/plain ArrowUp/Down реордер + Cmd/Ctrl+X/V клипборд поверх тех же ops; палитра/поля кликабельны (onClick рядом с draggable) — добавление блока без мыши работает через клик по PaletteBlock/FieldChip"},
+    {"ac": "Live-region анонсы информативны и по-человечески (не путь/fieldKey)", "covered": true, "note": "announceMove/Cut/Paste дают «Блок «Сумма» перемещён в «Оплата», позиция 2 из 4.» — имя, не fieldKey; юнит-тесты canvas-a11y.test.js подтверждают формат"},
+    {"ac": "Fullscreen работает не декоративно, палитра/инспектор остаются достижимы", "covered": false, "note": "кнопка переключает CSS-класс (не стаб), но результат прячет палитру/инспектор за fixed-оверлеем; обещанный в собственном ADR (§6) tab-переключатель «Показать поля/свойства» отсутствует в коде — UX-2, blocking"},
+    {"ac": "Тема (light/dark) — все новые элементы через --chs-* токены, contrast/G2 честный", "covered": true, "note": "ux-g2-theme-pairing PASS; form-designer.css не содержит hex/rgb; drop-indicator и container-highlight не полагаются только на цвет (outline+box-shadow+background одновременно)"},
+    {"ac": "Мёртвые кнопки отсутствуют — каждый контрол либо работает, либо честно disabled", "covered": false, "note": "fullscreen-toggle визуально «работает» (класс меняется), но текстовая подсказка внутри него лжёт о доступности палитры/инспектора — не классический дед-баттон, но эквивалент по вреду для доверия к UI"}
+  ]
+}

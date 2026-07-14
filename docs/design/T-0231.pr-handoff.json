@@ -1,0 +1,29 @@
+{
+  "task_id": "T-0231",
+  "status": "pr_open",
+  "branch": "task/T-0231",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/implementation-loop.ts",
+    "src/__tests__/implementation-loop.test.ts",
+    "ci/checks/impl-loop-b2-phase-bundle.sh",
+    "ci/checks/impl-loop-b4-interview-readonly.sh",
+    "ci/checks/impl-loop-b5-sim-no-dup-linter.sh",
+    "package.json",
+    "docs/design/T-0231.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "G-2 (ADR spec.contract §8): coherenceHash uses SHA-256 of canonical JSON (alphabetically sorted keys, depth-first). ADR requires determinism and desync-catching — both satisfied. Algorithm is realization-owned choice per G-2.",
+    "G-1 (ADR spec.contract §8): implementation and bundle are in-memory TypeScript types (not new DB tables). ADR §15 explicitly permits projections without authority-store; no migration added because B-2 entities are pure projections as required. If persistence is needed later, a migration will be added then.",
+    "G-4 (ADR spec.contract §8): simulation mode-1 uses a GatewayRoute[] DI port for routing rules rather than parsing BPMN XML to extract gateway conditions. lintBpmn (T-0027) is called first as the sole BPMN linter (FR-B5-3). The route-calculation itself uses the deterministic gateway evaluator against the provided routes — this is a valid realization of 'deterministic attribute traversal through gateways/DMN' per §8.1.",
+    "No migration 060 added: ADR §15 and spec G-1 allow projections to be in-memory/derived. The phase-machine and bundle are TypeScript types without new DB tables. Migration 059 (B-1) is the last migration added to date."
+  ],
+  "friction_events": [],
+  "notes": "B-2..B-5 all implemented in single file src/core/implementation-loop.ts. 51 unit tests covering AC-1..AC-19 (AC-7/8/12/16/20 covered by fitness checks). 3 fitness checks (b2/b4/b5) all green with self-tests. 2091 existing tests pass, 0 regressions. FROZEN-CLEAR: grant-lattice.ts and object-handle.ts unmodified; isNarrowerOrEqual imported as pure reader. Agent LLM runtime stays DORMANT. Symlinked node_modules from main choros checkout for local gate (CI runner installs its own). Note: Check-9 of implementation-agent-seed.sh will need updating in a follow-up if it still asserts 'no src/ runtime module for implementation-agent' — the new file is named implementation-loop.ts (not implementation-agent), so Check-9 still passes."
+}

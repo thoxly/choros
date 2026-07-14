@@ -1,0 +1,68 @@
+{
+  "task_id": "T-0725",
+  "status": "pr_open",
+  "branch": "task/T-0725",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/db/live-form-schema.ts",
+    "src/http/forms-document-ops.ts",
+    "src/__tests__/forms-document-ops-application-id.test.ts (NEW)",
+    "ci/checks/db/T-0725-document-ops-application-id-gate.db.test.ts (NEW)",
+    "docs/tasks/T-0725.spec.md (NEW)",
+    "docs/tasks/T-0725.adr.md (NEW)",
+    "T-0725.pr-handoff.json (NEW)"
+  ],
+  "summary": "N-1 из ревью T-0711 (non-blocking finding, §6, ось 4): POST /api/forms/document-ops принимал опциональный applicationId (T-0711), но агент не обязан его слать — на процессе с 2+ привязками (process_app_binding UNIQUE(tenant,process_key,application_id), migration 075) без пина запрос молча резолвился через T-0711 фолбэк (ORDER BY created_at ASC — старейшая привязка), возможно НЕ ту схему. Человек (FormDesigner) всегда шлёт выбранное приложение СТРУКТУРНО — пикер управляет и палитрой полей, и вызовом persistLayout(...,selectedAppId) (T-0711 review §1(а)) — асимметрия. ФИКС (строго аддитивно — resolveLiveRecordSchema/classifyLayoutSave/floor1-editor/FormBuilder НЕ тронуты): (1) контракт роута (forms-document-ops.ts header JSDoc 'Route:' блок) теперь ЯВНО называет applicationId принимаемым опциональным полем — тот же паттерн 'сервер уже принимал, декларация недоставала', что T-0700 применил для targetRegistrySlug в TOOL_AUTHOR_BINDING (assistant-configurator.ts); (2) новая listProcessAppBindingCandidates (src/db/live-form-schema.ts) — перечисляет ВСЕ process_app_binding строки процесса (JOIN choros.application за человекочитаемым slug/display_name), НЕ используется резолюцией T-0711 (та остаётся неизменной для каналов без пикера); (3) пре-флайт-гейт в document-ops-хендлере: applicationId отсутствует + 2+ привязки → 422 AMBIGUOUS_APPLICATION (машиночитаемый code + message, перечисляющий ВСЕ кандидаты с applicationId), запускается ДО applyDocumentOp/classifyLayoutSave — никакой записи в form_binding не происходит. 1 привязка (или 0) — гейт не срабатывает, T-0711/T-0656 поведение НЕ регрессирует.",
+  "ambiguity_gate": {
+    "detector": "COUNT(process_app_binding строк для (tenant_id, process_key)) > 1 И applicationId отсутствует в теле запроса. Малформенный applicationId (не UUID-shape) уже честно 400 VALIDATION раньше (assertUuidShape, до транзакции) — до гейта доходит либо null (не прислали), либо валидный UUID (гейт неприменим, дальше решает classifyLayoutSave/T-0711).",
+    "single_binding": "candidates.length <= 1 → гейт молчит, T-0711 фолбэк/fail-closed без изменений — доказано unit AC-d и live-PG AC-d (PROC_SINGLE без пина → 200, PROC без привязок вообще → прежний 409 WRONG_FLOOR через существующий fail-closed путь, НЕ 422).",
+    "error_shape": {
+      "http_status": 422,
+      "code": "AMBIGUOUS_APPLICATION",
+      "precedent": "тот же статус, что floor1-editor.ts's 422 UNKNOWN_FIELD — 'well-formed запрос, семантически неисполним без уточнения', отличим от 409 WRONG_FLOOR (контентная классификация) и 400 VALIDATION (форма запроса)",
+      "message_style": "'Process \"<processKey>\" is bound to N applications — pass applicationId... Candidates: <displayName|slug|id> (applicationId=<uuid>); ...' — машиночитаемый code для программного распознавания + человеко-подсказка со ВСЕМИ id, чтобы агент мог повторить запрос без повторного похода за списком (та же 'ask, не guess' дисциплина, что relation-cascade.ts / assistant-configurator.ts edit_jsonschema)"
+    }
+  },
+  "human_parity": {
+    "human_path_unchanged": "POST /api/forms/binding (binding.ts), floor1-editor.ts /edits, FormBuilder — ЗЕРО изменений кода; их существующие suites (form_binding_layout.db.test.ts, floor1-editor.test.ts, T-0711-multi-app-binding-resolve.db.test.ts) зелёные без единой правки.",
+    "agent_path_before": "мог прислать пин (опционально); на мульти-привязке без пина ТИХО получал схему старейшей привязки, без сигнала.",
+    "agent_path_after": "пин ОСТАЁТСЯ опциональным (НЕ введён required-параметр — не ломает существующие single-binding вызовы); на РЕАЛЬНО неоднозначном процессе (2+ привязки) без пина — честный 422 вместо тихого промаха. Асимметрия «человек всегда попадает в свою схему, агент может тихо промазать» закрыта: агент либо попадает (с пином), либо честно блокируется (без пина на неоднозначности), никогда не промазывает молча."
+  },
+  "deviations_from_adr": [],
+  "tests_added": [
+    {
+      "file": "src/__tests__/forms-document-ops-application-id.test.ts",
+      "covers": "5 юнитов, stub pg.Pool (multi-binding aware, honors 3-й bind-параметр = пин): AC-a/b pin=B+B-поле → 200 (резолв ПИННУТОЙ привязки); pin=A+то же B-поле → 409 WRONG_FLOOR (пин реально меняет схему, реюз T-0711); AC-c без пина+2 привязки → 422 AMBIGUOUS_APPLICATION, message содержит ОБА applicationId, UPDATE не вызван (captured.updateCalled undefined); AC-d без пина+1 привязка → 200 (T-0711 фолбэк не сломан); без пина+0 привязок → прежний 409 WRONG_FLOOR (не 422 — гейт неприменим, существующий fail-closed путь)"
+    },
+    {
+      "file": "ci/checks/db/T-0725-document-ops-application-id-gate.db.test.ts",
+      "covers": "5 тестов, live PG :55432, изолированный тенант, нейтральные фикстуры (t0725-*): AC-c процесс с ДВУМЯ привязками (A, B — разные live-схемы alpha_only/beta_only) без applicationId → 422 AMBIGUOUS_APPLICATION, message называет оба applicationId; form_binding.version/layout НЕ изменены после отказа (прямой SELECT после 422); AC-a applicationId=B + B-only поле → 200; AC-b applicationId=A + то же B-only поле (на ДРУГОМ form_key, чтобы не зависеть от состояния теста AC-a) → 409 WRONG_FLOOR; AC-d процесс с ОДНОЙ привязкой (SOLO) без applicationId → 200 (T-0711 фолбэк живьём не сломан)"
+    }
+  ],
+  "gates": {
+    "tsc": "green — npm run build (tsc + seed/tsconfig), exit 0",
+    "eslint_server": "green — npm run lint, 0 ошибок в изменённых файлах (src/db/live-form-schema.ts, src/http/forms-document-ops.ts); 45 pre-existing console-warnings в НЕ затронутых файлах (не в этом диффе)",
+    "vitest_targeted_server": "green — 14 файлов / 301 тестов, все импортёры затронутых модулей (live-form-schema.ts, forms-document-ops.ts, binding.ts): assistant-configurator 42, process-catalog-target-registry 7, floor-boundary-wire 17, binding-fields-from-layout 13, binding-owner-bypass 4, agent-facing-auth-wraps-p1 16, floor1-editor 69, forms-document-ops-application-id 5 (NEW), binding-get-layout 4, agent-facing-auth-wraps 12, forms-document-ops-wire 6, live-form-schema-application-id 7, binding-layout-shape 3, agent-auth-bypass.adversarial 96 — все PASS, 0 failed",
+    "vitest_db_targeted": "green — live PG localhost:55432 (docker choros-postgres-1): T-0725-document-ops-application-id-gate.db.test.ts 5 passed (NEW) + T-0711-multi-app-binding-resolve.db.test.ts 7 passed (regression guard) + form_binding_layout.db.test.ts 8 passed (regression guard) = 20/20. Полный fitness:db НЕ гонялся — по прямой инструкции задачи (точечные прогоны своих + смежных файлов)",
+    "fitness_targeted": "green — anti-case-lock.sh PASS (aggregate 15 ≤ baseline 16, без роста; фикстуры t0725-* нейтральны), forms-schema-binding.sh PASS, named-binding-isolation.sh PASS (NB-1..NB-6 все зелёные)"
+  },
+  "live_proof_plan": {
+    "status": "deferred — стенд offline на момент задачи",
+    "steps": [
+      "1. На dev-стенде (Tailscale 100.121.76.86:3000, залогиненная сессия) через экран «Процессы» (BindProcessModal) привязать ОДИН published-процесс к ДВУМ приложениям (A и B), каждое со своим registry_def (разные наборы полей).",
+      "2. Через ассистента (текстом, БЕЗ явного указания приложения): 'собери форму для процесса <X>, добавь поле <из схемы B>' — агент вызывает POST /api/forms/document-ops БЕЗ applicationId → ожидается, что ассистент получает 422 AMBIGUOUS_APPLICATION и, вместо тихого сохранения против произвольной схемы, ЗАДАЁТ уточняющий вопрос пользователю ('к какому из двух приложений — A или B?') с именами кандидатов из error.message.",
+      "3. Пользователь отвечает 'B' (или ассистент сам называет slug/display_name из списка кандидатов) — повторный запрос с applicationId приложения B → ожидается 200, поле реально добавлено в раскладку, видно в FormDesigner при открытии той же формы.",
+      "4. Тот же сценарий с applicationId=A (пользователь явно просит другое приложение) на поле, существующем ТОЛЬКО в схеме B → ожидается честный 409 WRONG_FLOOR (не тихий save против чужой схемы) — ассистент сообщает пользователю, что поле не относится к выбранному приложению.",
+      "5. Регресс: процесс с ОДНОЙ привязкой — тот же текстовый сценарий БЕЗ упоминания приложения → ассистент сохраняет форму сразу (200), без уточняющего вопроса — не сломан T-0711 фолбэк на структурно-однозначном процессе.",
+      "6. Human-путь (FormDesigner UI) на ТОМ ЖЕ мульти-привязочном процессе — пикер «Приложение» уже выбран, save работает как раньше, без 422 (человеческий путь не затронут этой задачей)."
+    ]
+  },
+  "friction_events": []
+}

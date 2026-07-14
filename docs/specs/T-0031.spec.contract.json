@@ -1,0 +1,61 @@
+{
+  "task_id": "T-0031",
+  "status": "ready",
+  "summary": "Ship the encodeGrantAuditEvent/encodeAssignmentAuditEvent encoder (pure function, the contractual seam T-0030 calls at every grant write call-site) that maps GrantAuditEvent→AuditEventInput for the T-0016 audit floor, plus the grant-trail read API (GET /api/grant-trail, filterable by role/actor/subject) and UI wiring of GrantTrailScreen to the live endpoint, so every grant create/revoke/assignment change is permanently queryable as a first-class row in the unified per-tenant audit_event table.",
+  "functional": [
+    "FR-1 encodeGrantAuditEvent(e: GrantAuditEvent, nowMs: number): AuditEventInput — pure IO-free encoder exported from src/core/audit-grant-encoder.ts; maps kind→type, actor, subjectRoleId→subject, scope, proposedBy→proposed_by, confirmedBy→confirmed_by, capability→payload, nowMs→occurred_at; does NOT set chain columns (seq/prev_hash/row_hash/vocab_version).",
+    "FR-2 encodeAssignmentAuditEvent(e: AssignmentAuditEvent, nowMs: number): AuditEventInput — pure encoder for assignment.create/assignment.revoke events; maps actor, employeeId→subject, orgScope→scope, roleId→payload.roleId, proposedBy/confirmedBy, nowMs→occurred_at.",
+    "FR-3 queryGrantTrail(db, tenantId, opts): Promise<GrantTrailRow[]> — DB query function exported from src/db/audit-grant-trail.ts that reads audit_event rows where type IN ('grant.create','grant.revoke','assignment.create','assignment.revoke') inside withTenant (RLS-scoped); supports roleId/actor/subject/limit/beforeSeq filter options.",
+    "FR-4 GET /api/grant-trail — HTTP endpoint registered in src/http/grant-trail.ts; query params: role_id, actor, subject, limit (default 100, max 500), before_seq; returns {rows: GrantTrailRow[], hasMore: boolean}; static seed fallback when DATABASE_URL absent.",
+    "FR-5 GrantTrailScreen UI wiring — web/src/screens/rights/ra-grant-trail.jsx fetches GET /api/grant-trail on mount, renders live rows; TRAIL constant from ra-data.jsx becomes fallback/initial state only.",
+    "FR-6 Encoder is the contractual seam for T-0030: T-0030's coder imports encodeGrantAuditEvent and encodeAssignmentAuditEvent from src/core/audit-grant-encoder.ts and calls them before appendAuditEvent at every grant/assignment write call-site; this is additive for T-0030 (no change to the encoder's implementation)."
+  ],
+  "non_functional": [
+    "NF-1 Encoder is pure and IO-free: src/core/audit-grant-encoder.ts contains no pg/fetch/http/net/child_process import; static lint asserts this; equal inputs => equal output.",
+    "NF-2 Encoder does not redefine GrantAuditEvent: imports it verbatim from grant-lattice.ts; grant-lattice.ts is not edited by T-0031.",
+    "NF-3 No new tenant table: grant trail data lives entirely in audit_event; known_tenant_tables.txt unchanged; any seed migration is INSERT-only into audit_event numbered 030+.",
+    "NF-4 Trail query is RLS-scoped: queryGrantTrail always runs inside withTenant (sets choros.tenant_id GUC); cross-tenant leakage is prevented by the existing audit_event RLS policy.",
+    "NF-5 Chain compatibility: encoder output fields match audit_event column set exactly; payload is a plain JSON-serializable object; occurred_at is epoch-ms as TS number; no chain columns in the returned AuditEventInput.",
+    "NF-6 No edit to audit_event DDL: T-0031 adds no columns and ships no DDL migrations for audit_event or audit_head.",
+    "NF-7 Backward-compatible static fallback: GET /api/grant-trail returns seed data when DATABASE_URL is not set, preserving current dev-no-Postgres UI behavior.",
+    "NF-8 HTTP error codes machine-readable: limit>500 or non-integer limit/before_seq => 400 INVALID_PARAM."
+  ],
+  "out_of_scope": [
+    "appendAuditEvent live DB implementation = T-0053 (Postgres-in-compose); T-0031 delivers the encoder that produces AuditEventInput; the live append path is T-0053.",
+    "T-0030 HTTP write-call-sites: T-0030's coder adds the import+call to encodeGrantAuditEvent at its write call-sites; T-0031 only delivers the encoder and its contract.",
+    "assignment.narrow event type: the UI seed has action='narrow'; day-1 scope is grant.create/grant.revoke/assignment.create/assignment.revoke only; narrow is a future event type.",
+    "role_criticality (crit) flag pre-computation on trail rows = T-0040/T-0044; UI recomputes client-side.",
+    "Export/download button in GrantTrailScreen.",
+    "Server-side filter by action type (grant/revoke/narrow tabs): day-1 client-side filter; server-side type filter is deferred.",
+    "Dual-control gate confirmation audit events = T-0044 (E4.6).",
+    "LLM-proposes grant workflow audit = T-0039 (E3.5); encoder already threads proposed_by/confirmed_by.",
+    "Keycloak/JWT auth in the trail endpoint = T-0054."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-01", "text": "encodeGrantAuditEvent({ kind:'grant.create', actor:'u1', subjectRoleId:'role-x', capability:{resourceType:'record',operation:'read'}, scope:{kind:'node',hierarchy:'org',nodeId:'dept-1',nodeLevel:'department'} }, 1000) returns AuditEventInput with type='grant.create', actor='u1', subject='role-x', scope equal to the supplied ScopeElement, proposed_by=null, confirmed_by=null, payload.resourceType='record', payload.operation='read', occurred_at=1000.", "verifiable_as": "test"},
+    {"id": "AC-02", "text": "encodeGrantAuditEvent with proposedBy='llm' and confirmedBy='u2' returns proposed_by='llm' and confirmed_by='u2'.", "verifiable_as": "test"},
+    {"id": "AC-03", "text": "encodeGrantAuditEvent with kind='grant.revoke' returns type='grant.revoke'.", "verifiable_as": "test"},
+    {"id": "AC-04", "text": "encodeGrantAuditEvent with capability.resourceFacet present includes resourceFacet in payload; absent resourceFacet produces no resourceFacet key in payload.", "verifiable_as": "test"},
+    {"id": "AC-05", "text": "encodeAssignmentAuditEvent({ kind:'assignment.create', actor:'u1', employeeId:'emp-1', roleId:'role-x', orgScope:{kind:'node',hierarchy:'org',nodeId:'dept-1',nodeLevel:'department'} }, 2000) returns type='assignment.create', actor='u1', subject='emp-1', scope equal to orgScope, payload.roleId='role-x', occurred_at=2000.", "verifiable_as": "test"},
+    {"id": "AC-06", "text": "encodeAssignmentAuditEvent with kind='assignment.revoke' returns type='assignment.revoke'.", "verifiable_as": "test"},
+    {"id": "AC-07", "text": "Encoder output for both encodeGrantAuditEvent and encodeAssignmentAuditEvent contains no chain columns (seq, prev_hash, row_hash, vocab_version) — those fields are absent from the returned object.", "verifiable_as": "test"},
+    {"id": "AC-08", "text": "encodeGrantAuditEvent is pure: called twice with the same arguments (including explicit id override) returns structurally equal objects for all fields including id.", "verifiable_as": "test"},
+    {"id": "AC-09", "text": "Static lint: src/core/audit-grant-encoder.ts imports GrantAuditEvent and Scope from grant-lattice.ts and contains no pg, fetch, http, https, net, or child_process import.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "Static lint: src/core/grant-lattice.ts exports the GrantAuditEvent type unchanged from its current definition — T-0031 adds no new exports to and makes no edits to grant-lattice.ts.", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "Static lint: unit tests for audit-grant-encoder demonstrate the T-0030 call contract — at minimum one test shows: const input = encodeGrantAuditEvent(event, nowMs); followed by a mocked appendAuditEvent(tx, input) call — validating the seam is callable from T-0030 without further changes to the encoder.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "GET /api/grant-trail (no filters) returns HTTP 200 with JSON body { rows: [...], hasMore: boolean } where each row contains seq, id, type, actor, subject, scope, proposed_by, confirmed_by, payload, occurred_at.", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "GET /api/grant-trail?role_id=<id> returns only rows where subject=<id> (grant events) or payload.roleId=<id> (assignment events).", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "GET /api/grant-trail?actor=<id> returns only rows where actor=<id>.", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "GET /api/grant-trail?limit=5 returns at most 5 rows; hasMore=true when more rows are available.", "verifiable_as": "test"},
+    {"id": "AC-16", "text": "GET /api/grant-trail?limit=600 returns HTTP 400 INVALID_PARAM.", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "GET /api/grant-trail?before_seq=abc (non-integer) returns HTTP 400 INVALID_PARAM.", "verifiable_as": "test"},
+    {"id": "AC-18", "text": "GET /api/grant-trail when DATABASE_URL is not set returns HTTP 200 with static seed data (fallback, >= 1 row).", "verifiable_as": "test"},
+    {"id": "AC-19", "text": "queryGrantTrail runs inside withTenant (uses choros.tenant_id GUC). Cross-tenant: rows inserted for tenant A are not returned when queried as tenant B (covered by existing cross_tenant.test.ts via known_tenant_tables.txt audit_event entry).", "verifiable_as": "test"},
+    {"id": "AC-20", "text": "queryGrantTrail returns only rows where type IN ('grant.create','grant.revoke','assignment.create','assignment.revoke'). A row with type='approve' inserted into audit_event is NOT returned by queryGrantTrail.", "verifiable_as": "test"},
+    {"id": "AC-21", "text": "GrantTrailScreen mounts, calls fetch('/api/grant-trail'), and renders the response rows in the trail table (>= 1 .chs-trailrow element after fetch resolves); the static TRAIL constant is no longer the primary data source.", "verifiable_as": "manual"},
+    {"id": "AC-22", "text": "No new tenant table is created by T-0031. known_tenant_tables.txt is unchanged. Fitness lint asserts no new CREATE TABLE in any migration numbered 030+ shipped by T-0031.", "verifiable_as": "fitness"},
+    {"id": "AC-23", "text": "If T-0031 ships a seed migration (INSERT into audit_event), it is numbered 030+ and is idempotent (ON CONFLICT DO NOTHING or equivalent).", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0031-grant-trail.spec.md"
+}

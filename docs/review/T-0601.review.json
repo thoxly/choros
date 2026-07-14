@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0601",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "_note": "Судья прогнал всё независимо, не доверяя handoff-числам. Дифф c6db7b8..HEAD — ровно 8 файлов, скоуп-крипа нет: 1 CSS-правило (.chs-screen), новый гейт ci/checks/ux/ux-g8-scroll-reachable.sh, аддитивная вставка гейта в package.json::scripts.fitness, spec/adr/handoff-контракты и spec/adr .md. Единственная тронутая строка кода продукта — app.css:204 '.chs-screen { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }' (было 'overflow: hidden'). .chs-main/.chs-shell в диффе НЕ фигурируют — рамка вьюпорта не тронута (подтверждено git diff). Полный web vitest: 60 files passed | 1634 tests passed | 0 failed (exit 0). npm run build (root: tsc && seed tsconfig): exit 0. bash ci/checks/ux/ux-g8-scroll-reachable.sh → PASS (exit 0). --self-test → PASS все 4 фикстуры (exit 0). bash ci/checks/anti-case-lock.sh → PASS (base c6db7b8, delegates clean + full D-064 §5 denylist within baseline, aggregate 24=24 — новый .sh-гейт кейс-литералов не внёс). package.json &&-цепь: 333→335 (+2 ровно за main+self-test нового гейта, структура цепи не сломана, вставка сразу после ux-g2-theme-pairing и его --self-test). g8 встречается в fitness ровно 2 раза. Контракты spec/adr/pr-handoff валидны через demiurge/schemas/validate.py (validate_file, parsed-instance)."
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/app-shell/app.css:204 (.chs-screen) + web/src/screens/rights/ra-shell.jsx:116",
+      "issue": "Инвентаризация экранов в ADR/spec описывает 26 маршрутов внутри shell.jsx:1144 .chs-screen, но правило .chs-screen — общий класс, и его ВТОРОЙ потребитель — ra-shell.jsx:116 (суб-шелл 'Права и доступ', вкладки editor/criticality/sod/trail) — в инвентаризации явно не перечислен. Это НЕ дефект: ra-shell структурно идентичен (.chs-shell grid height:100vh overflow:hidden → .chs-main flex-column min-height:0 overflow:hidden → .chs-screen flex:1 min-height:0), фикс применяется к нему тем же CSS корректно и без двойного скролла (те же height:100% внутренние скроллеры). Замечание чисто документационное — полнота инвентаря.",
+      "suggestion": "Опционально: упомянуть ra-shell.jsx как второго потребителя .chs-screen в ADR §1, чтобы инвентарь был исчерпывающим. Не блокирует."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/ux/ux-g8-scroll-reachable.sh:98-105 (assert_no_overflow_hidden / assert_overflow_auto)",
+      "issue": "Гейт консервативен: правило вида '.chs-screen { overflow: hidden; overflow-y: auto; }' (где по CSS-каскаду overflow-y:auto ПОБЕЖДАЕТ и скролл фактически работает) гейт всё равно валит по A1 (over-strict). Проверено мутационной пробой — exit 1. Это безопасное направление (ложно-строго, не ложно-мягко): гейт не может пропустить реальный overflow:hidden-баг. Не дефект, отмечено для полноты.",
+      "suggestion": "Оставить как есть — over-strict здесь предпочтительнее; риск нулевой, поведение задокументировано в шапке скрипта."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1 (.chs-screen без overflow(-y):hidden)", "covered": true},
+    {"ac": "AC-2 (.chs-screen overflow-y:auto)", "covered": true},
+    {"ac": "AC-3 (.chs-main/.chs-shell остаются overflow:hidden)", "covered": true},
+    {"ac": "AC-4 (гейт PASS сейчас, FAIL на overflow:hidden-фикстуре)", "covered": true},
+    {"ac": "AC-5 (--self-test проходит)", "covered": true},
+    {"ac": "AC-6 (гейт вписан в fitness, &&-цепь цела)", "covered": true},
+    {"ac": "AC-7 (web vitest 100% зелёный)", "covered": true},
+    {"ac": "AC-8 (build зелёный)", "covered": true},
+    {"ac": "AC-9 (anti-case-lock зелёный)", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Мутационная проба (реальный прошлый инцидент вечно-зелёного гейта): plant overflow-y:hidden → gate exit 1 (A1+A2 fire); plant overflow:hidden короткая форма (исходный баг) → gate exit 1; plant overflow:hidden+overflow-y:auto → gate exit 1 (over-strict, safe). Все три покраснели, гейт не вечно-зелёный. Файл восстановлен к исходному SHA 734b76cf, git status clean.",
+    "Двойной скролл: подтверждено математикой flex/height — .chs-screen получает definite height (flex:1 в fixed-height flex-column .chs-main), группа A (.chs-inbox/.chs-org/.chs-audit-screen/.chs-rights/.chs-notif-screen/.chs-editor/.chs-forms-screen/.chs-asst) использует height:100% (не min-height:100%), значит заполняет ровно и не превышает → новый overflow-y:auto у .chs-screen dormant (scrollHeight===clientHeight). Проверено чтением CSS каждого группы-A корня.",
+    "Bare-div группа B: screen-spend.jsx:187 root = <div style={{maxWidth:940, margin:'0 auto', padding}}> без height/overflow — genuine bare div; overflow-x:hidden на .chs-screen предотвращает горизонтальную полосу."
+  ]
+}

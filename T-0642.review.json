@@ -1,0 +1,51 @@
+{
+  "task_id": "T-0642",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "fix_forward_round1": {
+    "prior_verdict": "BLOCKING (adversarial skeptic, security/XML-injection axis, round after this file's original approval)",
+    "finding": "injectCandidateGroups (src/core/user-task-role-mapper.ts:~219) wrote the DB-resolved role.slug into flowable:candidateGroups=\"<slug>\" WITHOUT XML-escaping. role.slug is attacker-controlled: POST /api/roles (src/http/seed-write.ts) accepted any non-empty string (typeof-only check, no charset validation; migrations/019_role.sql has no CHECK). Probe slug `x\" flowable:assignee=\"attacker` broke out of the candidateGroups attribute and injected an arbitrary flowable:assignee attribute into the deployed userTask XML, letting a tenant owner hard-assign Flowable tasks bypassing role-based routing. Sibling mapper agent-task-external-mapper.ts (T-0635) already had an escapeXml for its own injected values — T-0642 did not reuse it for this injection site.",
+    "fix": "Two layers, both verified: (1) escapeXml exported from agent-task-external-mapper.ts and reused (not duplicated) in user-task-role-mapper.ts — injectCandidateGroups now escapes roleSlug before interpolation. (2) POST /api/roles now validates slug against SLUG_RE (`^[a-z0-9][a-z0-9-]{0,63}$`, the same convention already used by applications.ts/registry-defs.ts) — a charset-violating slug is rejected with 400 VALIDATION before it ever reaches choros.role.slug. No migration added (app-level gate chosen over a CHECK constraint to avoid an existing-row migration hazard).",
+    "tests_added": "4 new security tests in user-task-role-mapper.test.ts (exact probe payload escaped + rogue attribute absent; &<>\" all escaped; clean slug unaffected regression; escaped output still lints) + 3 new tests in seed-write.authz.test.ts (probe payload -> 400; uppercase/space slug -> 400; normal dash slug -> 201 regression).",
+    "reverification": "Full targeted + full vitest suite re-run green post-fix (see T-0642.spec.md security_fix_round1.gates); tsc/build clean; anti-case-lock green; candidategroups-role-slug-linter.sh and role-migration-set.sh independently re-run green (no BPMN fixture or migration-set regression from this change).",
+    "residual_risk": "None identified for this injection site. Other choros.role.slug write paths (register.ts genesis/reader-role bootstrap, reader-grant.ts) use fixed system-literal slugs ('tenant-owner', 'reader'), not attacker input, and were left untouched — only POST /api/roles accepts a caller-supplied slug."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/process-defs.ts:818-821 (mapUserTaskRoleToCandidateGroups resolver callback)",
+      "issue": "resolveRoleSlugsByIds (grants-dao.ts) is written and documented as a BULK resolver (dedup + ANY($2::uuid[]) tenant-scoped read), but the wiring in publishProcessByKey invokes it once PER userTask-ref inside mapUserTaskRoleToCandidateGroups's internal loop (one query per distinct roleId, each with a 1-element array) rather than collecting all extractUserTaskRoleRefs(...) roleIds up front and resolving them in a single call. Functionally correct (per-process diagrams have few userTasks, and each call is its own tenant-scoped read-tx) — this is a latency/roundtrip nit, not a correctness bug.",
+      "suggestion": "Optional follow-up: have mapUserTaskRoleToCandidateGroups accept a batch-resolving port (roleIds: string[]) => Promise<Map<string,string>>, or have the process-defs.ts wrapper pre-resolve extractUserTaskRoleRefs(...).map(r => r.roleId) once and hand mapUserTaskRoleToCandidateGroups an in-memory lookup. Not blocking for this fix."
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/__tests__/process-defs.usertask-role.test.ts (whole file), src/__tests__/grants-dao.role-slug-resolution.test.ts",
+      "issue": "Routing proof stops at 'deployed XML string contains flowable:candidateGroups=\"<slug>\"' plus a separate unit/db proof that resolveRoleSlugsByIds resolves id->slug correctly. Nothing in this diff exercises getHoldersForRole/inbox.ts consuming that exact candidateGroups value end-to-end to prove it lands in a real holder's pool. This matches the established test-depth convention for the sibling publish-transform mappers (lane-role-mapper T-0457, agent-task-external-mapper T-0635) — executor-resolver.test.ts / inbox tests cover the slug-matching contract generically, not per fixing-task — so this is consistent with prior practice, not a regression in rigor. AC-8 (LIVE_PROOF on stand) is explicitly marked 'manual' in the spec and is the actual end-to-end proof.",
+      "suggestion": "None required for merge; AC-8 LIVE_PROOF on the stand is the intended closer of this gap per the spec itself."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8 (LIVE_PROOF)", "covered": false }
+  ],
+  "role_gap_evidence": [
+    "Diff verified against dev@a4a7e0e (git diff dev...HEAD): new src/core/user-task-role-mapper.ts (226 lines, pure transform + injected ResolveRoleSlug port), resolveRoleSlugsByIds added to src/db/grants-dao.ts (bulk, tenant-scoped, mirrors filterProvisionedAgentEmployeeIds exactly), one new Step 1.5 call site wired into publishProcessByKey (src/http/process-defs.ts) between mapAgentTaskToExternal and lintBpmn, as the spec requires.",
+    "Format check: injectCandidateGroups writes flowable:candidateGroups=\"<resolved-slug>\" (never the raw UUID) — verified in user-task-role-mapper.test.ts ('injects candidateGroups with the RESOLVED SLUG (not the UUID)') and process-defs.usertask-role.test.ts (deployed XML asserted via flowable.deployBpmn.mock.calls). ensureFlowableNamespace (T-0635) is imported and reused, not duplicated, and only invoked when something was actually wired (additive) — confirmed by reading the source and by the 'does not add xmlns:flowable when nothing was wired' test.",
+    "Consumers checked directly: executor-resolver.ts::resolveExecutor takes roleSlug; grants-dao.ts::getHoldersForRole matches WHERE r.slug = $2; inbox.ts reads candidateGroups[0] verbatim as roleSlug. All three match on slug, confirming the UUID-to-slug resolution is load-bearing, not cosmetic.",
+    "Regression checks read directly in code + tests: agentTask (serviceTask+executorType=agent) untouched — mapper filters strictly on localName==='userTask'; lane/timer-wired candidateGroups already present in row.bpmn_xml survive publish unmodified (explicit-wins precedence, tested with LANE_WIRED_XML fixture asserting 'buhgalter' survives over resolvable 'budget-approver'); plain userTask without assignedRoleId is a true no-op, resolver never invoked (asserted with vi.fn() call-count check).",
+    "T-0643 conflict risk assessed empirically, not just by inspection: cloned the worktree, checked out T-0642's tip (df00a8f) and ran `git merge --no-ff` against T-0643's spec commit (8a5e569, also based on a4a7e0e). Result: src/http/process-defs.ts merged CLEANLY with zero conflict markers — T-0642's Step 1.5 (line ~799) and T-0643's Step 2.65 (line ~866) land in sequence with no overlap, confirmed by grep after the merge. Only pr-handoff.json conflicted (expected — both are per-task handoff docs; trivial to resolve by keeping both entries or a merged summary). Import-block additions (T-0642 adds mapUserTaskRoleToCandidateGroups + resolveRoleSlugsByIds; T-0643 adds resolveDefaultStepResultSlug) sit on adjacent-but-distinct lines and did not conflict either.",
+    "Anti-case gate run directly: `bash ci/checks/anti-case-lock.sh` — PASS, Phase 1 + Phase 2 both green, soglasovanie count held at baseline (2), confirming the fixture rename (soglasovanie -> role-route-check, ТЭЛ 'Согласование' -> generic 'Test Process') documented in pr-handoff.json is test-fixture-only and did not touch platform code or erode the D-064 denylist.",
+    "Full verification run locally: `npx tsc --noEmit` clean (0 errors); targeted tests (user-task-role-mapper.test.ts 17, process-defs.usertask-role.test.ts 7, grants-dao.role-slug-resolution.test.ts 6) all green in isolation; full `npx vitest run` — 279 files passed / 2 skipped, 5454 tests passed / 10 skipped, 0 failed, matching pr-handoff.json's reported gate numbers exactly.",
+    "ci/checks/db/role-slug-resolution.db.test.ts (live-Postgres probe) read in full: seeds fresh hermetic tenants (never the shared dev-silo tenant), proves multi-role resolution, cross-tenant non-resolution (same UUID, wrong tenant -> empty), never-existed id -> empty, and partial-resolution semantics — consistent with AC-2/AC-3 and NF-4 tenant-scope requirement. Not re-run against live Postgres in this review pass (no DB available in this pass), but the DAO logic it exercises was independently confirmed via the pure-unit grants-dao test and direct source reading of the WHERE tenant_id=$1 AND id=ANY($2::uuid[]) query."
+  ]
+}

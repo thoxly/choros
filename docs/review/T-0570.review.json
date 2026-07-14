@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0570",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/read-pdp-anti-case.sh:79 (sed comment-strip)",
+      "issue": "Резидуал после R-1 фикса (не блокирует): sed-срезка trailing-комментариев не различает `//` внутри СТРОКОВОГО литерала — строка вида `export const P = \"x//role-approver\";` или protocol-relative URL `\"//cdn.tel-x.example\"` срезается по `//`, и литерал после него ускользает от скана (проверено PoC: обе проходят гейт с exit 0). При этом гард `[^:/]` корректно защищает `https://`-URL (проверено: `\"https://x.example/tel-abc\"` ловится), а мой оригинальный R-1 PoC (trailing `// FORBIDDEN` комментарий) теперь ловится. Резидуал требует НАМЕРЕННО сконструированной строки с `//` внутри литерала перед кейс-слагом — тот же класс усилий, что конкатенация `\"role-\" + \"approver\"`, которую никакой лексический (grep-based) гейт не ловит и не ловил, включая до-фиксную версию. Не однословный тривиальный обход, каким был R-1.",
+      "suggestion": "Опционально дожать при случае: резать только ` //` (пробел перед //) — тогда `\"x//...\"` и `\"//cdn...\"` останутся в скане; полная защита требует string-aware парсинга, что несоразмерно для bash-линтера."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/read-pdp-anti-case.sh:79 (greedy regex в sed)",
+      "issue": "Greedy `.*` в `s#^(\\+.*[^:/])//.*$#\\1#` срезает по ПОСЛЕДНЕМУ подходящему `//`, а не по первому (вопреки комментарию 'cut each added line at the first //'): строка с ДВУМЯ trailing-комментариями, где кейс-литерал только в ПЕРВОМ комментарии, оставляет текст первого комментария в сканируемой части → ложное срабатывание (проверено PoC). Направление отказа — fail-closed (блокирует легитимную строку, не пропускает вредную), т.е. безопасное; одиночный trailing-комментарий с литералом (обычный случай) корректно чист. Косметика: rare false-positive + комментарий кода не соответствует фактической семантике.",
+      "suggestion": "Заменить `.*` на non-greedy эквивалент, либо поправить комментарий на 'at the last eligible //' и принять fail-closed поведение осознанно."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/read-pdp-sentinel-coherence.sh:23-28 (check_coherence grep -qF)",
+      "issue": "FF-RP-15 гейт проверяет ПРИСУТСТВИЕ сентинел-литерала где угодно в migration 117 / carve-out (grep -qF по всему файлу), не позицию: если кто-то изменит nodeId в фактическом scope-JSON миграции, но оставит старый литерал в комментарии того же файла, гейт останется зелёным. Не блокирует: функциональный дрейф сида ловится самим амендированным FF-13 на первом же fitness:db (несовпавший с carve-out сид становится «hanging grant» → красный на каждом тенанте) — defense-in-depth существует; sentinel-coherence — дополнительный статический слой, не единственный.",
+      "suggestion": "Опционально: грепать литерал в контексте (`nodeId.*<literal>` / внутри jsonb-строки), не по всему файлу."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": false}
+  ],
+  "role_gap_evidence": [
+    "REVIEW ITERATION 3 (предмержевый дельта-чек f33df0b..743279b: FF-13 carve-out по амендированному ADR §10 + ребейз на dev@e727ad4 + перенумерация 115→117). Вердикт approved сохранён.",
+    "(1) FF-13 carve-out (bundle-coherence.test.ts): предикат HANGING_RECORD_GRANTS_SQL дословно совпадает с ADR §10.2 (resource_type='record' AND resource_facet IS NULL AND NOT(operation='read' AND scope kind/hierarchy/nodeLevel/nodeId = точная сентинел-форма)); санкц-комментарий двусторонний — цитирует ОБА контракта (T-0570 ADR §10 × T-0082 FR-3/AC-13) дословной формулой из §10.3 п.1 плюс обоснование structural-not-role exemption; FF-RP-14 force-тест использует ТУ ЖЕ предикат-константу (не копию), в ROLLBACK-транзакции сажает 3 адверсарные строки: (a) NULL-facet+read+НЕ-сентинел scope → ловится, (b) NULL-facet+update+сентинел → ловится (carve-out не шире санкции), (c) точная default-read форма → exempt (не уже). НЕ декорация — доказано мутационным тестом: временно расширил carve-out (operation='read' → operation IS NOT NULL) → FF-RP-14 покраснел с точным сообщением 'carve-out is wider than sanctioned' (expected to include badOpId); мутация откачена, worktree чист, после отката 3/3 зелёные.",
+    "(2) read-pdp-sentinel-coherence.sh (FF-RP-15): гейт честный — извлекает значение константы из source-of-truth (read-visibility.ts), fail-closed при неизвлечении, грепает точное вхождение в migration 117 и carve-out; --self-test сажает good (когерентные) и bad (дрейфнувший литерал …r1) фикстуры — прогнан: good чист, bad ловится (rc=1). Реальный прогон → PASS. Позиционная слабость (литерал в комментарии тоже матчится) зафиксирована nit R-5 — компенсирована тем, что функциональный дрейф ловит сам амендированный FF-13. Wired в package.json fitness (+--self-test) — подтверждено.",
+    "(3) Ребейз-резолюции на общих файлах, git diff dev...HEAD: dual-control-isolation.sh −0/+31 (чистая аддитивность, ноль удалённых строк), frozen-sanctions.jsonl −0/+1, role-criticality-migration-excludes.txt −0/+1, package.json −1/+1 где dev-строка fitness — СТРОГИЙ ПРЕФИКС новой (проверено программно), хвост = ровно 4 read-pdp чека с self-test'ами. T-0574-гарды НЕТРОНУТЫ: _dc_mig115_*/T0574-DC-MIG115-GUARD (assistant_agent_card_backfill) и _dc_mig116_* присутствуют из dev как есть; T-0570-гард переименован в _dc_mig117_*/T0570-DC-MIG117-GUARD — коллизий имён переменных нет; все added-строки T-0570 ссылаются только на migrations/117. Санкц-запись обновлена (decision=ADR-T-0570-migration-117-…, additive_basis упоминает _dc_mig117_*). Машинная верификация на ребейзнутой базе: frozen-checks-immutable.sh → PASS (A-1..A-4 + Враг-аттестация валидна, SANCTION/AUDIT явные). bash ci/checks/dual-control-isolation.sh → exit 0 (FAIL[FF-DC7]→relief PASS на 117 — задокументированный не-молчаливый паттерн).",
+    "(4) Перенумерация: grep -rn 'migration-115|migrations/115' по src/ ci/ migrations/ — ВСЕ оставшиеся вхождения принадлежат T-0574 (115_assistant_agent_card_backfill: их гарды в dual-control-isolation.sh, их db-тест migration-115-backfill.test.ts, комментарий в register.ts — унаследован из dev, 0 строк '115' в T-0570-диффе register.ts). T-0570-артефакты консистентно на 117 (миграция, granted_by/confirmed_by='migration-117', оба shell-гейта, комментарии records.ts/server.ts/db-тестов, ADR). Renumber-коммит e72d1c3 в src/ — только комментарии (проверено диффом).",
+    "(5) Прогнано на дельте: npx tsc --noEmit → чисто. read-pdp-sentinel-coherence.sh + --self-test → PASS. dual-control-isolation.sh → PASS. Остальные 3 READ-PDP гейта + self-test'ы → PASS. ЖИВОЙ DB-лейн на свежем изолированном postgres (порт 55499, снесён): все 103 миграции применились чисто В ПОРЯДКЕ 115(T-0574)→116(T-0574)→117(T-0570); bundle-coherence.test.ts 3/3 (амендированный FF-13 = 0 hanging-грантов на сидированных данных ВКЛЮЧАЯ backfilled default-read гранты, которые до carve-out красили бы FF-13 + FF-RP-14 force-тест), records-read-pdp.db.test.ts 4/4 (после renumber — важно: renumber лёг ПОСЛЕ тестерского отчёта итерации 2, поэтому перепрогнан мной), records_crud 17/17, T-0574's migration-115-backfill.test.ts 5/5 (кросс-задачная нетронутость). Итого 29/29.",
+    "Из итераций 1–2 без изменений: R-1 (дыра anti-case гейта) закрыт и перепроверен PoC'ом; R-2 (RP-11 composition-тест AC-6) добавлен и зелёный; production-wiring server.ts подключает resolveReadVisibility; N+1 отсутствует; миграция идемпотентна, без хардкода tenant-UUID; пустой rowIndex — задокументированная граница объёма; 6 предсуществующих несвязанных красных fitness-гейтов вне скоупа.",
+    "AC-11 (LIVE_PROOF на живом стенде) по-прежнему не воспроизведён этим ревью — manual-критерий по спеке, вне периметра автоматизированного code review; обязателен до закрытия задачи по D-064."
+  ]
+}

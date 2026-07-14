@@ -1,0 +1,43 @@
+{
+  "task": "T-0715",
+  "status": "done",
+  "branch": "task/T-0715",
+  "base": "dev@30c70f7b",
+  "commit": "45e66f43",
+  "task_type": "tests",
+  "changes_product": 0,
+  "files_changed": [
+    "web/package.json (devDependencies: + @testing-library/react@^16.3.2, + jsdom@^29.1.1)",
+    "web/package-lock.json (lockfile update for the above)",
+    "web/src/forms/FormDesigner.mount.test.jsx (new — real jsdom mount, 2 tests)",
+    "web/src/screens/screen-processes.mount.test.jsx (new — real jsdom mount, 3 tests)",
+    "web/src/screens/screen-inbox.mount.test.jsx (new — real jsdom mount, 3 tests)",
+    "web/src/screens/screen-record-detail.mount.test.jsx (new — real jsdom mount, 3 tests)"
+  ],
+  "test_counts": {
+    "before": { "files": 103, "tests": 2827 },
+    "after": { "files": 107, "tests": 2838 },
+    "new_tests_added": 11,
+    "full_suite_result_after": "107 files passed (107), 2838 tests passed (2838)"
+  },
+  "red_green_evidence": "Root cause confirmed structurally first: FormDesigner.jsx's `{registryDefs && (...)}` picker block (the exact block that crashed in T-0706, 'Cannot read properties of null (reading map)') lives inside `{!initialFields && (...)}` (line 1276) — it ONLY renders when the `initialFields` prop is ABSENT. Every existing FormDesigner.test.jsx render() call passes `initialFields={FIELDS}` (documented 'embedding/test mode'), so the crashing block was structurally UNREACHABLE by any pre-existing test, static or otherwise — confirming the file's own documented 'MOUNT-GAP'. RED experiment: reintroduced the pre-fix line verbatim (`{registryDefs && (` -> `{registryDefs && boundRegistryDef ? (`, i.e. dropped the outer null-guard so the ternary's last arm calls `registryDefs.map` unconditionally when registryDefs===null). Ran the FULL web suite under the break: 2 of 2829 tests failed (2 new tests existed at that point, only FormDesigner.mount.test.jsx). Of the 2827 PRE-EXISTING tests, only ONE failed — a string-literal 'regression lock' pin in FormDesigner.test.jsx that was added specifically after the T-0706 incident to grep for this exact source pattern (brittle: matches literal text, not behavior). The other 2826 pre-existing tests, including all 47 other assertions in FormDesigner's own sibling test file (render-smoke, fullscreen invariant, T-0665/T-0669/T-0706/T-0711/T-0682 wiring, etc.), stayed GREEN while the real /forms screen would white-screen on mount. The NEW FormDesigner.mount.test.jsx failed for the RIGHT reason: an actual uncaught React render exception, `TypeError: Cannot read properties of null (reading 'map')` thrown from FormDesigner.jsx:1348 during renderWithHooks -- i.e. it reproduced T-0706 live, via real behavior, not a source grep. Reverted the break (git diff on FormDesigner.jsx came back empty -- byte-identical to before); both FormDesigner.test.jsx (48/48) and FormDesigner.mount.test.jsx (2/2) went back GREEN. Secondary organic evidence (screen-inbox): while authoring InboxScreen's mount test with a plausible generic task fixture, the REAL component crashed (`Cannot read properties of undefined (reading 'left')` in SLACell, screen-inbox.jsx:480) because the fixture omitted the `sla` field that SLACell reads with no fallback -- confirming, independently and without any deliberate source edit, that a real mount test surfaces exactly this class of gap (a required-but-unguarded field) that a source-presence test cannot see at all. Fixed the fixture to carry a realistic `sla` object (matching the real API contract) and the test went GREEN; this is now a live regression net for SLACell.",
+  "screens_covered": [
+    "web/src/forms/FormDesigner.jsx (mounted with NO props -- the real /forms route shape; reaches the registry_def picker with registryDefs still null, the exact T-0706 crash state)",
+    "web/src/screens/screen-processes.jsx (ProcessesScreen, mounted with NO props inside MemoryRouter; covers loading gate, loaded grid, and the genuinely-empty-tenant EmptyState)",
+    "web/src/screens/screen-inbox.jsx (InboxScreen, mounted with NO props inside MemoryRouter + the real ToastProvider -- useToastContext()/useNavigate()/useSearchParams() are load-bearing, not decorative; covers loading gate, loaded task list, and the honest tenant-wide-empty CTA)",
+    "web/src/screens/screen-record-detail.jsx (RecordDetailScreen, mounted via its real route `/apps/:appId/records/:id` inside MemoryRouter+Routes+ToastProvider so useParams resolves realistically; covers loading gate, loaded record, and the honest 404 EmptyState)"
+  ],
+  "environment_investigation": {
+    "why_no_jsdom_before": "web/vitest.config.js was deliberately 'node' env (per its own header comment, T-0408): all .jsx screen tests were written as source-presence assertions against the raw .jsx text, or as renderToStaticMarkup single-pass renders (no effects/no re-renders) specifically BECAUSE neither jsdom nor @testing-library/react was ever a dependency anywhere in the repo (root or web node_modules/package.json) -- confirmed by direct search before starting this task. This is exactly the D-064 gap: 'mirror'/source-presence conventions were adopted as a workaround for a missing capability, not a deliberate choice, and several existing test files (FormDesigner.test.jsx's own P0 describe block, screen-inbox.test.jsx's InboxTaskForm comments) already self-documented the resulting 'MOUNT-GAP' in their own doc comments.",
+    "fix": "Installed @testing-library/react@^16.3.2 and jsdom@^29.1.1 as web devDependencies (web/package.json + package-lock.json). No global vitest.config.js split was needed: vitest 3.2.6 (the version already resolved from web/node_modules) supports a per-file `// @vitest-environment jsdom` docblock pragma (verified against node_modules/vitest/dist/chunks/coverage.*.js's `/@(?:vitest|jest)-environment\\s+([\\w-]+)\\b/` matcher) -- each new *.mount.test.jsx file opts into jsdom individually; all pre-existing test files keep running in the fast 'node' env, unaffected.",
+    "node_modules_caveat": "web/node_modules (and root node_modules) are symlinks to /Users/shoxy/Code/choros/node_modules (the trunk checkout) -- this worktree's node_modules is NOT private. `npm install` therefore wrote the new packages into the SHARED trunk node_modules (consistent with this repo's established 'npm install after merge' convention, DURABLE note from prior runs). web/package.json and web/package-lock.json themselves are real files in THIS worktree and are committed normally."
+  },
+  "screens_not_covered": [],
+  "notes": [
+    "Verify commands run from web/: `npx vitest run` (full suite, 107 files / 2838 tests, all green) and `npx eslint web/src --ext .jsx` (105 pre-existing errors/6 warnings across UNRELATED files, none in the 4 new files or any file this task touched -- confirms the new additions are lint-clean; the repo's own `web` lint script already runs with `|| true`).",
+    "tsc --noEmit not run: no .ts/.tsx file was touched (web is .jsx; only .jsx test files + package.json/package-lock.json changed).",
+    "No OBLIK/anti-case/D-056 gates apply -- pure test-tier addition, no product code touched, worktree lives outside .claude/worktrees so vitest's own discovery glob (src/**/*.test.jsx) is unaffected.",
+    "Did NOT fix the underlying fragility discovered in screen-inbox (SLACell has no defensive fallback for a missing/malformed `sla`/`deadline` shape) -- that is real PRODUCT code and out of scope for this tests-only, changes_product=0 task. Currently believed unreachable in production (src/http/inbox.ts always returns a populated sla/deadline per instance), so not spawned as a follow-up task; flagged here for visibility only.",
+    "Did not add @testing-library/jest-dom (not needed for the 'mount does not throw' + basic text/DOM-node assertions used here; kept the dependency footprint minimal)."
+  ]
+}

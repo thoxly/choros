@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0748",
+  "status": "pr_open",
+  "branch": "task/T-0748",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/keycloak/admin-port.ts",
+    "src/http/user-mgmt.ts",
+    "src/keycloak/fake-user-port.ts",
+    "web/src/screens/users-form.js",
+    "src/__tests__/admin-port.test.ts",
+    "web/src/screens/users-form.test.js",
+    "web/src/screens/screen-users.mount.test.jsx (NEW)",
+    "ci/checks/db/user-mgmt.db.test.ts",
+    "docs/tasks/T-0748.spec.md (NEW)",
+    "docs/tasks/T-0748.pr-handoff.json (NEW)"
+  ],
+  "summary": "T-0741 started sending KC firstName/lastName (derived from display_name via splitDisplayName). Keycloak's declarative user-profile validates both with person-name-prohibited-characters (realm-choros.json) — a display_name with characters that validator rejects (e.g. 'Bot #1', 'A&B') now ALSO 400s from POST /admin/realms/choros/users, but createHumanUser's 400-branch (admin-port.ts) unconditionally mapped EVERY 400 to EMAIL_INVALID (correct pre-T-0741, when that was the only possible 400 cause). user-mgmt.ts then told the owner 'email must be a valid email address' for a perfectly valid email while never naming the real problem (the display name). Fix: admin-port.ts now parses the KC 400 body's field-level messageKey (extractKcFieldErrors + isPersonNameCharacterError, both LIVE-CONFIRMED against a real KC 25.0.6) and throws a new NAME_INVALID_CHARACTERS code specifically when firstName/lastName fail the person-name validator; every other 400 (genuine bad email, unparseable body, unrelated-field drift) falls through UNCHANGED to EMAIL_INVALID. user-mgmt.ts maps the new code to an honest Russian 400 message; web/src/screens/users-form.js's mapUserError anchors it on the 'Отображаемое имя' field (screen-users.jsx's pre-existing generic field-anchor mechanism — no JSX changes needed).",
+  "root_cause": "admin-port.ts's createHumanUser 400-branch trusted the HTTP STATUS alone (400) as sufficient to identify EMAIL_INVALID, never inspecting KC's response BODY to see which field actually failed. That was a safe simplification before T-0741 (the only 400 this endpoint could produce was error-invalid-email); T-0741 added a second class of 400 (person-name validator on firstName/lastName) through the SAME status code, and the old branch silently absorbed it under the old label — a misattributed error, not a missing one.",
+  "live_proof": "docs/tasks/T-0748.spec.md §3 — real KC 25.0.6 (container t-0633-keycloak-1, :8180, choros-registrar client_credentials, the EXACT path createHumanUser itself uses), probed 2026-07-11. Confirmed the two live 400 body shapes admin-port.ts now parses: single-object {field,errorMessage} when one field fails, {errors:[...]} array when multiple fail in the same request. Person-name validator's messageKey is 'error-person-name-invalid-character', always on field firstName/lastName, never on email. No orphan KC users left behind by any 400 case (KC rolls the create back on validation failure — verified by re-querying all 4 throwaway probe usernames post-hoc: none existed). The unit tests in src/__tests__/admin-port.test.ts (AP-9) replay these exact live-observed body shapes through a local stub HTTP server — matches this file's own existing convention (AP-6/AP-8 already stub KC's 409 disambiguation the same way); the live probe is what anchors those stub bodies to reality.",
+  "red_to_green": "Reverted src/keycloak/admin-port.ts to its pre-fix state (git diff saved, git checkout -- to revert, git apply to restore — no git stash used) and re-ran src/__tests__/admin-port.test.ts -t AP-9: the 3 new person-name-error cases FAILED as expected ('expected EMAIL_INVALID to be NAME_INVALID_CHARACTERS' — i.e. reproduced the exact production bug), the 3 regression cases (genuine bad email / unparseable body / unrelated field) already passed pre-fix. Restored the fix via git apply; all 30/30 admin-port.test.ts tests green again (verified, not assumed).",
+  "gates": {
+    "tsc_noemit": "PASS — npx tsc --noEmit (repo root, src/): exit 0, 0 errors",
+    "eslint_targeted": "PASS — admin-port.ts/user-mgmt.ts/fake-user-port.ts/admin-port.test.ts: 0 errors, 2 pre-existing no-console warnings in user-mgmt.ts at lines 791/940 (outside this diff — git diff shows only lines 441-462 touched; confirmed byte-identical to origin on those lines)",
+    "admin_port_unit": "GREEN — npx vitest run src/__tests__/admin-port.test.ts (no ambient DATABASE_URL): 30/30 passed, including new AP-9 (6 cases: 3 person-name-error -> NAME_INVALID_CHARACTERS live shapes [single-field firstName, single-field lastName, multi-error array], 3 regression -> EMAIL_INVALID unchanged [genuine bad email, unparseable body, unrelated field])",
+    "admin_port_red_green": "RED (pre-fix, reverted admin-port.ts): 3/6 AP-9 cases failed exactly as the production bug describes (EMAIL_INVALID instead of NAME_INVALID_CHARACTERS). GREEN (fix restored): 30/30",
+    "user_mgmt_db_live_pg": "GREEN — DATABASE_URL=postgres://choros_migrator:...@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism ci/checks/db/user-mgmt.db.test.ts (SOLO): 40/40 passed (37 pre-existing + 3 new T-0748 cases: display_name='Bot #1' -> 400 NAME_INVALID_CHARACTERS with Russian 'имя'+'символ' message and NOT the email text; ordinary two-word display_name still 201 unaffected; KC-side EMAIL_INVALID defense-in-depth path still maps to the exact prior 400 VALIDATION email message)",
+    "web_users_form_unit": "GREEN — npx vitest run web/src/screens/users-form.test.js: 25/25 passed (22 pre-existing + 3 new mapUserError T-0748 cases)",
+    "web_mount_jsdom": "GREEN — npx vitest run web/src/screens/screen-users.mount.test.jsx (real React+jsdom mount of <UsersScreen/>, opens the real 'Создать учётку' modal, fills real form fields, submits, asserts on real rendered DOM): 2/2 passed — (1) NAME_INVALID_CHARACTERS 400 shows 'недопустимые символы' on the Отображаемое имя field (aria-invalid=true), email field stays valid, misleading email text absent from the whole dialog; (2) regression: EMAIL_TAKEN 409 still anchors on Email, unaffected by the new branch. Per-test timeout raised to 15000ms (see friction_events) — a known systemic full-suite-parallel-CPU-contention flake class also observed on the PRE-EXISTING screen-record-detail.mount.test.jsx (unrelated to this diff), not this test's own logic (reliably 1.5-3.2s when run solo/small-group).",
+    "web_full_suite": "GREEN — npx vitest run (web/, full suite): 114/114 test files, 2888/2888 tests passed",
+    "src_full_suite": "GREEN — npx vitest run (repo root, no ambient DATABASE_URL, full suite): 319/321 test files passed (2 skipped, pre-existing — flowable-client.integration.test.ts requires a live Flowable engine), 5977/5994 tests passed (17 skipped, same pre-existing reason)",
+    "fitness_targeted": "PASS — user-mgmt-no-secret-leak.sh, user-mgmt-reuses-kc-port.sh, kc/user-profile-actor-type.sh (T-0734 intact), anti-case-lock.sh (full D-064 §5 denylist: aggregate 15<=16 baseline, erodes-or-steady — 0 new anti-case literals from this diff), ux-g5-jargon-denylist.sh (informational, exit 0, 0 change attributable to this diff), ux-g6-no-new-hardcode.sh (0 newly-added hardcode findings)"
+  },
+  "deviations_from_adr": [],
+  "security_notes": [
+    "No new attack surface: this is purely an error-message ATTRIBUTION fix. The underlying create-user authorization gate (authorizeOrgWrite/loadAdminContext/assertOrgObjectAuthority) and the anti-collision LOGIN_RESERVED guard are untouched (diff starts strictly after kc.createHumanUser's catch block).",
+    "extractKcFieldErrors/isPersonNameCharacterError only ever READ Keycloak's own response body to pick a more specific error CODE — no new trust boundary crossed, no new external input accepted (the body already flows through this function's neighbor extractKcErrorMessage for the 409 case since T-0633).",
+    "Safe-default preserved end-to-end: any 400 body shape this parser doesn't recognize (empty, unparseable, unrelated field, KC-version drift) falls through to the EXACT prior EMAIL_INVALID behavior — proven by 3 explicit regression tests at the admin-port.ts layer and 1 at the user-mgmt.ts/DB layer."
+  ],
+  "follow_ups": [
+    "Not fixed here (T-0741 §6, unchanged, out of scope): src/core/register.ts (self-registration) does not pass displayName to createHumanUser at all, so this class of error cannot occur on that path — but self-registration also cannot yet benefit from T-0741's firstName/lastName fix either (its display_name is the email address, splitting it would be nonsense). Pre-existing gap, not introduced or widened by T-0748."
+  ],
+  "judge_attack_surface": [
+    "Try a KC 400 that has BOTH a bad email AND a bad name in the same request ({errors:[...]} array) — must still surface NAME_INVALID_CHARACTERS, not silently prefer the email branch (AP-9 case 3, DB test not separately covering the mixed case — only the unit layer does, since the DB test drives the fake port which models one KC-side code at a time, not raw KC body parsing).",
+    "Try to break the substring match in isPersonNameCharacterError with a field that happens to contain 'person-name' in its NAME but isn't firstName/lastName — the field check (fe.field === 'firstName' || fe.field === 'lastName') is a hard equality gate BEFORE the substring check, so this cannot false-positive on e.g. a hypothetical 'personNameHint' field.",
+    "Try an ordinary two-word Cyrillic display_name end-to-end through the real HTTP route (DB test 'T-0748 regression: an ordinary display_name...') — must still 201, unaffected.",
+    "Try the KC-side EMAIL_INVALID path (DB test 'T-0748 regression: KC-side EMAIL_INVALID...') via a monkey-patched kc.createHumanUser — must produce the BYTE-IDENTICAL prior message 'email must be a valid email address (e.g. name@company.ru)', not the new Russian name message.",
+    "Try mounting the real CreateUserModal and submitting with a NAME_INVALID_CHARACTERS response — must show the message anchored on Отображаемое имя (aria-invalid=true) and NOT on Email; the pre-fix misleading email text must be entirely absent from the dialog (screen-users.mount.test.jsx)."
+  ],
+  "friction_events": [
+    "tsc --noEmit on this repo's src/ project takes 1.5-2min; ran in background per established convention (see e.g. T-0757.pr-handoff.json's own note).",
+    "The DB-integration test file (ci/checks/db/user-mgmt.db.test.ts) is EXCLUDED from the root tsconfig.json's \"include\": [\"src\"] — a clean `tsc --noEmit` does NOT type-check that directory. Verified my edits there compile by actually RUNNING them live against PG :55432 (SOLO, DATABASE_URL set) rather than trusting tsc silence for that file.",
+    "The new jsdom mount test (screen-users.mount.test.jsx) intermittently exceeded vitest's default 5000ms per-test budget ONLY under full-suite parallel load (114 files, many workers) — reliably 1.5-3.2s when run solo or in a small group. The SAME class of flake was independently observed on the PRE-EXISTING, untouched screen-record-detail.mount.test.jsx in the same full-suite run (confirmed via `git diff --stat` on that file: empty). This matches the repo's own recorded lesson ('конкур-нагрузка амплифицирует таймауты→валидация СОЛО'). Mitigated by raising this file's own two per-test timeouts to 15000ms (touches only this new file, does not change the global testTimeout or any other test) rather than treating it as a real bug in the new test's logic — confirmed GREEN on a subsequent full-suite re-run (114/114 files, 2888/2888 tests) after the change.",
+    "No git stash used anywhere (forbidden per task rules) — the RED-proof revert/restore of admin-port.ts used `git diff > patch` + `git checkout -- <file>` (the sanctioned rollback) + `git apply patch` to restore, entirely within allowed operations."
+  ]
+}

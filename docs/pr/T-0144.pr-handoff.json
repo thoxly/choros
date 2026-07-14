@@ -1,0 +1,124 @@
+{
+  "task_id": "T-0144",
+  "status": "pr_open",
+  "branch": "task/T-0144",
+  "merge_target": "dev",
+  "base_commit": "88d5f40e05da7f89363e48d0fb2975fa1aa8e036",
+  "head_commit": "5b055adc1576fbbc80ed9f621be9daffa2532d0e",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Самоочистка db-тестов grant-editor: 5 тест-векторов (AC-01/AC-07/AC-14/AC-20/FF-10) переведены с inline-DELETE на afterAll-cleanup по describe-scoped ID. ADV-3 не тронут (FR-4). Скрипт scripts/cleanup-test-grants.ts для разовой санации silo с TEST_ACTORS = ['test', 'd0000000-0000-0000-0000-0000000000ff'] (ровно 2 FR-6 маркера). Нет миграций. REVIEW approved (2 итерации, 5b055ad). CI: tsc/eslint/fitness 309/0/vitest 1107/1107 PASS. fitness:db grant-editor.test.ts 16/16 × 2 прогона PASS (идемпотентно, счётчики не растут). AC-2 (genesis-owner-seed) ENV-BLOCKED: 15 накопленных e-owner строк в dev-БД от pre-T-0185 эпохи — разовая санация SQL ниже.",
+  "commits": [
+    {
+      "sha": "94bddb5",
+      "phase": "SPEC",
+      "message": "T-0144 SPEC: самоочистка db-тестов — afterAll-DELETE по ID (5 векторов), санация silo скриптом по granted_by-маркеру"
+    },
+    {
+      "sha": "488bcc4",
+      "phase": "DESIGN",
+      "message": "T-0144 DESIGN: ADR — afterAll-DELETE по describe-scoped ID (5 векторов), cleanup-скрипт c dry-run, FF-1 через genesis-proxy"
+    },
+    {
+      "sha": "2324ec9",
+      "phase": "BUILD",
+      "message": "T-0144 BUILD: afterAll-cleanup 5 векторов"
+    },
+    {
+      "sha": "71f981e",
+      "phase": "BUILD",
+      "message": "T-0144 BUILD: cleanup-test-grants скрипт + санация silo"
+    },
+    {
+      "sha": "1a93ed9",
+      "phase": "REVIEW",
+      "message": "T-0144 REVIEW: changes_requested — 'e-owner' deviates FR-6 + tier_published_locked blocks afterAll cleanup (T-0087 env)"
+    },
+    {
+      "sha": "ea1cc46",
+      "phase": "BUILD",
+      "message": "T-0144 BUILD-fix: drop e-owner marker (R-1) + rebase on dev with T-0185 trigger fix, idempotency proven (R-2)"
+    },
+    {
+      "sha": "5b055ad",
+      "phase": "REVIEW",
+      "message": "T-0144 RE-REVIEW: approved — R-1/R-2 resolved, double-run stable, SQL sanitation predicate"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "iteration": 2,
+      "fix_commit": "ea1cc46",
+      "blocking_resolved": ["R-1: e-owner removed from TEST_ACTORS, now exactly 2 FR-6 markers", "R-2: T-0185 migration 050 fixed tier_published_locked BEFORE DELETE trigger; afterAll cleanup now works"],
+      "nits_resolved": ["R-3: closed automatically with R-1 (e-owner removed, so comment cleanup was moot)"],
+      "artifacts": [
+        "docs/reviews/T-0144.review.md",
+        "docs/design/T-0144.review.contract.json"
+      ]
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 1113,
+      "passed": 1107,
+      "failed": 0,
+      "ac_coverage": "5/6 (AC-2 ENV-BLOCKED, not regression)",
+      "fitness_static": "309/0",
+      "fitness_db_grant_editor_run1": "16/16 PASS",
+      "fitness_db_grant_editor_run2": "16/16 PASS (idempotency confirmed)",
+      "tested_commit": "5b055ad",
+      "artifacts": [
+        "docs/test-reports/T-0144.test-report.md",
+        "docs/design/T-0144.test-report.contract.json"
+      ]
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (2 pre-existing no-console warnings, 0 errors)",
+      "vitest_run": "pass (1107/1107 tests, 6 skipped)",
+      "fitness": "pass (309/0)"
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/grant-editor.test.ts",
+    "scripts/cleanup-test-grants.ts",
+    "docs/specs/T-0144-db-test-cleanup.spec.md",
+    "docs/specs/T-0144.spec.contract.json",
+    "docs/design/T-0144-db-test-cleanup.adr.md",
+    "docs/design/T-0144.adr.contract.json",
+    "docs/design/T-0144.review.contract.json",
+    "docs/design/T-0144.test-report.contract.json",
+    "docs/reviews/T-0144.review.md",
+    "docs/test-reports/T-0144.test-report.md",
+    "docs/pr/T-0144.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "notes": [
+    "РАЗОВАЯ САНАЦИЯ dev-БД (за оркестратором): в dev-БД накоплено 15 строк granted_by='e-owner' (role_id=DEV_ROLE_OWNER, resource_type LIKE 'mgmt_object:%') от pre-T-0185 прогонов, когда tier_published_locked триггер подавлял все DELETE. Эти строки ломают genesis-owner-seed AC-12 (ожидает ровно 17, получает 32). SQL-предикат: DELETE FROM choros.\"grant\" WHERE tenant_id = 'a0000000-0000-0000-0000-000000000001' AND role_id = 'e0000000-0000-0000-0000-000000000001' AND resource_type LIKE 'mgmt_object:%' AND granted_by = 'e-owner'; — ожидаемый rowCount: 15. Не затрагивает genesis-гранты (granted_by='seed'), не затрагивает другие роли. Безопасно только когда fitness:db не запущен параллельно (ADV-3 race). После санации genesis-owner-seed AC-12 зеленеет.",
+    "AMBIENT DATABASE_URL ЛОМАЕТ externalWorker.e2e/health ТЕСТЫ: если DATABASE_URL установлен в окружении, src/__tests__/externalWorker.e2e.test.ts (7 fail) и src/__tests__/health.test.ts (2 fail) падают — тесты пингуют store-режим в обход mock-setup. npm run ci нужно запускать БЕЗ DATABASE_URL. Кандидат в бэклог: тесты должны явно пинить store-режим без зависимости от ambient env."
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "rebase_note": "dev совпадает с merge-base T-0144 (88d5f40 = merge T-0185). Конфликтов не ожидается: единственный изменённый prod-файл ci/checks/db/grant-editor.test.ts не менялся на dev с момента ветвления.",
+    "post_merge_action": "Выполнить разовую санацию dev-БД SQL-предикатом (см. notes[0]). После санации перепрогнать fitness:db — genesis-owner-seed AC-12 ожидаемо зеленеет.",
+    "infra_changes": "Нет миграций, нет изменений docker-compose, нет новых таблиц. Только ci/checks/db/grant-editor.test.ts (рефакторинг) + scripts/cleanup-test-grants.ts (новый файл)."
+  },
+  "backlog_candidates": [
+    {
+      "source": "notes[1] — ambient DATABASE_URL problem",
+      "title": "Isolate externalWorker.e2e/health from ambient DATABASE_URL",
+      "description": "src/__tests__/externalWorker.e2e.test.ts and src/__tests__/health.test.ts fail when DATABASE_URL is set in the environment, because they ping the real store instead of the mock. Tests should explicitly guard their store-mode or mock the DB connection so npm run ci is safe to run in any environment state. Current workaround: always run npm run ci without DATABASE_URL exported.",
+      "files": [
+        "src/__tests__/externalWorker.e2e.test.ts",
+        "src/__tests__/health.test.ts"
+      ],
+      "priority": "medium"
+    }
+  ],
+  "friction_events": []
+}

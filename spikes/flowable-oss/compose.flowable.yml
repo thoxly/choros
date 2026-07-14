@@ -1,0 +1,51 @@
+# T-0117 SPIKE — NOT PRODUCTION. Flowable 7 OSS (Apache 2.0) + disposable Postgres 16.
+# Stack is fully independent (project -p spike_flowable, named volume, host port 8080).
+# Pinned images only (no :latest) — FF-IMAGES-PINNED.
+services:
+  pg:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: flowable
+      POSTGRES_USER: flowable
+      POSTGRES_PASSWORD: flowable
+    volumes:
+      - spike_flowable_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowable -d flowable"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    # host port for optional direct psql; default high to avoid clashes (override FLOWABLE_PG_PORT)
+    ports:
+      - "${FLOWABLE_PG_PORT:-55432}:5432"
+
+  rest:
+    image: flowable/flowable-rest:7.1.0
+    depends_on:
+      pg:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      SPRING_DATASOURCE_URL: jdbc:postgresql://pg:5432/flowable
+      SPRING_DATASOURCE_USERNAME: flowable
+      SPRING_DATASOURCE_PASSWORD: flowable
+      # default admin for REST basic-auth (no enterprise key — RL-3)
+      FLOWABLE_REST_APP_ADMIN_USER_ID: admin
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: test
+      # history cleanup enabled in OSS artifact (AC-4/5). Cleanup is a SCHEDULED timer-job;
+      # the auto-cron is set rare (yearly) so it never fires mid-seed — we drive it
+      # deterministically via REST (move the *-history-cleanup timer-job to executable)
+      # in run.sh when we want to MEASURE throughput.
+      FLOWABLE_ENABLE_HISTORY_CLEANING: "true"
+      FLOWABLE_HISTORY_CLEANING_CYCLE: "0 0 0 1 1 ?"
+      FLOWABLE_HISTORY_CLEANING_AFTER: "1"
+    ports:
+      - "${FLOWABLE_REST_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/flowable-rest/docs/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  spike_flowable_pg:

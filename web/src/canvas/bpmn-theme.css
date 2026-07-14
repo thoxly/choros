@@ -1,0 +1,493 @@
+/* ============================================================================
+   CHOROS — bpmn-theme.css
+   ТЕМА поверх встраиваемого редактора bpmn-js / diagram-js / properties-panel.
+   Не создаёт свой канвас — ПЕРЕОПРЕДЕЛЯЕТ штатные классы bpmn.io.
+
+   Порядок подключения (обязателен):
+     1) diagram-js.css            (база: канвас, палитра, context-pad, popup)
+     2) bpmn-js.css               (база: маркеры BPMN)
+     3) bpmn-font/.../bpmn.css    (иконочный шрифт .bpmn-icon-*)
+     4) properties-panel.css      (база панели свойств)
+     5) tokens.css                (наши --chs-* переменные)
+     6) bpmn-theme.css            (ЭТОТ файл — только переопределения)
+
+   Все значения — ТОЛЬКО через --chs-*. Никаких хардкод-цветов/радиусов/теней.
+   Тёмная и светлая темы наследуются автоматически из tokens.css через
+   переключение [data-theme] — здесь мы лишь ссылаемся на семантические токены.
+
+   ФИРМЕННАЯ СЕМАНТИКА ТРЁХ ИСПОЛНИТЕЛЕЙ.
+   Тип шага = тип исполнителя. Кастомный renderer добавляет на .djs-element
+   маркер-класс через canvas.addMarker(el, 'chs-exec-…'):
+     • User Task     → .chs-exec-human   (--chs-exec-human)
+     • Agent Task    → .chs-exec-agent   (--chs-exec-agent)
+     • External Task → .chs-exec-service (--chs-exec-service)
+   Тема красит обводку/подложку шага и его type-иконку этим кодом.
+   ============================================================================ */
+
+/* ============================================================================
+   1. КАНВАС / КОНТЕЙНЕР
+   ============================================================================ */
+.djs-container,
+.bjs-container {
+  background: var(--chs-color-bg);
+  font-family: var(--chs-font-sans);
+}
+
+/* Фоновая сетка точек — приглушённая, в цвет границ */
+.djs-container svg {
+  background-color: var(--chs-color-bg);
+  background-image: radial-gradient(
+    var(--chs-color-border-faint) 1px,
+    transparent 1px
+  );
+  background-size: 22px 22px;
+  background-position: -1px -1px;
+}
+
+/* ============================================================================
+   2. ЭЛЕМЕНТЫ ДИАГРАММЫ (формы + связи)
+   diagram-js рисует фигуру в .djs-visual; первая фигура — несущая.
+   Переопределяем штатные чёрно-белые атрибуты (используем !important,
+   т.к. renderer задаёт stroke/fill как презентационные атрибуты/di-цвета).
+   ============================================================================ */
+
+/* Несущая фигура шага/события/шлюза.
+   T-0323: подложка — surface (0.990 light / 0.245 dark), НЕ surface-2: на тёплом
+   фоне канваса (--chs-color-bg ≈0.965) surface-2 (≈0.945) почти сливался — фигура
+   читалась как безрамочная. surface даёт явный контраст подложка↔фон в ОБЕИХ темах,
+   обводка border-strong усилена до 1.5px ради чёткой границы шага. */
+.djs-visual > :nth-child(1) {
+  fill: var(--chs-color-surface) !important;
+  stroke: var(--chs-color-border-strong) !important;
+  stroke-width: 1.5px !important;
+}
+
+/* Текст внутри фигур */
+.djs-visual > text,
+.djs-visual tspan {
+  fill: var(--chs-color-text) !important;
+  font-family: var(--chs-font-sans) !important;
+  font-weight: var(--chs-weight-medium) !important;
+}
+
+/* Линии потока (sequence flow) */
+.djs-connection .djs-visual > path {
+  stroke: var(--chs-color-border-strong) !important;
+  fill: none !important;
+}
+.djs-connection .djs-visual > path[marker-end] {
+  marker-end: url(#chs-sequenceflow-end) !important;
+}
+
+/* Стрелки/маркеры связей */
+marker path,
+marker polyline,
+marker circle {
+  fill: var(--chs-color-border-strong) !important;
+  stroke: var(--chs-color-border-strong) !important;
+}
+
+/* Start event — тонкая обводка, нейтраль */
+.djs-element[data-element-id^="Start"] .djs-visual > :nth-child(1),
+.chs-event-start .djs-visual > :nth-child(1) {
+  stroke: var(--chs-color-success) !important;
+  fill: var(--chs-color-success-soft) !important;
+}
+/* End event — толстая обводка, нейтраль-стоп */
+.chs-event-end .djs-visual > :nth-child(1) {
+  stroke: var(--chs-color-text-muted) !important;
+  fill: var(--chs-color-neutral-soft) !important;
+  stroke-width: 3px !important;
+}
+/* Gateway — ромб */
+.chs-gateway .djs-visual > :nth-child(1) {
+  fill: var(--chs-color-surface-raised) !important;
+  stroke: var(--chs-color-border-strong) !important;
+}
+.chs-gateway .djs-visual > path:not(:nth-child(1)) {
+  stroke: var(--chs-color-text-muted) !important;
+  fill: none !important;
+}
+
+/* ---- ТРИ ИСПОЛНИТЕЛЯ: цвето-код обводки + подложки шага ---- */
+.djs-element.chs-exec-human .djs-visual > :nth-child(1) {
+  stroke: var(--chs-exec-human) !important;
+  fill: var(--chs-exec-human-soft) !important;
+}
+.djs-element.chs-exec-agent .djs-visual > :nth-child(1) {
+  stroke: var(--chs-exec-agent) !important;
+  fill: var(--chs-exec-agent-soft) !important;
+}
+.djs-element.chs-exec-service .djs-visual > :nth-child(1) {
+  stroke: var(--chs-exec-service) !important;
+  fill: var(--chs-exec-service-soft) !important;
+}
+
+/* Type-иконка задачи (верхний левый угол) в цвет исполнителя */
+.chs-exec-human .djs-visual > .chs-type-icon  { color: var(--chs-exec-human); }
+.chs-exec-agent .djs-visual > .chs-type-icon  { color: var(--chs-exec-agent); }
+.chs-exec-service .djs-visual > .chs-type-icon{ color: var(--chs-exec-service); }
+.chs-type-icon path,
+.chs-type-icon circle,
+.chs-type-icon rect,
+.chs-type-icon polygon { stroke: currentColor !important; fill: none !important; }
+
+/* ============================================================================
+   3. ВЫДЕЛЕНИЕ / НАВЕДЕНИЕ / ВЗАИМОДЕЙСТВИЕ
+   ============================================================================ */
+.djs-outline {
+  stroke: var(--chs-color-accent) !important;
+  stroke-width: 1.5px !important;
+  stroke-dasharray: none !important;
+  rx: var(--chs-radius-1);
+  ry: var(--chs-radius-1);
+}
+.djs-element.selected .djs-outline {
+  stroke: var(--chs-color-accent) !important;
+  stroke-width: 1.5px !important;
+}
+.djs-shape.hover .djs-outline,
+.djs-element:hover .djs-outline {
+  stroke: var(--chs-color-accent-border) !important;
+}
+
+/* Точки изменения размера / связей */
+.djs-bendpoint .djs-visual circle,
+.djs-segment-dragger .djs-visual,
+.djs-resizer-visual {
+  fill: var(--chs-color-accent) !important;
+  stroke: var(--chs-color-bg) !important;
+}
+.djs-drag-active .djs-visual > :nth-child(1) {
+  stroke-dasharray: 3 3 !important;
+}
+
+/* Подсветка зоны вставки / создания связи */
+.djs-connect-ok .djs-visual > :nth-child(1),
+.drop-ok .djs-visual > :nth-child(1) {
+  stroke: var(--chs-color-success) !important;
+}
+.djs-connect-not-ok .djs-visual > :nth-child(1),
+.drop-not-ok .djs-visual > :nth-child(1) {
+  stroke: var(--chs-color-danger) !important;
+}
+
+/* ============================================================================
+   4. ВНЕШНИЕ ПОДПИСИ + ПРЯМОЕ РЕДАКТИРОВАНИЕ
+   ============================================================================ */
+.djs-label {
+  fill: var(--chs-color-text-muted) !important;
+  font-family: var(--chs-font-sans) !important;
+}
+.djs-direct-editing-parent {
+  border: 1px solid var(--chs-color-accent) !important;
+  border-radius: var(--chs-radius-2) !important;
+  box-shadow: 0 0 0 3px var(--chs-color-accent-soft) !important;
+  background: var(--chs-color-bg) !important;
+}
+.djs-direct-editing-content {
+  color: var(--chs-color-text) !important;
+  font-family: var(--chs-font-sans) !important;
+  font-size: var(--chs-text-base) !important;
+}
+
+/* ============================================================================
+   5. ПАЛИТРА (.djs-palette)  — слева, плотная, резкие грани
+   ============================================================================ */
+.djs-palette {
+  background: var(--chs-color-surface) !important;
+  border: 1px solid var(--chs-color-border) !important;
+  border-radius: var(--chs-radius-3) !important;
+  box-shadow: var(--chs-shadow-1) !important;
+  left: var(--chs-space-6);
+  top: var(--chs-space-6);
+}
+.djs-palette .entry {
+  color: var(--chs-color-text-muted) !important;
+  width: 30px !important;
+  height: 30px !important;
+  line-height: 30px !important;
+  font-size: 20px !important;
+  border-radius: var(--chs-radius-2) !important;
+  transition: background 80ms ease, color 80ms ease;
+}
+.djs-palette .entry:hover {
+  background: var(--chs-color-hover) !important;
+  color: var(--chs-color-text) !important;
+}
+.djs-palette .entry.highlighted-entry,
+.djs-palette .entry:active {
+  background: var(--chs-color-selected) !important;
+  color: var(--chs-color-accent) !important;
+}
+.djs-palette .separator {
+  border-bottom: 1px solid var(--chs-color-border) !important;
+  margin: var(--chs-space-2) var(--chs-space-3) !important;
+}
+.djs-palette-toggle {
+  color: var(--chs-color-text-faint) !important;
+}
+.djs-palette-toggle:hover { color: var(--chs-color-text) !important; }
+
+/* Иконочный шрифт BPMN — наследует цвет .entry, не задаёт свой */
+[class^="bpmn-icon-"]:before,
+[class*=" bpmn-icon-"]:before { color: inherit; }
+
+/* T-0098: Choros executor-typed palette entries — colored accent dot/border */
+.djs-palette .entry.chs-palette-human { color: var(--chs-exec-human) !important; }
+.djs-palette .entry.chs-palette-agent  { color: var(--chs-exec-agent)  !important; }
+.djs-palette .entry.chs-palette-service{ color: var(--chs-exec-service)!important; }
+
+.djs-palette .entry.chs-palette-human:hover  { background: var(--chs-exec-human-soft)   !important; }
+.djs-palette .entry.chs-palette-agent:hover  { background: var(--chs-exec-agent-soft)   !important; }
+.djs-palette .entry.chs-palette-service:hover{ background: var(--chs-exec-service-soft) !important; }
+
+/* T-0457: lane→role swimlane palette entry — neutral accent (org/structure tone) */
+.djs-palette .entry.chs-palette-lane { color: var(--chs-color-text-muted) !important; }
+.djs-palette .entry.chs-palette-lane:hover { background: var(--chs-color-surface-2) !important; }
+
+/* ============================================================================
+   6. CONTEXT-PAD (контекстное меню узла — плавающие действия)
+   ============================================================================ */
+.djs-context-pad .entry {
+  background: var(--chs-color-surface-raised) !important;
+  color: var(--chs-color-text-muted) !important;
+  border: 1px solid var(--chs-color-border-strong) !important;
+  border-radius: var(--chs-radius-2) !important;
+  width: 26px !important;
+  height: 26px !important;
+  line-height: 26px !important;
+  font-size: 16px !important;
+  box-shadow: var(--chs-shadow-1) !important;
+  transition: background 80ms ease, color 80ms ease, border-color 80ms ease;
+}
+.djs-context-pad .entry:hover {
+  background: var(--chs-color-accent) !important;
+  color: var(--chs-color-accent-fg) !important;
+  border-color: var(--chs-color-accent) !important;
+}
+/* Удаление — опасное действие */
+.djs-context-pad .entry.bpmn-icon-trash:hover {
+  background: var(--chs-color-danger) !important;
+  border-color: var(--chs-color-danger) !important;
+  color: var(--chs-color-accent-fg) !important;
+}
+.djs-context-pad.open { z-index: 100; }
+
+/* ============================================================================
+   7. POPUP-МЕНЮ (Замена элемента / выбор типа шага)
+   ============================================================================ */
+.djs-popup,
+.djs-popup-parent {
+  background: var(--chs-color-overlay) !important;
+  border: 1px solid var(--chs-color-border-strong) !important;
+  border-radius: var(--chs-radius-3) !important;
+  box-shadow: var(--chs-shadow-2) !important;
+  color: var(--chs-color-text) !important;
+  font-family: var(--chs-font-sans) !important;
+}
+.djs-popup .djs-popup-header,
+.djs-popup-header {
+  border-bottom: 1px solid var(--chs-color-border) !important;
+  padding: var(--chs-space-4) var(--chs-space-5) !important;
+}
+.djs-popup-header .djs-popup-title,
+.djs-popup-title {
+  font-size: var(--chs-text-xs) !important;
+  font-weight: var(--chs-weight-semibold) !important;
+  letter-spacing: var(--chs-tracking-wide) !important;
+  text-transform: uppercase !important;
+  color: var(--chs-color-text-faint) !important;
+}
+/* Поле поиска внутри popup */
+.djs-popup-search input,
+.djs-popup .djs-popup-search-input {
+  background: var(--chs-color-bg) !important;
+  border: 1px solid var(--chs-color-border-strong) !important;
+  border-radius: var(--chs-radius-2) !important;
+  color: var(--chs-color-text) !important;
+  font-family: var(--chs-font-sans) !important;
+  font-size: var(--chs-text-base) !important;
+  height: var(--chs-control-h-sm) !important;
+}
+.djs-popup-search input:focus {
+  outline: none !important;
+  border-color: var(--chs-color-accent) !important;
+  box-shadow: 0 0 0 3px var(--chs-color-accent-soft) !important;
+}
+/* Заголовок группы */
+.djs-popup .entry-header,
+.djs-popup-group .djs-popup-group-name {
+  font-size: var(--chs-text-2xs) !important;
+  font-weight: var(--chs-weight-semibold) !important;
+  letter-spacing: var(--chs-tracking-wide) !important;
+  text-transform: uppercase !important;
+  color: var(--chs-color-text-faint) !important;
+}
+/* Пункт меню */
+.djs-popup .entry,
+.djs-popup-body .entry {
+  color: var(--chs-color-text-muted) !important;
+  border-radius: var(--chs-radius-2) !important;
+}
+.djs-popup .entry:hover,
+.djs-popup-body .entry:hover {
+  background: var(--chs-color-hover) !important;
+  color: var(--chs-color-text) !important;
+}
+.djs-popup .entry.selected,
+.djs-popup .entry.active {
+  background: var(--chs-color-selected) !important;
+  color: var(--chs-color-text) !important;
+}
+.djs-popup .entry .djs-popup-entry-name {
+  font-size: var(--chs-text-base) !important;
+}
+.djs-popup-backdrop { background: transparent !important; }
+
+/* T-0098: exec-dot in popup entries (三 executor colours as small circles) */
+.djs-popup__execdot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.djs-popup__execdot--human   { background: var(--chs-exec-human); }
+.djs-popup__execdot--agent   { background: var(--chs-exec-agent); }
+.djs-popup__execdot--service { background: var(--chs-exec-service); }
+
+/* ============================================================================
+   8. ОВЕРЛЕИ / ТУЛТИПЫ / СООБЩЕНИЯ
+   ============================================================================ */
+.djs-tooltip,
+.djs-tooltip-error {
+  background: var(--chs-color-overlay) !important;
+  border: 1px solid var(--chs-color-border-strong) !important;
+  border-radius: var(--chs-radius-2) !important;
+  color: var(--chs-color-text) !important;
+  font-family: var(--chs-font-sans) !important;
+  font-size: var(--chs-text-sm) !important;
+  box-shadow: var(--chs-shadow-1) !important;
+}
+.djs-tooltip-error { border-color: var(--chs-color-danger) !important; }
+
+/* ============================================================================
+   9. ПАНЕЛЬ СВОЙСТВ (hand-rolled bpmn-properties-panel.jsx)
+   T-0323: правила приведены к классам, которые реально эмитит наша рукописная
+   панель (bpmn-properties-panel.jsx). Удалены rules под официальный
+   @bpmn-io/properties-panel, который не установлен (numberfield/textarea/
+   feel-editor/list/collapsible/add-remove-entry/dot и его CSS-переменные) —
+   они были мёртвым кодом.
+   ============================================================================ */
+.bio-properties-panel-container {
+  border-left: 1px solid var(--chs-color-border) !important;
+  background: var(--chs-color-surface) !important;
+}
+.bio-properties-panel {
+  background: var(--chs-color-surface) !important;
+  color: var(--chs-color-text) !important;
+  font-family: var(--chs-font-sans) !important;
+  font-size: var(--chs-text-base) !important;
+}
+
+/* Шапка панели — иконка типа + имя + тип элемента */
+.bio-properties-panel-header {
+  background: var(--chs-color-surface-2) !important;
+  border-bottom: 1px solid var(--chs-color-border) !important;
+  padding: var(--chs-space-6) var(--chs-space-7) !important;
+}
+.bio-properties-panel-header-type {
+  font-family: var(--chs-font-mono) !important;
+  font-size: var(--chs-text-2xs) !important;
+  letter-spacing: var(--chs-tracking-wide) !important;
+  text-transform: uppercase !important;
+  color: var(--chs-color-text-faint) !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  line-height: var(--chs-leading-tight) !important;
+}
+.bio-properties-panel-header-label {
+  font-size: var(--chs-text-lg) !important;
+  font-weight: var(--chs-weight-semibold) !important;
+  letter-spacing: var(--chs-tracking-tight) !important;
+  color: var(--chs-color-text) !important;
+  line-height: var(--chs-leading-tight) !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+.bio-properties-panel-header-icon svg { color: var(--chs-color-text-muted) !important; }
+
+/* Группа свойств */
+.bio-properties-panel-group { border-bottom: 1px solid var(--chs-color-border-faint) !important; }
+.bio-properties-panel-group-header {
+  background: var(--chs-color-surface) !important;
+  padding: var(--chs-space-5) var(--chs-space-7) !important;
+  min-height: 36px !important;
+}
+.bio-properties-panel-group-header:hover { background: var(--chs-color-hover) !important; }
+.bio-properties-panel-group-header-title {
+  font-size: var(--chs-text-2xs) !important;
+  font-weight: var(--chs-weight-semibold) !important;
+  letter-spacing: var(--chs-tracking-wide) !important;
+  text-transform: uppercase !important;
+  color: var(--chs-color-text-muted) !important;
+}
+.bio-properties-panel-arrow svg,
+.bio-properties-panel-arrow { color: var(--chs-color-text-faint) !important; fill: var(--chs-color-text-faint) !important; }
+
+/* Тело группы */
+.bio-properties-panel-group-entries {
+  background: var(--chs-color-surface) !important;
+  padding: var(--chs-space-4) var(--chs-space-7) var(--chs-space-6) !important;
+}
+
+/* Запись (label + control) */
+.bio-properties-panel-entry { margin: var(--chs-space-5) 0 !important; }
+.bio-properties-panel-label {
+  font-size: var(--chs-text-2xs) !important;
+  font-weight: var(--chs-weight-medium) !important;
+  letter-spacing: var(--chs-tracking-wide) !important;
+  text-transform: uppercase !important;
+  color: var(--chs-color-text-muted) !important;
+  margin-bottom: var(--chs-space-3) !important;
+}
+
+/* Поля ввода / селекты */
+.bio-properties-panel-input,
+.bio-properties-panel-textfield input,
+.bio-properties-panel-select select {
+  background: var(--chs-color-bg) !important;
+  border: 1px solid var(--chs-color-border-strong) !important;
+  border-radius: var(--chs-radius-2) !important;
+  color: var(--chs-color-text) !important;
+  font-family: var(--chs-font-sans) !important;
+  font-size: var(--chs-text-base) !important;
+  min-height: var(--chs-control-h) !important;
+}
+.bio-properties-panel-input:focus,
+.bio-properties-panel-textfield input:focus,
+.bio-properties-panel-select select:focus {
+  outline: none !important;
+  border-color: var(--chs-color-accent) !important;
+  box-shadow: 0 0 0 3px var(--chs-color-accent-soft) !important;
+}
+/* Машинные значения (id, endpoint, числа) — моноширинный */
+.bio-properties-panel-input.chs-mono,
+.bio-properties-panel-entry[data-mono] input {
+  font-family: var(--chs-font-mono) !important;
+  letter-spacing: var(--chs-tracking-mono) !important;
+}
+
+/* Описание / подсказки под полем */
+.bio-properties-panel-description {
+  font-size: var(--chs-text-xs) !important;
+  color: var(--chs-color-text-faint) !important;
+  line-height: var(--chs-leading-snug) !important;
+}
+
+/* Скролл-контейнер панели */
+.bio-properties-panel-scroll-container { background: var(--chs-color-surface) !important; }

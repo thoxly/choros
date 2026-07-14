@@ -1,0 +1,52 @@
+{
+  "task": "T-0646",
+  "task_type": "tests",
+  "changes_product": 0,
+  "summary": "Snap the fitness:db timeout-mask: the ci/checks/db LIVE-Postgres suite was deterministically/load-sensitively RED on the vitest 5000ms default testTimeout (and 10000ms hookTimeout) alone — a timeout-margin failure, not a functional bug. A deterministically-red gate MASKS real db regressions (fitness-mask class, memory choros-fitness-mask-unmask). Diagnosed as SYSTEMIC (not the 4 originally-observed files): under concurrent-CI DB load, whichever heavy PG-integration test happens to run slow tips over 5000ms — two independent full fitness:db runs failed a DIFFERENT set of files, all with 'Test timed out in 5000ms'. Cure = raise the timeout budget suite-wide in the root vitest.config.js + one genuine test-fixture efficiency fix.",
+  "approach": "mixed (suite-wide timeout config + one batched write loop)",
+  "files_changed": [
+    "vitest.config.js",
+    "ci/checks/db/pgOutboxStore.integration.test.ts",
+    "ci/checks/db/doc-reconcile.db.test.ts",
+    "ci/checks/db/doc-regen.db.test.ts",
+    "ci/checks/db/doc-summary.db.test.ts"
+  ],
+  "systemic_fix": {
+    "file": "vitest.config.js",
+    "change": "Added testTimeout: 60000 and hookTimeout: 30000 to the root `test` block (shared by src unit suite + db suite; db suite runs via `vitest run --dir ci/checks/db` which uses this same root config).",
+    "value_rationale": "60000 testTimeout gives real margin over the slowest LEGIT test observed live: seed-pack.test.ts AC-9 reset took 26153ms and AC-8 idempotency 16390ms (server startup + full HTTP applyPack round-trips; T-0140). 30000 was too tight for those under concurrent load. hookTimeout 30000 covers heavy beforeAll server-start hooks (rights-intents.db.test.ts imports src/server.js + listens; its hook exceeded the 10000ms default under load, cascading to 17 SKIPPED tests).",
+    "why_cure_not_mask": "A genuine regression is an ASSERTION failure, caught at ANY timeout; only a truly-hung test waits longer before failing. Raising the ceiling is harmless for the fast src unit suite (passing tests finish in ms; and the db tier is excluded from the default `vitest run` via the exclude list). No assertion touched."
+  },
+  "per_file_efficiency_fix": {
+    "file": "ci/checks/db/pgOutboxStore.integration.test.ts",
+    "change": "FF-5/AC-15 seed loop: 1010 sequential single-row INSERT round-trips (1000 dispatched + 10 pending) collapsed into 2 multi-row INSERT...SELECT unnest() statements. Pure test-fixture seeding (no store/product function in the loop), same columns, same values, same row count — only round-trip count changes. Committed in 77cd68cf.",
+    "note": "This is a real inefficiency fix (per brief preference (b)); it makes that test robustly fast regardless of timeout."
+  },
+  "doc_files_note": "doc-reconcile/doc-regen/doc-summary .db.test.ts: an earlier pass (commit 77cd68cf) added per-file vi.setConfig({testTimeout:60000}) overrides. Now FOLDED INTO the suite-wide default for a single source of truth — the vi.setConfig calls were removed and the explanatory comments retrained (they document why those files are heavy: they replicate the production per-page write loop over the WHOLE live-repo doc snapshot, some running runRegen/runReconcile twice). No behavior change: suite default 60000 >= the removed per-file 60000.",
+  "tipping_files_identified": {
+    "note": "Timeout victims vary run-to-run under load (this is the point — systemic). Observed across two full fitness:db runs + coordinator's run:",
+    "files": [
+      "ci/checks/db/pgJobStore.integration.test.ts (sweepExpiredLocks)",
+      "ci/checks/db/inbox_claim_substitution.db.test.ts (T-0588 Tier-2 substitute)",
+      "ci/checks/db/seed-pack.test.ts (AC-8 idempotency, AC-9 reset — 10-27s legit)",
+      "ci/checks/db/rights-intents.db.test.ts (beforeAll server-start hook -> 17 SKIPPED, hookTimeout)",
+      "ci/checks/db/doc-reconcile.db.test.ts / doc-regen / doc-summary",
+      "ci/checks/db/pgOutboxStore.integration.test.ts (FF-5 1010-row seed)",
+      "ci/checks/db/T-0744-orphaned-role-owner-claim.db.test.ts",
+      "ci/checks/db/cross_app_ref_reconcile.db.test.ts",
+      "ci/checks/db/report_page_render_ac6.test.ts"
+    ]
+  },
+  "db_result": {
+    "before_fail": "systemic timeout-flake: run-1 8 failed / 1440 passed (doc-reconcile x7, doc-regen x1); run-2 5 failed / 1443 passed (T-0744, cross_app_ref_reconcile, report_page_render_ac6, seed-pack) — ALL 'Test timed out in 5000ms', different files each run",
+    "targeted_after_pass": "4 previously-failing files re-run with new config against real PG :55432 (choros_migrator) — 4 files passed / 0 failed, 89 tests passed / 0 failed: pgJobStore.integration.test.ts, inbox_claim_substitution.db.test.ts (12), seed-pack.test.ts (5; AC-9=26153ms, AC-8=16390ms), rights-intents.db.test.ts (17 — previously all SKIPPED via hook timeout, now run+pass)",
+    "full_suite_note": "Full fitness:db (159 files) NOT re-run at coordinator instruction (machine under concurrent-agent load; orchestrator will run the solo pass). Targeted run demonstrates the cure on the exact tipping files."
+  },
+  "assertions_weakened": false,
+  "assertions_note": "Only timeout config (root vitest.config.js) and one test-fixture seed loop (pgOutbox, identical rows/values via unnest) changed. Every it()/expect() body is byte-unchanged. No test deleted or skipped; rights-intents' 17 SKIPPED were a hook-timeout cascade (NOT a describe.skip — grep confirms no .skip in the file), now un-skipped by the hookTimeout bump.",
+  "gates": {
+    "tsc": "clean (npx tsc --noEmit -p .)",
+    "eslint": "clean on all changed files",
+    "frozen_checks_immutable": "PASS — no ci/checks/*.sh gate script touched (only test files under ci/checks/db + root vitest.config.js)"
+  }
+}

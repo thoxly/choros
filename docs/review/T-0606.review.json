@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0606",
+  "verdict": "approved",
+  "_verdict_history": "changes_requested @5de1d42 (blocking F-1: engine_managed guard обходился живым POST /api/forms/approval/submit) → approved @de31974 после фикса F-1 (гейт добавлен в form-record-persister.ts; F-2/F-3 nits тоже устранены). Дельта 5de1d42..de31974 доверифицирована судьёй независимо.",
+  "ci_seen": {
+    "green": true,
+    "_note": "ДЕЛЬТА 5de1d42..de31974 перегнана судьёй независимо на живом Postgres localhost:55432 (template хэш 39b70d37, включает 122). npm run build → exit 0. npm test (root) → 255 files passed | 2 skipped (257), 4947 passed | 10 skipped, exit 0. npm run fitness:db → 107 files passed (107), 1115 passed (1115), exit 0 — включая ci/checks/db/approval-registry-guard.db.test.ts Part A + Part B + НОВЫЙ Part B-bis (form-submit path, +2 теста: 1113→1115). Первый прогон fitness:db дал 1 упавший (doc-reconcile.db.test.ts F-3 — timeout 5000ms под параллельной нагрузкой, ФАЙЛ ВНЕ ДИФА); переподтверждён ИЗОЛИРОВАННО 15/15 green (737ms) И повторным ПОЛНЫМ прогоном 1115/1115 green — известный doc-*/parallel-load флейк per бриф задачи, НЕ регрессия. Именованные гейты: dual-control-isolation.sh exit 0; substitution-isolation.sh exit 0; anti-case-lock.sh exit 0 (+ --self-test exit 0); tier-isolation.sh exit 0 (+ --self-test exit 0); detel-literal-baseline.sh exit 0. Все три contract-JSON (adr/spec/pr-handoff) валидны через schemas/validate.py::validate_file. Bypass-проба ревьюера воспроизведена на template-БД → теперь 403 REGISTRY_ENGINE_MANAGED, ноль фантомных строк. Мутация (снять if(reg.engine_managed) в form-record-persister) → Part B-bis красный (200 + фантомный recordId). Working tree clean vs HEAD после откатов."
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "blocking",
+      "axis": 1,
+      "_status": "RESOLVED @de31974",
+      "location": "src/http/form-record-persister.ts (makeFormRecordPersister) — второй живой write-path в choros.record через POST /api/forms/:formId/submit",
+      "issue": "GUARD BUG #1 ОБХОДИЛСЯ ЖИВЫМ HTTP-ПУТЁМ. Задача @5de1d42 добавила assertNotEngineManaged ТОЛЬКО в src/http/records.ts (маршрут /api/records). Существовал ВТОРОЙ живой write-path в тот же engine_managed реестр «Согласование»: POST /api/forms/approval/submit → makeFormDefResolver резолвит slug 'soglasovanie' → makeFormRecordPersister делал ПРЯМОЙ INSERT INTO choros.record БЕЗ проверки engine_managed. Доказано живьём: makeFormRecordPersister('approval',{decision:'approve'}) записал фантомную decision-запись в engine_managed реестр (rowCount=1). Per критерий задания «обход guard-а живым путём = blocking».",
+      "suggestion": "УСТРАНЕНО @de31974: form-record-persister.ts SELECT-ит engine_managed тем же запросом и бросает HttpError(403,'REGISTRY_ENGINE_MANAGED', та же честная русская строка, что records.ts) ДО INSERT (3b-bis, property-driven — не form-id-driven). Верификация судьёй: (1) исходная bypass-проба на template-БД теперь → 403 + rowCount=0; (2) мутация (снять if(reg.engine_managed)) → новый DB-тест Part B-bis красный (200 + фантомный recordId); (3) карта write-поверхности (ADR §4-bis) независимо сверена grep-ом — полна, оба не-гейтнутых пути (external-participant — фиксированный код-таргет EXTERNAL_PARTICIPANT_REGISTRY_ID; applications.ts cascade — lifecycle за owner/admin-authz 403) безопасны по существу; ноль пропущенных INSERT/UPDATE/DELETE-точек, shared DAO-хелпера нет."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "axis": 2,
+      "_status": "RESOLVED @de31974",
+      "location": "src/db/binding-trigger-dao.ts :110-118 doc",
+      "issue": "ДОК-НЕТОЧНОСТЬ «byte-for-byte»: DAO NULL-fallback подзапрос имеет `id ASC` tie-breaker, которого нет в резолвере Step 3 (process-instance-resolver.ts) — то есть НЕ побайтно идентичен, DAO строже (детерминирован при равных created_at).",
+      "suggestion": "УСТРАНЕНО @de31974: doc переписан на «SAME SEMANTICS ... with ONE deliberate strengthening (review T-0606 F-2): adds id ASC that the resolver's Step 3 does NOT have ... If the two paths are ever synchronized, align the resolver by ADDING id ASC there, not by removing it here». Формулировка теперь буквально верна."
+    },
+    {
+      "id": "F-3",
+      "severity": "nit",
+      "axis": 3,
+      "_status": "RESOLVED @de31974",
+      "location": "src/__tests__/binding-trigger.unit.test.ts :899-911 (стаб реимплементирует SQL-предикат на JS)",
+      "issue": "UNIT-ТЕСТЫ Part A тавтологичны относительно продукт-SQL: стаб makeTriggerScopeClient вычисляет match на JS, мутация SQL WHERE оставляет unit зелёными. Реальный пин trigger-scope — DB-тест Part A.",
+      "suggestion": "УСТРАНЕНО @de31974: добавлен COVERAGE HONESTY блок-комментарий, явно указывающий, что unit пинят плумбинг/форму OnCreateBindingRow, а реальная гарантия trigger-scope — в ci/checks/db/approval-registry-guard.db.test.ts Part A (мут-пробы A/C краснят её)."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1 (миграция 122 ADD COLUMN trigger_registry_id uuid NULL + engine_managed boolean NOT NULL DEFAULT false)", "covered": true, "_evidence": "живой PG information_schema; 122 в schema_migrations; идемпотентность (re-run setup-template no-op)"},
+    {"ac": "AC-2 (getOnCreateBinding SQL-скоуп trigger_registry_id=$3 OR NULL→primary)", "covered": true, "_evidence": "DB Part A green; мутпроба A краснит"},
+    {"ac": "AC-3 (createRecord передаёт reg.id; trigger только для scoped реестра)", "covered": true, "_evidence": "DB Part A: primary стартует, secondary НЕ стартует"},
+    {"ac": "AC-3b (NULL submit_task_key + живой первый таск 'task-submit' → completeUserTask НЕ вызван)", "covered": true, "_evidence": "unit Part C green; мутпроба D краснит — T-0604 §1.1 инвариант залочен"},
+    {"ac": "AC-4 (engine_managed create → 403 REGISTRY_ENGINE_MANAGED на ВСЕХ живых write-путях)", "covered": true, "_evidence": "DB Part B (/api/records) green + Part B-bis (form-submit) green: POST /api/forms/approval/submit → 403 + rowCount=0 (исходный bypass судьи закрыт); мутпробы B (records.ts) и Part-B-bis-guard (form-persister) обе краснят. Инвариант держится на ОБЕИХ живых точках записи."},
+    {"ac": "AC-5 (engine_managed update/delete → 403)", "covered": true, "_evidence": "DB Part B PUT/DELETE 403, ряд цел; карта write-поверхности §4-bis подтверждает единственные UPDATE/DELETE-точки данных записи — records.ts (гейтнуты) + applications.ts cascade (lifecycle за authz, не CRUD-класс)"},
+    {"ac": "AC-6 (applyStepResult структурно не задет — движок пишет в защищённый реестр)", "covered": true, "_evidence": "step-applier.test.ts SA-11 + DB Part B live applyStepResult пишет в engine_managed реестр успешно"},
+    {"ac": "AC-7 (миграция помечает ТЭЛ Согласование engine_managed=true; telLinear trigger_registry_id NULL, ТЭЛ не регрессирует)", "covered": true, "_evidence": "UPDATE идемпотентный тройной-ключ demo-tenant; NULL резолвится в единственный is_system=false 'purchases' (076/086); Part B-bis regression: purchase-форма → 200 не задета"},
+    {"ac": "AC-8 (D-064 ноль новых слаг-литералов; detel/anti-case не растут)", "covered": true, "_evidence": "detel exit 0 (soglasovanie в новом Part B-bis — тест-фикстуры .test.ts, вне D-064-скана по методологии), anti-case 24/24; продукт-механизм колоночный"},
+    {"ac": "AC-9 (build/test/fitness:db/гейты зелёные, счётчики)", "covered": true, "_evidence": "перегнано судьёй: build 0, test 4947, fitness:db 1115 (после изоляции doc-reconcile флейка), все именованные гейты exit 0"}
+  ],
+  "role_gap_evidence": [
+    "ДЕЛЬТА-ВЕРИФИКАЦИЯ (5de1d42..de31974) — ФИКС F-1 ПОДТВЕРЖДЁН ЖИВЬЁМ: (1) исходная bypass-проба ревьюера (makeFormRecordPersister('approval',{decision:'approve'}) на template-БД с 'soglasovanie' engine_managed=true) воспроизведена — теперь persist БРОСАЕТ HttpError status=403 code=REGISTRY_ENGINE_MANAGED, recordId=none, rowCount в engine_managed реестре=0. Гейт закрыт. (2) МУТАЦИЯ (снять весь блок `if (reg.engine_managed) throw` в form-record-persister.ts) → новый DB-тест Part B-bis 'POST /api/forms/approval/submit → 403' КРАСНЫЙ ('expected 200 to be 403', вернулся ok:true + фантомный recordId); второй Part-B-bis тест (purchase → 200 регрессия) остался зелёным. Мутация откачена, tree clean. Новый тест — настоящий пин на РЕАЛЬНОМ HTTP-роуте (registerFormsRoutes + production makeFormRecordPersister/makeFormDefResolver над тем же app-pool, как server.ts).",
+    "КАРТА WRITE-ПОВЕРХНОСТИ (ADR §4-bis) — НЕЗАВИСИМО СВЕРЕНА судьёй grep-ом: `INSERT INTO choros.record` (не-тест) = records.ts:826 (гейт), form-record-persister.ts:329 (гейт добавлен), external-participant.ts:216 (фиксированный код-таргет EXTERNAL_PARTICIPANT_REGISTRY_ID, вызывающий не может перенаправить — не бага-#1-класс), step-applier.ts:701 (легитимный движковый писатель); `UPDATE choros.record` = только records.ts:1301 (гейт); `DELETE FROM choros.record` = records.ts:1408 (гейт) + applications.ts:407 (cascade за owner/admin-authz 403 FORBIDDEN, line 521 — lifecycle-удаление всего приложения, не CRUD над отдельным актом). Карта в §4-bis совпадает с моим grep-ом точка-в-точку, вердикты корректны. Shared DAO insertRecord-хелпера нет (grep пуст); assistant draft-ops прямых record-инсертов не делают (подтверждено ранее). Ни один путь не пропущен.",
+    "ФИКС НИТОВ F-2/F-3 — ПОДТВЕРЖДЁН: F-2 doc в binding-trigger-dao.ts переписан с «byte-for-byte» на «SAME SEMANTICS with ONE deliberate strengthening (id ASC)» — теперь буквально верен. F-3 — добавлен COVERAGE HONESTY комментарий в unit-тест, явно указывающий, что реальная гарантия trigger-scope живёт в DB-тесте. Records.ts assertNotEngineManaged doc обновлён ссылкой на второй HTTP-путь + §4-bis.",
+    "ГЕЙТЫ (перегнаны судьёй на дельте): build exit 0; npm test 4947 passed; npm run fitness:db 1115/1115 passed (Part B-bis +2; doc-reconcile флейк изолирован → 15/15 green соло + 1115/1115 на повторном полном прогоне = детерминизм); dual-control exit 0; substitution exit 0; anti-case(+self) exit 0; tier(+self) exit 0; detel exit 0. Contract-JSON (adr/spec/pr-handoff) валидны.",
+    "handoff-ЧЕСТНОСТЬ (pr-handoff обновлён @de31974): summary/mechanism теперь раскрывают form-record-persister гейт + §4-bis карту; live_proof.status по-прежнему 'pending orchestrator' (Flowable недоступен — честно). Полнота закрытия BUG #1 теперь заявлена корректно (оба живых write-пути закрыты), совпадает с моей верификацией."
+  ]
+}

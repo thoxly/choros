@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0179",
+  "status": "ready",
+  "summary": "T-0121e: bundle-coherence расширение — аддитивный путь: (а) добавить report_page_dep в bundle_members.txt как choros_table; (б) новый check-report-page-deps.sh (T-0179-owned, статические проверки DDL-инвариантов migration 052); (в) новый ci/checks/db/report_page_bundle_deps.test.ts (live-DB FF-BUNDLE-DEPS: field_key ∈ record_schema.properties). bundle-coherence.sh (frozen T-0082) НЕ правится.",
+  "functional": [
+    "FR-1: bundle_members.txt получает строку report_page_dep|choros_table|migrations/052_report_page_dep.sql|report_page_dep|dep_kind (аддитивно).",
+    "FR-2: Новый ci/checks/check-report-page-deps.sh (владелец T-0179) — статический guard: RD-1..RD-7 (bundle_members entry, migration exists, DDL-инварианты dep_kind CHECK + UNIQUE + stale DEFAULT, known_tenant_tables entry, self-test).",
+    "FR-3: Новый ci/checks/db/report_page_bundle_deps.test.ts — vitest live-DB probe (skipIf !DATABASE_URL): DB-1 field_key ∈ record_schema.properties всех теннантов; DB-2 stale=true не блок, лог; DB-3 нет orphan deps.",
+    "FR-4: check-report-page-deps.sh добавлен в npm run fitness (package.json).",
+    "FR-5: bundle-coherence.sh НЕ изменяется (frozen T-0082)."
+  ],
+  "non_functional": [
+    "NF-1: frozen-checks-immutable.sh exit 0 (bundle-coherence.sh не тронут).",
+    "NF-2: Нет новых prod npm-зависимостей.",
+    "NF-3: check-report-page-deps.sh fail-closed на отсутствующем bundle_members.txt (self-test --self-test).",
+    "NF-4: Live-DB тест skipIf (!DATABASE_URL) — не ломает статический CI-пайплайн."
+  ],
+  "out_of_scope": [
+    "Правка bundle-coherence.sh (frozen T-0082).",
+    "Добавление report_page (без _dep) в bundle_members.txt.",
+    "Live bash-проверка field_key через awk/jq без vitest — делегировано fitness:db.",
+    "Любые правки src/core/, src/http/.",
+    "MCP-seed author_report_page (T-0121f).",
+    "Floor-рендерер (T-0121g)."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1",  "text": "bundle_members.txt содержит строку report_page_dep|choros_table|migrations/052_report_page_dep.sql|report_page_dep|dep_kind.", "verifiable_as": "fitness"},
+    {"id": "AC-2",  "text": "bundle-coherence.sh проходит (exit 0) на текущей кодовой базе; bundle-coherence.sh НЕ изменён.", "verifiable_as": "fitness"},
+    {"id": "AC-3",  "text": "check-report-page-deps.sh существует, строка 2 = '# T-0179 ·'.", "verifiable_as": "fitness"},
+    {"id": "AC-4",  "text": "check-report-page-deps.sh exit 0 на текущей кодовой базе.", "verifiable_as": "fitness"},
+    {"id": "AC-5",  "text": "RD-1: check-script подтверждает report_page_dep в bundle_members.txt как choros_table.", "verifiable_as": "fitness"},
+    {"id": "AC-6",  "text": "RD-2: migrations/052_report_page_dep.sql существует.", "verifiable_as": "fitness"},
+    {"id": "AC-7",  "text": "RD-3: dep_kind CHECK constraint (report_page_dep_kind_chk) присутствует в migration 052.", "verifiable_as": "fitness"},
+    {"id": "AC-8",  "text": "RD-4: UNIQUE constraint на (tenant_id, page_id, registry_def_id, field_key) в migration 052.", "verifiable_as": "fitness"},
+    {"id": "AC-9",  "text": "RD-5: stale boolean DEFAULT false в migration 052.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "RD-6: report_page_dep в known_tenant_tables.txt.", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "RD-7: check-report-page-deps.sh --self-test с временно переименованным bundle_members.txt → exit 1 (fail-closed).", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "DB-1 (live): все non-stale report_page_dep.field_key присутствуют в соответствующих registry_def.record_schema.properties.", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "DB-2 (live): строки stale=true логируются (не fail).", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "DB-3 (live): нет orphan report_page_dep (FK constraint подтверждён live).", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "npm run fitness exit 0.", "verifiable_as": "fitness"},
+    {"id": "AC-16", "text": "tsc --noEmit exit 0.", "verifiable_as": "fitness"},
+    {"id": "AC-17", "text": "frozen-checks-immutable.sh exit 0 (bundle-coherence.sh не тронут).", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0179-bundle-coherence-deps.spec.md"
+}

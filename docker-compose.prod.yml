@@ -1,0 +1,69 @@
+# Choros prod overlay (T-0061, E0.6)
+#
+# Override-file for production deployments. Merge on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                  --env-file .env.prod up -d
+#
+# RULES (RL-3 / AC-3):
+#   - Every sensitive variable MUST be in required-form ${VAR:?message} (NO ${VAR:-default}).
+#   - docker compose WILL ABORT with a clear error if .env.prod is absent or incomplete —
+#     this is intentional and is the prod-secret safety net (compose-spec §required-variables).
+#   - Prod-volumes have _prod suffix (AC-4) — physically isolated from dev volumes.
+#   - Keycloak runs in start (prod) mode; KC TLS hardening deferred to E0.7.
+#   - No prod secret is committed here (RL-3). See .env.prod.example for template.
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required for prod — set in .env.prod}
+      POSTGRES_USER:     ${POSTGRES_USER:?POSTGRES_USER required for prod — set in .env.prod}
+      POSTGRES_DB:       ${POSTGRES_DB:?POSTGRES_DB required for prod — set in .env.prod}
+    volumes:
+      - "choros_pgdata_prod:/var/lib/postgresql/data"
+      - "./config/postgres:/docker-entrypoint-initdb.d:ro"
+
+  keycloak:
+    # prod mode: KC start (prod). KC_HOSTNAME_STRICT=false + KC_HTTP_ENABLED=true
+    # are the minimum for a single-server without TLS termination (E0.7 gap).
+    # Full KC hardening (KC_PROXY=edge, KC_HOSTNAME_URL) is deferred to E0.7.
+    command: start --import-realm
+    environment:
+      KEYCLOAK_ADMIN:          ${KEYCLOAK_ADMIN:?KEYCLOAK_ADMIN required for prod — set in .env.prod}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD required for prod — set in .env.prod}
+      KC_DB_PASSWORD:          ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required for prod — set in .env.prod}
+      KC_DB_USERNAME:          ${POSTGRES_USER:?POSTGRES_USER required for prod — set in .env.prod}
+      KC_HOSTNAME_STRICT:      "false"                     # prod single-server: relaxed (E0.7 gap)
+      KC_HTTP_ENABLED:         "true"                      # HTTP until TLS/proxy in E0.7
+
+  flowable:
+    environment:
+      SPRING_DATASOURCE_PASSWORD:       ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required for prod — set in .env.prod}
+      SPRING_DATASOURCE_USERNAME:       ${POSTGRES_USER:?POSTGRES_USER required for prod — set in .env.prod}
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: ${FLOWABLE_REST_APP_ADMIN_PASSWORD:?FLOWABLE_REST_APP_ADMIN_PASSWORD required for prod — set in .env.prod}
+
+  choros:
+    environment:
+      DATABASE_URL:     ${DATABASE_URL:?DATABASE_URL required for prod — set in .env.prod}
+      CHOROS_AUTH_MODE: ${CHOROS_AUTH_MODE:?CHOROS_AUTH_MODE required for prod — set in .env.prod}
+      NODE_ENV:         production
+      PORT:             ${PORT:?PORT required for prod — set in .env.prod}
+      # T-0549 — clean prod: the migration runner (ops/docker-entrypoint.sh →
+      # migrations/run.mjs) skips every `-- @demo-seed` migration, so a fresh
+      # production deploy comes up with NO fake reference company (TEL process,
+      # vendor-CRM, ₽ catalogs, contractor directory). A new human lands in a
+      # clean, empty tenant. Override to "1" only to deliberately demo on prod.
+      CHOROS_SEED_DEMO: ${CHOROS_SEED_DEMO:-0}
+      # T-0624: same named-volume fix as dev (base file), just the _prod-suffixed
+      # volume declared below (AC-4 physical isolation pattern). NOTE: this is a
+      # stopgap durability floor for prod, NOT the durable answer — a real prod
+      # deploy should swap FsObjectStore for an S3-compatible ObjectStore adapter
+      # (GT-4 founder-gated choice, T-0579 ADR §deploy) so file bytes survive
+      # host loss, not just container/image churn.
+      FILE_STORE_ROOT: ${FILE_STORE_ROOT:-/app/uploads}
+    volumes:
+      - "choros_uploads_prod:/app/uploads"
+
+volumes:
+  choros_pgdata_prod: {}   # physically isolated from choros_pgdata (dev)
+  choros_uploads_prod: {}  # physically isolated from choros_uploads (dev) — T-0624

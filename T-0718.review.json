@@ -1,0 +1,39 @@
+{
+  "task_id": "T-0718",
+  "verdict": "approved",
+  "summary": "GET /api/inbox/:id теперь оверлеит живой Flowable-шаг на projection через реюз T-0709 core (resolveLiveNodesByInstance + overlayLiveSteps из src/core/process-catalog-view.ts), без изменения самого core-модуля (diff в core = 0 строк). Единый источник истины подтверждён: inbox/catalog/detail используют ОДНУ и ту же пару функций и один и тот же LIVE_OVERLAY_DEADLINE_MS=2000. Degrade честный (never 500, never worse than pre-T-0718). Defer/agent-строки структурно не затронуты (projection для них никогда не резолвится). web/ не тронут, как заявлено.",
+  "checks": {
+    "a_single_source_reuse": {
+      "verdict": "pass",
+      "detail": "inbox.ts импортирует overlayLiveSteps + resolveLiveNodesByInstance + CatalogEnginePort из src/core/process-catalog-view.ts (не форк, не копипаста). `git diff dev...task/T-0718 -- src/core/process-catalog-view.ts` = 0 строк — core-модуль байт-в-байт не менялся, только заимпортирован. Та же пара функций уже используется в processes.ts (detail) и process-catalog.ts (каталог) — теперь и в inbox.ts (деталка инбокса). Три read-поверхности (inbox/catalog/detail) сходятся на одном резолвере — расхождение item.step vs projection.step структурно закрыто: overlayLiveSteps перезаписывает step/role/concurrentSteps ИЗ ТОГО ЖЕ getActiveUserTasks, что item.step уже показывал (waitingTask.step из findWaitingInstanceTask)."
+    },
+    "b_degrade_and_deadline": {
+      "verdict": "pass",
+      "detail": "overlayInboxDetailLiveStep: (1) projection.status==='done' → возврат без похода в движок; (2) client отсутствует или не имеет getActiveUserTasks → возврат unchanged; (3) try/catch вокруг resolveLiveNodesByInstance — любая ошибка движка возвращает projection как есть, никогда не бросает. Дедлайн-бюджет — тот же LIVE_OVERLAY_DEADLINE_MS=2_000 (буквально скопированное значение, синхронизированное с processes.ts/process-catalog.ts), передаётся как deadlineMs в resolveLiveNodesByInstance — та же бюджетная логика (race с setTimeout), что уже unit-тестирована в process-catalog-view.test.ts (T-0709-R-P2-1). Дополнительно вызов обёрнут ВНЕШНИМ try/catch в самом inbox.ts route (pre-existing, не новый) — двойная защита от 500."
+    },
+    "c_defer_agent_untouched": {
+      "verdict": "pass",
+      "detail": "Проверено структурно: projection резолвится ТОЛЬКО когда writeDeps есть И (waitingTask найден через findWaitingInstanceTask/listInstanceInboxTasks — инстанс-бэкед задачи с реальным Flowable instanceId) ИЛИ найден doneProj через listInstanceProjections по inboxTaskId. Defer-задачи (agent.deferred, listDeferredInboxTasks) НЕ проходят ни через listInstanceInboxTasks, ни через listInstanceProjections — их id не совпадает ни с одним waitingTask.id, ни с inboxTaskId done-проекции. Следовательно `projection` остаётся undefined для defer/agent-only строк, `if (projection)` guard не пускает их в overlayInboxDetailLiveStep — оверлей их вообще не касается. Это подтверждает заявление спеки 'missing live-entry → unchanged' на уровне ДО оверлея (сам объект туда не попадает)."
+    },
+    "d_engine_only_via_injected_client_scope": {
+      "verdict": "pass",
+      "detail": "overlayInboxDetailLiveStep принимает flowable: FlowableClient|undefined и приводит его к CatalogEnginePort (структурный порт с одним read-методом getActiveUserTasks) — вызывает writeDeps.flowableClient, тот же pre-existing optional-инъецированный dependency, что уже используется в inbox.ts на approve-роуте (строки ~1434-1486). Никакого bare fetch/нового транспорта не introduced. Подтверждено: bash ci/checks/start-route-isolation.sh проверяет ТОЛЬКО process-start.ts (FF-7-1/7-2) и processes.ts (FF-7-3 pg-free display plane) — grep по скрипту показывает START_MODULE/DISPLAY_MODULE жёстко заданы этими двумя файлами, inbox.ts вне скоупа гейта. Инбокс уже pg-carrying ДО этого диффа (import pg from 'pg' на строке 29, предшествующий T-0718) — спека права, это не новое нарушение изоляции, т.к. изоляционный гейт этот файл никогда не покрывал."
+    },
+    "e_tenant_scope": {
+      "verdict": "pass",
+      "detail": "projection.inst передаётся в resolveLiveNodesByInstance только для projection, УЖЕ отфильтрованной через listInstanceProjections(writeDeps.pool, tenantId) — tenantId резолвится из writeDeps.resolveActorTenant(actor) ДО похода в движок. getActiveUserTasks(instanceId) — глобальный по Flowable instanceId (движок сам не tenant-aware), но instanceId сюда попадает ТОЛЬКО из уже tenant-скоупленного projection — идентичная модель доверия, что в processes.ts/process-catalog.ts (T-0709, тот же паттерн, ранее одобрен). Аудит-трек (status/startedAt/inboxTaskId) не переписывается — оверлей чисто display (step/role/concurrentSteps)."
+    },
+    "f_anti_case": {
+      "verdict": "pass",
+      "detail": "Тестовые слаги нейтральны: e-test-approver / e-test-initiator (DEV_USER/PROC_ACTOR в inbox-detail-live-step.test.ts) — соответствуют D-064 anti-case конвенции. bash ci/checks/anti-case-lock.sh подтверждает: aggregate literal count 15 (baseline 16) — НЕ регрессировал, гейт зелёный."
+    }
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "N1",
+      "severity": "P3",
+      "note": "LIVE_OVERLAY_DEADLINE_MS=2_000 продублирован как локальная константа в inbox.ts (третья копия — уже есть в processes.ts и process-catalog.ts). Спека сама признаёт это ('re-declared as a plain number, kept in sync by intent'). Не блокирует — значение примитивное, риск рассинхрона низкий, но при следующем reuse (4-я read-поверхность) стоит вынести константу в core (process-catalog-view.ts экспортирует функции, но не сам дедлайн) — тогда все вызывающие обязаны совпадать по построению, а не по договорённости в комментарии."
+    }
+  ]
+}

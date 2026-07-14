@@ -1,0 +1,124 @@
+{
+  "task_id": "T-0597",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1142,
+    "passed": 1142,
+    "failed": 0,
+    "_note": "web vitest полный: 1142/1142 tests passed, 56/58 suites passed. 2 падающие suite (apps-schema.test.js, records-form.test.js) НЕ входят в total — pre-existing инфра-разрыв (пакет 'ajv' физически отсутствует в web/node_modules И root node_modules этого worktree), не тронуты диффом, падают идентично на dev-базе. Не тестовые провалы T-0597."
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1/AC-2 (alert()→pushToast, текст сохранён)",
+      "test": "web/src/screens/screen-inbox.test.jsx (НОВЫЙ, 8 тестов, source-presence) :: 'does not call native blocking alert() anywhere' (regex [^.]\\balert\\( — 0) + 'imports useToastContext from existing toast-context module' + 'InboxScreen invokes useToastContext()' + 'claimTask surfaces via pushToast tone error / not alert' + 'approveTask surfaces via pushToast tone error / not alert' + 'preserves ENGINE_DRIVE_ERROR_MESSAGE[code] mapping' + 'preserves ALREADY_CLAIMED branch' + 'preserves NOT_ELIGIBLE fallback'. Перегнан тестером самостоятельно — 8/8 green. Независимо: grep по screen-inbox.jsx подтвердил 0 alert(, 0 осиротевших eslint-disable no-alert.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3 (reveal-toggle: type toggle, aria-label/aria-pressed, button)",
+      "test": "web/src/screens/screen-llm-connections.test.jsx (+42 расширение) describe('T-0597 — reveal-toggle') :: 'showKey useState(false)' + 'type={showKey?text:password}' + 'aria-label синхронный (Показать/Скрыть ключ)' + 'aria-pressed={showKey}' + 'real <button type=button> (keyboard reachable)' + 'eye/eye-off KitIcon' + 'imports KitIcon' + 'key state resets on cancel AND after successful bind (write-only hygiene)'. Плюс a11y.test.jsx (обновлён): 'defaults to masked entry (type starts password, toggles to text)' + НОВЫЙ 'showKey defaults to false (starts masked, not revealed)'. Перегнано — 42+7 green.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4/AC-5 (actionable-hint navigate('/org'), путь реален)",
+      "test": "web/src/screens/rights/screen-rights.test.jsx (+5 расширение) describe('T-0597 — actionable hint on empty employees') :: 'imports useNavigate from react-router-dom' + 'AssignRoleForm calls useNavigate()' + 'hint still carries original honest reason text (Список сотрудников пуст)' + 'offers clickable «Открыть оргструктуру» wired to navigate(\\'/org\\')' + 'real <button type=button>, not <div onClick> (keyboard reachable)'. Перегнан — 32/32 (весь файл) green. Независимо: путь /org сверен с shell.jsx:1160 Route + screen-overview.jsx:193 — реален; фрагмент в тернаре hint → кнопки нет при непустом employees.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6/AC-7 (дефолт=Anthropic, DeepSeek первый/выбираем)",
+      "test": "web/src/screens/screen-llm-connections.test.jsx describe('T-0597 — дефолт формы = Anthropic') :: 'derives initial state from PROVIDER_PRESETS anthropic (single source)' + 'provider/endpoint/model/priceIn/priceOut/currency initial state reference ANTHROPIC_PRESET' + 'DeepSeek remains FIRST PROVIDER_PRESETS entry (deepseekIdx < anthropicIdx) and selectable' + 'onProviderChange logic untouched (still auto-fills from preset array)'. Перегнано — green. Независимо: anthropic-пресет внутренне согласован (api.anthropic.com/v1 + claude-3-5-sonnet + 3.00/15.00 USD), не полу-Anthropic с deepseek-url.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8/AC-9/AC-10 (honest-баннер, warning-чип, primary-кнопка)",
+      "test": "web/src/screens/screen-llm-connections.test.jsx describe('T-0597 — честный статус готовности') :: 'createOkNoKey captures !secretHandle.trim()' + 'banner appends honest next-step line only when createOkNoKey' + 'chipStyle uses --chs-color-warning-soft/--chs-color-warning, NOT --chs-color-surface-raised/--chs-color-text-muted (регресс-замок на старые нейтральные токены)' + 'Вставить API-ключ button primary only while unbound (variant={secretBound?ghost:primary})'. Перегнано — green.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12 (ux-g6 --required = 0 новых hardcode/overlay)",
+      "test": "bash ci/checks/ux/ux-g6-no-new-hardcode.sh --required → '0 newly-added hardcode/overlay finding(s)', PASS [G6]. Перегнан тестером в REQUIRED-режиме (сильнее заявленного informational) — 0 находок на всём диффе, включая FR-5 warning-чип, FR-3 accent-ссылку, глазик.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13 (ux-g5 = 0 находок на продуктовом тексте)",
+      "test": "bash ci/checks/ux/ux-g5-jargon-denylist.sh → 28 findings всего (informational, exit 0), ВСЕ в .test.jsx (T-id-in-describe). Тестер выполнил КЛЮЧЕВУЮ проверку самостоятельно: grep вывода по 5 продуктовым файлам (screen-inbox.jsx/screen-llm-connections.jsx/ra-overview-forms.jsx/components.jsx/icon-registry.js) без test-файлов → 0 находок. +3 к baseline (25→28) — ровно 3 новых describe('T-0597 — …') в screen-llm-connections.test.jsx. Продуктовый текст чист.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14 (web vitest полный green; tsc в затронутых)",
+      "test": "npx vitest run (web) → 1142/1142 tests, 56/58 suites (2 pre-existing ajv-suite). tsc: дифф не трогает НИ ОДНОГО .ts (только web/**.jsx + docs); web/ без tsconfig.json (plain JSX); root TypeScript/tsc не установлен в этом worktree (node_modules отсутствует на root) — tsc N/A к этому диффу и физически недоступен здесь. Согласуется с handoff types:'n/a'.",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "npx vitest run (web, full suite)",
+      "result": "pass",
+      "note": "56 suites passed | 2 failed (58); 1142 tests passed | 0 failed. 2 failed suites = pre-existing 'Cannot find package ajv' (apps-schema.test.js, records-form.test.js) — НЕ тронуты диффом (git diff dev...HEAD --name-only их не содержит), падают идентично на dev, ajv физически отсутствует в node_modules. Тот же разрыв в docs/review/T-0592.review.json. Совпадает с pr-handoff (1142/1142)."
+    },
+    {
+      "check": "npx vitest run web/src/screens/screen-inbox.test.jsx (FR-1)",
+      "result": "pass",
+      "note": "8/8 (новый файл)."
+    },
+    {
+      "check": "npx vitest run web/src/screens/screen-llm-connections.test.jsx (FR-2/4/5)",
+      "result": "pass",
+      "note": "42/42 (+42 расширение: reveal-toggle 8, Anthropic-дефолт 4, честный статус 4, плюс существующие T-0574)."
+    },
+    {
+      "check": "npx vitest run web/src/screens/__tests__/screen-llm-connections.a11y.test.jsx",
+      "result": "pass",
+      "note": "7/7. Обновлён честно: старый assert литерального type=\"password\" → assert нового reveal-контракта type={showKey?text:password}, ПЛЮС новый assert showKey default=false (masked-by-default сохранён) — не ослабление, корректное обновление контракта."
+    },
+    {
+      "check": "npx vitest run web/src/screens/rights/screen-rights.test.jsx (FR-3)",
+      "result": "pass",
+      "note": "32/32 (+5 расширение: useNavigate import/call, honest reason text, «Открыть оргструктуру»→navigate('/org'), button-not-div)."
+    },
+    {
+      "check": "bash ci/checks/ux/ux-g6-no-new-hardcode.sh --required",
+      "result": "pass",
+      "note": "0 newly-added hardcode/overlay findings (required-режим). Все новые стили — var(--chs-*) только."
+    },
+    {
+      "check": "bash ci/checks/ux/ux-g5-jargon-denylist.sh",
+      "result": "pass",
+      "note": "informational exit 0; 28 всего, ВСЕ в .test.jsx; 0 на 5 продуктовых файлах (проверено grep-фильтром). +3 = новые T-0597-describe в test-файле."
+    },
+    {
+      "check": "bash ci/checks/ux/ux-g2-theme-pairing.sh",
+      "result": "pass",
+      "note": "PASS обе темы, оба token-source (tokens.css + form-theme.css). Новые токены FR-3/FR-5 (accent, warning, warning-soft) — по 2 определения (light+dark)."
+    },
+    {
+      "check": "bash ci/checks/rights-ui-no-new-write.sh / rights-ui-anti-case.sh / rights-ui-frozen-write.sh",
+      "result": "pass",
+      "note": "Все три PASS — правка ra-overview-forms.jsx (FR-3) не вводит write-эндпоинт, не добавляет D-064 anti-case литерал, write-core байт-неизменен."
+    },
+    {
+      "check": "root vitest smoke / tsc",
+      "result": "skip",
+      "note": "Root node_modules НЕ установлен в этом worktree (нет node_modules/.bin/tsc, ajv/pg отсутствуют) — root vitest/tsc физически не запускаемы здесь. Дифф чисто web (.jsx), server/src не тронут, ни одного .ts в диффе → root smoke не обязателен (см. задание: 'диф чисто web — полный не обязателен'), а tsc N/A (нет TypeScript-поверхности в дельте). Web vitest (единственная релевантная поверхность) перегнан полностью."
+    }
+  ],
+  "failures": [],
+  "notes": {
+    "coverage_gaps_found": "None по автотестам. Один manual-only разрыв, вне тестового тира по конвенции проекта: LIVE_PROOF real-click обеих тем на живом стенде (глазик показывает/скрывает напечатанное, warning-чип амбер, toast появляется/не гаснет, /org-ссылка навигирует) — не покрываем в vitest 'node' без DOM; доедет LIVE_PROOF-ом (D-064, manual). Все AC с verifiable_as=test/fitness/ci покрыты автоматически и перегнаны независимо.",
+    "security_probe_reveal_toggle": "SECURITY-инвариант reveal-глазика (write-only) проверен СТРУКТУРНО, не только тестом кодера: прослежен весь жизненный цикл state apiKey в ConnectionKeyBinder (screen-llm-connections.jsx) — init useState('') на :352; ЕДИНСТВЕННЫЙ data-сеттер onChange=setApiKey(e.target.value) :460 (ввод пользователя); сбросы в '' на submit :379, catch :397, Cancel :490. НИ ОДНОГО пути populate из fetch/сервера — список соединений отдаёт только secret_bound + secret_handle_redacted (шапка :14, рендер :905-910), сырой ключ на клиент не приходит. Значит showKey (type password↔text) не может раскрыть СОХРАНЁННЫЙ ключ — раскрывать нечего, кроме ephemeral pre-send значения, которое пользователь сам напечатал. showKey сброшен в false вместе с apiKey на submit (:380) и Cancel (:490). Тест кодера ('key state resets on cancel AND after a successful bind') фиксирует оба сброса как регресс-замок. Инвариант RL-3 (сервер никогда не возвращает сырой ключ) НЕ ослаблен reveal-toggle.",
+    "anti_false_pass_checks_performed": [
+      "Не доверял заявленным counts — перегнал полный web vitest (1142/1142) и 4 целевых suite (89/89) с чистого запуска, совпадение с pr-handoff подтверждено.",
+      "Проверил, что 2 падающие suite — pre-existing и вне периметра: git diff dev...HEAD --name-only НЕ содержит apps-schema.test.js/records-form.test.js; ajv физически отсутствует (ls node_modules/ajv → нет и в web, и в root); оба падают идентично при прогоне на изолированном файле — не регресс T-0597.",
+      "Проверил ux-g6 в REQUIRED-режиме (не только заявленный informational) — 0 находок; это строже, чем декларировал handoff.",
+      "Выполнил КЛЮЧЕВУЮ ux-g5-проверку самостоятельно: отфильтровал вывод гейта по 5 продуктовым файлам БЕЗ test-файлов → 0 находок; подтвердил, что все +3 к baseline — исключительно T-id-in-describe в screen-llm-connections.test.jsx (тест-файл, легитимно), 0 на видимом продуктовом тексте.",
+      "Проверил отсутствие осиротевших eslint-disable: grep 'no-alert' по screen-inbox.jsx → 0 (директивы удалены вместе с alert-ами, не остались висеть).",
+      "Проверил аддитивность иконок: eye/eye-off есть и в KitIcon SVG-cases (components.jsx :46-47), и в ICON_REGISTRY (KNOWN_NAMES=Set из registry) — dev-warn fallback для них не сработает; сигнатуры существующих иконок не тронуты.",
+      "Проверил внутреннюю согласованность anthropic-пресета (FR-4): endpoint/model/цены все anthropic-семейства (api.anthropic.com/claude-3-5-sonnet/3.00/15.00) — не гибрид с deepseek-url.",
+      "Проверил tokens.css: --chs-color-warning/-soft/-accent определены в ОБОИХ блоках (:root light + [data-theme=dark]), по 2 def каждый — новые FR-3/FR-5 стили тема-безопасны."
+    ],
+    "residual_findings_nonblocking": [
+      "F-1 (nit, review/ux): 'chs-link-button' класс не в CSS (FR-3) — визуальное покрыто инлайн-токенами, className hook-инертен, не сломан. Кандидат в kit-класс при 2-м потребителе.",
+      "F-2 (info, ux): глазик-якорь absolute/bottom привязан к wrapper-с-лейблом (FR-2) — сегодня визуально корректно (Field без hint), трассировано на случай будущего hint у этого поля.",
+      "F-3 (info, review/ux): отсутствует docs/adr/T-0597.adr.contract.json (судил по ADR-T0597.md по директиве); AC-нумерация spec.md↔spec.contract.json расходится (смысл покрыт полностью, ни один AC не потерян). Дефект гигиены фазы spec/design, не блокирует."
+    ]
+  }
+}

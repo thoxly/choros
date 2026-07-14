@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0186",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "docs/specs/T-0186-store-mode-pin.spec.md:111",
+      "issue": "Spec states '22 tests (16 in default store suite + 1 in AC-6 lock-expiry + other)' but actual vitest run reports 18/18 (17 in default store suite + 1 in AC-6 suite). The count '22' is stale from an earlier draft. No functional impact — all tests pass.",
+      "suggestion": "Update spec test count to 18 in a future cleanup pass. Non-blocking."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/server.ts:310",
+      "issue": "When both an explicit non-null store and storeMode='memory' are passed to createServer, the explicit store is used as-is (potentially a PostgresJobStore) while timerStore and outboxStore are forced to undefined. Asymmetry is documented in JSDoc but can surprise future callers expecting full memory isolation. No current call site hits this case.",
+      "suggestion": "Add a JSDoc warning or runtime assertion in a future cleanup. Not blocking."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

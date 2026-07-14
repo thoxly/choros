@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0061",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 17,
+    "passed": 17,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "FF-T61-1: docker compose (dev) config -q exits 0",                                                                  "result": "pass"},
+    {"ac": "AC-2",  "test": "FF-T61-2: docker compose (prod) config -q exits 0 with placeholder env",                                            "result": "pass"},
+    {"ac": "AC-3",  "test": "FF-T61-3: (a) no ${VAR:-default} for sensitive vars; (b) all sensitive vars use ${VAR:?msg} required-form + adversarial: prod up without .env.prod exits 1 with clear error message", "result": "pass"},
+    {"ac": "AC-4",  "test": "FF-T61-4: prod volumes have _prod suffix; no bare choros_pgdata + adversarial isolation (marker written to dev absent in prod — ERROR: relation does not exist)", "result": "pass"},
+    {"ac": "AC-5",  "test": "FF-T61-5: .env.prod.example contains only REPLACE_* placeholders",                                                  "result": "pass"},
+    {"ac": "AC-6",  "test": "FF-T61-6: .env.prod in .gitignore",                                                                                 "result": "pass"},
+    {"ac": "AC-7",  "test": "FF-T61-7: choros service present in docker-compose.yml with required fields (build:., depends_on all 3 substrates, port 3000)", "result": "pass"},
+    {"ac": "AC-8",  "test": "FF-T61-8: Dockerfile exists + docker build exits 0 (multi-stage verified); image contains dist/, web/dist/, migrations/, ops/ — no .env*, no src/", "result": "pass"},
+    {"ac": "AC-9",  "test": "FF-T61-9: KC prod overlay uses 'start' not 'start-dev' + live: KC healthy in prod mode", "result": "pass"},
+    {"ac": "AC-10", "test": "AC-10: KC+Flowable healthchecks now pass natively (KC: bash /dev/tcp probe; Flowable: URL-embedded basic-auth wget) — all 4 services healthy via docker compose up --wait", "result": "pass"},
+    {"ac": "AC-11", "test": "FF-T61-10: unique host port defaults (55432/8180/9000/8082/3000)",                                                  "result": "pass"},
+    {"ac": "AC-12", "test": "FF-T61-11: no-committed-secret.sh exits 0 on new files",                                                            "result": "pass"},
+    {"ac": "AC-13", "test": "FF-T61-12 (live): docker compose up -d --wait (project t0061retest) — ALL 4 services healthy (docker inspect Health.Status=healthy for postgres, keycloak, flowable, choros); /health returns HTTP 200 status:ok; migrations run in logs before app start (29 migrations applied)", "result": "pass"}
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "live_prod_stack_results": {
+    "verdict": "pass",
+    "test_project": "t0061retest (isolated, own volumes/ports, torn down after)",
+    "ports_used": "POSTGRES_PORT=55444, KEYCLOAK_PORT=18180, KEYCLOAK_MGMT_PORT=19000, FLOWABLE_PORT=18082, APP_PORT=13000",
+    "postgres": "PASS — healthy (docker inspect); prod volume t0061retest_choros_pgdata_prod created; dev marker absent in prod DB (volume isolation confirmed)",
+    "keycloak": "PASS — healthy (docker inspect); bash /dev/tcp probe against container-internal port 9000 succeeds; prod 'start' mode active",
+    "flowable": "PASS — healthy (docker inspect); URL-embedded wget basic-auth probe passes (BusyBox compat fixed)",
+    "choros_app": "PASS — healthy (docker inspect); entrypoint ran 29 migrations BEFORE app start (logged); /health HTTP 200 {status:ok}; node-based healthcheck passes (no wget dependency)",
+    "migrations": "PASS — ops/docker-entrypoint.sh ran migrations/run.mjs before exec node dist/index.js; all 29 migrations applied; on invalid DATABASE_URL entrypoint exits 1 refusing to start (silo-upgrade-by-design)",
+    "stack_isolation": "PASS — adversarial probe (b): dev marker written to t0061retestdev2_choros_pgdata; absent from t0061retest_choros_pgdata_prod; physical volume isolation confirmed",
+    "image_cleanliness": "PASS — adversarial probe (c): docker run ls: no .env*, no src/, no web/src/; only dist/, web/dist/, migrations/, ops/, node_modules, package*.json in /app"
+  },
+  "adversarial_probes": [
+    {
+      "id": "probe-a",
+      "description": "Prod stack config/up without .env.prod — must fail with required-var error",
+      "result": "PASS (fixed): docker compose config exits 1 with clear message: 'error while interpolating services.flowable.environment.SPRING_DATASOURCE_PASSWORD: required variable POSTGRES_PASSWORD is missing a value: POSTGRES_PASSWORD required for prod — set in .env.prod'; ${VAR:?msg} form now enforced in docker-compose.prod.yml"
+    },
+    {
+      "id": "probe-b",
+      "description": "Dev and prod stacks simultaneously with separate projects — volume isolation",
+      "result": "PASS: t0061retestdev2_choros_pgdata (dev) and t0061retest_choros_pgdata_prod (prod) are independent Docker volumes; marker written to dev DB absent from prod DB; physical isolation confirmed"
+    },
+    {
+      "id": "probe-c",
+      "description": "docker run --rm <image> ls — no .env*, no src/ sources in image",
+      "result": "PASS: runtime image contains only dist/, web/dist/, migrations/, ops/, node_modules, package*.json; no .env*, no src/, no web/src/ (multi-stage build confirmed clean)"
+    }
+  ],
+  "integration_honesty_d056": {
+    "ci_stack_job_present": true,
+    "uses_up_wait": true,
+    "up_wait_passes": "docker compose up -d --wait exits 0 with all 4 services healthy (verified live in project t0061retest); CI stack job will pass on real run"
+  },
+  "ci_gate": {
+    "tsc": "pass (0 errors)",
+    "eslint": "pass (2 pre-existing no-console warnings, 0 errors)",
+    "fitness_static": "pass — all FF-T61-1..11 checks green including updated compose-prod-config.sh (checks both (a) no :- and (b) :? required-form)",
+    "flowable_static": "pass — FF-FL-4..11 all green including FF-FL-11 baseline SHA f693923 (KC/Flowable healthcheck fixes authorized)",
+    "vitest": "pass — 768 tests pass, 5 skipped integration, 0 failures",
+    "database_url_env": "absent during ci run (as required)"
+  },
+  "regression_check": {
+    "dev_compose_config": "PASS: docker compose (dev) config -q exits 0 — dev stack unaffected",
+    "dev_defaults_preserved": "PASS: dev stack still has ${VAR:-default} soft-defaults (no hard-fail in dev); prod overlay correctly uses ${VAR:?msg} form only",
+    "entrypoint_skip_without_db_url": "PASS: container starts normally when DATABASE_URL is unset (dev/test mode); entrypoint logs 'skipping migrations'"
+  },
+  "friction": []
+}

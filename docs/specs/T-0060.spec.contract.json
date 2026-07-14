@@ -1,0 +1,152 @@
+{
+  "task_id": "T-0060",
+  "status": "ready",
+  "summary": "Активировать Keycloak JWT-аутентификацию на четырёх worker-эндпоинтах (POST /jobs, POST /external-task/fetch-and-lock, POST /external-task/:id/complete, POST /external-task/:id/fail): единый guard проверяет Bearer-токен через JWKS Keycloak и валидирует claims iss/aud/actor_type; dev-auth путь (x-dev-user) остаётся нетронутым при CHOROS_AUTH_MODE=dev.",
+  "functional": [
+    "FR-1: Единый auth-middleware guard покрывает все 4 worker-эндпоинта (одна точка ветвления по CHOROS_AUTH_MODE, не N разбросанных проверок)",
+    "FR-2: В режиме keycloak извлекает Bearer-токен из Authorization-заголовка; при отсутствии/неверном формате — 401; проверяет подпись через JWKS Keycloak (OIDC discovery или KEYCLOAK_JWKS_URI)",
+    "FR-3: Обязательные claims — iss (совпадает с {KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}), aud (содержит choros-api), exp (не истёк), actor_type (human | agent); невалидность любого → 401",
+    "FR-4: После успешной проверки обработчику доступны sub и preferred_username из токена (в request-контексте)",
+    "FR-5: При CHOROS_AUTH_MODE=dev guard не активируется на worker-эндпоинтах; x-dev-user работает; существующие тесты неизменны",
+    "FR-6: JWKS-ключи кэшируются в памяти (TTL настраивается JWKS_CACHE_TTL_MS, default 300000 мс); при 401 — однократная инвалидация и перезапрос",
+    "FR-7: Конфигурация через env vars: CHOROS_AUTH_MODE, KEYCLOAK_URL, KEYCLOAK_REALM (default choros), KEYCLOAK_AUDIENCE (default choros-api), JWKS_CACHE_TTL_MS (default 300000)",
+    "FR-8: Реализация на stdlib Node.js (node:crypto, node:https) без npm JWT-библиотек"
+  ],
+  "non_functional": [
+    "NF-1: Без новых npm-зависимостей (zero-dep, только stdlib)",
+    "NF-2: Публичные экспорты src/http/auth.ts и src/http/externalWorker.ts не изменяются (DEV_USER_HEADER, registerAuthRoutes, registerExternalWorkerRoutes, createServer)",
+    "NF-3: Overhead при горячем JWKS-кэше ≤ 2 мс на запрос",
+    "NF-4: Fail-closed — любая ошибка валидации → 401; KC недоступен → 503 AUTH_UNAVAILABLE (не 500, детали не раскрываются)",
+    "NF-5: Env-конфигурация, ни один dev-секрет не коммитится в TS-код",
+    "NF-6: Тесты keycloak-режима — live-kc CI-джоб; dev-режим — существующий live-dev джоб без KC"
+  ],
+  "out_of_scope": [
+    "Создание KC service-account'ов и provisioning агентов — T-0042",
+    "Invoke-grant'ы и request/command-split — T-0024",
+    "Авторизация (RBAC) — только аутентификация в рамках T-0060",
+    "Запись auth-событий в аудит-лог — T-0016/E2 scope",
+    "Аутентификация non-worker эндпоинтов (inbox, org, grants, rights, processes)",
+    "mTLS — исключён для MVP",
+    "Prod Keycloak TLS + hostname pinning — E0.7 scope",
+    "Кастомные Keycloak SPI / extensions"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "externalWorker.e2e.test.ts — все тесты зелёные при CHOROS_AUTH_MODE=dev (или unset), Keycloak не запущен",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "auth.e2e.test.ts — все тесты зелёные при CHOROS_AUTH_MODE=dev; поведение /api/me с x-dev-user неизменно",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "POST /jobs без заголовка Authorization → HTTP 401, тело {\"error\":{\"code\":\"UNAUTHENTICATED\",\"message\":\"...\"}} при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "POST /external-task/fetch-and-lock без Authorization → HTTP 401 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "POST /external-task/:id/complete без Authorization → HTTP 401 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "POST /external-task/:id/fail без Authorization → HTTP 401 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Authorization: Bearer <malformed> (не JWT) → HTTP 401 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "JWT с неверной подписью (подписан другим ключом) → HTTP 401 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "JWT с истёкшим exp → HTTP 401 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "JWT с неверным iss (не {KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}) → HTTP 401 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "JWT без aud: choros-api (или несовпадающей аудиторией) → HTTP 401 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "JWT без claim actor_type → HTTP 401 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "Валидный JWT с actor_type=\"agent\" (agent service-account от KC agent-orchestrator) → POST /jobs → HTTP 201 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "Валидный JWT с actor_type=\"human\" (ROPC-токен e-kravtsova) → POST /external-task/fetch-and-lock → HTTP 200 при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "После успешной валидации обработчик получает sub (непустой UUID-string) и preferred_username (непустой string) из токена в request-контексте",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-16",
+      "text": "KC недоступен (JWKS endpoint таймаут) → HTTP 503 с кодом AUTH_UNAVAILABLE (не 500, не stacktrace в теле) при CHOROS_AUTH_MODE=keycloak",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-17",
+      "text": "grep -r 'CHOROS_AUTH_MODE' src/ возвращает ≤ 2 совпадений (в auth.ts и опционально в server.ts); guard не разбросан по N обработчикам",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "grep -E 'jsonwebtoken|jose|jwks-rsa' src/ возвращает 0 совпадений — никаких npm JWT-библиотек в TS-коде",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-19",
+      "text": "Публичные экспорты неизменны: grep 'export.*DEV_USER_HEADER' src/http/auth.ts возвращает 1 совпадение; registerExternalWorkerRoutes, registerAuthRoutes, createServer сигнатуры не изменились",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-20",
+      "text": "Отсутствие KEYCLOAK_URL при CHOROS_AUTH_MODE=keycloak → ошибка запуска сервера (non-zero exit или thrown Error) до принятия первого запроса; не silent fail",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-21",
+      "text": "grep -cE 'KEYCLOAK_URL|KEYCLOAK_AUDIENCE|JWKS_CACHE_TTL_MS' docs/environments.md ≥ 3 — все новые env vars задокументированы",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-22",
+      "text": "Live-kc интеграция: agent-token от agent-orchestrator (client_credentials) → POST /jobs → 201; ROPC-токен e-kravtsova → POST /external-task/fetch-and-lock → 200",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-23",
+      "text": "При горячем JWKS-кэше второй запрос с тем же токеном не инициирует новый HTTP-запрос к Keycloak (unit-тест с mocked fetch/http подтверждает 0 вызовов JWKS после первого)",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0060-worker-endpoint-auth.spec.md"
+}

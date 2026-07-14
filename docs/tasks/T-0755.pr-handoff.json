@@ -1,0 +1,21 @@
+{
+  "task": "T-0755",
+  "root_cause": "mixed",
+  "root_cause_detail": {
+    "primary": "а — deployed gap: no production runtime completer for the tel-intake topic; agent-dispatch drives only agent-step (docker-compose.yml:209-210, agent-dispatch-loop.ts:13-16); only the test harness bridge-smoke-runner.ts + the CI e2e journey complete it (tel-linear-smoke.sh:8-11 'day-1 DORMANT/stub')",
+    "secondary": "б — seed/case leak (D-064): telLinear is a @demo-seed process (migrations 085/087/090) whose triage step uses a bespoke tel-intake topic instead of the canonical agent-step the platform drives; a case-specific step gates the generic create=start primitive",
+    "tangential": "в — the seeded dormant keystone agent a-triage (migration 090, d0000000-…-0006) is NOT referenced by the BPMN (no agentRef/agentEmployeeId), so the intended dormant-defer-to-human never fires"
+  },
+  "diagnosis_path": "docs/tasks/T-0755.diagnosis.md",
+  "fix_made": false,
+  "fix_approach": "NONE — stopped per Phase-2 guardrail. No clean, self-contained, provable fix exists without an architectural/product decision about which runtime model owns triage completion (Option A: build a deterministic triage worker = the flagged 'built-in triage worker' founder decision; Option B: re-topic demo triage to canonical agent-step + wire a-triage — ripples into CI/test contracts that enshrine tel-intake AND relies on the agent-step live path which is itself unproven end-to-end live; Option C: re-author the demo so create=start lands on a human step — a demo/product-shape decision). See diagnosis §5.",
+  "reprove": {
+    "method": "NOT RUN — nothing fixed to prove. Live park already evidenced by T-0691 (docs/live-proof/T-0691-e16-capstone.json bypasses[0] + p0_findings[0], screenshots docs/live-proof/T-0691-evidence/).",
+    "reached_human_step": false,
+    "bypass_needed": true
+  },
+  "escalate": true,
+  "code_changed": false,
+  "gates_run": "none (no code changed; diagnosis + handoff docs only)",
+  "notes": "create=start is genuinely broken at the platform level in deployment for any on_create process whose first post-submit step is an agent/deterministic external task on a topic the runtime does not drive (today: every on_create→telLinear instance). It does not fail loudly — it silently parks with a stale «Подача заявки / ОЖИДАНИЕ» projection (worse: looks alive, is dead). The green-CI mask = the test harness / e2e journey standing in for a production worker that was never built. Recommendation: Option B (most product-faithful, столп 4) but ONLY after a prerequisite task PROVES the agent-step live path end-to-end against real Flowable; Option C for a faster low-risk honest create=start proof."
+}

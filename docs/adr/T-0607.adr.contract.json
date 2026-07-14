@@ -1,0 +1,83 @@
+{
+  "task_id": "T-0607",
+  "status": "ready",
+  "decision": "Пять точечных дельт честности, каждая закрывает свой дефект без переписывания ассистента. Дельта (а): новый DAO src/db/registry-digest-dao.ts::loadReadableRegistryDigest резолвит гранты актёра тем же getGrantsForSubject + composite ancestry (READ-PDP T-0570), перечисляет registry_def тенанта, считает видимые записи и берёт до sampleLimit примеров, фильтруя КАЖДУЮ строку через isRecordReadable (тот же предикат, что LIST records) — ничего шире прав; cap на реестры/примеры; любой сбой → {degraded:true, registries:[]} (honest-degrade, не throw). AnalystPorts.loadRegistryDigest? (default null); runAnalyst кладёт результат в ReportDraft.registryDigest; buildDraftContext рендерит секцию 'Разделы и записи (в ваших правах)'. 'Записей нет' появляется ТОЛЬКО когда дайджест не degraded И все visibleCount===0; при null/degraded — 'не удалось прочитать разделы', НЕ 'записей нет'. server.ts::setAnalystPorts подключает loadRegistryDigest (MVP-шаг по O1, не полный record-lister). Дельта (б): hasAuthoringDraftGrant = isOwner(ctx) || canOperateSystemAgent(userGrants на ctx.userSubject, не на мигающем пересечении). isOwner — новый опциональный HandlerContext.isTenantOwner?:()=>Promise<boolean>, заполняется в assistant.ts через существующий isGenesisOwnerForTenant; не задан → owner-ветка не срабатывает (fail-closed). canOperateSystemAgent НЕ трогается (owner-short-circuit по контракту — обязанность caller'а, capability-authz.ts:121-124). Отказ при отсутствии права остаётся детерминированным серверным AUTHORING_ACCESS_DENIED_MESSAGE. Дельта (в1): helpers resolveRegistryDefId/resolveApplicationId (UUID as-is; иначе SELECT id по slug в правах тенанта; не найдено → null); executeApprovedOpAsDraft резолвит идентификаторы реестра/приложения перед DB-записью для edit_jsonschema_non_destructive/relate_application/author_binding/emit_form/generate_process; не-резолвящийся → honest op-error string, не 500. Дельта (в2): пост-исполнительная сверка — новый чистый src/core/assistant-report.ts::buildHonestOpsReport(finalTextFromLlm, opResults): при провалах НЕ echo-ит оптимистичный '✅', даёт 'Выполнено частично' + explicit ✓/✗ список с honest-причиной; дубль-op помечает 'уже было', не 'не создано'; без провалов — прежний текст. Дельта (г): (i) runAnalyst оборачивает ctx.llm.chat() try/catch → console.error + canonicalizeLlmError-текст (дисциплина T-0600), не пробрасывает; (ii) диспатч-catch в assistant.ts для НЕ-unavailable ошибок пишет assistant-сообщение с честным текстом (buildDispatchFailureReply) в тред + отвечает им, сырой err только в console.error — тред никогда не немой; respondLlmUnavailable путь не трогается. Дельта (д): buildDraftContext рендерит S3-телеметрию (цикловое время/разбивка по актору) ТОЛЬКО когда isProcessAnalyticsQuery(userText) true; по общему запросу о данных телеметрия в LLM не попадает. Дайджест реестров остаётся всегда (данные пользователя, не телеметрия).",
+  "rejected_alternatives": [
+    {"option": "Полный record-lister с пагинацией/tool-use для (а)", "why_not": "Раздувает в отдельного агента (O1). Дайджест (счёт + примеры в правах) — минимальный честный шаг, покрывает живой факт 'сколько заведено и как называется хотя бы один'."},
+    {"option": "Owner-short-circuit внутри canOperateSystemAgent", "why_not": "Размывает чистый предикат над Grant[]; его контракт явно оставляет owner на caller'а (capability-authz.ts:121-124). Чиним caller (hasAuthoringDraftGrant)."},
+    {"option": "Гейт (б) через пересечение agent∩user для допуска", "why_not": "Именно оно мигает по scope seeded-агента — источник недетерминизма. Для ДОПУСКА достаточно права пользователя (+owner); agent∩user остаётся инвариантом ИСПОЛНЕНИЯ (executor draft-only, tenant-scoped)."},
+    {"option": "(в1) класть каталог реестров в промпт, чтобы LLM знал UUID", "why_not": "Хрупко (токены, дрейф). Резолв slug→UUID на стороне исполнителя надёжнее и уже в правах тенанта. Каталог в промпт — возможный UX-FU, не обязателен для честности."},
+    {"option": "(в2) чинить changelog внутри processToolCall", "why_not": "processToolCall — пуре-планировщик, не знает исхода DB. Честный рапорт возможен только ПОСЛЕ исполнения — отсюда пост-сверка."},
+    {"option": "(г) только catch в analyst", "why_not": "Закрывает analyst-путь, но не путь роутера при иных сбоях. Нужны оба уровня, чтобы тред никогда не оставался немым."},
+    {"option": "(д) полностью убрать S3-загрузку из аналитика", "why_not": "Теряем процессную аналитику для тех, кто её просит. Гейтим по интенту, а не удаляем."}
+  ],
+  "object_model": [
+    {"entity": "loadReadableRegistryDigest (новая, src/db/registry-digest-dao.ts)", "fields": [
+      {"name": "signature", "type": "(pool, tenantId, actorSlug, nowMs, opts?) => Promise<ReadableRegistryDigest>"},
+      {"name": "ReadableRegistryDigest", "type": "{ degraded: boolean; registries: {slug,displayName,visibleCount,samples:string[]}[] }"}
+    ]},
+    {"entity": "AnalystPorts.loadRegistryDigest (новое поле, assistant-analyst.ts)", "fields": [
+      {"name": "signature", "type": "(tenantId, actorSlug) => Promise<ReadableRegistryDigest | null>, default null"}
+    ]},
+    {"entity": "HandlerContext.isTenantOwner (новое опциональное поле, assistant-intent.ts)", "fields": [
+      {"name": "signature", "type": "(() => Promise<boolean>) | undefined; не задан → owner-ветка не срабатывает"}
+    ]},
+    {"entity": "buildHonestOpsReport (новая, src/core/assistant-report.ts)", "fields": [
+      {"name": "signature", "type": "(finalTextFromLlm: string, opResults: OpResult[]) => string — pure"},
+      {"name": "OpResult", "type": "{ description: string; ok: boolean; error?: string; duplicate?: boolean }"}
+    ]},
+    {"entity": "buildDispatchFailureReply (новая, src/core/assistant-report.ts)", "fields": [
+      {"name": "signature", "type": "() => string — pure, канонический русский текст без жаргона"}
+    ]},
+    {"entity": "resolveRegistryDefId/resolveApplicationId (новые, src/http/assistant.ts)", "fields": [
+      {"name": "signature", "type": "(pool, tenantId, idOrSlug) => Promise<string | null> — UUID as-is; иначе SELECT id по slug (RLS)"}
+    ]},
+    {"entity": "isProcessAnalyticsQuery (новая, src/core/assistant-analyst.ts)", "fields": [
+      {"name": "signature", "type": "(userText: string) => boolean — keyword-детектор процессной аналитики"}
+    ]}
+  ],
+  "contracts": [
+    "src/db/registry-digest-dao.ts — новый: loadReadableRegistryDigest + ReadableRegistryDigest (ADR §1.1)",
+    "src/core/assistant-analyst.ts — AnalystPorts.loadRegistryDigest?; ReportDraft.registryDigest; buildDraftContext (секция реестров + честная пустота + телеметрия за интент-флагом); isProcessAnalyticsQuery; try/catch вокруг ctx.llm.chat()+canonicalizeLlmError (ADR §1.1/§1.5/§1.6)",
+    "src/core/assistant-intent.ts — HandlerContext.isTenantOwner? (ADR §1.2)",
+    "src/core/assistant-configurator.ts — hasAuthoringDraftGrant owner-short-circuit + резолв на userGrants (ADR §1.2)",
+    "src/core/assistant-report.ts — новый чистый модуль: buildHonestOpsReport, buildDispatchFailureReply, OpResult (ADR §1.4/§1.5)",
+    "src/http/assistant.ts — resolveRegistryDefId/resolveApplicationId; slug-резолв в executeApprovedOpAsDraft; пост-исполнительная сверка через buildHonestOpsReport; диспатч-catch пишет честную ошибку в тред; заполняет ctx.isTenantOwner (ADR §1.3/§1.4/§1.5)",
+    "src/server.ts — setAnalystPorts({ loadRegistryDigest }) (ADR §1.1)",
+    "новые тесты: src/__tests__/assistant-analyst-digest.test.ts (AC-1/2/10), assistant-configurator-owner.test.ts (AC-4), assistant-report.test.ts (AC-7/9), расширение analyst/configurator unit (AC-8)",
+    "новые live DB: ci/checks/db/registry-digest.test.ts (AC-3), configurator-owner-gate.test.ts (AC-5), edit-jsonschema-slug-resolve.test.ts (AC-6)",
+    "docs/handoff/T-0607.pr-handoff.json — BUILD-фаза"
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1: аналитик со stub-дайджестом строит контекст с именем реестра и числом записей; текст не содержит 'записей нет'.", "ci_check": "vitest run src/__tests__/assistant-analyst-digest.test.ts"},
+    {"id": "FF-2", "rule": "AC-2: 0 реестров (не degraded) → 'записей нет'; degraded → НЕ 'записей нет'.", "ci_check": "vitest run src/__tests__/assistant-analyst-digest.test.ts"},
+    {"id": "FF-3", "rule": "AC-3: live DB — реестр+запись+READ-грант → count>=1+sample; без гранта → 0.", "ci_check": "npm run fitness:db (ci/checks/db/registry-digest.test.ts)"},
+    {"id": "FF-4", "rule": "AC-4: hasAuthoringDraftGrant владелец без гранта → true; не-владелец без гранта → false.", "ci_check": "vitest run src/__tests__/assistant-configurator-owner.test.ts"},
+    {"id": "FF-5", "rule": "AC-5: live DB — владелец допущен детерминированно; не-владелец без гранта отказан.", "ci_check": "npm run fitness:db (ci/checks/db/configurator-owner-gate.test.ts)"},
+    {"id": "FF-6", "rule": "AC-6: live DB — edit_jsonschema с registryDefId=slug → резолв+запись; несуществующий slug → honest op-error.", "ci_check": "npm run fitness:db (ci/checks/db/edit-jsonschema-slug-resolve.test.ts)"},
+    {"id": "FF-7", "rule": "AC-7: buildHonestOpsReport [ok,fail] помечает упавшую как упавшую, без '✅' для неё.", "ci_check": "vitest run src/__tests__/assistant-report.test.ts"},
+    {"id": "FF-8", "rule": "AC-8: runAnalyst с бросающим LLM → HandlerResult с каноническим текстом, без сырого тела.", "ci_check": "vitest run (analyst unit)"},
+    {"id": "FF-9", "rule": "AC-9: buildDispatchFailureReply — честный текст без жаргона; роут пишет его в тред при сбое диспатча.", "ci_check": "vitest run src/__tests__/assistant-report.test.ts"},
+    {"id": "FF-10", "rule": "AC-10: общий запрос → контекст без S3-телеметрии; процессный запрос → содержит.", "ci_check": "vitest run src/__tests__/assistant-analyst-digest.test.ts"},
+    {"id": "FF-11", "rule": "AC-11: жаргон-гейт + --self-test зелёные.", "ci_check": "bash ci/checks/ux/assistant-llm-message-jargon.sh && bash ci/checks/ux/assistant-llm-message-jargon.sh --self-test"},
+    {"id": "FF-12", "rule": "AC-12: анти-кейс-замок зелёный, без новых кейс-литералов.", "ci_check": "bash ci/checks/anti-case-lock.sh"},
+    {"id": "FF-13", "rule": "AC-13: npm test + npm run build + npm run fitness:db зелёные.", "ci_check": "npm test && npm run build && npm run fitness:db"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-2"},
+    {"ac": "AC-3", "covered_by": "FF-3"},
+    {"ac": "AC-4", "covered_by": "FF-4"},
+    {"ac": "AC-5", "covered_by": "FF-5"},
+    {"ac": "AC-6", "covered_by": "FF-6"},
+    {"ac": "AC-7", "covered_by": "FF-7"},
+    {"ac": "AC-8", "covered_by": "FF-8"},
+    {"ac": "AC-9", "covered_by": "FF-9"},
+    {"ac": "AC-10", "covered_by": "FF-10"},
+    {"ac": "AC-11", "covered_by": "FF-11"},
+    {"ac": "AC-12", "covered_by": "FF-12"},
+    {"ac": "AC-13", "covered_by": "FF-13"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0607-assistant-truth.md",
+  "escalation": "Нет. Все пять — коррекция дефектов честности в существующих контрактах (READ-PDP T-0570, owner-резолвер isGenesisOwnerForTenant, draft-executor, T-0573 honest-путь), не новая архитектура и не необратимое/денежное/секретное решение. Owner-short-circuit — применение уже задокументированного контракта canOperateSystemAgent (обязанность caller'а), не расширение прав."
+}

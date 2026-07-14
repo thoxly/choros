@@ -1,0 +1,115 @@
+{
+  "task_id": "T-0082",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "sha": "95e2a0a",
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/bundle-coherence.sh:118",
+      "issue": "Нечитаемый реестр (chmod 000) не даёт явного сообщения «registry unreadable». Скрипт получает 'Permission denied' в stderr от redirect '<', продолжает с MEMBER_COUNT=0 и в итоге печатает FAIL на < 5 members + object-schema not found. Fail-closed инвариант соблюдён (exit 1), но диагностика непрозрачна. NF-4 не нарушен — гард таки падает. Grep-проверка object-schema также получает permission denied и тоже фиксирует нарушение, так что оба канала дублируют ошибку корректно.",
+      "suggestion": "Добавить проверку readability перед циклом: [[ -r \"${MEMBERS_FILE}\" ]] || { echo \"FAIL [bundle-coherence]: registry not readable: ${MEMBERS_FILE}\"; exit 1; }. Без неё user видит загадочное 'only 0 members' вместо явного указания на permission denied."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/bundle-coherence.sh:132-142",
+      "issue": "bpmn-linter-isolation.sh вызывается безусловно — даже если bpmn-process строка удалена из реестра. Это чуть более строго, чем описывает ADR псевдокод (делегация BPMN-члена), но не нарушает ни одного AC. Дополнительная fail-closed охрана скорее плюс.",
+      "suggestion": "Косметически: можно задокументировать в комментарии, что BPMN-linter вызывается unconditionally (не only when bpmn-process kind=external). Это преднамеренно или нечаянно — в любом случае безопасно."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/pr/T-0082.pr-handoff.json:files_changed",
+      "issue": "PR-хэндофф в files_changed перечисляет только 5 BUILD-файлов, но не упоминает ADR (docs/design/T-0082-bundle-coherence.adr.md) и spec (docs/specs/T-0082-bundle-coherence.spec.md), хотя оба файла присутствуют в diff 83c9c7c..HEAD. Это DESIGN-phase артефакты, вошедшие в diff через ветку. Конвенция Demiurge позволяет files_changed ограничивать BUILD-зоной, так что не нарушение — но неполная картина для будущего ревьюера.",
+      "suggestion": "Нит, не блокирует. Опционально включить DESIGN-артефакты в files_changed или добавить примечание о фазовой границе."
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "ac": "AC-1",
+      "covered": true,
+      "evidence": "bundle_members.txt содержит ровно 5 строк-членов (2 choros_table + 3 external); choros_table-строки имеют непустые table_or_path и key_column; CI green."
+    },
+    {
+      "ac": "AC-2",
+      "covered": true,
+      "evidence": "bundle-coherence.sh исполняем (chmod+x подтверждён чтением); в статическом CI (npm run ci без DB) завершается exit 0; подтверждено live прогоном."
+    },
+    {
+      "ac": "AC-3",
+      "covered": true,
+      "evidence": "Скрипт grep -qx registry_def known_tenant_tables.txt (строка 65) + grep -Eq 'record_schema[[:space:]]+jsonb[[:space:]]+NOT[[:space:]]+NULL' (строка 82); whitespace-tolerant работает на реальном двойном пробеле в 004 (Python repr подтверждён)."
+    },
+    {
+      "ac": "AC-4",
+      "covered": true,
+      "evidence": "Скрипт: grep -Eq 'CREATE TABLE[[:space:]]+choros.\"grant\"' (строка 91) + grep -Eq 'resource_type[[:space:]]+text[[:space:]]+NOT[[:space:]]+NULL' (строка 94) на migrations/008_grant.sql; оба матча подтверждены."
+    },
+    {
+      "ac": "AC-5",
+      "covered": true,
+      "evidence": "bash ${BPMN_LINTER} (строка 135), ненулевой exit-код пробрасывается через ERRORS++; проверено стабом с exit 1 — bundle-coherence.sh возвращает exit 1."
+    },
+    {
+      "ac": "AC-6",
+      "covered": true,
+      "evidence": "case external → echo '[bundle-deferred] ${name}: see docs/design/T-0082-bundle-deferral-contract.md' (строка 110); никакого ERRORS++; live run печатает 3 строки [bundle-deferred] и завершается exit 0."
+    },
+    {
+      "ac": "AC-7",
+      "covered": true,
+      "evidence": "Файл существует; секция '## Deferred members' содержит строки bpmn-process, form-code, form-json-schema; секция '## Promotion rule: external → choros_table' с условиями промоушна и требованием DoD; 'bpmn-def' упоминается в Purpose параграфе. Семантически покрыто."
+    },
+    {
+      "ac": "AC-8",
+      "covered": true,
+      "evidence": "package.json fitness строка заканчивается на '&& bash ci/checks/bundle-coherence.sh' (git diff подтверждён); ci.yml job ci — npm run ci (строка 24), который транзитивно вызывает fitness → bundle-coherence.sh как blocking gate."
+    },
+    {
+      "ac": "AC-9",
+      "covered": true,
+      "evidence": "Скрипт: check MEMBER_COUNT < 5 (строка 121) + grep object-schema (строка 127). Тест с реестром без object-schema (4 строки) → exit 1, 2 violations. Тест с 5 строками без object-schema → exit 1, 1 violation. Тест с пустым реестром → exit 1."
+    },
+    {
+      "ac": "AC-10",
+      "covered": true,
+      "evidence": "git diff 83c9c7c..HEAD: known_tenant_tables.txt не изменён; bpmn-linter-isolation.sh не изменён; tier_bearing_tables.txt и tier-isolation.sh не существуют и не созданы T-0082."
+    },
+    {
+      "ac": "AC-11",
+      "covered": true,
+      "evidence": "grep -Eiq '\\b(tier|draft|published)\\b' ci/checks/bundle-coherence.sh → пусто. Ни одного запрещённого токена."
+    },
+    {
+      "ac": "AC-12",
+      "covered": true,
+      "evidence": "ci/checks/db/bundle-coherence.test.ts: describe.skipIf(!DB_URL); без DATABASE_URL — 2 skipped (exit 0), не FAIL. С live DB (localhost:55432, choros_migrator) — 2 passed."
+    },
+    {
+      "ac": "AC-13",
+      "covered": true,
+      "evidence": "ci/checks/db/bundle-coherence.test.ts FF-13: SQL WHERE resource_type='record' AND resource_facet IS NULL; с live DB → 2 passed."
+    },
+    {
+      "ac": "AC-14",
+      "covered": true,
+      "evidence": "git diff 83c9c7c..HEAD: src/core/grant-lattice.ts, src/core/types.ts, src/core/flowable-client.ts, src/core/bpmn-linter.ts — все unmodified."
+    }
+  ],
+  "ci_details": {
+    "npm_run_ci": "green",
+    "tsc": "0 errors",
+    "eslint": "0 errors (2 pre-existing warnings в src/bridge-runner.ts и src/core/externalTaskBridge.ts — не T-0082)",
+    "fitness_static": "PASS [bundle-coherence]: all members coherent",
+    "vitest": "1032 passed | 6 skipped (1038)",
+    "fitness_db_bundle_coherence": "2 passed с live DB на localhost:55432"
+  },
+  "role_gap_evidence": []
+}

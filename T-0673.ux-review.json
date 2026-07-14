@@ -1,0 +1,19 @@
+{
+  "task_id": "T-0673",
+  "role": "design-steward",
+  "verdict": "approved",
+  "summary": "Фоллбэк нерезолва честный и видимый: person-slug (напр. e-larina) человеко-легибелен и остаётся ОСНОВНЫМ текстом ActorChip; сырой UUID, который не резолвится, ДЕМОТИРУется в tooltip/моно-метку, а основной текст падает на generic-лейбл 'Сотрудник' (isMachineActorLabel, components.jsx:135-142/211-221) — никогда пустота, никогда выдуманное имя (D2 honest-empty). Тот же примитив ActorChip, что в инбоксе/аудите/grant-trail (T-0648) — консистентность маркировки/tooltip. Тема/контраст — токенами (chs-actorchip, ExecutorBadge, без хардкод-hex).",
+  "findings": [
+    {
+      "severity": "P2",
+      "what": "Маркер деактивации сотрудника (chs-exec--deactivated + '(деактивирован)' в accessible-name) для person-ячеек списка визуально никогда не появится: /api/org (listOrgTree) не отдаёт deactivated на people[], PersonCell всегда получает deactivated=false. В инбокс/аудит ActorChip этот сигнал приходит через отдельный ResolvedActor.deactivated и виден — здесь возникает НЕсогласованность: тот же примитив, но один сигнал молча теряется в этом контексте.",
+      "where": "web/src/screens/screen-app-records.jsx:498-506 + src/db/org.ts:162-166",
+      "why": "Консистентность примитива частично нарушена (deactivation-стиль/AT-аннонс), но резолв имени, tooltip с id, тип-глиф и accessible type-label работают идентично инбоксу. Не блокирует (сигнал деактивации — вторичный аудит-слой, не ломает основную читаемость). Follow-up: протянуть deactivated через /api/org или убрать prop."
+    }
+  ],
+  "adversarial_checks_passed": {
+    "fallback_visible_honest": "OK — не пустота: displayName = (не-machine-key rawName) || (не-machine-key id) || meta.label ('Сотрудник'). Slug остаётся видимым; UUID уходит в tooltip. Никогда blank, никогда фабрикация.",
+    "consistency_with_inbox": "OK — ActorChip реюзнут вербатимно (импорт из components.jsx), те же tooltip (typeLabel · id), моно-метка (showId), sr-only тип-аннонс, глиф. Тот же примитив в списке/деталке/инбоксе/аудите.",
+    "tokens_theme_contrast": "OK — стили через chs-actorchip/chs-exec/ExecutorBadge (design-токены), никаких инлайн-hex в новом коде. Person-ячейка наследует токенную типографику ячеек таблицы."
+  }
+}

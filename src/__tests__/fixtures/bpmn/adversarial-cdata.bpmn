@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="http://www.flowable.org/processdef">
+  <process id="adversarialCdataProcess" name="Adversarial CDATA" isExecutable="true">
+    <serviceTask id="task1" name="CDATA Attack Task">
+      <extensionElements>
+        <flowable:field name="payload">
+          <flowable:string><![CDATA[{"registryId":"x","recordId":"y"}]]></flowable:string>
+        </flowable:field>
+      </extensionElements>
+    </serviceTask>
+  </process>
+</definitions>

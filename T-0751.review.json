@@ -1,0 +1,31 @@
+{
+  "task_id": "T-0751",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "T-0751-N1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "T-0751.pr-handoff.json / commit message (\"unit 4739\")",
+      "issue": "Reported unit count is inaccurate. Builder claims 'unit 4739'; a clean root `vitest run` on this branch reports 5960 passed | 17 skipped | 0 failed (317 files passed, 2 skipped). Actual state is STRONGER than claimed (more tests, zero failures), so this is a reporting discrepancy only, not a regression.",
+      "suggestion": "Reconcile the reported number (likely a stale/subset figure) in the handoff; the observed suite is fully green."
+    },
+    {
+      "id": "T-0751-N2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/rights-intents.ts:resolveActiveActorEmployeeId vs registerSelfAbsence inline lookup (lines ~999-1023 vs ~1339-1362)",
+      "issue": "Deliberate duplication of the `SELECT id FROM choros.employee WHERE tenant_id=$1 AND slug=$2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1` lookup (byte-identical SQL + identical 404 message 'actor employee record not found') rather than a shared helper. Justification VERIFIED: FF-0662-1 is a per-function-body predicate scan; extracting a shared helper would vacate registerSelfAbsence's own body coverage (confirmed: FF-0662-1 currently reports 'registerSelfAbsence carries the deactivation predicate on all 1 lookup(s)'), and moving registerSelfAbsence onto a helper would force a destructive (non-additive) registry reclassification of the frozen AUTHORITY_RESOLVERS list. Duplication is the correct minimal-additive choice, well-documented in the section comment. Non-blocking.",
+      "suggestion": "None required. Kept as an intentional, documented, independently gate-verified copy."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "1. Deactivated caller cut off: resolveActiveActorEmployeeId carries deactivated_at IS NULL (ACTOR_ACTIVE_SQL); deactivated -> 404, body has NO provides_coverage/holder_count; holder-set query NOT executed. FF-0662-1 PASS; live-PG deactivated 404 with both fields undefined; unit c3 asserts ranHolderSetQuery=false; MUTATION test (throwaway worktree, gate removed) -> deactivated caller got 200 {provides_coverage:true,holder_count:1} + holder-set query ran -> gate is load-bearing.", "covered": true },
+    { "ac": "2. Auto-additive legitimate: resolveActiveActorEmployeeId absent from BOTH AUTHORITY_RESOLVERS and ALLOWLIST at BASE_REF (git-verified) -> pure APPEND of a new entity, NOT reclassification. getRoleSlugsForActor untouched (still ALLOWLIST at base) -> distinct from T-0740-B remove+add founder-class. auto-sanction-additive --verify A-1..A-4 PASS + enemy-attestation valid (corpus_ref ancestor+blob match, family ACTOR-ACTIVE binds both files); frozen-checks-immutable PASS; self-test PASS incl. AC-5 founder-class boundary + FF-ASA2/3 destructive/mutation reject. All 3 frozen files pure-append (0 removed/modified lines).", "covered": true },
+    { "ac": "3. Marker not masking: route calls resolveActiveActorEmployeeId in its own handler block (rights-intents.ts:1039). findings 0 honest (23 marker-covered / 55 whitelisted / 0). MUTATION test: removing the call reverts route-coverage to 1 finding naming EXACTLY GET:/api/rights/intents/substitution-coverage (22 marker-covered) -> marker is route-bound, not a dead marker, not whitelist suppression.", "covered": true },
+    { "ac": "4. Non-refactor justified (non-blocking): duplication preserves registerSelfAbsence's own FF-0662-1 body accounting; extraction would break it or force destructive registry change. See T-0751-N2.", "covered": true },
+    { "ac": "5. T-0745 form not broken: useSubstitutionCoverage (web/src/screens/rights/ra-intents.jsx:260-262) treats non-2xx as reject->catch->setProvidesCoverage(null)=advisory-unknown; banner renders only when non-null. Active caller -> real coverage (live-PG positive control 200 provides_coverage:true holder_count:1; unit c1/c2). Frontend file untouched by T-0751.", "covered": true },
+    { "ac": "6. Gates: tsc 0; unit 5960 pass/0 fail; live-PG rights-intents 17/17; actor-active-route-coverage 0 findings (23/55/0) + self-test PASS; actor-authority-deactivation-gate 8 resolvers FF-0662-1/2 clean + self-test PASS; frozen-checks-immutable PASS; auto-sanction-additive + self-test PASS; http-route-auth-coverage PASS; anti-case-lock PASS. Diff scoped: 10 task-related files, actor-authority-gate.ts comment-only, no drive-by.", "covered": true }
+  ]
+}

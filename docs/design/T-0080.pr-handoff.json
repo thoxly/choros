@@ -1,0 +1,113 @@
+{
+  "task": "T-0080",
+  "epic": "E11.9",
+  "title": "Cross-application references: per-hop ACL + redacted projection (reuse field-visibility) + hop-cap",
+  "branch": "task/T-0080-cross-app-refs",
+  "migration_number": "068",
+  "migration_file": "migrations/068_cross_app_ref.sql",
+  "new_table": "choros.cross_app_ref",
+  "commit_message": "feat(T-0080): E11.9 cross-app references — per-hop ACL + redacted projection (reuse field-visibility) + hop-cap",
+
+  "design_note": "Implements §6 'references, not copies' for cross-application data traversal. A cross_app_ref definition stores only the ref_field pointer (source registry → target registry via a JSONB UUID key); target record fields are never copied. Per-hop ACL re-check goes through an injected CrossAppHopFetcher port (which wraps the single PDP / resolveFor). Redaction reuses T-0081 FieldProjection (physical key absence, not null). Traversal is bounded by HOP_CAP = 3. Cross-process data stays within the RLS channel (the migration RLS predicate is the single tenant_id predicate, NF-1). Fail-fast on first denied hop prevents information leakage about chain structure beyond the denial point.",
+
+  "files_changed": [
+    {
+      "path": "migrations/068_cross_app_ref.sql",
+      "kind": "new",
+      "description": "Tenant-scoped DDL for choros.cross_app_ref: PK (tenant_id, id), FK to registry_def (source + target), ref_field text, label, ref_strength CHECK (weak/strong), RLS predicate (single tenant_id predicate NF-1), FORCE RLS, GRANT to choros_app, index on (tenant_id, source_registry_id)."
+    },
+    {
+      "path": "src/core/cross-app-ref.ts",
+      "kind": "new",
+      "description": "Pure-core mechanism. Exports: CrossAppRefDef, CrossAppHopFetcher, CrossAppRefDeps, CrossAppHopResult, CrossAppHopDenied, CrossAppHopAllowed, HOP_CAP (=3), resolveHop(), resolveHopChain(), buildRedactedHopProjection(). No DB/IO/env. Imports only FieldProjection from field-visibility.ts (T-0081 brick reuse). Per-hop ACL via injected fetcher port (single PDP path). Hop-cap enforced in resolveHop step 1."
+    },
+    {
+      "path": "src/core/__tests__/cross-app-ref.test.ts",
+      "kind": "new",
+      "description": "25 pure unit tests covering CR-1 through CR-16 + SECURITY test. Tests: per-hop deny (no_grant, not_found, cross_tenant), hop-cap at boundary (depth=HOP_CAP-1 allowed, depth=HOP_CAP denied), dangling refs (missing/null/non-string), allowed pass-through, redacted projection structural distinctness (no `value` key), chain traversal (all-allowed/fail-fast/second-denied), depth accumulation, empty chain."
+    },
+    {
+      "path": "ci/checks/cross-app-refs-isolation.sh",
+      "kind": "new",
+      "description": "Fitness check with --self-test. CA1: core purity (no pg/fs/net/http/crypto/process.env). CA2: no direct grant-resolver import (single authority path). CA3: FieldProjection imported from field-visibility (no fork). CA4: HOP_CAP exported and used in depth guard. CA5: resolveHop exported. CA6: no parallel ACL store tokens."
+    },
+    {
+      "path": "ci/checks/known_tenant_tables.txt",
+      "kind": "modified",
+      "description": "ADDITIVE: appended 'cross_app_ref' (seam-file 1 of 3). Required for cross-tenant isolation test to include the new table."
+    },
+    {
+      "path": "ci/checks/db/cross_tenant.test.ts",
+      "kind": "modified",
+      "description": "ADDITIVE: added 'cross_app_ref' case in seedRowForTable (before default:, ON CONFLICT DO NOTHING, mirrors doc_page pattern, uses seedState.regIdA/regIdB for FK deps); added 'cross_app_ref' to SEEDED_TABLES set. (Seam-file 2 of 3.)"
+    },
+    {
+      "path": "ci/checks/role-criticality-migration-excludes.txt",
+      "kind": "modified",
+      "description": "ADDITIVE: appended '068_cross_app_ref # T-0080 — cross_app_ref DDL; owned by cross-app-refs-isolation.sh'. (Seam-file 3 of 3.)"
+    },
+    {
+      "path": "package.json",
+      "kind": "modified",
+      "description": "ADDITIVE: appended '&& bash ci/checks/cross-app-refs-isolation.sh && bash ci/checks/cross-app-refs-isolation.sh --self-test' to the END of the fitness script chain."
+    }
+  ],
+
+  "redaction_reuse_of_field_visibility": {
+    "summary": "cross-app-ref.ts imports FieldProjection from ./field-visibility.js (T-0081). The denied-hop sentinel shape is exactly FieldProjection & { visible: false } = { key, visible: false, redacted: true, label }. This is structurally identical to T-0081's Decision 4 (F-3): no `value` key, label/id only. buildRedactedHopProjection() returns this type. The CrossAppHopDenied interface wraps it as `redactedProjection: FieldProjection & { visible: false }`. No fork of the redaction sentinel — the same type is reused as pinned in T-0081 ADR §6.3 (Decision 6).",
+    "field_visibility_import_line": "import { type FieldProjection } from \"./field-visibility.js\";",
+    "FieldProjection_used_as": "CrossAppHopDenied.redactedProjection and the return type of buildRedactedHopProjection()"
+  },
+
+  "fitness_check": {
+    "script": "ci/checks/cross-app-refs-isolation.sh",
+    "self_test": "bash ci/checks/cross-app-refs-isolation.sh --self-test",
+    "checks": ["CA1 (core purity)", "CA2 (single resolver)", "CA3 (field-visibility reuse)", "CA4 (hop-cap)", "CA5 (resolveHop export)", "CA6 (no parallel ACL store)"],
+    "result": "PASS (both --real and --self-test)"
+  },
+
+  "seam_file_edits": [
+    {
+      "file": "ci/checks/known_tenant_tables.txt",
+      "change": "appended 'cross_app_ref' (additive)",
+      "verified": "grep confirms cross_app_ref is the last line"
+    },
+    {
+      "file": "ci/checks/db/cross_tenant.test.ts",
+      "change": "added case 'cross_app_ref': seeder using seedState.regIdA/regIdB FK; added 'cross_app_ref' to SEEDED_TABLES (additive, before default:, ON CONFLICT DO NOTHING)",
+      "verified": "fitness:db green — 790/790 tests pass"
+    },
+    {
+      "file": "ci/checks/role-criticality-migration-excludes.txt",
+      "change": "appended '068_cross_app_ref # T-0080 — cross_app_ref DDL; owned by cross-app-refs-isolation.sh' (additive)",
+      "verified": "role-criticality-isolation.sh PASS in full fitness run"
+    }
+  ],
+
+  "test_results": {
+    "tsc_noEmit": "CLEAN (0 errors)",
+    "eslint_src": "CLEAN (0 errors on new files)",
+    "fitness": "PASS except documented FE-s24-0001 artifact (scoped-admin-isolation FF-16: known_tenant_tables.txt changed — single failure traces to the new table addition)",
+    "cross_app_refs_isolation_sh": "PASS",
+    "cross_app_refs_isolation_sh_self_test": "PASS",
+    "vitest_run": "106 test files passed (25 new in cross-app-ref.test.ts), 2 skipped (flowable integration, no server), 0 failed",
+    "fitness_db": "57 test files passed (790/790), includes cross_tenant seeder for cross_app_ref"
+  },
+
+  "known_artifact_failures": [
+    {
+      "check": "scoped-admin-isolation FF-16",
+      "reason": "known_tenant_tables.txt was modified to add cross_app_ref — scoped-admin-isolation checks that migration 026 (which it owns) did not add a new tenant table. The failure traces entirely to our new table addition, not to any violation of scoped-admin invariants.",
+      "documented_as": "FE-s24-0001 artifact (task instructions: 'if the ONLY failures trace to known_tenant_tables.txt being changed, note them as the known artifact and continue')",
+      "other_failures": "none"
+    }
+  ],
+
+  "security_argument": {
+    "no_second_authority_path": "cross-app-ref.ts imports ONLY FieldProjection from field-visibility.ts and uses no grant algebra. All ACL decisions go through the injected CrossAppHopFetcher port, which is implemented in the adapter layer using resolveFor (the single PDP). Verified by CA2 static check.",
+    "no_value_leak": "Denied hops return { visible: false, redacted: true, label } — no value key. Allowed hops return fields already projected by the single PDP (T-0081 redaction already applied inside resolveFor). This module does not re-project or re-redact — it passes through the PDP output as-is. Verified by CR-8 test.",
+    "hop_cap": "HOP_CAP = 3 enforced in step 1 of resolveHop before any fetcher call. depth + 1 > HOP_CAP → denied(hop_cap_exceeded). Fetcher not called (verified by CR-3 test asserting mockFetcher not called).",
+    "fail_fast_chain": "resolveHopChain stops on first denied hop, preventing information leakage about chain structure beyond the denial boundary. Verified by CR-10 test asserting fetcher called exactly once.",
+    "rls_channel": "migration 068 has a single tenant_id predicate (NF-1, FORCE RLS, choros_app DML GRANT). Cross-process data exposure is within the RLS boundary. The pure core never bypasses RLS — all DB access is through the adapter layer."
+  }
+}

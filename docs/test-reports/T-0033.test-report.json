@@ -1,0 +1,108 @@
+{
+  "task_id": "T-0033",
+  "verdict": "pass",
+  "phase": "TEST",
+  "head": "3648969f44cd9221672066fcdd242277a36a4e44",
+  "branch": "task/T-0033-data-classification",
+  "summary": "Data-classification + value-aware masking: full deterministic CI green (tsc/eslint/fitness-shell + vitest 529/529) and fitness:db 123/123 reproduced on an ISOLATED Postgres (POSTGRES_PORT=55444, own compose project + volume, torn down). 16/16 AC covered (AC-15 correctly manual/deferred to T-0053). 5 adversarial probes run mimo existing tests and reverted; no security-AC inversion found. Two non-blocking security observations recorded (keyless-hash cross-tenant equality oracle; throwing-port fails closed by exception rather than to drop) — both spec-silent, not AC violations.",
+  "deterministic": {
+    "total": 652,
+    "passed": 652,
+    "failed": 0
+  },
+  "deterministic_detail": {
+    "tsc_noEmit": "exit 0",
+    "eslint_src": "exit 0",
+    "fitness_shell": "npm run fitness exit 0 — single-resolver, grant-resolver-isolation (Check1/3), mutation-gateway-isolation, data-classification-isolation (FF-DC8/9/10/17), bpmn-linter-isolation, cross-tenant, kc checks all green",
+    "vitest_pure": "529/529 (21 files); data-classification.test 34, grant-resolver.test 48",
+    "fitness_db": "123/123 (7 files) on isolated Postgres 55444 — data_classification 8/8, schema 16/16, cross_tenant 27/27 (AC-2 RLS), two_tenant 4/4, behavior 7/7, pgJobStore 36/36, pgTimerStore 25/25",
+    "migrations": "017_data_classification applies clean on pass 1 (012->017 jump per ADR RUN SEAM; 013-016=T-0017 not merged here), pass 2 idempotent ('nothing to apply, 13 already recorded'). Real DDL: CREATE TABLE + ENABLE/FORCE RLS + tenant-isolation policy + closed-class CHECK + tenant_id-leading PK, no egress column (S-1 seam honored).",
+    "total_note": "652 = 529 pure vitest + 123 fitness:db (deterministic test bodies). Shell fitness + tsc + eslint pass as gates (exit 0), not counted as test bodies."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "FF-DC1 schema.test (db) + known_tenant_tables.txt; migration 017 applies on isolated DB", "result": "pass"},
+    {"ac": "AC-2", "test": "FF-DC2 + cross_tenant.test (db) 27/27 — tenant-A row invisible to tenant-B session, visible to own", "result": "pass"},
+    {"ac": "AC-3", "test": "FF-DC3 data-classification.test — class-driven divergence keyed on clearance only", "result": "pass"},
+    {"ac": "AC-4", "test": "FF-DC4a/4b + FF-DC12 — fail-closed missing/mismatched classification (governed state G drops, never raw)", "result": "pass"},
+    {"ac": "AC-5", "test": "FF-DC5 + FF-DC7 — value-aware (present, transformed value, deeply-different from raw)", "result": "pass"},
+    {"ac": "AC-6", "test": "FF-DC6 — transform selected by (class, clearance), not field name", "result": "pass"},
+    {"ac": "AC-7", "test": "FF-DC7 grant-resolver.test — human(resolveHandle)==agent(resolveFor) deep-equal masked output; single-resolver.sh green", "result": "pass"},
+    {"ac": "AC-8", "test": "data-classification-isolation.sh FF-DC8 + deriveClearance rights-derived-only test — no parallel field-ACL store", "result": "pass"},
+    {"ac": "AC-9", "test": "grant-resolver-isolation.sh Check1/3 + FF-DC9 — no pg/fs/net/http import; frozen modules byte-unchanged", "result": "pass"},
+    {"ac": "AC-10", "test": "FF-DC10 + FF-DC10(isolation) — guarded reclassification requires transition/approve op; no direct-write path", "result": "pass"},
+    {"ac": "AC-11", "test": "FF-DC11 — direction-aware guard (down-reclass rejected for up-only subject; from->to exposed)", "result": "pass"},
+    {"ac": "AC-12", "test": "FF-DC12 — typed-facet honors schema version, isolated from null-clearance lever (governed@v2, facet v1, clearance=restricted)", "result": "pass"},
+    {"ac": "AC-13", "test": "FF-DC13 — determinism (deeply-equal inputs => deeply-equal masked output)", "result": "pass"},
+    {"ac": "AC-14", "test": "FF-DC14 — shared-axis contract (DataClass stable enumerable join symbol)", "result": "pass"},
+    {"ac": "AC-15", "test": "MANUAL/DEFERRED to T-0053 (DB-permission floor; activates with Postgres DAO) — spec §4 AC-15 + §7 S-4 fix this deferral, matching T-0021 AC-14", "result": "pass"},
+    {"ac": "AC-16", "test": "FF-DC15 — audit obligation shape (via set, actor/subject present) for masking + reclassification", "result": "pass"}
+  ],
+  "ac_15_status": "Confirmed deferral is fixed in design: spec §4 marks AC-15 '(manual, activates with T-0053)' and §7 S-4 declares the Postgres-backed classification port + DB-permission 'no raw classified read bypasses masking' floor lands with T-0053, identical to T-0021 AC-14. Not testable in this worktree (no DB DAO yet); correctly recorded as manual/deferred, not a gap.",
+  "adversarial_probes": [
+    {
+      "id": "probe-a-hash-equality-oracle",
+      "description": "Two tenants masking the SAME classified value via the 'hash' transform produce the SAME digest (digest() is keyless djb2 over the value only; tenant_id never enters maskFields/applyTransform/digest).",
+      "result": "reproduced",
+      "verdict": "non-blocking finding (spec-silent)",
+      "detail": "applyTransform(v,'hash') is a pure function of v with no tenant salt. maskFields/applyTransform/digest take no tenant_id. Cross-tenant equality of values is therefore observable from masked output (equality oracle), and the 8-byte djb2 digest is brute-forceable for low-entropy values (rainbow/dictionary). Spec §6-A #12 scopes out key custody/tokenization key mgmt but does NOT require the hash transform to be tenant-scoped or salted to prevent the equality oracle — so this is a design gap surfaced, not an AC violation. Reverted."
+    },
+    {
+      "id": "probe-b-partial-short-values",
+      "description": "partial transform on 1-4 char values must not reveal plaintext; check the >4 boundary.",
+      "result": "safe at <=4, boundary-leak at 5",
+      "verdict": "pass (per design)",
+      "detail": "Values length 1..4 => '****' (fully masked, no plaintext slice) — correct. Length 5 => '****2345' reveals last 4 of 5 chars (a 5-char secret leaks 80% of itself); length 6 => '****3456'. This is the documented last-4 contract (data-classification.ts:131-132 'value.length <= 4 => ****'); for >4 the last-4 reveal is by design (partial == last-4). No AC violation: AC-5 requires only deeply-different-from-raw, which holds. Noted as inherent property of last-4 partial. Reverted."
+    },
+    {
+      "id": "probe-c-governed-max-clearance-unresolvable-class",
+      "description": "governed=true + clearance=restricted (max) + a field whose class is corrupt/unresolvable => drop (not reveal). (No DataClass exists above the 'restricted' max, so the over-max case maps to corrupt/unknown class.)",
+      "result": "fail-closed confirmed",
+      "verdict": "pass",
+      "detail": "maskFields with governed:true, clearance:'restricted', corrupt class 'ultra-secret' => key 'ssn' omitted, raw '123456789' absent from output. selectTransform(corrupt, 'restricted') => 'drop'. Doubt resolves to maximal mask even at max clearance — NF-3 holds. Reverted."
+    },
+    {
+      "id": "probe-d-single-projection-live",
+      "description": "resolveFor (agent path) === resolveHandle (human path) bit-for-bit on the SAME input, with REAL masking (not just identity).",
+      "result": "deep-equal AND byte-equal",
+      "verdict": "pass",
+      "detail": "On a governed record {ssn:restricted, card:confidential}, clearance=internal: BOTH paths return {ssn:'[redacted]', card:'****1111'} (ssn gap2=>redact, card gap1=>partial last-4). human.toEqual(agent) AND JSON.stringify(human)===JSON.stringify(agent). Single-projection invariant verified live end-to-end through resolveFor, not just structurally. Reverted."
+    },
+    {
+      "id": "probe-e-throwing-classification-source",
+      "description": "A ClassificationSource whose getClassifications throws must fail closed (never fall through to a raw projection).",
+      "result": "fail-closed-by-exception",
+      "verdict": "pass (no raw leak); minor robustness observation",
+      "detail": "A throwing getClassifications causes resolveFor to PROPAGATE the exception ('boom') rather than catching it and returning raw — raw '123456789' never surfaces. Security posture is correct (no leak). Observation: the fail-closed mode here is fail-by-crash (the read errors) rather than fail-closed-to-drop (a denied/masked result). Acceptable for a security node; flagged as a robustness note, not a defect. Reverted."
+    }
+  ],
+  "integration_honesty_D056": {
+    "verdict": "honest",
+    "evidence": [
+      "grant-resolver.ts imports maskFields (line 49-52) and projectFields delegates to it (line 210-218); buildMaskContext (line 169-178) calls the live getClassifications port — masking is folded into the ONE real projection path, not a parallel unwired module.",
+      "Probe-d proved the masking executes end-to-end through resolveFor/resolveHandle on a real record with real grants (not a unit-isolated maskFields call).",
+      "Migration 017 is real DDL applied to a real isolated Postgres (not a mock): CREATE TABLE + ENABLE/FORCE RLS + tenant-isolation policy + closed-class CHECK; idempotent on second run.",
+      "AC-2 cross-tenant RLS verified at the DB layer (cross_tenant.test 27/27 on live Postgres), not stubbed."
+    ]
+  },
+  "secondary_ux": [
+    {"check": "no web-front UX surface in T-0033 (schema + gateway core only; UI explicitly out-of-scope per spec §3.3)", "result": "n/a", "note": "vtorично — no browser/LLM check applicable; deterministic CI is the whole signal here"}
+  ],
+  "failures": [],
+  "anti_false_fail_note": "Every probe was checked against the spec/ADR truth-table before classifying. The two findings (probe-a equality oracle, probe-e fail-by-exception) are NOT product defects against any AC — the spec/ADR are silent on both, and the implemented behavior is fail-closed (no raw leak) in every case. No green AC is satisfied via an adjacent lever (the rev-2 §10.7 isolating tests FF-DC4b/DC12 already closed the rev-1 null-clearance-lever role-gap; re-confirmed here). No product-defect FAIL is warranted; verdict pass.",
+  "findings": [
+    {
+      "id": "F-1-hash-equality-oracle",
+      "severity": "low-to-medium (spec-silent design gap, not AC violation)",
+      "title": "Keyless hash transform is a cross-tenant value-equality oracle + brute-forceable",
+      "detail": "The 'hash' transform digests the value with a keyless, salt-free djb2 (8-byte output) and never sees tenant_id. Identical values masked under different tenants yield identical digests => an observer of masked hashed output can detect when two tenants hold the same value (e.g. same SSN/email) and can rainbow/dictionary-attack low-entropy values. Spec §6-A #12 scopes out key custody but does not address the equality-oracle/salting question. Recommend: surface to architect — either (a) per-tenant salt threaded into digest (tenant_id is available at the resolver before maskFields, would need plumbing into MaskContext), or (b) an explicit ADR note that hash is a deterministic equality-preserving token by design and the equality oracle is accepted (matching the deferral of crypto custody to a later task). Either way the gap should be a recorded decision, not silent."
+    },
+    {
+      "id": "F-2-fail-closed-by-exception",
+      "severity": "low (robustness note)",
+      "title": "Throwing ClassificationSource fails closed by propagating the exception, not by masking to drop",
+      "detail": "If getClassifications throws, resolveFor does not catch it; the request errors. Security is preserved (no raw leak), but the fail-closed mode is fail-by-crash rather than a clean denied/maximally-masked result. The port contract (§10.4) says a source that cannot determine governance MUST return governed:true — but that contract assumes the source returns; it is silent on a source that throws. Minor: a future Postgres DAO that transiently errors would surface as a hard error rather than a fail-closed mask. Recommend architect note on the throwing-source contract for T-0053."
+    }
+  ],
+  "friction": [],
+  "blocked_reason": ""
+}

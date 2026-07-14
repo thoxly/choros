@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0637",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/http/agents.ts (holdsAgentMgmtUpdate/loadAgentOrgScope, now duplicated a 3rd time alongside secret-handle.ts and assistant-prompt-routes.ts)",
+      "issue": "This task adds a 4th call-site of the same authz predicate pattern to an already-duplicated function (agents.ts already had its own copy for llm-connection/activity; this task reuses that in-file copy correctly, so no NEW duplication is introduced by T-0637 itself — but the pre-existing triple-copy technical debt across agents.ts/secret-handle.ts/assistant-prompt-routes.ts remains unaddressed and now has one more consumer riding on it).",
+      "suggestion": "Already flagged by the architect in the ADR's notes as an explicit non-blocking follow-up (extract to src/core/agent-mgmt-authz.ts). No action needed in this task; keep as backlog follow-up."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11 (LIVE_PROOF)", "covered": false },
+    { "ac": "AC-12 (LIVE_PROOF non-regression)", "covered": false }
+  ],
+  "role_gap_evidence": [
+    "ADR <-> code: matches exactly. ND-1 Variant A (handlers added inline to src/http/agents.ts, reusing the file's own holdsAgentMgmtUpdate/loadAgentOrgScope, byte-identical predicate) and ND-2 Variant A (ad-hoc fetch in AgentRow, no PublishButton abstraction invented) are both implemented as decided, with the rejected alternatives left unbuilt.",
+    "11 FF traced and independently re-run (not just trusted from pr-handoff): agent-instruction-runtime-dormant.sh (FF-COMP-6) PASS, agent-bridge-contract.sh (FF-15) PASS, agent-instruction-additive.sh (FF-COMP-1) PASS, agent-instruction-no-pdp.sh (FF-COMP-5) PASS, agent-instruction-promote-shared.sh (FF-COMP-4) PASS, agent-instruction-published-locked.sh (FF-COMP-7) PASS, agent-instruction-tier-reuse.sh (FF-COMP-3) PASS, anti-case-lock.sh (D-064) PASS. All green with zero script edits, matching the ADR's byte-compatibility claim.",
+    "Authz verified by direct code read + test re-run: PUT/GET /api/agents/:id/instruction gate on holdsAgentMgmtUpdate + loadAgentOrgScope, the SAME predicate object already used for PUT /api/agents/:id/llm-connection in this same file (not a re-implementation, a literal reuse of the existing local functions) -> non-owner without mgmt_object:agent/update grant on org-scope gets 403 ADMIN_GATE_REJECTED before any DB write (agent-instruction-routes.test.ts AC-2 cases, re-run solo: 11/11 pass, including the explicit COUNT-style assertion s.insertRan.value===false on the 403 path).",
+    "Motor/gate integrity verified structurally, not just claimed: git diff --name-only dev...HEAD shows only src/db/agent-competence-dao.ts (NEW), src/http/agents.ts, web/src/screens/{screen-agents.jsx,agents-form.js}, and test files -- none of run-agent-step.ts, agent-step-context.ts, objective-compiler.ts, or src/server/agent-dispatch-loop.ts appear in the diff. FF-15's own forbidden-path grep (src/runtime/agent-dispatch/, src/core/assistant-analyst.ts, src/db/registry-digest-dao.ts, src/http/inbox.ts) confirmed clean by direct script re-run. The new AC-5 regression test (agent-dispatch-loop.instruction.test.ts) imports ONLY the existing composition-root exports (runAgentDispatchOnce, storeInstructionSource) plus a read-only import of stubBudgetPort from agent-step-context.ts (an unmodified file) -- proves hasInstruction flips false->true through the REAL production DI-port (not a stub instruction source) with zero motor edits. Re-ran solo: 2/2 pass, confirming defer-before (0 LLM calls, signal=dormant) and proceed-after (1 LLM call, agent.proceeded audited).",
+    "FF-COMP-6 evasion mechanism independently verified, not just trusted: grep -rlE 'agent_instruction|agent-instruction' src/http returned only artifacts.ts and the two new __tests__ files -- src/http/agents.ts itself is confirmed absent from that list, proving the agent-competence-dao.ts facade (thin, zero-logic re-export under a neutral filename) genuinely keeps agents.ts out of the grep's scope, exactly as the ADR's 'decision' and 'rejected_alternatives' sections argue (the rejected symbol-renaming approach was correctly identified as insufficient because the grep matches the raw import-specifier text, not just identifiers).",
+    "Regression sweep re-run solo (not merely cited from pr-handoff): agent-instruction.test.ts, assistant-prompt.test.ts, assistant-prompt-authz.test.ts, agent-step-weld.dormant.test.ts, agent-step-weld.live-stub.test.ts, agents-list.test.ts, agents-activity.test.ts, agents-llm-connection.test.ts -- all green (27 + 28 tests respectively), plus web-side agents-form.test.js + screen-agents.test.jsx (87 tests) from the web/ vitest config. tsc --noEmit -p . clean.",
+    "UI reviewed directly: AgentInstructionEditor has honest Loading/Error/Empty semantics (LoadingState/ErrorState components, not silent blanks), tier badge with Russian labels, publish button disabled with a Tooltip reason when tier!=='draft' or instruction_id is null (not a dead always-enabled affordance), 409/403 mapped to human Russian text via mapAgentInstructionError/mapAgentInstructionPromoteError, all styling uses --chs-* tokens exclusively (no hardcoded colors found in the new blocks).",
+    "One nit only (R-1, non-blocking, axis 5 reuse/proportionality): the pre-existing triple-copy of the authz predicate (agents.ts/secret-handle.ts/assistant-prompt-routes.ts) is not created by this task but gains a 4th consumer riding the same in-file copy; the ADR already flags this explicitly as a deliberate, scoped-out follow-up rather than an oversight -- consistent with the task's stated proportionality (a 3-function extraction refactor was correctly judged out of scope for an authoring-layer task).",
+    "LIVE_PROOF (AC-11/AC-12) not executed in this review pass -- this is a headless code review, no access to the live Tailscale dev stand or a live tenant LLM key. The pr-handoff.json is honest about this (open_questions explicitly states LIVE_PROOF is pending tester/founder execution on the dev stand). Recorded as not-covered in acceptance_coverage, not as a blocking defect of the code itself -- the authoring-layer code is structurally ready for it (draft/publish flow works end-to-end at the unit level per AC-4's promote test)."
+  ]
+}

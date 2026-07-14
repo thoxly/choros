@@ -1,0 +1,144 @@
+{
+  "task_id": "T-0068",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1124,
+    "passed": 1119,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "fitness:db (isolated Postgres POSTGRES_PORT=55489) audit-writer.chain.test.ts::FF-1 — genesis anchor + dense chain > first append writes the genesis anchor (seq=1, prev=32×0x00); + LIVE e2e seq=1 genesis verified",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "fitness:db audit-writer.chain.test.ts::FF-1 > three sequential appends form a dense +1 chain (prev_hash[n]=row_hash[n-1]); + LIVE e2e whole-tenant chain dense 1..7 from genesis verified",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "vitest audit-preimage.test.ts (FF-3/AC-3): golden digest pinned (vocab=1) + deterministic same-bytes + JCS permuted-keys-equal + R-4 non-ASCII/supra-BMP key ordering + NULL≠empty; row_hash=SHA-256(preimage)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "static: ci/checks/audit_no_global_seq.sh (FOR UPDATE present, no nextval/CREATE SEQUENCE/pg_advisory) green; live: fitness:db audit-writer.chain.test.ts::FF-2b > N=8 concurrent appends → 8 dense distinct seq, tenant-A/B independent; + adversarial PROBE-C parallel dispatch",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "fitness:db audit-writer.chain.test.ts::FF-1 > ROLLBACK undoes both the event row and the head advance; COMMIT → both visible & consistent (head.seq points to existing event)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "static: ci/checks/audit_append_only.sh + audit_writer_isolation.sh check 3 (no UPDATE/DELETE on audit_event in writer) green; adversarial PROBE-A: UPDATE/DELETE audit_event rejected for choros_app (GRANT) AND choros_migrator (trigger 006 'append-only')",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "vitest lifecycle-bridge.test.ts (FF-6/AC-7) > auditInstanceStarted appends exactly one instance.started row with subject=instanceId + payload.instanceId pointers (in-memory writer). FORWARD-OBLIGATION: no prod start-instance route exists yet (honest seam per ADR §4.4/§9, review-accepted)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "vitest lifecycle-audit.test.ts (FF-5/AC-8) > task_completed → exactly one append (type=task.completed, aggregateId pointer); task_failed → type=task.failed. LIVE e2e: REAL task.completed row landed in audit_event (seq=7) through outbox dispatcher onDispatched against Flowable+Postgres; main-wired-entry.test.ts (D-056) proves the real composition path",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "vitest lifecycle-audit.test.ts (FF-5/AC-9) > worker_lock_expired → no-op (0 appends); unknown eventType → no-op (0 appends)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "vitest lifecycle-audit.test.ts (FF-5/AC-10) > dispatcher only fires onDispatched when markDispatched advanced; second pass (already dispatched) → 0 appends. LIVE: second dispatch dispatched=0; adversarial PROBE-C: two parallel dispatchers → exactly 1 audit row (SKIP LOCKED + if(advanced))",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "vitest lifecycle-audit.test.ts (FF-7/AC-11): projectActorType human→human, agent/runtime→agent, agent/external-worker→service; union exactly {human,agent,service}; LIVE e2e: real row carries payload.actorType='service'",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "vitest audit-preimage.test.ts + lifecycle-audit.test.ts: changing payload.actorType changes recomputed row_hash (tamper-detectable). LIVE/adversarial PROBE-D & e2e tamper probe: flipping payload.actorType on the real stored row diverges canonical recompute",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "static: ci/checks/audit_actor_type_set.sh (projectActorType union ⊆ {human,agent,service} = audit.ts AuditEvent.type; migration 016 kind CHECK stays {human,agent}) green",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "vitest lifecycle-bridge.test.ts (FF-9/AC-14): no FLOWABLE_BASE_URL → no-op handle no-throw; deps missing → degraded no-op; + main-wired-entry.test.ts: startMain composition wires dispatcher with onDispatched, createServer starts no loop; static lifecycle_bridge_wiring.sh green",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "vitest lifecycle-guard.test.ts (FF-10/AC-15): resolveFor with guardCtx but no deps.sod → not sod_violation (pre-T-0032 grant-only); covering grant resolves denied:false; resolveFor signature unchanged (static lifecycle_bridge_wiring.sh guardCtx check)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "isolated Postgres: node migrations/run.mjs ×2 → run1 applied 30 files (001..030 incl. 030_grant_proposed_confirmed from T-0030 rebase, NO 031 — T-0068 adds no migration); run2 'nothing to apply (30 already recorded)' — idempotent, vacuously satisfied",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-17",
+      "test": "fitness:db cross_tenant.test.ts green (no new T-0068 table; audit_event/audit_head already in known_tenant_tables + FORCE RLS); cross-tenant isolation verified. Vacuously satisfied (0 new tables)",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "T-0068 is a headless audit-writer + lifecycle-mapper + bridge-wiring module — no visual/web UX surface. No browser/LLM secondary verification applicable (D-025: deterministic CI is the primary and only relevant signal here).",
+      "result": "n/a",
+      "note": "вторично, LLM/браузер — n/a for a headless module"
+    }
+  ],
+  "failures": [],
+  "_test_notes": {
+    "phase": "TEST",
+    "worktree": "/Users/shoxy/Code/choros-wt/T-0068 @ task/T-0068-instance-lifecycle (HEAD=1a7dd54)",
+    "object": "T-0068 Instance lifecycle ↔ canonical audit-writer — spec 17 AC, ADR ready (R-3 doc-fixes landed), review approved R-2 (dual-writer chokepointed, R-1 live-wiring mutation-proven, instance.started = honest forward-obligation).",
+    "gate_full_ci_no_database_url": {
+      "tsc_noEmit": "exit 0 (clean)",
+      "eslint_src": "exit 0 (2 pre-existing no-console warnings in externalTaskBridge.ts, 0 errors)",
+      "fitness_static": "exit 0 — full chain green incl. the 4 T-0068 checks (audit_no_global_seq, audit_actor_type_set, audit_writer_isolation, lifecycle_bridge_wiring) + rebased grant-editor/grant-trail checks; audit_writer_isolation single-sink chokepoint enforced",
+      "vitest_run": "801 passed | 5 skipped (42 files) — incl. main-wired-entry(1), audit-preimage(11), lifecycle-audit(13), lifecycle-bridge(3), lifecycle-guard(4), outboxDispatcher(7); 0 regressions",
+      "pipefail": "set -o pipefail; no DATABASE_URL in env for the ci job"
+    },
+    "gate_isolated_db": {
+      "engine": "Postgres 16 via docker compose -p t0068test, POSTGRES_PORT=55489, POSTGRES_USER=choros_migrator, own volume t0068test_choros_pgdata; torn down after run (docker compose -p t0068test down -v — volume confirmed removed)",
+      "migrations_x2": "run1 applied 30 files (001..030, incl. 030_grant_proposed_confirmed from T-0030 rebase, NO 031 — consistent with T-0068 adding no migration); run2 'nothing to apply (30 already recorded)' — AC-16 idempotency confirmed",
+      "fitness_db_x2": "vitest run --dir ci/checks/db --no-file-parallelism → 318/318 pass on BOTH runs (19 files), incl. audit-writer.chain.test.ts (7 tests: genesis anchor, dense chain, ROLLBACK atomicity, N=8 concurrency, interleaved grant+lifecycle dual-writer single-preimage chain + grant-row tamper-detect)"
+    },
+    "gate_live_e2e": {
+      "engine": "Isolated docker compose -p t0068test: Postgres 16 (POSTGRES_PORT=55489) + Flowable 7.1.0 (FLOWABLE_PORT=18089), shared isolated stack; own volume; torn down after run (down -v)",
+      "method": "Ephemeral runner (_t0068_live_e2e.mjs + _t0068_verify.mjs) drove the REAL T-0068 wired path against the live stack, then DELETED (working tree clean).",
+      "cycle": "deploy chorosSmoke BPMN (HTTP 201) → start instance 57f41943... (HTTP 201) → runBridgeOnce fetched=1 enqueued=1 (real fetchAndLock from Flowable) → lock job + enqueue task_completed outbox row → runOutboxOnce with onDispatched=makeAuditOnDispatched(makePgAuditWriter, withTenantTx, resolveActor→service) → deliver completeTask in Flowable AND append lifecycle audit row.",
+      "audit_floor_result": "REAL task.completed row landed in choros.audit_event at seq=7 (genesis tenant a0000000-...-0001): actor='s-ledger', payload.actorType='service', payload.aggregateId=jobId, vocab_version=1. Canonical recompute (SHA-256(canonicalPreimage)) MATCHES stored row_hash. Whole-tenant chain dense 1..7 from GENESIS_PREV_HASH (mixed: 6 genesis-seed grant.create rows + 1 lifecycle row, single preimage rule). audit_head.seq=7 == last row_hash (consistent). Tamper probe: flipping payload.actorType diverges recompute (AC-12 live).",
+      "exactly_once_live": "second runOutboxOnce → dispatched=0 (already-dispatched, if(advanced) gated onDispatched) → no duplicate audit row.",
+      "false_fail_note": "First runner pass mis-reported 'found 9 task.completed rows' — ANTI-FALSE-FAIL check: authoritative psql + independent verifier confirm exactly 1 task.completed row, chain dense & consistent. The miscount was a tooling artifact in the throwaway script's read path, NOT a product defect (DB state is correct: 1 lifecycle row, exactly-once held)."
+    },
+    "adversarial_probes": {
+      "method": "4 probes against the isolated stack; all non-destructive (UPDATE/DELETE attempts rejected and rolled back by triggers/grants; PROBE-C/D used fresh random tenants; genesis chain stayed intact at seq=7).",
+      "PROBE_A_append_only": "UPDATE/DELETE on audit_event REJECTED two ways: choros_app → 'permission denied' (GRANT = SELECT,INSERT only); choros_migrator (owner) → trigger 006 'audit_event is append-only: UPDATE/DELETE is forbidden' (defence in depth, T-0016). seq=7 actor stayed 's-ledger'. PASS.",
+      "PROBE_B_head_tamper": "Hand-tamper audit_head.row_hash behaves AS SPECIFIED (migration 007 / ADR §5): an in-place UPDATE of row_hash without advancing seq is REJECTED by trigger audit_head_advance ('seq must advance by exactly +1, was 7 attempted 7') for BOTH choros_app and choros_migrator; DELETE head denied (GRANT for app; trigger audit_head_no_delete 'audit_head is permanent' for migrator). Head unchanged (seq=7, hash a1c69299...). Note: full chain recompute verification (verifyAuditChain) is an explicit T-0053 forward-obligation (ADR §5/§9, out of T-0068 scope); T-0068's obligation — keep chain dense + preimage deterministic — holds. PASS.",
+      "PROBE_C_parallel_exactly_once": "Two concurrent runOutboxOnce dispatchers (double composition) draining the SAME tenant's single task_completed outbox row → r1.dispatched=1, r2.dispatched=0; exactly 1 task.completed audit row. Exactly-once holds via claimBatch SKIP LOCKED + markDispatched if(advanced). No double audit rows. PASS.",
+      "PROBE_D_payload_determinism": "~196KB payload with supra-BMP emoji/ZWJ sequences, RTL Arabic, combining marks, CJK, non-ASCII KEYS and emoji KEYS → survives Postgres jsonb round-trip; stored row_hash recomputes EXACTLY; permuted jsonb key insertion order yields a BYTE-IDENTICAL canonical preimage (JCS order-stable, RFC 8785); preimage deterministic across calls. PASS."
+    },
+    "integration_honesty_D056": {
+      "wired_entry_in_ci": "src/__tests__/main-wired-entry.test.ts runs in `vitest run` (part of npm run ci). Drives the REAL composition root startMain (NOT createServer) → startLifecycleBridge → startOutboxDispatcherLoop → runOutboxOnce → onDispatched → encoder → writer.appendAuditEvent; asserts a task.completed reaches audit (InMemoryAuditWriter) with subject=pi-77, payload.actorType=service, aggregateId=job-77, outbox.dispatched()=1. Only leaves faked; does not mock past the wiring point. Reviewer-mutation-proven (removing onDispatched reddens it).",
+      "isolation_in_fitness": "All 4 T-0068 fitness checks registered in package.json `fitness` (→ CI): audit_writer_isolation.sh (single-sink chokepoint — grep rejects audit_event/audit_head write-SQL outside src/db/audit-writer.ts; reviewer negative-proved a rogue INSERT reddens it), audit_no_global_seq.sh, audit_actor_type_set.sh, lifecycle_bridge_wiring.sh.",
+      "live_e2e_in_ci_gap": "The live Flowable+Postgres e2e (this report's gate_live_e2e) is run manually with the isolated compose; it is NOT in .github/workflows CI (same class of gap noted for T-0067 bridge-e2e-smoke). The runtime task.completed path IS covered automatically in CI by main-wired-entry.test.ts (in-memory leaves) — the live-stack run is supplementary proof, not the sole gate. Classified tooling-gap, not a product defect."
+    },
+    "false_fail_discipline": "Per role rule 3 (anti-false-FAIL, ELMA C-004): the single anomaly (first e2e runner's 'found 9') was verified against authoritative DB state (psql + independent verifier) before any FAIL classification — product behavior is correct (exactly 1 lifecycle row, valid dense chain, exactly-once). No product defect raised on a test-method artifact.",
+    "deterministic_count_basis": "deterministic.total/passed = 806 (vitest, incl. 5 skipped) + 318 (fitness:db) = 1124 total executed assertions/tests across the no-DB CI vitest set and the isolated-DB fitness:db set; 1119 passed, 5 skipped, 0 failed. (Static fitness shell checks + tsc + eslint additionally green, exit 0, not counted as discrete tests.)",
+    "schema_validation": "Validated against /Users/shoxy/Code/demiurge/.claude/worktrees/dreamy-hawking-97542b/schemas/test-report.schema.json via python3 validate_file — 0 errors (run live by tester)."
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "task_id": "T-0044",
+  "status": "pr_open",
+  "branch": "task/T-0044-dual-control",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "migrations/031_grant_confirmed2_by.sql",
+    "src/core/dual-control.ts",
+    "src/http/grants.ts",
+    "src/__tests__/dual-control.test.ts",
+    "ci/checks/db/dual-control.gate.e2e.test.ts",
+    "ci/checks/dual-control-isolation.sh",
+    "docs/design/T-0044-dual-control.adr.md",
+    "docs/design/T-0044.adr.contract.json",
+    "docs/specs/T-0044-dual-control.spec.md",
+    "docs/specs/T-0044.spec.contract.json",
+    "docs/reviews/T-0044.review.json",
+    "docs/test-reports/T-0044.test-report.json"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "summary": "T-0044 реализует dual-control gate (E4.6, D-A=A3): критические изменения ролей требуют двух аутентифицированных запросов от разных акторов.",
+    "how_two_approver_flow_looks_in_code": {
+      "description": "D-A=A3 в коде: request#1 (предложение + первое подтверждение) → запись semi-confirmed (proposed_by=actor, confirmed2_by=NULL, second_approver_required=true, WORM dualcontrol.gate pending); request#2 от ДРУГОГО аутентифицированного актора → confirmed2_by=actor2, статус confirmed, WORM satisfied. Ключевые файлы: src/core/dual-control.ts (dualControlDecision — чистая функция), src/http/grants.ts (handleFirstConfirm/handleSecondConfirm).",
+      "key_invariants": [
+        "Идентичность каждого approver берётся ТОЛЬКО из extractActor(req) — authenticated context, не из тела запроса (FF-DC11)",
+        "handleSecondConfirm: UPDATE ... WHERE confirmed2_by IS NULL — serializes race (PROBE-D: ровно один победитель 200, другой 409)",
+        "dualControlDecision вызывается с approvers=[] на req#1 — никакого body-asserted approver",
+        "Escalates только при routine→critical (T-0040 frozen boundary): adding second critical axis к уже critical role НЕ re-triggers (T-0040 contract, FE-2026-W24-0044-A)"
+      ]
+    },
+    "orchestrator_rulings_FE-2026-W24-0044": {
+      "note": "Фаундер МОЖЕТ отменить эти решения — они обратимы (impl-level, направление D-A=A3 остаётся).",
+      "Q-1": "confirmation_flag = DERIVED + WORM audit_event (тип dualcontrol.gate через appendAuditEventInput). Нет новой таблицы, нет новой колонки в таблицах авторизации — только ADD COLUMN confirmed2_by (migration 031). Прецедент: T-0040 §6-B derived-not-stored.",
+      "Q-2": "Corrupt/non-derivable clearance на read-гранте ⇒ implicit escalate (fail-closed, required_approvers=2 до консультации criticalityDiff). Закрывает T-0040 R-1 under-flag breach-path без правки frozen T-0040/T-0033.",
+      "Q-3": "Enforcement на existing single-INSERT write-path (два отдельных HTTP-запроса). Rev-2 supersedes body-asserted approvers[] mechanism: каждый approver аутентифицирован в своём запросе."
+    },
+    "inherited_dev_auth_floor": {
+      "description": "x-dev-user header (extractActor) не привязывает header string к реальной сессии — тот же оператор может предъявить два разных header значения и self-satisfy dual-control gate на dev-среде. Это pre-existing floor, НЕ введённый T-0044 (T-0044 закрыл body-asserted-approvers hole). Закроет T-0060 (real-auth). Пока реальный dual-control гарантируется только при честных акторах.",
+      "closes": "T-0060"
+    },
+    "obligation_T-0053": {
+      "description": "ОБЯЗАТЕЛЬСТВО: когда T-0053 построит runtime role→grants EFFECTIVE resolver, он ДОЛЖЕН фильтровать semi-confirmed escalating grants (confirmed2_by IS NULL) как NOT active. Сейчас read-path, активирующего half-confirmed critical grant, нет на base (verified: нет прохода, который активирует). Контракт зафиксирован в ADR §8.",
+      "status": "semi-confirmed (deferred, honest — not faked)"
+    },
+    "frozen_boundary_T-0040": {
+      "description": "escalates (criticalityDiff.escalates) fires ТОЛЬКО при routine→critical перeходе. Добавление второй critical оси к уже-critical role не re-triggers dual-control — это T-0040 contract (frozen T-0040 boundary). Escalation к routine→critical инициирует только обязательную проверку; downstream per-axis expanded bits сохраняются в effective_diff для любой будущей более тонкой политики. Изменить это — задача T-0040, не T-0044.",
+      "escalates_mode": "routine→critical only"
+    }
+  },
+  "friction_events": [
+    "FE-2026-W24-0044 (orchestrator ruling Q-1..Q-3: found in ADR §1, строки 34-93 docs/design/T-0044-dual-control.adr.md)",
+    "FE-2026-W24-0044-C-floor (inherited dev-auth floor — PROBE-C, test-report friction[0])",
+    "FE-2026-W24-0044-B (read-side activation obligation T-0053 — test-report friction[1])",
+    "R-3-confirm2-looseness (handleSecondConfirm не re-assert escalating row — cosmetic, test-report friction[2])",
+    "FE-2026-W24-0044-A (frozen T-0040 escalates boundary — test-report friction[3])"
+  ],
+  "test_summary": {
+    "verdict": "pass",
+    "ac_total": 19,
+    "ac_passed": 19,
+    "adversarial_probes": 5,
+    "deterministic_total": 1153,
+    "deterministic_passed": 1153,
+    "fitness_db": "323×2 (idempotent on dirty DB)",
+    "ci_no_db": "825 passed | 5 skipped (830)"
+  },
+  "review_verdict": "approved",
+  "review_findings_nits": ["R-1 (audit-append concurrency 500 — inherited T-0031 floor, not T-0044 regression)", "R-2 (second-confirm WORM event hardcodes effective_diff expanded bits — cosmetic)", "R-3 (handleSecondConfirm no re-assert escalating row — cosmetic)"],
+  "migration": "031_grant_confirmed2_by.sql (ADD COLUMN grant.confirmed2_by text NULL, role_assignment.confirmed2_by text NULL — additive only, no DROP, no CREATE TABLE)"
+}

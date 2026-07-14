@@ -1,0 +1,96 @@
+{
+  "task_id": "T-0022",
+  "status": "pr_open",
+  "branch": "task/T-0022-roles-assignments",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/db/cross_tenant.test.ts",
+    "ci/checks/db/pgTimerStore.integration.test.ts",
+    "ci/checks/db/role-assignment-scope.test.ts",
+    "ci/checks/db/role-assignment.test.ts",
+    "ci/checks/db/schema.test.ts",
+    "ci/checks/known_tenant_tables.txt",
+    "ci/checks/role-migration-set.sh",
+    "docs/design/T-0022-roles-assignments.adr.md",
+    "docs/design/T-0022.adr.contract.json",
+    "docs/reviews/T-0022.review.json",
+    "docs/specs/T-0022-roles-assignments.spec.md",
+    "docs/specs/T-0022.spec.contract.json",
+    "docs/test-reports/T-0022.test-report.json",
+    "migrations/019_role.sql",
+    "migrations/020_role_assignment.sql",
+    "migrations/021_grant_role_fk.sql",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [
+    "FE-T0022-001 — Migration 021 grant FK is immediate-VALIDATE (no NOT VALID): promote-hazard on a data-bearing contour (reproduced LIVE adversarial probe a); safe on clean-replay dev/prod target (grant table empty at base d948f6b); latent only — non-blocking for T-0022 gate. Forward-debt: if grant-write path lands before merge to a long-lived contour, use ADD CONSTRAINT … NOT VALID + separate VALIDATE CONSTRAINT or assert grant-empty pre-021.",
+    "FE-T0022-002 — No-grant-without-confirmation red-line is contract-only; confirmed_by self-settable by any app-role caller (reproduced LIVE adversarial probe b); by design for T-0022 scope (FR-4 columns only, workflow=T-0039, resolver-inertness=T-0053). Recording so 'columns exist' is not mistaken for 'proposals are inert'. Forward-debt: T-0053 must add confirmed_by IS NOT NULL AND isEffective filter; T-0039 must add confirm-authority gate."
+  ],
+  "verdict_payload": {
+    "spec_commit": "58ae4a4",
+    "design_commit": "309b735",
+    "build_commits": ["bdfe093", "15f717f"],
+    "review_approved_commit": "e1bfc94",
+    "test_commit": "febdf358186d6e1bc222d26ce927540c10440f3b",
+    "review_verdict": "approved",
+    "ac_coverage": 22,
+    "ac_passed": 22,
+    "deterministic_tests": {
+      "total": 665,
+      "passed": 665,
+      "failed": 0,
+      "breakdown": {
+        "vitest_unit_e2e": "512/512 (22 files, no DATABASE_URL — correct for npm run ci)",
+        "fitness_db_isolated": "153/153 (9 files, isolated Postgres 55452)",
+        "tsc_noEmit": "clean (exit 0)",
+        "eslint_src": "clean (exit 0)",
+        "fitness_static": "green (role-migration-set.sh AC-18/22, grant-resolver-isolation.sh AC-20, cross-tenant-fitness.sh)"
+      }
+    },
+    "adversarial_probes": [
+      {"id": "a", "result": "CONFIRMED — R-1 promote-hazard LIVE reproduced: applying 021 to a DB with pre-existing non-seeded grant.role_id fails with 23503 at ALTER time. Safe on clean-replay target (grant empty at d948f6b base). Non-blocking for gate."},
+      {"id": "b", "result": "CONFIRMED — choros_app can UPDATE confirmed_by NULL→arbitrary (no DB proposer≠confirmer authority). By design for T-0022 scope; inertness owed by T-0053; confirm-authority owed by T-0039."},
+      {"id": "c", "result": "CONFIRMED — all 3 FKs into role are confdeltype='a' NO ACTION; DELETE of referenced role rejected 23503. Correct per NF-4 frozen-role.id guarantee."},
+      {"id": "d", "result": "CONFIRMED — org_scope '[]', '{\"x\":1}', JSON-null literal all insert; SQL NULL → 23502. DB floor = NOT NULL + valid-jsonb; structural validation is write-API layer (T-0029)."},
+      {"id": "e", "result": "CONFIRMED — cross-tenant composite FK (tenant_id,role_id)→role: tenant-B role cannot be referenced from tenant-A role_assignment → 23503. NF-2 tenant isolation at referential layer is real."}
+    ],
+    "integration_honesty": "honest — all db tests use real pg.Client against live Postgres; no vi.mock/stub/fake; no skip-guards; DATABASE_URL absent → suite errors (fail-closed, not silently-green)"
+  },
+  "merge_target": "dev",
+  "merge_policy": "auto-merge D-053 (orchestrator rebases task/T-0022-roles-assignments onto current dev HEAD, then merges; dev has advanced since d948f6b — T-0019/T-0033 merged; rebase is orchestrator responsibility)",
+  "rebase_note": "dev has advanced past d948f6b (T-0019 and T-0033 merged). Migration numbers 019-021 are non-overlapping with any dev additions by design. Orchestrator must rebase before merge.",
+  "promote_guide_GT3": {
+    "role_as_principal": "The role table (migration 019) introduces the role concept as a DB-level principal for authz. After merge: choros.role rows exist (slug, name, org_scope SET, validity window); choros.role_assignment rows link employee→role with confirmed_by semantics. The grant.role_id FK (migration 021) is now live — any grant row requires a resolving role in choros.role.",
+    "what_to_verify_in_dev": [
+      "Run migrations on dev stack: migrations 019-021 auto-apply on next 'npm run migrate' or server start.",
+      "psql: \\dt choros.* — verify choros.role and choros.role_assignment tables present alongside existing org tables.",
+      "psql: SELECT slug, name FROM choros.role WHERE tenant_id = (SELECT id FROM choros.tenant WHERE slug = 'dev'); — should return 2 seeded roles: 'tenant-owner' and 'budget-approver' (AC-15).",
+      "psql: SELECT ra.*, e.slug AS emp_slug, r.slug AS role_slug FROM choros.role_assignment ra JOIN choros.employee e ON (e.tenant_id, e.id) = (ra.tenant_id, ra.employee_id) JOIN choros.role r ON (r.tenant_id, r.id) = (ra.tenant_id, ra.role_id) WHERE ra.tenant_id = (SELECT id FROM choros.tenant WHERE slug = 'dev'); — should show e-mironov→budget-approver assignment with confirmed_by set and org_scope pointing to fin department (AC-16).",
+      "psql: RLS check — SET ROLE choros_app; SET choros.tenant_id = '<tenant-B-uuid>'; SELECT count(*) FROM choros.role; — should return 0 (cross-tenant isolation AC-3/AC-4).",
+      "Migration idempotency: run 'npm run migrate' twice — second run must output 'nothing to apply' (AC-17).",
+      "grant.role_id FK live: INSERT INTO choros.grant (... role_id = '00000000-0000-0000-0000-000000000099' ...) — should fail 23503 (AC-13). A grant referencing a real seeded role must succeed."
+    ],
+    "forward_debts_explicit": [
+      {
+        "id": "R-1",
+        "label": "NOT VALID + VALIDATE discipline for grant FK on data-bearing contours",
+        "description": "Migration 021 adds grant_role_id_fkey as an immediately-validated FK (no NOT VALID). On the clean-replay dev/prod target this is safe (grant table is empty at d948f6b base). HAZARD: if a grant-write path (T-0029 or similar) lands before 021 is promoted to any long-lived contour that accumulated grant rows, the ALTER TABLE VALIDATE will fail with 23503 on the pre-existing non-seeded role_ids. Required discipline when grant-write-path merges: (a) add 021's FK as ADD CONSTRAINT … NOT VALID first, (b) run a reconciliation pass to purge/fix orphan grant.role_id rows, (c) then VALIDATE CONSTRAINT separately. Alternatively, assert grant table is empty as a pre-021 migration guard.",
+        "when_triggered": "Only if a grant-write path (e.g., T-0029) lands and accumulates non-seeded grant rows on a long-lived contour BEFORE this branch is merged."
+      },
+      {
+        "id": "R-2",
+        "label": "confirmed_by / isEffective filter — mandatory AC for T-0053 (role→grants resolver)",
+        "description": "The 'no grant minted without confirmation' red-line (E3.5) is currently contract-only: the confirmed_by column exists in role_assignment but no code reads it. Any app-role caller can UPDATE confirmed_by NULL→arbitrary value (self-confirm), verified LIVE. T-0053 (role→grants resolver) MUST include confirmed_by IS NOT NULL AND isEffective() as a hard acceptance criterion — not an enhancement, a red-line debt. T-0039 (confirm-authority) MUST add proposer≠confirmer authority gate. Without these, proposals have zero DB-or-code inertness despite the column existing.",
+        "when_triggered": "T-0053 BUILD phase — must be AC, not optional nit."
+      }
+    ]
+  }
+}

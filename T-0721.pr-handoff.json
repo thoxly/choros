@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0721",
+  "status": "pr_open",
+  "branch": "task/T-0721",
+  "pr_url": "https://github.com/thoxly/choros/pull/59",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": false
+  },
+  "summary": "P1 из архитектурной оценки T-0714 (docs/tasks/T-0714.assessment.md, опция c, фаза 1): GET /api/processes/:id отдавал сырые variables/history/completedBy* Flowable ЛЮБОМУ члену тенанта, гейтясь только tenant-membership — side-door вокруг field-visibility (T-0081) и READ-PDP (T-0570), которыми та же датума уже защищена на плоскости записей. Фикс: видимость DETAIL-полей инстанса наследуется от READ-видимости его записи-источника, через ЕДИНЫЙ authority-путь — isRecordReadable/resolveReadVisibility (T-0570), реюз без второй authority-математики. Новая функция isInstanceDetailVisible (process-projection.ts, уже pg-импортирующий модуль — processes.ts остаётся display-plane-pure, FF-DISPLAY-4/FF-7-3 неприкосновенно): record-less инстансы НЕ сужены (фаза-1 scope); иначе reverse-lookup recordId→{registryId,applicationId} + isRecordReadable. Новый опциональный resolveReadVisibility на StartInstanceDeps (process-start.ts, honest-degrade когда отсутствует). server.ts wiring — байт-в-байт композиция getGrantsForSubject+loadTenantOrgAncestry→makeResourceAncestryOracle, идентичная registerRecordRoutes — закрывает асимметрию, которую нашла T-0714 (registerProcessesRoutes не получал резолвер вовсе). Денай = honest-404 (эталон /api/records/:id, records.ts:2059-2071) — тот же error-shape, что и pre-existing not-found. Расследовано 'исполнитель без READ' — легитимного сценария не найдено (инбокс-плоскость GET /api/inbox/:id не отдаёт variables/history вовсе; UI никогда не ссылается на DETAIL из задачи), allowlist НЕ реализован. Владелец видит всё БЕЗ bespoke-ветки — через тот же migration-117 default-open грант, что и записи (доказано live-PG). Мини-spec/ADR — docs/tasks/T-0721.spec.md / T-0721.adr.md.",
+  "files_changed": [
+    "src/http/process-projection.ts",
+    "src/http/process-start.ts",
+    "src/http/processes.ts",
+    "src/server.ts",
+    "src/__tests__/processes-read-visibility.test.ts (NEW)",
+    "ci/checks/db/processes-read-visibility.db.test.ts (NEW)",
+    "ci/checks/process-detail-read-gate.sh (NEW, FF-INST-VIS-1)",
+    "ci/checks/process-detail-single-resolver.sh (NEW, FF-INST-VIS-2)",
+    "package.json (fitness chain — appended, additive tail)",
+    "docs/tasks/T-0721.spec.md (NEW)",
+    "docs/tasks/T-0721.adr.md (NEW)",
+    "T-0721.pr-handoff.json (NEW)"
+  ],
+  "tests_added": [
+    {
+      "file": "src/__tests__/processes-read-visibility.test.ts",
+      "covers": "10 unit-тестов (fake pg pool, без живого PG): honest-degrade когда resolveReadVisibility отсутствует (200 без гейта); actor с покрывающим грантом видит DETAIL (200); actor без грантов — deny (404); запись более не резолвится в тенанте (удалена) — deny даже с широким грантом; record-less инстанс видим даже актору с нулём грантов (фаза-1 fallback); LIST (/api/processes) не задет гейтом (фаза-1 scope = только DETAIL); + 4 прямых юнит-теста isInstanceDetailVisible."
+    },
+    {
+      "file": "ci/checks/db/processes-read-visibility.db.test.ts",
+      "covers": "6 live-PG тестов (T-0147 clone-механика, choros_app пул, реальный RLS), мирроринг ci/checks/db/records-read-pdp.db.test.ts (T-0570): FF-INST-VIS-1a (deny без READ-гранта на запись-источник); FF-INST-VIS-1b (allow с default-open RESOURCE_ROOT грантом); owner-parity (tenant-owner employee с migration-117-shaped role-reader грантом видит DETAIL — БЕЗ bespoke isGenesisOwnerForTenant ветки); record-less fallback (инстанс без recordId видим актору с нулём грантов); honest-degrade (pre-gate сервер без resolveReadVisibility — 200 для всех); tenant isolation (actor тенанта A с широким грантом не резолвит instanceId тенанта B — 404)."
+    }
+  ],
+  "gates": {
+    "tsc_noemit": "green — npx tsc --noEmit -p . (корень), 0 ошибок.",
+    "build": "green — npm run build (tsc + seed/tsconfig.json tsc), 0 ошибок.",
+    "vitest_targeted": "green — npx vitest run src/__tests__/processes-live-instances.test.ts src/__tests__/processes.e2e.test.ts src/__tests__/processes-read-visibility.test.ts src/__tests__/process-start.test.ts src/__tests__/process-start-sandbox-gate.test.ts src/__tests__/process-start-kc-mode.test.ts src/__tests__/process-started-record-id.unit.test.ts — 7 файлов, 78/78 тестов зелёных (68 pre-existing без единого изменения + 10 новых).",
+    "vitest_db_targeted": "green — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism processes-read-visibility (T-0147 template-clone) — 6/6 зелёных.",
+    "FF_INST_VIS_1": "green — bash ci/checks/process-detail-read-gate.sh && bash ci/checks/process-detail-read-gate.sh --self-test — оба PASS.",
+    "FF_INST_VIS_2": "green — bash ci/checks/process-detail-single-resolver.sh && bash ci/checks/process-detail-single-resolver.sh --self-test — оба PASS.",
+    "sibling_start_route_isolation": "green (регрессия проверена) — bash ci/checks/start-route-isolation.sh && --self-test — FF-7-3 (processes.ts pg-free) не задет.",
+    "anti_case_lock": "green — bash ci/checks/anti-case-lock.sh — Phase 1 (delegate-гейты) + Phase 2 (repo-wide денилист) оба PASS, агрегат не вырос (15 vs baseline 16). Первый прогон поймал planted-литералы 'role-approver'/'Согласование' в НОВОМ unit-тест-файле (скопированы из соседнего fixture-паттерна) — заменены на APPROVER_ROLE (импорт константы) + generic label 'detail-gate-test-step'.",
+    "fitness_full": "НЕ прогонялся локально целиком (по явному указанию оркестратора задачи — только targeted-гейты выше). npm run fitness:db (полный, ~140 файлов) НЕ прогонялся — тоже по явному указанию; прогнан ТОЛЬКО целевой новый файл.",
+    "package_json_no_dup_keys": "green — bash ci/checks/package-json-no-dup-keys.sh."
+  },
+  "deviations_from_adr": [],
+  "design_decisions": [
+    "Денай = 404 NOT_FOUND (не 403) — byte-identical error-shape с pre-existing 'instance not found', эталон /api/records/:id (T-0570). Консистентность между двумя API-плоскостями важнее теоретической RESTful-чистоты 403.",
+    "Record-less инстансы (нет recordId) НЕ сужены этой задачей — пред-существующее поведение сохранено, честная достройка на process-definition-scoped грант = отдельная follow-up-задача (T-0714 §5 фаза 3, §7 п.3).",
+    "Владелец (tenant-owner) видит DETAIL БЕЗ отдельной isGenesisOwnerForTenant-ветки — records.ts тоже не вызывает её для READ-PDP; владелец получает default-open видимость через migration-117 role-reader грант (свойство грантов, не bespoke-код). DETAIL-гейт реюзает тот же resolveReadVisibility — наследует это свойство бесплатно.",
+    "Allowlist 'исполнитель без READ на запись видит DETAIL' — расследовано и НЕ реализовано. GET /api/inbox/:id (единственный путь держателя задачи) не отдаёт variables/history/completedBy* вовсе — эти поля физически отсутствуют в ответе инбокс-детали; UI (screen-inbox.jsx TaskDetailPanel) никогда не запрашивает GET /api/processes/:id из карточки задачи. Легитимного продуктового сценария не найдено — allowlist не добавлен (роль-правило 'реализуй ровно объём спеки')."
+  ],
+  "open_questions": [
+    "Живая проверка (стенд offline на момент задачи) не исполнена браузером — см. live_proof_plan ниже.",
+    "Фаза 2 (LIST /api/processes фильтр по READ-видимости) и Фаза 3 (process-definition-scoped грант для record-less инстансов) из оценки T-0714 — вне объёма этой задачи, отдельные follow-up (T-0714 §7 п.2/п.3)."
+  ],
+  "live_proof_plan": "Когда стенд вернётся online — прожить браузером ДВУМЯ юзерами на одном тенанте:\n\n1. Найти (или создать) запись в любом реестре + инстанс процесса, стартованный через create=start-триггер этой записи (recordId привязан к инстансу — проверить через GET /api/processes?record=<id> или карточку записи «Связанные процессы»).\n2. Юзер A (владелец ИЛИ актор с READ-грантом на эту запись — по умолчанию default-open грант делегируем; либо явно выдать record-scoped READ-грант через /rights): открыть /processes → найти инстанс → открыть деталку. Ожидание: видит вкладку «Переменные»/историю шагов (variables/history присутствуют в ответе, не пустые).\n3. Юзер B (обычный член тенанта БЕЗ READ-гранта на эту конкретную запись — рядовой сотрудник другого отдела, не владелец, не в делегационной цепочке): \n   a. Открыть /records/<id> этой записи напрямую — ожидание: 404/«не найдено» (READ-PDP T-0570, уже в проде — контрольная проверка, что сценарий воспроизводим).\n   b. Открыть /processes → найти ТОТ ЖЕ инстанс в списке (LIST не гейтится этой задачей — юзер B ДОЛЖЕН видеть карточку инстанса в списке, это ожидаемо/by design фазы 1) → кликнуть в деталку. Ожидание (ГЛАВНАЯ ПРОВЕРКА ФИКСА): деталка возвращает 404/«не найдено» — variables/history НЕ утекают, несмотря на то что карточка была видна в списке.\n4. Контрольная проверка регресса: юзер B, будучи держателем ЗАДАЧИ этого инстанса (если применимо — назначить/взять в работу через инбокс), должен ПО-ПРЕЖНЕМУ уметь открыть /inbox/<taskId> и выполнить свой шаг (approve/etc.) — инбокс-путь не гейтится этой задачей, должен остаться полностью функционален несмотря на 404 на /processes/:id.\n\nАртефакты: 2 скриншота (деталка процесса юзера A — variables/history видны; деталка процесса юзера B — честный 404/«не найдено», при этом карточка того же инстанса видна в списке /processes) + 1 скриншот инбокс-задачи юзера B (доказывает, что исполнение шага не сломано).",
+  "friction_events": []
+}

@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0057",
+  "status": "needs_founder",
+  "decision": "Рекомендация В-C: MVP-контур Choros остаётся TS-only (Node ≥20, единственная рантайм-зависимость pg) — ядро (API/оргмодель/RBAC/объектная модель/мост к движку/формы/ops-каталог/UI), агентский и ML-воркеры помечены Python Stage 2, ops-скрипты и модули расширения/authoring и BYO-LLM-интеграции — TS day-1. Python в обязательный MVP-контур НЕ входит; граница для него (external-task HTTP-контракт: /jobs, /external-task/fetch-and-lock|complete|fail с lease/retries/backoff/DLQ) УЖЕ реализована в src/http/externalWorker.ts и e2e-зелёная, поэтому Python Stage 2 = новый HTTP-клиент без переписывания ядра. РВ-3: строку CONCEPT §6 'агентский рантайм = Python' СМЯГЧАЕМ — она про язык будущего external-worker-агента (Этап 2 по роадмапу §13), а не про язык MVP-контура. Статус ADR = DRAFT, pending founder ratification (GT-1). ADR — высоколеверажный (язык всего продукта) → needs_founder.",
+  "rejected_alternatives": [
+    {
+      "option": "В-B — TS+Python day-1 (Python-агентский рантайм обязателен в MVP-контуре, буквальное чтение CONCEPT §6)",
+      "why_not": "NO-GO для MVP: третий прикладной рантайм (node+JVM+Python) × 200-300 silo-контуров (К-1) + третий класс fleet-ops-органов на каждый контур (К-6, stack ADR §2 DoD) + второй язык и стык TS↔Python под слепое ревью фаундера — прямое нарушение весового принципа §6 'минимум языков/стыков' (К-3). Оплачивает Python-агентскую экосистему до того, как в MVP-роадмапе появится исполняемый агент: CONCEPT §13 явно помещает агентов в Этап 2, в MVP их нет (Д-2). По К-2 (Д-6) даже приемлемый путь Python — только через HTTP-API ядра; прямой БД-доступ дублировал бы PDP/grant-resolver и tenant-RLS на втором языке = red-line-риск 152-ФЗ (нарушает single-resolver.sh + cross-tenant-fitness.sh). Минус по 4 из 7 критериев без MVP-выгоды."
+    },
+    {
+      "option": "В-A — TS-only day-1 без зарезервированной границы (Python не цель даже как Stage-2-шов)",
+      "why_not": "Технически GO и на day-1 неотличим от В-C по коду (оба = TS-only-контур, 2 рантайма), но слабее по К-7: не называет Stage-2-шов как зафиксированную границу обратимости. Фактически граница УЖЕ построена (external-task HTTP-контракт в src/http/externalWorker.ts), поэтому запирания нет и в В-A — но В-C сильнее тем, что явно фиксирует этот шов как контракт совместимости и закрывает К-7 фактом, а не молчанием. В-A ⊂ В-C; выбран В-C как строго более полная формулировка того же day-1-кода."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "RuntimeClassDecision (РВ-2: вердикт по каждому классу прикладного кода)",
+      "fields": [
+        {"name": "code_class", "type": "enum(agent_runtime|ml_inference|ops_scripts|extension_authoring|byo_llm_integrations)"},
+        {"name": "verdict", "type": "enum(ts_day1|python_day1|python_stage2|not_mvp_goal)"},
+        {"name": "rationale_ref", "type": "string (ссылка на CONCEPT/stack-ADR/собранные данные)"}
+      ]
+    },
+    {
+      "entity": "ExternalTaskSeam (Stage-2-граница для Python — уже реализована в TS, контракт совместимости)",
+      "fields": [
+        {"name": "enqueue", "type": "POST /jobs {topic, variables?, retries?} -> 201 Job"},
+        {"name": "fetch_and_lock", "type": "POST /external-task/fetch-and-lock {workerId, topics[], maxJobs, lockDurationMs} -> {jobs[]}"},
+        {"name": "complete", "type": "POST /external-task/:id/complete {workerId} -> {ok:true}"},
+        {"name": "fail", "type": "POST /external-task/:id/fail {workerId, retries, retryTimeoutMs} -> {ok:true} (backoff/DLQ)"},
+        {"name": "data_access_path", "type": "HTTP-only (worker видит job-payload + домен-API ядра, в Postgres напрямую не ходит — путь 'а' Д-6)"}
+      ]
+    },
+    {
+      "entity": "SiloRuntimeCount (К-1/К-6: прикладные языковые рантаймы на один контур)",
+      "fields": [
+        {"name": "variant", "type": "enum(V-A|V-B|V-C)"},
+        {"name": "app_lang_runtimes", "type": "int (V-A=2, V-C=2 в MVP, V-B=3)"},
+        {"name": "fleet_multiplier", "type": "int (200-300 контуров целевого флота)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "registerExternalWorkerRoutes(router: Router, store: JobStore): void — поднимает 4 эндпоинта external-task (уже реализовано, src/http/externalWorker.ts)",
+    "POST /jobs {topic: string, variables?: object, retries?: int>=0} -> 201 Job",
+    "POST /external-task/fetch-and-lock {workerId: string, topics: string[], maxJobs: int>=1, lockDurationMs: int>=1} -> 200 {jobs: Job[]}",
+    "POST /external-task/:id/complete {workerId: string} -> 200 {ok:true}",
+    "POST /external-task/:id/fail {workerId: string, retries: int>=0, retryTimeoutMs: int>=0} -> 200 {ok:true}",
+    "Инвариант доступа к данным (T-0018/T-0021/T-0115): любой код — включая будущий Python-воркер — проходит ОДИН резолвер (resolveHandle/resolveFor) + tenant-RLS; внешний воркер обязан ходить через HTTP-API ядра, не в Postgres напрямую"
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "MVP-контур не содержит Python-рантайма: нет *.py вне node_modules/spikes; compose MVP-профиля не объявляет python-сервис", "ci_check": "find . -name '*.py' -not -path './node_modules/*' -not -path './spikes/*' пусто; grep docker-compose.yml на 'python'/'image:.*python' пусто"},
+    {"id": "FF-2", "rule": "Ровно один рантайм-язык-зависимость в манифесте ядра (pg); ядро не спавнит python", "ci_check": "переиспользует ci/checks/pg-single-dep.sh; grep src/ на 'spawn(.*python'/'exec(.*python' пусто"},
+    {"id": "FF-3", "rule": "Любой внешний воркер (вкл. Python Stage 2) ходит к данным только через HTTP external-task/домен-API, не в Postgres напрямую — единый резолвер сохранён", "ci_check": "переиспользует ci/checks/single-resolver.sh + ci/checks/cross-tenant-fitness.sh; deferred-probe: worker-каталог вне src/ не содержит 'postgres://'/'new Client(' (прямой БД-доступ)"},
+    {"id": "FF-4", "rule": "External-task-граница (Stage-2-шов) сохранна как контракт совместимости: эндпоинты /jobs и /external-task/fetch-and-lock|complete|fail существуют", "ci_check": "переиспользует e2e src/__tests__/externalWorker.e2e.test.ts (зелёный); удаление эндпоинта ломает Stage-2-обратимость (К-7)"},
+    {"id": "FF-5", "rule": "ops-каталог остаётся TS day-1: ops/catalog/* — .ts, не .py", "ci_check": "find ops/catalog -name '*.py' пусто"},
+    {"id": "FF-6", "rule": "Deferred (Этап 2): Python-агентский рантайм подключается через тот же job-store-контракт (assertVariableValue + resolveFor на стыке)", "ci_check": "активирует существующий deferred-probe-паттерн ci/checks/flowable-bridge-contract.sh на agent-bridge-каталог при его появлении"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR существует, шапка 'DRAFT — pending founder ratification'"},
+    {"ac": "AC-2", "covered_by": "§2 РВ-1 (TS-only) / РВ-2 (таблица 5 классов) / РВ-3 (смягчить §6)"},
+    {"ac": "AC-3", "covered_by": "§3 три варианта + go/no-go (В-A GO⊂В-C, В-B NO-GO, В-C GO рекоменд.)"},
+    {"ac": "AC-4", "covered_by": "§3 три таблицы 7 критериев × 3 варианта"},
+    {"ac": "AC-5", "covered_by": "Д-1 + К-1: В-A/В-C=2 (node+JVM), В-B=3 (+Python), × 200-300 контуров"},
+    {"ac": "AC-6", "covered_by": "Д-6 пути а/б (путь б = red-line дубль RLS/PDP) + К-2 + FF-3 (single-resolver.sh/cross-tenant-fitness.sh)"},
+    {"ac": "AC-7", "covered_by": "Д-4/Д-5 письменное обоснование со ссылкой CONCEPT §6 + §3 К-3/К-4/К-5"},
+    {"ac": "AC-8", "covered_by": "§1 Д-1..Д-6; Д-3 факт TS external-task клиента (src/http/externalWorker.ts, e2e); Д-2 покрытие сценариев (агенты=Этап 2)"},
+    {"ac": "AC-9", "covered_by": "§4 рекомендация В-C + обоснование + явный trade-off фаундеру"},
+    {"ac": "AC-10", "covered_by": "§3 К-7 + §5 'как выглядит шов' — граница доказана кодом (e2e-зелёный), ноль правок ядра; В-A без запирания"},
+    {"ac": "AC-11", "covered_by": "§0 'Вне рамок': JVM/движок и React/TS-фронт явно не пересматриваются"},
+    {"ac": "AC-12", "covered_by": "diff = только docs/design/T-0057-* (ADR+contract); src/ только читался, не изменялся"}
+  ],
+  "runtime_target": "н/д — артефакт T-0057 это документ (ADR-черновик), нового рантайма/внешнего ресурса не вводит. Решение по продукту: MVP-контур = silo docker-compose (Node-ядро + Flowable-JVM + Postgres + Keycloak + Caddy), Python в MVP-контур не добавляется; провижн/деплой остаются гейтом фаундера GT-4 (не затрагиваются этим ADR).",
+  "adr_artifact_path": "docs/design/T-0057-ts-vs-python.adr.md",
+  "escalation": "Высоколеверажный архитектурный выбор — язык исполняемого кода всего продукта. ADR идёт на гейт фаундера GT-1 как DRAFT: рекомендация В-C (TS-only MVP + зарезервированная Python-Stage-2-граница) подготовлена с честными trade-offs всех трёх вариантов; решение и ратификация — за фаундером, не за системой."
+}

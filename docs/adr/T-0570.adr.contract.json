@@ -1,0 +1,372 @@
+{
+  "task_id": "T-0570",
+  "status": "ready",
+  "decision": "READ-путь (GET /api/records + GET /api/records/:id) начинает СПРАШИВАТЬ тот же T-0021 resolveFor-PDP, что уже гейтит действия (D2). Открытость держит СИДИРОВАННЫЙ грант, не обход PDP. Три сцепленных элемента: (1) Resource-ancestry-оракул — композит (src/db/resource-ancestry.ts): на hierarchy='org' делегирует существующему org-оракулу без изменений; на hierarchy='resource' отвечает через RESOURCE_ROOT-сентинел (nodeLevel='application', константа платформы, ОДИН nodeId для всех тенантов — различение делает RLS, не nodeId) правилом 'root покрывает всё дерево ресурсов тенанта' за O(1), а для будущего узкого сужения поднимает record.registry_id→registry_def.application_id inline из УЖЕ выбранной строки (ancestry уже в SELECT records.ts: rd.application_id, r.registry_id) — карта не материализуется, нет запроса на строку. refToScope НЕ меняется (record→record-node), containment идёт через существующий isNarrowerOrEqual — латтис/handle байт-frozen. (2) Один платформенный default-open READ-грант: operation='read', resource_type='record', resource_facet=NULL (whole-resource), scope={kind:'node',hierarchy:'resource',nodeLevel:'application',nodeId:RESOURCE_ROOT_NODE_ID}, delegable=true, confirmed; держит платформенная роль role-reader; сидируется (а) в registerTenant в ТОЙ ЖЕ транзакции T-0373 (ON CONFLICT DO NOTHING, атомарно) и (б) backfill-миграцией 115, ИТЕРИРУЮЩЕЙ choros.tenant (INSERT…SELECT FROM choros.tenant, БЕЗ хардкода tenant-UUID — зеркало-антипод migration 088). (3) READ спрашивает PDP через optional honest-degrade-seam resolveReadVisibility? на RecordRoutesDeps (тем же паттерном, что уже существующие resolveWriteFacet?/resolveFieldVisibility?/resolveSandboxPrivilege?): гранты актора резолвятся ОДИН РАЗ на запрос через тот же getGrantsForSubject/makeDbGrantSource DAO (single-resolver, FR-7); LIST фильтрует каждую строку страницы чистой isRecordReadable (in-memory, O(1) grant-запросов, containment == resolveFor-предикат) — невидимые строки отсутствуют; DETAIL без covering-гранта ⇒ 404 (неотличимо от not-found). Когда resolveReadVisibility НЕ инжектирован (unit-тесты, ещё-не-подключённый composition root) — READ ведёт себя как сегодня (RLS+sandbox), гейт активируется РОВНО когда composition root подключил резолвер после применения миграции 117 (сид — предусловие включения, NF-2). Field-видимость переиспользует существующий field-visibility.ts/applyFieldVisibilityRedaction (FR-4) — второго проекционного пути нет; недозволенные ключи physically absent. AMENDED 2026-07-02 (возврат с TEST, коллизия FF-13/AC-13 ADR T-0082): default-read грант с resource_facet=NULL (легальный whole-resource в T-0021-ядре: strictly-absent facet ⇒ все поля) ломал live-инвариант bundle-coherence.test.ts «resource_type='record' ⇒ resource_facet IS NOT NULL» для каждого тенанта. Решение — вариант (а): САНКЦИОНИРОВАННОЕ СУЖЕНИЕ FF-13 по прецеденту T-0033 (новый ADR предписывает хирургическую правку старого гарда с сохранением его силы; старый ADR не переписывается). Амендированный FF-13-предикат: WHERE resource_type='record' AND resource_facet IS NULL AND NOT (operation='read' AND scope->>'kind'='node' AND scope->>'hierarchy'='resource' AND scope->>'nodeLevel'='application' AND scope->>'nodeId'='00000000-0000-0000-0000-0000000000r0') ⇒ 0 строк. Предикат БЕЗ role-условия: идентичность default-open несёт зарезервированный сентинел-scope, не держатель (полноширинная делегация под другой ролью легальна через validateNarrowing — role-предикат дал бы ложный красный). Сила инварианта ДОКАЗЫВАЕТСЯ force-тестом (FF-RP-14: не-сентинел NULL-facet record-грант ловится амендированным предикатом, ROLLBACK-транзакция), единство сентинел-литерала в 3 файлах пинит grep-гард (FF-RP-15; db-тесты по house-паттерну не импортируют из src/). Значение сентинела ратифицировано как есть ('r' не-hex ⇒ структурно не может совпасть с реальным application.id (uuid-колонка) и не порождается gen_random_uuid()). Кодер меняет ТОЛЬКО: (1) ci/checks/db/bundle-coherence.test.ts (carve-out + комментарий-санкция с двусторонней ссылкой + force-тест), (2) новый ci/checks/read-pdp-sentinel-coherence.sh. Миграция 115, register.ts, read-visibility.ts, resource-ancestry.ts, records.ts, frozen-ядро и зелёные RP-тесты НЕ трогаются.",
+  "rejected_alternatives": [
+    {
+      "option": "Fail-closed по умолчанию (как на действиях), без сидированного гранта — вариант (б) карты §7.",
+      "why_not": "Прямое противоречие ратифицированному решению фаундера (вариант (а), не (б)). Сломало бы всех существующих тенантов в день выката (NF-2) — никто ничего не видит до ручной настройки."
+    },
+    {
+      "option": "BOTTOM-scope {kind:'set',members:[]} как 'tenant-wide'.",
+      "why_not": "Доказано по латтису grant-lattice.ts:250: isBottom(parent)⇒isNarrowerOrEqual вернёт false. ⊥ = НОЛЬ охвата, покрыл бы НИЧЕГО — антоним 'всё'. (⊥ используется в T-0373 именно как least-authority для configurator-гранта.)"
+    },
+    {
+      "option": "Новый scope-kind {kind:'tenant'} / TOP-элемент в латтисе grant-lattice.ts.",
+      "why_not": "Правка frozen grant-lattice.ts (FF-RP-8, mutation-gateway-isolation), рябь по normalize/meet/adversarial-тестам T-0018; несоразмерно (NF-5). Resource-root-сентинел даёт то же 'покрывает всё', оставаясь node-scope, который латтис уже умеет."
+    },
+    {
+      "option": "{kind:'tags',tags:[]} тенант-ширины + tag-based refToScope.",
+      "why_not": "Потребовало бы менять refToScope (record→tags-scope), ломая единство с action-путём D2 (читает record как node); cross-kind несравнимость (node vs tags = false, grant-lattice.ts:295) убила бы и узкое record/registry-сужение через тот же оракул. Двойная модель scope — источник дрейфа."
+    },
+    {
+      "option": "Полный per-request resource-ancestry map (загрузить всё дерево record→registry→application тенанта на каждый запрос).",
+      "why_not": "На больших тенантах тяжёлая загрузка на каждый HTTP-запрос — NF-1 риск. Заменено на O(1) root-правило для default-гранта + inline-ancestry из уже выбранной строки для узких грантов (§2.1 правило 3): карта не материализуется."
+    },
+    {
+      "option": "Второй ACL/whitelist-store record-видимости (таблица record_read_acl).",
+      "why_not": "FR-7/NF-5: решение выводится ТОЛЬКО из choros.\"grant\" через тот же T-0018-латтис. Параллельный store = вторая система авторитета (запрещено, зеркалит grant-resolver-isolation Check 2)."
+    },
+    {
+      "option": "Backfill в стиле migration 088 (хардкод одного tenant-UUID 'a0000000-…-000000000001' в каждый INSERT).",
+      "why_not": "Доказанный анти-паттерн: работает только для DEV_TENANT, не backfill-ит остальных. Миграция 115 ОБЯЗАНА итерировать choros.tenant (FF-RP-6 греп-гейт)."
+    },
+    {
+      "option": "(б) Whole-resource без NULL: facet-сентинел {fields:['*']} + правка матчинга в grant-resolver/isRecordReadable.",
+      "why_not": "Ломает ратифицированную fail-closed доктрину ядра дословно (grant-resolver.ts:353–358: present facet, не парсящийся в валидный field-list, даёт НОЛЬ полей — never silently widen to whole-resource; '*' — ровно present facet, молча расширяющийся до whole-resource). Расползается по frozen-ядру: grantFacetFields + visibleFields + field-visibility.grantConferredFields + facet-deepEqual в validateNarrowing + T-0033 masking (нарушило бы собственный FF-RP-8/mutation-gateway-isolation). In-band магическая строка в narrowing-токене = паттерн дрейфа. Максимальная поверхность вместо минимальной."
+    },
+    {
+      "option": "(в1) resource_type='application' для default-гранта — обход FF-13 без правки теста (covering-фильтр resolveFor не сверяет resourceType).",
+      "why_not": "Checker-evasion, не решение: ложь в данных (грант читает ЗАПИСИ); classification/clearance-путь T-0033 ключуется на resource_type='record' — расхождение в masking; будущее ужесточение resourceType↔ref-kind в covering молча убило бы default-open в проде (fail-open→fail-closed флип без сигнала)."
+    },
+    {
+      "option": "(в2) Не-NULL whole-resource значение facet, уже понимаемое ядром (например {}).",
+      "why_not": "Не существует: grantFacetFields для {} ⇒ fields не Array ⇒ fail-closed [] (ноль полей). Любой не-NULL facet сегодня — либо field-list, либо ноль; вырождается в (б)."
+    },
+    {
+      "option": "Переписать FR-3/AC-13 в docs/design/T-0082-bundle-coherence.adr.md задним числом.",
+      "why_not": "Ратифицированные ADR — история решений; переписывание рушит трассируемость. Прецедент T-0033×mutation-gateway амендирует ГАРД с санкцией в новом ADR; старый документ не трогается."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "read-visibility.ts constants (src/core/read-visibility.ts — новый чистый модуль, no DB/net/fs)",
+      "fields": [
+        {
+          "name": "RESOURCE_ROOT_NODE_ID",
+          "type": "string const — сентинел-узел уровня 'application', общий для тенантов; различение — RLS-гейт, не nodeId (НЕ кейс-строка)"
+        },
+        {
+          "name": "READER_ROLE_SLUG",
+          "type": "string const = 'role-reader' — платформенная роль-держатель default-open READ-гранта (НЕ кейс-строка)"
+        }
+      ]
+    },
+    {
+      "entity": "ReadVisibilityResolver (src/http/records.ts — additive optional dep type)",
+      "fields": [
+        {
+          "name": "signature",
+          "type": "(actorSlug: string, tenantId: string, nowMs: number) => Promise<{ grants: Grant[]; ancestry: AncestryOracle }>"
+        },
+        {
+          "name": "grants",
+          "type": "Grant[] — covering READ-гранты актора из ТОГО ЖЕ getGrantsForSubject DAO (single-resolver)"
+        },
+        {
+          "name": "ancestry",
+          "type": "AncestryOracle — per-request композит: org (loadTenantOrgAncestry) + resource (makeResourceAncestryOracle)"
+        }
+      ]
+    },
+    {
+      "entity": "RecordRoutesDeps (src/http/records.ts — additive optional field, public surface иначе не меняется)",
+      "fields": [
+        {
+          "name": "resolveReadVisibility",
+          "type": "ReadVisibilityResolver | undefined (optional; honest-degrade к RLS+sandbox когда absent — NF-2)"
+        }
+      ]
+    },
+    {
+      "entity": "isRecordReadable (src/core/read-visibility.ts — чистая функция, ядро гейта)",
+      "fields": [
+        {
+          "name": "signature",
+          "type": "(row: RowAncestry, grants: Grant[], ancestry: AncestryOracle, nowMs: number) => boolean"
+        },
+        {
+          "name": "predicate",
+          "type": "grants.some(g => g.operation==='read' && isEffective(g,nowMs) && isLatticeScope(g.scope) && isNarrowerOrEqual(recordResourceScope(row.recordId), g.scope, ancestry)) — тот же containment, что resolveFor:589–607 (НЕ вторая математика, NF-5)"
+        }
+      ]
+    },
+    {
+      "entity": "RowAncestry (src/core/read-visibility.ts — ancestry inline из выбранной строки)",
+      "fields": [
+        {
+          "name": "recordId",
+          "type": "string"
+        },
+        {
+          "name": "registryId",
+          "type": "string (r.registry_id — уже в SELECT records.ts)"
+        },
+        {
+          "name": "applicationId",
+          "type": "string (rd.application_id — уже в SELECT records.ts)"
+        }
+      ]
+    },
+    {
+      "entity": "makeResourceAncestryOracle (src/db/resource-ancestry.ts — новый; чистый композит)",
+      "fields": [
+        {
+          "name": "signature",
+          "type": "(orgOracle: AncestryOracle, rowIndex: ReadonlyMap<string, RowAncestry>) => AncestryOracle"
+        },
+        {
+          "name": "isDescendantOrSelf('org',…)",
+          "type": "делегирует orgOracle (без изменений семантики)"
+        },
+        {
+          "name": "isDescendantOrSelf('resource', d, a)",
+          "type": "a===d ⇒ true; a===RESOURCE_ROOT_NODE_ID ⇒ true (правило 2, O(1)); иначе подъём d по rowIndex record→registry→application, сверяя a"
+        }
+      ]
+    },
+    {
+      "entity": "role (role-reader) — существующая таблица choros.role (миграция 002-ish), НЕ новая",
+      "fields": [
+        {
+          "name": "tenant_id",
+          "type": "uuid"
+        },
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "slug",
+          "type": "text = 'role-reader'"
+        },
+        {
+          "name": "display_name",
+          "type": "text"
+        },
+        {
+          "name": "created_at/updated_at",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "entity": "role_assignment (owner→reader, agent→reader) — существующая choros.role_assignment, НЕ новая",
+      "fields": [
+        {
+          "name": "tenant_id/id/employee_id/role_id",
+          "type": "uuid"
+        },
+        {
+          "name": "org_scope",
+          "type": "jsonb = {kind:'set',members:[]} (⊥ — как T-0373 owner-assignment)"
+        },
+        {
+          "name": "granted_by/confirmed_by/source",
+          "type": "text (confirmed для эффективности)"
+        },
+        {
+          "name": "created_at/updated_at",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "entity": "grant (default-open read) — существующая choros.\"grant\" (миграция 008), НЕ новая таблица/столбцы",
+      "fields": [
+        {
+          "name": "tenant_id/id/role_id",
+          "type": "uuid"
+        },
+        {
+          "name": "resource_type",
+          "type": "text = 'record'"
+        },
+        {
+          "name": "resource_facet",
+          "type": "jsonb = NULL (whole-resource ⇒ все поля видимы)"
+        },
+        {
+          "name": "operation",
+          "type": "text = 'read'"
+        },
+        {
+          "name": "scope",
+          "type": "jsonb = {kind:'node',hierarchy:'resource',nodeLevel:'application',nodeId:RESOURCE_ROOT_NODE_ID} (единый jsonb-столбец, не декомпозирован)"
+        },
+        {
+          "name": "constraint",
+          "type": "jsonb = NULL"
+        },
+        {
+          "name": "delegable",
+          "type": "boolean = true (сужаемо потомками через validateNarrowing)"
+        },
+        {
+          "name": "granted_by",
+          "type": "text = 'registration' (register.ts) / 'seed' (backfill 115)"
+        },
+        {
+          "name": "confirmed_by",
+          "type": "text (выставлен — грант эффективен; proposed_by=NULL)"
+        },
+        {
+          "name": "valid_from/valid_until",
+          "type": "bigint = NULL (эффективен всегда)"
+        },
+        {
+          "name": "created_at",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "contracts": [
+    "src/core/read-visibility.ts: export const RESOURCE_ROOT_NODE_ID: string; export const READER_ROLE_SLUG = 'role-reader'; export interface RowAncestry { recordId: string; registryId: string; applicationId: string; } export function recordResourceScope(recordId: string): ScopeElement; export function isRecordReadable(row: RowAncestry, grants: Grant[], ancestry: AncestryOracle, nowMs: number): boolean;",
+    "src/db/resource-ancestry.ts: export function makeResourceAncestryOracle(orgOracle: AncestryOracle, rowIndex: ReadonlyMap<string, RowAncestry>): AncestryOracle;",
+    "src/http/records.ts (additive): export type ReadVisibilityResolver = (actorSlug: string, tenantId: string, nowMs: number) => Promise<{ grants: Grant[]; ancestry: AncestryOracle }>; RecordRoutesDeps gains resolveReadVisibility?: ReadVisibilityResolver; — существующие экспорты (registerRecordRoutes, RECORD_STATUS_SIGNAL, ActorTenantResolver, WriteFacetResolver, FieldVisibilityResolver, ActorPrivilegeResolver, RecordRoutesDeps, RecordStatusSignalEmitter) НЕ меняются.",
+    "src/core/register.ts (additive): внутри существующей T-0373 транзакции — INSERT role(role-reader) + role_assignment(owner→reader, agent→reader) + grant(read/record/RESOURCE_ROOT), все ON CONFLICT DO NOTHING.",
+    "migrations/117_default_read_grant_backfill.sql: INSERT … SELECT … FROM choros.tenant t (per-tenant role-reader + assignment + read-grant, gen_random_uuid(), БЕЗ хардкода конкретного tenant-UUID). ON CONFLICT DO NOTHING (идемпотентно).",
+    "FROZEN (не редактируются, только импортируются): src/core/grant-resolver.ts, src/core/grant-lattice.ts, src/core/object-handle.ts, src/core/field-visibility.ts. refToScope не изменён.",
+    "Импортёры records.ts (контракт совместимости): src/server.ts (production-wiring resolveReadVisibility в коммите миграции 117), src/http/form-record-persister.ts (только ActorTenantResolver type). Тесты records-*.test.ts не ломаются (honest-degrade).",
+    "AMENDED ci/checks/db/bundle-coherence.test.ts (FF-13-блок, санкционированный carve-out §10 ADR): SELECT id::text, tenant_id::text FROM choros.\"grant\" WHERE resource_type='record' AND resource_facet IS NULL AND NOT (operation='read' AND scope->>'kind'='node' AND scope->>'hierarchy'='resource' AND scope->>'nodeLevel'='application' AND scope->>'nodeId'='00000000-0000-0000-0000-0000000000r0') — ожидание 0 строк; в коде теста комментарий-санкция: 'SANCTIONED CARVE-OUT — T-0570 ADR §10 × T-0082 FR-3/AC-13: NULL-facet legal ONLY for the platform default-open READ grant (read + RESOURCE_ROOT sentinel scope); the invariant keeps full force for every other record-grant.' + force-тест FF-RP-14 (ROLLBACK-транзакция: не-сентинел NULL-facet record-грант ловится предикатом; read+сентинел-строка — нет).",
+    "NEW ci/checks/read-pdp-sentinel-coherence.sh (FF-RP-15): извлекает значение RESOURCE_ROOT_NODE_ID из src/core/read-visibility.ts и grep-подтверждает точное вхождение литерала в migrations/117_default_read_grant_backfill.sql и в carve-out ci/checks/db/bundle-coherence.test.ts; self-test bad/good; wired в package.json fitness. Значение сентинела ратифицировано: '00000000-0000-0000-0000-0000000000r0' (не-hex 'r' ⇒ никогда не совпадёт с реальным application.id uuid-колонки и не порождается gen_random_uuid()).",
+    "docs/design/T-0082-bundle-coherence.adr.md НЕ редактируется (история; живой контракт инварианта = амендированный тест + §10 ADR T-0570)."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-RP-1",
+      "rule": "GET /api/records: строка без покрывающего READ-гранта отсутствует в списке; при пустом grant-множестве (гейт активен) список пуст, не полон.",
+      "ci_check": "src/__tests__/records-read-pdp.test.ts: инжектировать resolveReadVisibility, вернуть 0 covering-грантов ⇒ list=[]; default-грант ⇒ все строки. (AC-1)"
+    },
+    {
+      "id": "FF-RP-2",
+      "rule": "GET /api/records/:id без покрывающего гранта ⇒ 404 (не 200/403), неотличимо от not-found/cross-tenant.",
+      "ci_check": "records-read-pdp.test.ts: detail при 0 covering-грантов ⇒ HttpError(404), форма == not-found. (AC-2)"
+    },
+    {
+      "id": "FF-RP-3",
+      "rule": "Backfill не ломает: тенант, существовавший до 115, после сида+гейта даёт тот же видимый набор строк, что через старый RLS-путь.",
+      "ci_check": "ci/checks/db/records-read-pdp.db.test.ts: seed тенант без reader-гранта → применить 115 → видимый набор до/после == равны. (AC-3)"
+    },
+    {
+      "id": "FF-RP-4",
+      "rule": "registerTenant сидирует default-open READ-грант (role-reader + assignment + grant) АТОМАРНО в одной транзакции с T-0373.",
+      "ci_check": "ci/checks/db/records-read-pdp.db.test.ts: registerTenant → сразу getGrantsForSubject(owner) содержит read/record/RESOURCE_ROOT грант; abort-инъекция ⇒ ни role-reader, ни grant не осели. (AC-4)"
+    },
+    {
+      "id": "FF-RP-5",
+      "rule": "Сужение record-level без правки платформы: узкий READ-грант одному актору убирает записи вне scope; другой актор с default-грантом видит все.",
+      "ci_check": "records-read-pdp.test.ts: два актора, одному — грант на подмножество через существующий DAO (БЕЗ правки records.ts); проверить асимметрию видимости. (AC-5)"
+    },
+    {
+      "id": "FF-RP-6",
+      "rule": "Backfill-миграция 117 итерирует choros.tenant; НЕТ захардкоженного tenant-UUID (анти-паттерн 088).",
+      "ci_check": "ci/checks/read-pdp-no-hardcoded-tenant.sh: grep 115 на литерал UUID в позиции tenant_id/VALUES ⇒ FAIL; требует FROM choros.tenant. Self-test bad/good фикстуры. (AC-3, FR-2)"
+    },
+    {
+      "id": "FF-RP-7",
+      "rule": "Анти-кейс (D-064): в diff src/ нет строк role-approver, soglasovanie, tel-, Согласование(конст.), e-larina, e-orlov, e-configurator.",
+      "ci_check": "ci/checks/read-pdp-anti-case.sh: git diff-scoped grep -nE по добавленным строкам под src/ ⇒ FAIL при совпадении; self-test bad/good. (AC-9, NF-4)"
+    },
+    {
+      "id": "FF-RP-8",
+      "rule": "Латтис/handle/резолвер/field-visibility не тронуты: grant-lattice.ts, object-handle.ts, grant-resolver.ts, field-visibility.ts байтово без правок экспортов; refToScope не изменён.",
+      "ci_check": "ci/checks/read-pdp-frozen-core.sh: git diff --name-only не содержит этих 4 файлов; стиль mutation-gateway-isolation.sh FROZEN_EXPORTS. (NF-5, FR-7)"
+    },
+    {
+      "id": "FF-RP-9",
+      "rule": "N+1 отсутствует: GET /api/records с N≥50 строк резолвит гранты за O(1) запросов (не O(N)); containment in-memory.",
+      "ci_check": "records-read-pdp.test.ts: счётчик вызовов resolveReadVisibility/getGrantsForSubject == 1 на HTTP-запрос при N=50. (AC-7, NF-1)"
+    },
+    {
+      "id": "FF-RP-10",
+      "rule": "Человек==агент: для одного (grant set, ref) человеческий HTTP-путь и агентский reader дают byte-identical visible-set; нет отдельной агентской ветки.",
+      "ci_check": "records-read-pdp.test.ts: deep-equal проекция человек vs агент над одним грант-набором. (AC-8, FR-6)"
+    },
+    {
+      "id": "FF-RP-11",
+      "rule": "Field-level поверх record-level: актор с READ-грантом, чей resource_facet.fields сужен, получает запись (не 404), но недозволенные JSONB-ключи ОТСУТСТВУЮТ (не null); через существующий field-visibility.ts.",
+      "ci_check": "ci/checks/db/records_field_mask.test.ts-стиль + records-read-pdp.test.ts: узкий facet ⇒ record present, ключи physically absent. (AC-6, FR-4)"
+    },
+    {
+      "id": "FF-RP-12",
+      "rule": "Tenant-isolation первична: запись тенанта B невидима актору тенанта A даже при гипотетически широком READ-гранте (RLS + explicit filter — первый).",
+      "ci_check": "ci/checks/db/records-read-pdp.db.test.ts: актор A с RESOURCE_ROOT-грантом, строка тенанта B ⇒ 0 строк/404. (AC-10, NF-3)"
+    },
+    {
+      "id": "FF-RP-13",
+      "rule": "Honest-degrade: resolveReadVisibility absent ⇒ READ byte-identical дотаск-поведению (RLS+sandbox), все существующие read-тесты зелёные.",
+      "ci_check": "npm run fitness + records-pagination.test.ts/records-field-visibility*.test.ts/records-sandbox-gate.test.ts + ci/checks/db/records_crud.test.ts зелёные без инъекции резолвера. (NF-2)"
+    },
+    {
+      "id": "FF-RP-14",
+      "rule": "Инвариант T-0082 FF-13 сохраняет силу после carve-out: NULL-facet record-грант с любым НЕ-сентинел scope (или не-read operation) ловится амендированным предикатом; exempt — только точная структурная форма default-read гранта (read + node/resource/application/RESOURCE_ROOT).",
+      "ci_check": "ci/checks/db/bundle-coherence.test.ts: (i) амендированный FF-13-запрос ⇒ 0 строк на сидированных данных; (ii) force-тест в ROLLBACK-транзакции: вставить NULL-facet record-грант с не-сентинел scope ⇒ предикат возвращает строку; read+сентинел-строка предикатом НЕ возвращается. (§10 ADR)"
+    },
+    {
+      "id": "FF-RP-15",
+      "rule": "Сентинел — единый литерал: RESOURCE_ROOT_NODE_ID в src/core/read-visibility.ts == литерал в migrations/117_*.sql == литерал carve-out в ci/checks/db/bundle-coherence.test.ts; дрейф любого из трёх ⇒ красный (db-тесты не импортируют из src/ по house-паттерну — single-source через grep).",
+      "ci_check": "ci/checks/read-pdp-sentinel-coherence.sh: извлечь константу из read-visibility.ts, grep-равенство в двух других файлах; self-test bad/good; wired в npm run fitness. (§10 ADR)"
+    }
+  ],
+  "traceability": [
+    {
+      "ac": "AC-1",
+      "covered_by": "ADR §2.3 LIST-фильтр + FF-RP-1"
+    },
+    {
+      "ac": "AC-2",
+      "covered_by": "ADR §2.3 DETAIL 404 + FF-RP-2"
+    },
+    {
+      "ac": "AC-3",
+      "covered_by": "ADR §2.2 миграция 117 + FF-RP-3, FF-RP-6; сид легален для FF-13 T-0082 через §10 carve-out + FF-RP-14/15"
+    },
+    {
+      "ac": "AC-4",
+      "covered_by": "ADR §2.2 register.ts атомарный сид + FF-RP-4; сид легален для FF-13 T-0082 через §10 carve-out + FF-RP-14/15"
+    },
+    {
+      "ac": "AC-5",
+      "covered_by": "ADR §2.1 правило 3 + §4 validateNarrowing + FF-RP-5"
+    },
+    {
+      "ac": "AC-6",
+      "covered_by": "ADR §2.4 field-visibility reuse + FF-RP-11"
+    },
+    {
+      "ac": "AC-7",
+      "covered_by": "ADR §2.3 O(1)-резолюция + FF-RP-9"
+    },
+    {
+      "ac": "AC-8",
+      "covered_by": "ADR §2.5 FR-6 один resolveFor + FF-RP-10"
+    },
+    {
+      "ac": "AC-9",
+      "covered_by": "ADR §2.5 NF-4 + FF-RP-7"
+    },
+    {
+      "ac": "AC-10",
+      "covered_by": "ADR §2.5 NF-3 RLS-первичность + FF-RP-12"
+    },
+    {
+      "ac": "AC-11",
+      "covered_by": "manual — LIVE_PROOF §6 спеки; поддержан §2 (backfill-видимость, сужение грантом, 404, второй актор не задет)"
+    }
+  ],
+  "runtime_target": "runtime:node — TS/Node HTTP-слой (src/http/records.ts) + чистое ядро (src/core/read-visibility.ts) + DB-слой (src/db/resource-ancestry.ts, getGrantsForSubject) + Postgres-миграция (migrations/117_default_read_grant_backfill.sql) + seed в src/core/register.ts. Fitness: vitest (src/__tests__/records-read-pdp.test.ts) + live-PG (ci/checks/db/records-read-pdp.db.test.ts, npm run fitness:db) + shell-линтеры (read-pdp-no-hardcoded-tenant.sh, read-pdp-anti-case.sh, read-pdp-frozen-core.sh).",
+  "adr_artifact_path": "docs/adr/ADR-T0570-read-pdp.md",
+  "escalation": ""
+}

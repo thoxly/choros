@@ -1,0 +1,85 @@
+{
+  "task_id": "T-0122",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "review_iteration": 2,
+  "re_review_of": "8e9cef6 (DESIGN-fix: getGrants seam vs live schema + token-lookup isolation + max_uses atomicity, R-1/R-2/R-3)",
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "docs/design/T-0122-external-participant.adr.md §2.3/§9 ↔ src/core/object-handle.ts:84-87, grant-resolver.ts:82-85,489-505, migrations/008_grant.sql, 020_role_assignment.sql:57-58, 021_grant_role_fk.sql:30-33",
+      "issue": "RESOLVED (iter-2). Шов getGrants для is_external-роли-БЕЗ-assignment перенесён в реализацию порта getGrants T-0053, НЕ в frozen-резолвер — сверено с живым кодом: ResolveSubject identity-only opaque subjectId (object-handle.ts:84-87); resolveFor зовёт только deps.grants.getGrants и не ветвится (grant-resolver.ts:489-505), DB-backed getGrants явно отложен в T-0053 (комментарий :82-85). Ветвь B (directly-held) структурно состоятельна: grant.role_id uuid NOT NULL (008_grant.sql) + FK→role (021:30-33); предикат g.role_id=subjectId AND r.is_external ограничен is_external (НЕ расширяет direct-грант на любую роль); множества A/B непересекаемы (employee.id vs role.id, разные UUID-пространства + FK; external-роль не имеет role_assignment — FK 020:57-58 требует employee). Branch A предикат confirmed_by IS NOT NULL совпадает с 020:9-11. Инвариант невидимости в штатке сохранён. grant-resolver.ts не меняется (T-0021 FF-R5/R6 целы). FF-EXTERNAL-GETGRANTS добавлена. Шов закрыт без ветки-обхода в резолвере.",
+      "suggestion": "Закрыто по существу. См. остаточный nit R-1a (цитата на несуществующую колонку)."
+    },
+    {
+      "id": "R-1a",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0122-external-participant.adr.md §2.3 стр.116 (цитата `migrations/019_role.sql:23`)",
+      "issue": "Цитата-неточность (downgrade-nit, НЕ blocking). §2.3 ссылается на is_external как «(аддитивная колонка ... migrations/019_role.sql:23)», но 019_role.sql:23 = `CREATE TABLE choros.role (`, и колонки is_external в миграции 019 НЕТ (grep по migrations/ подтверждает: не существует нигде). ADR в §9 (стр.683) и §4.1 (стр.428) корректно называет её «новым булевым флагом / аддитивной колонкой» (ещё предстоит добавить) — намерение однозначно, impl-догадки не открывает, FF-EXTERNAL-GETGRANTS требует role.is_external. Но цитата 019:23 вводит в заблуждение, как будто колонка уже мигрирована. Это второе проявление того же класса, что iter-1 R-1 (cite на migrated-схему без сверки), но в пределах одной задачи и оба раза дизайн-намерение верно.",
+      "suggestion": "Поправить ссылку с `019_role.sql:23` на «новая additive-миграция: ALTER TABLE role ADD COLUMN is_external boolean NOT NULL DEFAULT false» (как is_system у registry_def 004:16); желательно назвать номер будущей миграции. Не блокирует approve."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 6,
+      "location": "docs/design/T-0122-external-participant.adr.md §2.4.1/§4.2 ↔ migrations/001_roles_and_schema.sql:27-28, ci/checks/db/schema.test.ts:282-289",
+      "issue": "RESOLVED (iter-2). Pre-context cross-tenant lookup оформлен структурно: external_token остаётся FORCE-RLS с ДВУМЯ именованными политиками — external_token_tenant_isolation (TO choros_app, default-DENY на GUC) + external_token_lookup_routing (TO choros_token_lookup, USING(true)). Per-role политики через TO <role> — реальная RLS-механика Postgres; choros_token_lookup = NOBYPASSRLS (как choros_app, сверено 001:27-28; FF-ROLE schema.test.ts:282-289 ассертит rolbypassrls=false) — видит cross-tenant строки лишь через именованную политику, не через атрибут роли (дух FF-1 сохранён). Сужено column-GRANT SELECT (token_hash, tenant_id, surface_id) — нет SELECT на external_surface/record/контент (42501). external_token by design = routing-таблица без прикладных tenant-данных (явный ADR-инвариант) ⇒ pre-context чтение routing-колонок не нарушает T-0013 «tenant-данные не вне контекста». token_hash утечь не может (необратимый sha256, сам = ключ lookup'а, предъявитель уже владеет прообразом). FF-T13-LOOKUP ловит расширение: ровно 2 политики, NOBYPASSRLS, нет SELECT на контент, тайминг hit/miss неразличим, self-test на 3-ю политику/BYPASSRLS/лишний grant. Противоречие §2.2«no new isolation code-path»↔§2.4 снято явно (ровно один помеченный охраняемый путь).",
+      "suggestion": "Закрыто. Третья роль = CI-видимое ожидаемое добавление в T-0013 FF-1 allowlist."
+    },
+    {
+      "id": "R-3",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "docs/design/T-0122-external-participant.adr.md §2.6/§4.4-step3 ↔ src/core/postgres/pgOutboxStore.ts/pgJobStore.ts (atomic-claim precedent)",
+      "issue": "RESOLVED (iter-2). Check-then-act заменён единым условным атомарным UPDATE … SET use_count=use_count+1 WHERE … AND (max_uses IS NULL OR use_count<max_uses) RETURNING — атомарен в Postgres (row-lock на затронутой строке; проверка-предикат+инкремент = одна операция, из N конкурентных ровно 1 получает RETURNING, остальные 0 строк ⇒ uniform-deny). Прецедент атомик-claim реален в кодбазе (pgOutboxStore/pgJobStore FOR UPDATE SKIP LOCKED/RETURNING). Цитата migrations/010 слабовата (010=back-fill UPDATE, не conditional-claim), но показанный SQL самодостаточен и корректен — nit-уровня неточность примера, не дефект. Компенсация «резерв сгорает» при провале действия задокументирована как ОСОЗНАННЫЙ fail-closed трейд-офф (резерв до действия; безопасный край: засчитано-но-не-отдано предпочтительнее двойной выдачи; двухфазный resv→commit вне day-1). FF-EXTERNAL-MAXUSES-RACE: N параллельных single-use ⇒ ровно 1 успех, use_count=min(N,max_uses); self-test на check-then-act ⇒ детект.",
+      "suggestion": "Закрыто. DoS-через-сгорающий-резерв — принятый трейд-офф, зафиксирован явно."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0122-external-participant.adr.md §4.4-step4",
+      "issue": "RESOLVED (iter-2). Вызов приведён к канонической сигнатуре T-0021: resolveFor(deps.resolver, handleOf(target_ref), {tenantId, subjectId: external_role_id}, op) — совпадает с src/core/grant-resolver.ts:489-496 (первый аргумент deps).",
+      "suggestion": "Закрыто."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0122-external-participant.adr.md §2.3 стр.112-124",
+      "issue": "RESOLVED (iter-2). Зафиксировано явно: external-грант = самостоятельная grant-строка; отзыв прав ВЫДАВШЕГО после mint не каскадит (семантика делегирования T-0018, не дыра, каскада нет в модели); отзыв внешнего = явный revoke external_surface.revoked_at/гранта; каскад-revoke-по-granter = вне day-1 (Stage-2), осознанно. Снимает кажущееся противоречие с action-time-риторикой (action-time верен для самого external-гранта; связь granter↔surface = mint-time-снимок).",
+      "suggestion": "Закрыто."
+    },
+    {
+      "id": "R-6",
+      "severity": "nit",
+      "axis": 6,
+      "location": "docs/design/T-0122-external-participant.adr.md §2.6 стр.204-211",
+      "issue": "RESOLVED (iter-2). Зафиксировано остаточное окно presigned-URL ≤ presign-TTL (T-0119, ≤300с): отзыв действует на следующий presign, уже выпущенный URL валиден до своего TTL (S3 не знает про revoke) — наследуется из T-0119, осознано. Плюс усиление: presign не выпускается с expiresAt > min(now+presignTTL, valid_until) — за окном поверхности новый URL не выдаётся вовсе.",
+      "suggestion": "Закрыто (с усилением сверх iter-1 suggestion)."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Кандидат-улика iter-1 (design-задача, трогающая grant-резолюцию/схему, расходится со смерженной миграцией) частично подтвердилась повторно В ЭТОЙ ЖЕ задаче: фикс закрыл шов по существу, но §2.3 снова цитирует строку-в-файле (019_role.sql:23) для колонки is_external, которой там физически НЕТ (line 23 = CREATE TABLE; колонка ещё не мигрирована). Оба раза (iter-1 R-1 и iter-2 R-1a) дизайн-намерение было корректным (новая additive-колонка) — расходилась только точность цитаты, не дизайн-решение. Класс = 'cite-precision на migrated-схеме', НЕ 'неверное дизайн-решение' ⇒ пока не SQ-эскалация. Если повторится на T-0126 (headless, тот же §4) как СОДЕРЖАТЕЛЬНОЕ расхождение (не только цитата) — поднимать чек: 'design-задача, трогающая schema, обязана grep-сверить цитируемые колонки/строки против фактической миграции (а не только сослаться на файл:строку)'."
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "task_id": "T-0058",
+  "status": "ready",
+  "summary": "Materialization of the Flowable 7 engine infrastructure substrate: a `flowable` service added to docker-compose.yml using the shared Postgres instance (single-DB invariant), a BPMN deployment mechanism (REST deploy proven by spike), a readiness healthcheck, dev-mode configuration (no enterprise key), a committed smoke BPMN with an external-task step, and CI fitness scripts — all without touching any application code in src/.",
+  "functional": [
+    "FR-1: `flowable` service in docker-compose.yml using pinned image `flowable/flowable-rest:7.1.0`, all credentials via env vars with dev-only defaults, configurable host port (default 8082), depends_on postgres:service_healthy.",
+    "FR-2: Flowable connects to the existing shared `postgres` service via JDBC (SPRING_DATASOURCE_URL pointing to postgres service); ACT_* Liquibase tables isolated from choros_* tables; no second Postgres container.",
+    "FR-3: BPMN deployment via REST (POST /flowable-rest/service/repository/deployments, multipart) returns HTTP 201; start-instance via REST returns HTTP 201; committed smoke BPMN file with external-task step; optional filesystem auto-deploy at DESIGN discretion.",
+    "FR-4: Compose healthcheck probes management endpoint (GET /flowable-rest/service/management/engine); CI fitness script wait-ready.sh polls until HTTP 200 or 120 s timeout.",
+    "FR-5: No enterprise license key; admin credentials via env vars with dev defaults; history cleanup enabled with rare cron (yearly) so it does not fire mid-test.",
+    "FR-6: .github/workflows/ci.yml extended to start Flowable and run fitness scripts; ci/checks/flowable-bridge-contract.sh (FF-G3) stays green (exits 0, no bridge path present)."
+  ],
+  "non_functional": [
+    "NF-1: Proportional delivery — ~20-30 lines in docker-compose.yml, committed smoke BPMN, fitness scripts, CI workflow changes; no src/ changes.",
+    "NF-2: No prod secrets committed (RL-1) — all env var defaults are dev-only values.",
+    "NF-3: Single-Postgres invariant (hard red-line from stack ADR) — one postgres service block in compose, unchanged.",
+    "NF-4: Unattended startup — Flowable Liquibase initializes ACT_* schema automatically on first start, no manual DBA steps.",
+    "NF-5: Port non-collision — FLOWABLE_PORT default 8082 must not collide with 55432 (Postgres), 8180 (Keycloak), 9000 (Keycloak mgmt), 3000 (Node app).",
+    "NF-6: Fitness scripts follow established pattern — bash, set -euo pipefail, clear PASS/FAIL output, exit 0/1."
+  ],
+  "out_of_scope": [
+    "TS REST client to Flowable (src/bridge/, src/core/flowable*.ts) — T-0064 (E6.1).",
+    "External-task to JobStore mapping — T-0067 (E6.2).",
+    "Any Java or JVM code; any src/ application code changes.",
+    "BPMN linter — T-0027 (done).",
+    "Flowable security hardening / RBAC on Flowable REST endpoint.",
+    "Production server provisioning, Tailscale, prod credentials — E0.7 (founder-gated).",
+    "Unified multi-service compose file — E0.6.",
+    "History-cleanup scheduling / autovacuum tuning for ACT_* tables — fleet-ops runbook.",
+    "Operaton fallback container (Flowable 7 is the chosen primary; Operaton is a de-risked fallback for the future).",
+    "Flowable multi-instance clustering — S3+ path."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "After `docker compose up flowable` (or full stack), the `flowable` service reaches healthy state within 120 s as reported by the compose healthcheck. Fitness script `ci/checks/flowable/wait-ready.sh` exits 0.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "`docker-compose.yml` uses image `flowable/flowable-rest:7.1.0` (exact pinned tag, no :latest). No enterprise license key env var is set. Static grep confirms both.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "`docker-compose.yml` contains exactly one `postgres` service block (unchanged from T-0053). The `flowable` service `SPRING_DATASOURCE_URL` contains `postgres:5432`. No second Postgres or database container exists. Static analysis confirms.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "After full stack up, psql query confirms ACT_* tables exist AND choros_* tables exist AND there is zero naming overlap between the two table families.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "No Flowable password, license, or credential committed to the repo matches a non-dev pattern. Static check on compose env vars confirms all Flowable credential values are dev defaults.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "The Flowable host port (FLOWABLE_PORT, default 8082) is unique across all service port mappings in `docker-compose.yml`. Static parse confirms no collision.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "After Flowable is healthy, `POST /flowable-rest/service/repository/deployments` with the committed smoke BPMN file returns HTTP 201 and a JSON body containing a deployment ID. Fitness script `ci/checks/flowable/deploy-bpmn.sh` (or `smoke.sh`) exits 0.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "After deploy (AC-7), `POST /flowable-rest/service/runtime/process-instances` with `{\"processDefinitionKey\":\"<smoke-process-key>\"}` returns HTTP 201. Fitness script confirms HTTP 201.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "After instance start (AC-8), `GET /flowable-rest/service/runtime/process-instances?processDefinitionKey=<smoke-process-key>` returns HTTP 200 and `total >= 1`. Fitness script confirms.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "The committed smoke BPMN file contains at least one `serviceTask` with `flowable:type=\"external\"` and a `flowable:topic` attribute. XML grep/parse on the committed file confirms.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "`ci/checks/flowable-bridge-contract.sh` exits 0 (no src/bridge/ or src/core/flowable*.ts present — T-0058 does not create those paths). CI confirms.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "The `flowable` block in `docker-compose.yml` declares `depends_on: postgres: condition: service_healthy`. Static yaml parse confirms.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "`.github/workflows/ci.yml` includes Flowable startup and runs the Flowable fitness scripts. The full CI run on the task branch is green (all prior checks including T-0053 Postgres and T-0054 Keycloak fitness remain green).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "`docker-compose.yml` flowable env includes `FLOWABLE_ENABLE_HISTORY_CLEANING=true` and `FLOWABLE_HISTORY_CLEANING_CYCLE` set to a rare cron expression (yearly or never-during-tests, e.g. `0 0 0 1 1 ?`). Static grep confirms.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "`docker compose up` with all services starts cleanly; the `postgres` and `keycloak` service blocks are unchanged from T-0053/T-0054 baseline (diff confirms no regressions).",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0058-flowable-service.spec.md"
+}

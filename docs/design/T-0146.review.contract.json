@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0146",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "review_iteration": 2,
+  "re_review_of": "7039aeb (BUILD-fix: close R-1 ownership-capture via base-ref owner + R-2 branch-spoof residual)",
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "ci/checks/frozen-checks-immutable.sh:100-126",
+      "issue": "RESOLVED (iteration 2). Ownership-capture bypass closed: owner T-ID is now read from the BASE_REF version of the file (`git show BASE_REF:path | sed -n '2p'`) for ALL changed files (C/M/R/T/D), not from the attacker-controlled on-disk copy. Re-verified in isolated tmp git repos: PROBE-2 (DELETE+re-ADD foreign name with own header) → exit 1; PROBE-3 (modify foreign check + rewrite line 2 to own T-ID) → exit 1. Both previously PASS, now correctly FAIL with the BASE_REF foreign T-ID (T-0044) reported.",
+      "suggestion": "No further action. Fix matches iteration-1 suggestion exactly."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/frozen-checks-immutable.sh:18-26 (script header) + docs/design/T-0146-frozen-checks-immutable.adr.md §11",
+      "issue": "DOWNGRADED to accepted residual (was blocking). Branch-name spoof remains reachable: a branch task/T-0044-* obtains TASK_ID=T-0044 and may edit the genuine T-0044 check whose BASE_REF header is '# T-0044 ·'. Re-verified: PROBE-5 → exit 0 (expected residual). This is now explicitly documented as accepted-by-design in the script header (RESIDUAL RISK block) and ADR §11 amendment with rationale: (a) the dangerous path — foreignizing a check by header rewrite — is closed by R-1; (b) closing the residual fully requires a control-plane claim check, out of scope for a local pure-bash gate (NF-1); (c) the branch name is reviewer-visible in the PR title/audit trail; (d) above the stated 'misdirected BUILD agent, not adversary' threshold (spec §2 / ADR §1). The residual is NOT reachable by accident — it requires deliberately naming a branch after another task's ID, which collides with the worktree/claim workflow — so it does not regress to a major. Per iteration-1 finding text, explicit documentation downgrades this to nit.",
+      "suggestion": "Cosmetic: the script header (line 18) cites 'ADR §10 amendment' but the amendment is §11 (§10 is 'Runtime / deploy target'). Non-blocking; fix opportunistically."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "docs/specs/T-0146-frozen-checks-immutable.spec.md:84",
+      "issue": "Unchanged accepted residual: destructive shrink of ci/checks/known_tenant_tables.txt passes (gate scopes to *.sh glob, spec §7). No change required for this gate.",
+      "suggestion": "Accepted by design. Candidate for a separate registry-integrity gate."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 5,
+      "location": "package.json",
+      "issue": "Unchanged accepted residual: removing a foreign check's invocation from the fitness chain in package.json is not caught (out of ci/checks/*.sh glob, spec §7).",
+      "suggestion": "Accepted by design. Candidate for a separate fitness-chain-integrity gate; not in this task's scope."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/frozen-checks-immutable.sh:108-113 (HEAD fallback)",
+      "issue": "New fallback path probed for ownership-capture and found sound. `git show HEAD:path` fallback fires ONLY when `git show BASE_REF:path` is empty (the name did not exist in BASE). For any name that pre-exists in BASE (e.g. a real foreign check), the BASE read returns the foreign header first and the fallback never executes — verified FALLBACK-B: branch committed its own-header version (HEAD=T-0999) of a name that exists in BASE (T-0044) → still exit 1, BASE anchor wins. For a name NOT in BASE, HEAD:path was necessarily written by the branch itself, so the fallback can only ever read the branch's OWN T-ID — never a foreign one (verified FALLBACK-FIRE: branch-added file modified in working tree → exit 0 with own T-0150). The fallback cannot be abused to capture a foreign name.",
+      "suggestion": "No action. Documented here as adversarial-probe evidence that the fallback does not reopen R-1."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Integrity meta-gates must anchor ownership in something NOT controlled by the audited agent. T-0146 iteration 2 resolves this for the file-content axis (owner header now read from BASE_REF, immutable to the branch). The residual axis (TASK_ID from branch name) is accepted because the only remaining local anchor would be a control-plane claim lookup, which is out of scope for a pure-bash gate. Candidate ledgers/role-gaps.md entry: pure-bash integrity gates can anchor on git history (tamper-proof) but cannot verify branch-name→claim binding without a control-plane round-trip; that binding belongs to the orchestration layer, not the gate."
+  ]
+}

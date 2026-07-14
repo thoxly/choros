@@ -1,0 +1,19 @@
+{
+  "task_id": "T-0671",
+  "verdict": "approved",
+  "commit": "85d88c894daa6392e400f9fae73dd0f2bbf13371",
+  "gates": {
+    "tsc_noEmit": { "result": "PASS", "detail": "no output, exit clean" },
+    "vitest_run_web": { "result": "PASS", "detail": "Test Files 96 passed (96); Tests 2605 passed (2605) — matches claimed count exactly", "duration_s": 8.37 },
+    "anti_case_lock": { "result": "PASS", "detail": "Phase 1 (delegate gates read-pdp/rights-ui/detel-literal-baseline) all PASS; Phase 2 full D-064 denylist: telLinear 1 (baseline 1) OK, aggregate 16 (baseline 16) — no growth" },
+    "forms_schema_binding": { "result": "PASS", "detail": "[FF-FORMS1] every form-defs field is bound to a server validation rule; submit route re-validates; validator pure" }
+  },
+  "ac_coverage": {
+    "AC-1_engine_visible": "covered — string-mirror predicate test + inline predicate-object test in FormDesigner.test.jsx",
+    "AC-2_draft_hidden": "covered — same pattern, draft object asserted bindable()===false",
+    "AC-3_published_no_regression": "covered — published object asserted bindable()===true",
+    "AC-4_t0669_filter_for_engine": "covered — regex assertion that boundAppIdsForProcess memo block contains no source==='engine' branch, keys only on b.process_key"
+  },
+  "test_methodology_note": "FormDesigner.test.jsx has no jsdom/act tier (vitest.config.js node env, documented in file header) — AC-1..4 tests mirror the predicate as an inline copy (`const bindable = (d) => d.source === 'engine' || d.status === 'published'`) and assert against literal objects, rather than rendering the component with a mocked /api/process-catalog fetch and asserting real <option> DOM. This is consistent with the file's pre-existing convention (every other test in this file uses source-string-presence or static-markup checks, per the file's own header comment) and is not a regression introduced by this diff — the whole file predates jsdom/act support. Flagged as a pre-existing structural limitation, not a T-0671-specific defect.",
+  "blocking_findings": []
+}

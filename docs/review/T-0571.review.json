@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0571",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "blocking",
+      "status": "resolved",
+      "resolution": "Устранено кодером в 564acf2, перепроверено ревьюером по дельте c53ad55..HEAD: (1) src/http/inbox.ts:1705-1717 — 502-тело обёрнуто в {error:{code, stage, engineCode, instanceId}}; форма консистентна с codebase-конвенцией (router.ts:177-187 sendErrorEnvelope даёт {error:{code, message}}; инлайн-зеркала files.ts/process-defs.ts точно так же кладут доп. диагностические поля внутрь error вместо message — не рукописное расхождение); (2) ADR §2.3 + T-0571.adr.contract.json amended с явной пометкой orchestrator-sanctioned и мотивировкой (рассинхрон ADR↔кодбаза, вскрытый ревью, а не самовольное отступление); deviation задокументирована в pr-handoff.json; (3) все 3 AC-7 unit-теста честно читают body.error.code/stage/engineCode (не top-level) — 41/41 зелёных в src/__tests__/inbox-engine-drive.test.ts; (4) web/src/screens/screen-inbox.jsx — карта ENGINE_DRIVE_ERROR_MESSAGE (3 кода → русские сообщения без жаргона) встроена в ОБА потребителя (~389, ~678) по существующему inline-паттерну; fallback `?? ...` сохраняет прежнее поведение для NOT_ELIGIBLE и всех прочих кодов — регрессии существующих веток нет; web-suite 52 файла/1479 тестов зелёные. E2E/journeys-потребители action-эндпоинта парсят только success-path (200/done) — 502-телом не затронуты.",
+      "axis": 5,
+      "location": "src/http/inbox.ts:1691-1704 (502 body {code,stage,engineCode,instanceId}); web/src/screens/screen-inbox.jsx:379-382,664-667",
+      "issue": "Новый 502-ответ approve отдавал плоский объект {code, stage, engineCode, instanceId} — без обёртки {error:{code,...}}, которую используют ВСЕ остальные ручные error-ответы в кодовой базе (router.ts:183 mapDomainError/sendErrorEnvelope, files.ts:236/348, grant-propose.ts:375, message-ingest.ts:137, process-defs.ts:575/585/595). Фронт (web/src/screens/screen-inbox.jsx) читает `body?.error?.code` в обоих потребителях POST /api/inbox/:id/action — для плоского формата `body.error` был бы undefined, пользователь увидел бы неинформативное 'Ошибка: HTTP 502' вместо типизированного кода, который AC-7 явно требует сделать видимым и отличимым. Расхождение возникло на уровне ADR §2.3 (таблица фиксировала плоскую форму), разошедшегося с конвенцией кодовой базы, и не было проверено против реального потребителя.",
+      "suggestion": "Обернуть 502-тело в {error:{code, stage, engineCode, instanceId}} по конвенции router.ts и обновить потребителей/тесты; ADR amended с санкцией оркестратора."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "status": "resolved-by-followup",
+      "resolution": "Вынесено оркестратором в отдельную задачу T-0591 (worst-case latency синхронного approve при деградировавшем движке: withRetry timeoutMs×maxRetries внутри poll-цикла без общего дедлайна запроса). Не блокирует T-0571: поведение withRetry pre-existing, синхронность принята ADR осознанно, типовой путь быстрый (db-lane live-прогон подтверждает).",
+      "axis": 3,
+      "location": "src/http/process-projection.ts:1257-1324 (pollTimeoutMs/pollIntervalMs poll loop) + src/core/flowable-client.ts:406-439 (withRetry: timeoutMs=10_000 default × maxRetries=3 + backoff)",
+      "issue": "Poll-цикл в reconcileInstanceEngineDrive проверяет `Date.now() - pollStart >= pollTimeoutMs` (10с по умолчанию) ТОЛЬКО между итерациями, но каждый вызов `getActiveUserTasks` внутри цикла сам обёрнут в `withRetry` (timeoutMs=10с × до 4 попыток с exponential backoff до 5с) — то есть при зависшем/недоступном (но не сразу ошибающемся) движке ОДИН вызов getActiveUserTasks может занять ~40+ секунд, и внешний pollTimeoutMs это не прерывает. Итоговая задержка HTTP-ответа approve при деградировавшем движке может значительно превышать ожидаемые 'до 10 секунд' из ADR/спеки. Это pre-existing поведение withRetry, но T-0571 впервые делает этот путь синхронным к HTTP-ответу approve.",
+      "suggestion": "Follow-up T-0591: общий upper-bound на весь approve-запрос (AbortController/race с дедлайном на весь reconcile) либо документирование реального худшего случая для операционной готовности."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "AC-7 после фикса F-1 покрыт полностью: HTTP-статус (502) + typed code в {error:{code,...}} envelope + человекочитаемое сообщение в UI (ENGINE_DRIVE_ERROR_MESSAGE map в обоих потребителях screen-inbox.jsx) — ошибка видима и отличима от успеха на уровне продукта, не только API-контракта.",
+    "Deviation (1) PUT→POST в completeUserTask подтверждена как правильная относительно Flowable REST API (action-based операции идут через POST на runtime/tasks/{id}, PUT — эндпоинт обновления свойств) и покрыта живым db-lane тестом (ci/checks/db/engine-drive-generic.db.test.ts, FF-3/AC-6) — прогнан против реального Flowable 7.1.0 + Postgres в этом ревью, оба сценария (generic + анти-кейс второй процесс) зелёные.",
+    "Deviation (2) regression-guard в reconcileInstanceTimers сохраняет дедуп по СТРУКТУРНОМУ признаку (роль candidateGroups, не строковый литерал кейса) — не вводит новый кейс-хардкод, подтверждено FF-6 grep (пусто) и полным vitest run (timer-firing-loop тесты зелёные в общем прогоне 4849/4849).",
+    "Deviation (3, добавлена после F-1) — правка ADR §2.3 на {error:{...}} envelope: санкционирована оркестратором явно, задокументирована в handoff/ADR/contract с мотивировкой; перепроверено, что это исправление рассинхрона ADR↔кодбаза, не изменение семантики контракта (те же коды, те же поля, та же дискриминация structural vs transport).",
+    "Перепроверка дельты 564acf2: tsc --noEmit чистый; lint 0 ошибок (34 pre-existing warnings); src/__tests__/inbox-engine-drive.test.ts 41/41; web-suite 52 файла/1479 тестов зелёные (npm ci + vitest run в web/); FF-6 grep пуст; engine-drive-no-literal-defkey.sh PASS."
+  ]
+}

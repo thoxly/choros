@@ -1,0 +1,102 @@
+{
+  "task_id": "T-0129",
+  "status": "pr_open",
+  "branch": "task/T-0129-implementation-loop-design",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/specs/T-0129-implementation-loop.spec.md",
+    "docs/specs/T-0129.spec.contract.json",
+    "docs/design/T-0129-implementation-loop.adr.md",
+    "docs/design/T-0129.adr.contract.json",
+    "docs/design/T-0129.review.contract.json",
+    "docs/reviews/T-0129.review.md",
+    "docs/test-reports/T-0129.test-report.md",
+    "docs/design/T-0129.test-report.contract.json",
+    "docs/pr/T-0129.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review + test-report + pr-handoff). Нет src/ изменений. ci_local build/lint/types/tests/fitness=true означает UNAFFECTED (product CI зелёный, docs-only ветка — baseline=dev). D-056: integration-honest gate пройден.",
+    "Все 20 AC покрыты на design-фазе через approved-ревью; deferred-to-impl отсутствуют (нет post-impl live-probe AC в отличие от T-0119).",
+    "Reviewer nit R-1 (applied): FF-5 переформулирован — считать 7 НОМЕРОВ примитивов, не 7 строк.",
+    "Reviewer nit R-2 (applied): §10.1 добавлен абзац о promote atomicity — бандл как неделимая единица (coherence_hash + bundle-coherence гард).",
+    "Reviewer nit R-3 (applied): §16 добавлено примечание — скрипты impl-loop-adr-*.sh создаёт impl-задача; на момент ADR = спецификация, не файлы.",
+    "Remote PR не открывается: commit на локальной ветке (local-review-handoff pattern; GitHub PR требует scoped agent PAT GT-4, не провижн в этом окружении)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "test_evidence": {
+    "diff_gate": "docs-only PASS (0 файлов вне docs/**)",
+    "npm_ci_result": "PASS — tsc (0 errors) + eslint + fitness (291/291) + vitest (1042/1042)",
+    "review_verdict": "approved (T-0129.review.contract.json); 20/20 AC covered",
+    "test_report": "docs/design/T-0129.test-report.contract.json (verdict=pass, schema OK)"
+  },
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "B-1",
+      "title": "impl: seed implementation-agent (роль + employee + agent_card + гранты + vocab impl.*)",
+      "scope": "Аналог T-0077 migration 044: новая seed-миграция role=implementation-agent (namespace e0, position_id=NULL), employee kind=agent, agent_card + budget_policy_id, гранты authoring_draft ∪ implementation_op (ноль authoring_published), audit-вокабуляр impl.interview.*/impl.bundle.*/impl.simulation.*/impl.pilot.*/impl.phase.*. Зависит от: T-0077 (паттерн), T-0018 (гранты).",
+      "gates": "agent-hire-frozen-additive.sh (аддитивная миграция, ноль правок 044); config-agent-seed.sh Check-4 (authoring_published забанен для роли); FF-T0077-* baseline зелёный.",
+      "nits_to_carry": []
+    },
+    {
+      "suggested_id": "B-2",
+      "title": "impl: implementation + bundle модель-проекция + bundle-coherence гард",
+      "scope": "Сущности фаз (implementation.phase машина состояний §2) + контракт бандла (§5: bundle_id, implementation_id, tier, version, components, coherence_hash, changelog) как проекции существующих сущностей (employee/agent_card/role/grant + content-tier authoring_draft). Bundle-coherence CI-гард (extensibility §9 п.4). Зависит от: extensibility §9п.4, T-0018.",
+      "gates": "bundle-coherence проверка заземлена в FF-2 adr-foundations; unit-тесты когерентности.",
+      "nits_to_carry": []
+    },
+    {
+      "suggested_id": "B-3",
+      "title": "impl: грант-консистентность бандла (разрешимый адресат + дренируемый-десинк)",
+      "scope": "Проверка «разрешимый адресат» для каждого RoleRef бандла против живой read-only оргструктуры + дренируемый-десинк поверх isNarrowerOrEqual (T-0018). Внедренец не может эмитировать в draft грант шире решётки. Зависит от: T-0018, B-2.",
+      "gates": "validateNarrowing / isNarrowerOrEqual тесты; адресат-разрешение unit-проба.",
+      "nits_to_carry": []
+    },
+    {
+      "suggested_id": "B-4",
+      "title": "impl: протокол интервью (claim→discrepancy→question, read-only org)",
+      "scope": "Фаза interview: ask_interview_question MCP-tool, interview_claim структура (claim_id/text/org_refs/resolution/discrepancy?), валидация каждого утверждения против read-only оргструктуры, явный вопрос при missing_role/ambiguous_assignee/scope_unrepresentable, старт из шаблона. Оргструктура read-only (не создаёт узлов). Зависит от: B-1, B-2.",
+      "gates": "fail-closed интервью unit-пробы: missing_role → вопрос raised (не фантомный узел).",
+      "nits_to_carry": []
+    },
+    {
+      "suggested_id": "B-5",
+      "title": "impl: прогон режим 1 (расчёт маршрутов без движка, расширение T-0027)",
+      "scope": "Детерминированное протаскивание атрибутов синтетических кейсов через шлюзы/DMN бандла; выход — таблица кейс→маршрут→адресат. Расширение lintBpmn (T-0027). Без живого движка, без побочных эффектов. Зависит от: T-0027, B-2.",
+      "gates": "unit-тесты расчёта маршрутов; эффект-гранты T-0034 в draft заглушены fail-closed.",
+      "nits_to_carry": []
+    },
+    {
+      "suggested_id": "B-6",
+      "title": "impl: пилот (scoped rollout поверх T-0018 — set([node,interval])+TTL)",
+      "scope": "Продуктовое понятие пилота: published-бандл с узко-скоупнутыми грантами set([node(оргузел), interval(axis,lo,hi)]) + valid_until. Снятие ограничения = расширение скоупа = новый промоут (human-gate). Зависит от: T-0018, B-2.",
+      "gates": "validateNarrowing для пилотных грантов; TTL-проверка.",
+      "nits_to_carry": []
+    },
+    {
+      "suggested_id": "B-7",
+      "title": "impl: карточка внедрения UI (фазы + вкладка Прогон)",
+      "scope": "Поверхность §9: карточка внедрения с implementation.phase, состояние «черновик / пилот / в проде / ждёт подтверждения», вкладка «Прогон» (сценарии + результаты последнего прогона, кнопка пригласить на репетицию). Явный отказ от глобального dev/prod-переключателя. Зависит от: B-2, UI-stack.",
+      "gates": "UI-тесты карточки; two-floor инвариант (клиент не видит BPMN/DMN/гранты напрямую).",
+      "nits_to_carry": []
+    },
+    {
+      "suggested_id": "DESIGN T-0130",
+      "title": "design: симуляция режимы 2/3 + статисты + A/B + контракт-шов §11",
+      "scope": "Механика прогона по контракту-шву §11 ADR T-0129: статисты (эфемерные исполнители RoleRef, не employee), симулированное время (Stage-2 + Flowable-спайк), A/B-движок. T-0130 владеет механикой прогона; T-0129 владеет контрактом бандла. Аддитивные пожелания к бандлу (не пересматривают T-0129, только расширяют контракт §11): (1) model-поле агентного шага перекрывается RunVariant-параметром прогона — T-0130 варьирует модель не меняя бандл (уже учтено в §8.3 и §11 таблице); (2) expected_routes — аннотация сценария для assertion режима 1 (расчёт маршрутов); если T-0130 потребует этого поля — аддитивное расширение bundle.components, не пересмотр T-0129. Зависит от: T-0129 (этот ADR), T-0058 (Flowable live).",
+      "gates": "§11 frozen-seam инварианты: статисты ≠ сотрудники; прогон = draft-тир; config-only promote; эффекты fail-closed в draft.",
+      "nits_to_carry": [
+        "model-дефолт агентного шага перекрывается RunVariant в T-0130 — аддитивное поле, не пересмотр T-0129",
+        "expected_routes — аннотация сценария для assertion режима 1 расчёта маршрутов — аддитивное расширение при необходимости T-0130"
+      ]
+    }
+  ],
+  "rationale": "T-0129 — design-задача (SPEC+ADR+review). ADR зафиксировал: модель фаз петли (7 фаз + рёбра revise/evolve), агент-внедренец как расширение T-0077 (аддитивная роль, ноль нового authority-store), структурную DRAFT-границу (MAY-create vs MUST-propose), контракт бандла (когерентная единица E12.1), 3 детерминированных гарда (T-0027 + грант-консистентность + bundle-coherence), протокол интервью (fail-closed), 3 режима прогона, шов §11 с T-0130 (6 гарантий), MVP/Stage-2 классификацию 7 примитивов, 9 doc-структурных fitness-функций, traceability 20 AC. Review approved (20/20 AC, 3 nit applied). Product CI green (1042/1042, fitness 291/291, docs-only). Все 3 nit-правки применены до TEST. Готово к merge в dev и старту impl-декомпозиции B-1..B-7."
+}

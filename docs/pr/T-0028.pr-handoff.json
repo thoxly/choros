@@ -1,0 +1,92 @@
+{
+  "task_id": "T-0028",
+  "status": "pr_open",
+  "branch": "task/T-0028-engine-mutation-guard",
+  "merge_target": "dev",
+  "base_commit": "8472256",
+  "head_commit": "d89a5be04c97f2b46318b15e5926e70868d1e97b",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Engine state-mutation guard (E2.7): forbids raw record objects from entering the system via JobStore.complete() payload. Three-layer implementation — Layer A: CI structural isolation (mutation-gateway-isolation.sh); Layer B: assertVariableValue call-site guard in both InMemoryJobStore and PostgresJobStore; Layer C: deferred Flowable bridge contract probe (flowable-bridge-contract.sh, exits 0 until T-0058). RECORD_IN_PAYLOAD error code added to ErrorCode union. Job.result optional field added to types.ts. No new TS modules, no new npm deps.",
+  "commits": [
+    {
+      "sha": "224289aac8fefbc1be5ff330a1348904cb8cc9f7",
+      "phase": "DESIGN",
+      "message": "T-0028 DESIGN: engine mutation guard — ADR + schema-valid contract"
+    },
+    {
+      "sha": "f6c4ed243a9343b93999f2994ab6446f762c92c4",
+      "phase": "BUILD",
+      "message": "T-0028 BUILD: engine mutation guard — payload validation + CI checks"
+    },
+    {
+      "sha": "0ed0695a2a0ae86e119d8e11eff87ed7e62cea5b",
+      "phase": "REVIEW",
+      "message": "T-0028 REVIEW: approved — all CI green, 3-layer ADR compliant, ADV-1..12 covered, 4 nits"
+    },
+    {
+      "sha": "0406cb8046aad940f7e48730bc5afd21d6ffa8fb",
+      "phase": "BUILD (nit-fix)",
+      "message": "T-0028 BUILD: review nits R-1..R-4"
+    },
+    {
+      "sha": "d89a5be04c97f2b46318b15e5926e70868d1e97b",
+      "phase": "TEST",
+      "message": "T-0028 TEST: pass — 490/490, 10/10 AC, 2 adversarial probes green"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "f6c4ed2",
+      "nits_addressed": ["R-1", "R-2", "R-3", "R-4"],
+      "artifact": "docs/reviews/T-0028.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 490,
+      "passed": 490,
+      "failed": 0,
+      "ac_coverage": "10/10",
+      "fitness": "12/12",
+      "adversarial_probes": "2/2",
+      "tested_commit": "0406cb8",
+      "artifact": "docs/test-reports/T-0028.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 warnings)",
+      "vitest_run": "pass (490/490, 20 test files)",
+      "fitness_all_checks": "pass (12/12)"
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/pgJobStore.integration.test.ts",
+    "ci/checks/flowable-bridge-contract.sh",
+    "ci/checks/mutation-gateway-isolation.sh",
+    "docs/reviews/T-0028.review.json",
+    "docs/test-reports/T-0028.test-report.json",
+    "package.json",
+    "src/__tests__/completeFail.test.ts",
+    "src/__tests__/variable-guard.test.ts",
+    "src/core/inMemoryJobStore.ts",
+    "src/core/jobStoreTypes.ts",
+    "src/core/postgres/pgJobStore.ts",
+    "src/core/types.ts"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) merges feature branch into dev after all gates pass",
+    "founder_gate_GT-3": "dev→main promotion is founder-gated (GT-3). Review PR diff on dev, confirm 3-layer guard visible in types.ts / jobStoreTypes.ts / inMemoryJobStore.ts / pgJobStore.ts / ci/checks/. One-click promote dev→main when satisfied.",
+    "no_infra_changes": "T-0028 provisions no new infrastructure (pure TS extension, no new Postgres migrations, no new services). Safe to merge to dev immediately after auto-merge gate.",
+    "downstream_note": "T-0028 seals the Layer C contract for the Flowable bridge (T-0058+). When the bridge is built, ci/checks/flowable-bridge-contract.sh will automatically activate and enforce the contract. No founder action needed at that point."
+  },
+  "friction_events": []
+}

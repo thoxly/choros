@@ -1,0 +1,30 @@
+{
+  "task": "T-0645",
+  "root_cause": "Privilege-escalation asymmetry (found on T-0637): publishing an agent_instruction (which becomes the live LLM agent's SYSTEM PROMPT) required a WEAKER right than saving its draft. saveDraft (PUT /api/agents/:id/instruction, agents.ts::handleSetAgentInstruction) gates on scoped mgmt_object:agent/update over the OWNING agent (holdsAgentMgmtUpdate + isNarrowerOrEqual). But POST /api/artifacts/:id/promote promote='agent_instruction' (artifacts.ts::defaultCheckTierPromoteGrant) required only the GENERIC, agent-unbound mgmt_object:tier_promote/transition grant that grant/registry/app publishing shares. Attack: admin A drafts agent X's instruction; admin B, holding only generic tier_promote and NO authority over X, publishes it -> B installs X's live system prompt.",
+  "fix_approach": "Scoped the promote path for artifact_table='agent_instruction' ONLY to require the SAME authority as saveDraft: mgmt_object:agent/update over the OWNING agent (resolved from the instruction row's employee_id -> position -> department, org-root fallback mirroring agents.ts::loadAgentOrgScope). This REPLACES the generic tier_promote gate for agent_instruction (not AND) so authority == saveDraft (author can publish; a pure agent/update holder needs no separate tier_promote). All OTHER artifact types (grant/registry_def/application) keep the generic tier_promote gate untouched. Wired through the existing ArtifactAuthzDeps.checkTierPromoteGrant seam by widening its signature with a ctx:{artifactTable,artifactId} param (existing zero-arg test stubs stay assignable); the default impl branches on ctx.artifactTable.",
+  "files_changed": [
+    "src/core/agent-mgmt-authority.ts (NEW: single shared holdsAgentMgmtUpdate predicate)",
+    "src/http/agents.ts (saveDraft path now imports the shared predicate; local byte-identical copy removed; unused isNarrowerOrEqual/AncestryOracle/AdminContext imports dropped)",
+    "src/http/artifacts.ts (agent_instruction promote gated on scoped agent/update via shared predicate; loadOwningAgentOrgScope + checkAgentInstructionAuthority added; ctx passed to gate)",
+    "ci/checks/db/T-0645-agent-instruction-promote-scope.db.test.ts (NEW: real-PG proof)"
+  ],
+  "resolver_reused": "holdsAgentMgmtUpdate",
+  "no_third_bespoke_check": "Confirmed. Extracted holdsAgentMgmtUpdate into src/core/agent-mgmt-authority.ts and pointed BOTH the saveDraft path (agents.ts) AND the new promote path (artifacts.ts) at that ONE resolver. No new/forked authority predicate was invented. (Pre-existing byte-identical copies in secret-handle.ts/llm-config.ts/assistant-prompt-routes.ts left untouched to avoid collateral on frozen security paths; noted for a follow-up unification.)",
+  "mutation_proof": "RED without / GREEN with, against real PG (choros_test template clone). Test (b) 'DENIES an actor holding ONLY generic tier_promote (no agent/update over X)': WITH fix -> 403 NO_PROMOTE_GRANT and the instruction stays tier='draft' (escalation does not land). WITH fix reverted (agent_instruction branch disabled) -> the same actor gets 200 {promoted:true,tier:'published'} (the escalation succeeds) AND the legitimate agent/update holder (a') is wrongly 403 -> proving the pre-fix asymmetry. Fix restored -> all 4 GREEN.",
+  "tests": [
+    "ci/checks/db/T-0645-agent-instruction-promote-scope.db.test.ts (real PG, 4 cases): (b) escalation DENIED 403 + row stays draft; (a) genesis owner publishes 200; (a') holder of agent/update over owning agent publishes 200 [proves REPLACE not AND: no tier_promote needed]; (c) tier_promote-only actor still promotes an application 200 [other artifact types unaffected]"
+  ],
+  "gates_touched": [],
+  "gates_run_green": [
+    "agent-instruction-additive.sh (+ --self-test)",
+    "agent-instruction-rls.sh (+ --self-test)",
+    "agent-instruction-no-pdp.sh (+ --self-test)",
+    "agent-instruction-promote-shared.sh (+ --self-test)",
+    "single-resolver.sh",
+    "grant-resolver-isolation.sh",
+    "tsc --noEmit (exit 0)",
+    "eslint src/http/agents.ts src/http/artifacts.ts src/core/agent-mgmt-authority.ts (exit 0)",
+    "affected unit tests: artifacts.authz, agent-instruction-promote, agent-instruction-routes, secret-handle, agents-llm-connection, agents-activity, assistant-prompt-authz (93 passed)"
+  ],
+  "notes": "agent-instruction-promote-shared.sh (FF-COMP-4) was NOT touched and stays GREEN: it asserts (1) agent_instruction in CONFIG_TABLES, (2) the DAO never writes tier='published', (3) no new agent.instruction.promoted audit type. The fix adds an AUTHORITY precondition before the SAME shared promoteTier mechanism -- it introduces no new promote mechanism, no DAO publish-write, and no new audit type -- so the 'shared T-0087 promote MECHANISM' invariant is untouched. The gate encodes the shared MECHANISM, not a 'shared tier_promote AUTHORITY' assumption, so no additive reclassification was needed. grant-resolver.ts / grant-lattice.ts stay byte-frozen (agent-instruction-no-pdp.sh green); artifacts.ts imports isNarrowerOrEqual only transitively via the shared predicate + a type-only ScopeElement import. Missing-instruction id maps to org-root scope -> genesis-owner/root holder pass then promoteTier returns the honest 404; unauthorized -> fail-closed 403."
+}

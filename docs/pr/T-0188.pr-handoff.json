@@ -1,0 +1,90 @@
+{
+  "task_id": "T-0188",
+  "status": "pr_open",
+  "branch": "task/T-0188-cross-tenant-seeders",
+  "merge_target": "dev",
+  "base_commit": "0a4cb13c",
+  "head_commit": "34c817c",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Adds 6 seeder functions + 6 `case` entries in `seedRowForTable` for tables missing since migrations 043–052: invoke_proposal, notification, email_channel_config, notification_preference, report_page, report_page_dep. Adds `seedState.reportPageId{A,B}` for the report_page → report_page_dep FK chain. Adds `SEEDED_TABLES` constant + AC-CT-4 guard describe block: any future table added to `known_tenant_tables.txt` without a seeder immediately produces a failing (not skipped) test. Result: `cross_tenant.test.ts` goes from ≥75 skipped to 115/115 green; full `fitness:db` suite: 529/529 PASS, 0 skipped, 0 failed. REVIEW approved (2 nits, no changes_requested). Guard is intentional hardening: any new tenant table must have a seeder or CI goes red.",
+  "commits": [
+    {
+      "sha": "59559f8",
+      "phase": "SPEC",
+      "message": "spec(T-0188): SPEC + contract — cross-tenant seeders for 6 missing tables"
+    },
+    {
+      "sha": "ec0c6e5",
+      "phase": "BUILD",
+      "message": "build(T-0188): add seeders for 6 missing cross-tenant tables + completeness guard"
+    },
+    {
+      "sha": "34c817c",
+      "phase": "REVIEW",
+      "message": "T-0188 REVIEW: approved — 115/0 cross-tenant green, guard verified, 2 nits"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "34c817c",
+      "findings_resolved": [],
+      "nits_noted": [
+        "R-N1: seedEmailChannelConfig returns void — not a correctness issue",
+        "R-N2: pre-existing effect_resource fall-through (missing break before outbox case) — out-of-scope per spec; follow-up T-0189 created"
+      ],
+      "artifact": "docs/design/T-0188.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1107,
+      "passed": 1107,
+      "failed": 0,
+      "ac_coverage": "7/7",
+      "fitness_static": "PASS — all checks green",
+      "fitness_db_cross_tenant": "115/115 PASS, 0 skipped (was ≥75 skipped before T-0188)",
+      "fitness_db_total": "529/529 PASS, 0 failed, 0 skipped",
+      "fitness_db_idempotency": "529/529 on second consecutive run (AC-CT-5)",
+      "tested_commit": "34c817c",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings",
+        "fitness_static_checks": "PASS — all checks green (no sibling-gotcha FAILs on this branch)",
+        "vitest_unit": "1107/1107 passed, 6 skipped",
+        "fitness_db_cross_tenant": "115/115 — all 36 KNOWN_TENANT_TABLES covered including 6 new tables",
+        "fitness_db_total": "529/529 passed, 0 failed",
+        "fitness_db_pre_existing_fails": "none — all 33 db test files pass cleanly on this run"
+      },
+      "artifact": "docs/test-reports/T-0188.test-report.md",
+      "contract_artifact": "docs/design/T-0188.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/cross_tenant.test.ts",
+    "docs/design/T-0188.review.contract.json",
+    "docs/reviews/T-0188.review.md",
+    "docs/specs/T-0188-cross-tenant-seeders.spec.md",
+    "docs/specs/T-0188.spec.contract.json",
+    "docs/test-reports/T-0188.test-report.md",
+    "docs/design/T-0188.test-report.contract.json",
+    "docs/pr/T-0188.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "guard_note": "AC-CT-4 guard is intentional hardening: SEEDED_TABLES in cross_tenant.test.ts must be updated whenever a new table is added to known_tenant_tables.txt. This is by design — the guard makes the gap visible as a failing test, not a silent skip.",
+    "r_n2_note": "Pre-existing effect_resource fall-through (missing break before outbox case) causes double-seeding of outbox in beforeAll. Not a correctness issue (ON CONFLICT DO NOTHING absorbs it). Follow-up task T-0189 created to add the break and verify idempotency formally.",
+    "no_migration": "T-0188 adds no migration — change is purely in ci/checks/db/cross_tenant.test.ts (test infrastructure only). No DB schema changes; no migrate run needed on post-merge."
+  },
+  "friction_events": []
+}

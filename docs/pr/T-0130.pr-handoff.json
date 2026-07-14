@@ -1,0 +1,135 @@
+{
+  "task_id": "T-0130",
+  "status": "pr_open",
+  "branch": "task/T-0130-simulation-design",
+  "merge_target": "dev",
+  "base_commit": "b3ef396",
+  "head_commit": "b744909",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Design ADR для симуляции внедрения (T-0130): три режима по нарастающей цене (статический расчёт маршрутов/линтер → автопрогон draft-инстансов со статистами-агентами → репетиция реальными людьми) + A/B LLM-вариантов до промоута. Red-lines: внешние эффекты в draft застаблены fail-closed через draft-gateway (B-4, новая работа поверх неизменённого T-0034), статисты эфемерны (DraftStatistGrantSource overlay B-3, вне оргструктуры/прав-решётки). Честная реализационная развилка аффинности: tier-неосведомлённый код существует, аффинность вводится B-3/B-4. Два новых fitness-чека (sim-adr-foundations: FF-1, sim-adr-structure: FF-2..FF-8) + adversarial self-test обоих. CI: tsc+eslint+fitness(256/256)+vitest(1042/1048) — зелёный. Review iter-2: approved, 17/17 AC covered.",
+  "commits": [
+    {
+      "sha": "b3ef396",
+      "phase": "SPEC",
+      "message": "T-0130 SPEC: simulation requirements"
+    },
+    {
+      "sha": "5c6fe6f",
+      "phase": "DESIGN",
+      "message": "T-0130 DESIGN: simulation ADR (3 modes + A/B LLM)"
+    },
+    {
+      "sha": "56dd875",
+      "phase": "REVIEW",
+      "message": "T-0130 REVIEW: changes_requested (2 blocking — отсутствующие fitness-чеки + draft-аффинность не выразима tierless-кодом)"
+    },
+    {
+      "sha": "1536815",
+      "phase": "DESIGN-fix",
+      "message": "T-0130 DESIGN-fix: ship FF checks as files + honest tier-affinity fork (review R-1/R-2/R-3)"
+    },
+    {
+      "sha": "b744909",
+      "phase": "RE-REVIEW",
+      "message": "T-0130 RE-REVIEW: approved (R-1/R-2/R-3 resolved; R-4 nit grep_absent filter)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "1536815",
+      "findings_resolved": [
+        "R-1 (blocking) — fitness-чеки поставлены файлами; --self-test обоих PASS; adversarial probe (strip T-0034 → foundations red; delete StatistSubject → structure red; banned-phrase → structure red) подтверждена",
+        "R-2 (blocking) — draft-аффинность честно выражена как новая работа B-3/B-4 поверх tierless-аппарата (verifyEffectGrants без tier-параметра, isEffective = временное окно, Grant без поля tier — file:line сверено); over-claim снят",
+        "R-3 (nit) — §5.3 явно фиксирует маркер test:true в detail jsonb actor_event (migration 018_actor_event.sql); согласовано с T-0129 §10.4"
+      ],
+      "findings_nit": [
+        "R-4 — grep_absent фильтр over-broad: keyword-strip тривиально обходим словом-фильтром; реальный ADR чист; порог = ошибающийся агент; опциональный follow-up для кодера"
+      ],
+      "artifact": "docs/design/T-0130.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1048,
+      "passed": 1042,
+      "failed": 0,
+      "ac_coverage": "17/17",
+      "fitness_static": "256/256",
+      "tested_commit": "b744909",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 2 pre-existing no-console warnings, 0 errors",
+        "fitness_static_checks": "256/256 PASS, 0 FAIL (incl. sim-adr-foundations FF-1 PASS + self-test PASS; sim-adr-structure FF-2..FF-8 PASS + self-test PASS; frozen-checks-immutable PASS owner-tagged T-0130)",
+        "vitest_unit": "1042/1048 pass (6 skipped = flowable integration offline + 1 kc e2e), 53 files passed, 0 failed"
+      },
+      "artifact": "docs/test-reports/T-0130.test-report.md",
+      "contract_artifact": "docs/design/T-0130.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/sim-adr-foundations.sh",
+    "ci/checks/sim-adr-structure.sh",
+    "docs/design/T-0130-simulation.adr.md",
+    "docs/design/T-0130.adr.contract.json",
+    "docs/design/T-0130.review.contract.json",
+    "docs/reviews/T-0130.review.md",
+    "docs/specs/T-0130-simulation.spec.md",
+    "docs/specs/T-0130.spec.contract.json",
+    "package.json",
+    "docs/test-reports/T-0130.test-report.md",
+    "docs/design/T-0130.test-report.contract.json",
+    "docs/pr/T-0130.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "description": "ci/checks/sim-adr-structure.sh: grep_absent-фильтр отсекает строки с ADR-лексикой (фикстура/self-test/FF-[0-9] и др.) до поиска banned-фразы. Banned-фраза + слово-фильтр на той же строке → чек зеленеет. Живой ADR чист. Порог = ошибающийся агент-архитектор, не адверсарий; doc-линтер = бэкстоп (ADR читает человек на ревью).",
+      "follow_up_candidate": "Опциональный follow-up для кодера: заменить keyword-strip на гильмето-точный дискриминатор — банить banned-фразу только вне «...» (вырезать гильмет-контент), тогда §13-цитаты зелёные, а обход словом-фильтром закрыт."
+    }
+  ],
+  "follow_up": {
+    "impl_decomposition_B1_B7": {
+      "description": "ADR §11 декомпозирует симуляцию на 7 build-задач для оркестратора",
+      "tasks": [
+        {"id": "B-1", "name": "computeRoutes (режим 1)", "class": "MVP", "depends_on": ["T-0027", "T-0129 B-2 (bundle)", "T-0018"]},
+        {"id": "B-2", "name": "RunVerdict + сценарная модель", "class": "MVP", "depends_on": ["B-1"]},
+        {"id": "B-3", "name": "DraftStatistGrantSource overlay", "class": "MVP-late", "depends_on": ["T-0021", "T-0018", "T-0022"]},
+        {"id": "B-4", "name": "эффект-стаб (draft-gateway)", "class": "MVP/MVP-late", "depends_on": ["T-0034 (consume, no edit)", "T-0016"]},
+        {"id": "B-5", "name": "режим 2 автопрогон", "class": "MVP-late", "depends_on": ["T-0058", "B-3", "B-4"]},
+        {"id": "B-6", "name": "режим 3 репетиция", "class": "MVP-late", "depends_on": ["B-5", "инбокс-UI"]},
+        {"id": "B-7", "name": "abComparison + бюджет-стоп", "class": "MVP-late", "depends_on": ["B-5", "T-0023"]}
+      ]
+    },
+    "nit_R4_guillemet_discriminator": {
+      "description": "Опциональный follow-up: заменить keyword-strip grep_absent в sim-adr-structure.sh на гильмето-точный дискриминатор",
+      "priority": "optional",
+      "location": "ci/checks/sim-adr-structure.sh:55-81 (grep_absent)"
+    },
+    "additive_requests_to_T0129": {
+      "description": "ADR §10.3 фиксирует два аддитивных пожелания к бандлу T-0129 (опциональные новые поля, не пересмотр контракта, не блокируют T-0130)",
+      "items": [
+        "bundle.components.process агентные шаги: model-поле должно быть RunVariant-overridable — бандл несёт дефолтную модель, прогон перекрывает её не мутируя бандл (T-0129 §8.3/§11 уже декларирует это — уточнение фиксирует формально)",
+        "Опциональный bundle.components.expected_routes? — ожидаемые маршруты для детерм. вердикта §5.4; если внедренец зафиксировал ожидания в интервью, бандл может их нести; иначе Scenario.expected задаётся при прогоне. Аддитивно, fail-safe при отсутствии"
+      ]
+    }
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "founder_gate_GT-3": "dev→main promotion is founder-gated (GT-3). Design ADR approved, impl B-1..B-7 pending separate build tasks.",
+    "no_infra_changes": "T-0130 adds docs + 2 new fitness checks (sim-adr-foundations.sh, sim-adr-structure.sh) + additive package.json fitness-chain registration. No DB migrations, no docker-compose changes, no src/ runtime code. Safe to merge to dev immediately post-rebase.",
+    "downstream_effect": "CI now permanently enforces ADR structure for T-0130 simulation design. Future iterations of this ADR (impl amendments) must pass FF-1..FF-8 checks. B-1..B-7 build tasks reference this ADR as ratified design authority.",
+    "sibling_relationship": "T-0129 (внедренческая петля/SEAM-1) и T-0130 (симуляция) — сестринские задачи; frozen seam T-0129 §11 потреблён, не переоткрыт. Аддитивные пожелания §10.3 — follow-up к T-0129, не блокируют мерж."
+  },
+  "friction_events": []
+}

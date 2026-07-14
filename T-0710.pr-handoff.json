@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0710",
+  "status": "pr_open",
+  "branch": "task/T-0710",
+  "pr_url": "https://github.com/thoxly/choros/pull/58",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "ci_local_notes": {
+    "lint": "npm run lint: 0 errors, 44 pre-existing no-console warnings unrelated to this diff (unchanged files)",
+    "tests": "full src/__tests__ (244 files / 4611 tests) green; 3 new targeted live-PG db tests (:55432) green; sibling live-PG db tests touching the same modules (process-projection.test.ts, deferred-inbox.test.ts, inbox_claim_substitution.db.test.ts, inbox-defer-escalation.db.test.ts, inbox-actor-resolve.db.test.ts, engine-drive-generic.db.test.ts, detel-base-task-role.db.test.ts, detel-rollup-to-variables.db.test.ts) green (Flowable-dependent cases honestly [skip] — engine unreachable on this stand)",
+    "fitness": "TARGETED gates only per task scope (full npm run fitness / npm run fitness:db intentionally NOT run): detel-base-task-from-engine.sh (+self-test), detel-literal-baseline.sh (+self-test), start-route-isolation.sh (+self-test), defer-no-new-table.sh (+self-test), anti-case-lock.sh, http-route-auth-coverage.sh, candidategroups-role-slug-linter.sh — all PASS"
+  },
+  "files_changed": [
+    "src/http/process-projection.ts",
+    "src/http/inbox.ts",
+    "src/db/deferred-inbox-store.ts",
+    "docs/tasks/T-0710.spec.md",
+    "ci/checks/db/T-0710-legacy-instance-concurrent-steps.db.test.ts",
+    "ci/checks/db/T-0710-inbox-instance-filter.db.test.ts",
+    "ci/checks/db/T-0710-inbox-escalation-order.db.test.ts",
+    "src/__tests__/inbox-escalation-order.test.ts"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [],
+  "live_proof_plan": {
+    "stand": "offline (no live Flowable/dev deploy reachable from this worktree) — plan targets the dev stand for the founder/orchestrator to run against choros.audit_event data (or the literal legacy instance 99573238 if still present)",
+    "steps": [
+      {
+        "check": "Легаси-инстанс 99573238 — один активный узел",
+        "how": "Открыть /processes/99573238 (или эквивалентный легаси-инстанс с потерянным базовым task.approved + существующим process.next_task) в UI. Ожидание: секция «Текущий шаг» показывает РОВНО один узел (без блока data-testid=\"concurrent-branches\"). До фикса: два узла (стухший базовый + реальный следующий). Локально воспроизведено и доказано db-тестом ci/checks/db/T-0710-legacy-instance-concurrent-steps.db.test.ts против живого PG :55432 (не против самого стенда — Flowable/dev недоступны из этого worktree)."
+      },
+      {
+        "check": "?instance= фильтр сужает инбокс",
+        "how": "GET /api/inbox?instance=<реальный instanceId> с валидным x-dev-user/Bearer. Ожидание: все items[].inst === <instanceId>, задачи других инстансов отсутствуют. До фикса: параметр игнорировался, ответ был идентичен безфильтровому. Доказано db-тестом ci/checks/db/T-0710-inbox-instance-filter.db.test.ts (SQL-честность + роут) на живом PG."
+      },
+      {
+        "check": "Approver-задачи видны (не похоронены эскалациями)",
+        "how": "На тенанте с несколькими агентскими эскалациями (agent.deferred) и хотя бы одной старой обычной approver-waiting задачей — GET /api/inbox (без ?sort=). Ожидание: обычная approver-задача ранжируется ВЫШЕ (раньше в items[]) более старой по occurred_at эскалации. ?sort=sla — не тронут (эскалация с меньшим SLA-запасом всё ещё первая). Доказано db-тестом ci/checks/db/T-0710-inbox-escalation-order.db.test.ts на живом PG."
+      }
+    ],
+    "not_reproduced_locally": [
+      "Не смог прожить все три сценария на РЕАЛЬНОМ dev-стенде/браузером — Flowable-движок и dev-деплой недоступны из этого изолированного worktree (только localhost:55432 Postgres напрямую). Все три пункта доказаны db-тестами против живого PG (реальные SQL-запросы, реальный HTTP-роут через registerInboxRoutes), но НЕ через живой браузер/реальный Flowable/инстанс 99573238 как он реально существует на дев-стенде (тот конкретный instanceId не найден в локальной БД — использован как литеральный test-fixture id для трассируемости с docs/live-proof/T-0709.md)."
+    ]
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "task_id": "T-0572",
+  "status": "ready",
+  "summary": "Экран «Доступ» пишет: честный «Обзор ролей» (tenant-состояние вместо роли-с-грантами/demo-pack, ложь «Нет ролей» умирает), выдача/отзыв ролей и грантов из UI через существующий dual-control write-API (POST /api/grants, POST /api/role-assignments и их /revoke, phase=confirm2), вкладка «кто что может» (админ по роли/юзеру, обычный юзер — только свои права read-only), декорация «Каталог ролей» (status:demo) снимается или уточняется честно. READ-путь сам уважает PDP (формы записи скрыты от акторов без authority-гранта).",
+  "functional": [
+    "FR-1 — новый GET-эндпоинт читает tenant-состояние (choros.role + choros.role_assignment + choros.\"grant\" реального тенанта вызывающего), не demo-pack и не in-memory RIGHTS_SEED; screen-rights.jsx переключается на него.",
+    "FR-2 — выдача/отзыв роли сотруднику из UI через существующие POST /api/role-assignments и POST /api/role-assignments/:id/revoke (никакого нового write-эндпоинта); semi-confirmed состояние показывается честно, не как активное.",
+    "FR-3 — выдача/отзыв гранта роли из UI через существующие POST /api/grants и POST /api/grants/:id/revoke; advanced-форма только для владельца/админа (PD-17 F1).",
+    "FR-4 — сужение scope гранта достижимо из формы через существующий parseScopeElement/T-0018-латтис; полнота палитры всех ScopeElement-веток день-1 не обязательна, достаточно технической достижимости сужения.",
+    "FR-5 — dual-control не обходится: ни один UI-путь не создаёт грант/назначение в обход POST /api/grants|role-assignments; semi-confirmed не отображается как активное право нигде на экране.",
+    "FR-6 — «кто что может»: админ-взгляд (права по роли/по сотруднику) и юзер-взгляд (только свои права, PD-17 F1 read-only человеческим языком), фильтрация по идентичности на сервере.",
+    "FR-7 — формы выдачи/отзыва не рендерятся (или честно disabled) для актора без mgmt_object:role/mgmt_object:grant authority — READ сам уважает PDP, не только перехват 403 постфактум.",
+    "FR-8 — бейдж «Каталог ролей» (/rights/editor, shell.jsx) приводится в соответствие фактическому состоянию кода (live, если ra-role-editor.jsx полностью пишет в реальный API, либо честная конкретная пометка остаточного мока) — G7 бейдж≡контент."
+  ],
+  "non_functional": [
+    "NF-1 — никакой новый POST-эндпоинт для создания/отзыва грантов или назначений; единственный новый эндпоинт — READ (FR-1/FR-6).",
+    "NF-2 — dual-control не отключается из UI ни при каких условиях (PD-17 F2, не отключаемо).",
+    "NF-3 — fail-closed видимость: экран деградирует в пустое/read-only состояние честно, никогда не показывает угаданное состояние вместо ошибки.",
+    "NF-4 — анти-кейс (D-064): ни одной строки role-approver/soglasovanie/tel-/Согласование-константа/e-larina/e-orlov/e-configurator в добавленных строках src/ и web/src/.",
+    "NF-5 — переиспользование resolveActorTenant/resolveActorSlugFromAuth/loadAdminContext/withAuth — не переизобретает actor/tenant resolution.",
+    "NF-6 — UX_REVIEW обязателен (существенная работа над web/).",
+    "NF-7 — Empty/Loading/Error реализованы на каждой новой/переписанной вкладке и форме — проверяемо по факту, не по ощущению."
+  ],
+  "out_of_scope": [
+    "READ-PDP механизм record/field-видимости движка — T-0570 (уже в базе, эта задача строит UI над ним)",
+    "Backfill default-грантов старым тенантам — T-0573 (параллельно в волне)",
+    "SoD DAO/write-эндпоинты/UI — T-0032/T-0386, отдельный примитив от dual-control",
+    "Расширение маскинг-грамматики поверх roleFieldVisibility/applyFieldVisibilityRedaction",
+    "Полный UI на все ветки ScopeElement (record-level К1-сценарий «менеджер видит своих») — только техническая достижимость сужения день-1",
+    "Изменение dual-control.ts/role-criticality.ts/grant-resolver.ts/grant-lattice.ts — заморожены",
+    "«Запросить изменение» для обычного пользователя остаётся disabled, если не найден готовый бэкенд-путь на DESIGN",
+    "Новый /api/pdp/explain-подобный эндпоинт «почему у меня нет доступа» — не расширяется",
+    "Управление пользователями-учётками (создание сотрудника из UI вместо Keycloak-admin) — отдельный примитив (карта примитивов E5)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "GET эндпоинт «Обзора ролей» возвращает роли ИЗ choros.role реального тенанта вызывающего (не demo-pack, не RIGHTS_SEED) — для тенанта с N>0 ролями ответ содержит ровно эти N ролей.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "Для тенанта с 0 ролей эндпоинт возвращает {roles: []} без demo:true и без фикстур-подмены — честный пустой результат.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "screen-rights.jsx (или экран-преемник) не делает fetch на /api/rights — источник данных сменён на новый эндпоинт.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "Выдача роли сотруднику из UI выполняет ровно один вызов существующего POST /api/role-assignments — никакого нового write-эндпоинта.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "Выдача гранта роли из UI выполняет ровно один вызов существующего POST /api/grants — никакого нового write-эндпоинта.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "Отзыв роли/гранта из UI вызывает существующие POST /api/role-assignments/:id/revoke и POST /api/grants/:id/revoke — не UPDATE напрямую, не новый revoke-путь.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "Ответ сервера {state:\"semi-confirmed\", second_approver_required:true} рендерится UI как явное «ждёт подтверждения» состояние, отличимое от активного права.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "Полу-подтверждённое (confirmed_by IS NOT NULL AND confirmed2_by IS NULL) право не отображается в «кто что может» как действующее ни в админ-, ни в юзер-взгляде.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "Обычный пользователь без mgmt_object:role/mgmt_object:grant гранта видит на «Доступ» только read-only «мои права» — формы выдачи/отзыва не рендерятся в DOM.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "«Кто что может» юзер-взгляд возвращает права ТОЛЬКО вызывающего сотрудника, когда он не admin/owner — сервер фильтрует по идентичности вызывающего, не по клиентскому параметру.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "Анти-кейс: в диффе задачи (src/ и web/src/) нет строковых литералов role-approver, soglasovanie, tel-, Согласование (как хардкод-константа), e-larina, e-orlov, e-configurator.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Бейдж /rights/editor в shell.jsx равен \"live\" (если ra-role-editor.jsx подтверждённо пишет в реальный API целиком) либо остаётся \"demo\" с конкретным указанием остаточного мока — DESIGN документирует выбранный случай.",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-13",
+      "text": "Empty/Loading/Error реализованы на «Обзоре ролей», на форме выдачи/отзыва и на обеих вкладках «кто что может» (админ+юзер).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "Формы выдачи/отзыва роли и гранта используют существующий scope-parser (parseScopeElement) через API-контракт — не вводят параллельный scope-формат на клиенте.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "tsc --noEmit чист; eslint чист для новых/изменённых файлов.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "LIVE_PROOF-путь воспроизведён на живом стенде (владелец ООО Аксон): «Обзор ролей» честен, выдача/отзыв роли+гранта работает, dual-control путь пройден честно (semi-confirmed → approve → появляется в «кто что может»), обычный сотрудник видит только свои права.",
+      "verifiable_as": "manual"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0572-rights-ui-writes.spec.md"
+}

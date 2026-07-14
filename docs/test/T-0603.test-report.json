@@ -1,0 +1,100 @@
+{
+  "task_id": "T-0603",
+  "verdict": "pass",
+  "deterministic": {
+    "build": {"result": "pass", "exit": 0, "_note": "npm run build (tsc && node_modules/.bin/tsc --project seed/tsconfig.json) — exit 0, 0 ошибок типов."},
+    "root_vitest": {"total": 4928, "passed": 4917, "skipped": 10, "failed": 1, "files": "253 passed | 2 skipped (256), 1 failed", "exit": 1, "_note": "ЕДИНСТВЕННЫЙ фейл — src/__tests__/forms-from-schema.test.ts::'SP-1: no FormStoreDeps → memoryPersist no-op' (T-0336 §3.3): timeout 10000ms под параллельной full-suite нагрузкой. Файл НЕ в диффе T-0603 (git diff --name-only не содержит forms-from-schema). При изоляции npx vitest run этого файла → 36/36 passed (SP-1 3974ms) → environmental timeout-флейк, НЕ регресс T-0603. T-0603-релевантные файлы при изоляции: rollup-contract.test.ts 48/48, binding-trigger.unit.test.ts 8/8."},
+    "web_vitest": {"total": 1637, "passed": 1637, "skipped": 0, "failed": 0, "files": "60 passed (60)", "exit": 0, "_note": "npm ci (--maxsockets=3) + npx vitest run. Вкл. records-form.test.js 237/237 (при изоляции подтверждено) — +3 новых T-0603 AC-5 web-парити кейса (550000 / null / 230), теми же фикстурами, что серверный rollup-contract.test.ts T0603-19..21."},
+    "fitness_db_live_pg": {"files": "103 passed | 1 failed (104)", "tests": "1099 passed | 1 failed (1100)", "exit": 1, "_note": "vitest run --dir ci/checks/db, DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros (PG живой). ЕДИНСТВЕННЫЙ фейл — ci/checks/db/doc-reconcile.db.test.ts::'F-9: tenant isolation' timeout на границе 5000ms per-test (файл 21341ms под нагрузкой). Файл НЕ в диффе T-0603. При изоляции → 15/15 passed (F-9 3971ms) → timeout-флейк, осциллирует ~3900↔5150ms под DB-нагрузкой, НЕ регресс. detel-rollup-to-variables.db.test.ts (вкл. новый T-0603 embedded describe) → 3 tests passed."},
+    "anti_case_lock": {"result": "pass", "exit": 0, "_note": "bash ci/checks/anti-case-lock.sh → exit 0. Phase 1 делегаты (read-pdp/rights-ui anti-case, detel-literal-baseline) clean. Phase 2 полный D-064 §5 denylist repo-wide (src+web/src) aggregate 24/24 = baseline, ни один литерал не вырос. bash ci/checks/anti-case-lock.sh --self-test → exit 0 (все детекторы функциональны через все литерал-семейства)."},
+    "contract_validate": {"result": "pass", "exit": 0, "_note": "python3 /Users/shoxy/Code/demiurge/schemas/validate.py на docs/specs/T-0603.spec.contract.json → exit 0 И docs/adr/T-0603.adr.contract.json → exit 0. Оба контракт-JSON валидны."},
+    "_note": "Все лейны перегнаны судьёй-тестером НЕЗАВИСИМО с чистого запуска (не доверие handoff-числам). T-0603-релевантные числа совпали с pr-handoff (rollup-contract 48/48, binding-trigger 8/8, web records-form 237, anti-case 24/24). Оба ненулевых exit (root vitest, fitness:db) — из-за timeout-флейков в файлах ВНЕ диффа T-0603, каждый green при изоляции — НЕ регрессии фикса. Живой PG :55432 использован для fitness:db (был поднят до сессии; не трогал/не сносил)."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1 (validateEmbeddedRollupFieldDef: дискриминатор + closed-set op + дисциплина value_field/count + factor_field non-empty) — test", "test": "src/__tests__/rollup-contract.test.ts :: describe('validateEmbeddedRollupFieldDef (T-0603 AC-1)') T0603-1..7 (7 it): reject null/non-object/array; reject missing/empty source; reject invalid op; sum/avg/min/max require value_field; count reject-with-value/valid-without; factor_field non-empty-string-when-present; full round-trip. Перегнан судьёй в изоляции — 48/48.", "result": "pass"},
+    {"ac": "AC-2 (computeEmbeddedRollup sum+factor: Σ(value×factor), factor-default-1, строки-числа) — test", "test": "rollup-contract.test.ts T0603-8..11 (4 it): Σ(value×factor) многострочно=1000; factor=1 при отсутствии в def=350; factor=1 при отсутствии/нечисловом в строке=490; строки-числа коэрсятся=400. Adversarial проба (a) подтверждает: тесты реально проверяют умножение.", "result": "pass"},
+    {"ac": "AC-3 (null-честность: пустой/все-нечисловые → null не 0; смешанные → числовые) — test", "test": "rollup-contract.test.ts T0603-12..15 (4 it): source-не-массив/missing/null→null; пустой массив→null (не 0); все нечисловые→null; смешанные→сумма числовых=350.", "result": "pass"},
+    {"ac": "AC-4 (count=строки/пустой→null; avg/min/max по числовым) — test", "test": "rollup-contract.test.ts T0603-16..18 (3 it): count=3, пустой→null, нечисловые-строки всё равно считаются; avg=mean 200; min=10/max=90.", "result": "pass"},
+    {"ac": "AC-5 (парити сервер computeEmbeddedRollup ↔ клиент computeRollup на ≥3 общих фикстурах) — test", "test": "ДВА зеркальных блока идентичных фикстур/чисел: server rollup-contract.test.ts T0603-19..21 (550000 / empty→null / mixed-blank→230) + client web records-form.test.js 'T-0603 AC-5' (computeRollup те же 550000/null/230) с перекрёстными комментариями-якорями. Судья ПОСТРОЧНО сверил обе computeRollup — семантика null/пустых/нечисловых/NaN/строк-чисел/count/factor-default совпадает точно (см. adversarial ПАРИТИ).", "result": "pass"},
+    {"ac": "AC-6 (extractDerivedFields диспетчер embedded/child/mixed + skip-invalid) — test", "test": "rollup-contract.test.ts T0603-22..25 (4 it): embedded→'rollup-embedded'; child(source_registry_id)→'rollup'; mixed→оба; invalid(no source/no registry)→skip. Adversarial проба (c) подтверждает диспетч реально проверяется.", "result": "pass"},
+    {"ac": "AC-7 (РЕАЛЬНЫЙ HTTP-роут POST /api/records: непустая коллекция → startInstance.amount=сумма число, НЕ null) — test", "test": "src/__tests__/binding-trigger.unit.test.ts :: 'AC-7: non-empty collection → amount = computed sum, NOT null' — стаб-pool с embedded-роллап-схемой (total=x-rollup{source:items,op:sum,value_field:price,factor_field:qty}) + on_create binding field_mapping{amount:'total'}; POST data.items[100000×3,250000×1,50000×5] → captured flowable.startInstance.variables.amount === 800000. Проходит сквозь РЕАЛЬНЫЙ registerRecordRoutes → derived-overlay → projectEngineVariables. 8/8 при изоляции.", "result": "pass"},
+    {"ac": "AC-8 (та же цепь ПУСТАЯ коллекция → amount=null, детерминированный default N6) — test", "test": "binding-trigger.unit.test.ts :: 'AC-8: empty collection → amount = null' — POST data.items=[] → startInstance.variables.amount === null. Осознанно зафиксировано (ADR §1.4, spec N6, cross-ref ADR-T0575 §2.4).", "result": "pass"},
+    {"ac": "AC-9 (живой DB+Flowable: embedded сумма >500000 → HIGH-VALUE; <порога/пустая → default) — fitness", "test": "ci/checks/db/detel-rollup-to-variables.db.test.ts :: 'T-0603 — embedded rollup... AC-9' — нейтральные имена (lines/price/qty/embeddedRollupGw<ts>), POST inline data.lines, resolveInstanceIdForRecord → activeTaskDefKeys, assert task-high-value / task-default. В среде судьи SKIP GRACEFUL ([skip] Flowable not reachable at :8082) — ИДЕНТИЧНО родным T-0575 child-тестам в этом же файле. Файл сообщает 3 tests passed (skip = graceful pass через requireDbAndFlowable-гард). Live-Flowable proof — pending orchestrator (после мержа/деплоя на стенде).", "result": "pending_live"},
+    {"ac": "AC-10 (GET /api/records/:id → derived[total]=та же сумма; расхождение UI↔сервер закрыто) — fitness", "test": "тот же db-тест :655-661 — GET /api/records/:id → detail.derived.total===550000. Требует live Flowable+PG → pending orchestrator. Код-путь READ (records.ts:1683, НЕ тронут диффом) вызывает тот же extractDerivedFields+computeAllDerivedFields → derived-map наполняется для embedded автоматически.", "result": "pending_live"},
+    {"ac": "AC-11/AC-12 (npm test/build/fitness:db/anti-case-lock зелёные) — fitness", "test": "build exit 0; anti-case-lock exit 0 + --self-test exit 0 (denylist 24/24 не вырос); root/web/db лейны green по T-0603-файлам. 2 ненулевых exit = timeout-флейки вне диффа (forms-from-schema SP-1, doc-reconcile F-9), green при изоляции.", "result": "pass"}
+  ],
+  "adversarial": [
+    {
+      "probe": "МУТАЦИЯ (а): сломай computeEmbeddedRollup — игнорируй factor (values.push(num) вместо num*factor в sum-ветке)",
+      "result": "pass",
+      "note": "6 unit краснеют: T0603-8 (Σ×factor 1000→400), T0603-10 (factor-default 490→390), T0603-11 (строки-числа 400→200), T0603-15 (смешанные), T0603-19 (парити 550000→400000... фактически 550000 без factor стало бы 350000), T0603-21 (парити 230). ПЛЮС integration AC-7 краснеет (сумма стала бы 400000≠800000). Факторная логика реально покрыта — тесты НЕ декоративны. Мутация откачена, verified git diff HEAD пуст."
+    },
+    {
+      "probe": "МУТАЦИЯ (б): подмени в binding-trigger AC-7 ожидание amount=800000 на 0",
+      "result": "pass",
+      "note": "AC-7 краснеет (1 failed | 7 passed): 'expected 800000 to be 0'. Ассерт РЕАЛЬНО наблюдает вычисленную сумму 800000, пришедшую в flowable.startInstance сквозь РЕАЛЬНЫЙ HTTP POST /api/records → on_create → derived-overlay → projectEngineVariables — не тавтология, не хардкод. Мутация откачена."
+    },
+    {
+      "probe": "МУТАЦИЯ (в): убери диспетчеризацию embedded из extractDerivedFields (else-ветка → пустая)",
+      "result": "pass",
+      "note": "2 unit краснеют: T0603-22 (embedded x-rollup → 'rollup-embedded', теперь пусто), T0603-24 (mixed → оба флейвора, теперь только child). ПЛЮС integration AC-7 краснеет — amount становится null, что ЕСТЬ ТОЧНО исходный P0-баг (embedded-поле не распознано → overlay пуст → amount:null → default-ветка). Тесты ловят регресс самого дефекта. Мутация откачена."
+    },
+    {
+      "probe": "ПАРИТИ построчная сверка server computeEmbeddedRollup ↔ client computeRollup (records-form.js:129-187)",
+      "result": "pass",
+      "note": "НОЛЬ расхождений. (1) не-массив/не-объект→null оба. (2) count: length===0?null:length, value игнорируется оба. (3) numeric-коэрсия: server toFiniteNumber === client (number→finite-check; string→trim, ''→null, Number(), finite). Проверены edge: NaN(number)→оба skip; Infinity(number)→оба skip; boolean/object-ячейка→оба skip. (4) factor только sum && factorField.length>0, default 1 при нечисловом/отсутствующем — оба. (5) пустой собранный→null оба. (6) sum=Σ/avg=mean/min/max — идентичны. (7) unknown op→null оба (client return null; server default-case). UI НЕ врёт против движка."
+    },
+    {
+      "probe": "child-флейвор НЕ сломан диспетчером (старые схемы с source_registry_id идут прежним путём)",
+      "result": "pass",
+      "note": "T0603-23 (child x-rollup → 'rollup') green; 23 pre-existing RC-теста (validateRollupFieldDef/extractDerivedFields) green; живой child DB-тест T-0575 в том же detel-файле не тронут (skip идентично). validateRollupFieldDef дословно как был. computeAllDerivedFields старые ветки 'rollup'→SQL и matrix не тронуты."
+    },
+    {
+      "probe": "Двусмысленная схема с ОБОИМИ дискриминаторами (source + source_registry_id)",
+      "result": "pass",
+      "note": "Детерминированно → child (source_registry_id проверяется первым, :623). Безопасно, продукт такую схему не порождает (apps-schema.js:461-463 никогда не эмитит source_registry_id для embedded). Тайбрейк железный в коде, но неявен в ADR — см. review F-1 (nit, документирование). Отдельного теста на 'оба поля' нет — не блокирует."
+    },
+    {
+      "probe": "Закон границы D-064: кейс-литералы в src/ продакшн-коде",
+      "result": "pass",
+      "note": "Скан добавленных src/**-строк: НОЛЬ purchaseApproval/500000/слагов-тенанта/заявка в rollup-contract.ts+derived-fields-dao.ts. Хиты только в тест-файлах (process_key='purchaseApprovalGeneric' — generic фикстура; '${amount>500000}' в комментариях) и docs. anti-case-lock 24/24 не вырос. DB-тест нейтрален (lines/price/qty)."
+    },
+    {
+      "probe": "null-семантика при пустой коллекции — осознанность и совместимость с BPMN",
+      "result": "pass",
+      "note": "amount=null сохранён НАМЕРЕННО (ADR §1.4:102, spec N6:127, adr.contract why_not '0=ложь'). null>500000=false детерминированно → default-ветка (корректно для пустой заявки, не throw). Консистентно с ADR-T0575 §2.4 и с существующим child-флейвором. AC-8 фиксирует."
+    }
+  ],
+  "failures": [
+    {
+      "id": "FLAKE-1",
+      "location": "src/__tests__/forms-from-schema.test.ts :: 'SP-1: no FormStoreDeps → memoryPersist no-op' (T-0336 §3.3)",
+      "severity": "non-blocking (вне периметра T-0603)",
+      "detail": "timeout 10000ms в full-suite root vitest под параллельной нагрузкой. Файл НЕ в диффе T-0603. При изоляции npx vitest run → 36/36 passed (SP-1 3974ms). Environmental timeout-флейк, не регресс. Не касается rollup/embedded-логики."
+    },
+    {
+      "id": "FLAKE-2",
+      "location": "ci/checks/db/doc-reconcile.db.test.ts :: 'F-9: tenant isolation — RECONCILE on tenant A does not touch tenant B'",
+      "severity": "non-blocking (вне периметра T-0603)",
+      "detail": "timeout на границе 5000ms per-test в fitness:db (файл 21341ms под нагрузкой). Файл НЕ в диффе T-0603. При изоляции → 15/15 passed (F-9 3971ms). Осциллирует ~3900↔5150ms под DB-нагрузкой — timeout-флейк, не регресс. Не касается rollup/embedded. Кандидат на повышение testTimeout (отдельный follow-up)."
+    }
+  ],
+  "notes": {
+    "coverage_gaps_found": "None по автотестам в периметре T-0603. Один legitimate live-only разрыв: AC-9/AC-10 (живой Flowable+PG — HIGH-VALUE ветка + derived[total]=550000) SKIP graceful в среде судьи (Flowable недоступен на :8082, идентично родным T-0575 child-тестам). Логический путь доказан БЕЗ live-Flowable двумя способами: (1) AC-7/AC-8 через РЕАЛЬНЫЙ HTTP-роут POST /api/records со стаб-flowable — captured startInstance.amount=800000 (непустая) / null (пустая); (2) чистый компьют + web-парити на общих фикстурах (550000/null/230). Live-Flowable proof корректно делегирован orchestrator (pr-handoff live_proof.status='pending orchestrator' — честно). Все AC с verifiable_as=test покрыты автоматически и перегнаны независимо.",
+    "anti_false_pass_checks_performed": [
+      "Не доверял заявленным counts — перегнал build, полный root vitest, web vitest (npm ci заново), fitness:db на живом PG, anti-case-lock+self-test, contract-validate с чистого запуска. T-0603-релевантные числа совпали с pr-handoff (rollup-contract 48/48, binding-trigger 8/8, web records-form 237, anti-case 24/24).",
+      "Выполнил ВСЕ ТРИ обязательные мутационные пробы (a факторный / b flip-ожидания / c убери-диспетч) с возвратом — каждая краснит ожидаемые тесты, ни одна не 'проходит с проигнорированной мутацией'. Тесты доказанно НЕ декоративны. Все откачены, git diff HEAD пуст.",
+      "Построчно сверил server computeEmbeddedRollup ↔ client computeRollup (records-form.js:129-187), включая edge NaN/Infinity/boolean/object-ячейки — НОЛЬ расхождений (UI не врёт против движка).",
+      "Проверил что child-флейвор НЕ сломан (T0603-23 + 23 pre-existing RC + validateRollupFieldDef дословно) и что двусмысленная схема детерминирована (source_registry_id first).",
+      "Проверил закон границы D-064: скан src/**-добавленных строк = 0 кейс-литералов в продакшн-коде; anti-case-lock 24/24 не вырос; DB-тест нейтрален.",
+      "Проверил что records.ts (точки применения create=start/READ) НЕ в диффе — фикс работает чисто обучением распознавателя+компьюта; wiring computeAllDerivedFields recordData→computeEmbeddedRollup целостен.",
+      "Проверил null-семантику (осознанность в ADR §1.4/spec N6/adr.contract why_not; совместимость с ${amount>500000}=false→default).",
+      "Валидировал spec/adr contract-JSON через schemas/validate.py — exit 0 оба; pr-handoff live_proof честен (pending orchestrator).",
+      "Изолировал оба фейл-теста (forms-from-schema SP-1, doc-reconcile F-9) — оба вне диффа T-0603, оба green при изоляции → timeout-флейки, НЕ регрессии. Не пропустил их как 'T-0603 сломал'."
+    ],
+    "residual_findings_nonblocking": [
+      "F-1 (nit, review): двусмысленная схема с обоими дискриминаторами → детерминированно child, но тайбрейк не выписан явно в ADR §1.1 и нет теста на 'оба поля'. Продукт такую схему не порождает. Follow-up: строка в ADR + опц. тест.",
+      "F-2 (info, review): pr-handoff ci_local.fitness заявляет 'exit 0', реальный прогон дал флейк-фейл doc-reconcile F-9 (вне периметра). T-0603-путь fitness:db чист."
+    ]
+  }
+}

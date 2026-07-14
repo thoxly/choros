@@ -1,0 +1,54 @@
+{
+  "task_id": "T-0044",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/grant-editor.adversarial.test.ts:534 (root cause src/http/grants.ts:219-298 appendAuditEventInput)",
+      "issue": "fitness:db is RED on one test (ADV-4: two concurrent identical POST /api/grants must both return 201) — req returns 500 INTERNAL. Root cause reproduced on an isolated Postgres: appendAuditEventInput reads audit_head WITHOUT a row lock (no SELECT ... FOR UPDATE / advisory lock / serialize-retry), so two concurrent grant writes both read head seq=N, both compute newSeq=N+1, and the loser collides on audit_event_pkey (tenant_id, seq) -> 23505 -> unhandled 500. This is a PRE-EXISTING T-0031 hash-chain concurrency hole, NOT a T-0044 regression: I checked out base dev 91f991e into a throwaway detached worktree and ran ADV-4 against the base write-path on the SAME isolated DB — it fails 6/6 there too (single audit append per grant already races identically; verified by a standalone single-append repro hitting the same 23505). appendAuditEventInput is frozen-adjacent T-0031 code outside T-0044's write-zone; T-0044 added a second append (dualcontrol.gate) per grant but did not create the race. Treated as an inherited-floor red, not a blocking finding for this task (parallels the dev-auth X-Dev-User inherited-floor).",
+      "suggestion": "Out of scope for T-0044. Spin a follow-up task to make appendAuditEventInput concurrency-safe: SELECT ... FROM audit_head FOR UPDATE (serialize the per-tenant chain), or pg_advisory_xact_lock(hashtext(tenant_id)), or catch 23505/40001 and retry the append. Then ADV-4 goes green for all write-paths. Recorded as role-gap / friction below."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/grants.ts:1135-1143 (handleSecondConfirm buildConfirmationFlag on req#2)",
+      "issue": "The second-confirm (satisfied) dualcontrol.gate WORM event hardcodes effective_diff = { expanded:{a:false,b:false,c:false}, escalates:true } rather than re-deriving the real per-axis expanded bits. The genuine CriticalityDiff (with correct expanded bits) IS recorded on req#1's pending event, and escalates:true on the satisfied event is correct, so no information is lost across the event PAIR and the gate decision is unaffected. But read in isolation the satisfied event's expanded bits are stubbed, a minor fidelity gap vs AC-12's 'serialized CriticalityDiff'.",
+      "suggestion": "Optionally re-fold the role's from/to criticality in handleSecondConfirm (or persist the diff on req#1 and echo it) so the satisfied event carries the true expanded bits. Cosmetic; do not block."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/http/grants.ts:1062-1128 (handleSecondConfirm)",
+      "issue": "handleSecondConfirm does not assert that the target row was an ESCALATING (semi-confirmed) change before setting confirmed2_by — it will set confirmed2_by on any row whose confirmed2_by IS NULL, including a routine grant (which legitimately keeps confirmed2_by NULL forever). This is harmless to security and activation semantics: a routine grant is already active at confirmed_by, and stamping confirmed2_by on it does not change its active status nor over-grant anything; the distinctness/idempotency guards still hold. It is a slight contract looseness (confirm2 is meaningful only for escalating rows).",
+      "suggestion": "Optionally re-derive criticalityDiff for the target row in confirm2 and reject confirm2 on a non-escalating row with a 409/argument error, so the phase is only honoured where it is meaningful. Cosmetic; not a hole."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": true },
+    { "ac": "AC-2",  "covered": true },
+    { "ac": "AC-3",  "covered": true },
+    { "ac": "AC-4",  "covered": true },
+    { "ac": "AC-5",  "covered": true },
+    { "ac": "AC-6",  "covered": true },
+    { "ac": "AC-7",  "covered": true },
+    { "ac": "AC-8",  "covered": true },
+    { "ac": "AC-9",  "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true },
+    { "ac": "AC-16", "covered": true },
+    { "ac": "AC-17", "covered": true },
+    { "ac": "AC-18", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Concurrency/serialization is a recurring un-owned axis: appendAuditEventInput (src/http/grants.ts:219-298, T-0031 hash-chain) has no audit_head row lock, so any two concurrent same-tenant write-paths collide on audit_event_pkey and surface as an unhandled 500 (ADV-4 red on base 91f991e AND HEAD, 6/6). The fitness rubric has no concurrency/contention axis and no per-task DoD step requiring a parallel-write probe on touched write-paths; the hole sat latent across T-0030/T-0031/T-0044. Candidate for a dedicated concurrency-fitness check (parallel POST -> all 2xx) + a security/robustness reviewer lens (SQ11), and a remediation task on the audit-append chain."
+  ]
+}

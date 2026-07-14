@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0543",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "RV-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "T-0543-widget-registry.interface.ts §3 BindingContractKind; ADR §1 (binding-contract-catalog «11 kinds»)",
+      "issue": "Расхождение счёта binding-contract kinds. ADR/TS заявляют 11 видов (scalar/enum/relation/collection/date-range/money/multi-select/person/file/rollup/matrix-lookup), но реальный клиентский каталог web/src/forms/field-contract.js (BINDING_CONTRACT_CATALOG) и серверный src/core/binding-contract-catalog.ts содержат 8 ключей (scalar/enum/relation/collection/money/person/file/rollup). date-range/multi-select/matrix-lookup в живом каталоге отсутствуют.",
+      "suggestion": "Сверить список BindingContractKind с фактическим каталогом на impl-фазе 1 (реестр ПОТРЕБЛЯЕТ каталог, не дублирует — несоответствие contractKinds дескриптора реальному каталогу должно быть пойманным FF, иначе R-MANIFEST разъедется). Либо привести TS-перечисление к 8, либо расширить каталог осознанно."
+    },
+    {
+      "id": "RV-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "T-0543-surface-document.schema.json definitions.node (нет additionalProperties:false на базе и per-type then-ветках)",
+      "issue": "Базовая definitions.node открыта (additionalProperties не false), и per-type then-ветки не запрещают ключи type/options на data-bound узле. Значит FF-CONTRACT-1 (валидность против схемы) сам по себе НЕ обеспечивает named-binding анти-snapshot инвариант (R-NB): field-узел со снапшотнутыми type/options прошёл бы схему. Инвариант держит ТОЛЬКО отдельный guard FF-NAMED-BIND (walkDocument). Это допустимое слоение (база обязана быть открытой для allOf-наращивания per-type props), и контракт guard заявляет явно — поэтому nit, не дыра.",
+      "suggestion": "На impl-фазе оставить FF-NAMED-BIND как обязательный gating-guard (не пожелание); опц. рассмотреть not-clause в then-ветках data-bound узлов (\"not\": {\"required\":[\"options\"]}) чтобы схема ловила часть нарушений. Зафиксировать в ADR §3, что схема — необходимое, но НЕ достаточное условие R-NB."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Хэндофф-контракт валиден по validate.py adr (required task_id/status/decision/fitness_functions>=1)", "covered": true },
+    { "ac": "surface v2 обобщает form-document v1; форма=частный случай; report_page сведён, не форкнут; v1->v2 коэрсия байт-стабильна (root неизменён)", "covered": true },
+    { "ac": "Границы честны: action=outcomeRef (E16), slug->E-NAV-IA, видимость по грантам T-0021 — только потребляются, не переоткрываются", "covered": true },
+    { "ac": "FF машинно-проверяемы: FF-REG-1 (grep/eslint), FF-CONTRACT-1 (schema validate), FF-NAMED-BIND (walkDocument guard), FF-COERCE-1 (vitest+renderToStaticMarkup), FF-SRC-DEP (bundle-coherence.sh+check-report-page-deps.sh), FF-UX-G1/G6 (grep) — все примитивы существуют в репо", "covered": true },
+    { "ac": "Обратная совместимость form-document.js: 12 заявленных публичных экспортов существуют; §10 фасад сохраняет символы, не молчаливое удаление", "covered": true },
+    { "ac": "Реестр заземлён: 10 сегодняшних render-case (FormDocumentRenderer.jsx:341-350) = 10 дескрипторов 1-в-1; PALETTE:114/WIDGET_COMPAT:190/switch:340 анкеры точны; +4 новых (list/chart/metric/action) для страниц", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Заземление проверено эмпирически в /Users/shoxy/Code/choros: grep подтвердил PALETTE@form-document.js:114, WIDGET_COMPAT@190, switch(node.type)@FormDocumentRenderer.jsx:340, и 10 render-case в точности совпадают с заявленным набором узлов.",
+    "Все 12 публичных символов form-document.js (childrenOf/isDataNodeType/indexSchema/defaultWidgetForType/buildDefaultDocument/nodeForField/validateDocument/FORM_DOCUMENT_SCHEMA_VERSION/keySet/walkDocument/PALETTE/WIDGET_COMPAT) присутствуют как экспорты — §10 compat-контракт не выдуман.",
+    "report_page_dep реален (migrations/052_report_page_dep.sql, ci/checks/check-report-page-deps.sh), Floor-2 sandbox реален (Floor2Sandbox.jsx, FLOOR2_CUSTOM_FLAG_KEY), named-binding T-0072 реален, FR-2 «не плодить механизмы» дословно в docs/specs/T-0121-reports-pages-design.spec.md — сведение report_page честное, не форк.",
+    "Примитивы FF существуют: react-dom@^18 (renderToStaticMarkup для FF-COERCE-1), vitest, walkDocument (FF-NAMED-BIND), bundle-coherence.sh + check-report-page-deps.sh (FF-SRC-DEP).",
+    "validate.py adr на T-0543.adr.contract.json -> exit 0 (контракт валиден; 7 fitness-функций, decision/status/task_id присутствуют)."
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "task_id": "T-0659",
+  "status": "pr_open",
+  "branch": "task/T-0659",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "web/src/screens/screen-process-editor.jsx",
+    "web/src/canvas/editor.css",
+    "web/src/lib/format.js (doc-comment only, behaviour unchanged)",
+    "web/src/screens/screen-process-editor.test.jsx (EXTENDED)",
+    "web/src/screens/screen-process-editor.errorpanel.mount.test.jsx (NEW)",
+    "docs/tasks/T-0659.spec.md (NEW)",
+    "docs/tasks/T-0659.pr-handoff.json (NEW)"
+  ],
+  "summary": "formatJsonReadable (web/src/lib/format.js) JSON.stringifies any object and hard-caps at 120 chars. The only structured-object consumer was StatusBanner's publish-lint violations list (screen-process-editor.jsx) — server LintViolation objects ({type, elementId, elementKind, message}, src/core/bpmn-linter.ts). The {type,elementId,elementKind} JSON envelope alone eats ~105-110 of the 120 chars, so a long .message (e.g. timer_escalation_no_convergence, whose 550+-char message carries a 'Fix: ...' hint at the tail — docs/design/ADR-T0612-purchase-escalation-convergence.md) survived truncation as ~12 unreadable characters. Systemic across every LintViolationType with a long message, not just timer-convergence — confirmed by reading src/core/bpmn-linter.ts (11 violation types, several with multi-clause messages) and the two actual formatJsonReadable call sites (grep confirmed only screen-process-editor.jsx's violations list and screen-record-detail.jsx's unrelated generic field-value fallback).",
+  "fix": "Client-render-only, server contract untouched (violations shape/422 envelope unchanged). screen-process-editor.jsx: new VIOLATION_TYPE_LABELS (Russian rule title per LintViolationType, all 11 current types covered; unmapped/future type falls back to the raw .type string — additive, never blocks render) + new ViolationItem({v}) component: string violations render as-is (role-warning back-compat); object violations with a string .message render a structured entry (rule title + 'elementKind «elementId»' context + the FULL .message, never truncated, CSS white-space:pre-wrap so it wraps instead of clipping); anything else falls back to the prior formatJsonReadable(v) behaviour (dead code path today — the linter never emits a violation without .message — kept as a safety net, not a regression). StatusBanner's violations list now maps to <ViolationItem/> instead of calling formatJsonReadable(v) directly. editor.css: .chs-banner__violation{,-title,-element,-message} rules (spacing + wrap), no hardcoded colors (design tokens only). format.js: formatJsonReadable's implementation and 120-char behaviour are UNCHANGED — only a doc-comment records the new invariant ('don't use this for structured errors') for future readers; its existing generic-preview consumer (screen-record-detail.jsx field fallback) is untouched and re-verified (its 43+3 tests still pass).",
+  "deviations_from_adr": [
+    "No ADR existed for this task (T-0659 is a render-bug fix, not an architectural decision) — spec.md documents the fix layer and AC instead.",
+    "Left the formatJsonReadable(v) fallback branch in ViolationItem for object violations without a .message, even though src/core/bpmn-linter.ts's LintViolation always carries .message today — defensive, not required by the task; documented in spec.md as 'не в скоупе' / AC4."
+  ],
+  "tests_added": [
+    {
+      "file": "web/src/screens/screen-process-editor.test.jsx",
+      "covers": "5 new node-env tests (project convention: call the component as a function, tree-walk the returned tree — no DOM) against the exported, hook-free ViolationItem: (1) a 550+-char timer_escalation_no_convergence-shaped message renders in FULL including the trailing 'Fix: ...' hint, with no '…' ellipsis anywhere in the output — RED before this fix (the old formatJsonReadable(v) call would have cut it to 120 chars + '…'); (2) .type translates to the Russian rule title + shows elementKind/elementId context; (3) an unmapped/future .type falls back to the raw type string without crashing; (4) plain-string violations (role-warning shape) still render as-is; (5) an object violation with no .message falls back to formatJsonReadable. StatusBanner itself (has a useEffect) is NOT tree-walked directly — it needs a real React runtime, covered by the mount test below instead."
+    },
+    {
+      "file": "web/src/screens/screen-process-editor.errorpanel.mount.test.jsx",
+      "covers": "NEW file — REAL DOM mount via @testing-library/react + jsdom (@vitest-environment jsdom), scoped to the exported StatusBanner (not the full ProcessEditorScreen, which embeds the real bpmn-js canvas — out of scope for a violation-rendering fix). 4 tests: mounts with a long lint violation and asserts screen.getByText finds the FULL message + the Russian rule title + the 'Fix:' hint in the real DOM; mounts a mixed violations array (string + structured object + unknown no-message shape) without throwing; renders null without crashing when there is no active message; renders without crashing when isError=true but violations=[] (empty array edge case). Catches real-DOM crashes the node-env tree-walk convention structurally cannot see (D-064 rationale — see FormDesigner.mount.test.jsx)."
+    }
+  ],
+  "gates": {
+    "tsc_noemit": "green — npx tsc --noEmit (repo root), exit 0, empty output (no src/ files touched by this fix, web/ is JS/JSX and outside tsconfig.json's \"include\": [\"src\"])",
+    "vite_build": "green — cd web && npx vite build: 548 modules transformed, built in 2m6s, 0 errors (only a pre-existing >500kB chunk-size advisory warning, unrelated to this diff)",
+    "vitest_web_targeted": "green — cd web && npx vitest run screen-process-editor.test.jsx screen-process-editor.errorpanel.mount.test.jsx format.test.js process-editor-api.test.js screen-record-detail.test.jsx screen-record-detail.mount.test.jsx: 6 files, 83 passed, 0 failed (record-detail suites re-run explicitly to confirm the untouched formatJsonReadable generic-preview consumer has zero regression)",
+    "vitest_web_full": "green — cd web && npx vitest run --exclude '**/forms-from-schema.test.ts' (excludes the pre-existing, unrelated T-0757 SP-1 10s-timeout flake per task instructions): 109 test files, 2852 tests, 0 failed",
+    "ux_g5_jargon_denylist_sh": "PASS (informational, exit 0) — 90 pre-existing findings repo-wide (all in .test.jsx describe() strings elsewhere, e.g. T-ids/telLinear in test names), NONE in the 3 files this task touched or added",
+    "ux_g6_no_new_hardcode_sh": "PASS — 0 newly-added hardcode/inline-overlay findings in the diff (editor.css additions use design tokens only: var(--chs-space-*), var(--chs-weight-*))",
+    "anti_case_lock_sh": "PASS — Phase 1 delegates clean; Phase 2 full D-064 §5 denylist aggregate 15 (baseline 16, strictly ≤, no new case-literal)",
+    "anti_uuid_actor_render_sh": "PASS — 0 bare raw-identifier renders under web/src/screens/",
+    "eslint_web": "web's own lint script is `eslint web/src --ext .jsx || true` (always exits 0 by design — no eslint config targets web/, only src/); root `eslint src` is unaffected since this task touches zero files under src/",
+    "fitness_full_backend": "NOT run — this is a web-only (JSX/CSS) render fix; zero files under src/, migrations/, or ci/checks/ changed; the fitness suite (200+ backend shell gates) has no surface this diff could regress. Ran the specific UX/anti-case/anti-uuid gates above that DO scan web/src/ instead, plus the full web vitest suite."
+  },
+  "blocked_reason": "",
+  "friction_events": [
+    "web/ has its own package.json/node_modules separate from the repo root (no npm workspaces) — required a separate `cd web && npm install` before any web-side test/build/eslint command would resolve; not something the task instructions flagged, discovered by npx failing to find vitest/vite/testing-library.",
+    "One pre-existing, unrelated flake noted per task instructions: forms-from-schema.test.ts SP-1 (T-0757, 10s timeout) — excluded from the full-suite run via --exclude, not touched, not fixed."
+  ]
+}

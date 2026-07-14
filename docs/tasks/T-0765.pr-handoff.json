@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0765",
+  "status": "pr_open",
+  "branch": "task/T-0765",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "fitness_caveat": "Only the single fitness gate directly relevant to this change was run standalone (actor-authority-deactivation-gate.sh, PASS — unaffected since prod code is untouched). The full `npm run fitness` chain was not re-run end-to-end: the diff is confined to one test file (src/__tests__/processes-read-visibility.test.ts, harness-only strengthening) with zero prod-code or fitness-gate-script changes, so no other gate's inputs changed. `ci` field above reflects tsc --noEmit (0 errors), the affected unit test file (28/28 green pre- and post-fix on current code), and the full unit suite (vitest run, no DATABASE_URL: 6001 passed/17 skipped, 0 failures) — see docs/tasks/T-0765.spec.md §4.",
+  "files_changed": [
+    "src/__tests__/processes-read-visibility.test.ts",
+    "docs/tasks/T-0765.spec.md",
+    "docs/tasks/T-0765.pr-handoff.json"
+  ],
+  "summary": "R-2 из ревью T-0759 (fake-green, класс T-0715): src/__tests__/processes-read-visibility.test.ts's fake pg pool gated its ACTOR_ACTIVE simulation purely by SQL query SHAPE + the deactivatedSlugs fixture list — it never checked whether the query TEXT actually carried the ACTOR_ACTIVE_SQL (deactivated_at IS NULL) predicate. A mutant that deletes `AND ${ACTOR_ACTIVE_SQL}` from isInstanceParticipant/isInstanceParticipantBatch's point-lookup (process-projection.ts) stayed invisible to the unit suite — all 28 tests green — meaning real coverage for this predicate was live-PG-only (ci/checks/db/processes-read-visibility.db.test.ts) plus the fitness gate, not the fast unit tier. Fix: the fake pool now imports the SAME ACTOR_ACTIVE_SQL constant the prod code imports and checks `text.includes(ACTOR_ACTIVE_SQL)` before applying deactivatedSlugs filtering — mirroring real Postgres semantics (a deactivated employee's row still exists; only a WHERE clause naming the predicate excludes it). Prod code (process-projection.ts) is untouched by the committed diff — it was only mutated transiently, twice, to prove RED, then reverted with `git checkout --` (no git stash used, per task constraint).",
+  "test_evidence": {
+    "baseline_before_fix": "src/__tests__/processes-read-visibility.test.ts: 28/28 GREEN on current (correct) prod code, using the OLD (shape-only) fake pool.",
+    "fake_green_reproduced": "Mutant A (removed `AND ${ACTOR_ACTIVE_SQL}` from isInstanceParticipant's clause-(1) point-lookup, process-projection.ts ~line 1285) applied against the OLD fake pool: still 28/28 GREEN — the fake-green confirmed empirically BEFORE any fix was applied.",
+    "after_fix_unmutated": "Same 28 tests, NEW (fixed) fake pool, current (correct) prod code: 28/28 GREEN — no new test cases added, only the fake pool's internal routing changed; zero regressions on the pre-existing suite.",
+    "mutation_red_detail": "Mutant A re-applied AFTER the fix, same removal (isInstanceParticipant, DETAIL path): 27 passed, 1 FAILED — `T-0721 · GET /api/processes/:id gated by READ-visibility of the source record > T-0759: a DEACTIVATED former participant is denied (404), not the participant skeleton` (expected 200 to be 404). Reverted via `git checkout -- src/http/process-projection.ts`.",
+    "mutation_red_list": "Mutant B (removed `AND ${ACTOR_ACTIVE_SQL}` from isInstanceParticipantBatch's PRIMARY actorSlug point-lookup only, ~line 1410; the sibling fallbackSlug lookup at ~line 1423 left intact) applied AFTER the fix: 26 passed, 2 FAILED — the LIST HTTP-level T-0759 anti-case (`expected true to be false`) AND the direct filterProjectionsByReadVisibility unit test for the same anti-case (`expected [...] to deeply equal []`). Reverted via `git checkout -- src/http/process-projection.ts`.",
+    "full_unit_suite": "vitest run (no DATABASE_URL): 320 files passed + 2 skipped (322), 6001 tests passed + 17 skipped — 0 failures.",
+    "types": "tsc --noEmit: 0 errors.",
+    "prod_code_final_state": "git diff dev@6c7aff0f..HEAD -- src/http/process-projection.ts is empty — both mutations were transient and fully reverted; only the test file carries a committed diff."
+  },
+  "fitness_gates_run": [
+    "actor-authority-deactivation-gate.sh PASS (FF-0662-1/2 — unaffected, prod code untouched by the committed diff)"
+  ],
+  "security_notes": [
+    "This task changes ZERO production authorization logic — it strengthens a test double's fidelity to the SQL it fakes. No new attack surface; the existing live-PG suite (ci/checks/db/processes-read-visibility.db.test.ts) remains the ground-truth security coverage for the ACTOR_ACTIVE predicate on real Postgres — this task adds a FAST unit-tier tripwire that now actually detects the same class of regression, rather than duplicating live-PG's authority.",
+    "The fake pool's new `carriesActiveGate` check is symmetric: it does not introduce a new false-deny for an ACTIVE actor whose query happens to omit the predicate for some OTHER reason — see spec §5 point 2. Every pre-existing (non-deactivated-actor) test in the file stays green with the fix in place, confirming no over-tightening."
+  ],
+  "deviations_from_adr": [],
+  "follow_ups": [
+    "Not committed as a mutation test in this task (out of scope, noted as attack-surface point 3 in the spec): isInstanceParticipantBatch's FALLBACK-slug point-lookup (process-projection.ts ~line 1423) was deliberately left un-mutated in the committed evidence to demonstrate the two batch lookups are independently reachable (Mutant B only touched the PRIMARY actorSlug lookup at ~line 1410). The fixed fake-pool branch covers it by construction (same `text.includes(ACTOR_ACTIVE_SQL)` check, same query shape) but a judge wanting the THIRD explicit RED-proof can mutate that line directly."
+  ],
+  "judge_attack_surface": [
+    "Re-run the mutation yourself: remove `AND ${ACTOR_ACTIVE_SQL}` from process-projection.ts's isInstanceParticipant clause-(1) point-lookup (~line 1285), run `npx vitest run src/__tests__/processes-read-visibility.test.ts` with no DATABASE_URL, confirm 1 failure (the T-0759 DETAIL anti-case), then `git checkout -- src/http/process-projection.ts` to restore.",
+    "Confirm the fix does not weaken clause (2)'s existing ACTOR_ACTIVE gate (getRoleSlugsForActor, T-0738) — it shares the exact same fake-pool branch/shape; the `carriesActiveGate` check applies uniformly to every caller of that shape, not specially to isInstanceParticipant's call sites.",
+    "Confirm no false-deny was introduced: every pre-existing T-0721/T-0722/T-0723 test (none of whose actors are ever in deactivatedSlugs) stays green — the fix only changes behavior for the `deactivatedSlugs`-listed slugs, and only differentiates by SQL text for THOSE slugs.",
+    "Confirm `git diff dev@6c7aff0f..HEAD -- src/http/process-projection.ts` is empty and `git stash list` is empty — the mutation evidence was captured via edit+run+revert (git checkout --), never git stash, per task constraint."
+  ],
+  "friction_events": []
+}

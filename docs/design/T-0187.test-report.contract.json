@@ -1,0 +1,26 @@
+{
+  "task_id": "T-0187",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1107,
+    "passed": 1107,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "node -e scripts-key dedup check + guard PASS in npm run fitness", "result": "pass"},
+    {"ac": "AC-2", "test": "named-binding-isolation.sh at index 56 + npm run build at index 57 — both green in CI output", "result": "pass"},
+    {"ac": "AC-3", "test": "fitness.split('&&').filter count = 96; guard self-test confirms", "result": "pass"},
+    {"ac": "AC-4", "test": "[T-0187] package-json-no-dup-keys: checking package.json → PASS; self-test PASS", "result": "pass"},
+    {"ac": "AC-5", "test": "tsc --noEmit exit 0 — 0 errors", "result": "pass"},
+    {"ac": "AC-6", "test": "vitest run 1107/1107 passed, 6 skipped (no DATABASE_URL)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "eslint src", "result": "pass", "note": "0 errors; 2 pre-existing no-console warnings unchanged"},
+    {"check": "npm run build (within fitness at index 57)", "result": "pass", "note": "tsc + seed/tsc both exit 0 — re-enabled L-2 from lost key"},
+    {"check": "fitness entry count = 96", "result": "pass", "note": "95 bash entries + 1 guard = 96 per AC-3"},
+    {"check": "raw fitness key occurrences in package.json = 1", "result": "pass", "note": "no duplicate top-level fitness key"}
+  ],
+  "failures": [],
+  "ci_wall_time_s": 25,
+  "vitest_skipped": 6
+}

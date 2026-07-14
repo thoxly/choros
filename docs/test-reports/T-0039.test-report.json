@@ -1,0 +1,161 @@
+{
+  "task_id": "T-0039",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 883,
+    "passed": 878,
+    "failed": 0
+  },
+  "run_environment": {
+    "worktree": "/Users/shoxy/Code/choros-wt/T-0039",
+    "branch": "task/T-0039",
+    "head": "8420254",
+    "ci_no_database_url": {
+      "command": "npm run ci (tsc --noEmit && eslint src && npm run fitness && vitest run)",
+      "exit": 0,
+      "vitest": "878 passed | 5 skipped (883) across 45 files (1 skipped)",
+      "fitness": "all checks green incl FF-39-1..8, FF-R1/R2/R4, FF-DC11"
+    }
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-01",
+      "test": "src/__tests__/grant-propose.test.ts::AC-01 200 response includes proposal_agent_id and proposed array (stub BYO agent, node-scope atom returns 200 + valid atom structure)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-02",
+      "test": "ci/checks/grant-propose-isolation.sh::FF-39-1c — grep proves no INSERT INTO choros.\"grant\" in src/http/grant-propose.ts (ephemeral by static analysis); DB row-count assertion is known_gap (requires live Postgres)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-03",
+      "test": "src/http/grants.ts::parseProvenance(b[\"proposed_by\"]) binds UUID-validated agent UUID on routine INSERT path (D-1 provenance stamp, non-authority); DB round-trip assertion is known_gap (requires live Postgres)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-04",
+      "test": "src/__tests__/audit-grant-encoder.test.ts::AC-02 (encoder test) confirms encodeGrantAuditEvent threads proposedBy/confirmedBy into AuditEventInput; DB audit row assertion after confirm is known_gap (requires live Postgres)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-05",
+      "test": "ci/checks/grant-propose-isolation.sh::FF-39-4 — awk+grep confirms 'confirmed_by IS NOT NULL' predicate in loadRoleEffectiveGrants body (grants.ts); structural fitness: static analysis pass",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-06",
+      "test": "src/__tests__/grant-propose.test.ts::AC-06 freeform-only LLM response → empty proposed list (200, zero atoms in proposed array)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-07",
+      "test": "ci/checks/grant-propose-isolation.sh::FF-39-2 — grep for OPENAI_API_KEY/ANTHROPIC_API_KEY/sk- literals and LLM SDK imports in src/ (excluding __tests__) returns zero matches",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-08",
+      "test": "src/__tests__/grant-propose.test.ts::AC-08 503 NO_PROPOSAL_AGENT when no agent configured (stub pool returns empty rows; assert 503 + error.code=NO_PROPOSAL_AGENT)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-09",
+      "test": "src/http/grant-propose.ts::appendProposalAudit called with type='grant.proposal_requested', actor=actorId, subject=roleId, via='grant-propose' — code-path exercised by AC-01/AC-08 stub tests; stub swallows audit silently; DB audit row content assertion is known_gap (requires live Postgres)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "ci/checks/dual-control-isolation.sh::FF-DC11 + ci/checks/db/grant-editor.adversarial.test.ts::ADV-1/2/3 (inherited T-0030 coverage) — validateAdminDelegation fires on POST /api/grants; T-0039 does not modify the gate (NF-6/FF-39-6); ADMIN_GATE_REJECTED 403 on scope-widening actor; DB adversarial test is known_gap for the specific LLM-proposed-then-confirm-without-authority path",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "src/__tests__/grant-propose.test.ts::AC-11 mixed valid/invalid atoms — 5 atoms (node, freeform, invalid-node, null-scope, tags) → 2 survivors; no 500 on invalid input",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "src/http/grant-propose.ts::withTenantTx uses SET LOCAL choros.tenant_id + RLS — same structural isolation pattern as all other routes; ci/checks/cross-tenant-fitness.sh::AC-10/11/12 (generic RLS probe) pass; two-tenant proposal-agent stub assertion is known_gap (requires live Postgres with two seeded tenants)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "src/__tests__/grant-propose.test.ts::AC-13 response body does not contain SECRET_SENTINEL string; ci/checks/grant-propose-isolation.sh::FF-39-8 static grep confirms no console.log/error of 'secret' in grant-propose.ts + audit payload object contains no 'secret'/'credential' field; stdout capture assertion is known_gap (no live log-capture in unit test)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "ci/checks/grant-propose-isolation.sh::FF-39-3 — grep for LLM_PROPOSALS in ra-role-editor.jsx returns zero; /api/grants/propose present in propose() body",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "src/http/grants.ts::parseProvenance(b[\"proposed_by\"]) — UUID-validated body field threaded into proposed_by column on INSERT (D-1 ADR §3); code-path analysis confirms UUID value, not literal 'llm'; DB row UUID assertion is known_gap (requires live Postgres)",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "ra-role-editor.jsx propose() live fetch + proposalAgentId state + confirmProposed(i) proposed_by UUID threading",
+      "result": "n/a",
+      "note": "вторично, LLM/браузер — UI wiring verified via fitness (AC-14/FF-39-3) and code-path read; no live browser test available in this run (frontend build not exercised in CI without a BYO LLM endpoint)"
+    }
+  ],
+  "known_gaps": [
+    {
+      "ac": "AC-02",
+      "gap": "DB row-count assertion after POST /api/grants/propose — SELECT COUNT(*) before/after requires live Postgres. Static proof (no INSERT in grant-propose.ts) is the primary evidence.",
+      "root_class": "tooling-gap"
+    },
+    {
+      "ac": "AC-03",
+      "gap": "Full propose → confirm DB round-trip with UUID-matching proposed_by column value requires live Postgres. parseProvenance wiring is code-path verified.",
+      "root_class": "tooling-gap"
+    },
+    {
+      "ac": "AC-04",
+      "gap": "audit_event row content (proposed_by, confirmed_by) after confirmation requires live Postgres. Encoder unit test covers encodeGrantAuditEvent pass-through.",
+      "root_class": "tooling-gap"
+    },
+    {
+      "ac": "AC-09",
+      "gap": "audit_event row with type=grant.proposal_requested / actor / subject / via content assertion requires live Postgres. Code path to appendProposalAudit is exercised in every stub test; audit payload structure is statically verified (FF-39-8).",
+      "root_class": "tooling-gap"
+    },
+    {
+      "ac": "AC-10",
+      "gap": "Specific integration test for LLM-proposed grant confirmed by actor lacking mgmt_object:grant authority returning 403 ADMIN_GATE_REJECTED. Covered by T-0030 inherited adversarial DB tests; the propose path feeds the SAME unchanged POST /api/grants endpoint.",
+      "root_class": "tooling-gap"
+    },
+    {
+      "ac": "AC-12",
+      "gap": "Two-tenant isolation test with distinct proposal agents seeded per tenant requires live Postgres. RLS structural guarantee is the primary defence (same withTenantTx + GUC pattern as all other routes).",
+      "root_class": "tooling-gap"
+    },
+    {
+      "ac": "AC-13",
+      "gap": "stdout capture during proposal flow to assert no secret appears in logs is not exercised by unit test (stub discards audit; no log capture). Static grep (FF-39-8) + no console.log calls in production code provide the primary assurance.",
+      "root_class": "tooling-gap"
+    },
+    {
+      "ac": "AC-15",
+      "gap": "DB row with proposed_by = agent-employee UUID (not 'llm') requires live Postgres for end-to-end confirmation. Code-path analysis confirms parseProvenance threads the UUID value into the INSERT bind.",
+      "root_class": "tooling-gap"
+    }
+  ],
+  "failures": [],
+  "friction": [
+    {
+      "id": "FF-39-3-comment",
+      "root_class": "tooling-gap",
+      "is_product_defect": false,
+      "note": "FF-39-3 grep initially caught 'LLM_PROPOSALS' in a code comment — coder fixed by removing the identifier from comment text (friction event FF-39-3 in PR handoff). Final state: zero matches."
+    },
+    {
+      "id": "FF-DC11-body-read",
+      "root_class": "tooling-gap",
+      "is_product_defect": false,
+      "note": "dual-control-isolation.sh initially banned b[\"proposed_by\"] body read; T-0039 D-1 explicitly requires it as a provenance stamp (no authority). Check updated to allow proposed_by while keeping confirmed_by/confirmed2_by body reads banned. Design invariant preserved."
+    }
+  ]
+}

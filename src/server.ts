@@ -1,26 +1,1473 @@
 import * as http from "node:http";
+import pg from "pg";
 import { Router } from "./http/router.js";
-import { JobStore } from "./core/jobStore.js";
+import { JobStore, PostgresJobStore } from "./core/jobStore.js";
+import { InMemoryJobStore } from "./core/inMemoryJobStore.js";
+import { type Clock } from "./core/types.js";
+import { PostgresTimerStore } from "./core/postgres/pgTimerStore.js";
+import { PostgresOutboxStore } from "./core/postgres/pgOutboxStore.js";
 import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
+import { registerOrgRoutes } from "./http/org.js";
+import { registerInboxRoutes } from "./http/inbox.js";
+// T-0249 (review CE-1): production assembly of the completion-effect registry —
+// the live wire for the (procKey, activity) → step-effect primitive.
+import { buildCompletionEffectRegistry } from "./composition/completion-effects-root.js";
+import { registerMessageIngestRoutes, emitInternalSignal } from "./http/message-ingest.js";
+import { RECORD_STATUS_SIGNAL } from "./http/records.js";
+import { registerFormsRoutes } from "./http/forms.js";
+import { makeFormRecordPersister, makeFormDefResolver } from "./http/form-record-persister.js";
+import { registerAuditRoutes } from "./http/audit.js";
+import { registerAuthRoutes } from "./http/auth.js";
+import { registerRightsRoutes } from "./http/rights.js";
+import { registerDictionariesRoute, registerGrantsRoutes } from "./http/grants.js";
+import { registerInvokeRoutes } from "./http/invoke.js";
+import { registerGrantProposeRoute, defaultGrantProposeDeps } from "./http/grant-propose.js";
+import { registerSecretHandleRoutes } from "./http/secret-handle.js";
+import { actorInjectRegistrar } from "./http/actor-inject-registrar.js";
+import { registerProcessesRoutes } from "./http/processes.js";
+import { batchResolveActors } from "./db/actor-resolver.js";
+import { registerGrantTrailRoutes } from "./http/grant-trail.js";
+import { registerAgentRoutes } from "./http/agents.js";
+import { registerAgentListRoutes } from "./http/agents-list.js";
+import { registerBindingRoutes } from "./http/binding.js";
+import { registerFormDocumentOpsRoute } from "./http/forms-document-ops.js";
+import { registerProcessCatalogRoutes } from "./http/process-catalog.js";
+import { registerArtifactRoutes } from "./http/artifacts.js";
+import { registerRegistryDefRoutes } from "./http/registry-defs.js";
+import { registerApplicationRoutes } from "./http/applications.js";
+import { registerRightsResourcesRoute } from "./http/rights-resources.js";
+import { registerSolutionPublishRoutes } from "./http/solution-publish.js";
+import { registerSectionRoutes } from "./http/sections.js";
+import { registerUserPrefRoutes } from "./http/user-prefs.js";
+import { registerRecordRoutes } from "./http/records.js";
+import { registerListViewRoutes } from "./http/list-views.js";
+import { registerRecordLinksRoutes } from "./http/record-links.js";
+import { registerAssistantRoutes } from "./http/assistant.js";
+import { makeHttpKeycloakAdminPort, makeHttpKeycloakUserPort } from "./keycloak/admin-port.js";
+import { registerRegisterRoutes } from "./http/register.js";
+import { registerUserMgmtRoutes } from "./http/user-mgmt.js";
+import { registerSeedWriteRoutes } from "./http/seed-write.js";
+import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
+import { type ResolverDeps } from "./core/grant-resolver.js";
+import { registerNotificationPrefRoutes } from "./http/notification-prefs.js";
+import { registerNotificationRoutes } from "./http/notifications.js";
+import { registerEmailChannelConfigRoutes } from "./http/email-channel-config.js";
+import { registerReportPageRoutes } from "./http/report-pages.js";
+import {
+  registerReportPageRenderRoutes,
+  type ReportAggReadVisibilityResolver,
+} from "./http/report-page-render.js";
+import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
+import { registerFloor1EditorRoutes } from "./http/floor1-editor.js";
+import { registerDmnRuleTableRoutes } from "./http/dmn-rule-table.js";
+import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
+import { registerRightsIntentRoutes } from "./http/rights-intents.js";
+import { registerRightsChangeRequestRoutes } from "./http/rights-change-requests.js";
+import { registerRightsOverviewRoutes } from "./http/rights-overview.js";
+import { registerSodRoutes } from "./http/rights-sod.js";
+import { registerSodAdminRoutes } from "./http/rights-sod-admin.js";
+import { registerProcessDefsRoutes } from "./http/process-defs.js";
+import { registerSolutionBundleRoutes } from "./http/solution-bundles.js";
+import { makeFlowableClient } from "./core/flowable-client.js";
+import { getOrgPool, resolveActorTenant, resolveActorSlugFromAuth } from "./db/org.js";
+// T-0419 (D7-3-FU): production field-visibility resolver — grants + policy from DB.
+import { getGrantsForSubject, getFieldVisibilityPolicy } from "./db/grants-dao.js";
+import { dormantLlmPort } from "./core/llm-port.js";
+// T-0363 (E17): DeepSeek / OpenAI-compatible LLM adapter (composition-root only — RL-3).
+import { OpenAILlmPort } from "./adapters/openai-llm-port.js";
+import { validateSecretHandleShape, redactHandle, parseAppHandle, type SecretResolverPort } from "./core/secret-handle-validator.js";
+// T-0382 (D5) BLOCKER-1: env:// secret-handle allow-list (arbitrary env exfil guard).
+import { decideEnvHandle } from "./core/env-secret-allowlist.js";
+// T-0476 (E-AGENTS L3): app:// encrypted secret store — AEAD decrypt at the root.
+import { loadMasterKey, decryptSecret, AppSecretStoreUnconfiguredError } from "./core/app-secret-cipher.js";
+import { getAppSecretSealed } from "./db/app-secret-dao.js";
+import { registerAppSecretRoutes } from "./http/app-secret.js";
+// T-0496: "Проверить подключение" — server-side LLM connection probe.
+import { registerLlmConnectionTestRoute } from "./http/llm-connection-test.js";
+import { type PgClientLike } from "./db/audit-writer.js";
+// T-0363 (E17): Analyst production ports.
+import { setAnalystPorts } from "./core/assistant-analyst.js";
+import { loadCycleTimeByActivity, loadActorTypeBreakdown } from "./db/transition-journal.js";
+// T-0607 (а): READ-PDP-scoped registry digest for the analyst (entity-data view).
+import { loadReadableRegistryDigest } from "./db/registry-digest-dao.js";
+// T-0382 (D5): per-tenant LLM config (BYO) — read from agent_card at call time.
+import { loadTenantLlmConfig } from "./db/agent-card-llm.js";
+// T-0382: LLM-config HTTP routes (tenant LLM connection screen backend).
+import { registerLlmConfigRoutes } from "./http/llm-config.js";
+import { registerLlmConnectionsRoutes } from "./http/llm-connections.js";
+// T-0383 (D5/PD-6): per-tenant assistant system prompt routes + runtime loader.
+import { registerAssistantPromptRoutes } from "./http/assistant-prompt-routes.js";
+import { readPublishedAssistantPrompt } from "./db/assistant-prompt-dao.js";
+// T-0477 [E-AGENTS L5]: spend accounting routes + spend-tracking LLM port.
+import { registerSpendRoutes } from "./http/spend.js";
+// T-0405 [PD-20]: operational analytics routes (GROUP BY on index, xlsx export).
+import { registerOperationalAnalyticsRoutes } from "./http/operational-analytics.js";
+import { getDefaultLlmConnection } from "./db/llm-connection-dao.js";
+// T-0518: file attachment HTTP routes + adapters.
+import { registerFileRoutes } from "./http/files.js";
+import { PgFileStore } from "./core/postgres/pgFileStore.js";
+import { FsObjectStore } from "./adapters/s3-object-store.js";
+import { makeFileRecordResolver } from "./core/grant-resolver.js";
+import { makeDbGrantSource } from "./db/grants-dao.js";
+import type { FileRecordResolver } from "./core/file-attachment.js";
+import type { ResourceRef } from "./core/object-handle.js";
+// T-0570 (D3, READ-PDP): production wiring for the records READ-PDP gate —
+// same getGrantsForSubject DAO (single-resolver) + composite resource-ancestry
+// oracle (org delegate + resource root-sentinel/inline-chain).
+import { loadTenantOrgAncestry } from "./db/org-ancestry.js";
+import { makeResourceAncestryOracle } from "./db/resource-ancestry.js";
+import type { RowAncestry } from "./core/read-visibility.js";
+
+const { Pool } = pg;
+
+// ---------------------------------------------------------------------------
+// T-0496 default endpoint/model — NOT a key/secret fallback.
+//
+// "Проверить подключение" (registerLlmConnectionTestRoute below) fills in a
+// default OpenAI-compatible endpoint/model ONLY when a tenant's OWN connection
+// profile left those two (non-secret) string fields blank; the secret handle
+// used for the actual call is ALWAYS the tenant's own (via tenantSecretResolver,
+// never this constant). This is unrelated to the T-0600 BYO fix below — that
+// fix removed a KEY fallback (a shared secret used on the tenant's behalf).
+// Defaulting a blank endpoint/model string is not a credential and carries no
+// BYO risk; kept minimal (no API-key constant, no secret resolver) precisely
+// so it cannot regrow into the removed fallback.
+// ---------------------------------------------------------------------------
+const DEEPSEEK_BASE_URL = process.env["DEEPSEEK_BASE_URL"] ?? "https://api.deepseek.com";
+const DEEPSEEK_MODEL    = process.env["DEEPSEEK_MODEL"]    ?? "deepseek-chat";
+
+/**
+ * T-0413 (SECURITY-FU): tenant-facing secret resolver.
+ *
+ * SECURITY: the `env://` scheme is SYSTEM-ONLY and MUST NOT be resolvable from a
+ * tenant-supplied handle. A tenant admin controls BOTH the secret-handle stored in
+ * agent_card AND the llm_endpoint (PUT /api/llm-config). If a tenant could supply
+ * an env:// handle, they could point the endpoint at an attacker host and have
+ * the server ship a server-side env value as a Bearer token — exfiltrating a
+ * credential via a tenant-controlled request.
+ *
+ * Therefore `env://` handles are NEVER resolvable through the tenant path,
+ * regardless of which var name they reference. Tenant BYO keys MUST be stored
+ * through the encrypted secret-handle custody store (POST /api/agents/:id/secret-handle,
+ * T-0025) and resolved through that path only.
+ *
+ * T-0600: the system env KEY fallback that USED to live in makeLlmPortFactory
+ * (a global DEEPSEEK_API_KEY silently used on behalf of an unconfigured
+ * tenant) has been REMOVED — see makeLlmPortFactory's doc comment below for
+ * the full rationale. This resolver's env:// rejection stands regardless;
+ * it was never the thing that made the old fallback reachable from a tenant.
+ */
+// Exported for adversarial testing (T-0413): a test can call
+// resolveSecret("env://...") against the REAL composition-root resolver
+// and assert it always throws rather than returning any server env value.
+export const tenantSecretResolver: SecretResolverPort = {
+  async resolveSecret(handle: string, ctx: { tenantId: string }): Promise<string> {
+    // T-0476 (E-AGENTS L3): app://<id> → decrypt the tenant's BYO key IN MEMORY.
+    // This is the self-serve tenant key path. The plaintext is returned ONLY to the
+    // immediate caller (the LLM adapter at call time) — it is NEVER logged, returned
+    // in an API response, or egressed (the secret-handle-isolation gate enforces no
+    // raw-key handling outside this custody resolver).
+    const appRef = parseAppHandle(handle);
+    if (appRef !== null) {
+      // Master key from env at the COMPOSITION ROOT only (app-secret-cipher is env-free).
+      let masterKey: Buffer;
+      try {
+        masterKey = loadMasterKey(process.env["APP_SECRET_MASTER_KEY"]);
+      } catch (err) {
+        if (err instanceof AppSecretStoreUnconfiguredError) {
+          // DORMANT: store not configured → honest error (no crash, no plaintext).
+          throw new Error(
+            `[T-0476] app:// secret store is not configured (APP_SECRET_MASTER_KEY unset); ` +
+            `cannot resolve handle ${redactHandle(handle)}.`,
+          );
+        }
+        throw err;
+      }
+      // Read the sealed row under the tenant's RLS scope, then decrypt in memory.
+      const pool = getOrgPool();
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`SET LOCAL choros.tenant_id = '${ctx.tenantId}'`);
+        await client.query("SET LOCAL search_path TO choros");
+        const sealed = await getAppSecretSealed(
+          client as unknown as PgClientLike,
+          ctx.tenantId,
+          appRef.secretId,
+        );
+        await client.query("COMMIT");
+        if (sealed === null) {
+          // Not found / wrong tenant (RLS hid it) → opaque error, no key material.
+          throw new Error(`[T-0476] app:// secret not found for handle ${redactHandle(handle)}`);
+        }
+        // Decrypt IN MEMORY. Returned to the immediate caller ONLY (RL-3).
+        return decryptSecret(
+          { ciphertext: sealed.ciphertext, nonce: sealed.nonce, keyVersion: sealed.keyVersion },
+          masterKey,
+        );
+      } catch (err) {
+        try { await client.query("ROLLBACK"); } catch { /* already closed */ }
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    // T-0413: REJECT all env:// handles in the tenant path — scheme is SYSTEM-ONLY.
+    // decideEnvHandle classifies the handle; any env:// outcome (denied OR allowed)
+    // is rejected here because the allow-list only governs the system-internal path.
+    const decision = decideEnvHandle(handle);
+    if (decision.kind !== "not_env") {
+      // env:// handle from a tenant-supplied source → always reject.
+      // The redactHandle strips the var name to avoid leaking it via the error message.
+      throw new Error(
+        `[T-0413] env:// handles are system-only and may not be used as tenant secret ` +
+        `handles (handle: ${redactHandle(handle)}). Store tenant keys via the ` +
+        `secret-handle custody store (POST /api/agents/:id/secret-handle).`,
+      );
+    }
+    // Other handle shapes (vault://, opaque tokens, etc.) are not resolvable at
+    // the env layer — return a descriptive error so the dormant path activates.
+    throw new Error(
+      `[T-0413] Cannot resolve handle scheme at env layer: ${redactHandle(handle)}. ` +
+      `Use the secret-handle custody store or wire a vault resolver.`,
+    );
+  },
+};
+
+/**
+ * T-0382 (D5): per-tenant LLM port factory (async).
+ *
+ * Priority order:
+ *   1. Per-tenant agent_card config (all three llm_* fields non-null AND handle valid).
+ *   2. dormantLlmPort → 503 (fail-closed default).
+ *
+ * T-0600 (BYO honesty fix): a PRIOR revision of this factory fell back to a
+ * global env-configured key (DEEPSEEK_API_KEY, T-0363) whenever step 1 found
+ * no per-tenant config. That silently routed a tenant WITHOUT its own
+ * assigned LLM profile through a shared server-side key — a BYO-doctrine
+ * violation (a live acceptance run surfaced this: an unconfigured tenant's
+ * assistant answered via the shared key instead of the honest dormant
+ * 503). The env-fallback step is REMOVED here: no per-tenant config (or an
+ * invalid handle shape) now goes straight to dormantLlmPort, which
+ * src/http/assistant.ts's classifyLlmUnavailability/respondLlmUnavailable
+ * (T-0573/T-0595) turns into the canonical honest "connect your LLM key"
+ * 503 — never a silent live call on someone else's key. The DEEPSEEK_*
+ * env-composition-root code (constants + deepseekSecretResolver) was the
+ * ONLY consumer of that fallback step and has been deleted outright (a
+ * validated-but-unreachable constant is its own kind of dishonesty in the
+ * code — see ADR-T0600 §1.1 for the full call-site audit). This does NOT
+ * touch the grantsPool===null branch (server.ts below, `if (grantsPool)`):
+ * that branch never registers the assistant route at all, so this factory
+ * is never invoked in that mode — no new degradation is introduced there.
+ *
+ * Each call queries the DB fresh so live config changes are picked up without
+ * a restart (no caching — the per-message latency hit is a single indexed
+ * SELECT on a small table; acceptable per PD-5).
+ *
+ * Called only from buildRouter's assistant route wiring and llm-config route —
+ * both in src/server.ts (composition root). NOT called from core or adapters.
+ *
+ * Exported (T-0600, AC-1) so a unit test can assert the BYO-honesty contract
+ * directly against the REAL composition-root factory — not a re-implemented
+ * copy — even though `DEEPSEEK_API_KEY` is set in the test's process env.
+ */
+export async function makeLlmPortFactory(
+  tenantId: string,
+  grantsPool: pg.Pool | null,
+) {
+  // 1. Attempt per-tenant DB config.
+  const tenantCfg = await loadTenantLlmConfig(grantsPool, tenantId);
+  if (tenantCfg) {
+    // TenantLlmConfig.secretHandle is the aliased opaque handle (RL-3: not raw key).
+    const verdict = validateSecretHandleShape(tenantCfg.secretHandle);
+    if (verdict.ok) {
+      return new OpenAILlmPort({
+        endpoint:     tenantCfg.llmEndpoint,
+        model:        tenantCfg.llmModel,
+        secretHandle: tenantCfg.secretHandle,
+        tenantId,
+        secretResolver: tenantSecretResolver,
+      });
+    }
+    // T-0600: an invalid handle shape in the per-tenant DB row must NOT
+    // silently degrade to a shared server key either — fail closed to
+    // dormant, same as "no config at all" (step 2 below).
+  }
+
+  // 2. No usable per-tenant config → dormant (fail-closed, three-lock §6).
+  // T-0600: NO global env fallback here for a real tenant path (see doc
+  // comment above) — this IS the BYO-honesty fix.
+  return dormantLlmPort;
+}
+
+// ---------------------------------------------------------------------------
+// Store-mode type (T-0186)
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls which store implementation the factory functions produce.
+ *
+ * - 'auto'   (default) — read DATABASE_URL from the environment; create a
+ *            PostgresJobStore when the URL is present, InMemoryJobStore otherwise.
+ *            This is the production path and the default for all call sites that
+ *            do not pass an explicit mode.
+ * - 'memory' — always return the InMemoryJobStore regardless of DATABASE_URL.
+ *            Used by tests that need to pin their store implementation and must
+ *            remain green whether or not an ambient DATABASE_URL is present (D-056).
+ */
+export type StoreMode = "auto" | "memory";
+
+// ---------------------------------------------------------------------------
+// Store factory (ADR §4.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates a PostgresJobStore if DATABASE_URL is set, otherwise InMemoryJobStore.
+ * Used by createServer() in production (index.ts) and by tests via optional store
+ * injection. Clock injection seam is preserved for deterministic tests.
+ *
+ * Exported so startMain (src/main.ts) can call it explicitly before passing both
+ * the store AND a resolverDepsObj to createServer() — required when T-0143 threads
+ * ResolverDeps through the composition stack (ADR §4.3: single allocation).
+ *
+ * T-0186: additive optional `mode` parameter. When mode === 'memory', the function
+ * always returns InMemoryJobStore regardless of DATABASE_URL. Default is 'auto'
+ * (existing behaviour preserved for all callers that omit the parameter).
+ */
+export function createJobStore(clock?: Clock, mode?: StoreMode): PostgresJobStore | InMemoryJobStore {
+  const url = mode !== "memory" ? process.env["DATABASE_URL"] : undefined;
+  if (url) {
+    const pool = new Pool({ connectionString: url });
+    return new PostgresJobStore(pool, clock);
+  }
+  return new InMemoryJobStore(clock);
+}
+
+/**
+ * Creates a PostgresTimerStore if DATABASE_URL is set, otherwise undefined.
+ * Timer health is only available when Postgres is configured.
+ *
+ * T-0186: additive optional `mode` parameter. When mode === 'memory', always
+ * returns undefined (no timer store in memory mode).
+ */
+function createTimerStore(clock?: Clock, mode?: StoreMode): PostgresTimerStore | undefined {
+  const url = mode !== "memory" ? process.env["DATABASE_URL"] : undefined;
+  if (url) {
+    const pool = new Pool({ connectionString: url });
+    return new PostgresTimerStore(pool, clock);
+  }
+  return undefined;
+}
+
+/**
+ * Creates a PostgresOutboxStore if DATABASE_URL is set, otherwise undefined.
+ * Outbox health (T-0062) is only available when Postgres is configured.
+ *
+ * T-0186: additive optional `mode` parameter. When mode === 'memory', always
+ * returns undefined (no outbox store in memory mode).
+ */
+function createOutboxStore(clock?: Clock, mode?: StoreMode): PostgresOutboxStore | undefined {
+  const url = mode !== "memory" ? process.env["DATABASE_URL"] : undefined;
+  if (url) {
+    const pool = new Pool({ connectionString: url });
+    return new PostgresOutboxStore(pool, clock);
+  }
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Internal builder — composes a Router with health + external-worker routes.
 // Returns both the Router (for handleRequest) and the http.Server.
 // ---------------------------------------------------------------------------
 
-function buildRouter(store: JobStore): Router {
+function buildRouter(
+  store: JobStore | PostgresJobStore | InMemoryJobStore,
+  timerStore?: PostgresTimerStore,
+  outboxStore?: PostgresOutboxStore,
+  // T-0143: captured in closure; passed to makeGrantResolver when a route calls it.
+  // Absent ⇒ hash fields drop honestly (FR-2 / NF-3).
+  // Partial<ResolverDeps>: at composition-root time only keyedDigest exists;
+  // per-request sources (grants/records/ancestry) are assembled at the route.
+  resolverDeps?: Partial<ResolverDeps>
+): Router {
+  // resolverDeps is captured here in the closure so every future route that calls
+  // makeGrantResolver(resolverDeps) automatically inherits the composition-root
+  // binding — no second wiring step required when a new route is added (FR-3).
+  void resolverDeps; // referenced via closure; used by future route registrations
   const router = new Router();
+  // Postgres pool for the grant write-path (DATABASE_URL optional — routes
+  // that hit DB will 500 naturally when no DB is configured; non-DB routes
+  // remain available).
+  const grantsPool = process.env["DATABASE_URL"]
+    ? new Pool({ connectionString: process.env["DATABASE_URL"] })
+    : null;
 
-  // Register GET /health
-  router.register("GET", "/health", (_req, res) => {
-    const body = JSON.stringify({ status: "ok" });
+  // Register GET /health (ADR §3.7: queue + timer + outbox metrics when Postgres available)
+  // T-0116: timer.timerLagMs; T-0062: outbox.{pendingLagMs,deadCount} (backward-compatible).
+  router.register("GET", "/health", async (_req, res) => {
+    let status: "ok" | "degraded" = "ok";
+    let queueDepth = 0;
+    let oldestAvailableLagMs: number | null = null;
+    let workerIncidents = 0;
+    let timerLagMs: number | null = null;
+    let outboxPendingLagMs: number | null = null;
+    let outboxDeadCount = 0;
+
+    // Queue health (T-0114 + T-0063 workerIncidents)
+    if (store instanceof PostgresJobStore) {
+      try {
+        const health = await store.getQueueHealth();
+        queueDepth = health.depth;
+        oldestAvailableLagMs = health.oldestAvailableLagMs;
+        workerIncidents = health.workerIncidents;
+      } catch {
+        status = "degraded";
+      }
+    }
+
+    // Timer health (T-0116) — independent try/catch (AC-11, ADR §3.7)
+    if (timerStore !== undefined) {
+      try {
+        const timerHealth = await timerStore.getTimerHealth();
+        timerLagMs = timerHealth.timerLagMs;
+      } catch {
+        status = "degraded";
+      }
+    }
+
+    // Outbox health (T-0062) — independent try/catch (AC-16, ADR §4.4)
+    if (outboxStore !== undefined) {
+      try {
+        const outboxHealth = await outboxStore.getOutboxHealth();
+        outboxPendingLagMs = outboxHealth.pendingLagMs;
+        outboxDeadCount = outboxHealth.deadCount;
+      } catch {
+        status = "degraded";
+      }
+    }
+
+    const body = JSON.stringify({
+      status,
+      queue: {
+        depth: queueDepth,
+        oldestAvailableLagMs,
+        workerIncidents,
+      },
+      timer: {
+        timerLagMs,
+      },
+      outbox: {
+        pendingLagMs: outboxPendingLagMs,
+        deadCount: outboxDeadCount,
+      },
+    });
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(body);
   });
 
   // Register external-worker endpoints
-  registerExternalWorkerRoutes(router, store);
+  registerExternalWorkerRoutes(router, store as JobStore);
+
+  // Register auth endpoints
+  registerAuthRoutes(router, store as JobStore);
+
+  // Register org structure endpoints
+  registerOrgRoutes(router, store as JobStore);
+
+  // T-0443: FlowableClient must be created BEFORE registerInboxRoutes so it can be
+  // threaded into inbox deps (additive-optional; honest-degrade when absent).
+  // Also used by registerProcessesRoutes below (start-instance + process-def publish).
+  // Moved earlier than original position; functionally identical (same env reads).
+  const flowablePassword = process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
+  const flowableClient =
+    grantsPool && flowablePassword
+      ? makeFlowableClient({
+          baseUrl:
+            process.env["FLOWABLE_REST_BASE_URL"] ??
+            // T-0483: compose-internal hostname `flowable` is reachable on the
+            // container-internal port 8080 (8082 is the host-published mapping only,
+            // invalid from inside the compose network). Keep the default self-consistent
+            // so an absent override does not silently produce ENGINE_UNAVAILABLE.
+            "http://flowable:8080/flowable-rest/service",
+          adminUser: process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
+          adminPassword: flowablePassword,
+        })
+      : null;
+
+  // T-0483: engine readiness probe. Separate from GET /health (which is the
+  // CONTAINER liveness probe — it must NOT depend on the engine, or an engine
+  // blip would mark choros itself unhealthy and trigger a needless restart).
+  // This endpoint reflects engine reachability so the UI / ops can distinguish
+  // "engine down" (honest "движок недоступен") from "app down". When no client is
+  // configured (memory mode / no FLOWABLE creds) it reports status "unknown".
+  router.register("GET", "/api/engine/health", async (_req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (!flowableClient || typeof flowableClient.pingEngine !== "function") {
+      res.statusCode = 200;
+      res.end(JSON.stringify({ engine: "unknown", reason: "not_configured" }));
+      return;
+    }
+    try {
+      const ping = await flowableClient.pingEngine();
+      if (ping.reachable) {
+        res.statusCode = 200;
+        res.end(JSON.stringify({ engine: "up" }));
+      } else {
+        // 503 so callers (and the UI) see a clear "engine unavailable" signal.
+        res.statusCode = 503;
+        res.end(JSON.stringify({ engine: "down", code: ping.code }));
+      }
+    } catch {
+      // pingEngine never throws, but be defensive: report down rather than 500.
+      res.statusCode = 503;
+      res.end(JSON.stringify({ engine: "down", code: "ENGINE_UNAVAILABLE" }));
+    }
+  });
+
+  // Register inbox endpoints. T-0282 (ADR §2.3): when a pool is available
+  // (DB-backed), wire the card-action approve route (POST /api/inbox/:id/action)
+  // alongside the existing claim path — tenant-scoped, actor→tenant resolved from
+  // the dev-user slug (the same resolver the start-route uses). Absent ⇒ read +
+  // claim only (memory-mode unchanged).
+  registerInboxRoutes(
+    router,
+    store as JobStore,
+    grantsPool
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+          // T-0335 (E15-S1b): thread the outbox store so the approve route's
+          // step-applier can enqueue the `step_applied` row in the approve tx.
+          // Absent (memory-mode) ⇒ applier seam not engaged (honest-degrade).
+          outboxStore,
+          // T-0443: optional FlowableClient for engine-drive post-approve (defKey resolution
+          // + reconcile). Absent ⇒ linear audit-only behaviour unchanged (honest-degrade).
+          flowableClient: flowableClient ?? undefined,
+          // T-0249 (review CE-1): the completion-effect registry — LIVE wire of the
+          // (procKey, activity) → effect primitive. Built unconditionally when a pool
+          // exists (the seam is a strict no-op for steps without a registered effect);
+          // the entitlement port inside is env-gated (CUSTOMER_ONBOARDING_LIVE) and
+          // FAILS VISIBLY (422 STEP_EFFECT_FAILED) when dormant — see
+          // src/composition/completion-effects-root.ts.
+          completionEffectRegistry: buildCompletionEffectRegistry(grantsPool),
+        }
+      : undefined,
+  );
+
+  // T-0536 [D8-R4 delivery]: register the MESSAGE INGEST door (POST /api/message)
+  // — the producer that finally feeds deliverMessageEnvelope so a process parked on
+  // a message-catch can RECEIVE its message and continue. Only when a DB pool + a
+  // live engine are present (honest-degrade: no delivery path without both). Tenant
+  // is taken from the ACTOR'S identity (resolveActorTenant), never from the body —
+  // cross-tenant correlation is structurally impossible (tenant-fail-closed).
+  registerMessageIngestRoutes(
+    router,
+    grantsPool && flowableClient
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+          engine: flowableClient,
+        }
+      : undefined,
+  );
+
+  // Register form-submission endpoints (T-0102 / T-0337 E15-S4 / T-0345).
+  // T-0345: when grantsPool is available, the FormDefResolver port is wired so
+  //   the route handler derives the active FormDef from the registry's record_schema
+  //   (single source of truth — registry governs what fields are accepted).
+  // Without grantsPool (memory mode / tests), the no-op memoryPersist fallback
+  // is used — mints a UUID for the response contract but no authoritative Map
+  // (T-0336 doctrine §3.3). Tests pass registerFormsRoutes with no deps.
+  registerFormsRoutes(
+    router,
+    grantsPool
+      ? {
+          persist: makeFormRecordPersister(
+            grantsPool,
+            (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+          ),
+          resolveFormDef: makeFormDefResolver(
+            grantsPool,
+            (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+          ),
+        }
+      : undefined,
+  );
+
+  // Register audit endpoints.
+  // T-0500: GET /api/audit now reads the REAL tenant-wide audit log — thread the
+  // grants pool (null in memory mode → the route fails honestly with 503). The
+  // demo instance-trace routes (/api/audit/:id, /api/audit/export) are pool-free.
+  registerAuditRoutes(router, store as JobStore, grantsPool ?? undefined);
+
+  // Register GET /api/rights/dictionaries BEFORE :roleId catch-all (R-1 fix).
+  // Seed-backed — no DATABASE_URL required (ADR §2.1 / AC-16).
+  registerDictionariesRoute(router);
+
+  // Register grant write-API (T-0030).
+  // Write routes require grantsPool; pool is non-null when DATABASE_URL is set.
+  if (grantsPool) {
+    registerGrantsRoutes(router, grantsPool);
+    // Register invoke routes (T-0024 E5.4).
+    registerInvokeRoutes(router, grantsPool);
+    // Register grant proposal endpoint (T-0039). Must come AFTER registerGrantsRoutes
+    // so the literal '/api/grants/propose' path is not confused with ':id' patterns.
+    // The path is a distinct fixed segment — it is never captured by the
+    // existing '/api/grants/:id/revoke' pattern.
+    // T-0489 [SECURITY]: keycloak-aware identity + tenant from the actor's own row
+    // (resolveActorTenant, fail-closed) instead of the hardcoded Dev Silo. Identity
+    // is resolved inside the handler via getAuthContext → resolveActorSlugFromAuth.
+    registerGrantProposeRoute(router, grantsPool, {
+      ...defaultGrantProposeDeps,
+      resolveActorTenant: (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+    });
+    // T-0418 [SECURITY] P0 + T-0328 G1: secret-handle.ts is FROZEN — its body still
+    // resolves identity via the dev-only x-dev-user extractActor. Wrap at the
+    // REGISTRATION SITE with the actor-inject façade (superset of withAuthRegistrar):
+    // it applies withAuth() (keycloak ⇒ valid Bearer REQUIRED; 401 otherwise, x-dev-user
+    // no longer bypasses) AND, in keycloak mode, resolves the validated JWT identity
+    // (getAuthContext → resolveActorSlugFromAuth, kind='human' only) into x-dev-user
+    // BEFORE the frozen body reads it — so the surface is FUNCTIONAL with a real Bearer,
+    // not just 401-closed (ADR T-0328 §4.1 G1; unblocks T-0471). Dev mode is a pure
+    // pass-through. secret-handle.ts is byte-untouched. (Tenant stays DEV_TENANT_ID
+    // in-body — secret-handle does not read x-tenant-id — so no injectTenant here.)
+    registerSecretHandleRoutes(
+      actorInjectRegistrar(router, {
+        resolveActorSlug: (sub, preferredUsername) =>
+          resolveActorSlugFromAuth(getOrgPool(), sub, preferredUsername),
+      }) as unknown as typeof router,
+      grantsPool,
+    );
+    // Register seed write-API (T-0140): POST /api/tenants|departments|positions|employees|roles
+    // and DELETE variants for reset. Same pool as grants.
+    registerSeedWriteRoutes(router, grantsPool);
+    // Register rights-INTENT operations (T-0223 D-2): hire/fire/substitute/urgent-revoke.
+    // Thin orchestration over the existing kernel (grants/substitution/validateNarrowing/
+    // audit). Same pool as grants. Explain-PDP-in-card reuses POST /api/pdp/explain (T-0136).
+    // T-0489 [SECURITY]: keycloak-aware identity + tenant from the actor's own row
+    // (resolveActorTenant, fail-closed). All four intent ops (hire/fire/substitute/
+    // urgent-revoke) now run under the caller's REAL tenant, not the Dev Silo.
+    registerRightsIntentRoutes(router, grantsPool, (actorSlug: string) =>
+      resolveActorTenant(getOrgPool(), actorSlug),
+    );
+    // Register dual-control change-request API (T-0390 D2-FU).
+    // MUST be registered BEFORE registerRightsRoutes (which adds GET /api/rights/:roleId).
+    // The router is first-match-wins; without this ordering the static path
+    // /api/rights/change-requests would be swallowed by the :roleId param route,
+    // calling findRole("change-requests") and returning 404 on every list request.
+    registerRightsChangeRequestRoutes(router, grantsPool);
+    // Register SoD read API (T-0391 D2-FU).
+    // MUST be registered BEFORE registerRightsRoutes (which adds GET /api/rights/:roleId).
+    // /api/rights/sod-rules and /api/rights/sod-check are literal paths and would
+    // otherwise be captured by the :roleId param slot (first-match-wins).
+    registerSodRoutes(router, grantsPool);
+    // Register SoD write API (T-0386 D6): CRUD for sod_constraint rows.
+    // Must also precede registerRightsRoutes (/api/rights/:roleId catch-all).
+    // PUT/DELETE /api/rights/sod-rules/:id are distinct paths from the literal
+    // GET /api/rights/sod-rules registered by registerSodRoutes above.
+    registerSodAdminRoutes(router, grantsPool);
+    // Register the honest tenant-state overview (T-0572 FR-1/FR-6): reads REAL
+    // choros.role/role_assignment/"grant" rows for the caller's tenant — not the
+    // demo-pack/RIGHTS_SEED fixture rights.ts serves. MUST also precede
+    // registerRightsRoutes: the literal path /api/rights/tenant-state would
+    // otherwise be swallowed by the GET /api/rights/:roleId catch-all.
+    registerRightsOverviewRoutes(router, grantsPool);
+    // T-0609: GET /api/rights/resources — the tenant's REAL application/registry
+    // dictionary for the «Дать роли право» grant form's resource selector (live
+    // acceptance finding: only the demo DICT_RESOURCES seed was reachable there).
+    // Additive read-only endpoint; does NOT replace or touch
+    // registerDictionariesRoute (grants.ts, byte-frozen — ci/checks/
+    // rights-ui-frozen-write.sh).
+    // T-0705 fix: MUST also precede registerRightsRoutes — the literal path
+    // /api/rights/resources was being swallowed by the GET /api/rights/:roleId
+    // catch-all (findRole("resources") → 404 "role not found" on every call,
+    // silently degraded to [] by the client's fetchRealResources() catch, but
+    // spamming the browser console — live-proof T-0652 F-3). This block was
+    // previously registered AFTER registerRightsRoutes (line ~780 pre-fix);
+    // moved here alongside its siblings above for the same reason they document.
+    registerRightsResourcesRoute(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register rights endpoints (includes GET /api/rights/:roleId catch-all).
+  // Registered AFTER registerRightsChangeRequestRoutes + registerSodRoutes so all
+  // static literal paths under /api/rights/* are already bound and first-match-wins
+  // routing never reaches the :roleId parameter slot for those paths.
+  registerRightsRoutes(router, store as JobStore);
+
+  // Register processes endpoints. The GET display plane is always registered; the
+  // POST /api/processes/start write-route (T-0280, FROZEN ADR §2.2) is wired only
+  // when a pool + FlowableClient are available — tenant-scoped via withTenantTx+RLS,
+  // actor→tenant membership resolved from the dev-user slug (AC-9 cross-tenant deny).
+  registerProcessesRoutes(
+    router,
+    store as JobStore,
+    grantsPool && flowableClient
+      ? {
+          pool: grantsPool,
+          flowable: flowableClient,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+          // T-0648: batch actor-display resolver for the instance-history
+          // `completedBy` slugs (processes.ts stays pg/db-import-free — FF-DISPLAY-4).
+          resolveActorsDisplay: (tenantId: string, ids: readonly string[]) =>
+            batchResolveActors(grantsPool, tenantId, ids),
+          // T-0721 (D-064, P1 из T-0714 — security/PDP): DETAIL read-visibility
+          // resolver — REUSE, BYTE-IDENTICAL composition to registerRecordRoutes's
+          // resolveReadVisibility above (getGrantsForSubject + loadTenantOrgAncestry
+          // → makeResourceAncestryOracle; single-resolver, FF-INST-VIS-2, no
+          // bespoke grant query). Closes T-0714 §3 P1: GET /api/processes/:id used
+          // to return Flowable's raw variables/history to any tenant member
+          // regardless of their READ grant on the instance's source record — the
+          // exact side-door around field-visibility (T-0081) / READ-PDP (T-0570)
+          // that gate records.ts already enforces.
+          resolveReadVisibility: async (actorSlug: string, tenantId: string, nowMs: number) => {
+            const [grants, orgOracle] = await Promise.all([
+              getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+              loadTenantOrgAncestry(grantsPool, tenantId),
+            ]);
+            const emptyRowIndex = new Map<string, RowAncestry>();
+            return {
+              grants,
+              ancestry: makeResourceAncestryOracle(orgOracle, emptyRowIndex),
+            };
+          },
+        }
+      : undefined,
+    // T-0328 G1: actor-slug resolver (kind='human') for the actor-inject façade so the
+    // FROZEN process-start body receives the validated JWT identity (x-dev-user +
+    // x-tenant-id) in keycloak mode. Wired only when DB-backed (grantsPool present).
+    grantsPool
+      ? (sub: string, preferredUsername: string | undefined) =>
+          resolveActorSlugFromAuth(getOrgPool(), sub, preferredUsername)
+      : undefined,
+  );
+
+  // Register grant trail endpoints (T-0031 / T-0514: real tenant via resolveActorTenant).
+  registerGrantTrailRoutes(
+    router,
+    grantsPool
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+        }
+      : undefined,
+  );
+
+  // Register agent hire endpoint (T-0042 — additive, no existing routes modified)
+  if (grantsPool) {
+    const kcPort = makeHttpKeycloakAdminPort();
+    registerAgentRoutes(router, grantsPool, kcPort);
+    // GET /api/agents (list) + GET /api/agents/:id (T-0271 — additive, withAuth,
+    // tenant-scoped via resolveActorTenant; metadata only, no secrets).
+    registerAgentListRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register named-binding endpoints (T-0072 E11.1 — additive).
+  // T-0376: actor-scoped /api/forms/binding routes require resolveActorTenant deps.
+  // T-0656: the agent machine seam (POST /api/forms/document-ops) shares the same
+  // deps + reuses binding.ts's auth/role/Floor gate (one contract, two drivers).
+  if (grantsPool) {
+    const bindingDeps = {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    };
+    registerBindingRoutes(router, grantsPool, bindingDeps);
+    registerFormDocumentOpsRoute(router, grantsPool, bindingDeps);
+  }
+
+  // Register the REAL process catalog + process↔application binding (T-0270 E13).
+  // GET /api/process-catalog (real defs from process_definition 074 + real instances
+  // from the audit-backed projection), GET/POST /api/process-app-bindings. All
+  // withAuth-wrapped + tenant-scoped via resolveActorTenant (same deps shape as the
+  // applications/agents-list APIs). Deps-gated on grantsPool — no-DB honest degrade.
+  if (grantsPool) {
+    registerProcessCatalogRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+      // T-0709 [E16/P1]: pass the shared FlowableClient so the catalog overlays each
+      // running instance's LIVE active step/role (the source /api/processes/:inst
+      // reads) instead of the start-time snapshot. Optional — absent ⇒ honest degrade.
+      flowable: flowableClient ?? undefined,
+      // T-0771 (E16 consistency, live-proof T-0742): read-visibility resolver —
+      // BYTE-IDENTICAL composition to registerProcessesRoutes'/registerRecordRoutes'
+      // resolveReadVisibility above (getGrantsForSubject + loadTenantOrgAncestry →
+      // makeResourceAncestryOracle; single-resolver, FF-INST-VIS-2, no bespoke grant
+      // query). Narrows the catalog's per-definition instance_count to the SAME
+      // visible set the /api/processes grid's ?definition=<key> deep-link shows —
+      // closes the T-0742 live-proof mismatch (card said "N инстансов", click showed
+      // 0 rows for a non-participant).
+      resolveReadVisibility: async (actorSlug: string, tenantId: string, nowMs: number) => {
+        const [grants, orgOracle] = await Promise.all([
+          getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+          loadTenantOrgAncestry(grantsPool, tenantId),
+        ]);
+        const emptyRowIndex = new Map<string, RowAncestry>();
+        return {
+          grants,
+          ancestry: makeResourceAncestryOracle(orgOracle, emptyRowIndex),
+        };
+      },
+    });
+  }
+
+  // Register applications create/list/get API (T-0262 E13 — first write-surface
+  // over a config primitive; the root fix for "no create buttons"). Tenant-scoped
+  // via withTenantTx + RLS; the actor's tenant is resolved from the dev-user slug.
+  // Siblings T-0263 (registry_def) and T-0264 (record) add their own blocks below.
+  if (grantsPool) {
+    registerApplicationRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0609/T-0705: GET /api/rights/resources registration moved above (next to
+  // registerRightsOverviewRoutes) so it precedes registerRightsRoutes' GET
+  // /api/rights/:roleId catch-all — see the comment there.
+
+  // T-0562 (PD-26 / ADR T-0561): «Опубликовать связанное решение по кнопке».
+  //   GET  /api/applications/:id/publish-preview  — derive the connected set (1 hop:
+  //        app + x-relation справочники + bound processes + step forms) + per-item tier.
+  //   POST /api/applications/:id/publish-solution — promote each draft item, REUSING
+  //        promoteTier (application) + publishProcessByKey (process). Per-item results;
+  //        200 all-ok / 207 partial. NO stored 'partial' state — the response is truth.
+  // Privileged: owner/admin OR authoring_draft (resolveActorPrivilege, T-0557) → else 403.
+  // Needs flowableClient for the process-publish path (publishProcessByKey).
+  if (grantsPool && flowableClient) {
+    registerSolutionPublishRoutes(router, {
+      pool: grantsPool,
+      flowable: flowableClient,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register sections (разделы) CRUD API (T-0551 E-NAV-IA — раздел = первоклассная
+  // сущность/папка, РЕВЕРС T-0540 строки). Tenant-scoped via withTenantTx + RLS
+  // (policy section_tenant_isolation); actor's tenant resolved from the dev-user
+  // slug / KC sub, never from headers. Same deps as applications.
+  if (grantsPool) {
+    registerSectionRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register user-prefs (личные настройки) CRUD API (T-0651 E-NAV-IA/sidebar-
+  // workspace — generic per-actor key/value store, migration 129). Tenant- AND
+  // actor-scoped via withTenantTx + RLS (policy user_pref_tenant_isolation) +
+  // an actor filter baked into every query; no extra privilege gate (a
+  // preference costs nothing to write and touches only the writer's own row).
+  if (grantsPool) {
+    registerUserPrefRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register list-view (сохранённые представления списка) CRUD API (T-0581 —
+  // view registry, столп 2/К1). Tenant-scoped via withTenantTx + RLS (policy
+  // list_view_tenant_isolation, migration 123); mutation requires the SAME
+  // configurator privilege as record/schema edits (owner/admin | authoring_draft,
+  // resolveActorPrivilege — honest-degrade when omitted, mirrors records.ts).
+  if (grantsPool) {
+    registerListViewRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register record create/list/get/update API (T-0264 E13 — the DATA-row write
+  // surface; sibling of applications/registry_def). Records are validated against
+  // their governing registry_def's record_schema, tenant-scoped via withTenantTx +
+  // RLS (policy record_tenant_isolation), and create/update each write an audit
+  // event (hash-chain). Same deps + tenant-resolution as applications.
+  // T-0351 E16: flowableClient passed so on_create bindings fire process start
+  // in the same tx as record creation (create = start, S1 seam). When flowableClient
+  // is null (no engine configured) the on_create trigger is silently skipped
+  // (honest-degrade — record still created, no process started).
+  if (grantsPool) {
+    registerRecordRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+      // T-0419 (D7-3-FU): field-visibility resolver — active in production.
+      // coveringGrants: same getGrantsForSubject DAO used by the full PDP
+      //   (single-resolver constraint — no second authority path).
+      // policy: derived from data_classification rows for the tenant (T-0081 §4.1):
+      //   fields classified 'confidential'/'restricted' become roleScopedFields;
+      //   no new store — projection of existing migration-017 rows.
+      // Honest-degrade: if grantsPool is null (no DB), this dep is absent and
+      //   redaction degrades to a no-op (NF-1, block above guards).
+      resolveFieldVisibility: async (actorSlug: string, tenantId: string, nowMs: number) => ({
+        coveringGrants: await getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+        policy: await getFieldVisibilityPolicy(grantsPool, tenantId),
+      }),
+      // T-0570 (D3, READ-PDP): read-visibility resolver — active in production,
+      // wired in the SAME commit that ships migrations/117 (the default-open
+      // backfill), so the gate never turns on before every tenant has a
+      // covering grant (NF-2). grants: same getGrantsForSubject DAO as every
+      // other PDP consumer (single-resolver, FR-7). ancestry: composite oracle
+      // — org hierarchy delegates to the real per-tenant department tree
+      // (loadTenantOrgAncestry, unchanged semantics); resource hierarchy answers
+      // via the RESOURCE_ROOT sentinel (O(1) "covers everything", ADR §2.1 rule
+      // 2) and self-identity (rule 1, record-scoped narrow grants, AC-5) without
+      // materializing a per-tenant resource map. The rowIndex is empty here
+      // (rule 3 registry/application-scoped narrowing — an explicit, documented
+      // future increment, ADR §2.1/§5 out-of-scope) — record-scoped narrow
+      // grants (rule 1) and the default-open root grant (rule 2) both work fully.
+      resolveReadVisibility: async (actorSlug: string, tenantId: string, nowMs: number) => {
+        const [grants, orgOracle] = await Promise.all([
+          getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+          loadTenantOrgAncestry(grantsPool, tenantId),
+        ]);
+        const emptyRowIndex = new Map<string, RowAncestry>();
+        return {
+          grants,
+          ancestry: makeResourceAncestryOracle(orgOracle, emptyRowIndex),
+        };
+      },
+      // T-0351 E16: wire the shared flowableClient for on_create trigger.
+      flowable: flowableClient ?? undefined,
+      // T-0536 [D8-R4 delivery]: wire the internal-signal emitter so a committed
+      // record UPDATE broadcasts the generic «record-status-changed» signal WITHIN
+      // the record's tenant (keyed by the record id), advancing any process parked
+      // on a matching signal-catch. Reuses the SAME deliverMessageEnvelope path as
+      // POST /api/message via emitInternalSignal. Only when a live engine is present
+      // (honest-degrade: no signal path without an engine to fire the catch).
+      emitSignal: flowableClient
+        ? async ({ tenantId, recordId, registryDefId, actor, nowMs }) => {
+            await emitInternalSignal(
+              {
+                pool: grantsPool,
+                resolveActorTenant: (s: string) => resolveActorTenant(getOrgPool(), s),
+                engine: flowableClient,
+              },
+              {
+                tenantId,
+                signalName: RECORD_STATUS_SIGNAL,
+                // Generic business key: the record id. A process binds its
+                // signal-catch correlationField to resolve to this record's id.
+                correlationKey: recordId,
+                payload: { record_id: recordId, registry_def_id: registryDefId },
+                actor,
+                nowMs,
+              },
+            );
+          }
+        : undefined,
+    });
+  }
+
+  // Register registry_def schema-change API (T-0177 T-0121c) + create/list/get
+  // (T-0263 E13). PUT/PATCH use the lazy pool (artifacts.ts pattern); the T-0263
+  // create/list/get routes are deps-gated on grantsPool + resolveActorTenant (same
+  // tenant-resolution as applications) and register only when grantsPool exists.
+  registerRegistryDefRoutes(
+    router,
+    undefined,
+    undefined,
+    grantsPool
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+        }
+      : undefined,
+  );
+
+  // Register artifact tier-promote endpoint (T-0087 E12.6).
+  // T-0489 G2 [SECURITY]: withAuth-wrapped at the registration site + tenant from the
+  // actor's own row (resolveActorTenant, fail-closed) instead of the hardcoded Dev Silo.
+  registerArtifactRoutes(router, {
+    resolveActorTenant: (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+  });
+
+  // Register notification preference endpoints (T-0171 E-N.4).
+  if (grantsPool) {
+    registerNotificationPrefRoutes(router, grantsPool);
+  }
+
+  // Register notification center endpoints (T-0173 E-N.6).
+  if (grantsPool) {
+    registerNotificationRoutes(router, grantsPool);
+  }
+
+  // Register email-channel-config endpoints (T-0203: HTTP surface over the
+  // already-implemented notification-email.ts CRUD; ADR T-0120 §2.3).
+  if (grantsPool) {
+    registerEmailChannelConfigRoutes(router, grantsPool);
+  }
+
+  // Register PDP explain endpoint (T-0136).
+  // Registered unconditionally — returns 503 NO_DATABASE when pool is absent (R-7).
+  registerPdpExplainRoutes(router, grantsPool ?? null);
+
+  // Register report_page CRUD + promote routes (T-0178 T-0121d).
+  // T-0489 G2 [SECURITY]: withAuth-wrapped at the registration site + tenant from the
+  // actor's own row (resolveActorTenant, fail-closed) instead of the hardcoded Dev Silo.
+  registerReportPageRoutes(router, undefined, undefined, (actorSlug: string) =>
+    resolveActorTenant(getOrgPool(), actorSlug),
+  );
+
+  // Register Floor-1 aggregate renderer + Floor-2 RLS-gated data API (T-0181 T-0121g).
+  // T-0489 G2 [SECURITY]: withAuth-wrapped at the registration site + tenant from the
+  // actor's own row (resolveActorTenant, fail-closed) instead of the hardcoded Dev Silo.
+  //
+  // T-0632 [SECURITY, столп 4]: record-level READ-PDP resolver — active in production,
+  // BYTE-IDENTICAL composition to registerRecordRoutes's resolveReadVisibility above
+  // (getGrantsForSubject + loadTenantOrgAncestry → makeResourceAncestryOracle;
+  // single-resolver, NF-1). Closes ADR-T0587 §1.1's finding: without this, a Floor-1
+  // aggregate (SUM/COUNT/...) was computed over the WHOLE registry regardless of the
+  // actor's record-scope READ grant — only the application-level checkReadGrant gated
+  // page visibility, never row visibility. Honest-degrade to undefined (legacy
+  // full-registry aggregate) ONLY when grantsPool is null (no DATABASE_URL — the whole
+  // render path 503s on DB access anyway in that case).
+  const reportAggReadVisibility: ReportAggReadVisibilityResolver | undefined = grantsPool
+    ? async (actorSlug: string, tenantId: string, nowMs: number) => {
+        const [grants, orgOracle] = await Promise.all([
+          getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+          loadTenantOrgAncestry(grantsPool, tenantId),
+        ]);
+        const emptyRowIndex = new Map<string, RowAncestry>();
+        return {
+          grants,
+          ancestry: makeResourceAncestryOracle(orgOracle, emptyRowIndex),
+        };
+      }
+    : undefined;
+  registerReportPageRenderRoutes(
+    router,
+    undefined,
+    undefined,
+    (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+    reportAggReadVisibility,
+  );
+
+  // Register Floor-1 form editor (T-0073 E11.2 — stateless pure transform).
+  // Pool is used solely for the keycloak-mode process_designer authz lookup
+  // (review R-1); dev mode works without it, so wiring stays unconditional.
+  registerFloor1EditorRoutes(router, grantsPool ?? null);
+
+  // Register DMN rule table WRITE API (T-0433).
+  // Endpoints: GET/POST /api/dmn-rule-tables, POST /api/dmn-rule-tables/:id/publish.
+  // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
+  // D-056: rows land in choros.dmn_rule_table (same table loadPublishedRuleTables reads).
+  if (grantsPool) {
+    registerDmnRuleTableRoutes(router, grantsPool);
+  }
+
+  // Register vendor activation + vendor-service endpoints (T-0127 / T-0198).
+  // The ONLY HTTP surface that reads activation/entitlement state. GET /vendor/activation
+  // always 200 (reporting is not gating); vendor-service calls return 402/403 when the
+  // subscription does not grant the service. Core/user endpoints never read the key.
+  registerVendorActivationRoutes(router);
+
+  // Register process-definition CRUD + publish routes (T-0252 E8 C2).
+  // Requires grantsPool (same tenant RLS pattern) + the shared FlowableClient
+  // composed above from env (NO env reads in core — NF-1).
+  if (grantsPool && flowableClient) {
+    // T-0468 [SECURITY]: tenant comes from the actor's identity (resolveActorTenant),
+    // never from an x-tenant-id header — same injection shape as applications.ts.
+    registerProcessDefsRoutes(
+      router,
+      grantsPool,
+      flowableClient,
+      (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+    );
+
+    // T-0465 (D8-G4): bundle-promote — publish a whole text-first solution bundle
+    // (apps + sections + processes tagged with one bundle_id) as ONE unit. Reuses
+    // promoteTier (config tier) + publishProcessByKey (process publish). Human-gated.
+    registerSolutionBundleRoutes(router, {
+      pool: grantsPool,
+      flowable: flowableClient,
+      resolveActorTenant: (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0342: Register public registration endpoint (POST /api/register).
+  // Deps-gated on grantsPool (DB required to create the new tenant). KC registrar
+  // config is read from env (KC_REGISTRAR_CLIENT_ID + KC_REGISTRAR_CLIENT_SECRET);
+  // if absent, endpoint returns 503 AUTH_UNAVAILABLE (honest-degrade per ADR §8 step 4).
+  // Do NOT wrap in withAuth — this is a PRE-LOGIN public endpoint (FF-1).
+  //
+  // T-0583: the SAME kcUserPort (live or honest-degrade) is reused by
+  // registerUserMgmtRoutes below — one KC-admin-port instance for both
+  // self-registration AND per-tenant "create user account" (N5, no second
+  // KC-integration module).
+  if (grantsPool) {
+    const registrarClientSecret = process.env["KC_REGISTRAR_CLIENT_SECRET"];
+    const kcUserPort = registrarClientSecret
+      ? makeHttpKeycloakUserPort()
+      : // No registrar secret configured: port always returns AUTH_UNAVAILABLE (honest-degrade)
+        {
+          async createHumanUser(): Promise<{ userId: string }> {
+            const err = new Error("AUTH_UNAVAILABLE");
+            (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+            throw err;
+          },
+          async deleteUser(): Promise<void> {
+            /* no-op compensation */
+          },
+          async setUserEnabled(): Promise<void> {
+            // T-0583: honest-degrade — no registrar secret configured, so a
+            // deactivate/reactivate attempt must surface 503, not silently
+            // succeed. registerUserMgmtRoutes maps this thrown code to 503.
+            const err = new Error("AUTH_UNAVAILABLE");
+            (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+            throw err;
+          },
+          async revokeUserSessions(): Promise<{ revoked: boolean }> {
+            // T-0702: honest-degrade — no registrar secret configured, so
+            // there is no KC to call. setUserEnabled above already throws
+            // 503 before this would ever be reached in the deactivation
+            // flow; this never-throw stub exists only to satisfy the port
+            // contract structurally (mirrors this object's other methods).
+            return { revoked: false };
+          },
+        };
+    registerRegisterRoutes(router, { pool: grantsPool, kc: kcUserPort });
+    // T-0583: per-tenant "create user account" / list / deactivate — reuses
+    // the identical kcUserPort + the caller's own tenant (resolveActorTenant),
+    // never DEV_TENANT_ID (mirrors registerRightsIntentRoutes wiring above).
+    registerUserMgmtRoutes(router, grantsPool, kcUserPort, (actorSlug: string) =>
+      resolveActorTenant(getOrgPool(), actorSlug),
+    );
+  }
+
+  // T-0352 (E16): Register GET /api/records/:id/links — 1-hop LIVE cross-app
+  // projection for the record card (§6 card policy: lazy, per-section expand).
+  // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
+  // APPEND-ONLY: must be the last register* call before setFallback.
+  //
+  // T-0739 [SECURITY P2, столп 4]: resolveReadVisibility — reuses the SAME
+  // reportAggReadVisibility instance wired above for registerReportPageRenderRoutes
+  // (getGrantsForSubject + loadTenantOrgAncestry, BYTE-IDENTICAL composition,
+  // NF-1 single-resolver). Gates the SOURCE record's READ-PDP visibility
+  // (ADR-T0739 §3.3).
+  registerRecordLinksRoutes(
+    router,
+    grantsPool
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+          resolveReadVisibility: reportAggReadVisibility,
+        }
+      : undefined,
+  );
+
+  // T-0363 (c): Wire analyst production ports so handleAnalyst reads real DB data.
+  // Ports are read-only (RecordLister, CycleTimeLister, ActorBreakdownLister).
+  // T-0383 (D5): also wire loadSystemPrompt port for per-tenant analyst prompt override.
+  // Honest-degrade: when grantsPool is null (no DB) the default no-op ports remain.
+  if (grantsPool) {
+    setAnalystPorts({
+      loadCycleTime: (tenantId: string) =>
+        loadCycleTimeByActivity(grantsPool, tenantId),
+      loadActorBreakdown: (tenantId: string) =>
+        loadActorTypeBreakdown(grantsPool, tenantId),
+      // T-0607 (а): registry-digest port — the analyst's honest, READ-PDP-scoped
+      // view of the entity data the asker may read (счёт + примеры в правах).
+      // Closes the столп-6 blindness: the analyst previously read only the S3
+      // journal (listRecords was never wired), so «сколько заведено?» answered
+      // «записей нет» while the user SEES the section. MVP digest (not a full
+      // record-lister — ADR-T0607 §1.1 / O1), enough for the honest answer.
+      loadRegistryDigest: (tenantId: string, actorSlug: string) =>
+        loadReadableRegistryDigest(grantsPool, tenantId, actorSlug, Date.now()),
+      // T-0383: per-tenant analyst system prompt (reads published instruction_meta).
+      loadSystemPrompt: (tenantId: string) =>
+        readPublishedAssistantPrompt(grantsPool, tenantId, "analyst"),
+    });
+  }
+
+  // T-0359 (E17): Register AI-assistant routes (thread/message/budget).
+  // T-0382 (D5): llmPortFactory is async and reads per-tenant agent_card config.
+  // T-0600: NO global env fallback anymore — see makeLlmPortFactory's doc
+  //   comment for the BYO-honesty rationale (a prior revision fell back to a
+  //   shared DEEPSEEK_API_KEY; that step has been removed).
+  // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
+  // APPEND-ONLY: the last register* call before setFallback.
+  if (grantsPool) {
+    registerAssistantRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+      // T-0382: async factory — reads per-tenant agent_card llm_* config only;
+      // no config (or an invalid handle) → dormantLlmPort (T-0600).
+      llmPortFactory: (tenantId: string) => makeLlmPortFactory(tenantId, grantsPool),
+      // T-0477 [E-AGENTS L5]: spend-tracking context factory — resolves the default
+      // llm_connection for the tenant (for prices/connection_id). Non-fatal: returns
+      // null when the tenant has no default connection or on DB error.
+      spendTrackingFactory: async (tenantId: string) => {
+        try {
+          const client = await grantsPool.connect();
+          let conn = null;
+          try {
+            await client.query("BEGIN");
+            await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+            await client.query("SET LOCAL search_path TO choros");
+            conn = await getDefaultLlmConnection(client as unknown as import("./db/audit-writer.js").PgClientLike, tenantId);
+            await client.query("COMMIT");
+          } catch {
+            await client.query("ROLLBACK").catch(() => {});
+          } finally {
+            client.release();
+          }
+          if (!conn) return null;
+          return {
+            pool: grantsPool,
+            tenantId,
+            connectionId: conn.id,
+            priceInputPer1k: conn.priceInputPer1k,
+            priceOutputPer1k: conn.priceOutputPer1k,
+            currency: conn.currency,
+          };
+        } catch {
+          return null;
+        }
+      },
+    });
+  }
+
+  // T-0382 (D5): LLM connection screen backend (GET/PUT per-tenant LLM config).
+  // Additive — registers two routes to read/write llm_endpoint+llm_model on agent_card.
+  // Secret-handle binding remains via the existing POST /api/agents/:id/secret-handle.
+  if (grantsPool) {
+    registerLlmConfigRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0474 (E-AGENTS L2): named LLM connection registry routes.
+  // GET/POST /api/llm-connections — list/create reusable LLM connection profiles
+  // (migration 094 choros.llm_connection). Management-tier gated, tenant-scoped via
+  // resolveActorTenant + withTenantTx (FORCE RLS). The opaque secret handle is never
+  // egressed (secret_bound boolean + redacted scheme only).
+  if (grantsPool) {
+    registerLlmConnectionsRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0476 (E-AGENTS L3): app:// encrypted secret store — "вставить API-ключ".
+  // POST/GET-status/DELETE /api/llm-connections/:id/key — write-only key binding.
+  // The raw key is encrypted (AES-256-GCM) into app_secret and the connection's
+  // secret_handle is set to app://<id>; the key is NEVER returned/logged. DORMANT
+  // (503 honest) when APP_SECRET_MASTER_KEY is unset. Read at the composition root.
+  if (grantsPool) {
+    registerAppSecretRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+      getMasterKey: () => process.env["APP_SECRET_MASTER_KEY"],
+    });
+  }
+
+  // T-0496: "Проверить подключение" — server-side LLM connection probe.
+  // POST /api/llm-connections/:id/test makes ONE minimal chat call through the
+  // existing OpenAILlmPort adapter using the REAL tenantSecretResolver (app:// decrypt
+  // in memory). Same authz as edit (owner OR llm_connection:configure), tenant-scoped.
+  // The raw key NEVER leaves the adapter; provider errors are sanitized before egress.
+  if (grantsPool) {
+    registerLlmConnectionTestRoute(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+      // Composition-root factory: builds the live port with the tenant secret resolver.
+      // Returns null when the connection cannot produce a usable port (invalid handle
+      // shape or no resolvable endpoint) — the route maps null → honest ok:false.
+      makeLlmPort: ({ tenantId, endpoint, model, secretHandle }) => {
+        // RL-3: only an opaque handle (app:///vault://) is usable. A malformed handle
+        // (or one that slipped through as a raw key) is rejected here — never sent.
+        const verdict = validateSecretHandleShape(secretHandle);
+        if (!verdict.ok) return null;
+        // The connection's own endpoint is preferred; fall back to the DeepSeek base
+        // only when the profile left it blank (a self-hosted/other profile must set one).
+        const ep = endpoint && endpoint.length > 0 ? endpoint : DEEPSEEK_BASE_URL;
+        return new OpenAILlmPort({
+          endpoint: ep,
+          model: model && model.length > 0 ? model : DEEPSEEK_MODEL,
+          secretHandle,
+          tenantId,
+          secretResolver: tenantSecretResolver,
+          // A probe must fail fast — cap the wait so a dead endpoint returns promptly.
+          timeoutMs: 15_000,
+        });
+      },
+    });
+  }
+
+  // T-0383 (D5/PD-6): per-tenant assistant system prompt routes.
+  // GET/PUT /api/assistant/prompt/:role ('analyst' | 'configurator').
+  // Additive — registers two routes per role for the prompt editor UI.
+  if (grantsPool) {
+    registerAssistantPromptRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0477 [E-AGENTS L5]: spend accounting routes (Расход screen backend).
+  // GET /api/spend — aggregates (windows + by-connection).
+  // GET /api/spend/recent — most-recent N rows.
+  // Auth: any tenant member (read-only accounting — no mutations, no ceilings).
+  if (grantsPool) {
+    registerSpendRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0405 [PD-20]: operational analytics — GROUP BY on index, lightweight result,
+  // xlsx/csv export. GET /api/operational-analytics, GET /api/operational-analytics/export.
+  //
+  // T-0739 [SECURITY P2, столп 4]: resolveReadVisibility — reuses the SAME
+  // reportAggReadVisibility instance wired above for registerReportPageRenderRoutes
+  // (getGrantsForSubject + loadTenantOrgAncestry, BYTE-IDENTICAL composition,
+  // NF-1 single-resolver). Entry gate (>=1 confirmed grant) + record_sums
+  // narrowing to READ-PDP-visible records (T-0632 parity, ADR-T0739 §3.1).
+  if (grantsPool) {
+    registerOperationalAnalyticsRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+      resolveReadVisibility: reportAggReadVisibility,
+    });
+  }
+
+  // T-0518: file attachment routes.
+  // POST /api/records/:recordId/files  — upload file (raw body, X-File-Name header)
+  // GET  /api/records/:recordId/files  — list files on a record
+  // GET  /api/files/:fileVersionId/download — stream/redirect to file content
+  //
+  // FsObjectStore rootDir: FILE_STORE_ROOT env (default /app/uploads — ephemeral
+  // in-container; a persistent volume mount is an operator concern, not wired here).
+  // The PDP uses makeFileRecordResolver (record-derived authz, no file ACL).
+  if (grantsPool) {
+    const fileStoreRoot = process.env["FILE_STORE_ROOT"] ?? "/app/uploads";
+    const pgFileStore = new PgFileStore(grantsPool);
+    const fsObjectStore = new FsObjectStore(fileStoreRoot);
+    // Build a per-request-style FileRecordResolver that loads grants + ancestry
+    // fresh from DB each call (same pattern as pdp-explain.ts). The grant source
+    // uses makeDbGrantSource (same DAO as the full PDP).
+    const fileGrantSource = makeDbGrantSource(grantsPool);
+    const fileRecordSource = {
+      async getRecord(ref: ResourceRef): Promise<Record<string, unknown> | null> {
+        if (ref.kind !== "record") return { __sentinel__: true };
+        const client = await grantsPool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${ref.tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+          const { rows } = await client.query<{ data: Record<string, unknown> }>(
+            `SELECT data FROM choros.record WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+            [ref.tenantId, ref.recordId],
+          );
+          await client.query("COMMIT");
+          return rows.length > 0 ? (rows[0]!.data ?? {}) : null;
+        } catch (err) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
+      },
+    };
+    // T-0518 + T-0620 [P0/read parity]: the READ-path PDP resolver — file download
+    // is decided as the owner record's `read` op, the SAME authority record-READ
+    // enforces. CRITICAL: it must use the SAME composite resource-ancestry oracle
+    // record-READ uses (makeResourceAncestryOracle over the tenant's real org tree
+    // + the RESOURCE_ROOT sentinel), NOT the raw org-only SEED_ORACLE. SEED_ORACLE
+    // cannot resolve the RESOURCE_ROOT default-open read grant (migration 124 /
+    // T-0619) that every staff member holds, so a plain reader's download 403'd —
+    // file-read gave LESS than record-read. Building the composite oracle per-call
+    // (keyed on the handle's tenant) closes that: role-reader/record/read now
+    // covers file download exactly as it covers record read (parity, T-0570 §2.1).
+    const fileReadResolver: FileRecordResolver = {
+      async resolveRecordOp(handle, subject, op) {
+        const orgOracle = await loadTenantOrgAncestry(grantsPool, handle.tenantId);
+        const emptyRowIndex = new Map<string, RowAncestry>();
+        const ancestry = makeResourceAncestryOracle(orgOracle, emptyRowIndex);
+        const readResolver = makeFileRecordResolver({
+          grants: fileGrantSource,
+          records: fileRecordSource,
+          ancestry,
+        });
+        return readResolver.resolveRecordOp(handle, subject, op);
+      },
+    };
+    // T-0620 [P0/file-write-authz parity]: file WRITE (upload/replace = `update`,
+    // delete = `delete`) must pass the SAME authorization barrier as record-WRITE,
+    // NOT a stricter one. Record-write today is gated by tenant-membership only —
+    // its write-PDP (resolveWriteFacet in records.ts) is OPTIONAL and NOT yet wired,
+    // so it honest-degrades to allow-for-tenant-members (no `record/update` grant is
+    // required anywhere). File-write was demanding a `record/update`/`record/delete`
+    // grant that NOBODY holds (the only record grant is role-reader/record/read),
+    // so every upload 403'd — an asymmetry, not a policy.
+    //
+    // This SPLIT resolver restores parity: `read` → the real PDP above (unchanged);
+    // `update`/`delete` → record-write parity = tenant-gate fail-closed FIRST, then
+    // the same authority record-write applies (allow for a resolved tenant member).
+    // When the write-PDP is connected in a later task, BOTH record-write and this
+    // seam connect to it in the SAME commit and gate together, consistently. This is
+    // NOT a second file authority (FF-NOACL): the file core still translates each
+    // file op to its record op and asks THIS injected resolver; the composition root
+    // decides the write op's authority exactly as it does for record-write.
+    const fileResolver: FileRecordResolver = {
+      resolveRecordOp(handle, subject, op) {
+        // READ stays on the real record/read PDP — download authority is unchanged.
+        if (op === "read") {
+          return fileReadResolver.resolveRecordOp(handle, subject, op);
+        }
+        // WRITE (update/delete): record-write parity. Tenant-gate fail-closed FIRST
+        // (cross-tenant file access stays denied — tenant isolation is NOT relaxed),
+        // then allow — the same honest-degrade record-write runs under until the
+        // shared write-PDP is connected.
+        if (handle.tenantId !== subject.tenantId) {
+          return Promise.resolve({ denied: true, reason: "cross_tenant" });
+        }
+        return Promise.resolve({ denied: false, ref: handle.ref, fields: {} });
+      },
+    };
+    registerFileRoutes(router, {
+      pool: grantsPool,
+      fileStore: pgFileStore,
+      objectStore: fsObjectStore,
+      resolver: fileResolver,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Set static file handler as fallback for everything else
+  router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
 
   return router;
 }
@@ -31,10 +1478,33 @@ function buildRouter(store: JobStore): Router {
  * for deterministic lock-expiry testing. Zero-arg usage (index.ts, health.test.ts)
  * is preserved via the default parameter.
  *
+ * T-0143: additive optional second parameter `resolverDeps?: ResolverDeps`.
+ * When present it is threaded to `buildRouter` where it is captured in a closure
+ * for use by any route that calls `makeGrantResolver` (FR-3, NF-2 / FE-W23-0008).
+ * Zero-arg and one-arg callers are unaffected (additive optional parameter).
+ * When absent, `hash` fields drop honestly (FR-2 / NF-3).
+ *
+ * T-0186: additive optional third parameter `storeMode?: StoreMode`. When
+ * `storeMode === 'memory'`, forces all store factories (job/timer/outbox) to
+ * return in-memory implementations regardless of DATABASE_URL. Tests that need
+ * to remain green under ambient DATABASE_URL pass 'memory' here. Production
+ * callers that omit the parameter get the default 'auto' behaviour (env-based
+ * store selection preserved). When an explicit `store` is already provided as the
+ * first argument, `storeMode` only affects the timer and outbox stores.
+ *
  * Does NOT call .listen() — that is the caller's responsibility.
  */
-export function createServer(store: JobStore = new JobStore()): http.Server {
-  const router = buildRouter(store);
+export function createServer(
+  store?: JobStore | PostgresJobStore | InMemoryJobStore,
+  // Partial<ResolverDeps>: at composition-root time only keyedDigest is available;
+  // per-request sources (grants/records/ancestry) are assembled at the route (T-0143 §4.3 amendment).
+  // Absent => hash fields drop honestly (FR-2 / NF-3).
+  resolverDeps?: Partial<ResolverDeps>,
+  // T-0186: explicit store mode; 'memory' pins to InMemoryJobStore regardless of DATABASE_URL.
+  storeMode?: StoreMode
+): http.Server {
+  const resolvedStore = store ?? createJobStore(undefined, storeMode);
+  const router = buildRouter(resolvedStore, createTimerStore(undefined, storeMode), createOutboxStore(undefined, storeMode), resolverDeps);
   return http.createServer(router.dispatch.bind(router));
 }
 
@@ -42,14 +1512,27 @@ export function createServer(store: JobStore = new JobStore()): http.Server {
  * Named export preserved for backwards-compatibility with health.test.ts, which
  * imports and calls `handleRequest` directly rather than going through createServer.
  *
- * Backed by a module-level default-store router so that GET /health (and the
+ * Backed by a lazy-built default-store router so that GET /health (and the
  * external-worker routes) behave identically to what createServer() would produce.
+ * Lazy evaluation ensures environment variables (e.g., CHOROS_WEB_DIST) set by
+ * test harnesses are respected.
+ *
+ * T-0186: additive optional third parameter `storeMode?: StoreMode`. Routers are
+ * cached separately per mode so that a 'memory'-mode call and a subsequent
+ * 'auto'-mode call each get their own valid cached router without
+ * cross-contamination. Tests pin 'memory' to remain green under ambient
+ * DATABASE_URL; production callers omit the parameter (default 'auto' path).
  */
-const _defaultRouter = buildRouter(new JobStore());
+const _routerCache: Partial<Record<StoreMode, Router>> = {};
 
 export const handleRequest = (
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  storeMode?: StoreMode
 ): void => {
-  _defaultRouter.dispatch(req, res);
+  const mode: StoreMode = storeMode ?? "auto";
+  if (!_routerCache[mode]) {
+    _routerCache[mode] = buildRouter(createJobStore(undefined, mode), createTimerStore(undefined, mode), createOutboxStore(undefined, mode));
+  }
+  _routerCache[mode]!.dispatch(req, res);
 };

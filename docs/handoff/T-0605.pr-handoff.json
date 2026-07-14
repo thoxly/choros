@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0605",
+  "status": "pr_open",
+  "branch": "task/T-0605-rights-eligibility-sew",
+  "pr_url": "local:task/T-0605-rights-eligibility-sew",
+  "live_proof": "pending orchestrator",
+  "summary": "Живой факт приёмки (тенант Аксон, стенд, 2026-07-03): назначение роли на экране «Доступ» не даёт eligibility в инбоксе — pool-задача движка с candidate group роли отдаёт 403 NOT_ELIGIBLE у владельца тенанта ДАЖЕ после того, как он выдал себе эту роль через /rights и держатель отображается на карточке роли; взять pool-задачу не может НИКТО (включая seed-держателя «снабженца»); второй 403 «Взять» молчаливый. Разрыв — НЕ два стора и НЕ identity-ключ: и запись (POST /api/role-assignments → grants.ts:1160), и оба чтения (карточка роли rights-overview.ts:295-298; PDP grants-dao.ts getRoleSlugsForActor/getGrantsForSubject) идут в ОДНУ таблицу choros.role_assignment по ОДНОМУ ключу employee_id (slug→id). Расходятся ПРЕДИКАТЫ АКТИВНОСТИ назначения. Канонический контракт «назначение активно» задокументирован в rights-overview.ts:34-42 и применяется картой роли + write-side: confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL) AND in-window — рутинное назначение (proposed_by=NULL, confirmed2_by=NULL) активно СРАЗУ; дуал-контроль назначения живёт в его СОБСТВЕННОМ semi-confirmed-состоянии. А PDP (grants-dao.ts, введён T-0397) применял ДРУГОЙ предикат: confirmed2_by IS NOT NULL OR NOT EXISTS(критичный грант роли). Роль pool-задачи держит approve/transition-грант (ось a criticalGrantPredicate) ⇒ PDP требовал confirmed2_by НА назначении. Write-side (grants.ts:1145-1156) НИКОГДА не ставит confirmed2_by для рутинного назначения (для назначения критичность from≡to ⇒ criticalityDiff.escalates=false ⇒ required_approvers=1), UI честно рапортует «Роль назначена». Самозаклин: держатель видим на карточке (proposed_by IS NULL проходит), невидим для PDP (нет confirmed2_by) ⇒ 403. Решение: схлопнуть предикат активации назначения В PDP на ЕДИНЫЙ канонический (rights-overview.ts / write-side) — активация зависит ТОЛЬКО от confirmed_by + окна + собственного semi-confirmed-состояния (confirmed2_by OR proposed_by IS NULL), НЕ от критичности роли. Grant-уровневый дуал-контроль (getGrantsForSubject step-3: критичный ГРАНТ активен лишь при confirmed2_by) НЕ ТРОНУТ. Плюс web-честность: ошибка claim ВСЕГДА показывается человеческим текстом (CLAIM_ERROR_MESSAGE), для NOT_ELIGIBLE — «Нет роли для этой задачи — попросите администратора назначить роль…». Миграции БД нет (колонки proposed_by/confirmed_by/confirmed2_by уже в migration 020+031).",
+  "mechanism": {
+    "root_cause": "Read/write асимметрия дуал-контроля. Write-side ключует второго подтверждающего на ЭСКАЛАЦИИ критичности (criticalityDiff.escalates) — для назначения роли всегда false (назначение не меняет грант-сет роли). PDP-read (T-0397) ключевал активацию назначения на АБСОЛЮТНОЙ критичности роли (держит ли роль критичный грант) — для любой workflow-роли true. Расхождение: назначение к уже-критичной роли — «рутинное» для writer (confirmed2_by=NULL), но «требует 2-го» для PDP-reader. Второго подтверждающего в тенанте из одного владельца на bootstrap нет ⇒ eligibility недостижима, pool-задача непроходима.",
+    "stores_and_keys": "Стор ОДИН: choros.role_assignment. Ключ ОДИН: employee_id (UUID). Запись: grants.ts:1160 INSERT employee_id (assertUuidShape, дропдаун ra-overview-forms.jsx:213 шлёт employee.id). Чтение PDP: grants-dao.ts резолвит slug→employee.id, матчит role_assignment.employee_id. Идентичность СОВПАДАЕТ — identity-разрыв (пустое имя/UUID-отображение) отвергнут как причина.",
+    "fix": "src/db/grants-dao.ts: в getRoleSlugsForActor (JOIN role_assignment→role) и getGrantsForSubject step-2 (загрузка role_assignment) ветка активации назначения «ra.confirmed2_by IS NOT NULL OR NOT EXISTS(критичный грант роли)» заменена на канонический «ra.confirmed2_by IS NOT NULL OR ra.proposed_by IS NULL». Мёртвый CRITICAL_GRANT_PREDICATE_G удалён. getGrantsForSubject step-3 (критичный ГРАНТ ⇒ confirmed2_by, CRITICAL_GRANT_PREDICATE_BARE) НЕ ТРОНУТ.",
+    "not_second_authority": "Изменение УДАЛЯЕТ расходящуюся вторую интерпретацию «назначение активно» и схлопывает PDP на уже-задокументированный канонический предикат rights-overview.ts:34-42. Никакого нового стора, никакой второй таблицы, никакого нового authority-пути. Authority критичных ПРАВ остаётся ровно в одном месте — grant step-3 (confirmed2_by). Соответствует дисциплине репо «no second authority path».",
+    "web_honesty": "web/src/screens/screen-inbox.jsx: CLAIM_ERROR_MESSAGE (NOT_ELIGIBLE/ALREADY_CLAIMED/NOT_POOL_TASK/NOT_FOUND) + claimErrorMessage(code) fallback. claimTask бросает claimErrorMessage(code) вместо сырого `Ошибка: ${code}`; catch → pushToast (провайдер duration:0, персистентный до dismiss — не молчит). Убран инлайн-тернар ALREADY_CLAIMED (перенесён в map)."
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npm run build (root, tsc ×2) — 0 ошибок. cd web && npm run build не требовался (JS-only правка + тест).",
+    "lint": true,
+    "lint_result": "node_modules/.bin/eslint src/db/grants-dao.ts src/__tests__/grants-dao.test.ts — 0 ошибок.",
+    "types": true,
+    "types_result": "tsc (root build) — 0 ошибок.",
+    "tests": true,
+    "tests_result": "npm test (root vitest) — 254 файла passed, 4893 passed | 10 skipped, exit 0 (включая обновлённый src/__tests__/grants-dao.test.ts: 30 тестов, mirror приведён к каноническому + 2 позитивных фикс-кейса e''''/e'''''). cd web && npx vitest run — 60 файлов passed, 1637 passed, exit 0 (включая screen-inbox.test.jsx: 17 тестов, +3 T-0605 на тост ошибки claim).",
+    "fitness": true,
+    "fitness_result": "npm run fitness:db (DATABASE_URL на PG :55432) — 104/105 файлов passed. МОИ файлы зелёные: ci/checks/db/grants-dao-dual-control.db.test.ts (11) + ci/checks/db/rights-eligibility-sew.db.test.ts (4); соседние ci/checks/db/inbox_claim.test.ts (7) + role-assignment.test.ts (19) + role-assignment-scope.test.ts (1) зелёные. Единственный упавший файл — ci/checks/db/doc-reconcile.db.test.ts (4 fail, 5000ms timeout) — НЕ СВЯЗАН с T-0605 (doc-pipeline reconcile, ничего про role_assignment/grants/eligibility); при соло-прогоне doc-reconcile проходит 15/15 — задокументированный flake fitness:db под нагрузкой/параллелью (memory: «упавшее перепроверять соло»). bash ci/checks/anti-case-lock.sh — PASS (Phase 1 delegates clean; Phase 2 full D-064 §5 denylist в baseline, aggregate 24, 0 новых кейс-литералов)."
+  },
+  "files_changed": [
+    "docs/specs/T-0605-rights-eligibility-sew.spec.md",
+    "docs/specs/T-0605.spec.contract.json",
+    "docs/adr/ADR-T0605-rights-eligibility-sew.md",
+    "docs/adr/T-0605.adr.contract.json",
+    "src/db/grants-dao.ts",
+    "src/__tests__/grants-dao.test.ts",
+    "ci/checks/db/grants-dao-dual-control.db.test.ts",
+    "ci/checks/db/rights-eligibility-sew.db.test.ts",
+    "web/src/screens/screen-inbox.jsx",
+    "web/src/screens/screen-inbox.test.jsx",
+    "docs/handoff/T-0605.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "Нет отклонений от ADR-T0605. Реализация соответствует §1 дословно: канонический предикат в двух функциях grants-dao.ts, удаление CRITICAL_GRANT_PREDICATE_G, grant step-3 не тронут, web-тост, миграции нет."
+  ],
+  "friction_events": [
+    "Worktree provisioned без node_modules (root и web) — npm ci --maxsockets=3 в обоих перед первым build/vitest (тот же паттерн, что T-0599/T-0601). Установились без сетевых проблем.",
+    "Первый прогон web-теста упал на 2 ассертах моего собственного нового теста: (1) ALREADY_CLAIMED-строка в источнике в двойных кавычках, а ассерт был в одинарных; (2) регекс `Ошибка: ${code}` ложно сработал на МОЁМ поясняющем комментарии (не на коде). Исправлено: комментарий переписан без литерала, ассерт кавычек выровнен — тест-театр не пропущен, оба ассерта теперь бьют по реальному коду.",
+    "fitness:db flake: doc-reconcile.db.test.ts упал в полном прогоне (5000ms timeout под нагрузкой), но проходит 15/15 соло — не связан с T-0605; перепроверен соло согласно durable-уроку памяти."
+  ]
+}

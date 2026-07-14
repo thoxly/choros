@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0306",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "_r3_note": "АДВЕРС-RE-VERIFY r3: единственный blocking r2 (F1-r2 timeout-flake mount-сценария A) ЗАКРЫТ хирургически и доказан под нагрузкой. Дифф r3 = ТОЛЬКО mount-тест + pr-handoff (src не тронут — tsc/vite числа r2 валидны). Probe удешевлён честно: waitLoaded() поллит реальный class-селектор .chs-state--loading (components.jsx:936, присутствует на первом рендере — не вакуумный), маркеры через attribute-селектор [title=...], a11y прямыми атрибутами, per-test 10000ms подстраховка на A/B, глобальный vitest.config не тронут. Стабильность: 7/7 подряд GREEN с ДЕФОЛТНЫМ 5s-таймаутом под нагрузкой волны (LA~75 — ровно условия, в которых r2 краснел 3/3). Полный web соло: 109 файлов / 2854 PASS, exit 0, 0 таймаутов. Nit «22→24» поправлен в handoff (pr-handoff schema-VALID). История: r1 blocking (сталая база + дубль T-0598 + регрессивный nav-config фикс) закрыты в r2; r2 blocking (flaky mount) закрыт в r3.",
+  "findings": [
+    {
+      "id": "F1-r2-mount-A-timeout-flake",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/screen-overview.mount.test.jsx — ЗАКРЫТО в r3 (6a5f77c4)",
+      "issue": "RESOLVED. r2: сценарий A краснел 3/3 по 5s-таймауту под нагрузкой (waitFor поллил getAllByRole('img',{name}) — accessible-name по всему DOM на каждый тик). r3: дешёвый probe + разовые атрибут-проверки + per-test 10000ms. Проверено судьёй: 7/7 подряд GREEN с дефолтным таймаутом при LA~75; полный прогон 2854/2854 без таймаутов. Мутационная ловимость НЕ потеряна: stepMarkerState (unknown→'todo') → сценарий B RED за 253ms чистым assertion «expected length 1 got +0», не таймаутом — waitLoaded ветвится на литерале `loading ? (` в StepRow, не на decision-функции (ревертнуто, дерево чисто).",
+      "suggestion": "Нет действия. Урок в копилку web-тира: в mount-тестах не поллить role+name внутри waitFor."
+    },
+    {
+      "id": "F2-r2-content-table-list-maintenance",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/first-run-empty-workspace.test.ts (CONTENT_TABLES, 12 таблиц)",
+      "issue": "Список 12 сверен с живыми миграциями: section(113)/list_view(123)/engine_process_name(131) включены, @demo-seed 132 пишет только Dev-Silo — корректно. matrix_lookup_cell не в списке, но покрыта транзитивно (составной FK (tenant_id,table_id) → matrix_lookup_table, 0 таблиц ⇒ 0 ячеек). Из 65 tenant-scoped таблиц вне списка остаются контент-смежные mcp_tool/doc_page/report_page/file — все их сиды Dev-Silo-литеральные, кросс-тенант закрыт RLS (A3 register-isolation), поэтому не blocking. Но список статичен: будущая контент-таблица (миграция 133+) в него сама не попадёт.",
+      "suggestion": "Follow-up: генерировать/сверять CONTENT_TABLES с known_tenant_tables.txt (denylist каркасных) или добавить fitness-напоминание при новой CREATE TABLE в миграциях."
+    },
+    {
+      "id": "F3-cta-deadend-nonauthor",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/screen-overview.jsx (шаг 1 CTA → /apps, гейт authoring_draft)",
+      "issue": "Не-автор после клика упрётся в гейт /apps. Для истинного first-run не всплывает (владелец имеет грант); плитка «Конструктор» несёт тот же CTA — нового тупика T-0306 не вводит.",
+      "suggestion": "Follow-up-задача: честное «нет прав на создание» на /apps для не-авторов."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "База: ветка от dev tip 3256f627; продуктовый дифф = 6 файлов r2 + mount-тест/handoff r3; nav-config.test.js отсутствует", "covered": true },
+    { "ac": "Консолидация: один онбординг-слой (FirstStepsStrip T-0598), FirstRunPanel/isFirstRun сняты", "covered": true },
+    { "ac": "Honest-degrade в strip: stepMarkerState unit 5/5 + source-wiring 3/3 + REAL jsdom mount A/B/C — 7/7 стабильных прогонов под нагрузкой, дефолтный таймаут", "covered": true },
+    { "ac": "DB-regression 12 контент-таблиц: fitness:db соло 2/2 (live-PG, шаблон 9c398948, миграции до 132) + register-isolation 3/3", "covered": true },
+    { "ac": "T-0598 без регресса: 24 старых теста зелёные, AC-8 литерал жив, AC-6/7 не тронуты, скрытие полосы mount-доказано (C)", "covered": true },
+    { "ac": "Гейты: tsc 0; vite build 0; web 109/2854 PASS 0 таймаутов; G2/G5/G6 exit 0; анти-кейс чист; pr-handoff schema-VALID", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "r3 стабильность под честной нагрузкой (LA~75, те же условия что валили r2): 7 последовательных прогонов mount-сьюты с ДЕФОЛТНЫМ 5s-таймаутом — 7/7 «3 passed (3)», 0 таймаутов.",
+    "Полный web-прогон судьи (single-thread, r3): 109 файлов / 2854 PASS / exit 0 — заявление строителя воспроизведено (в r2 не воспроизводилось: 2853/2854).",
+    "Мутация stepMarkerState (unknown → 'todo') на r3-тестах: unit RED + mount B RED за 253ms БЫСТРЫМ assertion (не таймаутом) — ловимость сохранена после удешевления probe. Ревертнуто git checkout --, stash не использовался.",
+    "Probe не вакуумный: .chs-state--loading — реальный класс LoadingState (components.jsx:936), рендерится на первом paint плитками и StepRow → waitLoaded ждёт настоящий переход loading→loaded.",
+    "fitness:db соло (r2, миграции после не менялись): first-run 2/2 + register-isolation 3/3 на живом PG :55432 под choros_app NOBYPASSRLS; registerTenant сеет только каркас (0 вставок в контент-таблицы).",
+    "Дифф r3 подтверждён: только web/src/screens/screen-overview.mount.test.jsx + docs/tasks/T-0306.pr-handoff.json — компоненты не тронуты, r2-верификация src остаётся в силе."
+  ]
+}

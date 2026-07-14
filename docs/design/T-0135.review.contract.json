@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0135",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-N1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/specs/T-0135-grant-presets.spec.md:82",
+      "issue": "AC-06 spec says 'p-treasury-exec содержит 3 атома' but implementation has 4 atoms (ledger.recon:read and ledger.recon:update are separate atoms). Test comment on line 129 says '4 atoms' — code is correct, spec is imprecise. No toHaveLength(4) assertion exists in AC-06 test.",
+      "suggestion": "Fix spec AC-06 to say '4 atoms'; add expect(preset!.grants).toHaveLength(4) in grant-presets.test.ts AC-06 describe block."
+    },
+    {
+      "id": "R-N2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/rights/ra-data.jsx:208",
+      "issue": "axesFromGrants checks g.ops.includes('exec') for external axis, but new presets use ops: ['invoke']. axesFromGrants will not raise external:true for p-treasury-exec and p-pay-init-limited. UI criticality display via critLevel(axesFromGrants(...)) underestimates external axis. Hardcoded critical:true in presets preserves the UI warning badge. Runtime T-0044 gate is unaffected. Pre-existing pattern from legacy TRAIL entries. Not a T-0135 regression.",
+      "suggestion": "In a separate nit-sweep task: update axesFromGrants to check ops.includes('invoke') || ops.includes('exec') for external and guarded axes."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-01", "covered": true },
+    { "ac": "AC-02", "covered": true },
+    { "ac": "AC-03", "covered": true },
+    { "ac": "AC-04", "covered": true },
+    { "ac": "AC-05", "covered": true },
+    { "ac": "AC-06", "covered": true },
+    { "ac": "AC-07", "covered": true },
+    { "ac": "AC-08", "covered": true },
+    { "ac": "AC-09", "covered": true },
+    { "ac": "AC-10", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "axesFromGrants legacy op-vocab gap (exec vs invoke) affects UI criticality display but not runtime gate; candidate for nit-sweep or dedicated task under T-0030 domain"
+  ]
+}

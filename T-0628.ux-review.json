@@ -1,0 +1,51 @@
+{
+  "task_id": "T-0628",
+  "verdict": "approved",
+  "gate_seen": {
+    "green": true,
+    "red_rules": []
+  },
+  "themes_checked": ["light", "dark"],
+  "pattern_sources": [
+    {
+      "element": "форма создания учётки — раздельные поля Логин (text) и Email (email)",
+      "pattern": "input-validation / inline-field-error",
+      "mcp_ref": "principles.md (Field kit: aria-invalid + chs-hint--invalid у поля)",
+      "applied": true
+    },
+    {
+      "element": "read-only деградация для не-владельца (canWrite=false)",
+      "pattern": "permission-aware read-only + explanatory banner",
+      "mcp_ref": "screen-org.jsx OrgTree canWrite (эталон в этой же кодовой базе)",
+      "applied": true
+    },
+    {
+      "element": "серверные ошибки 409/403/503/400",
+      "pattern": "honest error mapping → человеческий текст у поля или баннером",
+      "mcp_ref": "mapUserError (стандарт T-0583)",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "UX-1",
+      "severity": "nit",
+      "root": "A",
+      "location": "web/src/screens/screen-users.jsx:297",
+      "issue": "canWrite-баннер задаёт background через var(--chs-color-surface-muted, var(--chs-color-surface)), но токен --chs-color-surface-muted НЕ определён в web/src/design/tokens.css ни в одной теме — фон всегда разрешается в fallback --chs-color-surface. Работает корректно и читаемо в обеих темах (G6 зелёный, т.к. это var(), а не хардкод), но опора на несуществующий токен — маленький технический долг слоя: тот же приём уже тиражирован в FormDesigner.jsx:186.",
+      "suggestion": "Либо использовать напрямую --chs-color-surface (как это делает соседний bannerErrStyle), либо ввести реальный токен --chs-color-surface-muted в tokens.css для обеих тем, если задуман приглушённый фон нейтрального баннера. Не блокирует мерж."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "Форма: подписи полей по-русски, без жаргона login/username (Логин / Email / Пароль / Отображаемое имя)", "covered": true},
+    {"ac": "Плейсхолдеры больше не врут — поле Логин (text, 'ivan.petrov', hint 'используется для входа') и Email (email, 'ivanov@company.ru') разделены, каждое говорит правду", "covered": true},
+    {"ac": "Обязательность email видна ДО сабмита (отдельное поле type=email; пустое → 'Укажите email' у поля)", "covered": true},
+    {"ac": "Ошибка валидации показывается У ПОЛЯ человеческим текстом (Field: chs-hint--invalid + aria-invalid), не тост с кодом", "covered": true},
+    {"ac": "Серверные ошибки человеческие: 409 EMAIL_TAKEN → 'Такой email уже занят' (поле email), 409 login → 'Учётка с таким логином уже существует', 403 → текст про права, 503 → 'Сервис учёток временно недоступен', 400 → serverMsg/'Проверьте корректность полей' — стандарт T-0583 не регрессировал", "covered": true},
+    {"ac": "canWrite-баннер для рядового честный ('доступны владельцу тенанта… список только для чтения'), не пустой экран, не мёртвые кнопки — кнопки создания/деактивации/EmptyState-action скрыты для не-владельца", "covered": true},
+    {"ac": "Тема/контраст: все токены реальны в tokens.css (surface/border/text-muted/danger/danger-soft) для обеих тем; G2 theme-pairing зелёный; G6 no-new-hardcode 0 находок", "covered": true},
+    {"ac": "Тесты users-form.test.js покрывают новое поведение (4 field-ошибки, non-email login принят, отсутствующий email/login отклонён, payload несёт email, EMAIL_TAKEN → поле email)", "covered": true},
+    {"ac": "Прогон web-тестов: npx vitest run src/screens/users-form.test.js → 22/22 passed", "covered": true}
+  ]
+}

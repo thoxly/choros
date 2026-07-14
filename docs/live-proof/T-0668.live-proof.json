@@ -1,0 +1,53 @@
+{
+  "task": "T-0668",
+  "title": "Bare-fetch 401 auth-bypass class — web /api calls carry mode-aware authHeaders()",
+  "date": "2026-07-11",
+  "context": "Choros dev-stand OFFLINE this run; brought up a LOCAL full stack as a live-proof surrogate (established pattern, lineage T-0753 + offline-stand DURABLE note).",
+  "method": "browser+http",
+  "strongest_method": "browser",
+  "screens_proven": [
+    {
+      "screen": "Rights «Бытовые операции прав» (ra-intents.jsx / IntentsScreen, route /rights/intents)",
+      "fixed_call": "GET /api/rights/dictionaries with { headers: { ...authHeaders() } }",
+      "browser_evidence": "request carried Authorization: Bearer <JWT iss=http://localhost:8380/realms/choros aud=choros-api actor_type=human>; response HTTP 200 presets=14 resources=10; live preset labels rendered in the «ПРЕСЕТ-РОЛЬ» dropdown (not empty/seed).",
+      "screenshot": "docs/live-proof/T-0668-evidence/browser-rights-intents.png"
+    },
+    {
+      "screen": "Dev login user-picker (screen-login.jsx)",
+      "fixed_call": "GET /api/users with { headers: { ...authHeaders() } } (x2 sites)",
+      "http_evidence": "GET /api/users -> HTTP 200 with 7 live human employees (e-belov, e-kravtsova, e-larina, e-mironov, e-orlov, e-petrov, e-savina). Note: this is a dev-mode picker; authHeaders()={} pre-login in dev, behaviour preserved — the remediation removes a copy-able bare pattern (defense-in-depth).",
+      "screenshot": null
+    }
+  ],
+  "mechanism_proof": {
+    "why": "The two target routes are not server-withAuth-gated (the deployed 401 comes from the front gateway); the keycloak Bearer mechanism that authHeaders() satisfies was proven on genuinely withAuth-gated routes — the two ACTUAL live-caught incidents of this same bug class.",
+    "routes": [
+      { "route": "GET /api/org (T-0649 fetchEmployees incident)", "no_token": "401 UNAUTHENTICATED 'missing Authorization header'", "with_token": "200 (full org tree: departments/positions/people)" },
+      { "route": "GET /api/grant-trail (T-0648 rights-journal incident)", "no_token": "401 UNAUTHENTICATED 'missing Authorization header'", "with_token": "403 FORBIDDEN 'grant trail requires admin/owner authority' (identity resolved PAST the 401 gate, then a business authority check — exactly the 'before identity resolves' failure the fix removes)" }
+    ]
+  },
+  "stack_up": {
+    "kc": "fresh docker container t-0668-kc-lp (quay.io/keycloak/keycloak:25.0.6) on host port 8380, committed realm config/keycloak/ imported ('Realm choros imported'); ROPC login e-configurator/dev-pw-configurator -> HTTP 200 valid JWT",
+    "server": "node dist/index.js (built via npm run build, rc=0) in CHOROS_AUTH_MODE=keycloak on PORT=3080; /api/auth-config -> mode=keycloak; /health 200",
+    "web": "vite build -> web/dist, served by the server as SPA fallback (CHOROS_WEB_DIST); rendered live in headless chromium (Playwright)",
+    "migrations": "REUSED shared choros-postgres-1 :55432 (already at HEAD, migration 132_engine_process_name_seed applied) read-only; no fresh DB needed (proof is GET-only)"
+  },
+  "server_mode_confirmation": "GET /api/auth-config -> {\"mode\":\"keycloak\",\"keycloak\":{\"url\":\"http://localhost:8380\",\"realm\":\"choros\",\"clientId\":\"choros-web\",\"audience\":\"choros-api\"}}",
+  "closes_the_loop_with_merged_gates": [
+    "ci/checks/web-fetch-auth-coverage.sh (+ --self-test) — static gate: every /api fetch in web/src provably routes through authHeaders()",
+    "web/src/screens/web-fetch-auth-remediation.test.js — locks the 3 remediated call strings, asserts the bare forms are gone",
+    "web/src/app-shell/auth-headers.test.js — authHeaders() emits X-Dev-User in dev, Authorization: Bearer in keycloak"
+  ],
+  "evidence": {
+    "http_proof": "docs/live-proof/T-0668-evidence/http-proof.txt",
+    "browser_proof": "docs/live-proof/T-0668-evidence/browser-proof.txt",
+    "screenshot": "docs/live-proof/T-0668-evidence/browser-rights-intents.png"
+  },
+  "recipe_path": "docs/live-proof/local-stack-recipe.md",
+  "honest_scope_notes": [
+    "Reused the shared dev Postgres read-only (GET-only proof) rather than a fresh DB — safe, and it is already at schema HEAD matching the merged worktree.",
+    "screen-login.jsx /api/users remediation is defense-in-depth in dev mode (authHeaders()={} pre-login); its live 200+users proof shows the endpoint backs the picker, not a reproduced 401.",
+    "The exact deployed 401 on /api/rights/dictionaries and /api/users originates at the front gateway (Bearer-only), not the app route handlers, which are not withAuth-wrapped; the app-level Bearer mechanism was therefore proven on withAuth-gated routes.",
+    "Did NOT push or merge. Torn down: killed the server, docker rm -f t-0668-kc-lp. Left choros-postgres-1 (:55432) and t-0633 containers untouched."
+  ]
+}

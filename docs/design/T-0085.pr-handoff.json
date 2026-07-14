@@ -1,0 +1,85 @@
+{
+  "task_id": "T-0085",
+  "title": "E12.4 per-record object-schema versioning (expand/contract) — migration 070",
+  "status": "ready",
+  "date": "2026-06-16",
+  "salvage_vs_rebuilt": {
+    "salvaged_design": [
+      "docs/design/T-0085-record-schema-versioning.adr.md (migration slot updated 056→070)",
+      "docs/specs/T-0085-record-schema-versioning.spec.md (unchanged from salvage)",
+      "Full SQL DDL design (columns, 4 triggers, history table, rollback-safe function)"
+    ],
+    "rebuilt_clean": [
+      "migrations/070_record_schema_versioning.sql (was 056, now 070 for dev head 069)",
+      "src/core/record-schema-validator.ts (fixed AJV import: named import { Ajv } instead of module-default cast — eliminates ESLint no-explicit-any; || → ?? on validate.errors; added ajv to package.json dependencies)",
+      "src/__tests__/record-schema-validator.test.ts (removed unused ValidationResult import; added assertResult type-usage helper to satisfy @typescript-eslint/no-unused-vars)",
+      "ci/checks/record-schema-compat.sh (added --self-test Section A early-exit mode; added OK:rollback_blocked_v1 check)",
+      "All 3 seam files updated (known_tenant_tables.txt, cross_tenant.test.ts, role-criticality-migration-excludes.txt)"
+    ]
+  },
+  "files_changed": {
+    "new": [
+      "migrations/070_record_schema_versioning.sql",
+      "src/core/record-schema-validator.ts",
+      "src/__tests__/record-schema-validator.test.ts",
+      "ci/checks/record-schema-compat.sh",
+      "docs/design/T-0085-record-schema-versioning.adr.md",
+      "docs/specs/T-0085-record-schema-versioning.spec.md",
+      "docs/design/T-0085.pr-handoff.json"
+    ],
+    "modified": [
+      "package.json (added ajv dependency; appended record-schema-compat.sh to fitness line)",
+      "package-lock.json (ajv locked)",
+      "ci/checks/known_tenant_tables.txt (appended: registry_schema_history)",
+      "ci/checks/role-criticality-migration-excludes.txt (appended: 070_record_schema_versioning)",
+      "ci/checks/db/cross_tenant.test.ts (case 'registry_schema_history' + SEEDED_TABLES)"
+    ]
+  },
+  "migration": {
+    "file": "migrations/070_record_schema_versioning.sql",
+    "slot": 70,
+    "base": "dev b02e24b (head was 069_bundle_commit.sql)",
+    "applies_cleanly": true,
+    "idempotent": true,
+    "ddl_summary": [
+      "ALTER TABLE choros.record ADD COLUMN schema_version integer NOT NULL DEFAULT 1; ALTER ... DROP DEFAULT",
+      "ALTER TABLE choros.registry_def ADD COLUMN record_schema_version integer NOT NULL DEFAULT 1",
+      "CREATE TABLE IF NOT EXISTS choros.registry_schema_history (tenant_id, registry_id, schema_version PK; ENABLE+FORCE RLS; SELECT+INSERT to choros_app)",
+      "TRIGGER record_schema_version_default (BEFORE INSERT on record: defaults schema_version from registry)",
+      "TRIGGER record_schema_version_immutable (BEFORE UPDATE on record: restrict_violation on schema_version change)",
+      "TRIGGER registry_def_schema_version_increment (BEFORE UPDATE on registry_def: increment on schema change)",
+      "TRIGGER registry_def_schema_version_audit (AFTER UPDATE on registry_def: append to history)",
+      "FUNCTION choros.fn_check_rollback_safe(tenant_id, registry_id, target_version) → boolean"
+    ]
+  },
+  "alignment_with_current_data_model": {
+    "schema_evolution_056_to_069": "Migration 056 was already taken (external_participant_directory_seed), slots 057-069 added agent_instruction, files/attachments, implementation_agent_seed, template_def, doc_page/ref/log, docs_author_seed, docpage_writeful_tools, doc_page_summary, install_runbook_projection, dmn_rule_table, modules_nav, cross_app_ref, bundle_commit — none conflict with T-0085 (no changes to record or registry_def tables)",
+    "record_table": "Still has same columns as migration 005 — no intermediate migration touched record; schema_version column added by 070 is additive",
+    "registry_def_table": "Still has same columns as migration 004 — record_schema_version column added by 070 is additive",
+    "data_classification": "migration 017 facet_schema_version integer already logically refers to registry version — T-0085 adds the authoritative counter (record_schema_version) that facet_schema_version conceptually tracks; no FK (by design, same pattern as role_id in grant)"
+  },
+  "seam_files": {
+    "known_tenant_tables_txt": "appended registry_schema_history",
+    "cross_tenant_test_ts": "added case 'registry_schema_history' in seedRowForTable (FK chain: registry_def already seeded as regIdA/regIdB); added 'registry_schema_history' to SEEDED_TABLES",
+    "role_criticality_migration_excludes_txt": "appended 070_record_schema_versioning  # T-0085"
+  },
+  "fitness_results": {
+    "tsc_noEmit": "PASS (exit 0)",
+    "eslint_src_new_files_only": "PASS (0 errors on record-schema-validator.ts and test file)",
+    "eslint_src_all": "4 pre-existing errors on dev (doc-reconcile/doc-regen/doc-summary tests + floor1-editor); T-0085 introduces 0 new errors",
+    "record_schema_compat_static": "PASS",
+    "record_schema_compat_self_test": "PASS",
+    "record_schema_compat_db": "PASS (Section B with DATABASE_URL: v1/v2/trigger/history/rollback/immutability all green)",
+    "fitness_npm_run": "PASS except 1 known false-positive: scoped-admin-isolation.sh FF-16 fires when known_tenant_tables.txt is modified on any branch; resolves to PASS on merge to dev (known artifact FE-s24-0001)",
+    "vitest_run": "2437 passed, 6 skipped, 0 failed (108 files + 2 skipped)",
+    "fitness_db_setup_template": "PASS — migration 070 applied cleanly (64 files total)",
+    "fitness_db": "PASS — 808 tests, 58 files, all green"
+  },
+  "downstream_contracts": {
+    "T-0086": "expand/contract migration execution — reads record.schema_version, must use fn_check_rollback_safe before rollback",
+    "T-0033": "data_classification.facet_schema_version now has authoritative counter in registry_def.record_schema_version",
+    "T-0177": "schema-change-classifier — reads registry_def.record_schema before/after diff; T-0085 adds additive columns, not breaking",
+    "T-0087": "changelog UI — consumes registry_schema_history rows as version history",
+    "T-0013": "RLS contract followed exactly (ENABLE+FORCE RLS, tenant_id leading PK, choros_app non-owner NOBYPASSRLS)"
+  }
+}

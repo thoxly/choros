@@ -1,0 +1,99 @@
+{
+  "task_id": "T-0180",
+  "status": "pr_open",
+  "branch": "task/T-0180-author-report-page-tool",
+  "merge_target": "dev",
+  "base_commit": "ead2a3f",
+  "head_commit": "819683a",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Migration 053: idempotent mcp_tool seed for author_report_page (T-0121f / config-agent toolset). Adds tool UUID 10...00b (name=author_report_page, declares=[], pure_compute=true, resource_ops=[authoring_draft/create + authoring_draft/update]) and 2 grants (e2...008 create, e2...009 update) for role config-agent in dev-tenant (a0...001). ON CONFLICT DO NOTHING on all INSERTs; DRAFT-boundary holds (zero authoring_published grants). Static fitness check author-report-page-seed.sh (ARP-1..ARP-10: file, tool name, idempotency, DRAFT-boundary, pure_compute exact literal, no CREATE TABLE, camelCase resourceType, dev-tenant UUID, create+update ops, UUID namespace). Live-DB: T180-1..T180-8 — tool row shape, resource_ops, declares/pure_compute, grants, resolveAgentToolset discoverability, DRAFT-boundary post-053, idempotency, RLS cross-tenant. config-agent-seed.test.ts AC-02 (7→8 tools) and AC-04 (7→9 grants) updated to counter=fact. All vitest 1363/1363 passed; fitness:db 583/583 passed. FF-DC7 known red (dual-control sibling check, green post-merge to dev). IMPORTANT: migration 053 already applied to dev-DB and clone-template (T-0192 cross-branch gap); merge operator must NOT re-apply manually.",
+  "commits": [
+    {
+      "sha": "5541a9a",
+      "phase": "BUILD",
+      "message": "feat(seed): migration 053 — author_report_page mcp_tool seed для config-агента (T-0180/T-0121f)"
+    },
+    {
+      "sha": "d6f177d",
+      "phase": "BUILD",
+      "message": "test(fitness): CI-чек + DB-тесты для author_report_page seed (T-0180/T-0121f)"
+    },
+    {
+      "sha": "9aafdb2",
+      "phase": "REVIEW",
+      "message": "T-0180 REVIEW: approved — seed mcp_tool author_report_page (migration 053)"
+    },
+    {
+      "sha": "819683a",
+      "phase": "NIT-FIX",
+      "message": "fix(nit): ARP-5 grep pattern — precise literal match pure_compute=false (N-1 T-0180)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "9aafdb2",
+      "findings_resolved": [
+        "N-1 (nit) — ARP-5: grep pattern `pure_compute.*false` tightened to exact literal `pure_compute=false`. Fixed in 819683a."
+      ],
+      "findings_nit": [],
+      "artifact": "docs/design/T-0180.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1946,
+      "passed": 1946,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "5/5 T-0121f ACs (reachable-via-resolveAgentToolset, authoring_draft-grants-only, DRAFT-only-no-promote, audit-vocab-seam, AC-12/seed-part)",
+      "fitness_static": "PASS — ARP-1..ARP-10 all green; FF-DC7 known red (sibling dual-control check, green post-merge to dev by design)",
+      "fitness_db": "583/583 passed — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros, 40 files; author_report_page_seed.test.ts 8/8 (T180-1..T180-8), config-agent-seed.test.ts AC-02/AC-04 pass",
+      "tested_commit": "819683a",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors (pre-existing no-console warnings only)",
+        "fitness_static_checks": "PASS — all checks green except FF-DC7 (known sibling-task gotcha)",
+        "ff_dc7_status": "KNOWN_RED — dual-control-isolation.sh flags migration 053; green post-merge to dev",
+        "vitest_unit": "1363/1363 passed, 6 skipped (flowable integration offline) — 67 test files",
+        "fitness_db_tests": "583/583 passed — author_report_page_seed.test.ts 8/8, config-agent-seed.test.ts 8-tool/9-grant counts verified live-DB, 40 test files"
+      },
+      "artifact": "docs/test-reports/T-0180.test-report.md",
+      "contract_artifact": "docs/design/T-0180.test-report.contract.json"
+    }
+  },
+  "migration_note": {
+    "migration": "053_author_report_page_seed.sql",
+    "applied_to_dev_db": true,
+    "applied_to_clone_template": true,
+    "cross_branch_gap": "T-0192 tracks the clone-template update; see memory choros-ci-check-gotchas for the sibling-FF pattern",
+    "merge_operator_action": "DO NOT re-apply migration 053 manually — already in dev-DB and template"
+  },
+  "adr_coverage_note": {
+    "adr": "T-0121",
+    "covered_through": "T-0121f",
+    "this_task_slice": "§9.5 — MCP-tool seed author_report_page + 2 authoring_draft grants for config-agent",
+    "residual": "§9.6+ T-0121g+: Floor-1 server-side aggregate renderer, Floor-2 RLS-gated data API, static analysis — next slices"
+  },
+  "deferred_nits": [],
+  "files_changed": [
+    "migrations/053_author_report_page_seed.sql",
+    "ci/checks/author-report-page-seed.sh",
+    "ci/checks/db/author_report_page_seed.test.ts",
+    "ci/checks/db/config-agent-seed.test.ts",
+    "ci/checks/role-criticality-migration-excludes.txt",
+    "package.json",
+    "docs/reviews/T-0180.review.md",
+    "docs/design/T-0180.review.contract.json",
+    "docs/test-reports/T-0180.test-report.md",
+    "docs/design/T-0180.test-report.contract.json",
+    "docs/pr/T-0180.pr-handoff.json"
+  ]
+}

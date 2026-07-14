@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0739",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "NB-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/operational-analytics.ts / src/http/report-page-render.ts (top_actors / actorBreakdown)",
+      "issue": "top_actors и actorBreakdown остаются tenant-wide за entry-gate — палят cross-employee активность (кто сколько сделал) любому держателю >=1 гранта. НЕ регрессия (было tenant-wide и до T-0739; задача добавила gate), решение задокументировано в ADR §3.1 через ADR-T0632 precedent (audit_event, не choros.record). Остаток: рядовой сотрудник видит throughput коллег.",
+      "suggestion": "Будущая задача: manager/observability-privilege gate на top_actors, соразмерно spend.ts/org.ts доктрине."
+    },
+    {
+      "id": "NB-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/record-links.ts makeHopFetcher / resolveHop",
+      "issue": "Hop/target записи тянутся через RLS-only fetcher без per-target isRecordReadable. Линки ВИДИМОЙ source-записи могут раскрыть target-запись, которую актор не вправе читать (в том же тенанте). Пред-существующий остаток, явно вне скоупа (ADR §3.3 + // FUTURE), source-гейт закрыл находку T-0726 'резолвер не протянут вообще'. УЖЕ, а не хуже прежнего.",
+      "suggestion": "Отдельная задача hop-redaction: прогонять каждую target-запись hop'а через isRecordReadable перед проекцией."
+    },
+    {
+      "id": "NB-3",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/seed-write.ts POST /api/employees (не в диффе T-0739)",
+      "issue": "seed-write создаёт employee БЕЗ role-reader (минуя ensureReaderRoleAndAssignHuman). В проде slug != KC sub → не аутентифицируется (no false-403); в dev-mode DEV_USER_HEADER такой актор даст 403 NO_READ_GRANT. Агент (kind='agent') с нулём грантов тоже → 403 (спорно-корректное ужесточение). Минорный edge, не прод-ломающий entry-gate.",
+      "suggestion": "Наблюдение для трекинга — не блокер T-0739; при желании выровнять seed-write с hire-flow reader-grant."
+    },
+    {
+      "id": "NB-4",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/db/operational-analytics-dao.ts loadRecordScanForVisibility",
+      "issue": "RECORD_SCAN_LIMIT=5000 newest-first: registry с >5000 записей за 30д даст под-считанный record_sums (труакция старых). Это корректность (под-счёт), НЕ утечка (скрытое не течёт). Осознанный паритет с T-0632 AGG_SCAN_LIMIT.",
+      "suggestion": "Принято как T-0632-паритет; при росте объёмов — пагинированный/оконный агрегат."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Entry-gate operational-analytics[/export] (>=1 confirmed grant, деактивированный→403)", "covered": true },
+    { "ac": "record_sums сужен к READ-PDP-видимым (T-0632 parity, hidden excluded — мутационно live)", "covered": true },
+    { "ac": "workload/top_actors tenant-wide под gate — решение задокументировано (ADR §3.1)", "covered": true },
+    { "ac": "process-analytics entry-gate реюз уже threaded резолвера (§3.2)", "covered": true },
+    { "ac": "record-links source gated isRecordReadable, deny→honest-404 (§3.3)", "covered": true },
+    { "ac": "Единый резолвер reportAggReadVisibility, 3 consumer'а, NF-1 (single-resolver.sh PASS)", "covered": true },
+    { "ac": "findings 9->5 живым прогоном actor-active-route-coverage.sh", "covered": true },
+    { "ac": "honest-degrade без резолвера = старое поведение (test-only, прод всегда wired)", "covered": true },
+    { "ac": "Мерж-шов с T-0736/T-0737 без конфликта (merge-tree чисто, marker-argument не трогает whitelist)", "covered": true }
+  ],
+  "gates_run": {
+    "tsc": "EXIT 0",
+    "eslint": "0 errors, 45 pre-existing warnings",
+    "live_pg_T0739": "10/10 passed",
+    "actor_active_route_coverage": "77 audited, 17 marker, 55 whitelisted, 5 findings (9->5)",
+    "single_resolver": "PASS",
+    "actor_authority_deactivation_gate": "PASS",
+    "cross_tenant_fitness": "PASS",
+    "report_page_render_isolation": "PASS",
+    "read_pdp_anti_case": "PASS",
+    "anti_case_lock": "PASS",
+    "merge_tree_vs_origin_dev": "clean, 0 conflicts"
+  }
+}

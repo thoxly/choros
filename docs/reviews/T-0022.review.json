@@ -1,0 +1,69 @@
+{
+  "task_id": "T-0022",
+  "verdict": "approved",
+  "phase": "REVIEW",
+  "reviewed_object": {
+    "design_commit": "309b735",
+    "build_commits": ["bdfe093", "15f717f"],
+    "base": "d948f6b",
+    "head": "15f717f"
+  },
+  "ci_seen": {
+    "green": true,
+    "detail": {
+      "tsc_noEmit": "pass (exit 0)",
+      "eslint_src": "pass (exit 0)",
+      "fitness_static": "pass (exit 0) — role-migration-set.sh AC-18/22 green, grant-resolver-isolation.sh AC-20 green (frozen src/core unmodified), cross-tenant-fitness.sh green",
+      "fitness_db": "pass — 9 files, 153 tests, isolated Postgres 55450",
+      "isolated_db": "pass — migrations 001-016+019-021 applied twice (2nd run no-op, 19 files=19 schema_migrations rows, AC-17); negatives re-probed live: grant cross-tenant role_id -> 23503 (grant_role_id_fkey), org_scope NULL -> 23502, role_assignment composite employee/role FK -> 23503; RLS default-DENY under choros_app NOBYPASSRLS without GUC -> 0 rows on both role and role_assignment"
+    }
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "migrations/021_grant_role_fk.sql:26-29",
+      "issue": "Migration 021 adds grant_role_id_fkey as an immediately-VALIDATED FK (no NOT VALID), so the ALTER TABLE scans every pre-existing grant row at apply time. The ADR (1.4) verifies 'grant is EMPTY in the dev migration base' and that is accurate (008 seeds no grant data; the lone 008 'INSERT' grep hit is a GRANT DML statement). Confirmed live on a fresh isolated DB: 021 applies cleanly. LATENT HAZARD, not a code defect: any long-lived environment that accumulates grant rows whose role_id does not resolve to a seeded role BEFORE 021 runs would fail the ALTER with 23503 at promote time. Observed concretely: a parallel-branch test volume (t-0115) holds 82 grant rows with 82 distinct, non-seeded role_ids and no role table — that DB would reject 021. The canonical promote target (founder /srv/choros) is clean-replay today, so this is safe now.",
+      "suggestion": "Non-blocking. If a grant-write path lands before this merges to a long-lived contour, consider ADD CONSTRAINT ... NOT VALID + a separate VALIDATE CONSTRAINT after a reconciliation pass, or assert grant-empty as a pre-021 guard. The ADR seed-ordering invariant already covers future SEED rows; this finding only flags non-seed runtime rows."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "migrations/020_role_assignment.sql:8-14 (FR-4 / spec AC contract)",
+      "issue": "The proposal-vs-confirmed 'confirmed_by IS NULL => zero grants' guarantee is CONTRACT-ONLY in this task, not code-enforced. Verified: grep over src/ finds no code reading role_assignment.confirmed_by; getGrants in grant-resolver.ts is an injected port with no DB body. This is exactly as the spec (FR-4, OS-1, Resolution contract) and ADR (1.3/1.5/5) declare — the confirmed+in-window filter lands in T-0053. The migration correctly enforces only the column shape (confirmed_by text NULL). Recording honestly so the orchestrator does not mistake 'columns exist' for 'proposals are inert at resolution' — the inertness is owed by T-0053.",
+      "suggestion": "None for T-0022. Carry the resolution-boundary filter (confirmed_by IS NOT NULL AND isEffective) as an explicit T-0053 acceptance criterion so the red-line 'no grant minted without confirmation' is actually executed."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true},
+    {"ac": "AC-19", "covered": true},
+    {"ac": "AC-20", "covered": true},
+    {"ac": "AC-21", "covered": true},
+    {"ac": "AC-22", "covered": true}
+  ],
+  "compat_contracts": {
+    "C-1": "schema.test.ts FF-FK-RESOLVE inverted correctly: positive grant_role_id_fkey -> role(tenant_id,id) assertion, role/role_assignment as valid baseline FK targets via KNOWN_TENANT_TABLES, FK-pairs arrayContaining extended (role_assignment->employee, role_assignment->role, grant->role). Green live.",
+    "C-2": "cross_tenant.test.ts seedRowForTable gained role + role_assignment cases; seedGrant now inline-seeds a real role so grant.role_id resolves under the new FK (verified: 2 seeded grants both role_exists=1); seedState tracks emp/role ids; ordering (role after tenant, role_assignment after employee+role+department) holds. 37 cross_tenant tests green, no other KNOWN_TENANT_TABLES consumer broke.",
+    "beyond_adr_scope_note": "pgTimerStore.integration.test.ts and package.json were also touched (not in ADR8 handoff list but justified): pgTimerStore replaced a stale hardcoded expect(12) schema_migrations count with a dynamic file-count guard (the 12 would break under 019-021); package.json wires role-migration-set.sh into the fitness chain. Both correct and necessary; not a finding."
+  },
+  "role_gap_evidence": []
+}

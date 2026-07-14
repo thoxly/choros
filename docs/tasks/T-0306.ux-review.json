@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0306",
+  "verdict": "approved",
+  "gate_seen": {
+    "green": true,
+    "red_rules": []
+  },
+  "_r2_note": "UX-слой r2: blocking UX-1 из r1 (дубль онбординга с T-0598) ЗАКРЫТ правильно — не вторым элементом, а консолидацией honest-degrade В канонический слой T-0598 (stepMarkerState + unknown-маркер). UX-гейты зелёные: G2 exit 0 (light default + [data-theme=dark] в обоих источниках токенов), G5 exit 0 (informational; 0 находок в новых видимых строках — «Статус шага недоступен» человеческий русский), G6 exit 0 (0 новых хардкодов; stepMarkerUnknownStyle только var(--chs-*)). Единственный blocking r2 — инженерный (flaky mount-тест), живёт в review.json; UX-замечаний blocking-уровня нет.",
+  "themes_checked": [],
+  "pattern_sources": [
+    {
+      "element": "StepRow unknown-маркер (пунктирный круг с прочерком)",
+      "pattern": "honest-degrade / distinct-state marker («не знаем» ≠ «не сделано» ≠ «сделано»)",
+      "mcp_ref": "principles.md §6 (repo) — состояния явные; консолидация в T-0598 checklist-stepper (uxpatterns patterns/advanced/wizard)",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "UX-r2-1-marker-discriminability",
+      "severity": "nit",
+      "root": "A",
+      "location": "web/src/screens/screen-overview.jsx (stepMarkerUnknownStyle vs stepMarkerTodoStyle)",
+      "issue": "Различимость unknown vs todo держится на dashed vs solid границе 1px (оба var(--chs-color-border)) + глиф «—» цветом var(--chs-color-text-muted). Токены тематизированы в обеих темах (tokens.css: :root + [data-theme=dark], G2 PASS), глиф даёт вторую, не-цветовую подсказку + role=img/aria-label/title «Статус шага недоступен» — доступность закрыта. Но на низком DPI dashed-окружность 20px может читаться слабо. Живой real-click в обеих темах не выполнен (среда без браузера) — статическая верификация.",
+      "suggestion": "На приёмке глянуть маркер в dark на реальном экране; если сливается — усилить (например, фон var(--chs-color-surface-2)). Не blocking: семантика уже доносится глифом и aria."
+    },
+    {
+      "id": "UX-r2-2-cta-deadend-nonauthor",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-overview.jsx (шаг 1 CTA → /apps)",
+      "issue": "Перенос нерешённого nit r1: CTA «Создать приложение» ведёт на /apps (гейт authoring_draft); не-автор упрётся в гейт. Для истинного first-run не всплывает (владелец с грантом), плитка «Конструктор» несёт тот же CTA — нового тупика T-0306 не вводит.",
+      "suggestion": "Follow-up-задача: честное «нет прав на создание» на /apps для не-авторов."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    { "ac": "Один онбординг-слой на Обзоре (консолидация с T-0598, без дубля)", "covered": true },
+    { "ac": "Empty-state подсказка «создай первое приложение» доносится (strip виден при apps===0, CTA-кнопка рабочая — mount A/C при 30s)", "covered": true },
+    { "ac": "Honest-degrade видим и различим: unknown ≠ todo (dashed + глиф + aria/title человеческим русским)", "covered": true },
+    { "ac": "Token-only, обе темы, без жаргона (G2/G5/G6 exit 0)", "covered": true },
+    { "ac": "Живой real-click в обеих темах", "covered": false }
+  ]
+}

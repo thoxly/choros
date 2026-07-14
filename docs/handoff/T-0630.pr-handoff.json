@@ -1,0 +1,68 @@
+{
+  "task_id": "T-0630",
+  "status": "pr_open",
+  "branch": "task/T-0630-accounts-read-authz",
+  "live_proof": {
+    "verdict": "GREEN",
+    "stand": "http://100.121.76.86:3000 dev@e8c735d",
+    "method": "Playwright chromium, real Keycloak Authorization Code + PKCE via KC login form (not dev-shortcut); direct fetch('/api/users/accounts') from within the authenticated browser session using the actor's own Bearer accessToken (from localStorage chs-kc-session) — same request the SPA itself issues, not a bypass.",
+    "rank_and_file_actor": "e-orlov (no mgmt_object:employee grant, not owner) -> GET /api/users/accounts => 403 NOT_OWNER, body has zero employee rows; /users UI page shows human-readable 'Не удалось загрузить пользователей (HTTP 403)', no list rendered.",
+    "owner_actor": "e-owner (genesis owner) -> GET /api/users/accounts => 200, full account list (32 employees) rendered in UI and present in fetch body.",
+    "report": "docs/live-proof/T-0630.live-proof.md",
+    "evidence_dir": "docs/live-proof/T-0630-evidence/"
+  },
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/specs/T-0630-accounts-read-authz.spec.md",
+    "docs/design/ADR-T0630-accounts-read-authz.md",
+    "src/http/user-mgmt.ts",
+    "src/http/seed-write.ts",
+    "ci/checks/db/user-mgmt.db.test.ts",
+    "docs/handoff/T-0630.pr-handoff.json"
+  ],
+  "summary_phases": {
+    "SPEC": "done — docs/specs/T-0630-accounts-read-authz.spec.md (5 functional incl. the reused-authority constraint, 5 non-functional incl. D-064/T-0658 zero-new-authority-path discipline, 5 acceptance criteria).",
+    "DESIGN": "done — docs/design/ADR-T0630-accounts-read-authz.md (reuse loadAdminContext+assertOrgObjectAuthority verbatim on GET; widen operation type to include \"read\"; rejected hasOrgObjectAuthority as too broad and a new employee-lookup as forbidden).",
+    "BUILD": "done — code fix + tests, all required gates green."
+  },
+  "authority_mechanism": "GET /api/users/accounts now calls loadAdminContext(pool, tenantId, actorId, nowMs()) then assertOrgObjectAuthority(admin, \"mgmt_object:employee\", \"read\", tenantId, actorId, nowMs(), msg, oracle) — the IDENTICAL seam PATCH /api/users/:employee_id already uses on the same file (POST uses \"create\", PATCH uses \"update\"). loadAdminContext (src/db/org.ts) resolves BOTH admin.isGenesisOwner (step 1) and the delegable mgmt_object:* grant list (step 3) via subqueries that CONFIRMED carry `AND deactivated_at IS NULL` (T-0658 fail-closed predicate, verified by reading org.ts:704-748 and :763-819 — both isGenesisOwnerForTenant's inlined owner-check and the role_assignment-load step in loadAdminContext). assertOrgObjectAuthority's operation parameter type was widened from \"create\"|\"update\"|\"delete\" to also accept \"read\" (grant-lattice.ts's Operation union already included \"read\" — zero lattice/validateAdminDelegation changes; all 8 pre-existing create/update/delete call sites in seed-write.ts and user-mgmt.ts are unaffected, confirmed by full green test suite). No new employee-lookup SQL was written anywhere — the D-064/T-0658 warning against a 6th parallel authority path is honored by construction (reused function calls only).",
+  "gate_results": {
+    "npm_ci": "188 packages installed, 0 errors (--maxsockets=3)",
+    "tsc_noEmit": "0 errors",
+    "eslint_src": "0 errors, 44 pre-existing console warnings (none in touched files, unchanged from baseline)",
+    "vitest_run": "5580 passed, 10 skipped (291 files, 2 skipped) — full main tier green",
+    "fitness_db_solo": "1297 tests collected; user-mgmt.db.test.ts: 28/28 passed (was 26, +2 T-0630 tests: read-gate-plain 403 no-leak, read-gate-granted 200 read-parity, +1 softened-409-text test = +3 total, net new tests in this file). 1 pre-existing unrelated failure: ci/checks/db/cross_tenant.test.ts (`seedRowForTable: unknown table user_pref` — migration 129 added user_pref before this branch's base aee684b; the test's seed-row switch was never updated for it; confirmed via `git log` the file predates this branch and was untouched by this diff). No fitness regression attributable to T-0630.",
+    "http_route_auth_coverage": "PASS — FF-0328-1/2/3 clean (user-mgmt.ts already withAuth-wrapped; new authority code is inside the existing wrap, no new route-registration pattern)",
+    "grant_resolver_isolation": "PASS — no forbidden imports, no parallel-authority tokens, frozen modules (object-handle.ts/grant-lattice.ts/types.ts) unmodified",
+    "user_mgmt_no_secret_leak": "PASS FF-583-7 — no secret leak introduced",
+    "user_mgmt_reuses_kc_port": "PASS FF-583-8 — no new KC HTTP path",
+    "anti_case_lock": "PASS — Phase 1 delegates clean, Phase 2 full D-064 denylist aggregate 16 (baseline 16, no growth)"
+  },
+  "mutation_proof": {
+    "method": "git stash push -- src/http/user-mgmt.ts src/http/seed-write.ts (reverting ONLY the source fix, keeping the new tests), re-ran the T-0630 tests, then git stash pop to restore the fix.",
+    "red_before_fix": "Both new tests failed on pre-fix code: (1) the plain-member GET test got a REAL 200 response containing the full leaked account list (3 accounts including the plain member's own row, expected 403, JSON body printed in the assertion failure as proof) instead of the expected 403; (2) the softened-409-text test received the old literal \"an account with that email already exists\" instead of the new Russian text. Both pass after `git stash pop` restored the fix — full 28/28 green in ci/checks/db/user-mgmt.db.test.ts."
+  },
+  "get_users_accounts_403_text": "\"owner or mgmt_object:employee grant required to read user accounts\" (NOT_OWNER code, matches the existing PATCH message style verbatim except for the verb).",
+  "email_409_text": "Softened from \"an account with that email already exists\" to \"логин или email уже заняты — выберите другие значения\" (EMAIL_TAKEN code unchanged). Reason: admin-port.ts's own comment documents EMAIL_TAKEN as the DEFAULT mapping when Keycloak's 409 response body is absent/unparseable/ambiguous — so a LOGIN clash can surface under this same code, and the old text wrongly pointed the owner at the email field specifically. LOGIN_TAKEN (distinct KC code, T-0633 round-3, unambiguous username clash) is untouched.",
+  "live_proof_todo": [
+    "On the stand: log in as a rank-and-file employee (no mgmt_object:employee grant, not owner) and confirm the /users screen either shows nothing or a clean 403 state when GET /api/users/accounts is called directly (e.g. via browser devtools fetch) — expect 403 NOT_OWNER, no account list in the response body.",
+    "Confirm the owner and any mgmt_object:employee-grant holder (e.g. role-constructor-admin) still see the full account list unaffected — no regression for the intended audience.",
+    "Trigger a duplicate-login create attempt (non-email-taken case) and confirm the 409 body now reads the softened Russian text, not the old English 'email already exists' claim."
+  ],
+  "findings": [
+    "Pre-existing, unrelated to T-0630: ci/checks/db/cross_tenant.test.ts's seedRowForTable() switch statement does not have a case for the `user_pref` table (added in migration 129, T-0651). This makes that ONE test file fail with 'seedRowForTable: unknown table user_pref' regardless of this branch's changes (confirmed failing identically before and after the T-0630 fix, and the file has no commits on this branch — `git log` shows its last touch was T-0581). Worth a follow-up task to add the missing seed-row case.",
+    "Pre-existing test-infra fragility, unrelated to T-0630: ci/checks/db/doc-reconcile.db.test.ts's F-9 (and occasionally F-2/F-3/F-5/F-8) fail with 'Test timed out in 5000ms' under current machine load. Root-caused (not just 'flaky'): the file relies on the GLOBAL vitest testTimeout (no per-file override), and its own queries individually take 5-12s on this machine — confirmed by re-running the file ALONE with `--testTimeout=20000`, which passed 15/15 (F-9 alone took 12.3s, well over the default 5000ms). This is a load-sensitive pre-existing gap in that file's timeout budget, not a T-0630 regression — doc-reconcile.ts is not imported by and shares no code path with user-mgmt.ts/seed-write.ts. Worth a follow-up task to raise/override its timeout."
+  ],
+  "deviations_from_adr": [],
+  "blocked_reason": "",
+  "friction_events": [
+    "First fitness:db solo run still showed doc-reconcile.db.test.ts F-9 timing out even without any concurrent run — investigated further (see findings) and root-caused it to the file's queries exceeding the vitest DEFAULT 5000ms timeout under current machine load, not to concurrency alone. Verified user-mgmt.db.test.ts itself was unaffected and green (28/28) in every one of the 3 fitness:db invocations run during this session (2 with contention, 1 solo).",
+    "assertOrgObjectAuthority's operation parameter needed widening (create|update|delete -> +read) rather than reuse-as-is, since grant-lattice.Operation already had \"read\" but the seed-write.ts wrapper had narrowed it — a one-line additive type change, confirmed safe by checking all 8 existing call sites still compile and their tests stay green."
+  ]
+}

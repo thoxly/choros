@@ -1,0 +1,145 @@
+{
+  "task_id": "T-0029",
+  "status": "pr_open",
+  "branch": "task/T-0029-scoped-admin",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "merge_target": "dev",
+  "base_commit": "b32d403",
+  "head_commit": "eda4d54",
+  "migrations": ["026_genesis_owner_seed.sql"],
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E3.3: scoped administration = держи делегируемый грант mgmt_object:X. Новый pure-модуль src/core/scoped-admin.ts — тонкая композиция T-0018 grant-lattice по двум осям (resource/org): validateNarrowing + isNarrowerOrEqual verbatim, без нового algebra. Идемпотентная миграция 026 бутстрапит genesis tenant-owner в полноценного mgmt-admin (17 делегируемых грантов: 16 CRUD × 4 вида + 1 invoke на mgmt_object:agent). isGenesisOwner = инжектируемый boolean, граница доверия = вызывающая сторона (T-0030). 17/17 AC; 4 adversarial-пробы (R-2 forward-limit живьём, set-widening без усреднения, owner-bypass честность, idempotency-vs-reconciliation); tsc/eslint/vitest 894/894/fitness:db 243/243 на изолированном Postgres (55462). grant-resolver.ts / grant-lattice.ts / object-handle.ts байт-в-байт не тронуты. Новых tenant-таблиц нет.",
+  "commits": [
+    {
+      "sha": "1324106",
+      "phase": "SPEC",
+      "message": "T-0029 SPEC: scoped admin = ordinary grants on mgmt_object:* + monotonic-narrowing checker + genesis tenant-owner bootstrap"
+    },
+    {
+      "sha": "40f4ece",
+      "phase": "DESIGN",
+      "message": "T-0029 DESIGN: scoped-admin checker (dual-axis lattice composition) + genesis seed"
+    },
+    {
+      "sha": "da5c2bd",
+      "phase": "BUILD",
+      "message": "T-0029 BUILD: scoped-admin checker (dual-axis lattice composition)"
+    },
+    {
+      "sha": "f0434c2",
+      "phase": "BUILD",
+      "message": "T-0029 BUILD: migration 026 genesis owner seed (additive, idempotent)"
+    },
+    {
+      "sha": "7f97441",
+      "phase": "BUILD",
+      "message": "T-0029 BUILD: tests + fitness (unit, adversarial fuzz, db seed probe, isolation)"
+    },
+    {
+      "sha": "23f203a",
+      "phase": "REVIEW",
+      "message": "T-0029 REVIEW: approved — verbatim lattice composition, no fail-open, seed 17/idempotent"
+    },
+    {
+      "sha": "eda4d54",
+      "phase": "TEST",
+      "message": "T-0029 TEST: pass — 17/17 AC green, gate+isolated-db clean, 4 adversarial probes by-design (R-2 forward-limit confirmed)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-opus-4-8 (reviewer role, T-0029 REVIEW)",
+      "reviewed_commit": "7f97441",
+      "blocking_resolved": [],
+      "nits_open": ["R-1", "R-2"],
+      "r1_note": "R-1 (nit): ADR §3 prose написано '16' в двух местах (строки 121 и 152); реальных mgmt-грантов в сиде 17 (16 CRUD + 1 invoke). Код/миграция/fitness консистентны на 17. Документационный лаг, не дефект кода.",
+      "r2_note": "R-2 (nit): org-set genesis-owner {fin,cs,plat} пинит forest-wide reach делегированных-вниз admins к текущему снапшоту из 3 корней. Owner сам не ограничен (un-parented root, FR-4 short-circuit). Forward-limitation для T-0030/T-0053 — не дефект.",
+      "artifact": "docs/reviews/T-0029.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 894,
+      "passed": 894,
+      "failed": 0,
+      "ac_coverage": "17/17",
+      "adversarial_probes": "4/4",
+      "tested_commit": "eda4d54",
+      "run_details": {
+        "tsc": "exit 0 (--noEmit clean)",
+        "eslint": "exit 0 (src clean)",
+        "vitest_unit": "651 passed / 5 skipped (30 files; incl. scoped-admin.test.ts 21, scoped-admin.adversarial.test.ts 4, scoped-admin.fitness.test.ts 6)",
+        "fitness_static": "all static checks PASS (FF-8/9/9b/10/11/16/17 + AC-12 static = 17 mgmt-grants)",
+        "fitness_db": "243 passed / 243 (incl. genesis-owner-seed.test.ts 5 + cross_tenant.test.ts 47); isolated Postgres port 55462, volume torn down",
+        "postgres_container": "port 55462, isolated volume t0029test (55432 untouched); torn down -v after run",
+        "migrations_idempotency": "run×2: run1 applied; run2 'nothing to apply' → idempotent"
+      },
+      "artifact": "docs/test-reports/T-0029.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 warnings)",
+      "vitest_run": "pass (651 unit / 5 skipped)",
+      "fitness_static": "pass (all checks: scoped-admin-isolation.sh full run)",
+      "fitness_db": "pass (243/243 isolated Postgres 16, own volume t0029test)",
+      "integration_honesty_d056": "isolated Postgres port 55462, migrate-from-zero×2, torn down; no sibling-worktree test leakage (vitest.config excludes .claude/**, web/**, ../choros-wt/**)"
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/genesis-owner-seed.test.ts",
+    "ci/checks/scoped-admin-isolation.sh",
+    "docs/design/T-0029-scoped-admin.adr.md",
+    "docs/design/T-0029.adr.contract.json",
+    "docs/reviews/T-0029.review.json",
+    "docs/specs/T-0029-scoped-admin.spec.md",
+    "docs/specs/T-0029.spec.contract.json",
+    "docs/test-reports/T-0029.test-report.json",
+    "migrations/026_genesis_owner_seed.sql",
+    "package.json",
+    "src/__tests__/scoped-admin.adversarial.test.ts",
+    "src/__tests__/scoped-admin.fitness.test.ts",
+    "src/__tests__/scoped-admin.test.ts",
+    "src/core/scoped-admin.ts"
+  ],
+  "deviations_from_adr": [
+    "R-1 nit (не дефект): ADR §3 prose '16' в строках 121 и 152 — фактически 17 (16 CRUD + 1 invoke). Код/миграция/fitness на 17. Документационный лаг; подтянуть при следующем касании ADR."
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "what_this_gives": "Закрывает E3.3: администрирование как паттерн (держи делегируемый грант mgmt_object:X). Новый модуль scoped-admin.ts + genesis-owner seed (migration 026). Аддитивно: 0 разломов существующих API. grant-lattice.ts / grant-resolver.ts / object-handle.ts не тронуты. Новых tenant-таблиц нет; mgmt-grants едут на существующей таблице grant.",
+    "admin_is_ordinary_grant": "Администратор — это обычный грант с capability=mgmt_object:X + delegable=true. Нет отдельного admin-флага, нет параллельного хранилища прав. Чтобы выдать кому-то admin: INSERT в grant с нужным mgmt_object:* + назначить роль tenant-owner/admin через role_assignment. Сам genesis-owner получает все 17 грантов через migration 026.",
+    "genesis_owner": "Пользователь с ролью tenant-owner + genesis role_assignment (source='genesis') — это genesis owner. В чекере он идентифицируется флагом isGenesisOwner (инжектируется вызывающей стороной = T-0030). Проверить в БД: SELECT r.name, ra.source FROM role_assignment ra JOIN role r ON r.id = ra.role_id WHERE ra.source = 'genesis'; — должна быть ровно одна запись с role=tenant-owner.",
+    "how_to_verify": [
+      "npm run ci: tsc --noEmit / eslint src / vitest run / npm run fitness — всё зелёное.",
+      "npm run fitness:db (изолированный PG): 243/243 включая genesis-owner-seed.test.ts.",
+      "Миграции: node migrations/run.mjs дважды — первый прогон применяет 026; второй прогон 'nothing to apply'.",
+      "Проверить genesis owner в БД: SELECT COUNT(*) FROM grant WHERE capability LIKE 'mgmt_object:%' AND delegable = true; — должно быть 17.",
+      "Проверить genesis assignment: SELECT COUNT(*) FROM role_assignment WHERE source = 'genesis'; — должна быть 1.",
+      "Проверить tenant owner role: SELECT COUNT(*) FROM role r JOIN role_assignment ra ON ra.role_id = r.id WHERE r.name = 'tenant-owner'; — ровно 1 на тенант."
+    ],
+    "infra_changes": "1 Postgres-миграция (026 — INSERT-only, нет DDL, нет CREATE TABLE). Нет новых сервисов/docker-compose изменений. package.json: +1 fitness check (scoped-admin-isolation.sh); нет новых npm-зависимостей.",
+    "downstream_seams": {
+      "T-0030": {
+        "description": "Write-API для выдачи/отзыва mgmt-грантов. Здесь живёт trust boundary isGenesisOwner: T-0030 должен деривировать флаг из БД (role=tenant-owner + source='genesis' assignment), а не из user-input. Также T-0030 содержит call-sites audit-emit (AC-15 контракт: GrantAuditEvent с полями actor/subject/capability/scope/proposed_by/confirmed_by).",
+        "critical": "isGenesisOwner-флаг — единственный механизм owner-bypass в чекере (un-parented root, FR-4). Если T-0030 позволит вызывающей стороне самостоятельно установить флаг = полная self-elevation дыра. Флаг ОБЯЗАН деривироваться строго из БД-состояния (tenant-owner роль + confirmed genesis assignment)."
+      },
+      "T-0053": {
+        "description": "Live getGrants (real Postgres). При появлении нового корневого департамента (parent_id NULL) owner grant-set {fin,cs,plat} не покроет новый корень для ДЕЛЕГИРОВАННЫХ вниз admin'ов (R-2). Решение: при создании нового root-департамента переиздавать owner mgmt-grant org_scope с включением нового корня, либо пересмотреть super-root подход."
+      },
+      "audit_emit_callsites": {
+        "ac_15_contract": "scoped-admin.ts НЕ эмитирует аудит сам — он pure/IO-free. AC-15 задаёт shape GrantAuditEvent: {actor, subject, capability, scope, proposed_by, confirmed_by}. Call-sites эмита — в write-API T-0030, где реальный INSERT в grant происходит. При имплементации T-0030: каждый create/revoke mgmt-grant ОБЯЗАН эмитить GrantAuditEvent с этими полями."
+      }
+    },
+    "nits_for_next_touch": [
+      "R-1: ADR §3 строки 121 и 152 — заменить '16' на '17 (16 CRUD × 4 вида + 1 invoke)' при следующем касании ADR-доки.",
+      "R-2: При создании нового корневого департамента — переиздать owner org_scope в migration/write-API (T-0030/T-0053)."
+    ]
+  },
+  "friction_events": []
+}

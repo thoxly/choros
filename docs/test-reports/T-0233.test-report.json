@@ -1,0 +1,113 @@
+{
+  "task_id": "T-0233",
+  "verdict": "pass",
+  "head_sha": "c503350f678da99647a481c81cf1c7956777e073",
+  "deterministic": {
+    "total": 2059,
+    "passed": 2053,
+    "failed": 0,
+    "skipped": 6,
+    "notes": "vitest run (OPENAI_API_KEY unset, zero network): 2053 passed, 6 skipped (1 workerAuth.kc.e2e — KC not wired in dev; 4 flowable-client.integration — Flowable not wired; 1 flowable-client.adversarial — skip marker). 0 failures. T-0233 dedicated suite: 15/15 pass in src/runtime/legal-precheck/__tests__/run-precheck.test.ts. tsc --noEmit exit 0. eslint exit 0 (2 warnings pre-existing console statements in bridge-runner.ts/externalTaskBridge.ts, not in T-0233 files)."
+  },
+  "tsc": "ok",
+  "new_fitness": "green",
+  "no_paid_llm_confirmed": true,
+  "dormant_defer_confirmed": true,
+  "fitness_checks": {
+    "llm-port-injectable.sh": "PASS — FF-LP-1: LlmPort exported, dormantLlmPort defined, no SDK imports in core/runtime/legal-precheck, runLegalPrecheck accepts llm port in deps",
+    "precheck-no-reasoning-egress.sh": "PASS — FF-LP-2/D-139: PrecheckAnswer has no forbidden field (reasoning/trace/raw/chainOfThought), .reasoning only in audit payload",
+    "precheck-no-network-in-core.sh": "PASS — FF-LP-3/AC-4/AC-12: no network call in llm-port.ts/agent-precheck-motor.ts/run-precheck.ts; dormantLlmPort references LlmDormantError",
+    "legal-precheck-unpark-narrow.sh": "PASS — FF-LP-4/AC-11/NF-4: agent_instruction runtime reads confined to src/runtime/legal-precheck/",
+    "legal-precheck-single-resolver.sh": "PASS — FF-LP-5/AC-7: resolveFor is the single PDP in run-precheck.ts",
+    "legal-precheck-single-audit.sh": "PASS — FF-LP-6/AC-8: no direct audit_event INSERT; agent.blocked and agent.deferred referenced; appendAuditEvent is the audit sink",
+    "precheck-secret-custody.sh": "PASS — FF-LP-8/AC-13/NF-3: llm-port.ts pure (no env/secret); adapter uses validateSecretHandleShape/SecretResolverPort; no raw secret in console/audit/response",
+    "agent-instruction-runtime-dormant.sh": "PASS — FF-COMP-6/AC-11: SANCTION granted (frozen-sanctions.jsonl D-060 additive path); no engine/worker/bridge reads agent_instruction; http reads confined to allowlist (includes src/runtime/legal-precheck/ narrow unpark)",
+    "frozen-checks-immutable.sh": "PASS — T-0146/FF-FCI12: frozen-sanction GRANTED for agent-instruction-runtime-dormant.sh modification by T-0233 via frozen-sanctions.jsonl"
+  },
+  "fitness_db": "deferred — no Postgres available; db checks require live PG; no T-0233 files touch ci/checks/db/**",
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "tsc --noEmit exit 0; llm-port-injectable.sh FF-LP-1(a)/(b)/(c) green: LlmPort exported, dormantLlmPort defined, no SDK in core/runtime, deps.llm accepts LlmPort",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "run-precheck.test.ts > AC-2: succeed path with stub → proceed + red-flags answer + zero network calls (DEMO_DEAL ≥5M₽, answerForm=legal_precheck_v1, redFlags.length>0)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "run-precheck.test.ts > AC-3 (pure motor): proceed — all gates pass, deterministic (JSON.stringify identical); AC-3 (orchestrator): same input + stub → byte-identical outcome",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "run-precheck.test.ts > AC-4 (pure motor): llmDormant=true → defer-to-human(dormant) NOT proceed; AC-4 (orchestrator): liveEnabled=false → defer-to-human(dormant) + agent.deferred audit; dormantLlmPort.complete() throws LlmDormantError; precheck-no-network-in-core.sh FF-LP-3",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "run-precheck.test.ts > AC-5: pdpDenied/llm_error/llm_timeout → fail-closed (3 pure-motor tests + 1 orchestrator PDP-deny test); agent.blocked audit emitted, 0 success audit",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "run-precheck.test.ts > AC-4 orchestrator (liveEnabled=false → agent.deferred with doubt_reason + inboxTaskRef=audit-id); AC-6: missing instruction → defer-to-human + agent.deferred with doubt_reason (inboxTaskRef=rows[0].id)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "legal-precheck-single-resolver.sh FF-LP-5: resolveFor is the single PDP; grep confirmed no second resolver on run-precheck.ts path",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "legal-precheck-single-audit.sh FF-LP-6: no direct INSERT; agent.blocked/agent.deferred referenced; appendAuditEvent is sole sink; AC-2/AC-4/AC-5/AC-6 tests confirm exactly 1 audit event per run",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "precheck-no-reasoning-egress.sh FF-LP-2/D-139: PrecheckAnswer has no reasoning/trace/raw/chainOfThought (tsc + grep); run-precheck.test.ts > AC-2: JSON.stringify(answer) does not contain 'reasoning'; D-139 structural suite: PrecheckAnswer keys check",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "run-precheck.test.ts > AC-2: proceedOutcome.answer.answerForm='legal_precheck_v1' (echoes request's answerForm from agent_instruction.answer_form via readPublished); stub echoes req.answerForm (NF-6 invariant)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "legal-precheck-unpark-narrow.sh FF-LP-4: agent_instruction runtime reads ⊆ src/runtime/legal-precheck/ only; agent-instruction-runtime-dormant.sh FF-COMP-6: ALLOWED_RE includes src/runtime/legal-precheck/ narrow allowlist, all other runtime paths dormant",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "OPENAI_API_KEY unset throughout; npx vitest run exit 0 (2053 pass, 0 fail); precheck-no-network-in-core.sh confirms no fetch/https/net in core/runtime paths; llm-port-injectable.sh confirms no SDK imports in core/runtime/legal-precheck",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "precheck-secret-custody.sh FF-LP-8: llm-port.ts pure (no env vars); adapter uses validateSecretHandleShape/SecretResolverPort; no raw secret in console/audit/response/exception on runtime path",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "run-precheck.test.ts > AC-14: cross-tenant handle (TENANT_B document, TENANT_A subject) → fail-closed(pdp_deny, denyReason='cross_tenant'); tenant isolation enforced by grant-resolver makeHandle tenantId check",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "src/__tests__/fixtures/demo-legal-precheck-contract.ts: DEMO_DEAL_CONTEXT.amount=5_500_000 ≥5M₽, fictional contract body; DEMO_DEAL in run-precheck.test.ts uses same amount; DEMO_PRECHECK_ANSWER in stub-llm-port.ts tied to demo fixture",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "tsc --noEmit exit 0; npx vitest run exit 0 (2053/0); all 9 fitness checks exit 0; fitness:db deferred (no Postgres, no T-0233 db files)",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "notes": "All 16 ACs verified deterministically without OPENAI_API_KEY and without any paid LLM call. dormant-by-default confirmed via three-lock mechanism: (1) agent_card.llm_* NULL, (2) liveEnabled=false, (3) dormantLlmPort throws LlmDormantError. D-139 no-reasoning-egress confirmed: PrecheckAnswer type has no reasoning fields (tsc), fitness check scopes to PrecheckAnswer interface block only, run-precheck.ts stores only reasoning_trace_ref (UUID) in audit not raw reasoning text. Narrow unpark: agent_instruction reads confined to src/runtime/legal-precheck/ (FF-LP-4 + FF-COMP-6 allowlist). frozen-sanctions.jsonl additive D-060 path used to sanction modification of agent-instruction-runtime-dormant.sh (owned by T-0230, T-0233 adds legal_precheck to allowlist). No product defects found."
+}

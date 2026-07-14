@@ -1,0 +1,101 @@
+{
+  "task_id": "T-0116",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "src/core/postgres/pgTimerStore.ts:158-166",
+      "issue": "cancel(): tenantId принимался как параметр, но не использовался в WHERE-предикате SQL. BYPASSRLS-соединение могло отменить таймер любого тенанта.",
+      "suggestion": "Добавить AND tenant_id = $1 в WHERE-предикат.",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "WHERE tenant_id = $1 AND id = $2 AND state = 'pending' — предикат добавлен. Код проверен в pgTimerStore.ts:183-185."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "src/core/postgres/pgTimerStore.ts:174-182",
+      "issue": "done(): аналогичный баг — tenantId игнорировался в SQL WHERE.",
+      "suggestion": "Добавить AND tenant_id = $1 в WHERE-предикат.",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "WHERE tenant_id = $1 AND id = $2 AND state = 'firing' — предикат добавлен. Код проверен в pgTimerStore.ts:201-203."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/postgres/pgTimerStore.ts:121",
+      "issue": "SET LOCAL выполнялся через template-literal без UUID-валидации tenantId до интерполяции.",
+      "suggestion": "Добавить UUID-валидацию перед интерполяцией.",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "UUID_RE regex + throw added before SET LOCAL in fetchAndFire (pgTimerStore.ts:130-131). JSDoc добавлен (строки 118-121)."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/core/postgres/pgTimerStore.ts:80-98",
+      "issue": "enqueue(): tenantId-параметр мёртв в SQL, но сигнатура не документировала это.",
+      "suggestion": "Добавить JSDoc-комментарий с объяснением.",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "JSDoc-блок добавлен (pgTimerStore.ts:80-87): явно указывает, что tenantId принимается для interface consistency, фактический tenant_id берётся из GUC, caller MUST SET choros.tenant_id перед вызовом."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/db/pgTimerStore.integration.test.ts",
+      "issue": "Отсутствовали тесты cancel() и done().",
+      "suggestion": "Добавить интеграционные тесты cancel/done (успех + неверное состояние + cross-tenant).",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "Добавлено 6 тестов: cancel pending→cancelled (true), cancel non-pending (false), cancel cross-tenant TENANT_B→TENANT_A timer (false); done firing→done (true), done non-firing (false), done cross-tenant (false). Итого 113 DB-тестов (было 107). Все проходят."
+    },
+    {
+      "id": "R-6",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/pgTimerStore.integration.test.ts:567-586",
+      "issue": "Новые cross-tenant тесты cancel/done (R-1/R-2 fix) используют appPool (choros_app — RLS активен), а не migratorPool (BYPASSRLS). Это означает, что при мысленном удалении AND tenant_id = $1 из SQL тесты всё равно прошли бы — RLS уже фильтрует строки по GUC. Тесты доказывают корректность при RLS-пути, но не доказывают, что explicit predicate защищает BYPASSRLS-соединение (оригинальный threat model из R-1/R-2). Это нит наблюдения: фикс правильный, но тест не является фальсифицирующим для исходного сценария атаки.",
+      "suggestion": "Для полноты: добавить один тест, использующий migratorPool непосредственно для cancel/done с tenantId = TENANT_B и timerId TENANT_A. Это покрыло бы BYPASSRLS-сценарий. Однако это улучшение — не регрессия; текущих тестов достаточно для approve."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": true  },
+    { "ac": "AC-2",  "covered": true  },
+    { "ac": "AC-3",  "covered": true  },
+    { "ac": "AC-4",  "covered": true  },
+    { "ac": "AC-5",  "covered": true  },
+    { "ac": "AC-6",  "covered": true  },
+    { "ac": "AC-7",  "covered": true  },
+    { "ac": "AC-8",  "covered": true  },
+    { "ac": "AC-9",  "covered": true  },
+    { "ac": "AC-10", "covered": true  },
+    { "ac": "AC-11", "covered": true  },
+    { "ac": "AC-12", "covered": true  },
+    { "ac": "AC-13", "covered": true  },
+    { "ac": "AC-14", "covered": true  }
+  ],
+  "role_gap_evidence": [
+    "R-6 (нит): паттерн cross-tenant тестов через appPool (RLS путь) не покрывает BYPASSRLS-сценарий. Если в проекте ожидаются тесты безопасности через migrator-соединение для store-методов, стоит добавить fitness-правило: 'каждый store-метод с tenantId-параметром должен иметь тест через migratorPool с mismatched tenantId'. Кандидат в ledgers/role-gaps.md как паттерн для будущего security-reviewer (SQ11)."
+  ],
+  "_review_meta": {
+    "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+    "date": "2026-06-10",
+    "review_type": "re-review после R-1..R-5 fix",
+    "fix_commit": "27e25f0",
+    "base_review_commit": "9e8d966",
+    "ci_static": "green (npm run ci: tsc + eslint + fitness + vitest, 490 tests)",
+    "ci_db": "green (fitness:db: 113 tests, 6 test files, migrations 012 recorded — 6 новых тестов cancel/done)",
+    "blocking_count": 0,
+    "nit_count": 4,
+    "notes": "R-1 и R-2 закрыты корректно: AND tenant_id = $1 добавлен в оба WHERE-предиката (cancel и done). R-3 закрыт: UUID_RE валидация добавлена до интерполяции SET LOCAL в fetchAndFire. R-4 закрыт: JSDoc документирует мёртвый параметр и GUC-паттерн. R-5 закрыт: 6 новых интеграционных тестов (cancel/done × 3 сценария каждый). Новый нит R-6: cross-tenant тесты используют appPool (RLS путь), а не BYPASSRLS-соединение — не блокирующий. Все остальные характеристики из первого review подтверждены без изменений."
+  }
+}

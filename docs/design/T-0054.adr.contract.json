@@ -1,0 +1,225 @@
+{
+  "task_id": "T-0054",
+  "status": "ready",
+  "decision": "Add a Keycloak 25.x service to docker-compose.yml (additive, postgres block untouched) using start-dev mode with import-on-start realm provisioning; Keycloak internal store = existing Postgres instance on dedicated 'keycloak' schema (single-substrate principle); host port 8180; realm JSON committed at config/keycloak/realm-choros.json with 7 human dev accounts (matching org.ts fixture), one choros-api confidential client, one actor_type protocol mapper (oidc-usermodel-attribute-mapper → claim actor_type), and representative agent-orchestrator service-account client; CHOROS_AUTH_MODE env var (default: dev) is the migration seam — dev mode keeps x-dev-user stub intact (all existing tests unchanged), keycloak mode is a stub T-0060 fills; JWT contract frozen: iss=realm-URL, aud includes choros-api, actor_type claim human|agent, RS256.",
+  "rejected_alternatives": [
+    {
+      "option": "Embedded H2 for Keycloak internal store",
+      "why_not": "Violates single-Postgres-per-silo principle (stack ADR). H2 is container-ephemeral without an explicit volume; state is lossy on restart. A dedicated 'keycloak' schema on the existing Postgres instance is consistent, operationally simpler (one backup), and aligned with the silo substrate model established by T-0053."
+    },
+    {
+      "option": "Keycloak 24.x instead of 25.x",
+      "why_not": "25.x is the latest stable OSS at design time. No feature gap between 24 and 25 for this task. The coder may downgrade to 24.x without escalation if a 25.x issue is found — the ACs are version-agnostic per spec §7."
+    },
+    {
+      "option": "Port 8080 as Keycloak host port",
+      "why_not": "8080 is a common developer-machine default used by many tools; Keycloak itself defaults to 8080 in start-dev, so an ambient Keycloak would collide. 8180 (8080+100 offset) is the conventional secondary HTTP port used in Keycloak's own multi-instance docs."
+    },
+    {
+      "option": "Keycloak Operator / Helm / external provisioning tool",
+      "why_not": "Overkill for a dev/silo compose stack; adds a non-trivial dependency and a new language surface. Keycloak's built-in --import-realm is battle-tested and zero-dep for this use case."
+    },
+    {
+      "option": "Bootstrap script using Admin REST API calls at start time",
+      "why_not": "Fragile: depends on timing (Keycloak must be fully ready), adds a shell/curl dependency, and provisioning state is not committed to git (no audit trail). JSON realm import is declarative, committed, and applied atomically on first start."
+    },
+    {
+      "option": "Shared realm (pooled tenancy) instead of dedicated realm",
+      "why_not": "Explicitly rejected by tenancy-and-delivery.md §6 and spec §0. Keycloak Organizations (shared realm for pooled SaaS) is deferred with pooled mode. One realm = one silo contour is ratified."
+    },
+    {
+      "option": "Remove x-dev-user path (require JWT from day 1)",
+      "why_not": "Breaks AC-9: all existing e2e tests (auth.e2e.test.ts, inbox.e2e.test.ts) use x-dev-user and would require a live Keycloak. The spec mandates the migration seam: dev-auth stays intact under CHOROS_AUTH_MODE=dev."
+    },
+    {
+      "option": "Scatter CHOROS_AUTH_MODE check across every route handler",
+      "why_not": "Creates untestable scattered guard logic. The correct model is one env-var read at the auth-middleware layer in src/http/auth.ts — one branch point, not N. T-0060 fills the keycloak branch in the same single location."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "KeycloakRealmRoot (realm-choros.json root)",
+      "fields": [
+        {"name": "realm", "type": "string — 'choros' (default; matches KEYCLOAK_REALM)"},
+        {"name": "enabled", "type": "boolean — true"},
+        {"name": "accessTokenLifespan", "type": "number — 300 (seconds)"},
+        {"name": "directAccessGrantsEnabled", "type": "boolean — true (enables ROPC for AC-3)"},
+        {"name": "resetPasswordAllowed", "type": "boolean — true (dev convenience)"}
+      ]
+    },
+    {
+      "entity": "CoreApiClient (choros-api — audience source)",
+      "fields": [
+        {"name": "clientId", "type": "string — 'choros-api'"},
+        {"name": "protocol", "type": "string — 'openid-connect'"},
+        {"name": "publicClient", "type": "boolean — false (confidential)"},
+        {"name": "serviceAccountsEnabled", "type": "boolean — false"},
+        {"name": "directAccessGrantsEnabled", "type": "boolean — true"},
+        {"name": "secret", "type": "string — 'choros-api-dev-secret' (DEV ONLY)"}
+      ]
+    },
+    {
+      "entity": "ActorTypeMapper (protocol mapper on choros-api)",
+      "fields": [
+        {"name": "name", "type": "string — 'actor-type-mapper'"},
+        {"name": "protocolMapper", "type": "string — 'oidc-usermodel-attribute-mapper'"},
+        {"name": "config.user.attribute", "type": "string — 'actor_type'"},
+        {"name": "config.claim.name", "type": "string — 'actor_type'"},
+        {"name": "config.jsonType.label", "type": "string — 'String'"},
+        {"name": "config.access.token.claim", "type": "boolean-string — 'true'"}
+      ]
+    },
+    {
+      "entity": "HumanUser (one per org.ts human employee — 7 total)",
+      "fields": [
+        {"name": "username", "type": "string — employee id (e.g. 'e-kravtsova')"},
+        {"name": "email", "type": "string — '<username>@choros.dev'"},
+        {"name": "enabled", "type": "boolean — true"},
+        {"name": "emailVerified", "type": "boolean — true"},
+        {"name": "credentials[0].type", "type": "string — 'password'"},
+        {"name": "credentials[0].value", "type": "string — 'dev-pw-<username>' (DEV ONLY)"},
+        {"name": "attributes.actor_type", "type": "string[] — ['human']"}
+      ]
+    },
+    {
+      "entity": "AgentServiceAccountClient (agent-orchestrator + 3 others)",
+      "fields": [
+        {"name": "clientId", "type": "string — 'agent-orchestrator' (pattern: 'agent-<name>')"},
+        {"name": "protocol", "type": "string — 'openid-connect'"},
+        {"name": "publicClient", "type": "boolean — false"},
+        {"name": "serviceAccountsEnabled", "type": "boolean — true"},
+        {"name": "directAccessGrantsEnabled", "type": "boolean — false"},
+        {"name": "secret", "type": "string — 'agent-orchestrator-dev-secret' (DEV ONLY)"},
+        {"name": "serviceAccountAttributes.actor_type", "type": "string — 'agent' (set on service-account user)"}
+      ]
+    },
+    {
+      "entity": "ComposeKeycloakService (docker-compose.yml additive block)",
+      "fields": [
+        {"name": "image", "type": "string — 'quay.io/keycloak/keycloak:25'"},
+        {"name": "command", "type": "string — 'start-dev --import-realm'"},
+        {"name": "KEYCLOAK_ADMIN", "type": "env string — default 'choros_kc_admin' (DEV ONLY)"},
+        {"name": "KEYCLOAK_ADMIN_PASSWORD", "type": "env string — default 'choros_kc_dev_pw' (DEV ONLY)"},
+        {"name": "KC_HTTP_PORT", "type": "env number — default 8180 (from KEYCLOAK_PORT)"},
+        {"name": "KC_DB", "type": "env string — 'postgres'"},
+        {"name": "KC_DB_URL", "type": "env string — 'jdbc:postgresql://postgres:5432/<db>?currentSchema=keycloak'"},
+        {"name": "KC_HOSTNAME_STRICT", "type": "env string — 'false' (dev mode)"},
+        {"name": "KC_HTTP_ENABLED", "type": "env string — 'true' (dev mode)"},
+        {"name": "depends_on.postgres.condition", "type": "string — 'service_healthy'"},
+        {"name": "healthcheck.test", "type": "string — curl /health/ready on localhost:8180"},
+        {"name": "volumes[0]", "type": "string — './config/keycloak:/opt/keycloak/data/import:ro'"}
+      ]
+    },
+    {
+      "entity": "AuthModeSeam (src/http/auth.ts additive constant)",
+      "fields": [
+        {"name": "CHOROS_AUTH_MODE", "type": "env string — 'dev' | 'keycloak'; default 'dev'"},
+        {"name": "dev branch", "type": "behaviour — x-dev-user stub active; identical to today"},
+        {"name": "keycloak branch", "type": "behaviour — x-dev-user disabled; Bearer JWT expected (T-0060 implements)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "JWT contract (frozen for T-0060): iss = http://<host>:<port>/realms/<realm>; aud MUST include 'choros-api'; sub = non-empty UUID string; preferred_username = employee-id (human) or client_id (agent); actor_type = 'human' | 'agent' (via actor-type-mapper on choros-api client); alg = RS256 (or ES256 if configured).",
+    "CHOROS_AUTH_MODE seam: env var read in src/http/auth.ts; default 'dev'; 'dev' = x-dev-user stub active (existing behaviour, no change); 'keycloak' = x-dev-user disabled, Bearer JWT expected (T-0060 fills this branch). T-0060 reads the same var.",
+    "Realm JSON path contract: config/keycloak/realm-choros.json — committed, valid JSON, not gitignored, authoritative realm definition. Keycloak mounts it via /opt/keycloak/data/import/:ro on start-dev.",
+    "Compose additive contract: docker-compose.yml gains a 'keycloak' service block; the 'postgres' service block is unmodified. The postgres+keycloak stack comes up with 'docker compose up -d'. 'depends_on: postgres: condition: service_healthy' ensures ordering.",
+    "Port contract: KEYCLOAK_PORT default = 8180. Not 5432, 55432, or 3000. Documented in docs/environments.md.",
+    "Keycloak internal store contract: KC_DB=postgres; KC_DB_URL points to the same Postgres instance (postgres service, port 5432 internal) with currentSchema=keycloak; Keycloak bootstraps 'keycloak' schema itself. choros_migrator role is used for dev; choros_app is NOT granted access to the keycloak schema.",
+    "Human fixture contract: all 7 type='human' persons from src/http/org.ts ORG_SEED are present as Keycloak users: e-kravtsova, e-mironov, e-larina, e-orlov, e-savina, e-petrov, e-belov. Each has actor_type=human attribute and credentials[password]=dev-pw-<username>.",
+    "Agent client contract: at least one client with serviceAccountsEnabled=true, clientId matching 'agent-*' prefix, directAccessGrantsEnabled=false, and service-account user attribute actor_type=agent. Representative client: agent-orchestrator.",
+    "docs/environments.md update contract: file MUST contain KEYCLOAK_PORT, KEYCLOAK_REALM, CHOROS_AUTH_MODE, core API client-id (choros-api), and a note on adding users/agents.",
+    "Public-surface compat contract (FE-W23-0008): DEV_USER_HEADER export from src/http/auth.ts unchanged; createServer, handleRequest, registerAuthRoutes, findEmployee, listSelectableUsers signatures unchanged. CHOROS_AUTH_MODE is an internal constant, not exported."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "Keycloak health endpoint GET /health/ready returns HTTP 200 within 120 s of docker compose up -d keycloak",
+      "ci_check": "live-kc: ci/checks/kc/wait-ready.sh — polls GET http://localhost:${KEYCLOAK_PORT:-8180}/health/ready every 5 s for up to 120 s (24 retries); non-200 after timeout = fail"
+    },
+    {
+      "id": "FF-2",
+      "rule": "Realm provisioned on first start (import-on-start, no manual admin-UI); OIDC discovery URL returns 200 with issuer matching http://localhost:8180/realms/choros",
+      "ci_check": "live-kc: ci/checks/kc/realm-ready.sh — curl GET /realms/choros/.well-known/openid-configuration after FF-1 passes; assert HTTP 200 and jq '.issuer' matches pattern http://localhost:8180/realms/choros"
+    },
+    {
+      "id": "FF-3",
+      "rule": "Human user obtains access token via ROPC grant (e-kravtsova, dev password) against choros-api client — HTTP 200, non-empty access_token",
+      "ci_check": "live-kc: ci/checks/kc/human-token.sh — POST /realms/choros/protocol/openid-connect/token with grant_type=password, client_id=choros-api, client_secret, username=e-kravtsova, password=dev-pw-kravtsova; assert HTTP 200 and jq '.access_token | length > 0'"
+    },
+    {
+      "id": "FF-4",
+      "rule": "Agent service account obtains access token via client_credentials grant (agent-orchestrator) — HTTP 200, non-empty access_token",
+      "ci_check": "live-kc: ci/checks/kc/agent-token.sh — POST /realms/choros/protocol/openid-connect/token with grant_type=client_credentials, client_id=agent-orchestrator, client_secret=agent-orchestrator-dev-secret; assert HTTP 200 and jq '.access_token | length > 0'"
+    },
+    {
+      "id": "FF-5",
+      "rule": "JWT claims contract: decoded access tokens from FF-3 (human) and FF-4 (agent) each contain iss matching realm URL pattern, aud containing choros-api, non-empty sub, non-empty preferred_username, actor_type='human' for human and 'agent' for agent, JWT header alg=RS256",
+      "ci_check": "live-kc: ci/checks/kc/jwt-claims.sh — base64-decode JWT payload+header from FF-3/FF-4 tokens; jq assertions: .iss matches '^http://localhost:8180/realms/choros$'; (.aud | if type==\"array\" then contains([\"choros-api\"]) else .==\"choros-api\" end); .sub | length > 0; .preferred_username | length > 0; human token .actor_type==\"human\"; agent token .actor_type==\"agent\"; header .alg==\"RS256\""
+    },
+    {
+      "id": "FF-6",
+      "rule": "Realm JSON committed at config/keycloak/realm-choros.json, is valid JSON, and is not gitignored",
+      "ci_check": "static-now: ci/checks/kc/realm-json-exists.sh — test -f config/keycloak/realm-choros.json (file exists); python3 -c \"import json; json.load(open('config/keycloak/realm-choros.json'))\" (valid JSON); git check-ignore -q config/keycloak/realm-choros.json && exit 1 || true (not gitignored)"
+    },
+    {
+      "id": "FF-7",
+      "rule": "All 7 human users from org.ts fixture present in realm JSON: e-kravtsova, e-mironov, e-larina, e-orlov, e-savina, e-petrov, e-belov",
+      "ci_check": "static-now: ci/checks/kc/fixture-users.sh — for each of the 7 usernames: jq --arg u <name> '[.users[].username] | contains([$u])' config/keycloak/realm-choros.json must return true; all 7 must pass"
+    },
+    {
+      "id": "FF-8",
+      "rule": "At least one client with serviceAccountsEnabled=true and clientId matching 'agent-*' pattern in realm JSON",
+      "ci_check": "static-now: ci/checks/kc/agent-client.sh — jq '[.clients[] | select(.serviceAccountsEnabled==true and (.clientId | startswith(\"agent-\")))] | length' config/keycloak/realm-choros.json returns integer >= 1"
+    },
+    {
+      "id": "FF-9",
+      "rule": "Full test suite passes with CHOROS_AUTH_MODE=dev (or unset); zero failures in auth.e2e.test.ts and inbox.e2e.test.ts; x-dev-user path is active",
+      "ci_check": "live-dev: existing CI job (npm run ci) with CHOROS_AUTH_MODE=dev or default; all tests pass; no regression from T-0054 changes"
+    },
+    {
+      "id": "FF-10",
+      "rule": "CHOROS_AUTH_MODE env var is read in src/http/auth.ts (or src/server.ts); default is 'dev'; var name and values documented in docs/environments.md",
+      "ci_check": "static-now: grep -r 'CHOROS_AUTH_MODE' src/ returns at least one match in src/http/auth.ts or src/server.ts; grep confirms default fallback to 'dev' in the same file; FF-14 covers docs/environments.md documentation"
+    },
+    {
+      "id": "FF-11",
+      "rule": "No prod credential committed; dev credentials in realm JSON labeled DEV ONLY; compose vars use ${VAR:-default} form; no credential literal in TS source",
+      "ci_check": "static-now: ci/checks/kc/no-prod-secret.sh — (a) git grep -i 'choros_kc_dev_pw|choros_dev_pw|dev-pw-|dev-secret' src/ returns 0 matches; (b) grep -i 'DEV ONLY\\|dev-only' config/keycloak/realm-choros.json returns >= 1 match; (c) grep 'KEYCLOAK_ADMIN_PASSWORD' docker-compose.yml confirms ${VAR:-default} form, not a literal password"
+    },
+    {
+      "id": "FF-12",
+      "rule": "docker compose up -d starts both postgres and keycloak; both healthchecks reach 'healthy' state",
+      "ci_check": "live-kc: docker compose up -d exits 0; docker compose ps shows postgres and keycloak both in status 'healthy' (or 'running' with passing healthcheck)"
+    },
+    {
+      "id": "FF-13",
+      "rule": "KEYCLOAK_PORT default in docker-compose.yml is 8180 (not 5432, 55432, or 3000)",
+      "ci_check": "static-now: grep 'KEYCLOAK_PORT' docker-compose.yml confirms default 8180 (pattern ${KEYCLOAK_PORT:-8180}); grep -E ':-5432|:-55432|:-3000' docker-compose.yml | grep -i keycloak returns 0 matches"
+    },
+    {
+      "id": "FF-14",
+      "rule": "docs/environments.md updated with KEYCLOAK_PORT, KEYCLOAK_REALM, CHOROS_AUTH_MODE, choros-api (core API client-id), and a note on adding users/agents",
+      "ci_check": "static-now: grep -cE 'KEYCLOAK_PORT|KEYCLOAK_REALM|CHOROS_AUTH_MODE|choros-api' docs/environments.md returns >= 4; indicates all required var names are documented"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1 — compose healthcheck 24×5s retries (120 s total); §3.6 compose service healthcheck definition"},
+    {"ac": "AC-2", "covered_by": "FF-2 — OIDC discovery URL check after fresh start; §1 import-on-start mechanism; §3.1 realm root with enabled:true"},
+    {"ac": "AC-3", "covered_by": "FF-3 — ROPC grant with e-kravtsova dev credentials; §3.1 directAccessGrantsEnabled:true; §3.4 human users with dev passwords"},
+    {"ac": "AC-4", "covered_by": "FF-4 — client_credentials grant for agent-orchestrator; §3.5 agent service-account client"},
+    {"ac": "AC-5", "covered_by": "FF-5 — JWT claim assertions on human and agent tokens; §4.1 JWT contract table; §3.3 actor-type-mapper protocol mapper"},
+    {"ac": "AC-6", "covered_by": "FF-6 — realm JSON existence, validity, and non-gitignored check; §1 config/keycloak/realm-choros.json committed path"},
+    {"ac": "AC-7", "covered_by": "FF-7 — static assertion all 7 usernames present in realm JSON; §3.4 full human fixture table"},
+    {"ac": "AC-8", "covered_by": "FF-8 — static assertion serviceAccountsEnabled client with agent-* prefix; §3.5 agent-orchestrator client definition"},
+    {"ac": "AC-9", "covered_by": "FF-9 — existing CI test suite with CHOROS_AUTH_MODE=dev; §1.4 seam design; §4.2 seam contract default"},
+    {"ac": "AC-10", "covered_by": "FF-10 + FF-14 — CHOROS_AUTH_MODE read in source (FF-10) and documented in environments.md (FF-14); §4.2 seam contract; §4.3 env-var table"},
+    {"ac": "AC-11", "covered_by": "FF-11 — no prod creds in TS source; DEV ONLY label in realm JSON; compose uses ${VAR:-default} form; §1 RL-1; §4.3 DEV ONLY labels"},
+    {"ac": "AC-12", "covered_by": "FF-12 — both services healthy after docker compose up; §3.6 depends_on postgres:service_healthy"},
+    {"ac": "AC-13", "covered_by": "FF-13 — KEYCLOAK_PORT default 8180 confirmed by grep; §1.3 port rationale"},
+    {"ac": "AC-14", "covered_by": "FF-14 — grep for all 4 required var names in docs/environments.md; §4.3 env-var contract"}
+  ],
+  "runtime_target": "локально — docker-compose silo-стек (dev-машина разработчика или эфемерный CI-runner с Docker); тот же compose — основа silo-деплоя на сервер фаундера (/srv/choros, Tailscale), но провижн сервера = E0.7, гейт фаундера (GT-4). T-0054 не коммитит prod-секретов и не деплоит на сервер.",
+  "adr_artifact_path": "docs/design/T-0054-keycloak-compose.adr.md",
+  "escalation": ""
+}

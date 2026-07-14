@@ -1,0 +1,67 @@
+{
+  "task_id": "T-0728",
+  "status": "pr_open",
+  "branch": "task/T-0728",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/tasks/T-0728.spec.md",
+    "web/src/forms/field-renderer.jsx",
+    "web/src/screens/kanban-board.js",
+    "web/src/screens/kanban-board.jsx",
+    "web/src/screens/kanban-board.jsx.test.js",
+    "web/src/screens/kanban-card-field-cell.test.js",
+    "web/src/screens/screen-app-records.jsx",
+    "web/src/screens/screen-app-records.test.jsx",
+    "T-0728.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "summary": "N2 из ревью T-0698 (эпик E-UX-HUMAN T-0647, столп 2, анти-UUID): person-поля на канбан-доске показывали «—» — formatCellValue's PERSON_CELL_ASYNC-сентинел падал в общий 'not a string -> —' кейс kanban-board.jsx, и <KanbanBoard> вообще не получал employeesById. Оба обрыва закрыты: employeesById протянут от screen-app-records.jsx через KanbanBoard -> KanbanColumnView -> KanbanCard (тот же батч-стейт, что таблица уже грузит — ни одного нового fetch); person-ячейка рендерится через ТОТ ЖЕ PersonCell/ActorChip-механизм, что таблица (тот же deactivated-сигнал).",
+  "where_it_broke": [
+    "kanban-board.jsx (до фикса): KanbanCard's field-loop делал `typeof rendered === 'string' ? rendered : '—'` — ЛЮБОЙ non-string возврат formatCellValue (RELATION_CELL_ASYNC/FILE_CELL_ASYNC/PERSON_CELL_ASYNC, все три async-сентинела records-form.js) молча падал в '—'. Person-поле карточки ВСЕГДА показывало '—' независимо от того, назначен исполнитель или нет.",
+    "screen-app-records.jsx (до фикса): employeesById стейт существовал (батч-загружен через buildEmployeesById для таблицы), но НЕ передавался пропом в <KanbanBoard> вообще — даже почини первый обрыв, резолвить id->имя было бы нечем."
+  ],
+  "design_decision": "PersonCell перенесён из screen-app-records.jsx (локальная функция) в web/src/forms/field-renderer.jsx — файл, уже владеющий fetchEmployees()/buildEmployeesById (T-0698's «ONE canonical» employee-data-layer). Альтернатива (импорт PersonCell из screen-app-records.jsx в kanban-board.jsx) создала бы циклический импорт (screen-app-records.jsx уже импортирует {KanbanBoard} из kanban-board.jsx) — отклонена. screen-app-records.jsx теперь импортирует PersonCell из field-renderer.jsx и ре-экспортирует (`export { PersonCell };`) для обратной совместимости существующих импортов/тестов. Диспатч-решение 'person-поле -> PersonCell / иначе текст' вынесено в чистую resolveCardFieldCell (kanban-board.js), тот же паттерн, что resolveCardLabel (T-0626) — KanbanCard использует useCallback, поэтому render-тело нельзя вызвать напрямую в hook-free vitest-тире этого репо; решение живёт снаружи, тестируемо без React.",
+  "not_consolidated_out_of_scope": "screen-record-detail.jsx's PersonFieldValue остаётся отдельной near-identical реализацией (тот же ActorChip-контракт, другое имя пропа authorNames vs employees) — T-0698 B1 дал ей тот же deactivated-thread фикс, но не слил с PersonCell. T-0728 её не трогает (вне охвата N2, который специфично про канбан) — задокументировано как кандидат будущей чистки в field-renderer.jsx комментарии.",
+  "tests_added_or_changed": [
+    "web/src/screens/kanban-card-field-cell.test.js (NEW, 7 тестов): чистая логика resolveCardFieldCell против РЕАЛЬНЫХ formatCellValue/computeComputedFieldValue/PERSON_CELL_ASYNC (не фейковые моки) — person-значение -> isPerson:true+personId; пустое/отсутствующее person-значение -> честная деградация '—'; personId всегда строка; неперсонные поля (string/computed/missing-meta) не тронуты v1-поведением; relation-сентинел (вне охвата) по-прежнему деградирует в '—', не крашится.",
+    "web/src/screens/kanban-board.jsx.test.js (+4 теста): source-text wiring — импорт PersonCell из field-renderer.jsx, импорт+вызов resolveCardFieldCell, диспатч <PersonCell personId={cell.personId} employees={employeesById} />, проп employeesById с дефолтом EMPTY_EMPLOYEES_MAP протянут через оба хопа (KanbanBoard->KanbanColumnView->KanbanCard); существующая T-0626-проверка импорта records-form.js обновлена под добавленный PERSON_CELL_ASYNC.",
+    "web/src/screens/screen-app-records.test.jsx (+2 теста, 1 обновлён): employeesById проброшен именно в <KanbanBoard> (не второй fetch/стейт); PersonCell больше не имеет локального определения здесь (канонический дом — field-renderer.jsx, ре-экспорт для обратной совместимости); import-assertion обновлена под добавленный PersonCell в списке импорта из field-renderer.jsx."
+  ],
+  "gate_results": {
+    "npm_install_root": "188 packages, 0 errors (--maxsockets=3)",
+    "npm_install_web": "133 packages, 0 errors (--maxsockets=3)",
+    "tsc_noEmit_root": "0 errors",
+    "eslint_root_src": "0 errors, 45 pre-existing console warnings (baseline, none in touched files)",
+    "eslint_web_touched_files": "0 errors, 0 warnings (kanban-board.jsx/.js, screen-app-records.jsx, field-renderer.jsx + their test files)",
+    "vitest_web_targeted": "12 files / 308 tests passed — kanban-board.jsx.test.js, kanban-board.test.js, kanban-board.server-mirror.test.js, kanban-card-label.test.js, kanban-card-field-cell.test.js (new), screen-app-records.test.jsx, screen-record-detail.test.jsx, field-renderer*.test.jsx (4 files)",
+    "vitest_web_full": "99 files / 2727 tests passed, 0 failed",
+    "vite_build_web": "546 modules, 0 errors (pre-existing >500kB chunk-size warning, unrelated to this diff)",
+    "anti_uuid_actor_render_self_test": "PASS (4/4 self-test fixtures correct)",
+    "anti_uuid_actor_render_main": "PASS — 0 bare raw-identifier renders under web/src/screens/ (person cell routes through <PersonCell>, never a bare {rawVal})",
+    "ux_g2_theme_pairing": "PASS — light default + dark reachable in both token sources (no token/theme changes in this diff)",
+    "anti_case_lock": "PASS — Phase 1 delegate gates clean (read-pdp-anti-case, rights-ui-anti-case, detel-literal-baseline all pass after removing case-specific slugs (e-orlov/e-larina) from the new test's synthetic fixtures — replaced with generic emp-slug-N, consistent with the codebase's existing PersonCell fixture convention), Phase 2 full D-064 denylist aggregate 15 (baseline 16, no growth — this diff added zero denylist literals).",
+    "full_db_suite": "NOT run — this task is a pure client-side (web/src) display-mode wiring fix, no server/DB code touched. Per task instruction (targeted gates only, no full suites)."
+  },
+  "friction_events": [
+    "First draft of kanban-card-field-cell.test.js used case-specific employee slugs (e-orlov/e-larina, real personas from this repo's D-064 denylist) as synthetic fixture ids — anti-case-lock.sh's rights-ui-anti-case delegate caught it immediately (FAIL, 2 violations). Fixed by switching to the generic emp-slug-1/emp-slug-2 fixtures already used by PersonCell's own tests in screen-app-records.test.jsx — should have grepped the denylist/existing fixture convention before authoring the new test file's ids."
+  ],
+  "live_proof_plan": {
+    "verdict": "NOT YET RUN — стенд offline на момент авторства (per task instruction: описать план, не выполнять против стенда из этого worktree)",
+    "steps": [
+      "1. На dev-стенде открыть приложение, чей набор полей содержит person-типизированное поле, и создать/выбрать view типа «Канбан-доска» (group_by_field — любое select-поле; card_fields включает person-поле).",
+      "2. Убедиться, что хотя бы у одной записи person-поле заполнено (назначен исполнитель — активный сотрудник).",
+      "3. Открыть канбан-доску — карточка этой записи должна показывать имя-чип исполнителя (ActorChip) на месте соответствующего поля, а НЕ «—» и не сырой id/UUID.",
+      "4. Деактивировать этого сотрудника (PATCH /api/users/:id или экран /users, T-0583) и перезагрузить доску — тот же чип должен получить приглушённый визуал (chs-exec--deactivated / тултип «· деактивирован»), идентично тому, что уже видно для того же сотрудника в таблице записей (PersonCell) и в /audit, /inbox, /rights/trail.",
+      "5. Негативная проверка: карточка записи, у которой person-поле НЕ заполнено, показывает «—» (не крашится, не 'undefined').",
+      "6. Негативная проверка: если технически возможно подставить person-значение, отсутствующее в организации (например, вручную через API record.data), карточка показывает честную деградацию через ActorChip (raw slug виден, но НЕ как голый bare-child — не триггерит anti-uuid-actor-render) — не крашится, не показывает 'undefined'.",
+      "7. Сетевая проверка (devtools): подтвердить, что при открытии канбан-доски НЕ появляется второй/дублирующий запрос к GET /api/org — тот же единственный батч-запрос, что таблица уже делает при переключении между list/kanban видами одного набора полей.",
+      "8. Регрессия: таблица записей (list view) того же набора полей по-прежнему показывает person-поле и deactivated-маркер идентично шагам 3-4 — протяжка PersonCell в общий файл не изменила поведение таблицы."
+    ]
+  }
+}

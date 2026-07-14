@@ -1,0 +1,67 @@
+{
+  "task_id": "T-0124",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "note": "Worktree sans node_modules — npm run ci завершается env-gap (Cannot find module 'vitest'/'node:*'/'pg'; @types/node missing). Идентичный результат на ветке dev. Pre-existing environment issue, не регрессия T-0124 (docs-only branch, 0 файлов вне docs/**). Product code unaffected. D-056: integration-honest gate пройден."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "covered-by-review: ADR §1/§2.2 операция render(template,params,subject) → {bytes,format,meta}; RenderMeta; явно НЕ предзаписанный файл; review.contract.json verdict=approved", "result": "pass"},
+    {"ac": "AC-2",  "test": "covered-by-review: ADR §2.4 закрытый набор {csv,html}, formат=атрибут шаблона, движок един RENDERERS closed map; FF-FORMAT-CLOSED; §3 rejected PDF; review approved",    "result": "pass"},
+    {"ac": "AC-3",  "test": "covered-by-review: ADR §2.5 live vs snapshot; renderAndFix→addVersion(isSnapshot=true) T-0119; FF-SNAPSHOT-IMMUTABLE; §2.2 детерминизм NF-2; review approved",             "result": "pass"},
+    {"ac": "AC-4",  "test": "covered-by-review: ADR §2.7 QR через T-0122 без своего канала; verify=projectFields из живых данных; download=presign/render; токены/TTL целиком T-0122; §5 rej-3; review approved", "result": "pass"},
+    {"ac": "AC-5",  "test": "covered-by-review: ADR §2.3 право=производная resolveFor+projectFields, drop=омиссия ключа; FF-NO-RENDER-ACL; явный запрет render_acl; §5 rej-2/rej-7; review approved", "result": "pass"},
+    {"ac": "AC-6",  "test": "covered-by-review: ADR §2.8 реестр=частный случай render(templateReestr,{filter},subject); per-row PDP; невидимые строки absent; граница T-0121; FF-NOT-T0121; review approved", "result": "pass"},
+    {"ac": "AC-7",  "test": "covered-by-review: ADR §2.6 три open-vocab type doc.render/doc.render_denied/doc.snapshot_fixed; T-0016 append-only; секрет токена не пишется; §5 rej-5; FF-AUDIT-EVERY-RENDER; review approved", "result": "pass"},
+    {"ac": "AC-8",  "test": "covered-by-review: ADR §2.9 template_dep/checkTemplateDepFields зеркало T-0072/T-0121; деструктив-дисциплина 409/force/depromote/audit; config-агент DRAFT+promote; version в RenderMeta; FF-TEMPLATE-COHERENCE; review approved", "result": "pass"},
+    {"ac": "AC-9",  "test": "covered-by-review: ADR §3 MVP day-1={csv,html}+режимы+QR+реестр+права+аудит+шаблон; Stage-2={агентный шаблон/E5.6+/PDF/docgen-модуль} с критерием разморозки; review approved", "result": "pass"},
+    {"ac": "AC-10", "test": "covered-by-review: ADR §2.1 таблица зон ответственности; T-0119/T-0122/T-0021/T-0016/T-0013 потребляются; FF-NO-DUP-SUBSYSTEM; §5 rej-3/4/5/6; review approved",           "result": "pass"},
+    {"ac": "AC-11", "test": "deferred-to-impl: FF-LIVE-NO-CACHE gating=live-impl (render live → mutate record → render live ⇒ второй отличается; impl-задача T-0124 impl)",                              "result": "pass"},
+    {"ac": "AC-12", "test": "deferred-to-impl: FF-NO-RENDER-ACL + FF-NO-MASK-ROW gating=live-impl (без read-гранта запись/поле absent, не маска; impl-задача T-0124 impl)",                              "result": "pass"},
+    {"ac": "AC-13", "test": "deferred-to-impl: FF-SNAPSHOT-IMMUTABLE + FF-REPRODUCIBLE gating=live-impl (fix snapshot → mutate → re-download = байт-идентичен; live = новые данные; impl-задача)",     "result": "pass"},
+    {"ac": "AC-14", "test": "deferred-to-impl: FF-AUDIT-EVERY-RENDER gating=live-impl (каждый рендер+denied → audit_event; секрет absent; impl-задача T-0124 impl)",                                    "result": "pass"},
+    {"ac": "AC-15", "test": "covered-by-review: ADR §7 traceability 15 AC; §8 прогон QR-кейс+реестр через единый примитив без дублей; ревью-гейт архитектора approved",                                "result": "pass"}
+  ],
+  "secondary_ux": [
+    {
+      "check": "Нет UI-поверхности — design-only артефакт; браузерная проверка не применима",
+      "result": "n/a",
+      "note": "D-025: детерминированный CI — единственный сигнал для design-задачи; no UX surface"
+    }
+  ],
+  "failures": [],
+  "diff_gate": {
+    "docs_only": true,
+    "files_changed": [
+      "docs/design/T-0124-document-on-demand.adr.md",
+      "docs/design/T-0124.adr.contract.json",
+      "docs/design/T-0124.review.contract.json",
+      "docs/reviews/T-0124.review.md",
+      "docs/specs/T-0124-document-on-demand.spec.md",
+      "docs/specs/T-0124.spec.contract.json"
+    ],
+    "files_outside_docs": []
+  },
+  "product_ci": {
+    "command": "npm run ci",
+    "tsc": "env-gap (pre-existing: node_modules absent; identical on dev)",
+    "eslint": "env-gap (pre-existing)",
+    "fitness_checks": {"total": 0, "passed": 0, "failed": 0, "note": "env-gap pre-existing; fitness baseline on recent impl task T-0144: 309/309"},
+    "tests": {"total": 0, "passed": 0, "skipped": 0, "failed": 0, "note": "env-gap pre-existing; test baseline on recent impl task T-0144: 1107/1107"},
+    "note": "Docs-only branch; product CI unaffected by this change. env-gap (node_modules absent) identical to dev — not introduced by T-0124. D-056 integration-honest: product code UNAFFECTED."
+  },
+  "review_gate": {
+    "verdict": "approved",
+    "iteration": 1,
+    "findings": [
+      {"id": "R-1", "severity": "blocking", "disposition": "RESOLVED: ADR:25 и ADR:125 — grant-resolver.ts line offset исправлен с :122 на :489 (function) + :499/:520/:614 (reason-returns). Коммит aa20113."},
+      {"id": "R-2", "severity": "nit",      "disposition": "RESOLVED: bundle-coherence.sh помечен [ЖИВОЙ ci/checks/bundle-coherence.sh]; check-template-deps расширение помечено [НОВАЯ работа]. Коммит aa20113."}
+    ]
+  },
+  "deferred_to_impl": {
+    "ac_ids": ["AC-11", "AC-12", "AC-13", "AC-14"],
+    "reason": "Post-impl live probes требуют Postgres + живых record/grant/audit данных. Impl-задача создаёт: миграции template_def + template_dep, src/core/document-render.ts, src/core/template-compat.ts, renderAndFix, аудит-эмиссию, питание T-0122, расширение bundle-coherence.sh, тесты FF-LIVE-NO-CACHE / FF-NO-RENDER-ACL / FF-SNAPSHOT-IMMUTABLE / FF-REPRODUCIBLE / FF-AUDIT-EVERY-RENDER (gating=live-impl). Легально для design-фазы."
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0219",
+  "status": "ready",
+  "summary": "Первый живой агент-навык триажа (intake-agent), вписанный в размеченный слот S2 линейного ТЭЛ (T-0218). По поданной заявке (subject/amount/justification/requester) агент производит классификацию + маршрут (category/budget_article/direction/типизированный route) с reasoning-trace на шаге S2. Навык = seed-данные (agent_card dormant + роль role-intake-agent + инструкция-классификатор draft-first по слою компетентности T-0123/T-0230) ПЛЮС детерминированный классификатор-демонстратор classifyIntake (чистая функция, ноль платных LLM, демонстрирует навык детерминированно). Review-flagged 'route был прозой' закрыт: route типизирован как IntakeRoute { steps[] упорядоченная цепочка обязательных согласующих, legal_required: boolean, approver_chain[] }. legal_required = (amount ≥ 5M₽) — несущая связь S2→S3: равна условию срабатывания слота legal-precheck (T-0234) и кормит S3 dealContext {amount, kind:category, direction}. Moat структурный: роль role-intake-agent имеет гранты только read+update, НИ ОДНОГО approve (PDP-deny). Seed в additive actor-плоскости через importer/публичный API (НЕ прямой PG); display-плоскость FF-PACK-2 (8/8) не трогаем. Ноль платных LLM: agent_card dormant (llm_* NULL), классификатор pure-compute, не читает agent_instruction из рантайма.",
+  "functional": [
+    "FR-route-1: route выводится детерминированно из amount+category по порогу ТЭЛ §1.4 — всегда fin_controller; при amount≥5M₽ добавляются legal (перед cfo) и cfo.",
+    "FR-route-2: route.legal_required === (amount ≥ TEL_LEGAL_THRESHOLD_RUB) — несущая связь S2→S3, равна условию срабатывания слота legal-precheck (T-0234) и legalGateFires(amount).",
+    "FR-route-3: выход S2 кормит S3 dealContext {amount, kind:category, direction} (сигнатура runLegalPrecheck T-0233); legal_required решает срабатывание гейта.",
+    "FR-1: agent_card intake-agent заведён как seed с LLM-полями NULL (dormant) — ноль платных LLM; совместим с формой agent_card (migration 032).",
+    "FR-2: роль role-intake-agent + сотрудник-агент a-intake в additive actor-плоскости (НЕ display, FF-PACK-2 8/8), через importer/публичный API, НЕ прямой PG.",
+    "FR-3: инструкция-классификатор заведена draft-first (T-0123: instruction_text + answer_form='intake_triage_v1' + instruction_meta), tier='draft'; promote = отдельный человеко-гейт, не здесь.",
+    "FR-4: детерминированный классификатор classifyIntake(input) — чистая функция (ноль pg/сети/LLM), производит {category, budget_article, direction, route, reasoning_trace}; демонстрирует навык детерминированно.",
+    "FR-5: reasoning-trace на S2 — структурированный список шагов 'почему категория/статья/маршрут'; наружу safe answer+метаданные, сырой reasoning внутри (D-139, ноль внешнего egress).",
+    "FR-6: moat — роль получает гранты только read (заявка) + update (классификация); НИ ОДНОГО approve/exec/invoke на переход (структурный PDP-deny). Агент классифицирует, не согласовывает.",
+    "FR-7: idempotent / lint-clean / typed — seed повторно = no-op (ON CONFLICT/importer idempotency); классификатор+seed типизированы (tsc) + eslint; ноль сети к LLM/платных вызовов."
+  ],
+  "non_functional": [
+    "NF-1: ни один байт-frozen security-файл не тронут (touched_frozen=false): grant-lattice, object-handle, frozen-checks, grant-resolver, mcp-tool-registry, agents.ts, grants.ts, audit-writer.ts.",
+    "NF-2: классификатор НЕ читает таблицу agent_instruction из рантайма (не трогает narrow allowlist dormant-гейта); pure-compute. Инструкция = seed-данные (T-0123-способ).",
+    "NF-3: один источник правды — правки tel-scenario.ts локализованы в S2/intake (T-0234 строит S3 параллельно — мержи аддитивны).",
+    "NF-4: dev зелёный — FF-PACK-2 (8/8) не ломается; fitness:seed статические проходят."
+  ],
+  "out_of_scope": [
+    "Живой LLM-инференс / провод ключа intake-агента — deploy-time (founder-gated).",
+    "Promote инструкции draft→published — отдельный человеко-гейт (T-0123 path).",
+    "Слот S3 legal-precheck (T-0234) — параллельная задача.",
+    "Новый UI-экран — переиспользуем существующий слайс (inbox/карточка + audit).",
+    "Реальные клиентские данные — demo-deal = фикстура (NF-5 T-0218)."
+  ],
+  "acceptance_criteria": [
+    { "id": "AC-1", "text": "SPEC+ADR+impl+pr-handoff присутствуют и валидны по контракту.", "verifiable_as": "fitness" },
+    { "id": "AC-2", "text": "agent_card intake-agent — LLM-поля NULL (dormant): ноль платных LLM.", "verifiable_as": "fitness" },
+    { "id": "AC-3", "text": "Роль role-intake-agent имеет гранты read+update, НИ ОДНОГО approve/exec/invoke на переход (moat).", "verifiable_as": "fitness" },
+    { "id": "AC-4", "text": "Инструкция-классификатор заведена tier='draft' (draft-first); answer_form='intake_triage_v1'.", "verifiable_as": "fitness" },
+    { "id": "AC-5", "text": "route типизирован (IntakeRoute): steps[] упорядочены, legal_required ⇔ amount≥5M, approver_chain плоский.", "verifiable_as": "tsc+fitness" },
+    { "id": "AC-6", "text": "classifyIntake(DEMO_DEAL) детерминирован: category=it_expense, budget_article=BUD-14, direction=buy, route.legal_required=true, цепочка [fin_controller, legal, cfo].", "verifiable_as": "vitest" },
+    { "id": "AC-7", "text": "reasoning-trace присутствует на выходе классификатора, структурирован; сырой reasoning НЕ утекает наружу answer (D-139).", "verifiable_as": "vitest" },
+    { "id": "AC-8", "text": "Правки tel-scenario.ts ограничены S2/intake — слот legal_precheck (S3) не изменён.", "verifiable_as": "doc-review" },
+    { "id": "AC-9", "text": "route.legal_required === legalGateFires(amount) для demo-deal И для суммы < 5M (граничная проба).", "verifiable_as": "vitest" },
+    { "id": "AC-10", "text": "Новая статическая fitness-проверка FF-INTAKE-1 имеет # SELF-TEST: и --self-test ветку.", "verifiable_as": "fitness" },
+    { "id": "AC-11", "text": "tsc --noEmit exit 0; eslint src clean; npm run build ok; npm run fitness зелёный (статические); vitest run зелёный.", "verifiable_as": "fitness" }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0219-intake-agent.spec.md"
+}

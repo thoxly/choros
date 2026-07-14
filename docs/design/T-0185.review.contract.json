@@ -1,0 +1,29 @@
+{
+  "task_id": "T-0185",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [],
+  "acceptance_coverage": [
+    {"ac": "BEFORE DELETE returns OLD for draft row", "covered": true},
+    {"ac": "BEFORE DELETE raises for published row (no GUC)", "covered": true},
+    {"ac": "BEFORE DELETE with promoting GUC succeeds", "covered": true},
+    {"ac": "UPDATE semantics regression: published still raises", "covered": true},
+    {"ac": "Migration is idempotent (CREATE OR REPLACE + DROP/CREATE trigger)", "covered": true},
+    {"ac": "049_tier.sql untouched", "covered": true},
+    {"ac": "No .sh files touched", "covered": true},
+    {"ac": "npm run fitness green (role-criticality-isolation)", "covered": true},
+    {"ac": "Test DB cleaned up after each run (del-app-* count = 0)", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "externalWorker.e2e.test.ts and health.test.ts are brittle to ambient DATABASE_URL: createJobStore() silently selects PostgresJobStore when DATABASE_URL is set, breaking tests designed for InMemoryJobStore. Pre-existing gap, not introduced by T-0185. Candidate for a future test-isolation hardening task."
+  ],
+  "re_review": {
+    "base_sha": "69b7d1b",
+    "fix_sha": "af3af84",
+    "r1_resolved": true,
+    "r2_resolved": true,
+    "diff_scope": "exactly 2 files: excludes entry + afterEach cleanup",
+    "fitness_db_result": "5/5 tier_delete_fix.test.ts pass",
+    "db_cleanup_confirmed": "SELECT count(*) FROM choros.application WHERE slug LIKE 'del-app-%' = 0"
+  }
+}

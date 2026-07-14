@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  customer-onboarding.bpmn — T-0244 B-6
+  Linear onboarding process for vendor-crm (Flowable BPMN 2.0).
+
+  Design constraints (ADR §3.3, FR-4):
+  - LINEAR only: no gateway branching, no terminate event, no message events.
+  - 4 UserTask + 1 ServiceTask (in order: fill card → verify → issue key → notify)
+  - All UserTask: candidateGroups="vendor-admin" (role-based assignment)
+  - ServiceTask "Уведомить": extensionElements → T-0120 notification to founder
+  - Extension-point BILLING (§6): inserted BETWEEN verify and issue-key in Stage-2
+    as a new ServiceTask or UserTask node (no rewrite of existing nodes needed)
+  - Uses ONLY deployBpmn/startInstance/fetchAndLock/completeTask (T-0058 live surface)
+
+  Process key: customer-onboarding
+  Process id: customer-onboarding-v1
+-->
+<definitions
+  xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:activiti="http://activiti.org/bpmn"
+  xmlns:flowable="http://flowable.org/bpmn"
+  targetNamespace="http://choros.io/vendor-crm"
+  xsi:schemaLocation="http://www.omg.org/spec/BPMN/20100524/MODEL
+    http://www.omg.org/spec/BPMN/2.0/20100501/BPMN20.xsd">
+
+  <process id="customer-onboarding" name="Онбординг клиента" isExecutable="true">
+
+    <!-- Start -->
+    <startEvent id="start" name="Начало"/>
+
+    <!-- UserTask 1: Заполнить карточку клиента -->
+    <userTask id="task-fill-card"
+              name="Заполнить карточку клиента"
+              flowable:candidateGroups="vendor-admin">
+      <documentation>
+        Фаундер заполняет данные клиента: company_name, contact_name, contact_email,
+        plan, not_after. После заполнения данные сохраняются в запись registry
+        customer-subscription.
+      </documentation>
+    </userTask>
+
+    <!-- UserTask 2: Проверить данные и согласовать -->
+    <!--
+      ⟦ EXTENSION-POINT: BILLING (Stage-2, §6 ADR) ⟧
+      В Stage-2 между этим UserTask и следующим вставляется шаг Биллинга
+      (ServiceTask или UserTask + BillingPort по образцу EntitlementPort).
+      Текущие sequenceFlow переписываться не будут: новый узел вставляется
+      между seq-flow UT2→UT3, без изменения остальных узлов.
+    -->
+    <userTask id="task-verify-data"
+              name="Проверить данные и согласовать"
+              flowable:candidateGroups="vendor-admin">
+      <documentation>
+        Фаундер проверяет введённые данные, согласует тариф и срок подписки.
+        После согласования процесс переходит к шагу выпуска ключа.
+      </documentation>
+    </userTask>
+
+    <!-- UserTask 3: Выпустить активационный ключ (KEYSTONE STEP) -->
+    <userTask id="task-issue-key"
+              name="Выпустить активационный ключ"
+              flowable:candidateGroups="vendor-admin">
+      <documentation>
+        KEYSTONE STEP (ADR §3.3, FR-5).
+        Фаундер вводит circuit_id (или подтверждает из карточки).
+        Система вызывает runIssueKey → EntitlementPort → T-0242.
+        При успехе: circuit_id + activation_key_issued_at записываются в record,
+        статус меняется на active, audit_event(customer.key_issued) эмитируется.
+        При ошибке: шаг остаётся открытым (EntitlementDormantError / network error).
+      </documentation>
+    </userTask>
+
+    <!-- ServiceTask: Уведомить (T-0120 notification stub) -->
+    <!-- T-0246 bugfix: http-task requestMethod/requestUrl must be in extensionElements.
+         The notification step is a stub (no real endpoint in dev — R-4 spec out-of-scope).
+         Using external-task (same pattern as choros-smoke.bpmn20.xml) so the process
+         deploys and starts cleanly. A real worker or http-task can be wired in B-11/Stage-2.
+         Minimal deviation from T-0244 (operational artifact fix, not a contract-seam change). -->
+    <serviceTask id="task-notify"
+                 name="Уведомить об успешном онбординге"
+                 flowable:type="external"
+                 flowable:topic="customer-onboarding-notify">
+      <documentation>
+        Internal notification to founder (T-0120). Уведомление о завершении
+        онбординга отправляется внутри системы. Внешнее уведомление клиенту —
+        вне MVP (R-4 spec). В dev-среде используется external-task (stub).
+        Реальный HTTP endpoint подключается в Stage-2 через extensionElements.
+      </documentation>
+    </serviceTask>
+
+    <!-- End -->
+    <endEvent id="end" name="Онбординг завершён"/>
+
+    <!-- Sequence flows -->
+    <sequenceFlow id="sf-start-fill"   sourceRef="start"          targetRef="task-fill-card"/>
+    <sequenceFlow id="sf-fill-verify"  sourceRef="task-fill-card" targetRef="task-verify-data"/>
+    <!--
+      sf-verify-issue: THIS FLOW is where the billing step will be inserted in Stage-2.
+      The billing ServiceTask will be placed between task-verify-data and task-issue-key:
+        task-verify-data → [billing-step] → task-issue-key
+      No other flows change.
+    -->
+    <sequenceFlow id="sf-verify-issue" sourceRef="task-verify-data" targetRef="task-issue-key"/>
+    <sequenceFlow id="sf-issue-notify" sourceRef="task-issue-key"   targetRef="task-notify"/>
+    <sequenceFlow id="sf-notify-end"   sourceRef="task-notify"      targetRef="end"/>
+
+  </process>
+
+</definitions>

@@ -1,0 +1,49 @@
+{
+  "task_id": "T-0032",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/db/cross_tenant.test.ts:354-355,360-361",
+      "issue": "The seedState object literal declares empIdA/empIdB twice (the actor_event FK block at 353-355 and again the T-0022 chain block at 359-363). esbuild warns 'Duplicate key empIdA/empIdB in object literal' on every fitness:db run. Harmless at runtime (JS keeps the last, identical '' value) and NOT type-checked (tsconfig include=['src'] excludes ci/checks). This is a STALE-BASE artifact inherited from base 9409a75 (introduced by the T-0022 build 8a44900, NOT by this coder); the canonical dev fix b32d403 already de-duplicated it (single empIdA/empIdB pair). The coder's pre-T-0062 base predates that cleanup.",
+      "suggestion": "No coder action required — the orchestrator's rebase onto dev (b32d403) resolves it, since dev already removed the duplicate. If the rebase is non-trivial, drop the second empIdA/empIdB pair (lines 360-361) and keep the roleIdA/roleIdB pair."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/sod-isolation.sh:150",
+      "issue": "SOD-ISO4 (frozen-files-unchanged, FF-SOD4) asserts via `git diff --quiet HEAD -- <file>`, which compares the WORKING TREE to HEAD. After the coder commits, a frozen-file edit that was committed would NOT be caught by this check (HEAD already contains it). The header comment acknowledges 'In CI the diff is against the merge base' but the script itself does not implement the merge-base diff, so the committed-edit case relies on CI's external diff, not this fitness function. (Mirrors the analogous grant-resolver-isolation/effect-resource-isolation pattern, so it is a pre-existing convention, not a T-0032 regression.) I independently verified all four frozen files (grant-lattice.ts, object-handle.ts, actor-event.ts, 008_grant.sql) are byte-identical to base 9409a75 via `git diff 9409a75 HEAD`.",
+      "suggestion": "Optional hardening (not blocking, and a cross-cutting change across all *-isolation.sh): diff against the merge-base (`git merge-base origin/dev HEAD`) instead of HEAD so the committed-edit case is self-caught. Better filed as a separate fitness-hardening task than scoped into T-0032."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": true },
+    { "ac": "AC-2",  "covered": true },
+    { "ac": "AC-3",  "covered": true },
+    { "ac": "AC-4",  "covered": true },
+    { "ac": "AC-5",  "covered": true },
+    { "ac": "AC-6",  "covered": true },
+    { "ac": "AC-7",  "covered": true },
+    { "ac": "AC-8",  "covered": true },
+    { "ac": "AC-9",  "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true },
+    { "ac": "AC-16", "covered": true },
+    { "ac": "AC-17", "covered": true },
+    { "ac": "AC-18", "covered": true },
+    { "ac": "AC-19", "covered": true },
+    { "ac": "AC-20", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Pre-existing db-suite concurrency flake (NOT introduced by T-0032, NOT a SoD-logic defect): ci/checks/db runs test files in parallel forks against ONE shared Postgres with no per-file tenant isolation. On a FRESH DB the first `npm run fitness:db` reproducibly fails AC-4/FF-CT4 (cross_tenant.test.ts:644 'DELETE choros.application WHERE tenant_id=TENANT_B' — `expected 2 to be 1`): a sibling test file seeds a second TENANT_B application row CONCURRENTLY between this test's countBefore and countAfter. T-0032's seedSodConstraint touches only the sod_constraint table, so it cannot add application rows; the flake is in the pre-existing application-seeding cross-file races. PROVEN concurrency-induced: passes 225/225 with `vitest run --dir ci/checks/db --no-file-parallelism`, and passes on the 2nd run against a non-empty DB. RISK: real CI (ci.yml runs `npm run fitness:db` against a fresh per-run Postgres service with default parallel forks) CAN go intermittently red on this path. Candidate harness fix (separate task): add fileParallelism:false (or per-file tenant-id namespacing / serialize the cross_tenant + two_tenant + behavior files) in vitest config for the db suite. Filed as role-gap/friction for the orchestrator, not a T-0032 blocker.",
+    "Friction (scope-widening, surfaced honestly by analyst+architect, confirmed legitimate by reviewer): T-0032 expanded beyond 'implement the 3 reader stubs' to OWN the guarded-transition writer (appendActorEvent) + the FO-T0019-1 no-decrement debt, because the guarded class cannot record its act without the writer and the writer was tagged 'T-0021/E4.2' with no T-0021 ownership. The widening is recorded in spec §8 / ADR §2.2 and the writer/trigger are correctly in scope (verified live)."
+  ]
+}

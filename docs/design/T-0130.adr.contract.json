@@ -1,0 +1,119 @@
+{
+  "task_id": "T-0130",
+  "status": "ready",
+  "decision": "Симуляция — не отдельная подсистема и не движок, а simulation_run: конечный автомат прогона над draft-бандлом в draft-тире той же системы (extensibility §8), потребляющий уже принятые механизмы (линтер T-0027, PDP T-0021, эффект-стабы поверх T-0034, бюджет T-0023, аудит T-0016) и добавляющий ровно три новых элемента — (1) эфемерного draft-субъекта-«статиста», играющего RoleRef через тот же PDP T-0021 без записи в живую решётку; (2) draft-аффинный перехват эффектов, достигаемый построением draft-gateway (НОВАЯ работа B-4), который не передаёт published-эффект-гранты в coveringGrants для draft-run → неизменённый verifyEffectGrants (T-0034) естественно отдаёт deny 'нет покрывающего гранта' (фактический код tier-неосведомлён; tier-аффинность вводится gateway, T-0034 не трогается), не флажок; (3) A/B-обвязку (тот же сценарный набор × вектор (process_variant, model)). Три режима — три исполнителя одного прогона по нарастающей цене: режим 1 — чистая функция computeRoutes (консумент lintBpmn, без движка); режим 2 — реальные draft-инстансы на Flowable, люди = статисты; режим 3 — те же draft-инстансы, задачи живым людям в боевой инбокс с маркером test:true (выводимым из tier инстанса, не редактируемым флагом). Вердикт двухчастный: deterministic (машинный pass/fail, допустимый авто-гейт) и advisory (LLM/человеческий сигнал, не гейт промоута; промоут остаётся human-gate). Red-lines выражены как структурно отнятые возможности. Ноль новых authority-store, второго резолвера, второго аудит-лога, параллельной решётки, нового бюджет-механизма (NF-5).",
+  "rejected_alternatives": [
+    {"option": "Режим 1: дописать расчёт маршрутов внутрь lintBpmn (T-0027)", "why_not": "Смешало бы синтаксический линт BPMN и семантическое протаскивание атрибутов через шлюзы/DMN в одной функции; сломало бы freeze T-0027. Режим 1 = консумент lintBpmn + отдельная чистая функция computeRoutes."},
+    {"option": "Статист исполняет шаг через временный employee + role_assignment на время прогона", "why_not": "Засоряет оргдерево и живую решётку грантов фантомами-принципалами, размывает продуктовое понятие «агент-сотрудник»; нарушает FR-9 и frozen seam T-0129 §8.2. Решение — эфемерный StatistSubject + DraftStatistGrantSource-overlay через тот же PDP T-0021, draft-аффинный, scoped к run_id, без published-строк."},
+    {"option": "Маркер тест-задачи режима 3 — булев флаг на самой задаче, выставляемый при создании", "why_not": "Снимаем/подделываем постфактум, риск спутать с боевой задачей. Решение — is_test выводится из tier инстанса-источника (draft-инстанс → test); снять маркер нельзя, не сменив неизменяемый tier draft-инстанса."},
+    {"option": "Перехват эффектов через runtime-флаг simulate=true, гасящий внешние вызовы", "why_not": "Выключаемая настройка, а не отнятая возможность — нарушает NF-1 (изоляция невыключаема из draft). Решение — draft-gateway (НОВАЯ работа B-4) не подаёт published-эффект-гранты в coveringGrants для draft-run → неизменённый verifyEffectGrants (T-0034) естественно отдаёт deny 'нет покрывающего гранта' (его фактический единственный deny-путь), эффект уходит в стаб; реальный эффект из draft физически недостижим независимо от наличия гранта."},
+    {"option": "[iter-2, R-2] tier-параметр в verifyEffectGrants / поле tier на Grant для draft-аффинности", "why_not": "Это правка frozen-поверхности T-0034/T-0018 с миграцией и собственным чеком (нарушает NF-5, frozen-checks-immutable). Не нужна: естественный deny 'нет покрывающего гранта' уже даёт нужный результат, если draft-gateway просто не подаёт published-гранты в coveringGrants. Аффинность вводится построением gateway (B-4) поверх неизменённого механизма."},
+    {"option": "Новый simulation_budget-учётчик для лимита прогона", "why_not": "Второй бюджет-механизм, дрейфующий от T-0023 (нарушает NF-5). Решение — прогон = потребитель instance_budget/agent_budget/reservation/spend_ledger (T-0023) как есть; A/B агрегирует стоимость из того же spend_ledger; fail-closed стоп при исчерпании AND-gate."},
+    {"option": "LLM-оценка качества (advisory) как автоматический гейт промоута", "why_not": "Нарушает инвариант human-gated promote (extensibility §4/§8): промоут — подтверждение проверенных сценариев человеком. Решение — двухчастный RunVerdict: deterministic может быть авто-гейтом, advisory — только сигнал; симуляция промоут не автоматизирует."},
+    {"option": "Симуляция как отдельная параллельная система/среда с копией оргструктуры", "why_not": "Frozen seam T-0129 §11 + founder-confirmation 2026-06-11: симуляция = draft-тир той же системы, оргструктура одна живая read-only, не копируется. Переоткрытие запрещено."}
+  ],
+  "object_model": [
+    {"entity": "simulation_run", "fields": [
+      {"name": "run_id", "type": "uuid"},
+      {"name": "implementation_id", "type": "uuid (FK → implementation, T-0129)"},
+      {"name": "bundle_id", "type": "uuid (предмет прогона; tier ДОЛЖЕН быть draft)"},
+      {"name": "bundle_version", "type": "int (фиксируется на старте — сопоставимость A/B)"},
+      {"name": "mode", "type": "\"routes\" | \"autorun\" | \"rehearsal\""},
+      {"name": "variant", "type": "RunVariant"},
+      {"name": "scenarios", "type": "ScenarioRef[]"},
+      {"name": "budget_cap", "type": "BudgetCap"},
+      {"name": "status", "type": "\"running\" | \"passed_det\" | \"failed_det\" | \"halted_budget\" | \"aborted\""},
+      {"name": "verdict", "type": "RunVerdict"},
+      {"name": "test_marker", "type": "true (константа — всё помечено test)"}
+    ]},
+    {"entity": "StatistSubject", "fields": [
+      {"name": "kind", "type": "\"statist\" (отличим от employee/agent)"},
+      {"name": "run_id", "type": "uuid (вне прогона субъект не существует)"},
+      {"name": "plays_role", "type": "RoleRef (ССЫЛКА на роль, НЕ assignment)"},
+      {"name": "model", "type": "ModelRef (LLM-модель — параметр A/B)"}
+    ]},
+    {"entity": "DraftStatistGrantSource", "fields": [
+      {"name": "getGrants", "type": "(subject: ResolveSubject, now: number) => Grant[] — overlay поверх GrantSource (T-0021); для kind=statist проецирует гранты роли plays_role с draft-аффинной меткой, БЕЗ создания assignment; иначе делегирует обычному GrantSource"}
+    ]},
+    {"entity": "RunVariant", "fields": [
+      {"name": "process_variant", "type": "BundleVersionRef (вариант процесса X vs Y)"},
+      {"name": "model", "type": "ModelRef (LLM-модель X vs Y; параметр прогона, не свойство бандла)"}
+    ]},
+    {"entity": "Scenario", "fields": [
+      {"name": "scenario_id", "type": "uuid"},
+      {"name": "cases", "type": "SyntheticCase[] (вход режима 1)"},
+      {"name": "decisions", "type": "StepDecision[] (решения статистов — вход режима 2)"},
+      {"name": "expected", "type": "ExpectedOutcome (ожидаемые маршруты/исходы — для детерм. вердикта)"}
+    ]},
+    {"entity": "SyntheticCase", "fields": [
+      {"name": "caseId", "type": "uuid"},
+      {"name": "attributes", "type": "Record<string, JsonValue> (НЕ из реальных справочников — out-of-scope)"}
+    ]},
+    {"entity": "RouteResult", "fields": [
+      {"name": "ok", "type": "boolean (false при !lint.ok — fail-closed)"},
+      {"name": "lint", "type": "LintResult (T-0027)"},
+      {"name": "routes", "type": "RouteRow[]"},
+      {"name": "not_proven", "type": "string[] (ОБЯЗАТЕЛЬНО: forms_bound_to_data, statuses_actually_transition, rights_resolve_at_runtime, form_human_understandable)"}
+    ]},
+    {"entity": "RouteRow", "fields": [
+      {"name": "caseId", "type": "uuid"},
+      {"name": "path", "type": "stepId[]"},
+      {"name": "assignees", "type": "Record<stepId, { roleRef: RoleRef, resolvedActor: ActorRef[] }> (адресат из живой read-only оргструктуры)"}
+    ]},
+    {"entity": "RunVerdict", "fields": [
+      {"name": "deterministic", "type": "{ no_deadlocks, routes_match, rights_resolve, statuses_transition, effects_stubbed, pass: boolean } — машинный pass/fail, допустимый авто-гейт"},
+      {"name": "advisory", "type": "{ agent_answer_quality: Signal[], form_understandability: Signal[] } — сигнал, НЕ гейт промоута"}
+    ]},
+    {"entity": "BudgetCap", "fields": [
+      {"name": "instance_budget_id", "type": "uuid (T-0023 instance_budget)"},
+      {"name": "agent_budget_id", "type": "uuid? (T-0023 agent_budget статистов, опц.)"}
+    ]},
+    {"entity": "ABResult", "fields": [
+      {"name": "per_scenario", "type": "Record<scenarioId, Record<variantKey, { outcome, det_verdict, advisory_quality }>> — поэлементно X vs Y"},
+      {"name": "cost", "type": "Record<variantKey, { tokens, money }> — агрегат из spend_ledger (T-0023)"}
+    ]}
+  ],
+  "contracts": [
+    "computeRoutes(bundle: Bundle, cases: SyntheticCase[]): RouteResult — чистая функция (NF-2), без I/O; зовёт lintBpmn(bundle.components.process) как fail-closed предусловие, затем детерминированно протаскивает атрибуты через шлюзы/DMN и резолвит RoleRef → адресат; ВСЕГДА возвращает not_proven.",
+    "DraftStatistGrantSource implements GrantSource (T-0021): getGrants(subject, now) — для subject.kind='statist' проецирует гранты роли subject.plays_role (ЧТЕНИЕ грантов роли из решётки T-0018, НЕ создание assignment к субъекту); статист исполняет шаг через тот же resolveFor (T-0021), что и настоящий принципал. [iter-2, R-2] Аффинность статиста — свойство ПОСТРОЕНИЯ overlay (новая работа B-3), не tier-флаг на Grant: ResolveSubject identity-only, поля kind в нём НЕТ → kind='statist' = аддитивное расширение subject-типа B-3; overlay активен лишь когда subject.kind='statist' (такой субъект существует лишь в simulation_run над draft-бандлом), published-принципал (employee/agent) overlay не активирует → published-гранты не попадают в overlay-источник, статист в проде не резолвится.",
+    "[iter-2, R-2] draft-gateway (НОВАЯ работа B-4) в draft-тире НЕ передаёт published-эффект-гранты в coveringGrants → неизменённый verifyEffectGrants(declarations, coveringGrants=[], now, ...) (T-0034) естественно отдаёт deny 'нет покрывающего гранта' (= фактический единственный deny-путь src/core/effect-resource.ts:194-243, НЕ гипотетическая tier-ветка) → вместо коннектора вызывается стаб, записывающий 'отправил бы X' в test-аудит; 0 реальных эффектов независимо от наличия гранта у играемой роли (red-line FR-13). Фактический код tier-неосведомлён (Grant без tier; isEffective grant-lattice.ts:497-501 = только временное окно); tier-аффинность вводится построением gateway, T-0034-поверхность НЕ трогается (NF-5). Альтернатива (tier-параметр в verifyEffectGrants) отвергнута как правка frozen-поверхности с миграцией/чеком.",
+    "abComparison(scenarios: Scenario[], variants: RunVariant[]): ABResult — гоняет ИДЕНТИЧНЫЙ scenarios-набор на каждом variant (NF-4); варьирует model, не мутируя бандл; стоимость — агрегат spend_ledger (T-0023).",
+    "BudgetCap → reservation (T-0023, idempotent tool_call_id) → spend_ledger append на каждый LLM-вызов; при исчерпании two-ceiling AND-gate (T-0023 §1.3) → simulation_run.status='halted_budget' (fail-closed стоп).",
+    "Инвариант размещения: simulation_run.bundle.tier === 'draft' проверяется на старте; прогон в published-бандл отвергается fail-closed до исполнения.",
+    "Маркер режима 3: task.is_test := (instance.bundle.tier === 'draft') — выводимое свойство источника, не редактируемый флаг; неснимаемо без смены неизменяемого tier draft-инстанса.",
+    "Аудит прогона: appendAuditEvent (T-0016/T-0019) с test:true; [iter-2, R-3] маркер test:true живёт в detail jsonb актор-события (actor_event, migration 018_actor_event.sql — event-metadata), НЕ новая колонка is_test и НЕ отдельная таблица; признак неснимаем постфактум (append-only ledger); исключён из комплаенс-экспорта тем же фильтром по detail->>'test' (не второй лог); согласовано с T-0129 §10.4."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "ADR ссылается на ВСЕ несущие основы поимённо (T-0027, T-0021, T-0034, T-0018, T-0023, T-0016) и НЕ вводит запрещённых конструкций (новый authority-store / второй резолвер / второй аудит-лог / параллельная решётка / новый бюджет-механизм в утвердительном контексте)", "ci_check": "ci/checks/sim-adr-foundations.sh: grep ADR на наличие 6 токенов основ + отсутствие banned-конструкций; --self-test: фикстура без T-0027 ⇒ чек красный"},
+    {"id": "FF-2", "rule": "Каждый из 3 режимов имеет явное «что доказывает / чего НЕ доказывает»: ADR содержит секцию режима 1/2/3, у каждого присутствует токен границы (not_proven / «НЕ доказывает»). Отсутствие границы у любого режима — брак", "ci_check": "ci/checks/sim-adr-structure.sh (Check-MODES): 3 режима × наличие границы; --self-test: фикстура с режимом без «НЕ доказывает» ⇒ красный (AC-6)"},
+    {"id": "FF-3", "rule": "Статист-инвариант: ADR утверждает статиста как эфемерный draft-субъект (StatistSubject/DraftStatistGrantSource), НЕ employee, НЕ grant-строка в published, НЕ assignment, не переживает прогон; банит «статист — сотрудник» / «статист в оргструктуре» / «статист получает assignment»", "ci_check": "ci/checks/sim-adr-structure.sh (Check-STATIST): наличие токенов эфемерности + отсутствие banned; --self-test: фикстура «статист = employee» ⇒ красный (AC-8)"},
+    {"id": "FF-4", "rule": "Эффект-red-line как отнятая возможность: ADR утверждает draft-аффинность эффект-грантов (deny by construction) + стаб + «0 реальных отправок»; банит «флаг выключения эффектов» / «simulate=true гасит» / «настройка эффектов»", "ci_check": "ci/checks/sim-adr-structure.sh (Check-EFFECT): наличие «draft-аффин»/«по построению»/«0 реальных» + отсутствие banned флаг-конструкций; --self-test: фикстура с «флаг simulate выключает эффекты» ⇒ красный (AC-11, AC-14)"},
+    {"id": "FF-5", "rule": "Двухчастный вердикт + human-gate промоута: ADR содержит deterministic (авто-гейт допустим) и advisory (НЕ гейт промоута), промоут остаётся human-gate; банит «LLM-оценка автогейтит промоут» / «advisory гейтит промоут»", "ci_check": "ci/checks/sim-adr-structure.sh (Check-VERDICT): наличие обеих частей + «human-gate» + отсутствие banned; --self-test: фикстура «advisory автогейтит промоут» ⇒ красный (AC-13)"},
+    {"id": "FF-6", "rule": "A/B-сопоставимость + бюджет-консумент: ADR утверждает идентичный сценарный набор на вариантах (process_variant, model) и стоимость из spend_ledger (T-0023); модель — параметр прогона, не свойство бандла", "ci_check": "ci/checks/sim-adr-structure.sh (Check-AB): наличие RunVariant + «идентичн» + spend_ledger; --self-test: фикстура с разными наборами на X/Y ⇒ красный (AC-10, AC-12)"},
+    {"id": "FF-7", "rule": "Шов T-0129 потреблён, не переоткрыт: §10 содержит таблицу «что потребляет» (≥6 гарантий) + список НЕ-переоткрываемого (4 инварианта) + ссылку на frozen seam T-0129 §11; банит «пересматриваем бандл» / «статисты — сотрудники» / «эффекты можно включить»", "ci_check": "ci/checks/sim-adr-structure.sh (Check-SEAM): §10 содержит T-0129 + ≥6 строк потребления + 4 инварианта; --self-test: фикстура без таблицы потребления ⇒ красный (AC-16)"},
+    {"id": "FF-8", "rule": "Трассировка полна: каждый AC спека (AC-1..AC-17) имеет строку в §14 traceability с указанием секции ADR; решения рамки НЕ переоткрыты (founder-confirmation 2026-06-11 присутствует)", "ci_check": "ci/checks/sim-adr-structure.sh (Check-TRACE): 17 AC-строк + 2026-06-11; --self-test: фикстура с 16 строками ⇒ красный"},
+    {"id": "FF-9", "rule": "Self-test-гарантия (мета): оба ci-чека при --self-test ДОЛЖНЫ выйти с кодом 0 (= успешно показали, что на сломанной фикстуре краснеют); если self-test не реализован/фикстура проходит — чек падает", "ci_check": "bash ci/checks/sim-adr-foundations.sh --self-test && bash ci/checks/sim-adr-structure.sh --self-test"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§1, §2 — simulation_run = draft-тир той же системы, не отдельная система; оргструктура read-only, не копируется"},
+    {"ac": "AC-2", "covered_by": "§2 инвариант — config-only promote, тест-данные не пересекают границу (потреблено из extensibility §8 / T-0129 §8.4)"},
+    {"ac": "AC-3", "covered_by": "§5.3 — единый ledger + test:true неснимаемо, исключён из комплаенса"},
+    {"ac": "AC-4", "covered_by": "§3 — computeRoutes детерминированный, без движка, таблица кейс→маршрут→реальный адресат"},
+    {"ac": "AC-5", "covered_by": "§3 — консумент lintBpmn (T-0027), чистая fail-closed функция, не параллельный линтер (FF-1)"},
+    {"ac": "AC-6", "covered_by": "§3/§4.1/§5.1 — доказывает/НЕ доказывает у каждого режима; not_proven обязателен (FF-2)"},
+    {"ac": "AC-7", "covered_by": "§4.1 — режим 2 реальные draft-инстансы + статисты по сценарию; права через PDP T-0021"},
+    {"ac": "AC-8", "covered_by": "§4.2/§7.3 — статист = эфемерный draft-субъект, НЕ employee/grant-строка/assignment (FF-3)"},
+    {"ac": "AC-9", "covered_by": "§5.1 — режим 3 боевой инбокс + is_test от tier, неотличимо-помечено, 0 боевых эффектов"},
+    {"ac": "AC-10", "covered_by": "§6 — A/B идентичный сценарный набор × (process_variant, model), поэлементно + стоимость (FF-6)"},
+    {"ac": "AC-11", "covered_by": "§7.1 — эффект-red-line: draft-gateway (B-4, новая работа) лишает draft-run покрывающего эффект-гранта → неизменённый verifyEffectGrants (T-0034) отдаёт естественный deny 'нет покрывающего гранта' + стаб + тест 0 отправок при наличии гранта; реализационная развилка аффинности зафиксирована честно (FF-4)"},
+    {"ac": "AC-12", "covered_by": "§8 — бюджет-консумент T-0023, fail-closed стоп, A/B-агрегат из spend_ledger (FF-6)"},
+    {"ac": "AC-13", "covered_by": "§5.4 — двухчастный RunVerdict: deterministic = авто-гейт, advisory = сигнал; промоут human-gate (FF-5)"},
+    {"ac": "AC-14", "covered_by": "§7.2 — изоляция эффектов абсолютна и невыключаема из draft — свойство построения draft-gateway (B-4), не tier-флаг; T-0034-поверхность не трогается (FF-4)"},
+    {"ac": "AC-15", "covered_by": "§1/§9/§11 — опора без дублирования (draft-тир, T-0027, T-0034, T-0021, T-0016, T-0023) (FF-1)"},
+    {"ac": "AC-16", "covered_by": "§10 — SEAM-1 помечен: потребляет бандл T-0129, контракт стыка из frozen seam §11 (FF-7)"},
+    {"ac": "AC-17", "covered_by": "§5.1/§11 — UX-инвариант: маркер тест в боевом инбоксе, НЕ глобальный dev/prod-переключатель; пара draft/published машинный слой (manual)"}
+  ],
+  "runtime_target": "локально (design-only артефакт — ADR-документ + doc-линтеры в ci/checks/, без внешнего ресурса). Build-задачи §11 наследуют таргеты основ: режим 1 ядро (B-1/B-2) — локально (чистая TS, как T-0027); режим 2/3 прогон (MVP-late) — draft-тир на живом Flowable (T-0058, сервер /srv/choros, founder-gated GT-4); бюджет-энфорсмент — E5.9 (Stage-2). T-0130 сам ничего не провижнит.",
+  "adr_artifact_path": "docs/design/T-0130-simulation.adr.md",
+  "escalation": ""
+}

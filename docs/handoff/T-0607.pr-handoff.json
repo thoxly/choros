@@ -1,0 +1,59 @@
+{
+  "task_id": "T-0607",
+  "status": "pr_open",
+  "branch": "task/T-0607-assistant-truth",
+  "pr_url": "local:task/T-0607-assistant-truth",
+  "live_proof": "pending orchestrator",
+  "summary": "Пять дефектов честности контура ассистента (живой факт приёмки 2026-07-03, DeepSeek-live), каждый закрыт минимально-инвазивным фиксом + тестами. (а) СЛЕПОТА К ДАННЫМ (столп 6): src/server.ts::setAnalystPorts не подключал listRecords → аналитик читал только S3-журнал, отвечал «записей нет» при видимом разделе. Фикс: новый src/db/registry-digest-dao.ts::loadReadableRegistryDigest — READ-PDP-scoped дайджест реестров (getGrantsForSubject + composite ancestry + isRecordReadable, тот же single-resolver путь, что records LIST), новый порт AnalystPorts.loadRegistryDigest, секция «Разделы и записи (в правах)» в контексте LLM; «записей нет» утверждается ТОЛЬКО при known-empty дайджесте (не при degraded/unwired). Wired в server.ts. (б) НЕДЕТЕРМИНИРОВАННЫЙ ГЕЙТ ПРАВ: hasAuthoringDraftGrant не применял owner-short-circuit (capability-authz.ts:121-124 объявляет его обязанностью caller'а) → владелец, чья власть от владения, получал детерминированный ЛОЖНЫЙ AUTHORING_ACCESS_DENIED_MESSAGE; пересечение agent∩user мигало по scope агента. Фикс: hasAuthoringDraftGrant = isTenantOwner() || canOperateSystemAgent(intersectionGrants); HandlerContext.isTenantOwner заполняется из существующего isGenesisOwnerForTenant в assistant.ts (мемоизировано на запрос). Решение серверное, детерминированное, ДО LLM. canOperateSystemAgent не тронут. (в1) SLUG вместо UUID: executeApprovedOpAsDraft требовал сырой UUID реестра/приложения, LLM передавал slug → «invalid input syntax for type uuid». Фикс: resolveIdBySlug (UUID as-is; иначе SELECT id по slug в правах тенанта) в edit_jsonschema_non_destructive/relate_application(source+link target)/author_binding/generate_process(grounding); не найдено → honest op-error, не 500. (в2) ЛОЖНЫЙ РАПОРТ: LLM «Все поля добавлены ✅» + оптимистичный changelog оставались при 4/4 упавших ops. Фикс: новый чистый src/core/assistant-report.ts::buildHonestOpsReport — пост-исполнительная сверка per-op результатов: упавшие как упавшие, дубль как «уже было» (DUPLICATE:-префикс от executor), без «✅» при провалах. (г) ТИХИЕ БЕЗ-ОТВЕТЫ: не-unavailable сбой диспатча давал голый 500 без сообщения в треде. Фикс: роут при не-unavailable ошибке пишет canonical buildDispatchFailureReply в тред (persistAssistantFailureReply) И отдаёт 500 INTERNAL — реконсиляция с anti-mask-инвариантом T-0573 §2.2 (тред не молчит + баг виден). Аналитик НЕ глотает ошибку (пробрасывает на роут-шов). (д) УТЕЧКА ВНУТРЕННОСТЕЙ: buildDraftContext безусловно вклеивал «Цикловое время»/«Разбивка по типу актора» (S3-телеметрию). Фикс: isProcessAnalyticsQuery гейтит S3-загрузку и рендеринг телеметрии по явному процессному интенту.",
+  "mechanism": {
+    "a_data_blindness": "loadReadableRegistryDigest(pool, tenantId, actorSlug, nowMs, opts): резолвит гранты актёра тем же getGrantsForSubject + makeResourceAncestryOracle(loadTenantOrgAncestry, emptyRowIndex), перечисляет published registry_def, для каждого сканирует bounded окно записей и фильтрует каждую строку через isRecordReadable (тот же предикат, что LIST records) → {slug, displayName, visibleCount, samples[<=3]}. Cap: 25 реестров, 3 примера, 200 записей на реестр. Любой сбой → {degraded:true, registries:[]} (honest-degrade, не throw). AnalystPorts.loadRegistryDigest default null. buildDraftContext: null→«недоступны для чтения», degraded→«не удалось прочитать разделы», known-empty→«нет разделов», иначе список с count+samples; «записей нет» только при известном нуле.",
+    "b_rights_gate": "hasAuthoringDraftGrant(ctx): (1) if ctx.isTenantOwner && await ctx.isTenantOwner() → true (owner-short-circuit, try/catch fail-closed); (2) иначе canOperateSystemAgent(await ctx.intersectionGrants.getGrants(userSubject, now)). HandlerContext.isTenantOwner? — новое опциональное поле; assistant.ts заполняет мемоизированной () => isGenesisOwnerForTenant(pool, tenantId, actorSlug, Date.now()).catch(()=>false). Не задан (тесты) → owner-ветка не срабатывает. Не-владелец без capability по-прежнему детерминированно отказан.",
+    "v1_slug_resolve": "resolveIdBySlug(client, tenantId, 'registry_def'|'application', idOrSlug): UUID_RE.test → as-is; иначе SELECT id WHERE tenant_id AND slug LIMIT 1; не найдено → null. Вызывается перед DB-записью в 5 op-kinds; null → honest op-error string. Также детект дубля поля (record_schema #> properties/fieldKey) → DUPLICATE:-префикс.",
+    "v2_honest_report": "buildHonestOpsReport(finalTextFromLlm, opResults): без провалов → текст без изменений; с провалами → заголовок «Выполнено частично»/«Ни одна…» + explicit ✓/✗ список, дубль (DUPLICATE:-префикс → OpResult.duplicate) как «уже было», hard-fail с honest-причиной + tail «исправьте причину». assistant.ts собирает OpResult[] по реальным исходам executeApprovedOpAsDraft, применяет к handlerResult.text.",
+    "g_reply_guarantee": "Реконсиляция (г)↔anti-mask на РОУТ-шве. Аналитик пробрасывает ошибку (не глотает). Роут: unavailable → respondLlmUnavailable (T-0573, thread-msg+503); иное → persistAssistantFailureReply: пишет canonical buildDispatchFailureReply (без жаргона, без сырого err) в тред + sendErrorEnvelope(500, INTERNAL). Тред не молчит (г), баг виден (anti-mask). Сырой err только console.error.",
+    "d_telemetry_gate": "isProcessAnalyticsQuery(userText): keyword-детектор (цикл/время/узкое место/этап/процесс/длительность/bottleneck/cycle/…). S3-загрузка (loadCycleTime/loadActorBreakdown) и рендеринг секций телеметрии — только при true. Дайджест реестров (данные пользователя) — всегда."
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npm run build (tsc + seed/tsconfig) — 0 ошибок. npx tsc --noEmit — 0 ошибок.",
+    "lint": true,
+    "lint_result": "npx eslint src — exit 0 (9 pre-existing no-console WARNINGS incl. новые console.error в assistant-analyst.ts/assistant-configurator.ts(pre-existing)/registry-digest-dao.ts/assistant.ts — тот же паттерн, что T-0600; 0 errors).",
+    "types": true,
+    "types_result": "покрыто npx tsc --noEmit — 0 ошибок.",
+    "tests": true,
+    "tests_result": "npm test (root vitest run): 258 файлов passed | 2 skipped (260), 4957 тестов passed | 10 skipped (4967), exit 0 — включая новые src/__tests__/assistant-report.test.ts (9, AC-7/9-unit), assistant-analyst-digest.test.ts (9, AC-1/2/8/10), assistant-configurator-owner.test.ts (4, AC-4). Обновлены 2 пре-существующих теста контракта пробрасывания (assistant-analyst.test.ts::propagates dormant + agent-on-behalf.test.ts::intentDispatch propagates) — они уже проверяли пробрасывание, остаются зелёными после реконсиляции (аналитик пробрасывает). Живой Postgres (localhost:55432): npm run fitness:db — 109 файлов passed, 1105 тестов passed, exit 0 БЕЗ флейков в этом прогоне, включая 5 новых DB-тестов (registry-digest AC-3, configurator-owner-gate AC-5, edit-jsonschema-slug-resolve AC-6, assistant-dispatch-failure AC-9) и не-регресс assistant-llm-unavailable (anti-mask 500 INTERNAL сохранён) / assistant-llm-binding / config-request-capture.",
+    "fitness": true,
+    "fitness_result": "bash ci/checks/ux/assistant-llm-message-jargon.sh → PASS (константы T-0573/T-0595 не менялись); --self-test → PASS; bash ci/checks/anti-case-lock.sh → PASS (Phase 1+2 в пределах baseline, aggregate 24=24, 0 новых D-064 анти-кейс литералов; кейс-строки только в ci/checks/db/ тест-фикстурах, которые чек исключает)."
+  },
+  "files_changed": [
+    "docs/specs/T-0607-assistant-truth.spec.md",
+    "docs/specs/T-0607.spec.contract.json",
+    "docs/adr/ADR-T0607-assistant-truth.md",
+    "docs/adr/T-0607.adr.contract.json",
+    "src/db/registry-digest-dao.ts",
+    "src/core/assistant-report.ts",
+    "src/core/assistant-analyst.ts",
+    "src/core/assistant-configurator.ts",
+    "src/core/assistant-intent.ts",
+    "src/http/assistant.ts",
+    "src/server.ts",
+    "src/__tests__/assistant-report.test.ts",
+    "src/__tests__/assistant-analyst-digest.test.ts",
+    "src/__tests__/assistant-configurator-owner.test.ts",
+    "ci/checks/db/registry-digest.test.ts",
+    "ci/checks/db/configurator-owner-gate.test.ts",
+    "ci/checks/db/edit-jsonschema-slug-resolve.test.ts",
+    "ci/checks/db/assistant-dispatch-failure.test.ts",
+    "docs/handoff/T-0607.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "ADR §1.5 первоначально описывал (г) как: аналитик глотает ошибку в canonicalizeLlmError + роут пишет reply. При BUILD выяснилось, что аналитик-level swallow конфликтует с anti-mask-инвариантом T-0573 §2.2 (существующий ci/checks/db/assistant-llm-unavailable.test.ts::anti-mask требует, чтобы plain-Error давал видимый 500 INTERNAL, а не дружелюбный 200). РЕКОНСИЛЯЦИЯ: аналитик НЕ глотает (пробрасывает), а роут при не-unavailable сбое пишет canonical reply в тред И отдаёт 500 INTERNAL — оба инварианта соблюдены. Это ужесточение ADR §1.5 в сторону единственного роут-шва (проще, честнее), не расширение скоупа. AC-9 покрыт новым ci/checks/db/assistant-dispatch-failure.test.ts вместо unit-only (нужен реальный роут+тред для проверки reply-в-треде).",
+    "AC-8 (г unit) переформулирован: с 'аналитик возвращает canonical' на 'аналитик ПРОБРАСЫВАЕТ' — следствие той же реконсиляции; гарантия reply-в-треде теперь на роут-шве (AC-9 DB-тест), а не в аналитике.",
+    "(а) для admission-цели право резолвится на пересечении (не на raw user grants) для НЕ-владельцев — owner-short-circuit покрывает живой дефект владельца; для seeded-тенанта пересечение надёжно содержит authoring_draft (агент имеет tenant-wide scope). Raw-user-grant admission без owner потребовал бы расширения HandlerContext сверх необходимого — отложено (не нужно для живого факта)."
+  ],
+  "friction_events": [
+    "Worktree provisioned без node_modules — npm ci --maxsockets=3 перед первым прогоном.",
+    "Первый прогон DB-тестов упал на схемных мелочах фикстур (record.created_by NOT NULL → передать ownerSlug; employee не имеет колонки email → position_id; published-tier write-lock T-0087 FR-4 → SET LOCAL choros.promoting='1' в cleanup; registry_schema_history FK перед registry_def в cleanup) — все фиксы в тест-фикстурах, не в коде задачи.",
+    "Реконсиляция (г)↔anti-mask (см. deviations): первый вариант аналитик-swallow сломал существующий anti-mask DB-тест (ожидал 500); перепроектировано на роут-шов — оба инварианта зелёные."
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0053",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0053-postgres-compose.adr.md:171",
+      "issue": "ADR §3.1 table row for choros_migrator states 'Subject to FORCE RLS (even owner is filtered)'. This is factually incorrect: choros_migrator is a PostgreSQL superuser (rolsuper=true, rolbypassrls=true) and BYPASSES RLS entirely — FORCE ROW LEVEL SECURITY does not apply to superusers per PostgreSQL semantics. Verified live: migrator sees all rows without setting the GUC. The practical security posture is intact (app cannot SET ROLE to migrator, no role grant chain, dev password compose-only), but the ADR comment misrepresents Postgres behaviour and will mislead future maintainers.",
+      "suggestion": "Correct the §3.1 table note to: 'Owns choros schema + all baseline tables; holds DDL; runs the runner; never used at runtime. As a Postgres superuser (BYPASSRLS=true) it bypasses FORCE RLS — migrations and seeds must set choros.tenant_id explicitly for correctness, not because RLS filters them. Never used at runtime (runtime path is choros_app which IS NOBYPASSRLS).'"
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/db/behavior.test.ts:4",
+      "issue": "Comment 'NOTE: choros_migrator is subject to FORCE RLS too, so seeds set choros.tenant_id within the transaction' repeats the same incorrect claim from the ADR. The migrator bypasses RLS as a superuser; seeds set the GUC for semantic correctness and clarity, not because FORCE RLS applies.",
+      "suggestion": "Correct to: 'NOTE: choros_migrator is a Postgres superuser and BYPASSES RLS (FORCE RLS does not apply to superusers). Seeds set choros.tenant_id explicitly for semantic correctness — not because RLS filters the migrator, but so test data is scoped consistently with production semantics.'"
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "package.json:devDependencies",
+      "issue": "pg v8.21.0 does not ship bundled TypeScript type definitions (no .d.ts files, no 'types' field in package.json). The ci/checks/db/*.ts probe files use pg types (pg.Client, etc.) without @types/pg in devDependencies. tsconfig.json include is ['src'] only so tsc does not check ci/checks/db — the CI passes, but the probe code has no compile-time type safety. A type error in a probe (e.g. wrong column name in a query result) would only surface at runtime.",
+      "suggestion": "Add '@types/pg': '^8.6' to devDependencies. This is a one-line addition and aligns with zero-dep-only-in-runtime intent: @types packages are devDependencies. Alternatively, document that ci/checks/db is intentionally untyped (vitest transpiles with esbuild)."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1",  "covered": true},
+    {"ac": "AC-2",  "covered": true},
+    {"ac": "AC-3",  "covered": true},
+    {"ac": "AC-4",  "covered": true},
+    {"ac": "AC-5",  "covered": true},
+    {"ac": "AC-6",  "covered": true},
+    {"ac": "AC-7",  "covered": true},
+    {"ac": "AC-8",  "covered": true},
+    {"ac": "AC-9",  "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "ADR §3.1 contains a factual error about Postgres superuser + FORCE RLS semantics that went through DESIGN→BUILD without detection. A dedicated security reviewer (SQ11 candidate) with Postgres-specific knowledge would have caught this in DESIGN. Low risk here (app path is blocked, only ADR doc is wrong), but the error class — incorrect reasoning about DB security invariants in design docs — is worth tracking in ledgers/role-gaps.md as evidence for SQ11."
+  ]
+}

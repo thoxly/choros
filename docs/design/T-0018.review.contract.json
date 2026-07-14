@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0018",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/grant-lattice.ts:155-163",
+      "issue": "normalize() uses a noOpOracle for dropRedundant, so node-pair redundancy (e.g. {reg-1, app-1} where reg-1 ⊑ app-1) is NOT eliminated at normalize time — only tag and interval redundancies are dropped. The code comment acknowledges this conservatism explicitly, and it is sound (retaining extra narrower members never widens a grant's reach), but the canonical form is not maximally reduced for node-containing scope-sets without the oracle. Future callers with a real oracle will not get this normalization benefit from normalize() alone.",
+      "suggestion": "Accept the conservative documented behavior for now. If T-0053 or T-0021 need oracle-aware normalization, add a normalizeWithOracle(s, oracle) variant that also calls dropRedundant with the real oracle. Do not change T-0018's normalize() signature."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/__tests__/grant-lattice.test.ts:644-669",
+      "issue": "FF-7 'structural impossibility' test (lines 644-669) checks wideners against parents in a 3×3 loop, but the cross-check is conditional: `if (!isNarrowing) { expect(result.ok).toBe(false) }`. The widener set is deliberately non-⊑ for most (node('app-2') vs reg-1, tags-superset vs tags-parent, wider-interval vs interval), but the test does not assert that every widener-parent pair in the loop actually IS a non-⊑ case — it silently passes pairs where the widener happens to be ⊑ the parent (e.g. interval 0-200 ⊑ interval 0-200 is not in this test, but tags('a','b','extra') IS ⊑ tags('a','b','c') if 'extra' were in that set — which it isn't here, but the assertion structure could mask a missed widener). The test is still correct for the specific fixtures used, but the logic 'if not narrowing, must be rejected' is the right direction; it would be stronger to assert all combinations actually ARE non-⊑ first.",
+      "suggestion": "Add a preceding assertion that confirms each (widener, parent) pair is indeed non-⊑ before checking the validateNarrowing result, to make the structural-impossibility proof explicit and test-failure diagnostic."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/grant-lattice.ts:440-447",
+      "issue": "The facet-widening comment block (lines 440-447) shows in-code uncertainty about the correct interpretation — 'Wait — let's re-read' and 'Actually:' with mid-comment correction. The final logic (child absent + parent present = facet_widens) matches ADR §7, but the discarded reasoning is distracting and could mislead future maintainers.",
+      "suggestion": "Remove the 'Wait' / 'Actually' exploration text and leave only the final settled reasoning comment aligned with ADR §7: 'child absent, parent present → child is wider (no facet restriction applied where parent restricts)'. This is a comment cleanup, not a logic change."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/__tests__/grant-lattice.test.ts:503-521",
+      "issue": "FF-6 'set with redundant members' test (lines 503-521) contains an if/else branch: if the normalized result is a set, checks tagMembers length; else (non-set) checks it's the wider member. The else branch would silently pass even if the normalization incorrectly returned a single-element non-set result without verifying it's the right element. The test could be more direct.",
+      "suggestion": "Structure the test to always expect the set result with one tag member of [a,b] — since the input has two tag members and normalization should keep the wider — removing the ambiguous else branch."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

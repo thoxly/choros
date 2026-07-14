@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0737",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "src/http/audit.ts:521-523 (holdsAuditRead) + :700-705 route comment",
+      "issue": "The gate is genesis-owner ONLY for all three routes, INCLUDING the two demo/fixture routes (/export, /:instanceId) that serve in-memory INS-7731 data, not the real tenant journal. This is the deliberate, documented T-0500 policy (a scoped mgmt_object:* grant must NOT open the surface) and is verified correct — but it means a legitimate 'auditor' persona is blocked until a founder-gated audit:read grant / admin tier is introduced. The file's own T-0500 doc-comment already flags that expansion as a separate founder decision, so this is a conservative (fail-safe) choice, not a defect.",
+      "suggestion": "No action now. When a dedicated audit-reader role is desired, extend holdsAuditRead behind a founder decision rather than opening mgmt_object:* — keep it one policy across all three routes."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/audit-route-deactivation-gate.db.test.ts:216-249",
+      "issue": "The live-PG probe drives the DEACTIVATED-owner vector via dev-mode (x-dev-user header), not the keycloak/JWT residual-window path that the R-3 threat model actually describes. The deactivation predicate lives in loadAdminContext (mode-agnostic, ACTOR_ACTIVE_SQL), so the vector IS covered end-to-end, and the predicate itself is separately proven at resolver level by org-admin-deactivation.db.test.ts (T-0658). A keycloak-mode variant would mirror the residual-JWT scenario more literally.",
+      "suggestion": "Optional follow-up: add a keycloak-mode variant that authenticates a deactivated actor's still-valid token and asserts 403, to exercise extractActor's JWT branch in addition to loadAdminContext's predicate."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/actor-active-route-coverage.sh:175 (ROUTE_WHITELIST §D, audit.ts:GET:/api/audit)",
+      "issue": "GET /api/audit was newly ADDED to the whitelist although it already had a real owner gate since T-0500. It surfaces now only because the gate was refactored into the module-scope helper requireAuditRead(), which the scan's block-scoped text scan cannot see (documented §2.4 limitation #1, same class as notification-prefs.ts's checkAdminGrant). This is an honest false-negative of the scan, not a masked gap — the cited helper genuinely gates (hand-verified + stub/live tests). Noting only that the scan structurally cannot see gates extracted into helpers.",
+      "suggestion": "None required. The citation is accurate; leave inline duplication out (would triple the audit-authority surface)."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC: GET /api/audit gated by requireAuditRead before data (owner-only)", "covered": true},
+    {"ac": "AC: GET /api/audit/export gated before any instance lookup/stream", "covered": true},
+    {"ac": "AC: GET /api/audit/:instanceId gated before demo-trace build (was 0 gate)", "covered": true},
+    {"ac": "AC: policy genesis-owner ONLY; mgmt_object:* does NOT open (T-0500)", "covered": true},
+    {"ac": "AC: deactivated genesis-owner rejected end-to-end (deactivated_at IS NULL)", "covered": true},
+    {"ac": "AC: 401 unauth, 403 ADMIN_GATE_REJECTED (not 404), 503 no-pool fail-closed", "covered": true},
+    {"ac": "AC: findings 12->9 via whitelist §D citing requireAuditRead; scan self-test PASS", "covered": true},
+    {"ac": "AC: append-only writer untouched (audit_append_only PASS); diff scoped to reads", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

@@ -1,0 +1,79 @@
+{
+  "task_id": "T-0008",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 101,
+    "passed": 101,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "deploy-dev.sh --dry-run завершается без ошибок",
+      "test": "bash scripts/deploy-dev.sh --dry-run — 5/5 шагов, exit 0",
+      "result": "pass"
+    },
+    {
+      "ac": "deploy-dev.yml содержит dormancy gate (if: secrets.DEPLOY_SSH_KEY != '')",
+      "test": "grep — gate присутствует в if: условии job deploy-dev",
+      "result": "pass"
+    },
+    {
+      "ac": "Workflow НЕ касается main и prod-кредов",
+      "test": "Ревью yml: trigger branches: [dev], permissions: contents: read, нет main/prod операций",
+      "result": "pass"
+    },
+    {
+      "ac": "PR dev→main открыт (#15)",
+      "test": "gh pr view 15 — state: OPEN, url: https://github.com/thoxly/choros/pull/15",
+      "result": "pass"
+    },
+    {
+      "ac": "Healthcheck ждёт статус healthy, timeout 60s",
+      "test": "deploy-dev.sh строки 81-95: loop 12×5s, docker inspect .State.Health.Status",
+      "result": "pass"
+    },
+    {
+      "ac": "Deploy triggered only on CI success (workflow_run conclusion==success)",
+      "test": "deploy-dev.yml: on.workflow_run.workflows=[ci], if conclusion==success (R-1 fix, re-review approved)",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "YAML-валидность ci.yml",
+      "result": "pass",
+      "note": "python3.11 yaml.safe_load — OK"
+    },
+    {
+      "check": "YAML-валидность deploy-dev.yml",
+      "result": "pass",
+      "note": "python3.11 yaml.safe_load — OK"
+    },
+    {
+      "check": "npm run ci (tsc + eslint + vitest)",
+      "result": "pass",
+      "note": "7 файлов, 101/101 тестов, 0 ошибок tsc, 0 ошибок eslint"
+    },
+    {
+      "check": "PR #15 актуален (не закрыт, не заморожен)",
+      "result": "pass",
+      "note": "OPEN, additions=206474, auto-merge=disabled (founder-gate)"
+    },
+    {
+      "check": "R-6 escape корректен в dry-run",
+      "result": "pass",
+      "note": "$(git log --oneline -1) буквально в DRY-RUN выводе — вычисляется на сервере"
+    }
+  ],
+  "failures": [],
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 ошибок",
+    "eslint_src": "exit 0 — 0 ошибок",
+    "vitest_run": "7 passed (101 tests)",
+    "yaml_ci": "OK",
+    "yaml_deploy_dev": "OK",
+    "dry_run": "5/5 steps OK, exit 0",
+    "pr_15_state": "OPEN",
+    "review_verdict": "approved (re-review, commit 8067626)"
+  }
+}

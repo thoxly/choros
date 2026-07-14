@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  tel-linear.bpmn20.xml — T-0279 §A (ADR T-0278 §2.1) + T-0340 [E15-S5] (R-2 fix)
+  Canonical ТЭЛ process definition with DMN-driven exclusiveGateway.
+
+  Design constraints (ADR §2.1, NF O3):
+  - T-0340 [E15-S5] R-2: the gateway is an ADD (not replace). The base
+    «Согласование» userTask (task-approve, candidateGroups=role-approver) is
+    preserved on the MAIN path so U3/U4 acceptance steps keep working. The
+    exclusiveGateway is placed AFTER task-approve, driven by the DMN-evaluated
+    `approvalRequired` variable which is injected into the Flowable variable map
+    when the tel-intake external task completes (evaluateGatewayAtTriage at the
+    completeTask seam in externalTaskBridge.ts — R-1 fix).
+  - Structure:
+      startEvent
+      → userTask «Подача заявки» (role-initiator, U1/U2)
+      → serviceTask «Триаж» (external, topic=tel-intake, U3)
+        [R-1: at completeTask time, evaluateGatewayAtTriage sets approvalRequired]
+      → userTask «Согласование» (role-approver, U3/U4 pool task)
+      → exclusiveGateway [gw-approval-threshold, reads: approvalRequired]
+          → (approvalRequired == "needs-approval", amount > 5M)
+              → userTask «Доп. согласование» (role-approver, U4-extra)
+              → endEvent «Завершено»
+          → (default / standard track, amount ≤ 5M)
+              → endEvent «Завершено»
+  - userTask «Подача заявки»:     candidateGroups="role-initiator" (e-orlov, U1/U2)
+  - serviceTask «Триаж»:          external topic="tel-intake" (a-intake, U3 DORMANT)
+  - userTask «Согласование»:      candidateGroups="role-approver" (e-larina, U3/U4)
+  - exclusiveGateway:             reads process variable `approvalRequired` (DMN F4)
+                                  default="sf-gw-end" (no-outgoing-flow safety)
+  - userTask «Доп. согласование»: candidateGroups="role-approver" (e-larina, U4-extra)
+  - Roles from seed/demo/tel-scenario.ts: role-initiator / role-approver.
+
+  Process key: telLinear  (camelCase per Flowable convention, like chorosSmoke)
+  Deploy path: via deployBpmn REST (same as choros-smoke / customer-onboarding).
+               NOT filesystem auto-deploy; NOT in seed-pack.
+-->
+<definitions
+  xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:flowable="http://flowable.org/bpmn"
+  targetNamespace="http://choros.io/tel"
+  xsi:schemaLocation="http://www.omg.org/spec/BPMN/20100524/MODEL
+    http://www.omg.org/spec/BPMN/2.0/20100501/BPMN20.xsd">
+
+  <process id="telLinear" name="Канонический линейный ТЭЛ" isExecutable="true">
+
+    <!-- Start -->
+    <startEvent id="start" name="Начало"/>
+
+    <!-- UserTask 1: Подача заявки (инициатор, U1/U2) -->
+    <userTask id="task-submit"
+              name="Подача заявки"
+              flowable:candidateGroups="role-initiator">
+      <documentation>
+        Инициатор (e-orlov, role-initiator) заполняет форму заявки:
+        предмет, сумма (5.5M₽), обоснование. Серверная валидация через
+        POST /api/forms/:formId/submit (E9). После submit: запись в record,
+        процесс переходит к шагу Триажа.
+        Соответствует шагам S1+S2 сценария tel-scenario.ts / U1+U2 ADR §2.1.
+      </documentation>
+    </userTask>
+
+    <!-- ServiceTask: Триаж (внешняя задача, topic=tel-intake, DORMANT/DETERMINISTIC) -->
+    <serviceTask id="task-triage"
+                 name="Триаж"
+                 flowable:type="external"
+                 flowable:topic="tel-intake">
+      <documentation>
+        Агентский шаг (a-intake, role-intake-agent). External task, topic=tel-intake.
+        agent_card DORMANT (llm_* NULL) — ZERO платных LLM (ADR NF3/O5, AC-10).
+        На day-1 проходит детерминированно через fetchAndLock/completeTask
+        (тот же bridge-механизм, что в choros-smoke). При completeTask:
+        evaluateGatewayAtTriage (R-1, externalTaskBridge.ts) вычисляет
+        approvalRequired и инжектирует в переменные Flowable.
+        Соответствует шагу S3 (intake slot) сценария tel-scenario.ts / U3 ADR §2.1.
+      </documentation>
+    </serviceTask>
+
+    <!--
+      UserTask: Согласование (основная задача согласующего, role-approver, U3/U4).
+      RESTORED by T-0340 R-2: this is the BASE approval task that existed before T-0340
+      added the gateway. It is on the MAIN path so the journey acceptance steps U3/U4
+      still work: the approver sees this task in the pool (candidateGroups=role-approver),
+      claims it, and clicks «Согласовать». AFTER this task completes, the DMN-driven
+      exclusiveGateway decides whether a second approval step is needed (>5M purchases).
+    -->
+    <userTask id="task-approve"
+              name="Согласование"
+              flowable:candidateGroups="role-approver">
+      <documentation>
+        Основное согласование (e-larina, role-approver). Пул-задача: согласующий
+        берёт задачу («Взять») и нажимает «Согласовать» (card-action approve,
+        POST /api/inbox/:id/action {approve}).
+        После завершения: gateway gw-approval-threshold маршрутизирует по
+        переменной approvalRequired (вычислена при Триаже через DMN).
+        Соответствует шагам U3+U4 сценария tel-linear.journey.ts / ADR §2.1 S4.
+      </documentation>
+    </userTask>
+
+    <!-- ExclusiveGateway: DMN-driven approval threshold (T-0340 E15-S5, R-2 fix) -->
+    <!--
+      Reads the `approvalRequired` process variable, which is set by
+      evaluateGatewayAtTriage at the tel-intake completeTask seam (R-1).
+      The `default` attribute points to sf-gw-end so that if the variable is
+      absent or unrecognised, instances route to end (never error with
+      "no outgoing sequence flow could be selected").
+    -->
+    <exclusiveGateway id="gw-approval-threshold"
+                      name="Нужно доп. согласование?"
+                      default="sf-gw-end">
+      <documentation>
+        Разветвление по результату DMN-оценки суммы заявки (после task-approve).
+        Переменная: approvalRequired ("needs-approval" | "standard").
+        Настраивается через таблицу решений dmn_rule_table (migration 066),
+        засеянную migration 080 (порог 5 000 000 ₽, dev tenant a0000000-…001).
+        default="sf-gw-end": если переменная не установлена, маршрут→end (никогда не ошибка).
+      </documentation>
+    </exclusiveGateway>
+
+    <!-- UserTask: Доп. согласование (extra approver, U4-extra — needs-approval branch) -->
+    <userTask id="task-extra-approve"
+              name="Доп. согласование"
+              flowable:candidateGroups="role-approver">
+      <documentation>
+        Дополнительное согласование для заявок свыше 5 000 000 ₽.
+        Согласующий (role-approver, e-larina) берёт задачу из пула.
+        Ветка: approvalRequired == "needs-approval".
+      </documentation>
+    </userTask>
+
+    <!-- End -->
+    <endEvent id="end" name="Завершено"/>
+
+    <!-- Sequence flows -->
+    <sequenceFlow id="sf-start-submit"    sourceRef="start"                 targetRef="task-submit"/>
+    <sequenceFlow id="sf-submit-triage"   sourceRef="task-submit"           targetRef="task-triage"/>
+    <!-- Triage → task-approve (approvalRequired set at completeTask seam by R-1) -->
+    <sequenceFlow id="sf-triage-approve"  sourceRef="task-triage"           targetRef="task-approve"/>
+    <!-- task-approve → gateway (base approval done; gateway checks if extra needed) -->
+    <sequenceFlow id="sf-approve-gw"      sourceRef="task-approve"          targetRef="gw-approval-threshold"/>
+    <!-- Gateway branch: needs extra approval (>5M) -->
+    <sequenceFlow id="sf-gw-extra"        sourceRef="gw-approval-threshold" targetRef="task-extra-approve">
+      <conditionExpression xsi:type="tFormalExpression">${approvalRequired == 'needs-approval'}</conditionExpression>
+    </sequenceFlow>
+    <!-- Gateway default branch: standard track (≤5M or variable absent) → end -->
+    <sequenceFlow id="sf-gw-end"          sourceRef="gw-approval-threshold" targetRef="end"/>
+    <!-- Extra approval → end -->
+    <sequenceFlow id="sf-extra-end"       sourceRef="task-extra-approve"    targetRef="end"/>
+
+  </process>
+
+</definitions>

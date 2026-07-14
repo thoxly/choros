@@ -1,0 +1,111 @@
+{
+  "task_id": "T-0018",
+  "status": "ready",
+  "decision": "A single `grant` authority table — the only object encoding who may do what to which resources — whose permission floor is `resource_type × operation × scope`, where `scope` is an element of a closed lattice (S, ⊑, ⊓, ⊥) over four element kinds: hierarchy-node (subtree containment), tag-set (set inclusion), numeric-interval (canonical containment), and scope-set (union of the prior), stored in canonical form. The lattice's structural, decidable, total partial order ⊑ powers a write-time subset gate (validateNarrowing): a delegated grant is rejected before persistence unless child.scope ⊑ granter.scope and its facet/constraint do not widen the parent — making monotonic narrowing provable and self-elevation structurally impossible, not merely audited. The meet ⊓ is closed (never an arbitrary predicate), which is exactly what makes ⊑ decidable; that is why the lattice is closed rather than a free-text `expr`. The genesis tenant-owner is the un-parented delegation root; free-form predicate scopes sit OUTSIDE the lattice, are owner-only, and are delegable=false. Tools, masked fields, and record-level rights are DERIVED projections of grant rows resolved by T-0021 — no second permission subsystem. Grants bind to immutable UUIDs from T-0014 ResourceRef (never slugs). Grant create/revoke emit first-class events into the T-0016 audit floor (obligation + fields only). `grant` is a T-0013 tenant table (tenant_id leading PK, FORCE RLS, default-DENY, withTenant). DESIGN-only: DDL/RLS = T-0053, resolver/PDP = T-0021, ledger = T-0016. The static-now deliverable is the pure-TS scope-lattice algebra built immediately after this ADR as a self-contained module `src/core/grant-lattice.ts` with vitest fitness tests (FF-1..FF-9); it has no DB/IO/LLM dependency and verifies the load-bearing narrowing invariant before any Postgres exists.",
+  "rejected_alternatives": [
+    {"option": "Free-form predicate / arbitrary `expr` as the scope", "why_not": "⊑ becomes undecidable — cannot structurally prove one boolean expr implies another without a theorem prover or live-data eval; monotonic narrowing degrades to post-hoc audit and self-elevation becomes possible-but-logged. The 'was: arbitrary expr, unsound' the hypothesis §2/§6-A#2 rejected. Survives only as owner-only, non-delegable escape hatch outside the lattice (FR-6)."},
+    {"option": "Second authority subsystem (parallel record-ACL + separate field-visibility store)", "why_not": "Two sources of truth for who may touch a record/field; they drift, a permission in one but not the other is a silent leak or denial. Hypothesis §3 Q5 / §6-A#2: record-rights = operation × scope in ONE tuple, tools/fields derived. NF-1 forbids it; FF-A4 lints for it."},
+    {"option": "Grant binds to slugs / display names", "why_not": "Renaming a resource would silently re-target or orphan grants (T-0014 NF-3 rename-safety). Grants bind to immutable UUIDs from ResourceRef (T-0014 §5); FF-A5 lints that no node_id is a slug."},
+    {"option": "Grant attaches directly to a person/agent", "why_not": "Couples authority to identity; substitution, audit, least-privilege break. Grants attach to a `role` (the principal); humans and agents reach grants only through role assignments (T-0022)."},
+    {"option": "Post-hoc audit of self-elevation (detect-and-revoke) instead of a write-time gate", "why_not": "Narrowing becomes a hope checked after damage. The closed lattice makes the subset check a pre-persistence structural decision (FR-5); a widening grant never lands. Detect-and-revoke is the discipline-not-structure anti-pattern (T-0013 §2)."},
+    {"option": "A ⊤ (top / 'all') element in the delegable lattice", "why_not": "An implicit unbounded top makes every scope ⊑ ⊤, so any chain could widen back to 'all' through a top-typed parent. 'All' authority, if it exists, is an owner-only construct (FR-6), not a delegable lattice element; closure is stated over the delegable sublattice that EXCLUDES any implicit top. ⊥ (bottom, the well-defined empty meet) is kept; ⊤ is not."},
+    {"option": "Cross-kind coercion (e.g. tag-set implicitly ⊑ hierarchy-node)", "why_not": "Requires a semantic bridge between unrelated domains; there is none, and inventing one re-introduces undecidability. Distinct kinds are incomparable unless a scope-set explicitly contains a same-kind member (FR-3); meet of distinct non-set kinds is ⊥."},
+    {"option": "Store scopes in raw input form; normalize only at compare time", "why_not": "Comparison would depend on input member order / interval direction / duplicate tags, making ⊑/⊓ non-deterministic and fitness tests flaky. Canonical-form-at-write (NF-5) makes every stored scope normalized so comparison is order-independent and idempotent (AC-8)."},
+    {"option": "Mint the lattice algebra inside src/core/types.ts / jobStore.ts (edit existing files)", "why_not": "Collides with frozen job-model types and the in-memory store; couples authority to the job apparatus. The algebra is a NEW self-contained file src/core/grant-lattice.ts (additive, no edits to existing exports — FE-W23-0008 compatibility: types.ts/jobStore.ts public symbols untouched)."}
+  ],
+  "object_model": [
+    {"entity": "grant", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL leading PK column, T-0013 RLS key"},
+      {"name": "id", "type": "uuid NOT NULL; PK is (tenant_id, id)"},
+      {"name": "role_id", "type": "uuid NOT NULL; the principal; FK (tenant_id, role_id) -> role(tenant_id, id) (role table is T-0022)"},
+      {"name": "resource_type", "type": "text NOT NULL; application|registry|record (T-0014 ResourceRef.kind) + reserved mgmt_object:*|effect_resource; identity lives in scope not here"},
+      {"name": "resource_facet", "type": "jsonb NULL; which slice/fields; absent => whole-resource; only ever narrows (minimal grammar, interlocks E4.3)"},
+      {"name": "operation", "type": "text NOT NULL; read|create|update|delete|approve|transition|invoke (guard semantics of last three are E4.2/E5.4)"},
+      {"name": "scope", "type": "jsonb NOT NULL; a canonical closed-lattice element (node|tags|interval|set); the only place resource/subtree/value reach is expressed"},
+      {"name": "constraint", "type": "jsonb NULL; delegable => must be lattice-expressible (default: none beyond lattice); richer => owner-only/non-delegable (FR-6)"},
+      {"name": "delegable", "type": "boolean NOT NULL DEFAULT true; may be the parent of a narrower delegated grant; free-form-scope forced false"},
+      {"name": "granted_by", "type": "text NOT NULL; subject identity that minted the grant (audit linkage, FR-7)"},
+      {"name": "valid_from", "type": "bigint NULL; unix epoch ms; null => effective immediately"},
+      {"name": "valid_until", "type": "bigint NULL; unix epoch ms; null => no expiry; outside window => zero capability on read-path"},
+      {"name": "created_at", "type": "bigint NOT NULL; unix epoch ms"}
+    ]},
+    {"entity": "Grant (TS mirror, exported from grant-lattice.ts)", "fields": [
+      {"name": "tenantId", "type": "string"},
+      {"name": "id", "type": "string"},
+      {"name": "roleId", "type": "string"},
+      {"name": "resourceType", "type": "'application'|'registry'|'record'|`mgmt_object:${string}`|'effect_resource'"},
+      {"name": "resourceFacet", "type": "unknown (optional)"},
+      {"name": "operation", "type": "'read'|'create'|'update'|'delete'|'approve'|'transition'|'invoke'"},
+      {"name": "scope", "type": "GrantScope = ScopeElement | FreeformScope"},
+      {"name": "constraint", "type": "unknown (optional)"},
+      {"name": "delegable", "type": "boolean"},
+      {"name": "grantedBy", "type": "string"},
+      {"name": "validFrom", "type": "number (optional)"},
+      {"name": "validUntil", "type": "number (optional)"},
+      {"name": "createdAt", "type": "number"}
+    ]},
+    {"entity": "ScopeElement (closed-lattice domain S)", "fields": [
+      {"name": "node", "type": "{ kind:'node'; hierarchy:'resource'|'org'; nodeId:uuid; nodeLevel:'application'|'registry'|'record'|'department'|'position' } — denotes self + entire subtree"},
+      {"name": "tags", "type": "{ kind:'tags'; tags:string[] } — canonical: sorted, de-duplicated; reach = set inclusion"},
+      {"name": "interval", "type": "{ kind:'interval'; axis:string; lo:number; hi:number } — canonical lo<=hi; reach = interval containment over named axis"},
+      {"name": "set", "type": "{ kind:'set'; members:AtomElement[] } — union of member reach; canonical: flattened (no nested set), no ⊑-redundant member"},
+      {"name": "BOTTOM", "type": "the canonical empty scope-set { kind:'set', members:[] } = ⊥, confers nothing"}
+    ]},
+    {"entity": "FreeformScope (outside the lattice, owner-only)", "fields": [
+      {"name": "freeform", "type": "{ kind:'freeform'; predicate:string } — NOT admissible in the lattice; owner-only; delegable=false; never the parent of a delegation (FR-6)"}
+    ]},
+    {"entity": "AncestryOracle (injected hierarchy fact, pure)", "fields": [
+      {"name": "isDescendantOrSelf", "type": "(hierarchy, descendantId, ancestorId) => boolean; build-time = in-memory adjacency; T-0053 = application⊃registry_def⊃record FK chain (+ org tree)"}
+    ]},
+    {"entity": "GrantAuditEvent (FR-7 obligation; ledger is T-0016)", "fields": [
+      {"name": "kind", "type": "'grant.create' | 'grant.revoke'"},
+      {"name": "actor", "type": "string; granted_by (create) / revoker (revoke)"},
+      {"name": "subjectRoleId", "type": "string"},
+      {"name": "capability", "type": "{ resourceType; operation; resourceFacet? }"},
+      {"name": "scope", "type": "Scope"},
+      {"name": "proposedBy", "type": "string (optional; LLM-proposes/human-confirms E3.5)"},
+      {"name": "confirmedBy", "type": "string (optional)"}
+    ]}
+  ],
+  "contracts": [
+    "normalize(s: ScopeElement): ScopeElement — canonical form (NF-5): interval lo<=hi, tags sorted+de-duped, scope-set flattened (no nested set) with ⊑-redundant members dropped; IDEMPOTENT (normalize(normalize(s)) deep-equals normalize(s)).",
+    "isNarrowerOrEqual(child, parent, oracle): boolean — the partial order ⊑; structural, decidable, TOTAL (never throws/unknown). node⊑node via subtree containment (oracle); tags⊑tags via ⊆; interval⊑interval via same-axis containment; element⊑set iff fits one member; set⊑X iff every member ⊑ X; cross-kind non-set => false. ⊥⊑anything true.",
+    "meet(x, y, oracle): ScopeElement — greatest lower bound ⊓, CLOSED (result always node/tags/interval/set/⊥, never an arbitrary predicate). node⊓node=descendant or ⊥; tags=intersection; interval=[max lo,min hi] or ⊥; set⊓X=pairwise meets minus ⊥; distinct non-set kinds=⊥.",
+    "validateNarrowing(parent: Grant, child: Grant, oracle): {ok:true} | {ok:false; reason:'scope_widens'|'facet_widens'|'constraint_widens'|'parent_non_delegable'|'free_form_non_delegable'} — the FR-5 write-time gate, pre-persistence, no mutation. Accept iff parent.delegable AND parent.scope not freeform AND isNarrowerOrEqual(child.scope,parent.scope) AND facet/constraint non-widening. A freeform parent => free_form_non_delegable without inspecting child. Genesis tenant-owner mints are NOT subset-checked (un-parented root); every grant the owner delegates downward then becomes a subset-checked parent.",
+    "isEffective(grant: Grant, nowMs): boolean — validity-window helper (AC-13): (validFrom==null||now>=validFrom)&&(validUntil==null||now<validUntil). Out-of-window => zero capability; resolver (T-0021) treats as absent (FR-8). Single place validity is decided.",
+    "Free-form invariant (FR-6): only the genesis tenant-owner may mint a {kind:'freeform'} grant; it is forced delegable=false; any delegation whose parent is freeform is rejected; isNarrowerOrEqual against a freeform element is false for any lattice child (containment of an arbitrary predicate is unprovable).",
+    "Audit obligation (FR-7): every grant create AND revoke code path emits a GrantAuditEvent (actor, subjectRoleId, capability=resourceType×operation×resourceFacet, scope, proposedBy?/confirmedBy?) into the T-0016 audit floor; T-0018 fixes the obligation + minimum fields, not the ledger.",
+    "Build boundary: NEW self-contained file src/core/grant-lattice.ts (+ tests src/__tests__/grant-lattice.test.ts), ADDITIVE — no edit to existing exports of src/core/types.ts or src/core/jobStore.ts; no DB/IO/network/LLM import (pure functions + injected AncestryOracle). All new types declared in and exported from grant-lattice.ts.",
+    "Tenant inheritance (T-0013, NF-4): grant is a tenant table — tenant_id leading PK, FORCE RLS + default-DENY, scoped uniqueness, all access via withTenant; the subset check runs only within one tenant's grants (a tenant-B grant can never parent a tenant-A delegation)."
+  ],
+  "fitness_functions": [
+    {"id": "FF-A1", "rule": "⊑ decidable+total; meet closed; canonical idempotent; narrowing provable (no self-elevation); free-form non-delegable; validity-window correct", "ci_check": "vitest run src/__tests__/grant-lattice.test.ts — the build-contract suite FF-1..FF-9: ⊑ total over the node/tag/interval/set fixture matrix (never throws); node/tag/interval/set subset truth tables; meet(x,y) always admissible (disjoint node=⊥, interval=overlap-or-⊥, tags=intersection); normalize(normalize(s))==normalize(s) and order-independent ⊑/⊓; child⊑parent (non-widening)=>validateNarrowing ok, node/tag/interval-widening + escaping-set-member => ok:false with correct reason, NO input makes a non-⊑ child return ok; freeform parent=>free_form_non_delegable; isEffective false past/future window. Static-now."},
+    {"id": "FF-A2", "rule": "Grant TS type mirrors the FR-2 floor (roleId, resourceType, operation, scope required; full field set)", "ci_check": "tsc --noEmit over src/core/grant-lattice.ts + a compile-time fixture asserting the Grant shape. Static-now."},
+    {"id": "FF-A3", "rule": "Lattice module self-contained & additive (no edit to frozen types.ts/jobStore.ts exports; no DB/IO import)", "ci_check": "ci/checks/grant-lattice-isolation.sh: assert src/core/grant-lattice.ts imports nothing from jobStore/http/pg/fs/net; git diff touches no existing export in types.ts/jobStore.ts. Static-now."},
+    {"id": "FF-A4", "rule": "Single authority subsystem — no parallel record-ACL / field-visibility table in the model (NF-1/AC-11)", "ci_check": "ci/checks/single-authority.sh: grep the model fixture / type space for a second authority table (*_acl, field_visibility, record_rights); >0 => fail. Static-now."},
+    {"id": "FF-A5", "rule": "Grant binds to UUIDs, not slugs (AC-12)", "ci_check": "ci/checks/grant-uuid-binding.sh: every node:nodeId in any grant.scope fixture matches the UUID shape and is sourced from a ResourceRef/org-tree id; a slug/display-name => fail. Static-now (+ live rename test T-0053)."},
+    {"id": "FF-A6", "rule": "Every grant create/revoke site emits a GrantAuditEvent with the FR-7 field set (AC-14)", "ci_check": "ci/checks/grant-audit-emit.sh: each grant create/revoke call site is accompanied by an audit-emit carrying actor/subjectRoleId/capability/scope/proposedBy?/confirmedBy?; a site with no emit => fail. Static-now (+ live ledger T-0016)."},
+    {"id": "FF-A7", "rule": "grant is a registered T-0013 tenant table, FORCE RLS, default-DENY (AC-1)", "ci_check": "Static-now: grant in known_tenant_tables fixture. Live(T-0053): relrowsecurity AND relforcerowsecurity=(t,t) for grant; as choros_app with no SET LOCAL choros.tenant_id, count(*) FROM grant = 0. Activates-in-T-0053."},
+    {"id": "FF-A8", "rule": "FR-2 floor NOT NULL at DB; subset check runs inside withTenant; tenant isolation of grants (AC-2/AC-15)", "ci_check": "Static-now lint: the subset-check call path is inside withTenant (no raw grant query outside it). Live(T-0053): NULL on tenant_id/role_id/resource_type/operation/scope => constraint violation; context=A => count of tenant-B grants = 0. Static-now (lint) + activates-in-T-0053."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§4.1 grant as T-0013 tenant table + FF-A7"},
+    {"ac": "AC-2", "covered_by": "§4.1 floor NOT NULL + TS mirror Grant + FF-A2 / FF-A8"},
+    {"ac": "AC-3", "covered_by": "§4.2 ⊑ total/decidable + build FF-1 / FF-A1"},
+    {"ac": "AC-4", "covered_by": "§4.2 node⊑node via AncestryOracle + build FF-2"},
+    {"ac": "AC-5", "covered_by": "§4.2 tags/interval ⊑ + build FF-3"},
+    {"ac": "AC-6", "covered_by": "§4.2 element⊑set / set⊑set + build FF-4"},
+    {"ac": "AC-7", "covered_by": "§4.2 ⊓ closed + build FF-5"},
+    {"ac": "AC-8", "covered_by": "§4.2 normalize canonical/idempotent + build FF-6"},
+    {"ac": "AC-9", "covered_by": "§4.3 validateNarrowing write-time gate + build FF-7 / FF-A1 (static) + FF-A8 (live DB)"},
+    {"ac": "AC-10", "covered_by": "§4.4 free-form owner-only/non-delegable + build FF-8"},
+    {"ac": "AC-11", "covered_by": "§2 single subsystem (derived projections) + FF-A4"},
+    {"ac": "AC-12", "covered_by": "§4.1 UUID binding (ResourceRef) + FF-A5"},
+    {"ac": "AC-13", "covered_by": "§4.5 isEffective + build FF-9"},
+    {"ac": "AC-14", "covered_by": "§4.6 GrantAuditEvent obligation + FF-A6"},
+    {"ac": "AC-15", "covered_by": "§4.1 tenant inheritance + FF-A8 (subset check inside withTenant)"}
+  ],
+  "runtime_target": "Pure-TS scope-lattice module (src/core/grant-lattice.ts) runs LOCALLY in npm run ci (tsc --noEmit && eslint src && vitest run) — no external resource, no server needed for the static-now build. The grant TABLE (DDL/indexes/RLS policy bodies) activates in the Postgres silo docker-compose stack on the founder home server (/srv/choros, deploy founder-gated GT-4) at T-0053 — same infra as T-0013/T-0014, NO new infra dependency introduced by T-0018. T-0018 provisions nothing.",
+  "adr_artifact_path": "docs/design/T-0018-grant-authority.adr.md",
+  "escalation": ""
+}

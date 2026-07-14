@@ -1,0 +1,26 @@
+{
+  "task_id": "T-0193",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-N1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "docs/design/T-0121-reports-pages.adr.md",
+      "issue": "ADR §6 не документирует явный выбор: порядок page-load-before-authz раскрывает существование страницы (404 vs 403 oracle) при UUID v4 pageId. Для будущих ревьюеров нужна явная запись о принятом решении.",
+      "suggestion": "Добавить в ADR §6 примечание: 'page-id oracle accepted — UUID v4 entropy (122 бит) делает перебор нецелесообразным; cross-tenant RLS полностью блокирует межтенантный доступ.'"
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-T0193-DENY-FLOOR1", "covered": true },
+    { "ac": "AC-T0193-DENY-FLOOR2", "covered": true },
+    { "ac": "AC-T0193-ALLOW-FLOOR1", "covered": true },
+    { "ac": "AC-T0193-ALLOW-FLOOR2", "covered": true },
+    { "ac": "AC-6-nevyroj", "covered": true },
+    { "ac": "tsc", "covered": true },
+    { "ac": "unit-tests", "covered": true },
+    { "ac": "fitness-db", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

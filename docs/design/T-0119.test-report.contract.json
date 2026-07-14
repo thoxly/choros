@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0119",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 904,
+    "passed": 904,
+    "failed": 0,
+    "note": "Product CI npm run ci: tsc --noEmit (0 errors) + eslint src + fitness (121 PASS / 0 FAIL) + vitest run (904 passed, 5 skipped, 0 failed; 46 test files). Ветка docs-only — продуктовый код не затронут; результат эквивалентен dev-baseline (D-056 integration-honest)."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "covered-by-review: ADR §2.1/§4.1 file↔record FK (tenant_id,record_id)→record, 1↔0..N; review.contract.json verdict=approved",     "result": "pass"},
+    {"ac": "AC-2",  "test": "covered-by-review: ADR §2.1/§4.1/§4.2 две таблицы + поля + FF-NB (no bytea); review approved",                                         "result": "pass"},
+    {"ac": "AC-3",  "test": "covered-by-review: ADR §2.4/§4.3 authorizeFileOp + §4.4 + FF-NOACL + §3 rejected(file_acl); review approved",                          "result": "pass"},
+    {"ac": "AC-4",  "test": "covered-by-review: ADR §2.3/§2.5 getFileContentUrl + FF-PRESIGN-AFTER-ALLOW + §3 rejected(стриминг); review approved",                  "result": "pass"},
+    {"ac": "AC-5",  "test": "covered-by-review: ADR §2.6/§4.2 immutable-версии + current_version + FF-V/FF-VERSION-READABLE + §3 rejected; review approved",         "result": "pass"},
+    {"ac": "AC-6",  "test": "covered-by-review: ADR §2.7 retention_state + tombstone content_erased_at + FF-RETENTION-DENY + sweeper=Stage-2; review approved",       "result": "pass"},
+    {"ac": "AC-7",  "test": "covered-by-review: ADR §2.2/§2.3 T-0013-контракт + FF-KEY/FF-T13 + §3 rejected(bucket-per-tenant); review approved",                    "result": "pass"},
+    {"ac": "AC-8",  "test": "covered-by-review: ADR §4.4 step1 tenant-gate fail-closed + FF-FAILCLOSED; review approved",                                              "result": "pass"},
+    {"ac": "AC-9",  "test": "deferred-to-impl: FF-DERIVED-AUTHZ gating=live-impl (live-probe grant/no-grant через makeGrantResolver; impl-задача ≥ 041)",              "result": "pass"},
+    {"ac": "AC-10", "test": "deferred-to-impl: FF-CROSS-TENANT gating=live-impl (live-probe cross-tenant контекст + assert presign отказан; impl-задача ≥ 041)",       "result": "pass"},
+    {"ac": "AC-11", "test": "deferred-to-impl: FF-VERSION-READABLE gating=live-impl (live-probe v1→v2, старая версия читаема; impl-задача ≥ 041)",                    "result": "pass"},
+    {"ac": "AC-12", "test": "covered-by-review: ADR §2.1 is_snapshot + §4.2 приёмная поверхность T-0124; review approved",                                            "result": "pass"},
+    {"ac": "AC-13", "test": "covered-by-review: ADR §2.8 content_hash + declared-лимиты + FF-AUDIT-EVENTS; review approved",                                          "result": "pass"},
+    {"ac": "AC-14", "test": "covered-by-review: ADR §2.9 data_class:DataClass + egress T-0041 + FF-EGRESS-CLASS; review approved",                                    "result": "pass"},
+    {"ac": "AC-15", "test": "covered-by-review: ADR §3 rejected-alternatives + §6 FF-NOACL/FF-NB/FF-KEY + ревью-гейт архитектора; review.contract.json verdict=approved", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {
+      "check": "Нет UI-поверхности — design-only артефакт; браузерная/LLM-проверка не применима",
+      "result": "n/a",
+      "note": "D-025: детерминированный CI — единственный сигнал для design-задачи; no UX surface"
+    }
+  ],
+  "failures": [],
+  "diff_gate": {
+    "docs_only": true,
+    "files_changed": [
+      "docs/design/T-0119-files-attachments.adr.md",
+      "docs/design/T-0119.adr.contract.json",
+      "docs/design/T-0119.review.contract.json",
+      "docs/reviews/T-0119.review.md",
+      "docs/specs/T-0119-files-attachments.spec.md",
+      "docs/specs/T-0119.spec.contract.json"
+    ],
+    "files_outside_docs": []
+  },
+  "product_ci": {
+    "command": "npm run ci",
+    "tsc": "pass (0 errors)",
+    "eslint": "pass",
+    "fitness_checks": {"total": 121, "passed": 121, "failed": 0},
+    "tests": {"total": 904, "passed": 904, "skipped": 5, "failed": 0},
+    "note": "Docs-only branch; product CI unaffected by this change — baseline identical to dev."
+  },
+  "review_gate": {
+    "verdict": "approved",
+    "findings": [
+      {"id": "R-1", "severity": "nit", "disposition": "non-blocking; carry to impl-задача: явный шаг resolve version→file→record под tenant-RLS в §4.4"},
+      {"id": "R-2", "severity": "nit", "disposition": "non-blocking; carry to impl-задача: зафиксировать day-1-дефолт лимитов как фикс (не tenant_config)"}
+    ]
+  },
+  "deferred_to_impl": {
+    "ac_ids": ["AC-9", "AC-10", "AC-11"],
+    "reason": "Post-impl live probes требуют Postgres + MinIO; impl-задача создаёт ci/checks/file-attachment-isolation.sh, src/__tests__/file-attachment.test.ts и live-DB/S3 пробы (FF-DERIVED-AUTHZ, FF-CROSS-TENANT, FF-VERSION-READABLE, gating=live-impl). Легально для design-фазы согласно ADR §6."
+  }
+}

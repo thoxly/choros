@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0732",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/http/process-catalog.ts:374",
+      "issue": "Врезка engineNames открыта в отдельном withTenantTx без индивидуального try/catch, в отличие от resolveDefinitionNames, который заворачивает оверлей в общий honest-degrade try/catch. Ошибка оверлей-запроса → каталог 500 (резолвер деградировал бы к фолбэк-ключу).",
+      "suggestion": "Для симметрии обернуть selectEngineProcessNames в каталоге в honest-degrade (пустая map при ошибке), как в resolveDefinitionNames. Согласуется с окружающим кодом, поэтому не блокер."
+    },
+    {
+      "id": "N2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/http/process-catalog.ts:374",
+      "issue": "Каталог открывает ВТОРОЙ withTenantTx (отдельное соединение/round-trip) для engineNames вместо реюза tx, где уже взяты defRows/projections. Корректность цела (tenant-scoped), минорная эффективность.",
+      "suggestion": "Опционально: резолвить engineNames внутри той же tx, что и defRows/projections."
+    },
+    {
+      "id": "N3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "T-0732.pr-handoff.json (gates.fitness_targeted) / ci/checks/migrations/no-hardcoded-tenant-uuid.sh:25",
+      "issue": "Заявка «migrations/no-hardcoded-tenant-uuid.sh PASS» технически верна, но этот гейт хардкодом сканирует ТОЛЬКО migrations/118_…, НЕ 132 — PASS не доказывает чистоту 132. Миграция 132 чиста по конвенции 085 @demo-seed (хардкод DEV-тенанта легитимен, migrations/ вне anti-case-lock), но именно этот гейт её не полисит.",
+      "suggestion": "Не приписывать этому гейту покрытие 132; чистота 132 обеспечена конвенцией @demo-seed + anti-case-lock scope, а не этой проверкой."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1: deploy BPMN с name → человеко-имя tenant-scoped (своя таблица)", "covered": true },
+    { "ac": "AC-2: движковый процесс в деталке/каталоге/инбоксе → человеко-имя вместо ключа", "covered": true },
+    { "ac": "AC-3: BPMN без name → фолбэк keyDemoted (никогда голый ключ primary)", "covered": true },
+    { "ac": "AC-4: межтенантно тот же ключ не течёт чужое имя (RLS-enforced, T-0616 §F-1)", "covered": true },
+    { "ac": "AC-5: имён процессов нет в src/ — только BPMN-DATA + @demo-seed фикстуры", "covered": true }
+  ],
+  "gates_reproduced": {
+    "tsc": "exit 0",
+    "unit_bpmn_process_meta": "9/9",
+    "unit_process_catalog_view": "33/33",
+    "db_engine_process_name": "8/8 (choros_app NOBYPASSRLS)",
+    "db_cross_tenant_isolated": "202/202",
+    "db_schema_strict": "24/24 (schema.test 16/16)",
+    "db_process_projection": "7/7",
+    "db_process_catalog": "9/9",
+    "anti_case_lock": "PASS (+--self-test)",
+    "detel_literal_baseline": "PASS",
+    "detel_base_task_from_engine": "PASS",
+    "cross_tenant_fitness": "PASS",
+    "migrations_no_hardcoded_tenant_uuid": "PASS (scope=118 only)",
+    "frozen_checks_immutable": "PASS",
+    "choros_app_rolbypassrls": "f (NOBYPASSRLS confirmed via pg_roles)",
+    "choros_app_rolsuper": "f"
+  },
+  "ripple_verification": {
+    "variant_a_prime_justified": true,
+    "consumers_checked": [
+      "process-start.ts:352 (sandbox gate) — REAL: draft-status row → 409 SANDBOX_NOT_RUNNABLE для рядового юзера",
+      "inbox.ts:757 draftOnlyProcessKeys — REAL: non-published row → задачи скрыты из инбокса",
+      "process-catalog-view.ts:136 buildCatalogDefinitions + process-catalog.ts:226 listProcessDefRows (SELECT без status-фильтра) — REAL: любая defRow → source=modeler переклассификация",
+      "CHECK status IN (draft,published) — REAL: нет безопасного статуса (draft→gate+inbox, published→catalog)"
+    ],
+    "overlay_touches": "1 read-резолвер (resolveDefinitionNames) + каталог (buildCatalogDefinitions); 0 authz/видимости"
+  }
+}

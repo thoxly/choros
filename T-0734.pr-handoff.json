@@ -1,0 +1,64 @@
+{
+  "task_id": "T-0734",
+  "status": "pr_open",
+  "branch": "task/T-0734",
+  "pr_url": "(local branch task/T-0734, committed; push + PR is the founder-gated promotion step, RL-2)",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "ci_local_notes": {
+    "build": "npm run build (tsc + seed tsconfig) — exit 0",
+    "lint": "npm run lint (eslint src) — 0 errors, 44 pre-existing warnings in untouched src; no TS source changed by this task",
+    "types": "covered by tsc in build — clean",
+    "tests": "npx vitest run src/__tests__/admin-port.test.ts src/__tests__/register.test.ts — 52 passed, 3 skipped",
+    "fitness": "static: ci/checks/kc/user-profile-actor-type.sh PASS; frozen-checks-immutable PASS; anti-case-lock PASS; kc/realm-json-exists+fixture-users+agent-client+no-prod-secret PASS; no-committed-secret PASS; package-json-no-dup-keys PASS; ci-workflow-lint PASS. live: ci/checks/kc/ui-created-user-actor-type.sh PASS against KC :8180"
+  },
+  "files_changed": [
+    "config/keycloak/realm-choros.json",
+    "scripts/kc-dev-setup.sh",
+    "package.json",
+    ".github/workflows/ci.yml",
+    "ci/checks/kc/user-profile-actor-type.sh",
+    "ci/checks/kc/ui-created-user-actor-type.sh",
+    "docs/specs/T-0734-user-profile-actor-type.spec.md",
+    "docs/design/T-0734-user-profile-actor-type.adr.md",
+    "docs/live-proof/T-0734-user-profile-actor-type.live-proof.md"
+  ],
+  "deviations_from_adr": [
+    "This IS the ADR-producing task (DIAGNOSE+DESIGN+BUILD in one). No prior ADR to deviate from. Deviated from the TASK-SUGGESTED option (а) (top-level userProfile key + kc-dev-setup) for a reasoned cause: empirically, KC 25 --import-realm does NOT honor a top-level userProfile key (import 400) nor a bare kc.user.profile.config realm attribute (ignored) — only the components.org.keycloak.userprofile.UserProfileProvider entry activates the profile. Since CI's kc job and fresh provisioning use ONLY --import-realm (never kc-dev-setup), the fix MUST live in components. kc-dev-setup step 5 additionally reconciles persistent stands from the same embedded config. Documented in ADR §2.1/§3."
+  ],
+  "friction_events": [],
+  "changes_product": 1,
+  "diagnosis": {
+    "symptom": "A human account created from the product UI (POST /api/users -> createHumanUser) gets a login token with NO actor_type claim -> verifyClaims (src/http/auth.ts:302) returns 401 on EVERY request. Seeded fixture users work; UI-created users 401. Confirmed live on KC 25.0.6, realm choros, :8180.",
+    "root_cause": "config/keycloak/realm-choros.json declared no user profile. KC 25.0.6 enables the declarative User Profile by default with unmanagedAttributePolicy=DISABLED, so actor_type is an unmanaged attribute and KC SILENTLY DROPS it on every admin-REST user create (POST /admin/realms/<realm>/users). The actor-type protocol-mapper then has no attribute to read -> no token claim -> 401. Seeded users escape only because realm-import writes attributes straight to the DB, bypassing profile validation.",
+    "root_class": "product-defect",
+    "proposed_target": "config/keycloak/realm-choros.json (declare actor_type as a managed, admin-editable, options-validated user-profile attribute via the realm-import-native components entry) + scripts/kc-dev-setup.sh (reconcile the same config on persistent stands).",
+    "falsifiable": {
+      "hypothesis": "Declaring actor_type as a managed attribute in the KC declarative user profile makes the admin-REST create persist it, so the login token carries actor_type and verifyClaims passes.",
+      "prediction": "After the fix: admin POST /users with attributes.actor_type=[human] -> GET user shows attributes.actor_type=[human]; ROPC token carries actor_type='human'; an invalid actor_type value is rejected 400.",
+      "refuted_if": "The created user's stored attributes still show NONE, OR the token still lacks actor_type, after the profile declares actor_type admin-editable."
+    },
+    "leverage": "high",
+    "needs_cross_vendor": false,
+    "confirmation": "Live, HIGH confidence. KC 25.0.6 (t-0633-keycloak-1, :8180, realm choros). BEFORE: admin POST /users 201 but GET user attributes=NONE; ROPC token actor_type=<<MISSING>>; seeded e-kravtsova token actor_type='human' (asymmetry reproduced). AFTER (declarative profile with managed actor_type applied): GET user attributes={actor_type:[human]}; ROPC token actor_type='human'; invalid actor_type=[superadmin] -> 400 error-invalid-value; seeded regression green; setUserEnabled PUT{enabled:false} -> 204 with actor_type intact. The EXACT committed realm-choros.json also proven through the KC import deserializer (import 201 -> profile active -> admin-create persists -> token actor_type='human', aud includes choros-api)."
+  },
+  "live_proof_plan": {
+    "precondition": "Dev stend offline at task time — verification done LOCALLY against docker Keycloak 25.0.6 (t-0633-keycloak-1, :8180, same image/version as the stend) via the registrar admin-REST path (identical to createHumanUser) + ROPC + JWT decode + verifyClaims contract, plus the committed artifact proven through the import deserializer. Recorded in docs/live-proof/T-0734-user-profile-actor-type.live-proof.md. This is NOT a substitute for final browser acceptance on the real dev stend.",
+    "steps": [
+      "1. Apply the fix on the stend WITHOUT a realm reimport: run `bash scripts/kc-dev-setup.sh` (step 5 reconciles the profile via PUT /users/profile). Do NOT delete+reimport the realm (reimport can strip actor_type from existing users and reset fixture passwords — memory T-0638; recover with scripts/kc-reset-fixture-passwords.sh if ever needed).",
+      "2. In the product UI, owner opens 'Создать учётку' and creates a NEW human user (login + email + password).",
+      "3. That new user logs in via the real Keycloak form (Authorization Code, pattern from choros-acceptance-t0583-users) and opens any section.",
+      "4. Assert: the section loads (HTTP 200), NOT a 401 error screen. Cross-check DevTools Network: the token request returns a token whose actor_type claim = 'human' and requests are 2xx (not 401 'missing or invalid actor_type claim')."
+    ],
+    "expected": "The UI-created user logs in and uses the product with no 401 — actor_type claim is present in the token.",
+    "local_proof_done": "GREEN — see docs/live-proof/T-0734-user-profile-actor-type.live-proof.md (RED reproduction + GREEN after-fix + anti-case + regressions + committed-artifact import path)."
+  },
+  "followups_out_of_scope": [
+    "createHumanUser sends no firstName/lastName; those remain required:[user] in the profile (unchanged KC default), so a UI-created user hits an interactive VERIFY_PROFILE step on BROWSER login (not a 401 — the browser flow completes it). Separate UX/product task: the account-creation form should collect a display name, OR the registrar create should send firstName/lastName. Not the actor_type 401."
+  ]
+}

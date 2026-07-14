@@ -1,0 +1,93 @@
+{
+  "task_id": "T-0124",
+  "status": "ready",
+  "decision": "Document-on-demand — одна чистая render-операция render(template, params, subject) → {bytes, format, meta}, где источник данных — живые record-строки реестров (T-0014), прочитанные под субъектом через тот же resolveFor/projectFields (T-0021 PDP), НЕ предзаписанный файл. Право рендера = производная прав чтения записей-источников (нет render_acl, NF-1): недоступная субъекту запись/поле физически отсутствует (transform drop = омиссия ключа, src/core/data-classification.ts:127), не маскированная строка. Движок един для всех форматов; формат — атрибут шаблона (template_def.format). Day-1 закрытый набор = {csv, html} (табличный реестр + человекочитаемый QR; PDF отвергнут в Stage-2). Режимы развязаны через контракт T-0122 doc_mode: live = рендер каждый раз (не воспроизводим), snapshot = рендер зафиксирован иммутабельной file_version через addVersion(isSnapshot=true) (T-0119), воспроизводим. QR-кейс питается через поверхность T-0122 (verify/download) без своего канала. Шаблон — производный артефакт от registry_def.record_schema; зависимость от полей проверяется той же подсистемой согласованности, что report_page_dep (T-0121) / checkBindingCompat (T-0072) / bundle-coherence.sh (T-0082) — template_dep + checkTemplateDepFields, расширение, не четвёртый механизм. Каждый рендер (успех и отказ) — строка audit_event open-vocab type (doc.render/doc.render_denied/doc.snapshot_fixed), T-0016. Шаблон авторится config-агентом (T-0077) DRAFT + human-gated promote; рантайм-агентная генерация — Stage-2 (gap-map §4б инвариант 3).",
+  "rejected_alternatives": [
+    {"option": "PDF в day-1-наборе форматов", "why_not": "PDF-движок (верстка/шрифты/headless) — тяжёлая зависимость и поверхность для рендер-DoS, несоразмерная day-1 (NF-6). html покрывает человекочитаемый QR-кейс (браузер контрагента рендерит), csv — реестр. PDF добавляется Stage-2 одним Renderer + строкой в closed-set CHECK, без смены примитива (FF-FORMAT-CLOSED)."},
+    {"option": "render_acl / document-visibility поле на шаблоне (отдельное право рендерить)", "why_not": "Второй authority-механизм рядом с grant-таблицей (NF-1, gap-map §4б инвариант 2); шаблон мог бы повысить привилегию. Производность от resolveFor (src/core/grant-resolver.ts:122) даёт право через единый PDP. FF-NO-RENDER-ACL."},
+    {"option": "Свой внешний канал/токен/лендинг для QR", "why_not": "Дублировал бы T-0122-поверхность (токены/TTL/анти-абьюз, T-0122 §2.6/§2.7). T-0124 питает существующие verify/download (T-0122 §2.5, docs/design/T-0122-external-participant.adr.md:289-290). NF-5."},
+    {"option": "Своё файл-хранилище / presign для снапшота", "why_not": "T-0119 addVersion(isSnapshot=true) (docs/design/T-0119-files-attachments.adr.md:224) — приёмная поверхность; T-0124 = производитель байтов, не достраивает store. NF-5."},
+    {"option": "Своя audit-таблица render_log", "why_not": "T-0016 — ровно одна audit-таблица-семья (audit_event/audit_head); open-vocab type = строки doc.render* (migrations/006_audit_event.sql живой). NF-5."},
+    {"option": "Четвёртый механизм согласованности шаблон↔схема (свой линтер/реестр)", "why_not": "template_dep зеркалит report_page_dep (T-0121), checkTemplateDepFields зеркалит checkBindingCompat (src/core/binding-compat.ts живой) / checkReportPageDepFields, гард — расширение bundle-coherence.sh (T-0082 bundle_members.txt живой реестр). Один control plane согласованности. NF-1."},
+    {"option": "Маскированная строка-прочерк для недоступных записей/полей в документе", "why_not": "Capability-not-text (NF-3): transform drop = омиссия ключа (src/core/data-classification.ts:127); строка-прочерк раскрыла бы существование скрытой записи/поля (анти-oracle). Невидимое физически отсутствует. FF-NO-MASK-ROW."},
+    {"option": "Кэш живого рендера для производительности", "why_not": "Ломает FR-1 «из живых данных» и AC-11 (изменение между двумя live-рендерами обязано отразиться). Воспроизводимость даёт явная фиксация снапшота (file_version), не кэш. FF-LIVE-NO-CACHE."}
+  ],
+  "object_model": [
+    {"entity": "template_def (T-0124 НОВАЯ работа; tenant-таблица, FORCE RLS)", "fields": [
+      {"name": "tenant_id, id", "type": "uuid (PK)"},
+      {"name": "registry_id", "type": "uuid (FK (tenant_id,registry_id)→registry_def; реестр-источник, one primary)"},
+      {"name": "format", "type": "text CHECK ∈ {csv,html} (имя CHECK template_def_format_chk; расширение = аддитивная миграция)"},
+      {"name": "body", "type": "text (декларативные плейсхолдеры field_key; сложная верстка = Stage-2)"},
+      {"name": "version", "type": "integer (монотонная; часть RenderMeta и снапшота)"},
+      {"name": "tier", "type": "text {draft,published} (config-агент draft, human-gated promote)"},
+      {"name": "created_by/created_at/updated_at", "type": "text/bigint"}
+    ]},
+    {"entity": "template_dep (T-0124 НОВАЯ работа; зеркало report_page_dep T-0121; реестр зависимостей шаблон↔поля схемы)", "fields": [
+      {"name": "tenant_id, id", "type": "uuid (PK)"},
+      {"name": "template_id", "type": "uuid (FK→template_def, ON DELETE CASCADE)"},
+      {"name": "registry_def_id", "type": "uuid"},
+      {"name": "field_key", "type": "text (ключ в registry_def.record_schema.properties)"},
+      {"name": "dep_kind", "type": "text CHECK ∈ {read,aggregate}"},
+      {"name": "stale", "type": "boolean (true после force-деструктива)"}
+    ]},
+    {"entity": "RenderResult (контракт операции render, T-0124 НОВАЯ работа)", "fields": [
+      {"name": "bytes", "type": "Uint8Array"},
+      {"name": "format", "type": "'csv'|'html'"},
+      {"name": "meta", "type": "RenderMeta"}
+    ]},
+    {"entity": "RenderMeta (метаданные рендера для трассировки/снапшота)", "fields": [
+      {"name": "templateId", "type": "uuid"},
+      {"name": "templateVersion", "type": "integer"},
+      {"name": "format", "type": "'csv'|'html'"},
+      {"name": "renderedAt", "type": "bigint"},
+      {"name": "sourceDigest", "type": "string (детерминированный хэш projected-набора; воспроизводимость NF-2)"},
+      {"name": "recordCount", "type": "integer"}
+    ]},
+    {"entity": "audit_event строки рендера (T-0016 ЖИВОЙ, open-vocab type, НЕ новая таблица)", "fields": [
+      {"name": "type", "type": "text ∈ {doc.render, doc.render_denied, doc.snapshot_fixed}"},
+      {"name": "actor", "type": "subjectId / для внешнего external_role_id+surface_id (токен-секрет НЕ пишется)"},
+      {"name": "subject", "type": "json {templateId, templateVersion, params/filter}"},
+      {"name": "result", "type": "rendered|denied (+reason no_grant/cross_tenant/not_found), format, record_count, source_digest; для snapshot — version_id+is_snapshot"}
+    ]}
+  ],
+  "contracts": [
+    "render(template: TemplateRef, params: {recordRef} | {registryId, filter}, subject: ResolveSubject) -> RenderResult | {denied:true, reason}  // T-0124 НОВАЯ работа; читает каждую запись через resolveFor(handle, subject, 'read')+projectFields (T-0021 ЖИВОЙ src/core/grant-resolver.ts:290); недоступное физически отсутствует (drop)",
+    "renderAndFix(template, params, subject) -> versionId  // композиция: render(...) -> addVersion(store, fileOwner, bytes, {mime, isSnapshot:true, dataClass}) (T-0119 КОНТРАКТ-DONE docs/design/T-0119-files-attachments.adr.md:224) -> doc.snapshot_fixed audit; НЕ достраивает store",
+    "RENDERERS: Record<'csv'|'html', Renderer>  // closed map; формат = атрибут template_def.format; расширение = +Renderer +CHECK, не код per-кейс (FF-FORMAT-CLOSED)",
+    "checkTemplateDepFields(deps: TemplateDep[], recordSchema): {ok:true} | {ok:false, violations:[{templateId, fieldKey, type:'missing_in_schema'}]}  // src/core/template-compat.ts НОВАЯ работа; чистая (no-I/O); зеркало checkBindingCompat (T-0072 ЖИВОЙ src/core/binding-compat.ts) / checkReportPageDepFields (T-0121)",
+    "T-0122 op-отображение (КОНТРАКТ-DONE, T-0124 питает, НЕ переопределяет): verify -> resolveFor(handle,subject,'read')+projectFields(raw, facet поверхности ∩ facet гранта); «валидно/невалидно» из живых данных (запись существует+статус), скрытые поля физически отсутствуют. download -> doc_mode='snapshot': presignGet(file_version) | doc_mode='live': render(...). external_surface.doc_mode text CHECK ∈ {snapshot,live} (docs/design/T-0122-external-participant.adr.md:440)",
+    "Деструктив-дисциплина шаблон↔схема (зеркало T-0121 §5 docs/design/T-0121-reports-pages.adr.md:135-143): drop/rename field_key при активном non-stale template_dep -> 409 destructive_schema_change (не применяется); force:true + grant mgmt_object:schema_destructive -> применяется + dep stale=true + шаблон депромоут tier='draft' + один audit-event. bundle-coherence.sh расширяется проверкой template_dep.field_key ∈ record_schema.properties"
+  ],
+  "fitness_functions": [
+    {"id": "FF-NO-RENDER-ACL", "rule": "Нет второго механизма прав рендера: render-путь не вводит render_acl/document_visibility/own permission-store; право = resolveFor (PDP T-0021).", "ci_check": "grep -REn 'render_acl|document_visibility|renderPermission|canRender' src/ migrations/ ⇒ ноль совпадений; + unit: render под subject без read-гранта ⇒ запись/поле отсутствует."},
+    {"id": "FF-RENDER-VIA-PDP", "rule": "Каждое чтение записи-источника в рендере проходит resolveFor+projectFields (нет сырого SELECT FROM record мимо PDP в render-модуле).", "ci_check": "grep -REn 'from .*record' src/core/document-render* ⇒ только через PDP-порт; lint: render-модуль импортирует resolveFor, не сырой record-репозиторий."},
+    {"id": "FF-NO-MASK-ROW", "rule": "Недоступная запись/поле ОТСУТСТВУЕТ (омиссия ключа drop), не маскированная строка/строка-прочерк.", "ci_check": "unit: реестр под частичным грантом ⇒ невидимые строки отсутствуют (count=видимые); невидимые поля — ключ отсутствует в объекте (не null/'***')."},
+    {"id": "FF-FORMAT-CLOSED", "rule": "Набор форматов закрыт: template_def.format CHECK ∈ {csv,html}; RENDERERS — closed map; расширение = миграция CHECK + Renderer, не ветка кода per-кейс.", "ci_check": "grep CHECK-имя template_def_format_chk в миграции; тест: неизвестный формат ⇒ reject; число ключей RENDERERS = число элементов CHECK-set."},
+    {"id": "FF-SNAPSHOT-IMMUTABLE", "rule": "Снапшот = addVersion(isSnapshot=true) (T-0119); render-модуль не пишет в файл-store напрямую и не UPDATE/DELETE file_version.", "ci_check": "grep -REn 'INSERT INTO .*file_version|UPDATE .*file_version|DELETE .*file_version' src/core/document-render* ⇒ ноль; снапшот только через addVersion-порт; тест воспроизводимости (AC-13)."},
+    {"id": "FF-REPRODUCIBLE", "rule": "Повторный download снапшота отдаёт байт-идентичный документ после изменения исходных record; live отражает новые.", "ci_check": "integration (AC-13): fix snapshot → mutate record → re-download snapshot = байт-идентичен; live-render = новые данные."},
+    {"id": "FF-AUDIT-EVERY-RENDER", "rule": "Каждый рендер (успех И отказ) ⇒ ровно одна audit_event (doc.render/doc.render_denied/doc.snapshot_fixed); токен-секрет отсутствует в payload; type — open-vocab строка, не новая таблица.", "ci_check": "integration (AC-14): render+denied+fix ⇒ 1 event каждый, tenant-scoped; grep payload на отсутствие token/secret-ключей; grep миграций на отсутствие CREATE TABLE render_log."},
+    {"id": "FF-NO-DUP-SUBSYSTEM", "rule": "T-0124 не вводит дублей: ни file-store, ни внешний канал/токен, ни audit-таблица, ни 4-й coherence-механизм.", "ci_check": "grep -REn 'CREATE TABLE' migrations/ для T-0124 ⇒ только template_def/template_dep (+ опц. join), НЕ file*/*_token/render_log/external_*; template_dep-гард = расширение bundle-coherence.sh (член в bundle_members.txt), не новый скрипт."},
+    {"id": "FF-TEMPLATE-COHERENCE", "rule": "Зависимость шаблон↔field_key схемы проверяется checkTemplateDepFields (зеркало checkBindingCompat/checkReportPageDepFields); деструктивное изменение поля при активном non-stale dep → default-DENY (409), force → stale + депромоут + audit.", "ci_check": "unit checkTemplateDepFields (no-I/O, как binding-compat.test.ts); bundle-coherence.sh fail при template_dep.field_key ∉ record_schema.properties; integration: drop field без force ⇒ 409, не применяется."},
+    {"id": "FF-TENANT-SCOPED-RENDER", "rule": "Рендер читает только свой tenant; внешний tenant из токена, не из запроса (T-0013 RLS).", "ci_check": "integration: cross-tenant recordRef в params ⇒ not_found/deny (RLS migrations/005_record.sql:21-30); внешний путь — tenant из surface-токена."},
+    {"id": "FF-LIVE-NO-CACHE", "rule": "live-рендер не кэшируется: два последовательных live-рендера через мутацию отражают новое состояние.", "ci_check": "integration (AC-11): render live → mutate record → render live ⇒ второй отличается."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR §1, §2.2 (вход/выход/RenderMeta), §2.10; FF-RENDER-VIA-PDP, FF-LIVE-NO-CACHE"},
+    {"ac": "AC-2", "covered_by": "ADR §2.4, §3, §5 rej-1; FF-FORMAT-CLOSED"},
+    {"ac": "AC-3", "covered_by": "ADR §2.5 (renderAndFix→addVersion), §2.2 (детерминизм); FF-SNAPSHOT-IMMUTABLE, FF-REPRODUCIBLE"},
+    {"ac": "AC-4", "covered_by": "ADR §2.7 (verify/download op-отображение, «валидно» из живых данных); §5 rej-3"},
+    {"ac": "AC-5", "covered_by": "ADR §2.3 (resolveFor/projectFields, drop=omit), §5 rej-2/rej-7; FF-NO-RENDER-ACL, FF-NO-MASK-ROW"},
+    {"ac": "AC-6", "covered_by": "ADR §2.8 (генерация реестра + граница T-0121); FF-NO-MASK-ROW"},
+    {"ac": "AC-7", "covered_by": "ADR §2.6 (три open-vocab type, секрет не пишется); §5 rej-5; FF-AUDIT-EVERY-RENDER"},
+    {"ac": "AC-8", "covered_by": "ADR §2.9 (template_dep/checkTemplateDepFields зеркало T-0072/T-0121, деструктив-дисциплина, config-агент DRAFT+promote, version в RenderMeta); §5 rej-6; FF-TEMPLATE-COHERENCE"},
+    {"ac": "AC-9", "covered_by": "ADR §3 (MVP day-1 / Stage-2 с критериями разморозки)"},
+    {"ac": "AC-10", "covered_by": "ADR §2.1 (таблица зон), §5 rej-3/4/5/6; FF-NO-DUP-SUBSYSTEM"},
+    {"ac": "AC-11", "covered_by": "ADR §2.2 детерминизм, §2.10; FF-LIVE-NO-CACHE (post-impl test)"},
+    {"ac": "AC-12", "covered_by": "ADR §2.3; FF-NO-RENDER-ACL, FF-NO-MASK-ROW (post-impl test)"},
+    {"ac": "AC-13", "covered_by": "ADR §2.5; FF-SNAPSHOT-IMMUTABLE, FF-REPRODUCIBLE (post-impl test)"},
+    {"ac": "AC-14", "covered_by": "ADR §2.6; FF-AUDIT-EVERY-RENDER (post-impl test)"},
+    {"ac": "AC-15", "covered_by": "ADR §0 (два кейса), §8 (прогон QR + реестр из одного примитива, ноль дублей); ревью-гейт архитектора"}
+  ],
+  "adr_artifact_path": "docs/design/T-0124-document-on-demand.adr.md",
+  "escalation": ""
+}

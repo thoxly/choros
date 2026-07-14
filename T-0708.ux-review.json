@@ -1,0 +1,35 @@
+{
+  "task_id": "T-0708",
+  "verdict": "approved",
+  "summary": "Section heading «ПРОЦЕССЫ ПО ЭТОЙ ЗАПИСИ» matches the label-style convention of the neighbouring «СВЯЗАННЫЕ ДАННЫЕ» section (same labelStyle, same marginTop spacing token). Each row shows a human process title, a StatusChip, and a StepRef/terminal-note — all reused verbatim from the already-shipped process-instance card, so visual/interaction language is consistent across the two directions of the same E16 §6 link. Empty state is honestly absent (no chrome, no 'no processes' noise), matching CrossAppLinksPanel precedent on the same screen.",
+  "checks": [
+    {
+      "id": "human-language",
+      "verdict": "pass",
+      "detail": "Section title is a plain Russian phrase, not a technical/API term. Row content: process title via deriveInstanceTitle (never a raw key), step via StepRef (human label, machine key demoted to secondary mono chip only when present), status via StatusChip (Russian labels: Выполняется/Завершено/Ошибка/Ожидание/Пауза). Done instances show 'Процесс завершён' instead of leaving the step line blank or showing nothing — an honest, readable terminal state."
+    },
+    {
+      "id": "visual-consistency",
+      "verdict": "pass",
+      "detail": "RelatedProcessesPanel reuses labelStyle and the same marginTop:'var(--chs-space-5)' wrapper pattern as CrossAppLinksPanel immediately above it, so the two sections stack with consistent rhythm. Row uses the same valueStyle-derived typography as the rest of the record card fields (color: var(--chs-color-accent) for the title, muted text-xs for the step line) — no ad hoc styling invented for this feature."
+    },
+    {
+      "id": "interaction-affordance",
+      "verdict": "pass",
+      "detail": "Each row is a full-row Link to /processes/:instanceId (not just a small 'view' button), with a descriptive title tooltip ('Открыть процесс · <id>') — the raw instance id is available on hover/inspection for support/debugging purposes but never shown as primary visible text, consistent with the anti-uuid discipline elsewhere in the product."
+    },
+    {
+      "id": "empty-state-honesty",
+      "verdict": "pass",
+      "detail": "A record with zero related instances renders nothing at all (no section, no 'Процессов нет' placeholder) — correctly avoids empty-state noise on the majority of records that were never expected to have processes, matching the CrossAppLinksPanel precedent immediately above it in the same file. This is the right call for a card that already has many optional sections; a permanently-empty section would be visual clutter for most records."
+    },
+    {
+      "id": "loading-state",
+      "verdict": "pass-with-note",
+      "detail": "Loading state also renders nothing (no skeleton/spinner) — briefly invisible during fetch is acceptable for a below-the-fold, additive-context section (not blocking primary content), though it does mean the section can 'pop in' after the rest of the card has settled. This is a minor, non-blocking cosmetic tradeoff consistent with the panel's own stated design (additive context, never a blocker)."
+    }
+  ],
+  "non_blocking": [
+    "No skeleton/loading placeholder for RelatedProcessesPanel (unlike CrossAppLinksPanel, which does show a LoadingState placeholder while loading) — the new panel instead renders nothing until data resolves, so it can visually 'pop in' late. Cosmetic inconsistency with its sibling panel, not a defect."
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0130",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "ci/checks/sim-adr-foundations.sh, ci/checks/sim-adr-structure.sh",
+      "issue": "[iter-1 → RESOLVED iter-2] Fitness §13 (FF-1..FF-9) был описан, но ci-чеки отсутствовали файлами. В fix (1536815) оба чека поставлены, исполнимы и зелёные на этом ADR; --self-test обоих PASS (foundations: фикстура без T-0027 краснеет; structure: 16 AC-строк вместо 17 краснеет); зарегистрированы в package.json fitness (оба чека + оба --self-test, аддитивно). Адверсариально проверена РЕАЛЬНОСТЬ покраснения на временных копиях ADR: strip T-0034 ⇒ foundations red; delete StatistSubject ⇒ structure red; аффирмативная banned-фраза 'статист получает assignment' ⇒ structure red. frozen-checks-immutable PASS (оба owner-tagged T-0130).",
+      "suggestion": "Снято. Чеки умеют падать на реальном нарушении, не только на встроенной фикстуре; образец exit-2-при-провале-самопроверки скопирован с keyed-digest-core-purity.sh корректно."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "docs/design/T-0130-simulation.adr.md §7.1:348-369, §4.2:176-201, §12.1 vs src/core/effect-resource.ts:194 + src/core/grant-lattice.ts:62-76,497-501",
+      "issue": "[iter-1 → RESOLVED iter-2] Draft-аффинность подавалась как 'структурное производное T-0034 / свойство существующего tierless-кода'. В fix §7.1 и §4.2 переписаны маркерами [iter-2, R-2]: явно заявлено, что код tier-неосведомлён (verifyEffectGrants без tier-параметра, единственный deny-путь 'нет покрывающего гранта' — сверено в коде; isEffective = только временное окно; Grant без поля tier — сверено), а аффинность вводится НОВОЙ работой B-4 (draft-gateway не подаёт published-эффект-гранты в coveringGrants) / B-3 (DraftStatistGrantSource overlay) поверх неизменённого T-0034/T-0018 (NF-5). Альтернатива tier-параметра явно отвергнута. Все over-claim формулировки сняты (grep ADR); остаточные 'структурн' = red-lines-как-отнятые-возможности (легитимно).",
+      "suggestion": "Снято. Traceability AC-11/AC-14 согласована с честной развилкой; covered:true для обоих. Заголовок §7.1 'производное T-0034' — loose label, но тело строкой ниже дизамбигуирует (gateway = новая работа) — nit, не over-claim."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0130-simulation.adr.md §5.3 vs migrations/018_actor_event.sql",
+      "issue": "[iter-1 → RESOLVED iter-2] §5.3 теперь явно [iter-2, R-3]: маркер test:true живёт в detail jsonb актор-события (actor_event, migration 018, event-metadata), НЕ новая колонка is_test и НЕ отдельная таблица; исключение из комплаенс-экспорта фильтром по detail->>'test'. Сверено с файлом 018_actor_event.sql: миграция несёт detail jsonb с комментарием 'the only jsonb is detail event-metadata (FR-6/AC-17)'. Точно; согласовано с T-0129 §10.4.",
+      "suggestion": "Снято."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/sim-adr-structure.sh:55-81 (grep_absent)",
+      "issue": "grep_absent-фильтр over-broad: вырезает ЛЮБУЮ строку, матчащую банит|баним|сторожит|self-test|--self-test|фикстура|красный|Check-|FF-[0-9], ДО поиска banned-фразы. Проверено эмпирически: аффирмативная banned-фраза + слово 'фикстура' на той же строке ⇒ чек остаётся зелёным (нарушение спрятано). Фильтр НУЖЕН (§13-таблица строки 575-577 цитирует banned-фразы в гильметах для документирования — без фильтра был бы ложноположительный матч), но дискриминатор неточен: настоящее различие 'цитата vs утверждение' — обрамление в гильметы «…», ключевые слова — свободный прокси. Ловимый класс реален (banned-фразы = настоящие дизайн-регрессии), а слова-фильтры — обычная ADR-лексика, способная инцидентно совпасть.",
+      "suggestion": "nit (не гейтит): живой ADR чист, порог чека = ошибающийся агент (не адверсарий), doc-линтер = бэкстоп (ADR читает человек). Опциональный follow-up для кодера: заменить keyword-strip на гильмето-точный дискриминатор — банить banned-фразу только ВНЕ «…» (вырезать «[^»]*…[^»]*» либо требовать bare-вхождение), тогда §13-цитаты зелёные, а обход словом-фильтром закрыт."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "iter-2 подтверждение: класс iter-1 ('design-ADR подаёт red-line как свойство существующего кода') закрыт корректно — архитектор по требованию ревью вставил явную 'реализационную развилку аффинности' с file:line-сверкой и карвом в новую работу (B-3/B-4) поверх tierless-аппарата. Улика iter-1 действенна как чек-кандидат для ledgers/role-gaps.md: 'ADR-claim о существующем механизме обязан указывать файл:символ либо помечаться как новое' — здесь сработало именно так.",
+    "Новый класс-кандидат (iter-2, R-4): doc-линтер собственного ADR с grep_absent-фильтром строк-описаний — дискриминатор 'цитата vs утверждение' через список ключевых слов over-broad и тривиально обходим (добавь слово-фильтр на строку). Кандидат-правило: фильтр должен опираться на структурный маркер цитаты (гильметы/кавычки/код-фенс), не на свободную лексику."
+  ]
+}

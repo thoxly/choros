@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0656",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/binding.ts POST /api/forms/binding (human path) — classifyLayoutSave call at ~line 550",
+      "issue": "The classifyLayoutSave {root:...}→{type:'root',children:[root]} normalization (extracted from the pre-existing /binding handler) fixes a real latent bug (a real FormDesigner {schemaVersion,source,root:{...}} document previously mis-classified as false-Floor-2, per floor-boundary.ts's B-1 root-bypass contract from T-0519). Verified this is a correctness fix, not a weakening: floor-boundary.ts itself is untouched by this diff (`git diff dev...HEAD -- src/core/floor-boundary.ts` is empty), and its existing `isRoot && type === 'root'` handling is exactly what the wrapper now feeds it. However, there is still no dedicated regression test asserting POST /api/forms/binding (the human path) accepts a real {root:...} layout end-to-end — only the new document-ops wire test exercises classifyLayoutSave's Floor-1 200 case. The author flagged this gap themselves in pr-handoff findings[1]. Low risk (shared code path, machine-seam wire test already proves the gate function works), but should not be dropped.",
+      "suggestion": "Add a small POST /api/forms/binding test posting a real {schemaVersion,source,root:{type:'section',children:[...]}} layout with fieldKeys present in the live schema and assert 200/201 (not 409). Fast follow-up, not blocking."
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/core/form-document-ops.ts vs web/src/forms/form-document-ops.js (mirrored modules)",
+      "issue": "The TS server port is a manually-synced mirror of the client JS module (ADR-T0656 §4.1, necessary given tsconfig rootDir:src forbids a runtime web→src import). The shared op-vectors fixture proves behavioral parity for the vectors it covers, but nothing catches a signature/export-name drift (e.g. one module adding a new op function the other lacks) until someone writes a new vector. The author already flagged this exact gap as a finding (pr-handoff findings[2]: 'CI gate asserting identical exported function names').",
+      "suggestion": "Non-blocking; the existing parity fixture already gives real protection for the 5 ops in the closed vocabulary. Consider the export-name-drift gate as a follow-up task, mirroring forms-schema-binding.sh's drift guard."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "new write endpoint POST /api/forms/document-ops requires the SAME authz (extractActorSlug + resolveActorTenant + withTenantTx/RLS + checkRole) as POST /api/forms/binding", "covered": true },
+    { "ac": "unknown op kind / malformed op → 400 VALIDATION, fail-closed (not silent no-op)", "covered": true },
+    { "ac": "no existing form_binding.layout → 404 (agent must create via /binding first, no silent create)", "covered": true },
+    { "ac": "same Floor-1/Floor-2 content gate (classifyLayoutSave) applied to both /binding and /document-ops, one judge, no divergence", "covered": true },
+    { "ac": "binding.ts refactor (classifyLayoutSave/getBindingLayout extraction) preserves prior POST /api/forms/binding behavior byte-for-byte in logic (only wrapped in a function + added correctness fix for {root} shape)", "covered": true },
+    { "ac": "op-vectors parity fixture is asserted independently by BOTH src TS test and web JS test — drift in either tier reddens that tier's suite", "covered": true },
+    { "ac": "canvas ops (moveNode/insertNode/removeNode/reorderNode/updateNode) still work; undo/multiselect/tabs not regressed", "covered": true },
+    { "ac": "no case-specific content leaked into src/ (canvas/seam stay generic)", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Read src/http/forms-document-ops.ts in full: auth chain is extractActorSlug(req,pool) → resolveActorTenant(actor) → assertUuidShape(tenantId) → withTenantTx(pool,tenantId,...) → checkRole(client,tenantId,actor) → getBindingLayout (tenant-scoped SELECT) → applyDocumentOp → classifyLayoutSave → tenant-scoped UPDATE. Identical shape to /api/forms/binding's actor-scoped POST handler in src/http/binding.ts.",
+    "git diff dev...HEAD -- src/http/binding.ts: extractActorSlug/getBindingLayout/classifyLayoutSave exported (were private/inline); classifyLayoutSave body is a verbatim extraction of the previous inline Floor-gate block in POST /api/forms/binding, plus the {root} shape-normalization fix. git diff dev...HEAD -- src/core/floor-boundary.ts is EMPTY — the classifier itself (including its pre-existing T-0519 B-1 root-bypass handling) is untouched.",
+    "Ran ci/checks/http-route-auth-coverage.sh (FF-0328-1/2/3): PASS — all src/http route files withAuth-wrapped or allowlisted; no x-dev-user read outside a getAuthContext gate; frozen surfaces byte-unchanged.",
+    "Ran npx tsc --noEmit at repo root: 0 errors.",
+    "Ran npx vitest run on src/__tests__/forms-document-ops-wire.test.ts, form-document-ops-parity.test.ts, floor-boundary-wire.test.ts, floor-boundary.test.ts: 83/83 passed. These cover 404 (no layout), 400 (unknown op / missing op), 200+persist+version+1 with output equal to pure-op output (AC-e), 409 WRONG_FLOOR for dangling fieldKey and for a code-signal (custom) node (AC-f).",
+    "Ran npx vitest run in web/ on form-document-ops-parity.test.js, canvas-a11y.test.js, canvas-autoscroll.test.js: 25/25 passed.",
+    "Ran npx vitest run src/forms/ (full forms suite, 19 files) in web/: 302/302 passed, including history-stack.test.js (undo) and the pre-existing form-document-ops.test.js — no regression to the human canvas from the DnD/keyboard/a11y additions.",
+    "Read src/core/form-document-op-apply.ts (the wire→op dispatcher): closed-vocabulary gate (insert/remove/reorder/update/move only) with defensive wire-shape validators (isPathSegment/isNodePath/isFormNode/isTabIndex) before delegating to the pure ops in form-document-ops.ts — unknown kind or malformed args return {ok:false} rather than silently no-op-ing.",
+    "Read src/core/form-document-ops.ts (server TS port) and confirmed the shared fixture src/core/__fixtures__/form-document-op-vectors.json is read by BOTH src/__tests__/form-document-ops-parity.test.ts and web/src/forms/form-document-ops-parity.test.js via independent relative paths to the same file — genuine shared-fixture proof, not two hand-copied fixtures.",
+    "grep for case-specific content (закупк/ЗК-2026/поставщик/hardcoded test-case strings) in all new src/ and web/src/forms files: no hits (only doc-comments noting the ABSENCE of hardcodes).",
+    "pr-handoff (docs/handoff/T-0656.pr-handoff.json) and ADR (docs/design/ADR-T0656-forms-dnd-canvas.md) are internally consistent with the code: deviations section accurately describes the classifyLayoutSave normalization and the deferred MCP tool-wrapper; findings section pre-emptively flags exactly the two gaps (F1, F2) surfaced independently during this review."
+  ]
+}

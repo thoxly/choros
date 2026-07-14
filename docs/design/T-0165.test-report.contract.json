@@ -1,0 +1,70 @@
+{
+  "task_id": "T-0165",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1548,
+    "passed": 1548,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "grep -n 'ORG_SEED_CHILDREN' src/http/{grants,invoke,agents,secret-handle}.ts → empty",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "All 4 files import SEED_ORACLE from './seed-ancestry.js'; invoke-grant.test.ts green (1548/1548)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "npm run build → exit 0, 0 TS errors",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "npx vitest run → 1548/1548 passed, 6 skipped (70 files)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "bash ci/checks/seed/single-source.sh → FF-4: single-source PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "npm run fitness → exactly 2 FAIL lines (config-agent-seed Check-6: agents.ts + grants.ts); all other checks green",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "DATABASE_URL=... npm run fitness:db → 44 files, 603/603 passed",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "single-source.sh allow-list stale entries (agents.ts, invoke.ts, secret-handle.ts)",
+      "result": "n/a",
+      "note": "Stale but benign: no *_SEED const in those files post-migration; check does not FAIL. Cleanup candidate for T-0140 owner."
+    },
+    {
+      "check": "Check-6 FAIL count = exactly 2 (AC-6 met)",
+      "result": "pass",
+      "note": "Only agents.ts + grants.ts; no other unexpected FAILs. Origin-lag class — turns green post-merge+push."
+    },
+    {
+      "check": "invoke.ts re-export contract preserved",
+      "result": "pass",
+      "note": "invoke-grant.test.ts unchanged and green; SEED_ORACLE re-exported from seed-ancestry canonical."
+    }
+  ],
+  "failures": [],
+  "fitness_db": {
+    "total": 603,
+    "passed": 603,
+    "failed": 0,
+    "files": 44
+  }
+}

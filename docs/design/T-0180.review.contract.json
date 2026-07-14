@@ -1,0 +1,23 @@
+{
+  "task_id": "T-0180",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "N-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/author-report-page-seed.sh:89",
+      "issue": "ARP-5 grep pattern `pure_compute.*false` would match `pure_compute_false_whatever`. Given the migration context the risk is negligible, but `pure_compute=false` would be a more precise literal match.",
+      "suggestion": "Change grep to `grep -q 'pure_compute=false'` for exact match."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "T-0121f/reachable-via-resolveAgentToolset", "covered": true},
+    {"ac": "T-0121f/authoring_draft-grants-only", "covered": true},
+    {"ac": "T-0121f/DRAFT-only-no-promote", "covered": true},
+    {"ac": "T-0121f/audit-vocab-seam", "covered": true},
+    {"ac": "AC-12/seed-part", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

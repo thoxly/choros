@@ -1,0 +1,180 @@
+{
+  "task_id": "T-0063",
+  "status": "ready",
+  "decision": "Активный lock-sweep реализуется как новый метод PostgresJobStore.sweepExpiredLocks, выполняющий атомарный CTE-проход (FOR UPDATE SKIP LOCKED) по job WHERE state='LOCKED' AND lock_expiry<=now: декремент retries, переход в CREATED (retries>0, available_at=now) или FAILED (retries=0), + enqueueInTx инцидент-строки в outbox (event_type='worker_lock_expired') в той же транзакции (pg.PoolClient). Idempotency-ключ 'lock_expired:'+jobId+':'+lockExpiry. Cross-tenant discovery через SECURITY DEFINER choros.job_locked_expired_buckets (миграция 029). Фоновый цикл lockReclaimer.ts с инъектируемым setInterval и Clock. Health: getQueueHealth расширяется workerIncidents. Нет новых таблиц; нет новых DDL для job/outbox.",
+  "rejected_alternatives": [
+    {
+      "option": "Полностью атомарный CTE без отдельного enqueueInTx (UPDATE+INSERT в одном SQL-statement)",
+      "why_not": "enqueueInTx генерирует randomUUID()/clock.now() в TS-коде и принимает pg.PoolClient — вынос в чистый SQL дублировал бы store-слой. Паттерн 'одна транзакция, два statement' идентичен по атомарности."
+    },
+    {
+      "option": "Sweep через app_timer (kind='lock_reclaim_sweep') с durable dueAt",
+      "why_not": "Sweep нужен только живому процессу, durable state не нужен. setInterval + инъектируемые часы достаточны (NF-5). Добавил бы DDL-зависимость от T-0116 без пользы."
+    },
+    {
+      "option": "BYPASSRLS single cross-tenant UPDATE без SET LOCAL per-tenant",
+      "why_not": "Ослабляет RLS-инвариант (NF-4). Двухфазный паттерн (SECURITY DEFINER discovery + per-tenant SET LOCAL) идентичен outbox-диспетчеру T-0062 — проверенный механизм."
+    },
+    {
+      "option": "Incident в audit_event",
+      "why_not": "Нарушает семантику аудита (бизнес-события vs инфраструктурные сигналы). Outbox уже существует с dead-state и health-метриками."
+    },
+    {
+      "option": "Новая таблица worker_incident",
+      "why_not": "Нарушает NF-1 (no new tables). Outbox покрывает потребность без новой инфраструктуры."
+    },
+    {
+      "option": "Backoff при sweep-reclaim (available_at = now + retryTimeoutMs)",
+      "why_not": "Spec FR-6: 'воркер упал, не job' — immediate retry (available_at=now). Дополнительный backoff не запрошен в mvp-backlog E1.3."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "SweepResult",
+      "fields": [
+        {"name": "reclaimed", "type": "number"},
+        {"name": "failed", "type": "number"},
+        {"name": "incidents", "type": "number"}
+      ]
+    },
+    {
+      "entity": "RunSweepResult",
+      "fields": [
+        {"name": "tenants", "type": "number"},
+        {"name": "reclaimed", "type": "number"},
+        {"name": "failed", "type": "number"},
+        {"name": "incidents", "type": "number"}
+      ]
+    },
+    {
+      "entity": "LockReclaimerOptions",
+      "fields": [
+        {"name": "sweepIntervalMs", "type": "number"},
+        {"name": "setIntervalFn", "type": "typeof setInterval | undefined"},
+        {"name": "onSweep", "type": "((result: SweepResult) => void) | undefined"}
+      ]
+    },
+    {
+      "entity": "choros.outbox incident row (event_type='worker_lock_expired')",
+      "fields": [
+        {"name": "aggregate_kind", "type": "string = 'job'"},
+        {"name": "aggregate_id", "type": "uuid (jobId)"},
+        {"name": "event_type", "type": "string = 'worker_lock_expired'"},
+        {"name": "payload.topic", "type": "string"},
+        {"name": "payload.lockOwner", "type": "string"},
+        {"name": "payload.lockExpiry", "type": "number (ms epoch)"},
+        {"name": "payload.retriesLeft", "type": "number (retries after decrement)"},
+        {"name": "idempotency_key", "type": "string = 'lock_expired:'+jobId+':'+String(lockExpiry)"}
+      ]
+    },
+    {
+      "entity": "choros.job_locked_expired_buckets (SECURITY DEFINER fn, migration 029)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid"},
+        {"name": "expired_count", "type": "bigint"}
+      ]
+    }
+  ],
+  "contracts": [
+    "PostgresJobStore.sweepExpiredLocks(sweepDurationMs: number, outboxStore: PostgresOutboxStore, tenantId: string): Promise<SweepResult> — новый метод; per-tenant, SET LOCAL choros.tenant_id, FOR UPDATE SKIP LOCKED, атомарный CTE + enqueueInTx в одном pg.PoolClient",
+    "PostgresJobStore.getLockedExpiredBuckets(before: number): Promise<Array<{tenantId: string; expiredCount: number}>> — вызывает choros.job_locked_expired_buckets($1) без GUC",
+    "PostgresJobStore.getQueueHealth(): Promise<{ depth: number; oldestAvailableLagMs: number|null; workerIncidents: number }> — аддитивное расширение; workerIncidents = COUNT outbox WHERE event_type='worker_lock_expired' AND state IN ('pending','dead')",
+    "runSweepOnce(jobStore, outboxStore, bucketsFn): Promise<RunSweepResult> — аналог runOutboxOnce; итерирует по tenant-бакетам",
+    "startLockReclaimerLoop(jobStore, outboxStore, opts?): { stop: () => void } — setInterval с инъектируемым setIntervalFn",
+    "pgOutboxStore.enqueueInTx — аддитивная правка: ON CONFLICT DO NOTHING + SELECT-back при пустом RETURNING (как pgJobStore.enqueue idempotency pattern)",
+    "GET /health response: queue.workerIncidents: number (аддитивно, backward-compatible)",
+    "Контракт T-0067: payload = { topic, lockOwner, lockExpiry, retriesLeft } в worker_lock_expired outbox-строке",
+    "Контракт T-0068: onSweep-хук seam для будущей audit-записи при потере воркера"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "sweepExpiredLocks переводит LOCKED+expired job в CREATED/FAILED атомарно с outbox incident",
+      "ci_check": "pgJobStore.integration.test.ts describe 'sweepExpiredLocks': after sweep — job.state=CREATED/FAILED, SELECT COUNT(*) FROM outbox WHERE event_type='worker_lock_expired' AND aggregate_id=$jobId = 1 (AC-1)"
+    },
+    {
+      "id": "FF-2",
+      "rule": "Retries-семантика: retries--; FAILED при retries=0; available_at=now без backoff",
+      "ci_check": "Integration: retries=2 → sweep → retries=1, state=CREATED, available_at≈now; retries=0 → sweep → state=FAILED, retries=0 (AC-2, AC-3)"
+    },
+    {
+      "id": "FF-3",
+      "rule": "Payload incident содержит topic, lockOwner, lockExpiry, retriesLeft",
+      "ci_check": "Integration: SELECT payload FROM outbox WHERE event_type='worker_lock_expired' → JSON.parse(payload) has all 4 keys (AC-4)"
+    },
+    {
+      "id": "FF-4",
+      "rule": "Idempotency: повторный sweep не создаёт вторую outbox-строку для того же лок-события",
+      "ci_check": "Integration: two calls sweepExpiredLocks(now) → COUNT outbox WHERE event_type='worker_lock_expired' AND aggregate_id=$id = 1 (AC-5)"
+    },
+    {
+      "id": "FF-5",
+      "rule": "Sweep не трогает активные локи и job не в LOCKED-состоянии",
+      "ci_check": "Integration: LOCKED job с lock_expiry=now+1000 → sweep → state=LOCKED; CREATED/FAILED job → sweep → не изменены (AC-6, AC-7)"
+    },
+    {
+      "id": "FF-6",
+      "rule": "Concurrent sweep двух экземпляров реклеймирует каждый job ровно один раз",
+      "ci_check": "Integration: Promise.all([sweep, sweep]) → COUNT outbox WHERE aggregate_id=$id = 1 (FOR UPDATE SKIP LOCKED) (AC-8)"
+    },
+    {
+      "id": "FF-7",
+      "rule": "GET /health возвращает queue.workerIncidents: number аддитивно без поломки существующих полей",
+      "ci_check": "health.test.ts AC-1..AC-4 зелёные (не трогаем); новый describe: parsed.queue.workerIncidents >= 0 (AC-9)"
+    },
+    {
+      "id": "FF-8",
+      "rule": "workerIncidents = 0 при нет incidents; = N после N sweep-reclaim",
+      "ci_check": "Integration: GET /health → queue.workerIncidents=0 изначально; после sweep N jobs → queue.workerIncidents=N (AC-10)"
+    },
+    {
+      "id": "FF-9",
+      "rule": "RLS-инвариант: job тенанта B не реклеймируется при sweep тенанта A",
+      "ci_check": "pgJobStore.integration.test.ts sweep-раздел: seed jobs A и B; sweepExpiredLocks(tenantA) → jobs B state=LOCKED (не тронуты) (AC-11)"
+    },
+    {
+      "id": "FF-10",
+      "rule": "Интеграционный smoke: lock_expiry=now-1ms → swept; lock_expiry=now+1000 → не swept",
+      "ci_check": "pgJobStore.integration.test.ts: seed 2 jobs (expired + active lock) → sweep → only expired job changed (AC-12)"
+    },
+    {
+      "id": "FF-11",
+      "rule": "Существующие AC-1..AC-18 pgJobStore.integration.test.ts зелёные (аддитивность)",
+      "ci_check": "npm run ci (AC-13)"
+    },
+    {
+      "id": "FF-12",
+      "rule": "Миграция 029 идемпотентна (CREATE OR REPLACE FUNCTION)",
+      "ci_check": "node migrations/run.mjs дважды → второй прогон 0 ошибок (AC-14)"
+    },
+    {
+      "id": "FF-13",
+      "rule": "sweepExpiredLocks и lockReclaimer не импортируют из http/ (нет циклических зависимостей core→http)",
+      "ci_check": "grep -r 'from.*http/' src/core/ → 0 строк; tsc --noEmit"
+    },
+    {
+      "id": "FF-14",
+      "rule": "Clock injection в sweep: используется this.clock.now(), не Date.now() напрямую",
+      "ci_check": "grep -n 'Date\\.now()' src/core/postgres/pgJobStore.ts → не в sweepExpiredLocks; grep -n 'Date\\.now()' src/core/lockReclaimer.ts → 0"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§4.1 CTE UPDATE + enqueueInTx в одной транзакции; FF-1"},
+    {"ac": "AC-2", "covered_by": "§4.1 retries>0 → CREATED, available_at=now; FF-2"},
+    {"ac": "AC-3", "covered_by": "§4.1 retries=0 → FAILED; FF-2"},
+    {"ac": "AC-4", "covered_by": "§3.2 payload={topic,lockOwner,lockExpiry,retriesLeft}; FF-3"},
+    {"ac": "AC-5", "covered_by": "§4.1 idempotency_key ON CONFLICT DO NOTHING; §6 enqueueInTx fix; FF-4"},
+    {"ac": "AC-6", "covered_by": "§4.1 WHERE lock_expiry<=now (активный лок не выбирается); FF-5"},
+    {"ac": "AC-7", "covered_by": "§4.1 WHERE state='LOCKED' (другие состояния не выбираются); FF-5"},
+    {"ac": "AC-8", "covered_by": "§4.1 FOR UPDATE SKIP LOCKED + idempotency_key ON CONFLICT; FF-6"},
+    {"ac": "AC-9", "covered_by": "§4.4/§4.5 queue.workerIncidents в GET /health backward-compatible; FF-7"},
+    {"ac": "AC-10", "covered_by": "§4.4 COUNT outbox WHERE event_type='worker_lock_expired' AND state IN ('pending','dead'); FF-8"},
+    {"ac": "AC-11", "covered_by": "§4.1 двухфазный паттерн SET LOCAL per-tenant (T-0062 образец); FF-9"},
+    {"ac": "AC-12", "covered_by": "§4.1 predicate lock_expiry<=now включает истёкшие, исключает активные; FF-10"},
+    {"ac": "AC-13", "covered_by": "§5 FF-11 аддитивные describe-блоки, существующие AC не трогаются"},
+    {"ac": "AC-14", "covered_by": "§3.3 CREATE OR REPLACE FUNCTION (идемпотентно); FF-12"}
+  ],
+  "runtime_target": "контейнер (single-Postgres substrate, stack-ADR); lockReclaimer — фоновый poll-цикл в том же процессе сервиса; провижн не требуется (GT-4 не задействован)",
+  "adr_artifact_path": "docs/design/T-0063-retry-reclaim.adr.md",
+  "escalation": ""
+}

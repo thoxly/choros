@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0133",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0133-process-templates.adr.md:233-246 (§5 FF-self)",
+      "issue": "FF-self заявлен «DESIGN-гард, исполним сейчас / на этой фазе DESIGN» и несёт fitness-покрытие AC-2/AC-5/AC-13/AC-14, но файл ci/checks/T-0133-adr-shape.sh не существует (DESIGN-коммит db913d6 добавил только два doc-файла). Прецедентные DESIGN-ADR (T-0082/T-0129/T-0130/T-0128) тоже не везут self-shape CI-файл — конвенция «DESIGN везёт контракт-гарда, не файл»; проблема узкая: только T-0133 уникально заявляет present-tense исполнимость, которой нет, и именно на ней висит fitness-верифицируемость AC, помеченных спекой verifiable_as:fitness.",
+      "suggestion": "Либо материализовать T-0133-adr-shape.sh в этой DESIGN-поставке (тогда заявление правдиво), либо переклассифицировать FF-self → build-наследуемую (как FF-1..FF-5) и снять формулировки «исполним сейчас». Контент ADR покрывает эти AC и проверяем вручную — потому nit, не blocking."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0133-process-templates.adr.md:34-41 (§1), :67-68 (§2.1)",
+      "issue": "Claim «лишняя секция отвергнется живым импортёром» неточен в консервативную сторону: importer.ts::validatePackShape игнорирует неизвестные ключи (apply-loop итерирует закрытый LIVE_ENTITY_ORDER), а живой гейт ci/checks/seed/pack-schema-valid.sh использует собственный Node-валидатор, который НЕ соблюдает additionalProperties:false (нет обработки additionalProperties). То есть неизвестная секция пройдёт и importer, и гейт. Схема имеет additionalProperties:false, но единственный гейт над ней этого не применяет.",
+      "suggestion": "Переформулировать: аддитивная секция process_templates НЕ ломает apply/reset (importer итерирует закрытый LIVE_ENTITY_ORDER, extras игнорируются); опору на «отвержение лишней секции импортёром» убрать — вывод об аддитивной безопасности от этого только укрепляется."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0133-process-templates.adr.md:235 (§5) vs :308-311 (§7 BUILD-A)",
+      "issue": "§5 заявляет «ноль изменений существующих гардов», §7 BUILD-A — «расширить seed/pack.schema.json секцией process_templates[]». Схема pack.schema.json является гардом FF-1 (pack-schema-valid.sh) и БУДЕТ изменена; буквально «ноль изменений гардов» противоречит §7.",
+      "suggestion": "Уточнить: «ноль изменений ЛОГИКИ существующих гардов; схема расширяется аддитивно (BUILD-A)» — чтобы снять буквальное противоречие."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0133.adr.contract.json contracts[0] / docs/design/T-0133-process-templates.adr.md:210-213 (§4)",
+      "issue": "instantiateTemplate ... «поверх ПУБЛИЧНЫХ authoring-API (T-0129/T-0077)» читается как живой путь, но в репо нет process/BPMN authoring-API и forms authoring-API (есть только report-page POST). ADR честен по сути (§1 «form-def/bpmn-def-таблиц нет», наследует deferral T-0082, инстанциатор → BUILD-B), но строка контракта §4 не несёт [deferred]-маркера.",
+      "suggestion": "Пометить authoring-API инстанцирования (process/forms) как [deferred]/[НОВАЯ] явно — симметрично §1, наследуя deferral-контракт T-0082 — чтобы контракт не читался как опора на живой путь."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

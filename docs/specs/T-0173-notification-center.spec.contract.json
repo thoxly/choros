@@ -1,0 +1,112 @@
+{
+  "task_id": "T-0173",
+  "status": "ready",
+  "summary": "Notifications E-N.6: REST API notification-центра (GET /api/notifications keyset-пагинация, GET /api/notifications/unread-count badge через частичный индекс, POST /:id/read, PATCH batch-read). Авторизация структурна: recipient_id = actor (own-only). Mark-read чужой строки → 404. Tenant-RLS fail-closed.",
+  "functional": [
+    "FR-1: pgNotificationStore реализует NotifInsertPort + list/countUnread/markRead/batchMarkRead",
+    "FR-2: list — keyset-пагинация по (created_at, id) через idx_notification_listing",
+    "FR-3: countUnread — COUNT по idx_notification_unread (частичный индекс WHERE is_read=false)",
+    "FR-4: markRead — UPDATE WHERE id=$1 AND recipient_id=actor, возвращает bool",
+    "FR-5: batchMarkRead — UPDATE WHERE id=ANY($1) AND recipient_id=actor",
+    "FR-6: GET /api/notifications — listing, recipient_id всегда = actor",
+    "FR-7: GET /api/notifications/unread-count → { count: N }",
+    "FR-8: POST /api/notifications/:id/read — mark-read, чужое → 404, без appendAuditEvent",
+    "FR-9: PATCH /api/notifications — batch mark-read, чужие ids молча пропускаются",
+    "FR-10: tenant-контекст fail-closed — нет X-Dev-User → 401; SET LOCAL GUC перед SQL",
+    "FR-11: pgNotificationStore без appendAuditEvent (FF-NO-ISREAD-AUDIT)"
+  ],
+  "non_functional": [
+    "NF-1: own-only на SQL-уровне WHERE recipient_id = actor (FF-OWN-ONLY-READ)",
+    "NF-2: no cross-user мутация — mark-read чужого → 404 (FF-NO-CROSS-USER)",
+    "NF-3: badge использует idx_notification_unread, EXPLAIN подтверждает (FF-UNREAD-INDEXED)",
+    "NF-4: keyset корректность — нет дублей/пропусков при cursor-пагинации",
+    "NF-5: tenant-RLS fail-closed (T-0013/FF-T13)",
+    "NF-6: нет appendAuditEvent в read/mark-read путях (FF-NO-ISREAD-AUDIT)",
+    "NF-7: pgNotificationStore импортирует NotifInsertPort из notification-router.ts, не редекларирует",
+    "NF-8: нет нового at-least-once (mark-read = прямой UPDATE, не outbox)"
+  ],
+  "out_of_scope": [
+    "Шаблонизация (renderTemplate, notification-templates.ts) — T-0172",
+    "Email channel config REST — T-0170",
+    "Notification preferences REST — T-0171",
+    "publishNotificationEvent / routing / fanout — T-0169",
+    "Admin-обзор чужих уведомлений — не в ADR §2.2",
+    "Sweeper авто-ретенции — Stage-2",
+    "Push (мобильный) — not-MVP",
+    "DELETE уведомлений через REST — не в E-N.6 scope",
+    "Кеш unread count (Redis, materialized view) — Stage-2"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "pgNotificationStore.ts структурно совместим с NotifInsertPort под tsc --noEmit; импортирует NotifInsertPort/NotifInsertRow из notification-router.ts, не редекларирует",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "GET /api/notifications возвращает только уведомления текущего актора (recipient_id = actor); посторонний recipient_id игнорируется/не принимается",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Keyset-пагинация корректна: второй запрос с cursor из предыдущего ответа не возвращает дубли и не пропускает строки (при фиксированных данных)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "GET /api/notifications/unread-count возвращает { count: N } = количество непрочитанных; EXPLAIN live-DB показывает idx_notification_unread (частичный индекс)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "POST /api/notifications/:id/read для своего уведомления → 200 { ok: true }, is_read = true в БД",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "POST /api/notifications/:id/read для чужого (другой recipient) или несуществующего id → 404, строка не мутирует",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "PATCH /api/notifications с { ids: [...] } — помечает все свои ids прочитанными; чужие ids молча пропускаются (updated = только свои совпадения)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "GET /api/notifications без X-Dev-User → 401; без SET LOCAL GUC SQL ничего не возвращает (RLS fail-closed)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "Cross-tenant: уведомление tenant A не видно в контексте tenant B ни через listing, ни через unread-count",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "pgNotificationStore.ts не содержит appendAuditEvent ни в каком пути (FF-NO-ISREAD-AUDIT + FF-NO-DELIVERY-AUDIT)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "tsc --noEmit и npm test (vitest) проходят без новых ошибок",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "npm run fitness зелёный (включая notification-isolation.sh, notification-pref-isolation.sh, notification-email.sh + новый notification-center-isolation.sh)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "ci/checks/notification-center-isolation.sh (owner T-0173) зелёный: FF-OWN-ONLY-READ, FF-NO-CROSS-USER, FF-UNREAD-INDEXED (static), FF-NO-ISREAD-AUDIT",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "fitness:db тест notification-center.test.ts зелёный: insert + list + unread-count + markRead + batchMarkRead + cross-tenant isolation + EXPLAIN badge-index",
+      "verifiable_as": "test"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0173-notification-center.spec.md"
+}

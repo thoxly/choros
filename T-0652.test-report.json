@@ -1,0 +1,35 @@
+{
+  "task_id": "T-0652",
+  "role": "tester",
+  "verdict": "approved",
+  "commit_reviewed": "43df0fa1 (fix-forward on e6ee4455)",
+  "summary": "Re-verify. All gates re-run GREEN after the fix-forward. Web vitest 2550/2550 (+15 new: 11 formula-injection/guard tests in ra-grant-trail, 3 badge tests + 1 sibling in screen-rights). tsc 0. anti-case-lock PASS (baseline 16). ux-g7 self-test PASS. The new tests HONESTLY capture the OWASP tradeoff (they assert +/- leading values get the apostrophe, not hide it). One non-blocking observation: ux-g7 now emits 2 INFORMATIONAL findings (exit 0, does not block) on the reformatted grant-trail stub — a line-local false positive introduced by splitting that honest button across lines.",
+  "gates_rerun": {
+    "tsc_noEmit": {"cmd": "npx tsc --noEmit", "exit": 0, "result": "PASS"},
+    "web_vitest_full": {"cmd": "cd web && npx vitest run", "files": 95, "tests": 2550, "passed": 2550, "failed": 0, "exit": 0, "result": "PASS", "delta": "+15 vs prior 2535"},
+    "anti_case_lock": {"cmd": "bash ci/checks/anti-case-lock.sh", "aggregate": "16 (baseline 16)", "exit": 0, "result": "PASS"},
+    "ux_g7_self_test": {"cmd": "bash ci/checks/ux/ux-g7-no-fake-buttons.sh --self-test", "exit": 0, "result": "PASS"},
+    "ux_g7_real_diff": {"cmd": "bash ci/checks/ux/ux-g7-no-fake-buttons.sh", "findings": 2, "exit": 0, "result": "PASS (informational)", "note": "2 line-local false positives on the reformatted grant-trail stub (aria-disabled and onClick now on separate lines from the title= reason). Exit 0 — does not block. See TEST-N1."}
+  },
+  "adversarial_probe": {
+    "tool": "executed the shipped neutralizeFormula+csvEscape against 14 vectors",
+    "result": "ALL 14 held inert (=, DDE-via-;, +cmd, @, leading TAB, leading CR, leading space, nbsp, fullwidth homoglyph, already-apostrophe, second-line-of-multiline; plus legit mid-= not false-flagged). Quoting intact on the multiline case. See T-0652.review.json reverify_attacks."
+  },
+  "tradeoff_honesty": {
+    "id": "TEST-CHECK-TRADEOFF-NOT-HIDDEN",
+    "result": "PASS",
+    "finding": "The legitimate-data cost of prefixing (phone '+7..' → '\\'+7..', negative '-5' → '\\'-5') is asserted openly: csvEscape('-2+3') expects \"'-2+3\" and csvEscape('+cmd|/c calc') expects \"'+cmd|/c calc\". The tests document the apostrophe on +/- leading values rather than masking it."
+  },
+  "non_blocking": [
+    {
+      "id": "TEST-N1-G7-SELFFLAG-ON-REFORMATTED-STUB",
+      "severity": "P3",
+      "finding": "The fix reformatted the grant-trail empty-export <Button> from single-line to multi-line, so aria-disabled=\"true\" and onClick={(e)=>e.preventDefault()} now sit on their own lines while the title= visible reason moved to a separate line. ux-g7 is line-local, so it now flags those two added lines as inert-control-no-visible-reason (2 findings). The button IS honest (visible title + chs-trail__stubhint span). Gate is INFORMATIONAL → exit 0, DOES NOT BLOCK. Ironic that the task's own gate now flags the task's own honest button. Follow-up: either keep the inert marker + a reason marker on the same line, or widen the gate's heuristic window."
+    },
+    {
+      "id": "TEST-N2-G7-CROSS-LINE-LOOPHOLE (carried from first review)",
+      "severity": "P3",
+      "finding": "Still true: a describedby button line + chs-sr-only reason on a SEPARATE line is not flagged. Line-local heuristic limitation, documented, informational. Not introduced by this task's real changes."
+    }
+  ]
+}

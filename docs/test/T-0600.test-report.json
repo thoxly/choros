@@ -1,0 +1,106 @@
+{
+  "task_id": "T-0600",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 4918,
+    "passed": 4908,
+    "failed": 0,
+    "skipped": 10,
+    "root_vitest": {"files": "255 passed | 2 skipped (257)", "tests": "4908 passed | 10 skipped (4918)", "exit": 0},
+    "fitness_db_live_pg": {"files": "105 passed (105)", "tests": "1100 passed (1100)", "failed": 0, "exit": 0, "_note": "живой Postgres localhost:55432 (DATABASE_URL=postgres://choros_migrator:...@localhost:55432/choros). В ЭТОМ прогоне 0 флейков — doc-regen/doc-summary/seed-pack (о которых предупреждал автор как о средовом флейке под параллельной DB-нагрузкой) НЕ воспроизвелись, подтверждая средовой характер, не регрессию T-0600."},
+    "build_tsc": {"result": "pass", "exit": 0, "_note": "npm run build → exit 0"},
+    "jargon_gate": {"result": "pass", "self_test": "pass", "_note": "bash ci/checks/ux/assistant-llm-message-jargon.sh → PASS; --self-test → PASS (good fixture rc=0, bad fixture rc=14)"},
+    "anti_case_lock": {"result": "pass", "_note": "bash ci/checks/anti-case-lock.sh → PASS Phase 1+2, aggregate в пределах baseline, 0 новых D-064 литералов в src/"},
+    "contracts_valid": {"result": "pass", "_note": "adr/spec/pr-handoff contract-JSON валидны против schemas/*.json (validate.py)"},
+    "_note": "Все лейны перегнаны судьёй-тестером НЕЗАВИСИМО с чистого запуска (не доверие handoff-числам). Числа совпали с pr-handoff (root 4908 passed). Working tree восстановлен clean (git diff --quiet) после каждой из 4 мутаций."
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1: makeLlmPortFactory без per-tenant конфига → dormantLlmPort даже с DEEPSEEK_API_KEY в env — test",
+      "test": "src/__tests__/server-llm-factory.test.ts 3/3 (root vitest). identity `port === dormantLlmPort` (grantsPool=null → loadTenantLlmConfig=null, без DB); baseline без ключа тоже dormant; dormant.chat()→LlmDormantError. МУТАЦИОННО подтверждён: восстановление env-fallback краснит 2/3 теста (identity != dormant, третий даже сходил на DeepSeek получив 401).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2: живой DB-тест — реальный тенант + DEEPSEEK_API_KEY в env → честный 503, не сетевой вызов — fitness",
+      "test": "ci/checks/db/assistant-llm-env-fallback.test.ts 1/1 на ЖИВОМ PG. registerTenant + РЕАЛЬНЫЙ makeLlmPortFactory(tenantId, migPool) в registerAssistantRoutes → POST сообщения → 503 LLM_UNAVAILABLE, текст без 'sk-'/'DeepSeek'. ОГОВОРКА (review F-1): тест НЕ ловит восстановленный fallback при дефолтном эндпойнте (фейк-ключ→реальный 401→classifyLlmUnavailability→тот же 503). Судья мутационно подтвердил: fallback-restore ПРОШЁЛ этот тест зелёным при api.deepseek.com, но КРАСНЕЕТ при DEEPSEEK_BASE_URL=нерутабельный (SSRF/timeout). Реальная анти-регресс-защита контракта — на AC-1 unit-уровне (identity без сети). Дыры защиты нет, но живой тест — слабый дубль.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5: isProviderAuthFailure — классификация 401/403 по префиксу СОБСТВЕННОГО адаптера, не по provider-JSON — test",
+      "test": "src/__tests__/assistant-llm-message.unit.test.ts :116-137 (6 it): 401/403 (adapter-prefix)→true; timeout/network/500→false; LlmDormantError/plain-Error/string/undefined→false; matches /OpenAI API error (401|403):/ на СВОЁМ префиксе, не на теле. МУТАЦИОННО подтверждён: 'всегда false' краснит 3 теста.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6: canonicalizeLlmError НИКОГДА не echoит сырое тело провайдера — test",
+      "test": "assistant-llm-message.unit.test.ts :139-194: 401/403 provider-JSON→канонический русский, БЕЗ фрагментов (invalid_request_error/Incorrect API key/invalid_api_key/sk-***/request_forbidden/Country...); dormant→без agent_card/llm_*; generic (timeout/network/malformed)→без 30000ms/ENOTFOUND/Bad Gateway/'OpenAI API'; расширенный denylist (+порт/port/adapter) на ВСЕХ 5 случаях. МУТАЦИОННО подтверждён: 'return err.message' краснит 5 тестов (сырое JSON просачивается, вкл. токен 'port' в 'not supported').",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7: runConfiguratorLoop catch → канонический текст, сырое тело только server-side — test",
+      "test": "src/__tests__/assistant-configurator.test.ts :932-955 через РЕАЛЬНЫЙ runConfigurator + ThrowingLlmPort(LlmUnavailableError(provider-JSON)): result.text без invalid_request_error/Incorrect API key/sk-***, matches /ключ/+/провайдер/; generic (ECONNRESET) без 'OpenAI API'/'some.internal.host'. console.error виден в stderr. МУТАЦИОННО подтверждён: bypass-canonicalize (err.message напрямую) краснит 2 теста — доказывает провязку fix через runConfigurator, не только чистую функцию.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8/AC-9: runProcessGenLoop dormant И error catch → канонический текст, union не изменён — test",
+      "test": "src/core/__tests__/process-gen-loop.test.ts 15/15. Оба catch (dormant→cause='dormant', error→cause='error') возвращают canonicalizeLlmError(err); ProcessGenOutcome status/cause union не изменён (существующий 'error port → cause=error' проходит). console.error лог виден в stderr (не в user-тексте). Транзитивно закрывает assistant.ts:851 (outcome.message канонический по построению).",
+      "result": "pass"
+    },
+    {
+      "ac": "T-0496 «Проверить подключение» не сломан — regression",
+      "test": "src/http/llm-connection-test.ts не тронут диффом. sanitizeProviderError (:134-200) уже отдавал канонический status-класс (401/403→'Провайдер отклонил ключ...'), сырое тело всегда дропалось (RL-3 NON-EGRESS). server.ts:1116 makeLlmPort использует tenantSecretResolver с тенантским secretHandle; DEEPSEEK_BASE_URL/MODEL — только non-secret endpoint/model дефолты когда профиль пуст. Легитимная проверка соединения работает и честно показывает КЛАСС ошибки.",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {"check": "ci/checks/ux/assistant-llm-message-jargon.sh", "result": "pass", "note": "оба ADMIN/NON_ADMIN конституента чисты, без dev-jargon, без dead-door; --self-test PASS (good rc=0, bad rc=14). ОГОВОРКА: гейт инспектирует только assistant-messages.ts, НЕ новые строки canonicalizeLlmError (llm-port.ts) — те покрыты unit-тестом с расширенным denylist (review F-3)"},
+    {"check": "ci/checks/anti-case-lock.sh", "result": "pass", "note": "Phase 1 (read-pdp/rights-ui/detel-baseline git-diff-scoped, 0 новых) + Phase 2 (full D-064 §5 denylist repo-wide, aggregate 24=baseline 24) — в пределах baseline, 0 новых литералов в src/ (задание 5)"}
+  ],
+  "adversarial": [
+    {
+      "probe": "МУТАЦИЯ (а): восстановить env-fallback в makeLlmPortFactory — какой тест краснеет?",
+      "result": "pass",
+      "note": "src/__tests__/server-llm-factory.test.ts КРАСНЕЕТ 2/3 (identity `port === dormantLlmPort` нарушена — построен OpenAILlmPort на env-ключе; третий тест dormant.chat()→dormant сделал РЕАЛЬНЫЙ сетевой вызов на DeepSeek, получил 401, доказав живой egress). ОДНАКО живой AC-2 DB-тест (assistant-llm-env-fallback.test.ts) ПРОШЁЛ ЗЕЛЁНЫМ при дефолтном api.deepseek.com — фейк-ключ→реальный 401→classifyLlmUnavailability→тот же 503, что тест утверждает. Тест краснеет только при нерутабельном эндпойнте (DEEPSEEK_BASE_URL=https://10.255.255.1 → fail 100мс, SSRF/различие). Задание предсказывало 'должен краснеть assistant-llm-env-fallback.test.ts и/или server-llm-factory' — server-llm-factory (unit) краснеет надёжно; env-fallback (живой DB) — только при неудачном эндпойнте. Зафиксировано как review F-1 (nit, test-hardening). Контракт защищён unit-уровнем — 'никакой тест не краснеет'=НЕ наш случай."
+    },
+    {
+      "probe": "МУТАЦИЯ (б): в canonicalizeLlmError вернуть err.message — краснеют тесты 'no leak'?",
+      "result": "pass",
+      "note": "КРАСНЕЕТ 5 тестов в assistant-llm-message.unit.test.ts (canonicalizeLlmError no-leak): 401/403 provider-JSON просачивается вербатим (invalid_request_error/Incorrect API key/sk-***/request_forbidden), плюс денайлист-токен 'port' обнаружен внутри утёкшего '...territory not supported'. Точно как предсказано заданием."
+    },
+    {
+      "probe": "МУТАЦИЯ (в): сломать isProviderAuthFailure (всегда false) — 401-классификация красная?",
+      "result": "pass",
+      "note": "КРАСНЕЕТ 3 теста: isProviderAuthFailure(401/403)→ожидалось true, получено false; canonicalizeLlmError провайдер-auth-fail 401/403 падает в generic-ветку ('Не удалось обработать...'), не матчит /провайдер/ и /ключ/. Точно как предсказано."
+    },
+    {
+      "probe": "БОНУС: bypass canonicalizeLlmError в configurator catch (err.message напрямую в finalText)",
+      "result": "pass",
+      "note": "КРАСНЕЕТ 2 теста AC-7 (assistant-configurator.test.ts) — сырое ECONNRESET/provider-JSON просачивается в result.text. Доказывает, что fix РЕАЛЬНО провязан через runConfigurator end-to-end, не только чистая функция изолированно."
+    },
+    {
+      "probe": "Третий/четвёртый лик-пойнт err.message в user-facing (задание 1а) — grep src/http+src/core + все .chat()-call-sites",
+      "result": "pass",
+      "note": "НЕ НАЙДЕН. Единственные два локально-глотающих LlmUnavailableError+интерполирующих err.message места — configurator.ts:1199 и process-gen-loop.ts:235 — оба пофикшены. analyst.ts:364 НЕ ловит локально (всплывает в HTTP-диспетч → respondLlmUnavailable, err.message игнорируется). assistant.ts:851 (outcome.message) канонический по построению из runProcessGenLoop. assistant.ts:887 (op-failure) не несёт provider-тела (LLM-вызов в executeOp только через runProcessGenLoop, который не throw'ит наружу). llm-connection-test.ts:135 санитизирован. Третьего лика нет."
+    }
+  ],
+  "failures": [],
+  "notes": {
+    "coverage_gaps_found": "Один test-robustness разрыв (не coverage-gap контракта): AC-2 живой DB-тест не различает dormant от восстановленного-fallback→401→503 при дефолтном DeepSeek-эндпойнте — см. review F-1 (nit). Контракт BYO-честности НАДЁЖНО защищён на AC-1 unit-уровне (identity `port===dormantLlmPort` без сети, краснит на мутации). LIVE_PROOF real-render (владелец на стенде видит честный 503 у нерабочего ассистента, вставляет ключ, ассистент оживает) остаётся за manual-тиром (D-064) — зафиксировано в pr-handoff live_proof='pending orchestrator'.",
+    "anti_false_pass_checks_performed": [
+      "Не доверял handoff-числам — перегнал npm run build (exit 0), npm test (4908 passed/4918, exit 0), npm run fitness:db на РЕАЛЬНОМ PG localhost:55432 (105 files/1100 tests passed, 0 failed, exit 0) с чистого запуска.",
+      "Поднял/проверил живой Postgres (pg_isready + psql SELECT 1 на 55432) — AC-2 LIVE gate реально активен (не skip), env-fallback DB-тест поимённо verbose-подтверждён passed.",
+      "Выполнил ВСЕ ТРИ заданных мутационных пробы (а/б/в) + одну бонус — каждая поймана красным тестом; working tree восстановлен clean (git diff --quiet подтверждён) после каждой.",
+      "АКТИВНО искал третий/четвёртый лик-пойнт (grep err.message по src/http+src/core, перечисление всех .chat()-call-sites) — не найден; проанализировал транзитивные пути assistant.ts:851/887 и analyst-путь.",
+      "Зафиксировал позицию по T-0496: sanitizeProviderError уже дропает сырое тело (RL-3), показывает только status-класс — легитимная диагностика, не утечка; путь не тронут диффом.",
+      "Проверил dormant-текст на жаргон (respondLlmUnavailable константы + canonicalizeLlmError строки) — обе жаргон-free; gate PASS.",
+      "grep DEEPSEEK_API_KEY по ВСЕМУ репо (docker-compose/ci/scripts/docs/src) — подтвердил, что удалённый шаг 2 был единственным продовым secret-читателем; env-secret-allowlist/adversarial-тесты не сломаны (env:// tenant-reject держится).",
+      "Валидировал adr/spec/pr-handoff контракты против schemas/*.json (validate.py) — все valid; live_proof='pending orchestrator' честен.",
+      "МУТАЦИОННО обнаружил и зафиксировал слабость AC-2 живого теста (F-1) — не принял 'зелёный AC-2' за доказательство анти-регресса fallback; проверил, что unit-тест несёт защиту.",
+      "Подтвердил, что doc-regen/doc-summary/seed-pack флейки НЕ воспроизвелись в чистом fitness:db прогоне (0 failed) — средовые, не регрессия T-0600 (файлы вне diff)."
+    ],
+    "residual_findings_nonblocking": [
+      "F-1 (nit, axis 5): AC-2 живой DB-тест не ловит восстановленный env-fallback при дефолтном эндпойнте (401→503 маскирует) — защита на AC-1 unit-уровне; follow-up: ассертить no-network или нерутабельный sink-эндпойнт.",
+      "F-2 (nit, axis 2): env-secret-allowlist DEEPSEEK_API_KEY-запись стала недостижимой для резолюции (tenant-путь env:// отклоняет безусловно) — не дефект, guard-функция+adversarial-тесты сохраняются; вне скоупа T-0600.",
+      "F-3 (nit, axis 2): canonicalizeLlmError dormant-текст расходится с ASSISTANT_LLM_UNAVAILABLE_MESSAGE_* и НЕ полицируется shell-гейтом (только vitest) — оба жаргон-free; follow-up: единый источник/расширить гейт."
+    ]
+  }
+}

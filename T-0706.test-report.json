@@ -1,0 +1,78 @@
+{
+  "task_id": "T-0706",
+  "role": "tester",
+  "verdict": "approved",
+  "commit": "c187022b",
+  "summary": "Все заявленные гейты зелёные: tsc --noEmit, npm run build, полный vitest (2641/2641, как заявлено), anti-case-lock.sh, forms-schema-binding.sh. FormDesigner.test.jsx = 38 тестов (заявлено 21→38, подтверждено). Три ветки (AC-1/AC-2/AC-6) + save-путь (AC-3) покрыты, но ТОЛЬКО на уровне static-markup рендера + 'pure-logic mirror' (переизложение той же логики вне компонента, тестируется само с собой) — унаследованное архитектурное ограничение файла (jsdom/@testing-library отсутствуют в этом тестовом ярусе с T-0656), не введено этой задачей. Ни один тест не монтирует компонент с реальными async fetch + эффектами, чтобы живьём проверить порядок рендера/эффекта при гонке (заявленной в AC-3) — гонка проверена этим ревьюером построчным прослеживанием React commit/effect семантики (см. review.json), а не исполняемым тестом.",
+  "gates_rerun": {
+    "npx_tsc_noEmit": { "status": "pass", "detail": "exit 0, без вывода" },
+    "npm_run_build": { "status": "pass", "detail": "tsc && seed/tsconfig.json tsc — оба exit 0" },
+    "web_vitest_run_full": {
+      "status": "pass",
+      "detail": "97 test files passed, 2641 tests passed (совпадает с заявленным числом 2641), 0 failed. Duration ~6.5s.",
+      "test_files": 97,
+      "tests_passed": 2641,
+      "tests_failed": 0
+    },
+    "FormDesigner_test_jsx_isolated": {
+      "status": "pass",
+      "detail": "38 tests passed (заявлено 21→38 — подтверждено точно)."
+    },
+    "anti_case_lock_sh": {
+      "status": "pass",
+      "detail": "PASS: Phase1 (read-pdp-anti-case/rights-ui-anti-case/detel-literal-baseline) все чисто; Phase2 полный D-064 §5 denylist aggregate 16/16 (steady, не растёт)."
+    },
+    "forms_schema_binding_sh": {
+      "status": "pass",
+      "detail": "PASS [FF-FORMS1]: form-defs поля привязаны к серверной схеме валидации, submit route ре-валидирует, validator чист."
+    }
+  },
+  "coverage": {
+    "AC1_narrowing_explicit_slug": {
+      "status": "covered",
+      "detail": "test.jsx:336-343 (pure-logic mirror) + test.jsx:378-387 (source-presence: узкая ветка не рендерит <Select>) + test.jsx:317-320 (auto-select эффект строкой присутствует)."
+    },
+    "AC2_null_slug_multi_registry_hint": {
+      "status": "covered",
+      "detail": "test.jsx:345-353 (pure-logic mirror ambiguity condition) + test.jsx:398-400 (source-presence условия рендера)."
+    },
+    "AC3_save_disabled_race_defense": {
+      "status": "partially_covered",
+      "detail": "test.jsx:371-376 — ТОЛЬКО source-string presence (grep на точную JS-подстроку встречается 2 раза — в тексте предупреждения и в disabled-выражении кнопки), НЕ функциональный тест. Реальная гонка (эффект/рендер порядок при async fetch resolve) не воспроизведена через mount+fireEvent+await. Ревьюер прошёл трассировку вручную (см. review.json race_selectedDefId_vs_registryDefs_load) — логика подтверждена корректной, но тестовый ярус структурно не может это доказать сам (ограничение архитектуры файла с T-0656, не regression этой задачи)."
+    },
+    "AC4_single_registry_no_regression": {
+      "status": "covered",
+      "detail": "test.jsx:345 (GENERIC_DEFS с length=1 case) + diff-сравнение подтверждает byte-идентичное поведение (см. review.json AC4_single_registry_app_no_regression)."
+    },
+    "AC5_unknown_binding_pair_NF": {
+      "status": "covered",
+      "detail": "test.jsx:363-368 (pure-logic mirror) + test.jsx:442-445 (рендер без bindings, static markup smoke)."
+    },
+    "AC6_desync_honest_warning": {
+      "status": "covered",
+      "detail": "test.jsx:355-361 (pure-logic mirror: slug set, no match → null) + test.jsx:389-396 (source-presence: Select остаётся в этой ветке)."
+    },
+    "AC7_no_jargon": {
+      "status": "covered",
+      "detail": "test.jsx:402-419 — regex-проверка констант на отсутствие target_registry_slug/registry_def/WRONG_FLOOR/409; независимо подтверждено ux-g5-jargon-denylist.sh gate (0 находок в файле)."
+    },
+    "AC8_anti_case": {
+      "status": "covered",
+      "detail": "test.jsx:421-440 — join()-обфусцированные литералы, не триггерящие сам scanning-гейт; независимо подтверждено anti-case-lock.sh PASS."
+    },
+    "save_path_end_to_end": {
+      "status": "not_covered",
+      "detail": "Ни один тест не выполняет реальный fetch POST /api/forms/binding (persistLayout) с заявленной последовательностью выбора → это соответствует существующему тестовому ярусу файла (без сети/jsdom), не regression T-0706. Серверная сторона (resolveLiveRecordSchema/classifyLayoutSave) не тронута этой задачей и её контракт проверен отдельно (review.json AC1_narrowing_matches_server_resolution через прямое чтение src/db/live-form-schema.ts)."
+    }
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "TEST-NB-1",
+      "severity": "P3",
+      "title": "AC-3 race defense проверена только строковым grep на JS-выражение, не исполняемым сценарием",
+      "detail": "test.jsx:371-376 проверяет, что точная подстрока 'Boolean(boundRegistryDef && selectedDefId && selectedDefId !== boundRegistryDef.id)' встречается РОВНО 2 раза в исходнике (текст предупреждения + disabled-условие кнопки) — это гарантирует консистентность строки, но НЕ доказывает, что при реальном асинхронном порядке resolve (registryDefs vs processAppBindings) эффект/рендер действительно ведут себя так, как заявлено в комментариях кода. Рекомендация на будущее (не блокирует эту задачу): если тестовый ярус файла когда-нибудь мигрирует на @testing-library/react + jsdom (как отмечено в шапке файла — 'No jsdom in this tier'), стоит добавить mount-тест с управляемыми promise-resolve порядками, воспроизводящий именно эту гонку.",
+      "location": "web/src/forms/FormDesigner.test.jsx:371-376"
+    }
+  ]
+}

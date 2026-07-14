@@ -1,0 +1,77 @@
+{
+  "task_id": "T-0711",
+  "status": "pr_open",
+  "branch": "task/T-0711",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/db/live-form-schema.ts",
+    "src/http/binding.ts",
+    "src/http/forms-document-ops.ts",
+    "web/src/forms/FormDesigner.jsx",
+    "web/src/forms/FormDesigner.test.jsx",
+    "src/__tests__/live-form-schema-application-id.test.ts (NEW)",
+    "ci/checks/db/T-0711-multi-app-binding-resolve.db.test.ts (NEW)",
+    "docs/tasks/T-0711.spec.md (NEW)",
+    "docs/tasks/T-0711.adr.md (NEW)",
+    "T-0711.pr-handoff.json (NEW)"
+  ],
+  "summary": "P2 из ревью T-0706 (finding #37): resolveLiveRecordSchema (src/db/live-form-schema.ts) резолвил process_app_binding по process_key одному — LIMIT 1 без application_id-фильтра и без ORDER BY, при том что натуральный ключ UNIQUE(tenant, process_key, application_id) (migration 075) допускает 2+ привязки одного процесса к разным приложениям. Сервер валидировал save формы против ПРОИЗВОЛЬНОЙ (planner-order) привязки, игнорируя выбранное пользователем приложение: ложный 409 на корректной форме или молчаливый save против чужой схемы. ФИКС: (1) опциональный applicationId у resolveLiveRecordSchema/resolveLiveSchemaFieldKeys/resolveLiveCollectionSubKeys + classifyLayoutSave + deriveFieldsFromLayout — ОДИН SQL на обе ветки: AND ($3::uuid IS NULL OR application_id = $3); (2) детерминизм без пина: ORDER BY created_at ASC, id ASC (старейшая привязка — обоснование в ADR §2); (3) fail-closed: малформенный пин → null без единого запроса (на HTTP — 400 через assertUuidShape), валидный-но-несуществующий → 0 строк → null → 409, НИКОГДА не подмена другой привязкой; (4) протяжка: POST /api/forms/binding и POST /api/forms/document-ops принимают application_id/applicationId (dual-casing как process_key); FormDesigner.persistLayout шлёт selectedAppId (только непустой). Обратная совместимость: параметр опционален во всех 5 сигнатурах, отсутствие поля в теле = прежний контракт + детерминизм; все существующие call-sites (floor1-editor, FormBuilder, legacy) не тронуты и зелёные без правок стабов.",
+  "application_id_threading": {
+    "resolvers": "src/db/live-form-schema.ts: resolveLiveRecordSchema(client, tenantId, processKey, applicationId?) — единственный SQL-шов; resolveLiveSchemaFieldKeys/resolveLiveCollectionSubKeys форвардят параметр без изменений",
+    "gate": "src/http/binding.ts classifyLayoutSave(client, tenantId, processKey, layout, applicationId?) — ОДИН applicationId уходит в ОБА резолвера (field-keys + collection-subKeys), расщепление на две привязки внутри одного save невозможно (юнит-тест AC-4)",
+    "derive": "src/http/binding.ts deriveFieldsFromLayout(..., applicationId?) — тот же пин, что у гейта того же save (поля деривуются из той же схемы, что валидировала форму)",
+    "http_human": "POST /api/forms/binding (binding.ts): body.application_id|applicationId, опционально, UUID-guard → 400; протянут в classifyLayoutSave и deriveFieldsFromLayout",
+    "http_agent": "POST /api/forms/document-ops (forms-document-ops.ts): тот же опциональный параметр, протянут в classifyLayoutSave",
+    "ui": "web/src/forms/FormDesigner.jsx: persistLayout(doc, step, setSaveState, savedDocRef, setSaveGen, applicationId) — 6-й аргумент = selectedAppId с кнопки «Сохранить раскладку»; в body уходит как application_id только когда непустой",
+    "not_threaded_by_design": "floor1-editor.ts /edits и FormBuilder-путь (fields без layout) — там нет пикера приложения; получают детерминизм-фолбэк (старейшая привязка), контракты не изменены — см. spec §5"
+  },
+  "deviations_from_adr": [],
+  "tests_added": [
+    {
+      "file": "src/__tests__/live-form-schema-application-id.test.ts",
+      "covers": "7 тестов, fake pg.PoolClient: AC-1 без пина → 3-й bind-параметр null (не undefined) + SQL несёт ORDER BY и application_id = $3; AC-2 пин передаётся verbatim; AC-3 малформенный пин → null БЕЗ единого запроса; AC-4a/b оба резолвера-обёртки форвардят пин; classifyLayoutSave — оба process_app_binding SELECT'а получают ОДИН applicationId (и в pinned, и в null-ветке)"
+    },
+    {
+      "file": "ci/checks/db/T-0711-multi-app-binding-resolve.db.test.ts",
+      "covers": "7 тестов, live PG :55432, изолированный тенант, нейтральные фикстуры (t0711-*, fields-alpha/beta): AC-1 процесс с ДВУМЯ привязками → пин A даёт схему A, пин B — схему B; AC-2 без пина → детерминированно старейшая по created_at (новее-датированная строка вставлена ПЕРВОЙ физически; 5 повторов); AC-3 валидный-но-несуществующий UUID → null; AC-5 HTTP-шов: application_id=B + поле схемы B → 201, тот же layout с application_id=A → 409 WRONG_FLOOR, малформенный → 400, без application_id → детерминированный исход (409 против старейшей схемы A)"
+    },
+    {
+      "file": "web/src/forms/FormDesigner.test.jsx (расширен)",
+      "covers": "T-0711 describe: кнопка save передаёт selectedAppId в persistLayout; persistLayout форвардит его как application_id только когда непустой, без литеральных id; обновлён source-presence assert сигнатуры persistLayout + T-0669-комментарий"
+    }
+  ],
+  "gates": {
+    "tsc": "green — npx tsc, exit 0",
+    "eslint_server": "green — npx eslint по всем 4 изменённым src-файлам, 0 ошибок; web-lint: единственная ошибка 'Definition for rule react-hooks/exhaustive-deps was not found' на строке 887 FormDesigner.jsx — pre-existing (T-0533 eslint-disable-комментарий, не тронут этой задачей; web lint-скрипт в репо намеренно '|| true')",
+    "vitest_targeted_server": "green — все 10 файлов, импортирующие затронутые модули (live-form-schema/binding/forms-document-ops): 57 + 112 = 169 passed, 0 failed (floor-boundary-wire 17, binding-fields-from-layout 13, forms-document-ops-wire 6, binding-layout-shape 3, binding-get-layout 4, process-catalog-target-registry 7, live-form-schema-application-id 7 NEW, agent-auth-bypass.adversarial 96, agent-facing-auth-wraps 12, binding-owner-bypass 4)",
+    "vitest_web": "green — web/src/forms/FormDesigner.test.jsx: 43 passed, 0 failed",
+    "vitest_db_targeted": "green — live PG localhost:55432 (docker choros-postgres-1): T-0711-multi-app-binding-resolve.db.test.ts 7 passed + существующий form_binding_layout.db.test.ts 8 passed (регресс маршрута без application_id). Полный fitness:db НЕ гонялся — по прямой инструкции оркестратора (точечные прогоны только своих файлов)",
+    "fitness_targeted": "green — anti-case-lock.sh (aggregate 15 ≤ baseline 16), named-binding-isolation.sh, floor1-editor-isolation.sh, authoring-floor-isolation.sh, forms-schema-binding.sh, ux-g5-jargon-denylist.sh — все PASS"
+  },
+  "merge_notes": {
+    "t0682_intersection": "web/src/forms/FormDesigner.jsx параллельно правит T-0682 (мержится ПЕРВЫМ, эта ветка ребейзится следом). Правки T-0711 в этом файле минимальны: (а) call-site кнопки «Сохранить раскладку» (~строка 1494) — добавлен 6-й аргумент `selectedAppId,` в вызов persistLayout(...); (б) сигнатура function persistLayout(...) (~строка 1584) — добавлен параметр applicationId + докблок T-0711; (в) body внутри persistLayout — строка `...(applicationId ? { application_id: applicationId } : {})`. При конфликте: сохранить обе стороны; инвариант — selectedAppId идёт шестым аргументом persistLayout и уходит на сервер как application_id. FormDesigner.test.jsx: обновлён assert сигнатуры persistLayout + новый describe T-0711 + расширен комментарий T-0669-блока."
+  },
+  "live_proof_plan": {
+    "status": "deferred — стенд offline на момент задачи",
+    "steps": [
+      "1. На dev-стенде (Tailscale 100.121.76.86:3000, залогиненная сессия) через экран «Процессы» (BindProcessModal) привязать ОДИН published-процесс к ДВУМ приложениям (A и B), каждое со своим registry_def (разные наборы полей); зафиксировать target_registry_slug на обеих привязках.",
+      "2. FormDesigner: выбрать процесс + приложение B, собрать форму из поля, существующего ТОЛЬКО в схеме B, «Сохранить раскладку» → ожидается 201 (до фикса: недетерминированно — 409 если planner вернул привязку A).",
+      "3. Network-tab: убедиться, что POST /api/forms/binding несёт application_id = id приложения B (протяжка реально дошла до провода).",
+      "4. Переключить пикер на приложение A (T-0669-фильтр предлагает оба), попытаться сохранить ТУ ЖЕ форму → ожидается честный отказ (диссонанс схемы: поле B dangling в A) — не молчаливый save против чужой схемы.",
+      "5. Проверить form_binding.fields сохранённой записи: типы полей соответствуют схеме приложения B (deriveFieldsFromLayout получил тот же пин, что гейт).",
+      "6. Агентский шов: POST /api/forms/document-ops c application_id=B и op над той же формой → 200; с application_id=A → 409 WRONG_FLOOR.",
+      "7. Регресс: процесс с ОДНОЙ привязкой сохраняет форму без application_id в теле байт-в-байт как раньше (legacy-канал не сломан)."
+    ]
+  },
+  "friction_events": [
+    "API-обрыв (connection closed) посреди написания db-теста — работа не потеряна (worktree цел), но незакоммиченная; урок применён: WIP-коммит сразу после обрыва, дальше коммиты чаще",
+    "worktree был без node_modules (npm ci в корне и в web/ потребовался до любых гейтов) — provision worktree не ставит зависимости"
+  ]
+}

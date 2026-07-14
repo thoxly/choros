@@ -1,0 +1,114 @@
+{
+  "task_id": "T-0583",
+  "status": "ready",
+  "summary": "Управление пользователями-учётками из продукта: админ тенанта создаёт человеку KC-логин (логин+пароль, без email-верификации) прямо из UI — переиспользуя СУЩЕСТВУЮЩИЙ KeycloakUserPort.createHumanUser (тот же KC-admin-порт, что и agent-hire, choros-registrar/env) и hire-flow-выдачу role-reader T-0619 — так что создаётся KC-user + employee(kind='human', slug=KC-userId) + covering READ, и человек логинится и видит записи; плюс список пользователей тенанта и деактивация (disable KC-user + пометка employee). Итог: человека нанять не сложнее, чем ИИ-агента (агент=POST /api/agents/hire → KC client; человек=POST /api/users → KC user, оба через один порт).",
+  "functional": [
+    "F1. POST /api/users {tenant_id, login, password, display_name, position_id?, role_id?} создаёт KC-пользователя (actor_type=['human'], password non-temporary, emailVerified:true, БЕЗ письма-верификации) + employee(kind='human', slug=<KC userId>, display_name) в тенанте актёра; 201 {employee_id, login}; пароль в ответе не возвращается.",
+    "F2. Созданный пользователь СРАЗУ получает covering READ (role-reader) через переиспользуемый hire-flow-хелпер T-0619 (тот же путь, что registerHire для kind='human') → после логина видит записи (LIST непусто) без отдельного шага.",
+    "F3. При заданных role_id/position_id — role_assignment(employee→role_id) CONFIRMED и/или employee.position_id, под тем же admin-гейтом (орг-ось target-scope ⊆ admin-scope).",
+    "F4. GET /api/users/accounts возвращает {accounts:[{employee_id, login, display_name, position, department, active}]} — только kind='human' тенанта актёра, tenant-scoped (RLS); active=false для деактивированных.",
+    "F5. PATCH /api/users/:employee_id {active:false} деактивирует (KC enabled:false + employee.deactivated_at=now); {active:true} реактивирует (KC enabled:true + deactivated_at=NULL); 200 {employee_id, active}.",
+    "F6. Деактивированный пользователь не может войти/действовать (KC отказывает в токене при enabled:false); active:false виден в списке (F4).",
+    "F7. UI-экран управления пользователями (web/): список учёток (F4) + форма создания (F1) + деактивация/реактивация (F5) на слое --chs-* (OBLIK), с честными Empty/Loading/Error; поле пароля type=password + autoComplete=off.",
+    "F8. Все действия под существующим org-write гейтом (authorizeOrgWrite + assertOrgObjectAuthority('mgmt_object:employee', ...)): владелец тенанта ИЛИ держатель делегируемого covering mgmt_object:employee-гранта в покрывающем орг-скоупе; иначе 403."
+  ],
+  "non_functional": [
+    "N1. Пароль пользователя никогда не логируется, не пишется в audit_event (включая текст ошибки KC — через санитайзер) и не возвращается ни в одном HTTP-ответе (create/list/patch/ошибки).",
+    "N2. KC-креды только из env (KC_REGISTRAR_CLIENT_ID/SECRET, KEYCLOAK_BASE_URL, KEYCLOAK_REALM); ни одного секрета/пароля-константы в src/ (RL-1/NF-6).",
+    "N3. tenant-изоляция: создание/список/деактивация строго в тенанте актёра (resolveActorTenant → SET LOCAL choros.tenant_id + RLS); кросс-тенант → 403/404/пусто, никогда не проходит.",
+    "N4. KC-first + компенсация: KC-создание ДО записи в БД; падение БД после KC → best-effort deleteUser (нет KC-сироты); KC недоступен → 503, БД не тронута (паттерн register.ts / agent-hire).",
+    "N5. Переиспользование, НЕ дублирование: используется существующий KeycloakUserPort (src/keycloak/admin-port.ts) + hire-flow-выдача role-reader T-0619; НЕ вводится второй KC-интеграционный модуль, не копируется KC-HTTP-логика.",
+    "N6. Честная деградация: отсутствие KC-registrar-секрета/DATABASE_URL → 503 AUTH_UNAVAILABLE (как register.ts wiring в server.ts), не 500/белый экран.",
+    "N7. Анти-кейс (D-064): никаких имён персон/кейс-слагов в src/ — 'создать пользователя' generic; login/display_name из тела запроса на рантайме.",
+    "N8. UX_REVIEW обязателен (D-062): токены --chs-*, label/aria на полях формы, контраст статус-чипа 'деактивирован', без dev-жаргона.",
+    "N9. Login=username=email-поле KC (как register.ts username=email), письмо НЕ отправляется (emailVerified:true); пароль >= 8 символов (инвариант register.ts validateRequest)."
+  ],
+  "out_of_scope": [
+    "O1. Смена/сброс пароля существующего пользователя, self-service профиль, восстановление доступа — отдельная задача.",
+    "O2. Email-верификация/приглашения по почте — по директиве 'почту не прикручиваем'.",
+    "O3. Иерархия подчинения людей ('мой руководитель', эскалация вверх, увольнение/замещение T-0035) — §E2/E3/E4 карты примитивов, отдельные задачи.",
+    "O4. Учётки ИИ-агентов (kind='agent', KC client) — отдельный контур (POST /api/agents/hire уже покрывает создание; деактивация агента не в этой задаче).",
+    "O5. Массовый импорт пользователей / SCIM / внешняя IdP-федерация.",
+    "O6. Тонкая настройка ролей/грантов пользователя сверх дефолтного role-reader и опциональной роли позиции — экран 'Доступ' (T-0609 и др.).",
+    "O7. Жёсткое удаление учётки из UI (только деактивация; hard-delete остаётся owner-only DELETE /api/employees/:id, не расширяется)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "POST /api/users с валидным телом {tenant_id, login, password, display_name} под актёром-владельцем возвращает 201 {employee_id, login}; в БД появляется ровно одна строка choros.employee(kind='human', slug=<непустой KC userId>, display_name) в тенанте актёра.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "После AC-1: employee.slug равен KC user UUID, возвращённому портом createHumanUser (связка employee<->KC по slug=userId, как инвариант T-0342 для register.ts); НЕ произвольная строка.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "После AC-1 у созданного employee есть CONFIRMED role_assignment на role-reader и covering READ-грант (read/record/RESOURCE_ROOT) резолвится для него — тот же результат, что даёт hire-flow T-0619 для kind='human' (getGrantsForSubject содержит read/record-грант).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "POST /api/users с login, уже существующим в KC (createHumanUser → 409 EMAIL_TAKEN), возвращает HTTP 409; строка employee НЕ создаётся (нет частичного состояния).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Если БД-транзакция падает ПОСЛЕ успешного KC-создания, KeycloakUserPort.deleteUser вызывается ровно один раз с тем же userId (компенсация, нет KC-сироты); эндпоинт возвращает ошибку, а не 201.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "GET /api/users/accounts под актёром тенанта A возвращает 200 {accounts:[...]} только с kind='human' сотрудниками тенанта A (в т.ч. только что созданным в AC-1, active=true) и НЕ содержит ни одного сотрудника тенанта B; каждый элемент несёт employee_id, login, display_name, active.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "PATCH /api/users/:employee_id {active:false} возвращает 200 {employee_id, active:false}; вызывает KC setUserEnabled(userId,false) ровно один раз и проставляет employee.deactivated_at != NULL; последующий GET /api/users/accounts показывает active:false для этого employee.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "PATCH /api/users/:employee_id {active:true} на деактивированном пользователе возвращает 200 {active:true}; вызывает KC setUserEnabled(userId,true) и очищает employee.deactivated_at (=NULL); active снова true в списке.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "Кросс-тенант: актёр тенанта A на POST /api/users с tenant_id тенанта B → 403 (не создаёт); PATCH /api/users/:id по employee тенанта B → 403/404 (не деактивирует); GET /api/users/accounts не показывает чужой тенант. Ни одно кросс-тенантное действие не проходит.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "Непривилегированный член тенанта (без mgmt_object:employee-гранта и не владелец) на POST /api/users / PATCH /api/users/:id получает 403 ADMIN_GATE_REJECTED, а не 500 и не тихий успех.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "Ни один HTTP-ответ маршрутов /api/users, /api/users/accounts, /api/users/:id (успех и ошибки) не содержит подстроки тестового пароля — автоматизированный греп тел всех ответов интеграционного прогона на известную тестовую строку пароля.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Ни одна запись серверного лога или audit_event payload за прогон AC-1/AC-7 не содержит подстроки тестового пароля — автоматизированный греп журнала/аудита; и греп src/ не находит захардкоженного пароля/KC-registrar-секрета (только чтение из process.env).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "Анти-кейс (D-064): git-diff по src/ не содержит имён персон/кейс-слагов (e-larina/e-orlov/e-configurator/role-approver/soglasovanie/tel-/Согласование-как-константа); механизм создания пользователя generic (login/display_name из тела запроса). Существующий ci/checks анти-кейс-греп зелёный на diff.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "LIVE_PROOF на задеплоенном dev-стенде (KC :8180, realm choros): владелец тенанта открывает экран управления пользователями → создаёт пользователю логин+пароль → пользователь появляется в списке (active) → выходит и логинится под новым логином/паролем через реальный KC → видит записи тенанта → владелец деактивирует его → повторный вход под ним отклоняется KC — весь путь глазами через UI без Keycloak-admin/SSH/API-обходов.",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-15",
+      "text": "UX_REVIEW (D-062): design-steward подтвердил токены --chs-* на новом экране, label/aria на полях login/password/display_name, поле пароля type=password + autoComplete=off, читаемый контраст статус-чипа 'деактивирован' в обеих темах, честные Empty/Loading/Error.",
+      "verifiable_as": "manual"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0583-user-mgmt.spec.md"
+}

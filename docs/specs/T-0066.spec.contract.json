@@ -1,0 +1,107 @@
+{
+  "task_id": "T-0066",
+  "status": "ready",
+  "summary": "Написать docs/worker-api.md — справочный документ подключения external worker на любом языке: все 4 эндпоинта (POST /jobs, POST /external-task/fetch-and-lock, POST /external-task/:id/complete, POST /external-task/:id/fail) с request/response-схемами, сверенными с кодом; Job-объект; все HTTP-коды ошибок; happy-path walkthrough (enqueue→fetch→complete); auth (dev x-dev-user + keycloak Bearer JWT); retry/lock-timeout/reclaim-механика; idempotencyKey; curl-примеры + минимальный Python-воркер. BUILD пишет текст доки; fitness-скрипт ci/checks/worker-api-docs.sh проверяет полноту grep-ами.",
+  "functional": [
+    "FR-1: Все 4 эндпоинта описаны с полными request/response-схемами (поля, типы, required/optional, validation-ограничения из кода externalWorker.ts)",
+    "FR-2: Каждое задокументированное поле верифицировано против реализации (externalWorker.ts + inMemoryJobStore.ts/pgJobStore.ts) — нет инвентаризации 'по памяти'",
+    "FR-3: Job-объект задокументирован со всеми полями из src/core/types.ts: id, topic, variables, state (CREATED/LOCKED/COMPLETED/FAILED), retries, lockOwner, lockExpiry, createdAt, available_at, result",
+    "FR-4: Таблица всех HTTP-кодов ошибок и error-codes реально возвращаемых кодом: 400 VALIDATION/INVALID_JSON, 401 UNAUTHENTICATED, 403 NOT_OWNER, 404 NOT_FOUND, 409 LOCK_EXPIRED/NOT_LOCKED/RECORD_IN_PAYLOAD, 413 PAYLOAD_TOO_LARGE, 503 AUTH_UNAVAILABLE",
+    "FR-5: Happy-path walkthrough: enqueue (POST /jobs) → fetch-and-lock → complete, каждый шаг — curl + ответ",
+    "FR-6: curl-примеры для всех 4 эндпоинтов + минимальный Python-воркер (fetch-loop → complete/fail, без SDK Choros)",
+    "FR-7: Auth-раздел: dev-режим (x-dev-user), keycloak-режим (Bearer JWT, claims iss/aud/actor_type, получение токена client_credentials/ROPC), env-переменные auth",
+    "FR-8: Retry-раздел: lockDurationMs, lock_expiry, lock-reclaim (sweepIntervalMs ~30s), семантика retries в /jobs и /fail, available_at",
+    "FR-9: Описание idempotencyKey (опциональный, ≤255 символов, повторный enqueue с тем же ключом возвращает существующий job)",
+    "FR-10: Env-переменные choros-app из docs/environments.md §7 совпадают с тем, что читает auth.ts: PORT, CHOROS_AUTH_MODE, KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_AUDIENCE, JWKS_CACHE_TTL_MS, KC_ISSUER"
+  ],
+  "non_functional": [
+    "NF-1: Внешний разработчик поднимает воркер без чтения исходников (acceptance: понятен happy-path за < 30 мин)",
+    "NF-2: Python-пример — минимальный рабочий воркер (один модуль), не JS/TS",
+    "NF-3: Fitness-скрипт ci/checks/worker-api-docs.sh верифицирует наличие всех схем grep-ами (машинная проверка полноты)",
+    "NF-4: Env-переменные в worker-api.md синхронизированы с docs/environments.md (не дрейфуют)",
+    "NF-5: Документ — Markdown, нет генераторов и build-шагов"
+  ],
+  "out_of_scope": [
+    "Non-worker эндпоинты (inbox, org, rights, grants, processes, audit)",
+    "Развёртывание Choros-сервера (это docs/environments.md)",
+    "Документация BPMN-процессов и Flowable",
+    "OpenAPI/Swagger-генерация",
+    "SDK или клиентская библиотека",
+    "Авторизация (RBAC) — только аутентификация",
+    "Prod Keycloak TLS (E0.7)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "grep -cE 'POST /jobs|POST /external-task/fetch-and-lock|POST /external-task/.*complete|POST /external-task/.*fail' docs/worker-api.md ≥ 4 — все 4 эндпоинта присутствуют в документе",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "grep -cE '\\btopic\\b|\\bvariables\\b|\\bretries\\b|\\bidempotencyKey\\b' docs/worker-api.md ≥ 4 — все поля POST /jobs задокументированы",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "grep -cE '\\bworkerId\\b|\\btopics\\b|\\bmaxJobs\\b|\\blockDurationMs\\b' docs/worker-api.md ≥ 4 — все поля POST /external-task/fetch-and-lock задокументированы",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "grep -cE '\\bid\\b|\\btopic\\b|\\bvariables\\b|\\bstate\\b|\\bretries\\b|\\blockOwner\\b|\\blockExpiry\\b|\\bcreatedAt\\b|\\bavailable_at\\b' docs/worker-api.md ≥ 9 — Job-объект описан со всеми полями из src/core/types.ts",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "grep -cE 'NOT_FOUND|NOT_LOCKED|LOCK_EXPIRED|NOT_OWNER|RECORD_IN_PAYLOAD|UNAUTHENTICATED|AUTH_UNAVAILABLE' docs/worker-api.md ≥ 7 — все error-codes задокументированы",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "grep -cE 'enqueue|fetch.and.lock|complete' docs/worker-api.md ≥ 3 — happy-path walkthrough (enqueue→fetch-and-lock→complete) присутствует",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "grep -c 'curl' docs/worker-api.md ≥ 4 — curl-примеры для всех 4 эндпоинтов присутствуют",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "grep -cE '```python|```py' docs/worker-api.md ≥ 1 — Python-пример воркера присутствует",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "grep -cE 'x-dev-user|Bearer|CHOROS_AUTH_MODE' docs/worker-api.md ≥ 3 — оба auth-режима (dev и keycloak) задокументированы",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "Переменные CHOROS_AUTH_MODE, KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_AUDIENCE, JWKS_CACHE_TTL_MS присутствуют в docs/worker-api.md и совпадают с docs/environments.md §6–7 (grep по каждой переменной в обоих файлах)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "grep -cE 'retryTimeoutMs|CREATED|FAILED|lock.reclaim|sweepInterval|30' docs/worker-api.md ≥ 4 — retry-семантика и lock-reclaim задокументированы",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "grep -cE 'idempotencyKey|idempotent' docs/worker-api.md ≥ 2 — idempotencyKey задокументирован с семантикой",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "Все задокументированные request-поля присутствуют в src/http/externalWorker.ts; все response-поля — в src/core/types.ts. Верифицируется ревьюером BUILD на DoD-сверке.",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-14",
+      "text": "test -f docs/worker-api.md — документ существует по правильному пути в репо",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0066-worker-api-docs.spec.md"
+}

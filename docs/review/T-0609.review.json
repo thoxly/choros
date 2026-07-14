@@ -1,0 +1,65 @@
+{
+  "task_id": "T-0609",
+  "verdict": "approved",
+  "reviewed_sha": "6620d43",
+  "base_sha": "51fbc3224e0e519c8194c2dd97d392b037b577e0",
+  "previous_round": {"sha": "159bbfc", "verdict": "changes_requested", "blocking": "F-1 — грант из формы «Дать роли право» на реальный ресурс не резолвился PDP (scope hierarchy:'org' vs handle hierarchy:'resource'; resolveFor не читает resource_type)"},
+  "ci_seen": {
+    "green": true,
+    "_note": "Раунд 2 — доверификация дельты 839a53e..6620d43 (фикс F-1, путь A). Судья прогнал всё независимо. (1) ЖИВОЙ resolve-тест ci/checks/db/rights-resource-grant-resolve.db.test.ts на PG :55432 — 4/4 PASS: RESOLVE-1 грант из формы (POST /api/grants через реальный createServer(), ТОЧНОЕ тело формы: scope {kind:'node',hierarchy:'resource',nodeId:<real registry UUID>,nodeLevel:'registry'}) → resolveFor (frozen core) + makeDbGrantSource (production RLS DAO) + makeResourceAncestryOracle (production composite oracle) → denied:false; RESOLVE-2 чужой реестр → no_grant; RESOLVE-3 чужой тенант → cross_tenant (fail-closed до чтения грантов); RESOLVE-4 пин F-1: до-фиксный org-shape → no_grant. Write-path принял resource-hierarchy scope без препятствий (201, state:'confirmed' — routine read → PDP-active сразу). (2) Мутация D: регресс формы к org-эмиссии → web F-1-тест RED (KILLED), дерево восстановлено; RESOLVE-4 — серверный пин, форм-мутацию ловит именно web-слой (ожидаемое разделение). (3) Гейты: rights-ui-frozen-write PASS (grants.ts по-прежнему byte-unchanged — фикс НЕ тронул замороженный контур), rights-ui-no-new-write PASS, rights-ui-anti-case PASS, anti-case-lock PASS (baseline steady). (4) Полный web vitest: 61 files, 1669/1669 PASS (+7 новых F-1-тестов). npm run build exit 0. Обновлённый rights-resources.test.ts 4/4 PASS (id+node_level ассертятся как enforcement-identity). (5) Контракты spec/adr/handoff валидны после правки. Доки: формулировка-обманка «равно легитимная конвенция резолюции ресурса» снята и ЯВНО дезавуирована (spec §2.3 переписан: единственный enforcement-предикат, resource_type не читается, org-scope никогда не покрывает resource-запрос; ADR зеркально). Раунд 1 (159bbfc): root npm test 4947 pass, web 1662 pass, fitness:db rights-resources 4/4, мутации A/B/C 3/3 KILLED, все frozen/anti-case гейты + self-tests PASS — см. историю в git (839a53e)."
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "blocking",
+      "status": "RESOLVED (6620d43, путь A)",
+      "axis": 1,
+      "location": "web/src/screens/rights/ra-overview-forms.jsx (effectiveScope) + src/http/rights-resources.ts (id/node_level) + ci/checks/db/rights-resource-grant-resolve.db.test.ts",
+      "issue": "Раунд 1: covering-предикат resolveFor (grant-resolver.ts:589-607) матчит гранты по tenantId+operation+isEffective+isNarrowerOrEqual(scope) и НЕ читает resource_type; форма эмитила scope hierarchy:'org' → isNarrowerOrEqual короткозамыкал на несовпадении иерархий (grant-lattice.ts:280) → любой грант из формы был инертен на enforcement-пути (живой probe: uiFormGrant(org) covers handle(resource) = FALSE). Экран оставался декоративным — ровно блокирующая директива запуска.",
+      "resolution": "GET /api/rights/resources теперь отдаёт id (реальный UUID application/registry_def) + node_level рядом с uri/name; форма для реального ресурса эмитит scope {kind:'node', hierarchy:'resource', nodeId:<id>, nodeLevel:<node_level>} — ровно shape refToScope/миграции 117, тот же enforcement-путь, что READ-PDP. Доказано живьём сквозняком: UI-тело → POST /api/grants (реальный сервер) → production resolve-wiring → ALLOW записи этого реестра (RESOLVE-1) при герметичных негативах (RESOLVE-2/3) и пине старого shape (RESOLVE-4). resource_type остаётся человекочитаемой display-меткой — теперь честно задокументировано. Демо-ресурсы остаются на org-scope пути, но помечены «· демо» + квалифицированный тост (не ложный успех). Формулировка-обманка в spec §2.3 снята с явным дезавуированием."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "status": "open (не блокирует)",
+      "axis": 1,
+      "location": "src/core/flowable-client.ts getHistoricVariableInstances + screen-process-instance.jsx VariableRow",
+      "issue": "Переменные процесса рендерятся дословно без field-mask (T-0033 к engine-переменным не применяется). Для бизнес-переменных ОК; секреты по архитектуре идут через secret-handle, не через process variables. Инвариант-напоминание для follow-up при появлении секрет-несущих переменных. Гейт — tenant-membership, тот же, что у всей страницы (не расширен, AC-9).",
+      "suggestion": "Оставить для MVP; при необходимости — field-mask-hookpoint в follow-up."
+    },
+    {
+      "id": "F-3",
+      "severity": "nit",
+      "status": "open (не блокирует)",
+      "axis": 3,
+      "location": "src/http/rights-resources.ts registryResource fallback (appById miss)",
+      "issue": "При промахе appById (маловероятно под RLS) uri падает на registry:<uuid>.<slug> — неконсистентный формат display-метки. После F-1-фикса enforcement идёт по id/node_level, так что это чисто косметика display-строки.",
+      "suggestion": "Оставить."
+    },
+    {
+      "id": "F-4",
+      "severity": "nit",
+      "status": "new in round 2 (не блокирует)",
+      "axis": 1,
+      "location": "web/src/screens/rights/ra-overview-forms.jsx (real resource → «Охват: ресурс целиком»)",
+      "issue": "Для реального ресурса форма даёт ТОЛЬКО whole-resource охват (nodeLevel=application|registry) — нельзя сузить грант на реальный ресурс до подразделения/записи. Это сознательное честное упрощение (строка охвата говорит правду: «право действует на все записи»), и оно строго лучше инертного гранта. Сужение (record-level nodeId, комбинирование с org-осью) — материал для O2-follow-up.",
+      "suggestion": "Зафиксировано; не блокирует."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1 реальные ресурсы из DB как {uri,name,id,node_level}", "covered": true, "evidence": "rights-resources.test.ts 4/4 live PG; id/node_level ассертятся как enforcement-identity; mutation A (раунд 1) убила AC-1"},
+    {"ac": "AC-1 tenant-изоляция", "covered": true, "evidence": "isolation-кейс green"},
+    {"ac": "AC-2 пустой тенант → []", "covered": true, "evidence": "empty-tenant green"},
+    {"ac": "401 без x-dev-user", "covered": true, "evidence": "unauth green"},
+    {"ac": "Web merge real-first+demo-after (demoSeed-тегирование)", "covered": true, "evidence": "screen-rights.test.jsx green (44/44 в файле)"},
+    {"ac": "AC-7/AC-8/AC-9 variables/history/honest degrade/гейт не расширен", "covered": true, "evidence": "processes-live-instances green; мутации B/C (раунд 1) убиты"},
+    {"ac": "PDP-резолюция гранта на реальный ресурс (EFFECT, не только наполнение)", "covered": true, "evidence": "RESOLVE-1 ALLOW живьём (production wiring), RESOLVE-2 no_grant, RESOLVE-3 cross_tenant, RESOLVE-4 пин старого shape; mutation D (org-регресс формы) убита web F-1-тестом"}
+  ],
+  "role_gap_evidence": [
+    "Раунд 1: независимая трассировка PDP-пути (resolveFor не читает resourceType; иерархии org/resource дизъюнктны на grant-lattice.ts:280) + живой probe (permissive oracle) доказали F-1; мутации A/B/C 3/3 KILLED.",
+    "Раунд 2, живой сквозняк: POST /api/grants с ТОЧНЫМ телом формы (resource-hierarchy scope, real UUID) → 201 confirmed → resolveFor над record-handle того реестра → denied:false. Тот самый тест, который в раунде 1 был бы красным (рекомендация review принята дословно).",
+    "Мутация D (регресс эмиссии к hierarchy:'org' в форме): web-тест «emits scope {hierarchy:'resource'...}» RED — KILLED; восстановлено, git clean. RESOLVE-4 дополнительно пинит серверную семантику старого shape → no_grant.",
+    "Гейты после фикса: frozen-write (grants.ts нетронут — фикс прошёл ЧЕРЕЗ параметры существующего write-пути, не через его правку), no-new-write, anti-case ×2 — все PASS.",
+    "Доки: обманка снята не молча, а с явным дезавуированием и корректной механикой enforcement-предиката (проверено чтением нового §2.3 + ADR)."
+  ]
+}

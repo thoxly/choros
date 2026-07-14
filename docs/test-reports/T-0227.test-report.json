@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0227",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 2040,
+    "passed": 2040,
+    "failed": 0,
+    "skipped": 6
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-escalation-closed: a (op=transition, scope=record) holder is DENIED a terminate (no escalation)",
+      "test": "card-action.test.ts:320–337 'T-0227 FF-CA-10: a RECORD-targeted terminate is DENIED even under a ready bridge' — expects {ok:false, reason:'target_kind_mismatch'}, one audit_event(denied via transition:target_kind_mismatch), zero actor_event",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-legitimate-path: a process_instance-targeted terminate with process_instance-scoped grant is ACCEPTED",
+      "test": "card-action.test.ts:338–385 'T-0227 positive path: a proper process_instance terminate + process_instance grant is accepted under a ready bridge' — expects {ok:true}, audit type=card_action.deferred (C-2 no-op deferred, NOT executed)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-C2-audit: terminate/message no-op under ready bridge emits card_action.deferred, never false card_action.executed",
+      "test": "card-action.test.ts:383 — positive-path test asserts audit.rows(TENANT_A)[0].type === 'card_action.deferred' on a ready-bridge terminate; confirmed zero card_action.executed events emitted",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-FF-CA-10-fitness: broad-scope probe (registry-scoped record grant) cannot terminate a process_instance",
+      "test": "card-action.test.ts:387–end 'T-0227 FF-CA-10 broad-scope: a (transition, record) grant at the REGISTRY node does NOT cover a process_instance terminate' expects no_grant; plus bash ci/checks/card-action-broad-scope.sh PASS + --self-test fires on planted regression",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-fitness-amendment-legit: mutation-gateway-isolation.sh THAW is sanctioned (FF-FCI12, founder_decide@2026-06-15), branch-scoped, G1/G2/G6 teeth unconditional",
+      "test": "bash ci/checks/mutation-gateway-isolation.sh: SANCTION lines printed, G6-additive PASS vs merge-base 66c27da2; bash ci/checks/frozen-checks-immutable.sh: AUDIT granted for mutation-gateway-isolation.sh under T-0227 sanction",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-frozen-integrity: object-handle-isolation.sh and frozen-checks-immutable.sh green",
+      "test": "bash ci/checks/object-handle-isolation.sh: PASS all checks; bash ci/checks/frozen-checks-immutable.sh: PASS (sanction for mutation-gateway-isolation.sh explicit, all other frozen checks owned by T-0227)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-card-action-isolation: FF-CA-1..4 boundary invariants unbroken",
+      "test": "bash ci/checks/card-action-isolation.sh: PASS FF-CA-1..4 (resolveFor arbiter, closed enums, no own http, one binding-consistency mechanism)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-types-clean: tsc --noEmit exit 0",
+      "test": "npx tsc --noEmit: exit 0, 0 errors",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "ci_gate_run": {
+    "tsc_noEmit": "pass (exit 0, 0 errors)",
+    "eslint_src": "pass (exit 0, 2 pre-existing console warnings in bridge-runner.ts and externalTaskBridge.ts — 0 errors, not introduced by T-0227)",
+    "vitest_run": "pass (2040/2040 tests, 89 test files; 6 skipped = live-service skips: workerAuth.kc.e2e, flowable-client.integration — expected, pre-existing)",
+    "card_action_isolation_sh": "PASS FF-CA-1..4",
+    "card_action_broad_scope_sh": "PASS FF-CA-10 + self-test fires on planted regression",
+    "mutation_gateway_isolation_sh": "PASS G1/G2/G6; SANCTION printed for object-handle.ts + grant-lattice.ts (FF-FCI12, T-0227 thaw); G6-additive: files unmodified vs merge-base 66c27da2",
+    "object_handle_isolation_sh": "PASS all checks",
+    "frozen_checks_immutable_sh": "PASS; AUDIT GRANTED for mutation-gateway-isolation.sh under frozen-sanctions.jsonl T-0227 sanction"
+  },
+  "deferred_tiers": ["kc", "flowable", "db"],
+  "reviewer_nits": {
+    "R-1": "object-handle-isolation.sh Check-2 comment-vs-implementation drift (claims merge-base diff, implements working-tree git diff HEAD) — pre-existing weakness, not introduced by T-0227; out of scope for this task",
+    "R-2": "grant-resolver.ts covering predicate does not key on resourceType (relies on AncestryOracle disjointness); sound and backstopped by fail-closed kind-guard in fireCardAction; comment suggestion is informational, not blocking"
+  },
+  "tester": "claude-sonnet-4-6 (tester role, T-0227 TEST, independent of coder/reviewer D-007)",
+  "tested_commit": "9e39f775faac4c6e03447f642df261a269052308",
+  "test_date": "2026-06-15",
+  "head_sha": "9e39f775faac4c6e03447f642df261a269052308",
+  "notes": "All deterministic gates green. Full unit suite 2040/2040 pass on rebased tip 9e39f77. 4 fitness scripts specific to T-0227 green (card-action-isolation, card-action-broad-scope + self-test, mutation-gateway-isolation + sanction audit, object-handle-isolation, frozen-checks-immutable). ESLint 0 errors (2 pre-existing console warnings unrelated to T-0227). Skips are live-service (kc/flowable) — deferred to CI runner as expected. All 8 ACs confirmed covered by deterministic tests."
+}

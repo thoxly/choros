@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0016",
+  "status": "ready",
+  "summary": "Design-only specification of Choros's append-only per-tenant hash-chained audit floor: audit_event (per-tenant monotonic dense seq, DB-level no-UPDATE/DELETE via privilege-revoke AND no-mutate trigger, per-tenant prev_hash/row_hash chain over a vocab-pinned canonical preimage) + audit_head (one forward-only head per tenant, atomic with the append, externally anchorable). Inherits T-0013 tenant isolation verbatim; fixes the canonical-preimage formalism, the seven verifier defect classes (tamper/reorder/insert/delete/gap/dup/fork), and 20 CI-checkable acceptance criteria. DDL/triggers/verifier/snapshot-job land in T-0053 + dependent build tasks.",
+  "functional": [
+    "FR-1 audit_event is an append-only per-tenant tenant table (privilege-revoke AND no-mutate trigger; structural not discipline)",
+    "FR-2 per-tenant monotonic dense seq under per-tenant (not global) append serialization",
+    "FR-3 per-tenant hash chain: prev_hash=row_hash(seq-1), row_hash=H(canonical_preimage), genesis constants",
+    "FR-4 per-tenant forward-only head snapshot (audit_head), atomic with append, externally anchorable",
+    "FR-5 stateless per-tenant verifier detecting 7 defect classes (tamper/reorder/insert/delete/gap/dup/fork)",
+    "FR-6 canonical serialization + H + genesis pinned to vocab_version; any change = chain-format migration",
+    "FR-7 governance fields (type/actor/subject/scope/via/proposed_by/confirmed_by) first-class and hash-covered; grant events are rows"
+  ],
+  "non_functional": [
+    "NF-1 structural append-only, not discipline (CI-visible schema/privilege diff to defeat)",
+    "NF-2 per-tenant, zero cross-tenant contention (no global seq/lock/head)",
+    "NF-3 one audit narrative silo=pooled",
+    "NF-4 cheap offline stateless verifiability",
+    "NF-5 canonicalization stability (deterministic, length-unambiguous, NULL-distinct, JSON-canonical)"
+  ],
+  "out_of_scope": [
+    "SQL DDL/migrations/RLS policy bodies for audit_event+audit_head (T-0053)",
+    "no-UPDATE/no-DELETE rule/trigger + privilege grants implementation (T-0053)",
+    "append path + per-tenant serialization implementation (T-0053 + build tasks)",
+    "verifier implementation + live CI wiring (T-0053)",
+    "head-snapshot-to-versioned-object-storage job (T-0053/infra)",
+    "external hash-anchoring (tier-gated, not day-1, hypothesis §6-A #12)",
+    "HSM custody / hardware key management (tier-gated, not day-1)",
+    "signed audit/policy bundles (tier-gated, not day-1)",
+    "tenant isolation apparatus itself (owned by T-0013, consumed not redefined)",
+    "event taxonomy semantics / which events get audited (E3.x; grant model is T-0018)",
+    "152-FZ legal validation (lawyer, not engineering guard)"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "app role UPDATE on audit_event fails (privilege or trigger); row unchanged", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "app role DELETE on audit_event fails (privilege or trigger); row present", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "no-mutate trigger bars UPDATE/DELETE even for table owner (defense in depth)", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "append-only is structural: ci/checks lint fails if app role granted UPDATE/DELETE or trigger absent", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "seq is per-tenant dense+unique; UNIQUE(tenant_id,seq) rejects duplicate", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "append serialization per-tenant not global; N concurrent appends -> N distinct dense seq; no global lock/sequence", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "genesis: seq=GENESIS_SEQ row has prev_hash=GENESIS_PREV_HASH", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "chain linkage: prev_hash[n]=row_hash[n-1] for every n>genesis", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "row_hash=H(canonical_preimage) recomputed independently; preimage deterministic+length-unambiguous", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "preimage/hash vocabulary pinned to vocab_version; golden-digest snapshot test forces explicit bump on change", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "verifier detects all 7 defect classes (tamper/reorder/insert/delete/gap/dup/fork); clean chain verifies ok", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "verifier is stateless and per-tenant (no DB/network/global state; tenant-A ok while tenant-B tampered)", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "exactly one audit_head row per tenant; head names latest (seq,row_hash)", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "head advances forward-only; backward/skip update rejected by rule/trigger", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "append+head update atomic; head never names a non-durable row (rollback removes both)", "verifiable_as": "test"},
+    {"id": "AC-16", "text": "head externally anchorable; verifier fork-check flags live-head != anchored-head at same seq", "verifiable_as": "fitness"},
+    {"id": "AC-17", "text": "audit_event+audit_head in known_tenant_tables fixture; FORCE-RLS default-DENY tenant-scoped (reuses T-0013 probes)", "verifiable_as": "fitness"},
+    {"id": "AC-18", "text": "tenant_id leading column of every PK/composite-index/FK on both tables", "verifiable_as": "fitness"},
+    {"id": "AC-19", "text": "governance fields are first-class columns AND in the preimage (editing confirmed_by changes row_hash)", "verifiable_as": "test"},
+    {"id": "AC-20", "text": "grant-issuance event maps onto audit_event columns with no schema change (E3.6 = rows in this floor)", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0016-audit-floor.spec.md"
+}

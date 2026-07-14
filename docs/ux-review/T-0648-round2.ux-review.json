@@ -1,0 +1,49 @@
+{
+  "task_id": "T-0648",
+  "verdict": "approved",
+  "gate_seen": {
+    "green": true,
+    "red_rules": []
+  },
+  "themes_checked": ["light", "dark"],
+  "pattern_sources": [
+    {
+      "element": "ExecutorBadge sr-only type suffix",
+      "pattern": "visually-hidden accessible-name suffix (type spoken by AT in every render mode)",
+      "applied": true
+    },
+    {
+      "element": "ActorChip deactivated indicator",
+      "pattern": "muted + line-through + text marker (never colour-only, WCAG 1.4.1)",
+      "applied": true
+    }
+  ],
+  "findings": [],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {
+      "ac": "FIX-1: actor type reaches the accessible name in every ExecutorBadge render mode (showLabel=true, showLabel=false/bare)",
+      "covered": true
+    },
+    {
+      "ac": "FIX-2: HistoryStepRow completer glyph reflects the backend-resolved completedByType, no hardcoded human default when resolvable",
+      "covered": true
+    },
+    {
+      "ac": "FIX-3: deactivated actors show a muted style + «(деактивирован)» marker across all readers (audit, process-instance, grant-trail, analytics, inbox)",
+      "covered": true
+    }
+  ],
+  "notes": [
+    "Re-verified against actual code (not commit message claims): read web/src/components/components.jsx + components.css, src/http/processes.ts, src/http/inbox.ts, and all 5 reader screens.",
+    "FIX-1 confirmed closed: ExecutorBadge now unconditionally renders a `chs-sr-only` span with `(<type label>[, деактивирован])` alongside the visible label — present in default mode, showLabel=false, and bare mode. `.chs-sr-only` uses the standard clip-rect visually-hidden pattern (position:absolute, 1x1px, clip:rect(0,0,0,0)), not display:none/visibility:hidden — correctly stays in the AT tree while being invisible to sighted users. The decorative glyph (ExecGlyph) stays aria-hidden.",
+    "Test honesty verified: actor-chip.test.jsx's accessibleNameOf() walker skips aria-hidden subtrees, includes sr-only text nodes, and respects explicit aria-label overrides — a faithful approximation of AT accessible-name computation. Ran `npx vitest run src/components/actor-chip.test.jsx` directly: 27/27 pass, including the new FIX-1 (5 tests) and FIX-3 (3 tests) describe blocks. Full web suite also re-run: 80 files / 2175 tests, all green — no regressions from the sr-only/deactivated additions.",
+    "FIX-2 confirmed closed: src/http/processes.ts fetchInstanceHistoryDetail now carries completedByType/completedByDeactivated onto each history step, taken directly from the already-resolved batch map (`resolved.get(h.completedBy)` — the same hit used for completedByName), not a new per-step lookup — no N+1 introduced. web/src/screens/screen-process-instance.jsx HistoryStepRow now reads `step.completedByType || 'human'` and `step.completedByDeactivated`, replacing the prior hardcoded type=\"human\".",
+    "FIX-3 confirmed closed and genuinely propagated to all 5 readers (checked each diff, not just the commit message): screen-audit.jsx (display?.deactivated), screen-process-instance.jsx HistoryRow (display?.deactivated) and HistoryStepRow (step.completedByDeactivated), rights/ra-grant-trail.jsx (r.actor.deactivated / r.subject.deactivated), screen-operational-analytics.jsx TopActorsTable (r.actorResolved?.deactivated), and screen-inbox.jsx (t.execDeactivated, sourced from a new src/http/inbox.ts wire field execDeactivated populated from the existing claimerInfo.deactivated in all 3 findInboxItems call sites).",
+    "Visual style is token-only: .chs-exec--deactivated { opacity: 0.55 } plus line-through on the non-sr-only inner span — no hardcoded colors. This is a secondary/muted-state indicator; the accessible-name and tooltip carry the full semantic signal regardless of the opacity reduction, so residual contrast at 0.55 opacity is acceptable for this non-primary marker (consistent with the project's existing disabled-state conventions, e.g. .chs-input:disabled).",
+    "Ran the three named UX gates directly: ci/checks/ux/ux-g2-theme-pairing.sh PASS (light default + dark reachable in both token sources), ci/checks/ux/ux-g5-jargon-denylist.sh PASS (informational mode; 46 findings are all T-id references inside test describe() blocks, not real jargon in product-visible screens), ci/checks/ux/anti-uuid-actor-render.sh PASS (0 bare raw-identifier renders under web/src/screens/).",
+    "No new UX regression: normal (non-deactivated, non-bare) ActorChip/ExecutorBadge rendering is visually unchanged — the sr-only span is invisible to sighted users and the deactivated styling only applies when the new opt-in prop is passed. Full test suite green confirms no layout/behavior breakage.",
+    "FIX-4 (ADR §2.1 addendum on dual slug+id Map indexing) read and consistent with the code — not independently re-audited in depth this round since it is documentation-only and was not part of the original blocking/nit findings' code surface, but skimmed and found coherent with fetchInstanceHistoryDetail's resolved-map usage.",
+    "Round-1 changes_requested is now fully closed: the a11y blocker and both nits are resolved with real code changes, verified by direct inspection and test execution, not by trusting the author's commit message."
+  ]
+}

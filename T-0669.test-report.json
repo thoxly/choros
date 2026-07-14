@@ -1,0 +1,40 @@
+{
+  "task_id": "T-0669",
+  "role": "tester",
+  "verdict": "approved",
+  "commit": "4d76f359",
+  "summary": "Все заявленные гейты зелёные на обоих коммитах. На aea51d4b: tsc 0, серверный build ok, web build (vite) ok, полный vitest 2568 passed (+13 новых тестов), 3 CI-гейта PASS. RE-VERIFY на 4d76f359 (fix-forward UX-1): tsc 0, anti-case-lock 16/16 PASS, полный vitest 2570 passed (нетто +2: тест литерала×2 заменён на константа×1+использование×2, добавлены 2 раздельных стиль-теста пикер/save). Юнит-покрытие префилла (NB-2) настоящее и адверсариальное. Покрытие фильтрации/пустого/гонки — только source-presence (ограничение тир-а node-env, пре-существующая конвенция файла).",
+  "gates_rerun": {
+    "tsc_noEmit": { "cmd": "npx tsc --noEmit", "exit": 0, "status": "PASS", "commit": "4d76f359" },
+    "build_server": { "cmd": "npm run build (tsc + seed tsc)", "exit": 0, "status": "PASS", "commit": "aea51d4b", "note": "фикс 4d76f359 трогает только web/*.jsx — серверный build не затронут" },
+    "build_web": { "cmd": "web && npx vite build", "exit": 0, "status": "PASS", "commit": "aea51d4b", "note": "1 warning про размер чанка — пре-существующий" },
+    "vitest_full": { "cmd": "web && npx vitest run", "exit": 0, "status": "PASS", "test_files": 95, "tests": 2570, "commit": "4d76f359", "note": "2568 на aea51d4b → 2570 на 4d76f359 (нетто +2, соответствует заявке строителя); оба тронутых файла в изоляции green" },
+    "anti_case_lock": { "cmd": "bash ci/checks/anti-case-lock.sh", "exit": 0, "status": "PASS", "commit": "4d76f359", "note": "aggregate 16 (baseline 16) — steady" },
+    "forms_schema_binding": { "cmd": "bash ci/checks/forms-schema-binding.sh", "exit": 0, "status": "PASS", "commit": "aea51d4b" },
+    "ux_g5_jargon": { "cmd": "bash ci/checks/ux/ux-g5-jargon-denylist.sh", "exit": 0, "status": "PASS", "commit": "aea51d4b", "note": "informational-режим; текст хинта фиксом не менялся, FormDesigner.jsx не флагован" }
+  },
+  "coverage_assessment": {
+    "prefill_nb2": {
+      "status": "strong",
+      "detail": "process-catalog.test.js: findExistingBinding (match обоих ключей, null на fresh/пустых/не-массиве) + prefillFieldsFromBinding (проекция всех апсерт-колонок, null-safe дефолты, NULL slug → '' а не 'null', round-trip через buildBindingPayload доказывает target_registry_slug='custom-registry' НЕ null — прямой анти-регресс на баг NB-2)."
+    },
+    "style_split_picker_vs_save": {
+      "status": "adequate",
+      "detail": "Новые тесты 4d76f359 закрепляют раздельно: пикер-блок содержит role=status + chs-color-text-muted и НЕ содержит role=alert/chs-color-danger; save-блок содержит role=alert + chs-color-danger. Слайс-маркеры различают блоки корректно (тернарный '? (' vs '&& ('). Регресс UX-1 в любую сторону ловится."
+    },
+    "filtration_empty_race": {
+      "status": "weak",
+      "detail": "FormDesigner.test.jsx тир — node-env renderToStaticMarkup, БЕЗ jsdom/act. Поведенчески фильтрация (AC-1), пустой список (AC-2), гонка (AC-3) и полный-список-без-процесса (AC-5) НЕ прогоняются — только source-presence. Конвенция того же файла, не регресс подхода; логика проста, риск низкий."
+    }
+  },
+  "blocking_findings": [],
+  "non_blocking": [
+    {
+      "id": "T-NB1",
+      "severity": "P3",
+      "title": "AC-1/AC-2/AC-3/AC-5 не покрыты поведенчески",
+      "detail": "Фильтрация пикера, пустое состояние, гонка загрузки и полный-список-до-выбора-процесса верифицированы только source-presence (тир node-env без DOM). Живой поведенческий тест (jsdom/testing-library) закрыл бы разрыв. Префилл (AC-6) — покрыт настоящими юнитами.",
+      "location": "web/src/forms/FormDesigner.test.jsx"
+    }
+  ]
+}

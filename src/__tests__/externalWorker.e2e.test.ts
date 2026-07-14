@@ -148,7 +148,9 @@ describe("external-worker endpoints (default store)", () => {
   let port: number;
 
   beforeAll(async () => {
-    server = createServer();
+    // T-0186: pin to in-memory store so the suite is green regardless of
+    // whether DATABASE_URL is set in the ambient environment (D-056).
+    server = createServer(undefined, undefined, "memory");
     port = await startServer(server);
   });
 

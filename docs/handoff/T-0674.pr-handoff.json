@@ -1,0 +1,31 @@
+{
+  "task_id": "T-0674",
+  "status": "pr_open",
+  "branch": "task/T-0674-cross-tenant-userpref",
+  "summary": "Substrate/gate-integrity fix. ci/checks/db/cross_tenant.test.ts was red on dev (`seedRowForTable: unknown table user_pref`) because migration 129 (T-0651) added choros.user_pref but the test's exhaustive per-table seeder switch had no case for it. Added a standalone seed case for user_pref (no FK deps, same pattern as the existing 'section' case: uuid() id, generic actor='seed-actor'/key='seed.key'/value='{}'::jsonb, created_at/updated_at=0) plus the required entry in the SEEDED_TABLES static-guard set (AC-CT-4 checks both the switch case AND this set independently). No product code, no schema/RLS changes — test-fixture-only.",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "ci_local_detail": {
+    "types": "npx tsc --noEmit — clean, 0 errors.",
+    "tests": "DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism ci/checks/db/cross_tenant.test.ts --testTimeout=25000 — 199/199 passed, real run against live Postgres (not skipped). Confirmed by name: 'AC-1 ... table: user_pref' PASS, 'AC-2 ... table: user_pref' PASS, 'AC-CT-4 ... table user_pref has a seeder in seedRowForTable' PASS.",
+    "fitness": "anti-case-lock.sh (D-064 gate) — PASS, aggregate literal counts unchanged/decreased vs baseline, no case-content added (test-fixture-only change, no literals touched)."
+  },
+  "user_pref_isolation_result": {
+    "seed_row": "INSERT INTO choros.user_pref (tenant_id, id, actor, key, value, created_at, updated_at) VALUES ($1, uuid(), 'seed-actor', 'seed.key', '{}'::jsonb, 0, 0) ON CONFLICT DO NOTHING — generic, no case-content, mirrors the existing 'section' seeder's shape (no cross-table FK, standalone insert).",
+    "isolation_verdict": "PASS — user_pref IS correctly tenant-isolated. AC-1 (explicit WHERE tenant_id=B from tenant-A context -> 0 rows) and AC-2 (no WHERE, only tenant-A rows visible) both green for user_pref, proving migration 129's RLS FORCE + default-DENY policy (choros.tenant_id GUC) works as designed. Not a defect in T-0651 — the gap was purely the test's seeder coverage, not the table's security posture."
+  },
+  "files_changed": [
+    "ci/checks/db/cross_tenant.test.ts",
+    "docs/handoff/T-0674.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "blocked_reason": "",
+  "friction_events": [
+    "Two places needed the new table, not one: the switch-case in seedRowForTable AND the separate SEEDED_TABLES Set used by the static AC-CT-4 completeness guard (describe block at the end of the file). Missed the second on first pass — the guard test 'table user_pref has a seeder in seedRowForTable' failed even after the switch case was added, since SEEDED_TABLES is checked independently as a belt-and-suspenders anti-drift mechanism. Fixed by adding 'user_pref' to SEEDED_TABLES; full 199/199 green on the next run."
+  ]
+}

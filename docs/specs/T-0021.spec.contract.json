@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0021",
+  "status": "ready",
+  "summary": "grant_resolver / data-access gateway (PDP): the single chokepoint mapping an ObjectHandle to grant-filtered record fields — action-time-bound, fail-closed, with one projection function so a human form and an agent payload get byte-identical views.",
+  "functional": [
+    "FR-1: exported as grantResolver: HandleResolver, implementing T-0015's resolveHandle; the only handle->fields edge besides the deny-all default.",
+    "FR-2: grants resolved at call time via an injected GrantSource (getGrants(subject, nowMs)), never a handle-mint snapshot.",
+    "FR-3: a grant covers the handle iff handle ResourceRef (mapped to a resource scope element) is isNarrowerOrEqual(handleScope, grant.scope) AND operation matches AND isEffective(grant, now).",
+    "FR-4: one pure projectFields(rawFields, visibleFieldSet); human-form and agent-payload paths both call it.",
+    "FR-5: default-deny — no covering grant / out-of-window / cross-tenant / absent record => {denied:true, reason} with no fields, reason in {no_grant, cross_tenant, not_found}.",
+    "FR-6: operation-aware — a read grant does not authorize update of the same ref.",
+    "FR-7: rights derived from grant rows only (no parallel record-ACL or field-visibility store).",
+    "FR-8: resolve decision MAY emit a T-0016 audit obligation shape (via=grant_resolver); durable append deferred to T-0053."
+  ],
+  "non_functional": [
+    "NF-1: pure TS static-now — no DB/network/engine/LLM; now is a parameter; all IO behind injected ports (GrantSource, RecordSource, AncestryOracle); deterministic.",
+    "NF-2: additive — implements T-0015 HandleResolver unchanged; does not edit object-handle.ts / grant-lattice.ts / types.ts exports.",
+    "NF-3: cross-tenant resolve denied before any grant/record read.",
+    "NF-4: no payload caching written back into a handle/variable; any future cache keyed by subject+grant, never on the handle.",
+    "NF-5: proportionate thin core — authority math stays in T-0018 (isNarrowerOrEqual, isEffective, meet)."
+  ],
+  "out_of_scope": [
+    "Postgres GrantSource/RecordSource + RLS DAO (DB-permission 'no direct DAO path') -> T-0053.",
+    "BPMN deploy-time linter (raw-object binding rejection) -> T-0027.",
+    "Engine runtime state-mutation guard (engine writes only via gateway) -> T-0028.",
+    "Richer value-aware masking grammar / data-classification / egress -> T-0033 / E4.3.",
+    "Toolset resolution / mcp_tool.declares verification (the other grant projection) -> T-0043 / E5.3.",
+    "Durable audit append (resolver emits obligation shape only) -> T-0053.",
+    "Substitutions / on-behalf-of routing -> T-0026; resolver sees only the effective subjectId."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "resolveHandle(handle, subject) with NO covering grant returns {denied:true, reason:'no_grant'} and no fields key.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "Handle tenantId != subject.tenantId returns {denied:true, reason:'cross_tenant'} without reading any grant or record (tenant-gate first).", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "Action-time binding: covering grant at t0, revoked/empty at t1>t0 => resolve at t0 {denied:false}, at t1 {denied:true,'no_grant'}; grants re-queried per call, no mint-time snapshot.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "An otherwise-covering grant outside its validity window at resolve-now (isEffective false) yields {denied:true,'no_grant'}.", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "Human==agent equivalence: same (grant set, ref, record) -> a human-form call-site and an agent-payload call-site produce deep-equal {denied:false, ref, fields}; exactly one projection function both invoke.", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "Visible field set = union of covering grants' facet fields intersected with the handle Facet fields (when present); fields outside the set are absent (not null) from the returned fields object.", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "A read grant does not satisfy a resolve requesting update (and vice-versa); operation mismatch => {denied:true,'no_grant'}.", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "Handle ResourceRef not isNarrowerOrEqual any covering grant scope (record outside granted subtree per AncestryOracle) => {denied:true,'no_grant'}; inside subtree => resolved.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "RecordSource reports ref absent => {denied:true, reason:'not_found'}; no fabricated fields.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "Single chokepoint (structural): resolveHandle stays the only handle->fields export; ci/checks/single-resolver.sh stays green; no second handle->fields edge introduced.", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "No second authority subsystem: decision and field set computed solely from grant rows (via T-0018); no parallel record-ACL / field-visibility store.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "Pure: two invocations with deeply-equal inputs (ports return same data, same now) return deeply-equal outputs; no IO outside injected ports.", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "Satisfies T-0015 HandleResolver unchanged: type-checks as const grantResolver: HandleResolver and can replace denyAllResolver at the seam with no signature change.", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "DB enforcement (activates later): 'no direct DAO path' enforced by Postgres role-permissions + RLS so no path outside the gateway reads record fields.", "verifiable_as": "manual"},
+    {"id": "AC-15", "text": "Deploy/runtime enforcement (activates later): engine variables carry only handles and the engine mutates only via the gateway (BPMN linter + engine guard).", "verifiable_as": "manual"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0021-grant-resolver-pdp.spec.md"
+}

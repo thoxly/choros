@@ -1,0 +1,27 @@
+{
+  "task_id": "T-0733",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/org-move-api.db.test.ts",
+      "issue": "Нет прямого live-PG негативного кросс-тенантного теста специфично для batchResolveOrgNodes (department под тенантом A, GET /api/audit под тенантом B, честный miss через реальный HTTP). Изоляция доказана композицией: RLS живьём на смежных таблицах (department/position, миграции 014/015, FORCE ROW LEVEL SECURITY, cross-tenant-fitness.sh) + unit-тест audit-log.test.ts на параметр запроса (tenantId вызывающего, никогда второй тенант) + node-resolver.test.ts case (g). withTenant — byte-identical проверенный паттерн actor-resolver.ts (T-0648/T-0685). Не blocking — RLS-политика не новый код этой задачи, withTenant не новый паттерн.",
+      "suggestion": "Follow-up (не срочно): добавить в org-move-api.db.test.ts прямой live-негатив — второй тенант, department.moved от тенанта A, GET /api/audit тенантом B → targetDisplay.resolved===false — для полноты доказательной базы на будущее."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "department.moved targetDisplay резолвится в имя (не MonoId-id)", "covered": true },
+    { "ac": "position.moved targetDisplay резолвится в имя (не MonoId-id)", "covered": true },
+    { "ac": "Удалённый узел -> честная деградация (Отдел удалён / Должность удалена), никогда UUID, никогда undefined", "covered": true },
+    { "ac": "batchResolveOrgNodes -- один UNION ALL запрос, O(1) на страницу, не N+1", "covered": true },
+    { "ac": "Кросс-тенант закрыт (SET LOCAL + литеральный WHERE, RLS FORCE на department/position)", "covered": true },
+    { "ac": "append-only не нарушен -- writer (audit-writer.ts, seed-write.ts) не тронут", "covered": true },
+    { "ac": "isOrgNodeMoveAction выбирает NodeRef vs ActorChip корректно по ev.action", "covered": true },
+    { "ac": "employee.moved регрессии нет (по-прежнему ActorChip, не NodeRef)", "covered": true },
+    { "ac": "UX консистентность NodeRef/ActorChip (typography, theme-pairing)", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

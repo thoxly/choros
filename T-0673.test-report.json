@@ -1,0 +1,26 @@
+{
+  "task_id": "T-0673",
+  "role": "tester",
+  "verdict": "approved",
+  "summary": "Все гейты зелёные. tsc=0, vitest 2532/2532 (94 файла), anti-uuid-actor-render PASS, anti-case-lock PASS. Покрытие: батч-один-запрос (гейт hasPersonColumn + stateMatches===1/fetchMatches===1), honest fallback (список И деталь), person в списке (PersonCell) И деталке (PersonFieldValue), sentinel-идентичность symbol, non-Map tolerance.",
+  "gates": {
+    "tsc_noEmit": { "exit": 0, "status": "PASS" },
+    "vitest_run": { "exit": 0, "status": "PASS", "files": 94, "tests_passed": 2532, "tests_total": 2532, "note": "baseline из прошлого мержа был 2519; +13 новых тестов T-0673 (PersonCell 4 + wiring 3 + PersonFieldValue 3 + wiring 2 + formatCellValue person 2 переписаны/добавлены) — согласуется с диффом." },
+    "anti_uuid_actor_render": { "exit": 0, "status": "PASS", "detail": "0 bare raw-identifier render(s) under web/src/screens/" },
+    "anti_case_lock": { "exit": 0, "status": "PASS", "detail": "Phase1 delegates clean; Phase2 full denylist steady: e-larina 2/2, e-orlov 2/2, aggregate 16/16 — erodes-or-steady, ничего не выросло." }
+  },
+  "coverage_assessment": {
+    "batch_one_request": "COVERED — тест 'batch-loads employees via fetchEmployees() ONCE per page — gated on hasPersonColumn' (source-assert на hasPersonColumn useMemo + !hasPersonColumn return + fetchEmployees()); деталь 'reuses the SAME authorNames map … no second fetch' (stateMatches===1, fetchMatches===1).",
+    "fallback": "COVERED в ОБОИХ экранах — PersonCell 'honest fallback: id absent from batch map renders RAW slug' + non-Map tolerance; PersonFieldValue те же два теста. Демоция UUID→tooltip покрыта косвенно через ActorChip/isMachineActorLabel (свои тесты T-0648/T-0685, не тронуты).",
+    "person_in_list_and_detail": "COVERED — список: PersonCell 4 unit + wiring 3 (dispatch на PERSON_CELL_ASYNC, импорт fetchEmployees, degrade .catch). Деталь: PersonFieldValue 3 unit + wiring 2 (isAsyncPerson regex, PersonFieldValue проброс, single-fetch reuse).",
+    "sentinel_identity": "COVERED — 'PERSON_CELL_ASYNC is a stable symbol identity (not recreated each call)'."
+  },
+  "findings": [
+    {
+      "severity": "P2",
+      "what": "Тест 'threads deactivated through when the batch entry carries it' зелёный на руками-построенной Map с deactivated:true, но продовый источник (/api/org→listOrgTree) не отдаёт deactivated — тест не отражает реальный контракт данных (ложное покрытие сигнала деактивации).",
+      "where": "web/src/screens/screen-app-records.test.jsx (describe PersonCell, тест deactivated) vs src/db/org.ts:162-166",
+      "why": "Не блокирует (сам PersonCell корректен как чистая функция; резолв имени покрыт честно). Флаг о рассинхроне тест-фикстуры с реальным shape /api/org — см. review/ux P2."
+    }
+  ]
+}

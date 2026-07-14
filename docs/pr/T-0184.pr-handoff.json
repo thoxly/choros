@@ -1,0 +1,105 @@
+{
+  "task_id": "T-0184",
+  "status": "pr_open",
+  "branch": "task/T-0184-bypassrls-residual",
+  "merge_target": "dev",
+  "base_commit": "7add922046c96ecf60a3fe32b4822847cb4fa3fa",
+  "head_commit": "034e74f",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0184 closes the residual BYPASSRLS read gap in queryGrantTrail (src/db/audit-grant-trail.ts): adds explicit `tenant_id = $2` to the SQL conditions array, mirroring the T-0141 org.ts pattern. New pool-role fitness test (ci/checks/db/grant-trail-pool-role.test.ts) uses choros_migrator (BYPASSRLS) to prove AC-2 cross-tenant isolation and AC-3 self-test (raw SELECT without WHERE sees TENANT_B rows — confirming fix is load-bearing). Static check grant-trail-bypassrls-predicate.sh wired into npm run fitness. Nit R-1 closed: grep anchor changed from comment-matching WHERE pattern to backtick-string `tenant_id = $N` (planted-file-without-condition now correctly goes RED). npm run ci: 1107/1107 passed. fitness:db T-0184 tests: 2/2 PASS. 5 pre-existing DB failures unrelated to this task.",
+  "commits": [
+    {
+      "sha": "5dd3f11",
+      "phase": "SPEC",
+      "message": "T-0184 SPEC: residual BYPASSRLS reads + pool-role fitness"
+    },
+    {
+      "sha": "a6109ec",
+      "phase": "BUILD",
+      "message": "T-0184 BUILD: explicit tenant predicate in queryGrantTrail + pool-role fitness (T-0141 R-1 follow-up)"
+    },
+    {
+      "sha": "4b03b0e",
+      "phase": "REVIEW",
+      "message": "T-0184 REVIEW: approved — explicit tenant predicate + pool-role fitness"
+    },
+    {
+      "sha": "034e74f",
+      "phase": "TEST+PR",
+      "message": "T-0184 nit R-1: anchor static check to SQL condition, not comments"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "4b03b0e",
+      "findings_resolved": [
+        "R-1 — grep pattern anchored to `tenant_id = $N` (closed in commit 034e74f, TEST phase)"
+      ],
+      "findings_nit": [],
+      "artifact": "docs/design/T-0184.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1107,
+      "passed": 1107,
+      "failed": 0,
+      "ac_coverage": "6/6",
+      "fitness_static": "PASS — grant-trail-bypassrls-predicate.sh green (real + self-test); nit R-1 closed",
+      "tested_commit": "034e74f",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 2 cosmetic no-console warnings (pre-existing), 0 errors",
+        "fitness_static_checks": "PASS — all checks green including grant-trail-bypassrls-predicate.sh",
+        "vitest_unit": "1107/1107 passed, 6 skipped (flowable integration offline)",
+        "fitness_db_t0184": "2/2 — ci/checks/db/grant-trail-pool-role.test.ts — AC-2 + AC-3 PASS via choros_migrator BYPASSRLS pool",
+        "fitness_db_pre_existing_fails": "schema.test.ts > FF-ACT (Flowable tables present), grant-editor.adversarial.test.ts > ADV-2, seed-pack.test.ts > AC-8/AC-9 (timeout), genesis-owner-seed.test.ts > AC-12 — all pre-existing, none touch T-0184 files"
+      },
+      "artifact": "docs/test-reports/T-0184.test-report.md",
+      "contract_artifact": "docs/design/T-0184.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/db/audit-grant-trail.ts",
+    "ci/checks/db/grant-trail-pool-role.test.ts",
+    "ci/checks/grant-trail-bypassrls-predicate.sh",
+    "package.json",
+    "docs/specs/T-0184-bypassrls-residual.spec.md",
+    "docs/specs/T-0184.spec.contract.json",
+    "docs/design/T-0184.review.contract.json",
+    "docs/reviews/T-0184.review.md",
+    "docs/test-reports/T-0184.test-report.md",
+    "docs/design/T-0184.test-report.contract.json",
+    "docs/pr/T-0184.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "stage-2-pool-split",
+      "severity": "known-gap",
+      "description": "Runtime read pool remains choros_migrator (BYPASSRLS). Explicit WHERE tenant_id = $2 is the primary guard; RLS provides defence-in-depth only on NOBYPASSRLS connections. The structural fix (APP_DATABASE_URL = choros_app, NOBYPASSRLS) is the Stage-2 candidate, blocked on runtime config split.",
+      "follow_up_candidate": "Split DATABASE_URL into APP_DATABASE_URL (choros_app, NOBYPASSRLS) + MIGRATOR_DATABASE_URL — previously tracked as T-0022; makes RLS the primary guard and WHERE tenant_id defence-in-depth for all read paths."
+    }
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migrations": "T-0184 adds no SQL migrations, no DDL changes, no known_tenant_tables.txt changes. Pure application-layer fix (SQL query text + fitness test + static check).",
+    "no_gotchas": "No sibling-frozen-file false-positives expected. No role-criticality-isolation false-positive (no known_tenant_tables.txt change). All fitness checks green on branch.",
+    "downstream_effect": "queryGrantTrail now carries explicit WHERE tenant_id = $2 on all pool paths. Additive (redundant-but-correct on NOBYPASSRLS). Unblocks Stage-2: APP_DATABASE_URL split can proceed knowing the application layer is already hardened."
+  },
+  "stage2_candidate": {
+    "name": "APP_DATABASE_URL split — NOBYPASSRLS runtime pool",
+    "description": "Create APP_DATABASE_URL env var pointing to choros_app (NOBYPASSRLS) for all read/write application paths; keep DATABASE_URL / MIGRATOR_DATABASE_URL for migration runner only. With this split, RLS becomes the primary cross-tenant guard and the explicit WHERE tenant_id clauses become defence-in-depth. The existing pool-role fitness test (grant-trail-pool-role.test.ts) will need to update its migratorUrl() pool to appUrl() to reflect the new runtime role.",
+    "blocked_on": "Runtime config split (APP_DATABASE_URL env var), server restart, and update of all pool constructors in src/ to select app vs migrator URL by context."
+  },
+  "friction_events": []
+}

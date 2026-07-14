@@ -1,0 +1,52 @@
+{
+  "task_id": "T-0602",
+  "verdict": "pass",
+  "reviewed_sha": "b8ba914ac6826a9b94a26acf5646bac43eaafe5f",
+  "base_sha": "bb67bf41714fbac7f86e31f98589325ad6313fdc",
+  "deterministic": {
+    "total": 1653,
+    "passed": 1653,
+    "failed": 0,
+    "_note": "cd web && npx vitest run — 60 files passed (60), 1653 tests passed (1653), exit 0, duration ~6s. Целевой файл screen-llm-connections.test.jsx: 55 tests (было ~40, +15 за T-0602 describe-блоки: field-removal AC-1/2/4, dynamic instruction AC-5/6, humanizeSecretHandleScheme AC-7). Смежные screen-llm-connections.states.test.jsx (9) + .a11y.test.jsx (7) зелёные без регресса. Root npm run build (tsc && seed/tsconfig): exit 0. cd web && npm run build (vite): exit 0 (516 модулей; единственное предупреждение — pre-existing chunk-size >500kB, не связано с правкой)."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1 (форма без секрет-хэндл-поля + secretHandle/setSecretHandle state)", "test": "screen-llm-connections.test.jsx: 'AC-1: no Секрет-хэндл field label' + 'no secretHandle/setSecretHandle state' + 'no env://DEEPSEEK_API_KEY placeholder'", "result": "pass"},
+    {"ac": "AC-2 (onCreate не шлёт body.secret_handle)", "test": "screen-llm-connections.test.jsx: 'AC-2: onCreate never builds a secret_handle POST field'", "result": "pass"},
+    {"ac": "AC-3 (успех-баннер всегда честный next-step)", "test": "screen-llm-connections.test.jsx: 'T-0602: success banner unconditionally includes the honest next-step line' (createOkNoKey удалён)", "result": "pass"},
+    {"ac": "AC-4 (описание формы без секрет-хэндл/env/vault)", "test": "screen-llm-connections.test.jsx: 'AC-4: create-form description does not mention секрет-хэндл/env/vault'", "result": "pass"},
+    {"ac": "AC-5 (инструкция динамична по provider + fallback)", "test": "screen-llm-connections.test.jsx: 'instruction block derives from selectedPreset' + 'honest neutral fallback for self-hosted/other'", "result": "pass"},
+    {"ac": "AC-6 (consoleHint для всех 5 провайдеров)", "test": "screen-llm-connections.test.jsx: 'PROVIDER_PRESETS carries consoleHint … null for self-hosted/other'", "result": "pass"},
+    {"ac": "AC-7 (карточка — человеческая подпись по схеме)", "test": "screen-llm-connections.test.jsx: 6× humanizeSecretHandleScheme unit (app/env/vault/unknown/null) + 'humanized label ahead of raw redacted on card'", "result": "pass"},
+    {"ac": "AC-8 (g5-jargon 0 новых находок)", "test": "bash ci/checks/ux/ux-g5-jargon-denylist.sh (PASS, информационный) + --self-test (PASS)", "result": "pass"},
+    {"ac": "AC-9 (g8-scroll зелёный)", "test": "bash ci/checks/ux/ux-g8-scroll-reachable.sh (PASS)", "result": "pass"},
+    {"ac": "AC-10 (anti-case-lock зелёный)", "test": "bash ci/checks/anti-case-lock.sh (PASS, aggregate 24=24 baseline)", "result": "pass"},
+    {"ac": "AC-11 (существующие тесты без регресса, T-0574 instruction обновлён)", "test": "полный web vitest 1653/1653, states+a11y зелёные", "result": "pass"},
+    {"ac": "AC-12 (build root+web зелёный)", "test": "npm run build (root, exit 0) + cd web && npm run build (exit 0)", "result": "pass"},
+    {"ac": "AC-13 (web vitest зелёный)", "test": "cd web && npx vitest run (exit 0)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "ux-g5-jargon-denylist.sh (main)", "result": "pass", "note": "информационный, 31 pre-existing finding — все в тест-файлах (T-id/telLinear-паттерны) и других экранах, 0 в видимом тексте T-0602"},
+    {"check": "ux-g5-jargon-denylist.sh --self-test", "result": "pass", "note": "детектор ловит telLinear + bare-UUID, не флагает T-id в комментариях"},
+    {"check": "ux-g8-scroll-reachable.sh", "result": "pass"},
+    {"check": "anti-case-lock.sh", "result": "pass"}
+  ],
+  "mutation_probes": [
+    {
+      "id": "MUT-A",
+      "description": "Вернул поле секрет-хэндла в JSX формы создания (Field label='Секрет-хэндл (ссылка, не ключ)' placeholder='env://DEEPSEEK_API_KEY')",
+      "expectation": "AC-1 тесты 'без секрет-хэндл-поля' должны покраснеть",
+      "result": "RED (ожидаемо): 2 теста упали — 'AC-1: no Секрет-хэндл field label anywhere in the file' + 'AC-1: no leftover env://DEEPSEEK_API_KEY placeholder'. 53/55 остались зелёными. Тесты бьют. Файл восстановлен (git status clean)."
+    },
+    {
+      "id": "MUT-B",
+      "description": "Сломал humanizeSecretHandleScheme — всегда возвращает сырую строку (return redacted) вместо человеческой подписи по схеме",
+      "expectation": "тесты подписей карточки должны покраснеть",
+      "result": "RED (ожидаемо): 5 тестов упали — app://→'Ключ зашифрован и привязан', env://→'Ключ сервера…', vault://→'Ключ из внешнего хранилища…', unknown→null, null/undefined/empty→null. 50/55 остались зелёными. Тесты бьют. Файл восстановлен (git status clean)."
+    }
+  ],
+  "pre_existing_red_excluded": {
+    "gate": "FF-10 tier-isolation",
+    "note": "Красный на базе bb67bf4 (src/db/registry-digest-dao.ts tier='published' вне promote-модуля) — вне периметра T-0602 (git diff --name-only bb67bf4..HEAD не содержит эту поверхность), уже починен на dev (a40fde3). Не вешается на вердикт по прямому указанию задачи."
+  },
+  "failures": []
+}

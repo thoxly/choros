@@ -1,0 +1,109 @@
+{
+  "task_id": "T-0146",
+  "status": "pr_open",
+  "branch": "task/T-0146-frozen-checks-immutable",
+  "merge_target": "dev",
+  "base_commit": "353ec791d997d0e5325ea660055188a0cf3a845d",
+  "head_commit": "f90238c",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Новый мета-гейт ci/checks/frozen-checks-immutable.sh — pure-bash fitness-чек, который на task-ветке запрещает изменение или удаление чужих ci/checks/*.sh (владелец определяется по BASE_REF-версии второй строки файла: # T-XXXX ·). Закрывает ретро-паттерны T-0035/T-0118 (exclusion-правки в чужих frozen-чеках). R-1 ownership-capture закрыт: владелец читается из BASE_REF, недоступного для подделки текущей веткой. R-2 branch-name-spoof — принятый остаточный риск, задокументирован в ADR §11 и заголовке скрипта. 10/10 hostile-probe тестов. CI: tsc+eslint+fitness(186/186)+vitest(904/904) — зелёный.",
+  "commits": [
+    {
+      "sha": "57b1e68",
+      "phase": "SPEC",
+      "message": "T-0146 SPEC: frozen-checks-immutable meta-gate"
+    },
+    {
+      "sha": "583db25",
+      "phase": "DESIGN",
+      "message": "T-0146 DESIGN: frozen-checks-immutable ADR"
+    },
+    {
+      "sha": "54d0463",
+      "phase": "BUILD",
+      "message": "T-0146 BUILD: frozen-checks-immutable meta-gate"
+    },
+    {
+      "sha": "2913dd9",
+      "phase": "REVIEW",
+      "message": "T-0146 REVIEW: changes_requested"
+    },
+    {
+      "sha": "7039aeb",
+      "phase": "BUILD-fix",
+      "message": "T-0146 BUILD-fix: close R-1 ownership-capture (base-ref owner) + R-2 branch-spoof guard (review blocking)"
+    },
+    {
+      "sha": "f90238c",
+      "phase": "RE-REVIEW",
+      "message": "T-0146 RE-REVIEW: approved"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "7039aeb",
+      "findings_resolved": ["R-1 (blocking) — ownership-capture via BASE_REF read (PROBE-2/PROBE-3 pass)"],
+      "findings_nit": ["R-2 — branch-spoof residual (accepted, documented)", "R-3 — known_tenant_tables shrink (accepted by design)", "R-4 — package.json chain removal (accepted by design)", "R-5 — HEAD fallback sound (no action)"],
+      "artifact": "docs/design/T-0146.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 914,
+      "passed": 914,
+      "failed": 0,
+      "ac_coverage": "12/12",
+      "hostile_probes": "10/10",
+      "fitness_static": "186/186",
+      "tested_commit": "f90238c",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 2 cosmetic no-console warnings (pre-existing), 0 errors",
+        "fitness_static_checks": "186/186 PASS lines, 0 FAIL (including frozen-checks-immutable.sh self-check on own branch)",
+        "vitest_unit": "904/904 pass (45 files, 5 skipped = flowable integration offline)",
+        "hostile_probe_db": "10/10 — ci/checks/db/frozen-checks-immutable.test.ts (AC-1/2/3/4/5/6/11/12 + PROBE-2/PROBE-3 R-1 fix + PROBE-5 R-2 residual)"
+      },
+      "artifact": "docs/test-reports/T-0146.test-report.md",
+      "contract_artifact": "docs/design/T-0146.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/frozen-checks-immutable.sh",
+    "ci/checks/db/frozen-checks-immutable.test.ts",
+    "package.json",
+    "docs/specs/T-0146-frozen-checks-immutable.spec.md",
+    "docs/specs/T-0146.spec.contract.json",
+    "docs/design/T-0146-frozen-checks-immutable.adr.md",
+    "docs/design/T-0146.adr.contract.json",
+    "docs/design/T-0146.review.contract.json",
+    "docs/reviews/T-0146.review.md",
+    "docs/test-reports/T-0146.test-report.md",
+    "docs/design/T-0146.test-report.contract.json",
+    "docs/pr/T-0146.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "description": "Branch-name spoof: branch task/T-0044-anything gets TASK_ID=T-0044 and can amend T-0044 check whose BASE_REF header is '# T-0044 ·'. Accepted by design — reviewer-visible (PR title + diff). Requires deliberate impersonation, not possible by accident. Documented in ADR §11 + script header.",
+      "follow_up_candidate": "Full R-2 closure via control-plane claim lookup (out of scope for pure-bash gate NF-1). Candidate: verify TASK_ID against CP claim in orchestration layer."
+    }
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "founder_gate_GT-3": "dev→main promotion is founder-gated (GT-3). This task adds a new fitness check that runs in npm run fitness. After merge to dev, the meta-gate protects all existing ci/checks/*.sh from accidental modification on future task branches.",
+    "no_infra_changes": "T-0146 adds only ci/checks/frozen-checks-immutable.sh + ci/checks/db/frozen-checks-immutable.test.ts + package.json fitness-chain update. No DB migrations, no docker-compose changes, no src/ runtime changes. Safe to merge to dev immediately post-rebase.",
+    "downstream_effect": "All future BUILD agents running npm run fitness on task branches will be blocked from modifying foreign ci/checks/*.sh. This prevents recurrence of T-0035/T-0118 anti-patterns. The meta-gate is fail-open on dev/main/non-task branches (NF-3)."
+  },
+  "friction_events": []
+}

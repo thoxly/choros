@@ -1,0 +1,26 @@
+{
+  "task_id": "T-0639",
+  "reviewer": "independent-judge",
+  "role": "design-steward",
+  "verdict": "approved",
+  "summary": "Тексты — человеческим русским, без внутреннего жаргона Tier-N в видимых узлах (проверено grep + чтением). Поясняющая строка недостающих полей ВИДИМА зрячему (текстовый <p>, не только aria) и озвучена SR (role=status/aria-live). Контраст/тема через токены (--chs-color-success с fallback, класс chs-hint/chs-section2__note), без хардкодов кроме безопасного CSS-fallback 'green'. Tier-1 формулировка «прямо сейчас ничего не меняется / вступит в силу если держатель станет недоступен» ЧЕСТНА по T-0588 §1.3+AC-5 (Tier-1 = грант не минтится, маршрутизация переключается на заместителя только при недоступности исходного держателя).",
+  "findings": [
+    {
+      "severity": "nit",
+      "what": "Строка объяснения недостающих полей окрашена классом chs-hint (--chs-color-text-faint) — слабый контраст для сообщения, которое блокирует основное действие. По духу G-контраста для actionable-подсказки лучше muted, а не faint.",
+      "where": "web/src/screens/rights/ra-intents.jsx:337-340 (className=\"chs-hint\")",
+      "why": "Пояснение — единственный сигнал, почему кнопка мертва; faint-тон недо-коммуницирует важность. Не ложь и не барьер (текст читаем), потому nit."
+    },
+    {
+      "severity": "P2",
+      "what": "Жаргон «Tier-1»/«Tier-2» остаётся в ВИДИМОЙ статической подсказке SelfAbsenceForm (ra-intents.jsx:410-412). Это ПРЕ-СУЩЕСТВУЮЩИЙ текст (есть на dev), а не регресс T-0639; задача явно ограничена SubstituteForm (спека §3). Но тот же принцип «Tier-N не в видимом тексте» логично применить и там.",
+      "where": "web/src/screens/rights/ra-intents.jsx:410-412 (SelfAbsenceForm note)",
+      "why": "Консистентность денилиста жаргона по всему экрану /rights/intents; follow-up, не блокирует T-0639."
+    }
+  ],
+  "gates_applicable": {
+    "G5_jargon_denylist": "SubstituteForm видимый текст: 'Tier' отсутствует (только data-tier атрибут). PASS в охвате задачи.",
+    "G_contrast_tokens": "Токены, не хардкод (fallback 'green' безопасен). Замечание по faint-тону — nit.",
+    "a11y_visible_and_announced": "Пояснение видимо И озвучено (role=status/aria-live). PASS."
+  }
+}

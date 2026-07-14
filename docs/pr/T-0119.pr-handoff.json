@@ -1,0 +1,68 @@
+{
+  "task_id": "T-0119",
+  "status": "pr_open",
+  "branch": "task/T-0119-files-attachments-design",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/specs/T-0119-files-attachments.spec.md",
+    "docs/specs/T-0119.spec.contract.json",
+    "docs/design/T-0119-files-attachments.adr.md",
+    "docs/design/T-0119.adr.contract.json",
+    "docs/design/T-0119.review.contract.json",
+    "docs/reviews/T-0119.review.md",
+    "docs/test-reports/T-0119.test-report.md",
+    "docs/design/T-0119.test-report.contract.json",
+    "docs/pr/T-0119.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review + test-report + pr-handoff). Нет src/ изменений. ci_local build/lint/types/tests/fitness=true означает UNAFFECTED (product CI зелёный, docs-only ветка — baseline=dev). D-056: integration-honest gate пройден.",
+    "AC-9/AC-10/AC-11 (verifiable_as: test) отложены в impl-задачу — это легально для design-фазы; все три покрыты fitness-функциями FF-DERIVED-AUTHZ/FF-CROSS-TENANT/FF-VERSION-READABLE (gating=live-impl) в ADR §6.",
+    "Reviewer nit R-1 (non-blocking): рекомендация добавить явный шаг resolve version→file→record под tenant-RLS в §4.4 между step1 и step2 — carry to impl-задача.",
+    "Reviewer nit R-2 (non-blocking): day-1-дефолт лимитов размера/MIME зафиксировать как фикс (не tenant_config) в impl-задаче.",
+    "Remote PR не открывается: commit на локальной ветке (local-review-handoff pattern; GitHub PR требует scoped agent PAT GT-4, не провижн в этом окружении)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "test_evidence": {
+    "diff_gate": "docs-only PASS (0 файлов вне docs/**)",
+    "npm_ci_result": "PASS — tsc (0 errors) + eslint + fitness (121/121) + vitest (904/904)",
+    "review_verdict": "approved (T-0119.review.contract.json); 15/15 AC covered",
+    "test_report": "docs/design/T-0119.test-report.contract.json (verdict=pass, schema OK)"
+  },
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "T-0120 (или следующий свободный)",
+      "title": "impl: миграция + core/file-attachment.ts + S3-адаптер (MinIO) + fitness-шеллы",
+      "scope": "ADR §5 Build Plan: миграция 0NN_files_attachments.sql (file + file_version, FORCE RLS, known_tenant_tables), src/core/file-attachment.ts (buildObjectKey, authorizeFileOp, getFileContentUrl, addVersion, ObjectStore port), src/adapters/s3-object-store.ts (MinIO), compose-фрагмент MinIO, ci/checks/file-attachment-isolation.sh (FF-NOACL/FF-NB/FF-KEY static), src/__tests__/file-attachment.test.ts (FF-V/FF-PRESIGN-AFTER-ALLOW/FF-FAILCLOSED/FF-RETENTION-DENY/FF-AUDIT-EVENTS unit), live-DB/live-S3 probes (AC-9/AC-10/AC-11).",
+      "gates": "FF-NOACL/FF-NB/FF-KEY/FF-V/FF-PRESIGN-AFTER-ALLOW/FF-FAILCLOSED (static-now); FF-DERIVED-AUTHZ/FF-CROSS-TENANT/FF-VERSION-READABLE/FF-T13/FF-RETENTION-DENY(live)/FF-AUDIT-EVENTS (live-impl при Postgres+MinIO).",
+      "nits_to_carry": ["R-1: явный resolve version→file→record под tenant-RLS в §4.4 step1.5", "R-2: day-1-дефолт лимитов как фикс (не tenant_config)"]
+    },
+    {
+      "suggested_id": "T-0121 (или следующий свободный)",
+      "title": "impl: live-S3 / presign integration probes (AC-9/AC-10/AC-11 green gate)",
+      "scope": "При наличии Postgres + MinIO: live-DB probes FF-DERIVED-AUTHZ (seed+grant/no-grant, assert allow/deny), FF-CROSS-TENANT (seed cross-tenant, assert отказ + 0 bytes), FF-VERSION-READABLE (upload v1→replace→v2, old version readable), FF-T13 (new tables in known_tenant_tables.txt под T-0013/T-0115 apparatus). Активируется после merge impl-задачи.",
+      "gates": "AC-9/AC-10/AC-11 live gate зелёный при Postgres+MinIO — обязательный до Stage-1 release.",
+      "nits_to_carry": []
+    },
+    {
+      "suggested_id": "T-0122/T-0126 (уже в плане)",
+      "title": "external surface / headless download path (право файла = производный грант)",
+      "scope": "Путь прав внешнего принципала идёт через тот же authorizeFileOp/PDP T-0021 (производный ограниченный грант), не второй механизм. Depends on: impl-задача ≥ 041 (file-attachment core).",
+      "nits_to_carry": []
+    },
+    {
+      "suggested_id": "T-0124 (уже в плане)",
+      "title": "document-on-demand рендер + snapshot surface",
+      "scope": "Использует приёмную поверхность T-0119 (is_snapshot=true + addVersion с isSnapshot:true). Depends on: impl-задача ≥ 041.",
+      "nits_to_carry": []
+    }
+  ],
+  "rationale": "T-0119 — design-задача (SPEC+ADR+review). ADR закрыл 4 внутри-DESIGN развилки (bucket-модель, выдача контента, схема версий, ретенция), зафиксировал объектную модель (file/file_version), контракты (buildObjectKey/authorizeFileOp/getFileContentUrl/addVersion/ObjectStore), 12 fitness-функций, traceability AC-1..AC-15. Review approved (15/15 AC covered, 2 nit non-blocking). Product CI green (904/904, docs-only). Единственная развилка уровня фаундера (prod-S3-провайдер) вынесена как deploy-time параметр за ObjectStore-порт — не блокирует impl. Готово к merge в dev и старту impl."
+}

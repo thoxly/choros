@@ -1,0 +1,114 @@
+{
+  "task_id": "T-0572",
+  "verdict": "approved",
+  "_scope": "Экран /rights ПЕРЕПИСАН на живой источник. screen-rights.jsx: источник = GET /api/rights/tenant-state (demo-pack /api/rights убит), «Обзор ролей» = настоящие роли/назначения/гранты, секция «Кто что может», pending-блок (semi-confirmed) структурно отдельным контейнером, формы выдачи ТОЛЬКО при can_manage (структурный гейт), инбокс-путь → /rights/criticality. ra-overview-forms.jsx: формы выдачи/отзыва строго в существующие POST role-assignments/grants(/:id/revoke). shell.jsx: /rights/editor честно demo с конкретным тултипом; /rights = live без бейджа. РАУНД 2 (0b324cc): оба blocking и все три nit первого раунда закрыты — проверено по дельте e942fec..HEAD; +11 UX-fix тестов (27/27). Экран прав — судился по максимальной строгости.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/ux-g2-theme-pairing.sh → exit 0 (оба token-source light-default + dark reachable) — перегнан после 0b324cc",
+      "ci/checks/ux/ux-g6-no-new-hardcode.sh --required → 0 findings на полном диффе (вкл. фиксы): единственное новое CSS-правило раунда 2 (.chs-ov-scopesum) — только var(--chs-*)",
+      "ci/checks/ux/ux-g4-state-primitives.sh --required → 0 findings: LoadingState справочников (F-4) — kit-примитив, не рукотворная ветка",
+      "ci/checks/ux/ux-g5-jargon-denylist.sh → продуктовые файлы T-0572 ЧИСТЫ (0 findings); repo-wide шум — pre-existing *.test.jsx, не введён задачей",
+      "ci/checks/rights-editor-badge-verdict.sh → PASS (FF-T0572-BADGE)",
+      "npx vitest run web/src/screens/rights/screen-rights.test.jsx → 27/27 passed (16 исходных + 11 UX-fix: F-1 CTA/can_manage-ветвление, F-2 no-JSON.stringify/ScopeSummary/все kind/сентинел, F-3 ConfirmDialog-не-window.confirm, F-4 LoadingState+причины пустых источников, F-5 inbox-путь для pending-наблюдателя)"
+    ],
+    "green_note": "Все гейты зелёные в обоих раундах. Раунд 1 дал changes_requested по UX-находкам выше гейта (экран прав = максимальная строгость); раунд 2 (0b324cc) закрыл все пять находок — фиксы проверены по коду дельты, не по описанию кодера."
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "Real-click в живом стенде НЕ пройден — web-тест-тир vitest 'node' без DOM (Field/Select зовут useId, mount невозможен в этом репо). Судил по коду + токенам + тестам ЧЕСТНО. Статически строго: все CSS-токены новых элементов определены в ОБЕИХ темах — --chs-color-surface-2 (light :root L147 / dark L217), --chs-color-border-strong (L155/L225), --chs-color-border-faint (L156/L226), остальные color-токены по 2 def; radius/text/space — theme-invariant (корректно). PendingBadge = StatusChip 'waiting' → .chs-chip--waiting на --chs-color-warning/warning-soft (kit) — амбер, визуально отличен от нейтральных active-строк в обеих темах. Раунд 2: .chs-ov-scopesum — только layout (flex/gap), цветов не вносит; ScopeToken — pre-existing themed kit (rights-admin.css:83-91, токены); ConfirmDialog наследует Modal (kit, обе темы доказаны ранее). Real-click в обеих темах доедет LIVE_PROOF-ом (AC-16 manual, D-064).",
+  "pattern_sources": [
+    {
+      "element": "EmptyState (нет ролей) / LoadingState / ErrorState на «Обзоре ролей» + LoadingState справочников форм",
+      "pattern": "Empty States (first-use variant): state message + supporting detail + PRIMARY ACTION; в admin-ветке пустого тенанта CTA → /rights/editor (раунд 2). Loading/Error — kit, role=status/alert.",
+      "mcp_ref": "uxpatterns get_pattern user-feedback/empty-states → Anatomy (Primary action), Variations#first-use. После фикса F-1 анатомия соблюдена.",
+      "applied": true
+    },
+    {
+      "element": "AssignRoleForm/GrantRightForm — kit Select/Field + ScopePicker; hints причин пустых справочников",
+      "pattern": "kit Select с label↔control (htmlFor/id), hint как aria-describedby — причина пустого источника объяснена в том же a11y-канале; disabled submit пока форма неполна (§4 аффорданс); busy на Button (aria-busy).",
+      "mcp_ref": "principles.md §4 + §6; kit Select hint-проп (components.jsx:802, aria-describedby) — a11y-контракт кита.",
+      "applied": true
+    },
+    {
+      "element": "PendingBadge (semi-confirmed) в отдельном .chs-ov-pending + inbox-путь при canManage || pending>0",
+      "pattern": "статус-дифференциация semi-confirmed vs действующие (waiting-чип + пунктирный контейнер); одноклик-аффорданс к инбоксу подтверждений и для не-admin наблюдателя своего pending (раунд 2).",
+      "mcp_ref": "principles.md §6 + локальный образец ra-criticality.jsx.",
+      "applied": true
+    },
+    {
+      "element": "Отзыв роли/гранта — ConfirmDialog tone=danger с именованием субъекта",
+      "pattern": "Destructive action confirmation: kit ConfirmDialog (обёртка Modal — фокус-ловушка/Esc/scroll-lock наследуются), danger-кнопка, субъект назван в message, отмена ghost; не window.confirm, не одноклик.",
+      "mcp_ref": "principles.md §4 ('опасное действие = модал') — kit ConfirmDialog (components.jsx:729) сам ссылается на §4; образец потребления screen-org.jsx pendingDelete.",
+      "applied": true
+    },
+    {
+      "element": "ScopeSummary — человекочитаемый охват гранта (замена raw JSON)",
+      "pattern": "голос продукта §3: доменное значение рендерится человеческим языком для ВСЕХ kind — node→«Узел: label» (fallback «Узел оргструктуры»), сентинел default-open→«Весь тенант», tags→ScopeToken-чипы с label, set→рекурсивное перечисление, пусто→«Весь тенант», interval→«Диапазон», неизвестный→«Особый охват»; ни одна ветка не отдаёт JSON.",
+      "mcp_ref": "principles.md §3 (пользователь видит продукт, не разработку). Сентинел-литерал сверен с src/core/read-visibility.ts:60 RESOURCE_ROOT_NODE_ID — совпадает; дрейф деградирует в «Узел оргструктуры», не в ложь.",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "blocking",
+      "root": "B",
+      "location": "web/src/screens/rights/screen-rights.jsx (EmptyState «Нет ролей», ветка roles.length === 0)",
+      "issue": "Раунд 1: пустой тенант для АДМИНА был dead-end — EmptyState без action-слота, ветка не различала can_manage; админ нового тенанта не имел ни одной кнопки исправить «нет ролей».",
+      "suggestion": "Дать admin-ветке Primary action → /rights/editor; различать по can_manage, self — текст без CTA.",
+      "resolution": "RESOLVED (0b324cc): admin-ветка (canManage) — EmptyState title «Пока нет ролей», description «Создайте первую роль доступа, чтобы назначать её сотрудникам.», action = Button primary «Открыть «Каталог ролей»» → navigate('/rights/editor'); self — текст без CTA. Формулировки — ровно предложенные. Ветвление по can_manage, не по scope. Покрыто 2 тестами."
+    },
+    {
+      "id": "F-2",
+      "severity": "blocking",
+      "root": "B",
+      "location": "web/src/screens/rights/screen-rights.jsx (колонка «Охват», был JSON.stringify(g.scope))",
+      "issue": "Раунд 1: охват гранта показывался сырым JSON — нарушение §3 на экране прав, где охват критичен для понимания «кто что может»; self-юзер видел JSON про свои права.",
+      "suggestion": "ScopeSummary с человекочитаемым рендером всех kind; минимум — маппинг kind→русское слово.",
+      "resolution": "RESOLVED (0b324cc): компонент ScopeSummary — node→«Узел: <label из orgTree>» (fallback «Узел оргструктуры» без label), сентинел default-open (RESOURCE_ROOT_NODE_ID, сверен с read-visibility.ts:60) →«Весь тенант», tags→ScopeToken-чипы (kit ra-data.jsx:334, kind='tag', label-резолв c fallback на id), set→рекурсивное перечисление, пустой set/нет охвата→«Весь тенант», interval→«Диапазон: axis lo–hi», неизвестный kind→«Особый охват». JSON.stringify изгнан (тест it('does NOT render grant scope via JSON.stringify')). Self-взгляд без dictionaries деградирует в человеческую форму kind, не в JSON. Честен для всех kind — проверено по каждой ветке. Остаточная шероховатость: interval показывает машинное имя axis — interval вне day-1 палитры записи (только чтение legacy-грантов), деградация честная; не задерживаю."
+    },
+    {
+      "id": "F-3",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/rights/ra-overview-forms.jsx (RevokeAssignmentButton / RevokeGrantButton)",
+      "issue": "Раунд 1: отзыв роли/гранта одним кликом без подтверждения — §4 требует осознанного подтверждения деструктивного действия.",
+      "suggestion": "kit-Modal подтверждения с именованием субъекта.",
+      "resolution": "RESOLVED (0b324cc): оба revoke открывают kit ConfirmDialog (components.jsx:729 — обёртка Modal, a11y наследуется, НЕ самоделка и НЕ window.confirm — оба факта под тестами) tone=danger, субъект назван: «Отозвать роль у: <сотрудник>? Доступ по этой роли пропадёт сразу.» / «Отозвать право «<ресурс · операция>» у роли? Оно перестанет действовать сразу.»; loading на confirm-кнопке, закрытие заблокировано пока busy, при ошибке диалог остаётся открытым (retry/отмена). Образец потребления — screen-org.jsx pendingDelete."
+    },
+    {
+      "id": "F-4",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/rights/ra-overview-forms.jsx (Select без опций при пустых employees/dictionaries)",
+      "issue": "Раунд 1: пустые справочники давали молча неюзабельную форму — «ещё грузится» неотличимо от «пусто», причина пустоты не объяснена (AC-13 требует состояния и на формах).",
+      "suggestion": "LoadingState пока грузится; hint с причиной под пустым Select.",
+      "resolution": "RESOLVED (0b324cc): sourcesLoading (Promise.all по dictionaries+employees) → kit LoadingState compact «Загрузка справочников…» вместо формы — loading отличим от empty; каждый пустой источник объяснён через kit hint-проп (aria-describedby): сотрудники → «заведите сотрудников в разделе «Оргструктура» или обновите страницу», ресурсы/операции → «справочник недоступен — обновите страницу», орг-дерево → «выберите охват тегами или обновите страницу», теги → «не настроены — справочник пуст или недоступен». Причина + действие в каждом. Покрыто тестами."
+    },
+    {
+      "id": "F-5",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/rights/screen-rights.jsx (pending-блок + инбокс-подсказка)",
+      "issue": "Раунд 1: инбокс-кнопка → /rights/criticality была только под canManage, а pending-блок виден всем — не-admin наблюдатель своего pending не имел одноклик-пути к инбоксу подтверждений.",
+      "suggestion": "Показывать путь к инбоксу при pending>0 независимо от can_manage; сверить со спекой видимость self-pending.",
+      "resolution": "RESOLVED (0b324cc): подсказка рендерится при (canManage || rolePendingCount > 0) — self-наблюдатель своего pending получает одноклик к /rights/criticality. Сверка со спекой выполнена: self-pending виден намеренно, задокументировано в pr-handoff. Покрыто тестом."
+    }
+  ],
+  "principles_updated": [],
+  "_principles_note": "Новых правил облика не ввожу — все пять находок были нарушениями СУЩЕСТВУЮЩИХ §3 (голос: raw-JSON), §4 (деструктивное подтверждение; аффорданс) и §6 (Empty с CTA), и закрыты в рамках этих правил. ScopeSummary — кандидат в общий кит-примитив при втором потребителе (сейчас локален экрану — норм).",
+  "acceptance_coverage": [
+    {"ac": "AC-3 источник сменён на /api/rights/tenant-state, старый /api/rights не фетчится (структурно + тест)", "covered": true},
+    {"ac": "AC-1/AC-2 живые роли, пустой тенант → честный EmptyState без demo:true; ложь «Нет ролей» умерла", "covered": true},
+    {"ac": "AC-2/AC-13 Empty пустого тенанта: admin получает Primary action → /rights/editor (F-1 закрыт), self — честный текст; first-use anatomy соблюдена", "covered": true},
+    {"ac": "AC-4/AC-5/AC-6 write строго в существующие POST role-assignments/grants(/:id/revoke), ровно один вызов, нет нового write-route (тест)", "covered": true},
+    {"ac": "AC-7/AC-8 semi-confirmed → отдельный .chs-ov-pending + PendingBadge (waiting-чип), НЕ смешан с действующими (тест + визуально); одноклик-путь к инбоксу и для pending-наблюдателя (F-5 закрыт)", "covered": true},
+    {"ac": "AC-9 формы выдачи под структурным canManage-гейтом (отсутствуют в DOM, не disabled) — тест + код", "covered": true},
+    {"ac": "AC-13 Empty/Loading/Error на «Обзоре ролей» И на формах: LoadingState справочников + hint-причины пустых источников (F-4 закрыт)", "covered": true},
+    {"ac": "AC-12/FR-8 бейдж /rights/editor честно demo с КОНКРЕТНЫМ тултипом; /rights = live БЕЗ бейджа (G7 обе стороны). Badge-verdict CI PASS", "covered": true},
+    {"ac": "AC-14 scope как ScopeElement JSON в существующий parseScopeElement (тест); чтение scope — человекочитаемый ScopeSummary для всех kind, raw JSON изгнан (F-2 закрыт, тесты)", "covered": true},
+    {"ac": "N7/OBLIK только --chs-* токены (G6 --required=0 на полном диффе), kit Select/Field/Button/StatusChip/EmptyState/ConfirmDialog/LoadingState/ScopeToken, обе темы по токенам AA (статически)", "covered": true},
+    {"ac": "UX-грань §4: revoke через kit ConfirmDialog tone=danger с именованием субъекта (F-3 закрыт, тесты: не window.confirm, не одноклик)", "covered": true},
+    {"ac": "AC-16 real-click LIVE_PROOF на живом стенде (владелец ООО, dual-control сквозняком, обе темы) — НЕ пройден здесь (vitest node без DOM), доедет LIVE_PROOF-ом (manual, D-064)", "covered": false}
+  ]
+}

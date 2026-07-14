@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Choros — Формы (П3)</title>
+  <!-- Превью П3 (Forms): 2 формы (закупка · согласование) в тёмной и светлой теме.
+       Каждая форма исполняется в ИЗОЛИРОВАННОМ sandbox-iframe (allow-scripts, без
+       allow-same-origin = опаковый origin, как в проде). Тема form-theme.css
+       самодостаточна — объявляет свои --chs-* внутри iframe. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../src/design/tokens.css" />
+  <style>
+    body { padding: 0; }
+    .hbar {
+      position: sticky; top: 0; z-index: 2;
+      display: flex; align-items: center; gap: var(--chs-space-4);
+      padding: var(--chs-space-4) var(--chs-space-6);
+      background: var(--chs-color-surface); border-bottom: 1px solid var(--chs-color-border);
+    }
+    .hbar__title { font-weight: var(--chs-weight-semibold); margin-right: var(--chs-space-4); }
+    .hbar button {
+      height: var(--chs-control-h); padding: 0 var(--chs-space-5);
+      font: inherit; font-size: var(--chs-text-sm); color: var(--chs-color-text-muted);
+      background: var(--chs-color-surface-2); border: 1px solid var(--chs-color-border);
+      border-radius: var(--chs-radius-2); cursor: pointer;
+    }
+    .hbar button.on { color: var(--chs-color-text); border-color: var(--chs-color-accent-border); background: var(--chs-color-accent-soft); }
+    .hcols { display: grid; grid-template-columns: 1fr 1fr; gap: var(--chs-space-7); padding: var(--chs-space-7); align-items: start; }
+    .hcols section { min-width: 0; }
+    .hcols header { font-size: var(--chs-text-xs); text-transform: uppercase; letter-spacing: var(--chs-tracking-wide); color: var(--chs-color-text-faint); margin-bottom: var(--chs-space-3); }
+    .hframe-wrap { background: var(--chs-color-bg); border: 1px solid var(--chs-color-border); border-radius: var(--chs-radius-3); overflow: hidden; }
+    .hcols section.light .hframe-wrap { background: var(--chs-neutral-100); }
+    iframe { width: 100%; border: 0; display: block; height: 480px; }
+  </style>
+</head>
+<body>
+  <div class="hbar">
+    <span class="hbar__title">Формы · sandbox-iframe</span>
+    <button data-form="purchase" class="on">Заявка на закупку</button>
+    <button data-form="approval">Согласование</button>
+  </div>
+  <div class="hcols">
+    <section class="dark"><header>Тёмная</header><div class="hframe-wrap"><iframe data-theme="dark" sandbox="allow-scripts" title="Форма (тёмная)"></iframe></div></section>
+    <section class="light"><header>Светлая</header><div class="hframe-wrap"><iframe data-theme="light" sandbox="allow-scripts" title="Форма (светлая)"></iframe></div></section>
+  </div>
+
+  <script src="../src/forms/form-defs.js"></script>
+  <script>
+    // Абсолютный URL темы — чтобы резолвился внутри srcdoc-iframe независимо от base.
+    const CSS = new URL('../src/forms/form-theme.css', location.href).href;
+    const frames = Array.prototype.slice.call(document.querySelectorAll('iframe'));
+
+    function mount(formKey) {
+      const html = window.CHOROS_FORMS[formKey];
+      const script = window.CHOROS_SANDBOX_SCRIPT;
+      frames.forEach(function (f) {
+        const theme = f.getAttribute('data-theme');
+        // inner </script> расщеплён, чтобы не закрыть внешний скрипт парсером
+        f.srcdoc =
+          '<!DOCTYPE html><html data-theme="' + theme + '"><head><meta charset="utf-8">' +
+          '<link rel="stylesheet" href="' + CSS + '"></head><body>' + html +
+          '<scr' + 'ipt>' + script + '<\/scr' + 'ipt></body></html>';
+      });
+    }
+
+    // Авто-высота: форма постит {type:'fjs-height', h} наружу. Приёмник НЕ доверяет
+    // любому postMessage — валидирует source + опаковый origin 'null' (подпись
+    // sandbox без allow-same-origin) + форму сообщения, затем клампит высоту
+    // [MIN,MAX] (анти-DoS). Зеркало src/core/form-frame-height.ts (T-0101).
+    const FRAME_MIN_HEIGHT = 280;
+    const FRAME_MAX_HEIGHT = 20000;
+    function acceptFrameHeight(e, expectedSource) {
+      if (!e || expectedSource == null || e.source !== expectedSource) return null;
+      if (e.origin !== 'null') return null; // opaque-origin sandbox only
+      const d = e.data;
+      if (!d || d.type !== 'fjs-height') return null;
+      const h = d.h;
+      if (typeof h !== 'number' || !Number.isFinite(h) || h < 0) return null;
+      return Math.min(FRAME_MAX_HEIGHT, Math.max(FRAME_MIN_HEIGHT, Math.ceil(h)));
+    }
+    window.addEventListener('message', function (e) {
+      const f = frames.filter(function (fr) { return fr.contentWindow === e.source; })[0];
+      if (!f) return;
+      const h = acceptFrameHeight(e, f.contentWindow);
+      if (h !== null) f.style.height = h + 'px';
+    });
+
+    document.querySelectorAll('.hbar button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        document.querySelectorAll('.hbar button').forEach(function (x) { x.classList.remove('on'); });
+        b.classList.add('on');
+        mount(b.getAttribute('data-form'));
+      });
+    });
+
+    mount('purchase');
+  </script>
+</body>
+</html>

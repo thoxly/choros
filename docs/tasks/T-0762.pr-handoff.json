@@ -1,0 +1,65 @@
+{
+  "task_id": "T-0762",
+  "status": "pr_open",
+  "branch": "task/T-0762",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/keycloak/admin-port.ts",
+    "src/http/user-mgmt.ts",
+    "src/keycloak/fake-user-port.ts",
+    "web/src/screens/users-form.js",
+    "src/__tests__/admin-port.test.ts",
+    "web/src/screens/users-form.test.js",
+    "web/src/screens/screen-users.mount.test.jsx",
+    "ci/checks/db/user-mgmt.db.test.ts",
+    "docs/tasks/T-0762.spec.md (NEW)",
+    "docs/tasks/T-0762.pr-handoff.json (NEW)"
+  ],
+  "summary": "T-0748 fixed the CHARACTER-validator misattribution (a display_name like 'Bot #1' wrongly surfaced as 'email must be a valid email address'), but its own review (R-2, nit) live-probed the sibling LENGTH-validator class explicitly out of scope: a single-token display_name near the client's DISPLAY_NAME_MAX=256 still trips Keycloak's independent 255-char-per-field firstName/lastName cap (splitDisplayName duplicates an unbroken name into BOTH fields), producing KC 400 messageKey 'error-invalid-length-too-long' — which does NOT contain 'person-name', so isPersonNameCharacterError correctly returns false and the request still fell to the SAME misleading EMAIL_INVALID default T-0748 already fixed for the character class. Fix: admin-port.ts adds isPersonNameLengthError (reuses the existing extractKcFieldErrors parser, T-0748) and throws a new NAME_TOO_LONG code when firstName/lastName fail the length validator, checked alongside (not instead of) isPersonNameCharacterError; every other 400 (genuine bad email, unparseable body, unrelated-field drift, or the character class) is unaffected. user-mgmt.ts maps the new code to an honest Russian 400 message; users-form.js's mapUserError anchors it on 'Отображаемое имя' (same field-anchor mechanism as NAME_INVALID_CHARACTERS).",
+  "root_cause": "admin-port.ts's createHumanUser 400-branch (post-T-0748) checked ONLY the character-validator class before falling to the EMAIL_INVALID default — it did not know KC's declarative user-profile also independently validates firstName/lastName LENGTH (realm-choros.json: {\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}} on both fields, two separate validators in one JSON object). T-0748 closed the attribution gap for one of the two, leaving the other open to the exact same misattribution class T-0748 itself exists to prevent.",
+  "live_proof": "docs/tasks/T-0762.spec.md §3 — real KC 25.0.6 (container t-0633-keycloak-1, :8180, choros-registrar client_credentials — the EXACT path createHumanUser itself uses, and the SAME container T-0748's own judge used for the R-2 finding), probed 2026-07-13. Confirmed both live 400 body shapes now parsed: single-object {field,errorMessage} when only ONE of firstName/lastName exceeds 255 chars, {errors:[...]} array when a single-token (no-space) 300-char displayName duplicates into BOTH fields and both exceed the cap simultaneously (splitDisplayName's own documented duplication rule). messageKey is 'error-invalid-length-too-long' with params [field, null, 255] in both shapes — byte-identical to T-0748's own R-2 review finding. A control 201 with an ordinary two-word Cyrillic name was also probed live and cleaned up. No orphan KC user left behind by any of the 3 probes (verified via GET .../users?username=...&exact=true after each — [] in all 3 RED cases).",
+  "red_to_green": "Two independent mutation checks (no git stash used — Edit tool applied then reverted the exact original text, diffs verified byte-identical via git diff after restore): (1) admin-port.ts — removed the isPersonNameLengthError branch, ran src/__tests__/admin-port.test.ts: exactly the 4 new AP-10 NAME_TOO_LONG cases FAILED ('expected EMAIL_INVALID to be NAME_TOO_LONG'), the other 34 (including all AP-9 T-0748 cases) stayed green. Restored -> 38/38 green. (2) user-mgmt.ts — disabled the NAME_TOO_LONG catch branch (if (false && code===...)), ran ci/checks/db/user-mgmt.db.test.ts solo against live PG: exactly the 1 new T-0762 DB test FAILED (fell through to 503 AUTH_UNAVAILABLE, not even EMAIL_INVALID — proving the branch is load-bearing, not redundant with an existing fallback), the other 42 stayed green. Restored -> 43/43 green.",
+  "gates": {
+    "tsc_noemit": "PASS — npx tsc --noEmit (repo root): exit 0, 0 errors",
+    "admin_port_unit": "GREEN — npx vitest run src/__tests__/admin-port.test.ts (no ambient DATABASE_URL): 38/38 passed (30 pre-existing T-0748 + 8 new AP-10: 2 single-field length errors on firstName/lastName, 1 both-fields-over-cap {errors:[...]} shape, 1 mixed email+length {errors:[...]} shape, 1 character-vs-length cross-fire regression, 2 EMAIL_INVALID regressions [genuine email / unparseable body], 1 unrelated-field-length regression)",
+    "admin_port_red_green": "RED (mutated: isPersonNameLengthError branch removed): 34/38 passed, exactly the 4 new NAME_TOO_LONG-expecting AP-10 cases failed. GREEN (fix restored): 38/38.",
+    "user_mgmt_db_live_pg": "GREEN — DATABASE_URL=postgres://choros_migrator:...@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism -t user-mgmt (SOLO): 43/43 passed (40 pre-existing incl. T-0748's 3 + 3 new T-0762 cases: single-token 256-char display_name -> 400 NAME_TOO_LONG with Russian 'имя'+'длин' message and NOT the email text; T-0748's own NAME_INVALID_CHARACTERS class unaffected by the new branch; ordinary display_name still 201)",
+    "user_mgmt_db_red_green": "RED (mutated: user-mgmt.ts's NAME_TOO_LONG branch disabled via if(false&&...)): 42/43 passed, exactly the 1 new NAME_TOO_LONG DB test failed (503 AUTH_UNAVAILABLE instead of 400 NAME_TOO_LONG — falls PAST the EMAIL_INVALID branch too, since EMAIL_INVALID is keyed on the KC-side EMAIL_INVALID code not NAME_TOO_LONG, proving this is a genuinely new code path, not dead weight over an existing fallback). GREEN (fix restored): 43/43.",
+    "web_users_form_unit": "GREEN — npx vitest run web/src/screens/users-form.test.js: 28/28 passed (25 pre-existing incl. T-0748's 3 + 3 new T-0762 mapUserError cases: NAME_TOO_LONG with server message, NAME_TOO_LONG with no server message default, NAME_INVALID_CHARACTERS-vs-NAME_TOO_LONG cross-fire regression)",
+    "web_mount_jsdom": "GREEN — npx vitest run web/src/screens/screen-users.mount.test.jsx (real React+jsdom mount of <UsersScreen/>, opens the real 'Создать учётку' modal, fills real form fields with a 256-char single-token display_name, submits, asserts on real rendered DOM): 3/3 passed (2 pre-existing T-0748 + 1 new T-0762: NAME_TOO_LONG 400 shows 'слишком длинное' on Отображаемое имя, aria-invalid=true, email field stays valid, misleading email text absent from the whole dialog)",
+    "src_full_suite": "GREEN — npx vitest run (repo root, no ambient DATABASE_URL, full suite): 320/322 test files passed (2 skipped, pre-existing — flowable-client.integration.test.ts requires a live Flowable engine), 6009/6026 tests passed (17 skipped, same pre-existing reason)",
+    "anti_case_lock": "PASS — ci/checks/anti-case-lock.sh: Phase 1 delegates clean, Phase 2 full D-064 §5 denylist within baseline (aggregate 15<=16, erodes-or-steady) — 0 new anti-case literals from this diff (no persona/test literal is used as a production branch condition; the new checks match on structural field names firstName/lastName and KC's own messageKey substring, not hardcoded test values)",
+    "kc_checks_T0734_T0741_intact": "PASS — ci/checks/kc/user-profile-actor-type.sh (T-0734 declarative profile intact), admin-port.test.ts AP-8a/AP-8b (T-0741 splitDisplayName + firstName/lastName payload derivation unchanged, both suites in the 38/38 above), user-mgmt-no-secret-leak.sh + user-mgmt-reuses-kc-port.sh (T-0748/T-0342 lineage) all PASS unchanged"
+  },
+  "deviations_from_adr": [],
+  "security_notes": [
+    "No new attack surface: purely an error-message ATTRIBUTION fix, exactly like T-0748. The underlying create-user authorization gate (authorizeOrgWrite/loadAdminContext/assertOrgObjectAuthority) and the anti-collision LOGIN_RESERVED guard are untouched (diff is strictly additive inside the existing 400-branch and its two neighboring layers).",
+    "isPersonNameLengthError only ever READS Keycloak's own response body (via the pre-existing extractKcFieldErrors parser, unchanged) to pick a more specific error CODE — no new trust boundary crossed, no new external input accepted.",
+    "Safe-default preserved end-to-end: any 400 body shape neither isPersonNameCharacterError nor isPersonNameLengthError recognizes (empty, unparseable, unrelated field, KC-version drift, genuine bad email) falls through to the EXACT prior EMAIL_INVALID behavior — proven by explicit regression tests at both the admin-port.ts layer (AP-10) and the user-mgmt.ts/DB layer."
+  ],
+  "follow_ups": [
+    "Non-blocking, out of this task's scope (mirrors T-0748's own R-2 framing): web/src/screens/users-form.js's DISPLAY_NAME_MAX=256 could be tightened toward KC's 255-per-field boundary for the no-space case to prevent the 400 round-trip entirely on the client — a product/UX call (does the owner ever legitimately need a >255-char single-token name?), not a correctness requirement this task's honest-attribution fix depends on.",
+    "Not fixed here (T-0741 §6 / T-0748 §7, unchanged, out of scope): src/core/register.ts (self-registration) does not pass displayName to createHumanUser at all, so neither this class of error nor T-0748's can occur on that path."
+  ],
+  "judge_attack_surface": [
+    "Try a KC 400 with a single-token 300-char displayName (both firstName AND lastName over the 255 cap simultaneously, live {errors:[...]} array shape) — must surface NAME_TOO_LONG, not silently prefer/mask via a partial match (AP-10 case 3).",
+    "Try a KC 400 mixing a bad email AND an over-length firstName in the same {errors:[...]} array — must still surface NAME_TOO_LONG (length problem not masked by a co-occurring email problem), the mirror of T-0748's own AC-2 for the character class (AP-10 case 4).",
+    "Try to make isPersonNameCharacterError and isPersonNameLengthError cross-fire on each other's messageKey — a character error ('error-person-name-invalid-character') must map to NAME_INVALID_CHARACTERS, never NAME_TOO_LONG, and vice versa (AP-10 regression case, DB test regression case, web mapUserError regression case — checked at all three layers).",
+    "Try a length error on an unrelated field (e.g. 'username') — the field-equality gate (fe.field === 'firstName' || fe.field === 'lastName') runs BEFORE the substring check, so this cannot false-positive into NAME_TOO_LONG; must fall to EMAIL_INVALID (AP-10 final regression case).",
+    "Try mounting the real CreateUserModal, fill Отображаемое имя with 256 identical characters (no space), submit against a mocked NAME_TOO_LONG 400 — must show 'слишком длинное' anchored on Отображаемое имя (aria-invalid=true), Email must stay valid, and the pre-fix misleading email text must be completely absent from the dialog (screen-users.mount.test.jsx new case).",
+    "Verify the RED-mutation claims directly: temporarily remove isPersonNameLengthError's call site in admin-port.ts and re-run AP-10 — exactly 4 failures, no others; independently remove/disable the NAME_TOO_LONG branch in user-mgmt.ts and re-run the DB suite solo — exactly 1 failure (falls to 503, not even EMAIL_INVALID, proving the branch is genuinely load-bearing)."
+  ],
+  "friction_events": [
+    "The DB-integration test file (ci/checks/db/user-mgmt.db.test.ts) is excluded from the root tsconfig's \"include\":[\"src\"] — tsc --noEmit does not type-check it. Verified the new test compiles and behaves correctly by actually RUNNING it live against PG :55432 (solo, DATABASE_URL set), both pre- and post-mutation.",
+    "Live-probing the length-too-long shape against t-0633-keycloak-1 required discovering empirically that a SINGLE over-length field produces the single-object {field,errorMessage} shape while BOTH fields over the cap (single-token displayName duplication) produces the {errors:[...]} array shape — this distinction was not fully spelled out in T-0748's own R-2 review text (which only quoted the single-object shape) but both are now live-confirmed and covered by separate unit tests (AP-10).",
+    "Concurrent DB-tier test runs from other in-flight worktree tasks (T-0763, T-0764) sharing the same choros-postgres-1 container extended wall-clock time on the db-tier runs (up to ~5min per solo invocation vs. the usual ~4min) — no correctness impact, all runs used --no-file-parallelism and -t user-mgmt scoping to stay isolated from the other files' test databases.",
+    "No git stash used anywhere (forbidden per task rules) — both RED-proof revert/restore cycles used the Edit tool directly (apply mutation -> run -> apply restoration text) with a git diff comparison confirming the restored file was byte-identical to the pre-mutation fix."
+  ]
+}

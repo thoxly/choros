@@ -1,0 +1,109 @@
+{
+  "task_id": "T-0024",
+  "status": "ready",
+  "summary": "Add invoke-grant (operation='invoke', resource_type='agent') scoped to agent_role×org_scope, with request (propose-task) and command (execute stub + audit) paths, a new invoke_proposal table (migration 043), and canonical audit via the T-0031 seam.",
+  "functional": [
+    "FR-1: Invoke-grant is explicit — a row in choros.grant with operation='invoke' and resource_type='agent'; no implicit grant path.",
+    "FR-2: Grant scope is a lattice ScopeElement over org hierarchy; resource_facet carries agent_role_id of the target agent's assigned role.",
+    "FR-3: POST /api/invoke/request checks invoke-grant, inserts invoke_proposal row (status='proposed'), emits audit event 'invoke.request'.",
+    "FR-4: POST /api/invoke/command checks invoke-grant, emits audit event 'invoke.command', returns 202 with invocation_id; dispatch is a day-1 stub.",
+    "FR-5: Both paths emit AuditEventInput through the canonical appendAuditEvent seam (T-0031); actor=caller, subject=target agent.",
+    "FR-6: Invoke-grants are created and revoked via the existing POST /api/grants and POST /api/grants/:id/revoke endpoints with operation='invoke'.",
+    "FR-7: Invoke-grant is delegable by default; sub-delegation gated by validateNarrowing (T-0018); delegable:false is non-transferable.",
+    "FR-8: target_agent_id must resolve to an agent_card row (employee.kind='agent'); human target yields 400 VALIDATION.",
+    "FR-9: New table choros.invoke_proposal (migration 043) with columns: tenant_id, id, caller_id, target_id, goal, context, status CHECK IN ('proposed','cancelled'), created_at; tenant-isolation invariants (RLS, GUC policy, choros_app grant, known_tenant_tables.txt)."
+  ],
+  "non_functional": [
+    "NF-1: All changes to grant-lattice.ts, grant-resolver.ts, grants.ts are additive only — no refactoring of existing logic.",
+    "NF-2: resolveFor (T-0021) is called with op='invoke'; no second grant-check path is introduced.",
+    "NF-3: All audit writes use appendAuditEvent (T-0016/T-0031 canonical seam) — no local/partial writers.",
+    "NF-4: Absent or expired invoke-grant → 403 FORBIDDEN; no invoke_proposal row inserted; fail-closed.",
+    "NF-5: Every DB read/write inside withTenantTx with choros.tenant_id GUC set.",
+    "NF-6: Caller identity from X-Dev-User header (dev convention); production auth is T-0060's scope."
+  ],
+  "out_of_scope": [
+    "A2A call-graph depth/fan-out breakers (E5.8, Stage-2).",
+    "Actual agent runtime dispatch — day-1 command path is a stub.",
+    "Proposal promotion from proposed→executing (human gate, future task).",
+    "invoke_proposal cancellation endpoint (status column present, no cancel route day-1).",
+    "Keycloak service-account invocation mechanics (T-0042/T-0060).",
+    "Agent provisioning / hire flow (T-0042).",
+    "BYO-LLM secret-handle resolution (T-0025).",
+    "autonomy_threshold / confidence-based routing (E5.6/E5.7, Stage-2).",
+    "Auth middleware for /api/invoke/* routes (T-0060)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "POST /api/invoke/request with valid invoke-grant returns 201 Created; invoke_proposal row exists with status='proposed', correct caller_id, target_id, goal.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "POST /api/invoke/request with no covering invoke-grant (absent or scope mismatch) returns 403 FORBIDDEN; no invoke_proposal row inserted.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "POST /api/invoke/command with valid invoke-grant returns 202 Accepted with JSON body containing invocation_id (UUID).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "POST /api/invoke/command with no covering invoke-grant returns 403 FORBIDDEN.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "After successful POST /api/invoke/request, exactly one audit_event row with type='invoke.request', actor=caller_id, subject=target_agent_id, payload.mode='request'.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "After successful POST /api/invoke/command, exactly one audit_event row with type='invoke.command', actor=caller_id, subject=target_agent_id, payload.mode='command'.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Invoking a target_agent_id not in agent_card (or kind='human') returns 400 VALIDATION regardless of grant presence.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "POST /api/grants with operation='invoke', resource_type='agent' stores a row in choros.grant and emits a grant.create audit event.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "After POST /api/grants/:id/revoke on an invoke-grant, POST /api/invoke/request returns 403 FORBIDDEN.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "invoke_proposal has RLS enabled+forced; querying with a different choros.tenant_id GUC returns no rows from another tenant's proposals.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "A sub-delegated invoke-grant (narrower org_scope) is valid only within its narrower scope; a target outside that scope returns 403.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "invoke_proposal is listed in ci/checks/known_tenant_tables.txt; the frozen-file fitness check passes without CI red.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "grant-lattice.ts fitness test count does not decrease: all 122 T-0018 tests still pass after T-0024 lands.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "resolveFor signature is unchanged; callers omitting the optional invokeCtx param compile without error (additive-only check).",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0024-invoke-grant.spec.md"
+}

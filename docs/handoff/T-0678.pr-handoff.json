@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0678",
+  "status": "pr_open",
+  "branch": "task/T-0678",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "web/src/forms/widget-registry.js",
+    "web/src/forms/form-document.js",
+    "web/src/forms/form-document.test.js",
+    "docs/handoff/T-0678.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "The task's stated root cause named only WIDGET_COMPAT_TABLE/defaultWidgetForType. Investigation found a SECOND independent gate: validateDocument's V-CONTRACT rejected money/multi-select/person/file on a `field` node because those resolve to their own contract kind (not scalar/enum) — the exact capstone error was V-CONTRACT ('Узел Поле нельзя привязать к полю (тип money)'), not V-WIDGET. Fixed both: (1) added the 7 types to WIDGET_COMPAT_TABLE; (2) replaced the hardcoded `scalar||enum` field-node whitelist in validateDocument with `nodeTypeForFieldType(schemaField.type) === 'field'` so 'where a field goes' and 'what a field node hosts' share ONE source of truth and cannot drift."
+  ],
+  "friction_events": [
+    "Fresh worktree had no node_modules (root + web both missing) — ran npm ci --maxsockets=3 in both before any vitest/build could run.",
+    "FINDING (not a blocker): the FormDocumentRenderer render path was ALREADY correct for all 7 types before this fix — the widget value is cosmetic there. FieldControl resolves the real control from the field's schema TYPE (money→MoneyInput, datetime→DateInput withTime, email/url→typed inputs, person→PersonPicker, multi-select→checkbox group, file→FileField, all shipped in T-0509/T-0512/T-0516/T-0579/T-0649), and resolveFieldContract lets the schema type win whenever the widget's presentation isn't in the contract's list. So NO renderer change was needed and no widget added leads to an undrawable control — verified by probe. The bug was purely in the two AUTHORING gates (V-WIDGET + V-CONTRACT) that block save.",
+    "FINDING: a stale comment in FormDesigner.jsx (line 627) references a non-existent `classifyLayoutSave` function — the real save gate is `disabled={!validation.ok}` reading validateDocument, and persistLayout POSTs the doc verbatim. Left untouched (out of scope).",
+    "Pre-existing web eslint errors (DATA_NODE_TYPES unused import; render/validate unused in manifest()) exist on the untouched base — confirmed by stashing my diff (5 findings unchanged). My changes add zero new lint findings. The web lint gate script is `|| true` (non-blocking); the root lint gate (server TS) passes with 0 errors."
+  ],
+  "notes": {
+    "types_added": {
+      "money": "['money','number'] — MoneyInput (₽ inside, kopecks, T-0649)",
+      "datetime": "['datetime','date'] — DateInput withTime (дд.мм.гггг чч:мм, T-0649)",
+      "email": "['email','text'] — <input type=email> (T-0516)",
+      "url": "['url','text'] — <input type=url> (T-0516)",
+      "person": "['person'] — PersonPicker (org employee select, T-0512/T-0649)",
+      "multi-select": "['multi-select'] — checkbox group (T-0512)",
+      "file": "['file'] — FileField upload/download (T-0579)"
+    },
+    "pin_test": "web/src/forms/form-document.test.js — describe 'T-0678 PIN'. 9 tests (7 per-type + whole-document + non-empty widget-picker). Mutation-red proven twice: (a) revert V-CONTRACT gate → reds money/person/multi-select/file + whole-doc (5) with the exact capstone V-CONTRACT message, datetime/email/url stay green (scalar); (b) revert WIDGET_COMPAT entries → reds all 9. Both fixes independently load-bearing.",
+    "gate_numbers": {
+      "web_vitest": "2391 passed / 91 files (was 2382 before the 9 new pin-tests)",
+      "form_document_test": "27 passed (18 pre-existing + 9 new)",
+      "tsc_noEmit": "exit 0",
+      "web_build": "vite: 544 modules, exit 0",
+      "anti_case_lock": "PASS (Phase 1 delegates clean; Phase 2 full D-064 denylist within baseline, aggregate 16/16)"
+    },
+    "existing_types_untouched": "text/number/date/select/string/boolean/integer/textarea/relation/collection/computed byte-for-byte unchanged in WIDGET_COMPAT_TABLE; the non-field node-type contract gates (table/readout/relation) unchanged; all pre-existing form-document + renderer tests green."
+  }
+}

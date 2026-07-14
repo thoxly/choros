@@ -1,0 +1,11 @@
+# T-0061 — keep image lean and prevent secrets bake-in
+node_modules
+dist
+.env*
+.git
+ci
+docs
+spikes
+.claude
+web/node_modules
+# web/src/ and web/package*.json are needed by web-builder stage — do NOT exclude

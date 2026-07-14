@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0053",
+  "status": "ready",
+  "summary": "Materialize the Choros Postgres substrate every prior ADR was written against: a postgres:16 service in docker-compose (dev creds via env), a zero-dep Node migration runner with schema_migrations bookkeeping and skip-applied idempotency, baseline migrations 001-009 creating the ratified choros_* schema (job, application/registry_def/record JSONB object model, audit_event/audit_head, grant, object_handle) with the full T-0013 tenant-table convention (tenant_id NOT NULL leading PK, scoped uniqueness, FORCE RLS default-DENY) from migration #1, the non-owner/non-BYPASSRLS app role + separate migrator/owner role, ACT_* schema readiness (Flowable NOT installed), and an integration-honest CI gate that runs migrations, proves idempotency, and runs them with >=2 tenants. 18 CI-checkable acceptance criteria.",
+  "functional": [
+    "FR-1 postgres:16 service in docker-compose, dev creds via env",
+    "FR-2 zero-dep Node migration runner, schema_migrations bookkeeping, skip-applied idempotency, DATABASE_URL/migrator role",
+    "FR-3 baseline choros_* schema 001-009 = ratified object model only (job, application, registry_def, record, audit_event, audit_head, grant, object_handle); no FK to undesigned tables",
+    "FR-4 T-0013 tenant-table convention structural in DDL from migration #1 (tenant_id NOT NULL leading PK, scoped uniqueness, FORCE RLS, default-DENY on choros.tenant_id GUC)",
+    "FR-5 choros_app (NOSUPERUSER, NOBYPASSRLS, non-owner, DML-only) + choros_migrator (owner, DDL, never runtime)",
+    "FR-6 ACT_* schema/role readiness for future Flowable; Flowable itself NOT installed",
+    "FR-7 CI gate: migrations apply, idempotency re-run, >=2-tenant check; integration-honest; pg added only here"
+  ],
+  "non_functional": [
+    "NF-1 zero-dep runner (only pg client), no migration framework for choros_*",
+    "NF-2 structural isolation not discipline",
+    "NF-3 one schema/one RLS path silo and pooled",
+    "NF-4 reproducible unattended bring-up",
+    "NF-5 dev/prod credential separation (no prod secret committed)"
+  ],
+  "out_of_scope": [
+    "installing/running Flowable (E0.5, founder-gated)",
+    "JobStore->Postgres store code + migrations 010+ (T-0114)",
+    "Keycloak service/realm (E0.4)",
+    "role/assignment tables and any undesigned-model table",
+    "server provisioning / prod deploy (E0.7, founder-gated)",
+    "unified dev+prod compose stack (E0.6)",
+    "PgBouncer/partitioning/archival/history-cleanup (later scaling)",
+    "withTenant TS runtime wrapper + live RLS-probe app code (T-0114/identity tasks)"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "docker-compose defines a Postgres 16 service that comes up ready; params from env with dev defaults, no committed prod secret", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "runner applies all migrations on empty DB (exit 0, every file recorded in schema_migrations, all baseline tables exist)", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "runner idempotent: re-run applies zero migrations, schema_migrations unchanged, no DDL re-error", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "schema_migrations(version text PK, applied_at timestamptz); duplicate version -> PK violation", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "every baseline tenant table has ENABLE+FORCE RLS (pg_class probe returns empty)", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "default-DENY: choros_app with no SET LOCAL choros.tenant_id -> count 0 on every tenant table", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "tenant_id leading column of every composite index and FK on tenant tables", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "scoped uniqueness: same business key ok across tenants, duplicate within one tenant -> unique violation", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "tenant_id NOT NULL enforced at DB layer (NULL insert as migrator -> NOT NULL violation)", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "choros_app rolbypassrls=f, rolsuper=f, and not owner of any tenant table", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "choros_migrator owns tenant tables + holds DDL; choros_app CREATE TABLE fails", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "choros_app DML scoped per table; UPDATE/DELETE on audit_event fails (SELECT/INSERT only); no DDL grant", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "migrations idempotent and consistent with >=2 tenants (anti-decorative tenant_id, tenancy §9 guard 5)", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "no baseline FK targets an undesigned/non-existent table; all FKs resolve within baseline", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "JSONB columns present and typed jsonb (registry_def.record_schema, record.data, audit_event.payload, grant scope)", "verifiable_as": "test"},
+    {"id": "AC-16", "text": "ACT_* readiness (schema/role boundary) without installing Flowable; zero ACT_* tables after migrations", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "CI integration-honest with Postgres service: runner + idempotency re-run + >=2-tenant check; npm run ci green; worktrees excluded", "verifiable_as": "test"},
+    {"id": "AC-18", "text": "pg dependency declared exactly once in package.json; runner imports only Node builtins + pg", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0053-postgres-compose.spec.md"
+}

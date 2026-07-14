@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0192",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-N1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "scripts/db-cleanup-orphans.ts:107-108",
+      "issue": "--stale-templates may drop the template of another active worktree (datname !== CURRENT_TEMPLATE includes hashes that are 'current' for a different branch). ADR amendment T-0192 does not document this limitation explicitly.",
+      "suggestion": "Add a warning to the ADR and to the script help-text: 'do not run --stale-templates while other worktrees may be using their templates'. No auto-CI exposure since --stale-templates is an explicit opt-in flag."
+    },
+    {
+      "id": "R-N2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/db/globalSetup.ts:34-45, scripts/db-setup-template.ts:37-48, scripts/db-cleanup-orphans.ts:35-46",
+      "issue": "computeMigrationsHash is duplicated in 3 files. A shared ci/checks/db/migrations-hash.ts helper (builtins only) would eliminate duplication without violating FF-T147-3.",
+      "suggestion": "Extract computeMigrationsHash to ci/checks/db/migrations-hash.ts; import from all three callers. Acceptable as a follow-up task, not blocking current delivery."
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "ac": "AC-hash-determinism",
+      "covered": true
+    },
+    {
+      "ac": "AC-cross-branch-isolation",
+      "covered": true
+    },
+    {
+      "ac": "AC-orphan-no-accidental-drop",
+      "covered": true
+    },
+    {
+      "ac": "AC-stale-explicit-cleanup",
+      "covered": true
+    },
+    {
+      "ac": "AC-legacy-backward-compat",
+      "covered": true
+    },
+    {
+      "ac": "AC-FF-T147-all-green",
+      "covered": true
+    },
+    {
+      "ac": "AC-CI-green",
+      "covered": true
+    }
+  ],
+  "role_gap_evidence": []
+}

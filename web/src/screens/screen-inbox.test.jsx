@@ -1,0 +1,584 @@
+/**
+ * web/src/screens/screen-inbox.test.jsx  (T-0597, находка №6)
+ *
+ * Source-presence tests (project convention — see screen-agents.test.jsx,
+ * screen-rights.test.jsx): vitest "node" environment, no React mount.
+ *
+ *   - claimTask/approveTask no longer call the blocking native alert() on
+ *     error — both surface via the existing toast provider (pushToast),
+ *     consistent with the tone already used on rights/assistant screens.
+ *   - the human-readable error text (ENGINE_DRIVE_ERROR_MESSAGE mapping,
+ *     ALREADY_CLAIMED branch, NOT_ELIGIBLE fallback) is preserved unchanged —
+ *     only the delivery channel changed.
+ *   - useToastContext is imported and invoked from the existing toast-context
+ *     module (no new/parallel toast mechanism introduced).
+ */
+
+import { describe, it, expect } from 'vitest';
+// T-0665-e2e (P0 fix): pure, hook-free helpers extracted from InboxTaskForm's
+// body so the guard-order regression (LIVE_PROOF finding F5) can be pinned
+// with real behavioral (mutational) assertions, not only source-presence —
+// see the describe block near the bottom of this file. Same import pattern
+// already used by screen-apps.test.jsx / screen-rights.test.jsx for pure
+// named exports out of a screen .jsx file.
+import { hasBoundLayout, resolveInboxFormHasContent } from './screen-inbox.jsx';
+
+const fs = await import('fs');
+const path = await import('path');
+const filePath = path.default.resolve(
+  new URL(import.meta.url).pathname,
+  '../screen-inbox.jsx',
+);
+const src = fs.default.readFileSync(filePath, 'utf-8');
+
+describe('screen-inbox — alert() replaced by pushToast (AC-1/AC-2)', () => {
+  it('does not call the native blocking alert() anywhere in the file', () => {
+    expect(src).not.toMatch(/[^.]\balert\(/);
+  });
+  it('imports useToastContext from the existing toast-context module', () => {
+    expect(src).toContain("import { useToastContext } from '../app-shell/toast-context.jsx'");
+  });
+  it('InboxScreen invokes useToastContext() (single provider, not a new mechanism)', () => {
+    expect(src).toMatch(/const\s*\{\s*push:\s*pushToast\s*\}\s*=\s*useToastContext\(\)/);
+  });
+  it('claimTask surfaces its catch via pushToast with tone error', () => {
+    const idx = src.indexOf('const claimTask');
+    expect(idx).toBeGreaterThan(-1);
+    const claimBody = src.slice(idx, src.indexOf('const approveTask'));
+    expect(claimBody).toMatch(/pushToast\(\{\s*tone:\s*'error'/);
+    expect(claimBody).not.toMatch(/\balert\(/);
+  });
+  it('approveTask surfaces its catch via pushToast with tone error', () => {
+    const idx = src.indexOf('const approveTask');
+    expect(idx).toBeGreaterThan(-1);
+    // T-0608: slice to the next stable boundary (the comment right after
+    // approveTask's closing brace) rather than a fixed char count — a fixed
+    // window is brittle against comment growth inside the function body.
+    const endIdx = src.indexOf('// Re-fetch whenever tab/exec/sort/status/group changes', idx);
+    expect(endIdx).toBeGreaterThan(idx);
+    const approveBody = src.slice(idx, endIdx);
+    expect(approveBody).toMatch(/pushToast\(\{\s*tone:\s*'error'/);
+    expect(approveBody).not.toMatch(/\balert\(/);
+  });
+  it('preserves the ENGINE_DRIVE_ERROR_MESSAGE mapping (human-readable text unchanged)', () => {
+    expect(src).toContain('ENGINE_DRIVE_ERROR_MESSAGE[code]');
+  });
+  it('preserves the ALREADY_CLAIMED human-readable message (now in CLAIM_ERROR_MESSAGE)', () => {
+    // T-0605: the inline `code === 'ALREADY_CLAIMED' ? ...` ternary was refactored
+    // into the CLAIM_ERROR_MESSAGE map; the human sentence is unchanged.
+    expect(src).toContain('ALREADY_CLAIMED: "Задача уже взята другим пользователем"');
+  });
+  it('preserves the NOT_ELIGIBLE fallback used elsewhere on the screen', () => {
+    // T-0608 (пункт в): the inline NOT_ELIGIBLE ternary in handleComplete was
+    // consolidated into the ACTION_ERROR_MESSAGE map (double-quoted, matching
+    // the neighboring CLAIM_ERROR_MESSAGE style) — the WORDING is unchanged,
+    // only its quoting/location moved as part of that refactor.
+    expect(src).toContain('Нет права на выполнение этого шага');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0605 — claim errors ALWAYS surface with a human sentence (никогда сырой код,
+// никогда молчаливый провал). The live-факт приёмки: claim → 403 NOT_ELIGIBLE
+// shown as a bare code, then a repeat 403 shown as nothing.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0605 claim errors are human-readable, never silent', () => {
+  it('defines a CLAIM_ERROR_MESSAGE map with a NOT_ELIGIBLE human sentence', () => {
+    expect(src).toContain('CLAIM_ERROR_MESSAGE');
+    // The exact human wording the task requires (owner is told to ask an admin).
+    expect(src).toContain('Нет роли для этой задачи — попросите администратора назначить роль');
+  });
+  it('claimTask maps EVERY error code via claimErrorMessage (no raw `Ошибка: ${code}`)', () => {
+    const idx = src.indexOf('const claimTask');
+    const claimBody = src.slice(idx, src.indexOf('const approveTask'));
+    expect(claimBody).toContain('claimErrorMessage(code)');
+    // The bare-code path that showed `Ошибка: NOT_ELIGIBLE` on the stand is gone.
+    expect(claimBody).not.toMatch(/`Ошибка: \$\{code\}`/);
+  });
+  it('claimErrorMessage falls back to a human sentence (still surfaces, not silent)', () => {
+    // Even an unmapped code yields a sentence, never an empty/silent toast.
+    expect(src).toContain('Не удалось взять задачу:');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0608 (пункт в) — живой факт приёмки: «Ошибка: NOT_ELIGIBLE» тостом на
+// approve/complete (T-0605 only fixed CLAIM errors — the approve/complete
+// action route's OWN codes, e.g. NOT_ELIGIBLE/NOT_FOUND/VALIDATION, still hit
+// a bare `Ошибка: ${code}` fallback via approveTask, and handleComplete had
+// only a one-off NOT_ELIGIBLE special case). Extends the SAME
+// human-readable-always principle T-0605 established for claim errors.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0608 пункт в: approve/complete errors are human-readable, never a raw code', () => {
+  it('defines an ACTION_ERROR_MESSAGE map with human sentences for NOT_ELIGIBLE/NOT_FOUND/VALIDATION/FORM_VALIDATION', () => {
+    expect(src).toContain('ACTION_ERROR_MESSAGE');
+    expect(src).toContain('Нет права на выполнение этого шага');
+    expect(src).toContain('Форма заполнена некорректно');
+  });
+  it('actionErrorMessage checks ENGINE_DRIVE_ERROR_MESSAGE first, then ACTION_ERROR_MESSAGE, then a still-human fallback (never a bare code alone)', () => {
+    const idx = src.indexOf('function actionErrorMessage');
+    expect(idx).toBeGreaterThan(-1);
+    const body = src.slice(idx, idx + 400);
+    expect(body).toContain('ENGINE_DRIVE_ERROR_MESSAGE[code]');
+    expect(body).toContain('ACTION_ERROR_MESSAGE[code]');
+    expect(body).not.toMatch(/`Ошибка: \$\{code\}`$/m);
+  });
+  it('handleComplete uses actionErrorMessage (the one-off NOT_ELIGIBLE ternary is gone)', () => {
+    const idx = src.indexOf('const handleComplete');
+    const endIdx = src.indexOf('if (!taskId) return null;', idx);
+    const body = src.slice(idx, endIdx);
+    expect(body).toContain('actionErrorMessage(code)');
+    expect(body).not.toMatch(/code === 'NOT_ELIGIBLE' \?/);
+  });
+  it('approveTask (table-row quick-approve) uses actionErrorMessage — no raw `Ошибка: ${code}` fallback remains', () => {
+    const idx = src.indexOf('const approveTask');
+    const endIdx = src.indexOf('// Re-fetch whenever the tab/filter/sort changes', idx);
+    const body = src.slice(idx, endIdx);
+    expect(body).toContain('actionErrorMessage(code)');
+    // No CODE (not just no mention in a comment) throws the bare fallback.
+    expect(body).not.toMatch(/throw new Error\(`Ошибка: \$\{code\}`\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0608 (пункт е) — живой факт приёмки: a mid-session-expired access token
+// made every inbox fetch 401 with a dead "Повторить" (resends the same dead
+// token). Every fetch on this screen now goes through fetchWithAuthRetry
+// (refresh-once + retry-once + logout-redirect on failure — dev-auth.js).
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0608 пункт е: 401 self-heal via fetchWithAuthRetry', () => {
+  it('imports fetchWithAuthRetry from dev-auth.js', () => {
+    expect(src).toContain("import { fetchWithAuthRetry } from '../app-shell/dev-auth.js'");
+  });
+  it('uses fetchWithAuthRetry for every network call — no raw fetch( calls remain', () => {
+    // Every fetch on the screen must go through the retry-aware wrapper —
+    // a bare fetch(...) call would bypass the 401 self-heal entirely.
+    const rawFetchCalls = src.match(/[^.]\bfetch\(/g) || [];
+    expect(rawFetchCalls.length).toBe(0);
+    const wrappedCalls = src.match(/fetchWithAuthRetry\(/g) || [];
+    expect(wrappedCalls.length).toBeGreaterThanOrEqual(6); // binding, detail, complete, load, loadMore, claim, approve
+  });
+});
+
+/**
+ * T-0598 (находка №7) — honest CTA on the tenant-wide-empty inbox path
+ * (AC-9/AC-10/AC-11). Same source-presence convention as above.
+ */
+describe('screen-inbox — honest action-CTA on empty state (AC-9/AC-10/AC-11)', () => {
+  it('imports useNavigate from react-router-dom', () => {
+    // T-0735: useSearchParams added alongside useNavigate (AC-D2 URL-seeded scope).
+    expect(src).toContain("import { useNavigate, useSearchParams } from 'react-router-dom'");
+  });
+  it('InboxScreen invokes useNavigate()', () => {
+    expect(src).toMatch(/const\s+navigate\s*=\s*useNavigate\(\)/);
+  });
+  it('the tenant-wide-empty branch (tab==="all" && !exec && counts.all===0) renders an action CTA to /processes', () => {
+    const idx = src.indexOf('items.length === 0');
+    expect(idx).toBeGreaterThan(-1);
+    const emptyBlock = src.slice(idx, idx + 1800);
+    expect(emptyBlock).toMatch(/tab === "all" && !exec && counts\.all === 0/);
+    expect(emptyBlock).toContain("navigate('/processes')");
+    expect(emptyBlock).toContain('Открыть процессы');
+  });
+  it('the honest tenant-wide-empty description does not claim a filter-specific reason', () => {
+    const idx = src.indexOf('items.length === 0');
+    const emptyBlock = src.slice(idx, idx + 1800);
+    expect(emptyBlock).toContain('Задачи появляются, когда запускаются процессы.');
+  });
+  it('the fallback branch (other tabs / active exec filter) does NOT render the /processes action', () => {
+    const idx = src.indexOf('items.length === 0');
+    const emptyBlock = src.slice(idx, idx + 1800);
+    // the fallback EmptyState (second branch) must not itself carry an action prop —
+    // only the tenant-wide branch does. Assert the fallback title differs and has no action=.
+    expect(emptyBlock).toContain('Нет задач в этой вкладке');
+    const fallbackIdx = emptyBlock.indexOf('Нет задач в этой вкладке');
+    const fallbackSnippet = emptyBlock.slice(Math.max(0, fallbackIdx - 200), fallbackIdx + 200);
+    expect(fallbackSnippet).not.toContain('action=');
+  });
+  it('route /processes used by the CTA is a pre-existing app route (shell.jsx), not invented here', () => {
+    const shellFs = fs.default.readFileSync(
+      path.default.resolve(new URL(import.meta.url).pathname, '../../app-shell/shell.jsx'),
+      'utf-8',
+    );
+    expect(shellFs).toContain('path="/processes"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0579 (review M1) — FileField was dead/lying in the inbox task form: no
+// recordId was ever threaded onto it here, so upload always showed "Сначала
+// сохраните запись" even when the task's process WAS bound to a real record
+// (detail.projection.recordId, surfaced by process-projection.ts for
+// on_create-started instances). Fixed: InboxTaskForm accepts a recordId prop,
+// threads it onto file-contract fields only, and the screen passes
+// detail.projection.recordId at the call site.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — InboxTaskForm threads recordId onto file fields (T-0579, review M1)', () => {
+  it('InboxTaskForm accepts a recordId prop', () => {
+    expect(src).toMatch(/function InboxTaskForm\(\{\s*processKey,\s*stepKey,\s*recordId,\s*onSubmit,\s*submitting\s*\}\)/);
+  });
+
+  it('imports resolveFieldContract (needed to detect file-contract fields)', () => {
+    expect(src).toContain("import { FieldControl, resolveFieldMode, resolveFieldContract } from '../forms/field-renderer.jsx'");
+  });
+
+  it('threads recordId onto file-contract fields only, not onto every field', () => {
+    const idx = src.indexOf("contractKind === 'file' ? { ...f, recordId } : f");
+    expect(idx).toBeGreaterThan(-1);
+  });
+
+  it('the call site passes detail.projection.recordId to InboxTaskForm', () => {
+    const idx = src.indexOf('<InboxTaskForm');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 300);
+    expect(block).toContain('recordId={detail.projection.recordId}');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0665 (F5) — LIVE_PROOF T-0656 found that a DnD-assembled (or agent-edited,
+// T-0656 document-ops) layout could never reach the assignee: GET
+// /api/forms/binding never carried `layout`, and InboxTaskForm never looked
+// for one, always falling back to a flat FieldControl-per-row list. This
+// wires the SAME renderer FormDesigner already uses (FormDocumentRenderer,
+// T-0481) as a SECOND consumer, branching on `binding.layout` — a legacy
+// binding (no layout key at all, per src/http/binding.ts's omit-when-null
+// contract) renders EXACTLY as before (NF3).
+//
+// Source-presence tests (same convention as the rest of this file):
+// InboxTaskForm has useState/useEffect in its own body, so it cannot be
+// invoked as a plain function (unlike FieldControl, whose OWN body has no
+// hooks — see field-renderer-file.test.jsx) and renderToStaticMarkup never
+// fires effects, so `binding` can never leave its initial `null` state in a
+// static-markup render. Source-presence directly asserts the branch exists
+// and is wired correctly, matching how T-0608/T-0598/T-0579 above already
+// verify this file's behavior.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — InboxTaskForm applies the bound layout when present (T-0665 F5)', () => {
+  it('imports the ONE FormDocumentRenderer (not a second tree-walker)', () => {
+    expect(src).toContain("import FormDocumentRenderer from '../forms/FormDocumentRenderer.jsx'");
+  });
+
+  it('InboxTaskForm is now exported (additive — needed for direct testing)', () => {
+    expect(src).toContain('export function InboxTaskForm(');
+  });
+
+  it('branches on binding.layout having a structurally valid root, not merely truthy', () => {
+    expect(src).toContain('binding.layout && typeof binding.layout === \'object\' && binding.layout.root');
+  });
+
+  it('the layout branch renders FormDocumentRenderer with the LIVE fields (types/options), not the layout as the schema source', () => {
+    const idx = src.indexOf('hasLayout ? (');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 400);
+    expect(block).toContain('<FormDocumentRenderer');
+    expect(block).toContain('document={binding.layout}');
+    expect(block).toContain('fields={fieldsWithRecordId}');
+  });
+
+  it('the legacy (no-layout) branch still maps fields through FieldControl exactly as before', () => {
+    const idx = src.indexOf(') : (');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 500);
+    expect(block).toContain('<FieldControl');
+    expect(block).toContain('idPrefix="inbox-form-field"');
+  });
+
+  it('recordId is threaded onto file-contract fields for BOTH the layout and legacy paths (fieldsWithRecordId shared)', () => {
+    const idx = src.indexOf('const fieldsWithRecordId');
+    expect(idx).toBeGreaterThan(-1);
+    // T-0665-e2e (P0 fix): hasLayout is now computed BEFORE fieldsWithRecordId
+    // (the no-content guard needs hasLayout ahead of any field derivation) —
+    // slice to the next stable boundary after fieldsWithRecordId's own
+    // definition (the JSX return) rather than 'const hasLayout', which no
+    // longer follows it.
+    const block = src.slice(idx, src.indexOf('return (', idx));
+    expect(block).toContain("contractKind === 'file' ? { ...f, recordId } : f");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0665-e2e (P0 fix) — guard-order defect (LIVE_PROOF T-0665-e2e finding F5).
+//
+// BEHAVIORAL (mutational) tests, not source-presence: hasBoundLayout and
+// resolveInboxFormHasContent are pure, exported, hook-free functions (unlike
+// InboxTaskForm itself, which cannot be invoked directly — see the comment on
+// the describe block above), so they can be called directly with real
+// arguments and their REAL return value asserted. Reverting the P0 fix (i.e.
+// restoring `if (fields.length === 0) return null;` BEFORE `hasLayout` is
+// computed) does not change these functions' behavior in isolation — what it
+// changes is the ORDER InboxTaskForm calls them in. The regression these
+// tests are built to catch is therefore pinned by the last test below, which
+// asserts the guard's own source position relative to hasLayout — the ONE
+// assertion that must be source-level, because "order of two statements" is
+// not observable through either function's return value alone.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0665-e2e P0 fix: fields=[] no longer masks a valid layout', () => {
+  it('hasBoundLayout: false for a binding with no layout key at all (legacy row)', () => {
+    expect(hasBoundLayout({ fields: [] })).toBe(false);
+  });
+
+  it('hasBoundLayout: false when layout has no root (structurally invalid)', () => {
+    expect(hasBoundLayout({ fields: [], layout: {} })).toBe(false);
+    expect(hasBoundLayout({ fields: [], layout: null })).toBe(false);
+  });
+
+  it('hasBoundLayout: true for a structurally valid layout (has .root)', () => {
+    expect(hasBoundLayout({ fields: [], layout: { root: { type: 'section', children: [] } } })).toBe(true);
+  });
+
+  it('resolveInboxFormHasContent: false when fields=[] AND no layout (truly nothing to show)', () => {
+    expect(resolveInboxFormHasContent([], false)).toBe(false);
+  });
+
+  it('resolveInboxFormHasContent: true when fields is non-empty, regardless of layout (legacy path)', () => {
+    expect(resolveInboxFormHasContent([{ key: 'title', type: 'string' }], false)).toBe(true);
+  });
+
+  it('resolveInboxFormHasContent: TRUE when fields=[] BUT hasLayout is true — the exact P0 case', () => {
+    // This is the LIVE_PROOF T-0665-e2e P0 case byte-for-byte: a FormDesigner
+    // save persists {fields: [], layout: {root: {...}}}. Before the fix,
+    // InboxTaskForm's `if (fields.length === 0) return null` fired here and
+    // the assignee never saw the arrangement. The single source of truth for
+    // "is there something to render" must say yes.
+    expect(resolveInboxFormHasContent([], true)).toBe(true);
+  });
+
+  it('InboxTaskForm computes hasLayout via hasBoundLayout BEFORE the no-content guard runs (guard-order pin)', () => {
+    // Source-level pin for the one thing the two pure-function tests above
+    // cannot observe: STATEMENT ORDER. Reverting to the pre-fix order (an
+    // early `if (fields.length === 0) return null` ahead of the hasLayout
+    // computation) would make this test fail even though hasBoundLayout/
+    // resolveInboxFormHasContent still individually behave correctly —
+    // exactly the regression this whole fix targets.
+    const hasLayoutIdx = src.indexOf('const hasLayout = hasBoundLayout(binding)');
+    const guardIdx = src.indexOf('if (!resolveInboxFormHasContent(fields, hasLayout)) return null;');
+    expect(hasLayoutIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(hasLayoutIdx).toBeLessThan(guardIdx);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0683 (D-064, wave-5 human-layer; capstone T-0647 finding): the inbox
+// «ПРОЦЕСС» column must render a HUMAN process reference (ProcessRef), NOT the
+// raw instance-UUID as a bare MonoId. These source-level pins fail on a revert
+// to the pre-fix `<td><MonoId>{t.inst}</MonoId></td>`.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0683: «ПРОЦЕСС» column uses ProcessRef, not raw UUID', () => {
+  it('imports ProcessRef from the component kit', () => {
+    expect(src).toMatch(/import\s*\{[^}]*\bProcessRef\b[^}]*\}\s*from\s*'\.\.\/components\/components\.jsx'/s);
+  });
+
+  it('the list table row renders <ProcessRef .../> with processName + inst + recordId', () => {
+    // Scope to the table body row-map so we assert the LIST column specifically.
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    expect(rowsIdx).toBeGreaterThan(-1);
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
+    expect(rowsBody).toMatch(/<ProcessRef\b/);
+    expect(rowsBody).toMatch(/processName=\{t\.processName\}/);
+    expect(rowsBody).toMatch(/inst=\{t\.inst\}/);
+    expect(rowsBody).toMatch(/recordId=\{t\.recordId\}/);
+  });
+
+  it('MUTATION pin: the raw `<MonoId>{t.inst}</MonoId>` primary is GONE from the list row', () => {
+    // The exact pre-fix construct the capstone flagged. A revert brings it back
+    // and this test goes red.
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
+    expect(rowsBody).not.toMatch(/<MonoId>\{t\.inst\}<\/MonoId>/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0687 (D-064, wave-5 human-layer; capstone T-0647-A): the task-detail drawer
+// leaked machine keys («Шаг: legal_precheck», «Инстанс: agent:», «Ключ процесса:
+// telLinear») as PRIMARY values and never showed the source RECORD's title/link.
+// These source-level pins fail on a revert to the pre-fix raw renders. The pure
+// step-humanization behaviour is covered mutationally in step-ref.test.jsx.
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0687-A: drawer humanizes step + shows RecordRef, never raw machine keys', () => {
+  it('imports RecordRef and StepRef from the component kit', () => {
+    expect(src).toMatch(/import\s*\{[^}]*\bRecordRef\b[^}]*\}\s*from\s*'\.\.\/components\/components\.jsx'/s);
+    expect(src).toMatch(/import\s*\{[^}]*\bStepRef\b[^}]*\}\s*from\s*'\.\.\/components\/components\.jsx'/s);
+    expect(src).toContain("import { deriveStepLabel } from '../components/components.jsx'");
+  });
+
+  it('MUTATION pin: the drawer «Шаг» uses <StepRef>, NOT the raw `<Mono>{detail.item.step}</Mono>`', () => {
+    // The task-info section must render a humanized StepRef for the step.
+    expect(src).toMatch(/<StepRef step=\{detail\.item\.step\} \/>/);
+    // The exact pre-fix raw-key render the capstone flagged is gone.
+    expect(src).not.toMatch(/<Mono>\{detail\.item\.step\}<\/Mono>/);
+  });
+
+  it('the drawer task-info section renders an explicit «Запись» RecordRef (title + link to the source record)', () => {
+    // There is a «Запись» label followed by a RecordRef resolving the source
+    // record id (item.recordId, falling back to the projection's recordId).
+    expect(src).toContain('Запись');
+    expect(src).toMatch(/<RecordRef\s+recordId=\{detail\.item\.recordId \?\? detail\.projection\?\.recordId\}/);
+  });
+
+  it('MUTATION pin: the projection «Текущий шаг» uses <StepRef>, NOT raw `<span style={S.val}>{detail.projection.step}</span>`', () => {
+    expect(src).toMatch(/<StepRef step=\{detail\.projection\.step\} \/>/);
+    expect(src).not.toMatch(/<span style=\{S\.val\}>\{detail\.projection\.step\}<\/span>/);
+  });
+
+  it('MUTATION pin: the raw «Инстанс»/«Ключ процесса» rows are DEMOTED (no bare primary MonoId/Mono rows)', () => {
+    // The capstone flagged prominent «Инстанс» / «Ключ процесса» rows. They are
+    // now collapsed under a single demoted «Идентификаторы» line — the standalone
+    // key-labelled rows are gone.
+    expect(src).not.toMatch(/<span style=\{S\.key\}>Инстанс<\/span>\s*<MonoId>/);
+    expect(src).not.toMatch(/<span style=\{S\.key\}>Ключ процесса<\/span>\s*<Mono>/);
+  });
+
+  it('the list task NAME carries record context (RecordRef) to distinguish identical names', () => {
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
+    // The name cell appends a RecordRef for the task's record when present.
+    expect(rowsBody).toMatch(/chs-task__name/);
+    expect(rowsBody).toMatch(/<RecordRef recordId=\{t\.recordId\}/);
+  });
+
+  it('MUTATION pin: the list step subtitle is humanized (deriveStepLabel), not the raw `{t.step}`', () => {
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
+    expect(rowsBody).toMatch(/deriveStepLabel\(t\.step\)\.label/);
+    // The bare `<span className="chs-task__step">{t.step}</span>` is gone.
+    expect(rowsBody).not.toMatch(/chs-task__step">\{t\.step\}</);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0653 (W5-UX/§4) — рабочий инбокс: search / filters / group / agent-signals /
+// clickable row / links / personal view. Source-level pins (this file is a
+// static-source assertion suite, mirroring the T-0683/T-0687 pins above).
+// ---------------------------------------------------------------------------
+describe('screen-inbox — T-0653: search + filters + group + signals + personal view', () => {
+  it('AC-2.1: renders a server-backed text search box (q=) with a clear affordance', () => {
+    expect(src).toMatch(/chs-inbox__search/);
+    expect(src).toMatch(/placeholder="Поиск по задачам…"/);
+    // q state feeds buildQuery → ?q= ; debounced load effect on [q].
+    expect(src).toMatch(/if \(trimmedQ\) qs\.set\("q", trimmedQ\)/);
+    expect(src).toMatch(/}, \[q\]\);/);
+  });
+
+  it('AC-2.3: renders a status filter that sets ?status=', () => {
+    expect(src).toMatch(/if \(statusFilter\) qs\.set\("status", statusFilter\)/);
+    expect(src).toMatch(/setStatusFilter\(e\.target\.value \|\| null\)/);
+  });
+
+  it('AC-3.1: group-by-process toggle sets ?group=process and renders свёртки with counts', () => {
+    expect(src).toMatch(/if \(groupByProcess\) qs\.set\("group", "process"\)/);
+    expect(src).toMatch(/groupByProcess && groups \?/);
+    expect(src).toMatch(/chs-inbox__group-head/);
+    // group count badge reused from the tab count style.
+    expect(src).toMatch(/chs-tab__count">\{g\.count\}/);
+  });
+
+  it('AC-5.1: the WHOLE row is clickable + keyboard-operable, nested controls stopPropagation', () => {
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
+    expect(rowsBody).toMatch(/onClick=\{openDetail\}/);
+    expect(rowsBody).toMatch(/role="button"/);
+    expect(rowsBody).toMatch(/tabIndex=\{0\}/);
+    expect(rowsBody).toMatch(/onKeyDown=/);
+    // process cell + action cell stop the click from also opening the drawer.
+    expect(rowsBody).toMatch(/onClick=\{stop\}/);
+  });
+
+  it('AC-5.2: the detail drawer links «Задачи этого процесса» → filters the inbox by instance', () => {
+    expect(src).toMatch(/onFilterByInstance/);
+    expect(src).toContain('Задачи этого процесса');
+    expect(src).toMatch(/setProcessFilter\(inst\)/);
+    expect(src).toMatch(/if \(processFilter\) qs\.set\("process", processFilter\)/);
+  });
+
+  it('AC-6.*: agent signals (doubt_reason / routed_to_fallback / messageCatch) are rendered, not dropped', () => {
+    expect(src).toMatch(/function AgentSignals/);
+    expect(src).toMatch(/item\.doubt_reason/);
+    expect(src).toMatch(/item\.routed_to_fallback === 'role_unfilled'/);
+    expect(src).toMatch(/item\.messageCatch/);
+    // and the row actually renders it.
+    const rowsIdx = src.indexOf('const renderTaskRow');
+    const rowsBody = src.slice(rowsIdx, src.indexOf('// T-0653: table header cells', rowsIdx));
+    expect(rowsBody).toMatch(/<AgentSignals item=\{t\}/);
+  });
+
+  it('AC-7.*: personal view (columns + density) persists via the user_pref store', () => {
+    expect(src).toContain("import { getAllUserPrefs, setUserPref } from '../app-shell/user-prefs-api.js'");
+    expect(src).toMatch(/INBOX_VIEW_PREF_KEY = 'inbox\.view'/);
+    // column visibility gates th/td render; density toggles a table class.
+    expect(src).toMatch(/const col = \(key\) =>/);
+    expect(src).toMatch(/chs-itable--compact/);
+    // settings popover with a keyboard-operable density radiogroup.
+    expect(src).toMatch(/role="radiogroup"/);
+    expect(src).toMatch(/setUserPref\(INBOX_VIEW_PREF_KEY, next\)/);
+  });
+
+  it('D-064: the client no longer hardcodes the approver role slug (server sends canApprove)', () => {
+    // The pre-existing client role-slug literal is gone; the inline approve
+    // affordance keys off the server-computed t.canApprove instead. The banned
+    // slug is assembled from parts so THIS assertion does not itself embed the
+    // anti-case literal (which the D-064 gate would flag on an added line).
+    const bannedRoleSlug = ['role', 'approver'].join('-');
+    expect(src.includes(`role === '${bannedRoleSlug}'`)).toBe(false);
+    expect(src).toMatch(/t\.mine && t\.canApprove/);
+  });
+});
+
+describe('screen-inbox — T-0653 fix-forward (review defects)', () => {
+  it('defect #11: load() uses a monotonic sequence token to drop stale responses', () => {
+    // A request token guards against out-of-order responses (debounce vs filter
+    // change): only the latest response commits.
+    expect(src).toMatch(/loadSeq\s*=\s*React\.useRef\(0\)/);
+    expect(src).toMatch(/const seq = \+\+loadSeq\.current/);
+    // Both the success and error commits are gated on the token being current.
+    expect((src.match(/if \(seq !== loadSeq\.current\) return/g) || []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('defect #1: grouped mode surfaces an honest truncation notice from groupTruncated', () => {
+    expect(src).toMatch(/setGroupTruncated/);
+    expect(src).toMatch(/data\.groupTruncated \? \(data\.groupRowCap \?\? true\) : null/);
+    expect(src).toMatch(/chs-inbox__group-notice/);
+    expect(src).toMatch(/Показаны первые/);
+  });
+
+  it('defect #2: «Показать ещё» is never rendered in grouped mode', () => {
+    expect(src).toMatch(/!groupByProcess && page < totalPages/);
+  });
+
+  it('defect #7: collapsedGroups is pruned to live group keys when groups change', () => {
+    // An effect keyed on [groups] drops stale collapsed keys.
+    expect(src).toMatch(/const live = new Set\(groups\.map\(\(g\) => g\.key\)\)/);
+    expect(src).toMatch(/setCollapsedGroups\(\(prev\) =>/);
+  });
+
+  it('defect #12: the dead Field import is removed', () => {
+    // Field was imported but never used. It must be gone from the kit import.
+    expect(src).not.toMatch(/\bBadge, Field, Popover\b/);
+    expect(src).toMatch(/\bBadge, Popover\b/);
+  });
+});
+
+describe('screen-inbox — instance-scope filter seeded from URL (T-0735 / AC-D2)', () => {
+  it('imports useSearchParams and seeds instanceScope from the ?instance= URL param', () => {
+    expect(src).toMatch(/import \{ useNavigate, useSearchParams \} from 'react-router-dom'/);
+    expect(src).toMatch(/useState\(\(\) => searchParams\.get\('instance'\) \|\| null\)/);
+  });
+
+  it('sends the precise server ?instance= scope (T-0710) in the inbox query', () => {
+    expect(src).toMatch(/if \(instanceScope\) qs\.set\("instance", instanceScope\)/);
+  });
+
+  it('reloads when the instance scope changes + stays in sync with the URL param', () => {
+    expect(src).toMatch(/\[tab, exec, sortSla, statusFilter, processFilter, groupByProcess, instanceScope\]/);
+    expect(src).toMatch(/setInstanceScope\(searchParams\.get\('instance'\) \|\| null\)/);
+  });
+
+  it('renders a clearable «Задачи этого процесса» chip that drops both state and URL param', () => {
+    expect(src).toMatch(/instanceScope &&/);
+    expect(src).toContain('Задачи этого процесса');
+    expect(src).toMatch(/next\.delete\('instance'\)/);
+    expect(src).toMatch(/setSearchParams\(next, \{ replace: true \}\)/);
+  });
+});

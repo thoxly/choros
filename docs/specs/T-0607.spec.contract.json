@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0607",
+  "status": "ready",
+  "summary": "Пять дефектов честности контура ассистента (живой факт приёмки 2026-07-03, DeepSeek-live). (а) СЛЕПОТА К ДАННЫМ (столп 6): src/server.ts::setAnalystPorts не подключает listRecords ('not wired here … Defaults to []') → аналитик читает только S3-журнал, никогда реестры; при [] buildDraftContext пишет 'Записей нет', LLM рапортует владельцу отсутствие данных, хотя тот видит раздел в UI. (б) НЕДЕТЕРМИНИРОВАННЫЙ ГЕЙТ ПРАВ: assistant-configurator.ts::hasAuthoringDraftGrant проверяет только canOperateSystemAgent(intersectionGrants), НЕ применяя owner-short-circuit, который capability-authz.ts:121-124 объявляет обязанностью caller'а; пересечение agent∩user мигает по scope грантов агента → владелец получает детерминированный ЛОЖНЫЙ AUTHORING_ACCESS_DENIED_MESSAGE. (в) ЛОЖНЫЙ РАПОРТ ПРИ УПАВШИХ OPS: (в1) executeApprovedOpAsDraft требует сырой UUID реестра/приложения, LLM передаёт slug (нет каталога id↔slug↔name) → 'invalid input syntax for type uuid'; processToolCall штампует '✓ [DRAFT]' до реального исполнения. (в2) итоговый текст = LLM 'Все поля добавлены ✅' + оптимистичный changelog; реальные падения лишь приписаны отдельной '⚠ Ошибки…', исходный '✅' остаётся. (г) ТИХИЕ БЕЗ-ОТВЕТЫ: runAnalyst зовёт ctx.llm.chat() без try/catch (в отличие от runConfiguratorLoop) → неклассифицируемая ошибка LLM пробрасывается, router шлёт 500, но assistant-сообщение в тред НЕ пишется → user-message без ответа и без ошибки в треде. (д) УТЕЧКА ВНУТРЕННОСТЕЙ: buildDraftContext безусловно вклеивает 'Цикловое время по активностям (S3 журнал)' и 'Разбивка по типу актора' в контекст LLM → предлагается пользователю как объяснение. Фиксы минимально-инвазивны, по каждому пункту + тесты; полноценный tool-use аналитик и атомарный бандл-execute — follow-up ADR.",
+  "functional": [
+    "F-a1. Аналитик получает read-порт реестров в правах актёра (getGrantsForSubject + READ-PDP isRecordReadable): по каждому читаемому реестру display_name/slug, число видимых записей, до N примеров значений. Не сырой SQL в обход прав, не шире прав пользователя.",
+    "F-a2. Порт отработал и вернул 0 → текст честен ('в доступных вам разделах записей нет'); порт деградировал (honest-degrade) → текст НЕ утверждает отсутствие данных как факт.",
+    "F-b1. Серверный PDP решает право ДО/ВНЕ LLM: hasAuthoringDraftGrant применяет owner-short-circuit (владелец → всегда разрешено) поверх canOperateSystemAgent на грантах ПОЛЬЗОВАТЕЛЯ, детерминированно.",
+    "F-b2. Нет права → детерминированный серверный отказ (честный, указывает к кому обратиться); LLM не решает и не переопределяет.",
+    "F-v1. Исполнитель ops принимает slug ИЛИ UUID реестра/приложения; резолв slug→UUID на стороне исполнителя (в правах тенанта) до DB-записи; не-резолвящийся идентификатор → honest op-error, не 500.",
+    "F-v2. Итоговый рапорт отражает реальные исходы ops: строки упавших ops не подаются как успех; при падениях '✅ добавлено' не используется; дубль-op (поле уже есть) отличается от 'поля нет'.",
+    "F-g1. Каждый user-message получает ответ ИЛИ честную ошибку В ТРЕДЕ: runAnalyst оборачивает ctx.llm.chat() и возвращает canonicalizeLlmError-текст; роут пишет assistant-сообщение с честной ошибкой в тред при любом неперехваченном сбое диспатча (в дополнение к HTTP-конверту), без утечки сырого текста.",
+    "F-d1. S3-телеметрия (цикловое время, разбивка по актору) НЕ вклеивается в user-facing контекст аналитика по умолчанию; только когда запрос явно про процессную аналитику."
+  ],
+  "non_functional": [
+    "N1. D-064: без кейс-литералов в src/ — ci/checks/anti-case-lock.sh зелёный.",
+    "N2. Жаргон-гейт assistant-llm-message-jargon.sh (+ --self-test) зелёный; новые тексты без жаргона денилиста.",
+    "N3. Read-порт (а) не расширяет права: только покрытое READ-грантом актёра; agent∩user-инвариант и RLS/тенант-изоляция сохранены.",
+    "N4. Owner-short-circuit не расширяет права не-владельцам; не-владелец без гранта детерминированно отказан; capture-as-request не ломается.",
+    "N5. Публичные типы (HandlerResult, ConfiguratorResult, AnalystPorts, LlmPort) структурно не ломаются; тесты T-0573/T-0595/T-0599/T-0600 проходят.",
+    "N6. Read-порт аналитика O(1) резолв грантов + один bounded SELECT на реестр (cap на реестры и примеры), не N+1 сверх page."
+  ],
+  "out_of_scope": [
+    "O1. Полноценный tool-use аналитик (LLM сам выбирает реестры, пагинация, агрегации) — MVP-шаг: детерминированный дайджест читаемых реестров; остальное FU.",
+    "O2. LLM-роутер интента (замена keyword-classifyIntent) — гейт прав (б) чинится независимо от способа роутинга.",
+    "O3. Атомарный транзакционный plan→execute→report с откатом всего бандла при частичном провале — здесь только честный рапорт частичного исхода; FU.",
+    "O4. Резолв slug→UUID для generate_process.applicationId делаем; единая нормализация всех аргументов всех tools под общую схему — FU."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "(а) unit: аналитик со stub read-портом (дайджест реестра с записями) строит контекст с именем реестра и числом записей; текст не содержит 'записей нет'.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "(а) unit: read-порт вернул 0 читаемых реестров (отработал) → контекст об отсутствии данных в доступных разделах; при деградации порта (throw→honest fallback) контекст НЕ утверждает отсутствие как факт.", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "(а) live DB: реальный тенант с реестром+записью+READ-грантом актёра → loadReadableRegistryDigest даёт count>=1 и sample; второй юзер без READ-гранта → 0.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "(б) unit: hasAuthoringDraftGrant для владельца (isGenesisOwner=true) без явного пересекающегося гранта → true; для не-владельца без гранта → false.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "(б) live DB: реальный владелец тенанта → configurator-путь допущен детерминированно (нет AUTHORING_ACCESS_DENIED_MESSAGE); не-владелец без гранта → детерминированный отказ.", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "(в1) live DB: edit_jsonschema_non_destructive с registryDefId=slug существующего реестра → резолв slug→UUID, запись проходит; несуществующий slug → honest op-error, не исключение.", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "(в2) unit: при исходах ops [1 ok, 1 fail] рапорт помечает упавшую как упавшую, НЕ содержит '✅' для неё; changelog упавшей не подаётся как успех.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "(г) unit: runAnalyst с бросающим LLM-портом возвращает HandlerResult с каноническим текстом (без проброса, без сырого тела).", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "(г) unit: роут-уровневый обработчик ошибки диспатча пишет assistant-сообщение с честной ошибкой в тред (на извлечённой чистой функции построения ошибочного ответа).", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "(д) unit: общий запрос о данных → контекст без 'Цикловое время'/'Разбивка по типу актора'; явный запрос процессной аналитики → содержит.", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "bash ci/checks/ux/assistant-llm-message-jargon.sh и --self-test зелёные.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "bash ci/checks/anti-case-lock.sh зелёный, без новых кейс-литералов.", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "npm test, npm run build, npm run fitness:db зелёные (флейки doc-*/seed-pack изолированно).", "verifiable_as": "fitness"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0607-assistant-truth.spec.md"
+}

@@ -1,0 +1,125 @@
+{
+  "task_id": "T-0672",
+  "verdict": "approved",
+  "reviewer": "adversarial-judge",
+  "branch": "task/T-0672",
+  "base": "r2: rebased onto dev@b50308be (T-0756 merge); 5 commits atop, HEAD 828cf76e. r1 was reviewed at merge-base 504312f1 (staleness N1 — RESOLVED by the rebase).",
+  "ci_seen": { "green": true },
+  "scope_of_change": {
+    "note": "The T-0672 commits (504312f1..HEAD) touch ONLY 7 files: src/core/flowable-client.ts, src/http/process-projection.ts, src/__tests__/inbox-engine-drive.test.ts, ci/checks/db/engine-drive-completedby.db.test.ts (new), ci/checks/db/engine-drive-generic.db.test.ts (+T-0672 test), docs/tasks/T-0672.spec.md, docs/tasks/T-0672.pr-handoff.json. Verified with `git diff --stat 504312f1..HEAD`.",
+    "process_defs_ts_and_T-0641_deletions_in_two_dot_diff": "`git diff dev..HEAD` MISLEADINGLY shows process-defs.ts reverted + 4 T-0641 files deleted. This is a two-dot-diff artifact of branch staleness, NOT a change made by this task: the T-0672 commits never touch process-defs.ts or any T-0641 file. A 3-way merge/rebase onto current dev preserves T-0641 (disjoint files, no conflict). Do NOT read this as a T-0641 revert."
+  },
+  "gates_rerun_by_judge": {
+    "tsc_noEmit": "exit 0, 0 type errors (full project, 242s wall — my own run)",
+    "inbox-engine-drive.test.ts": "53/53 PASS (my run) — includes the 5 new T-0672 unit tests (claim-before-complete ordering literal + resolve-by-instance, optional-absent backward-compat, non-fatal claim-failure, empty-actor guard)",
+    "flowable-client.test.ts": "42/42 PASS (my run)",
+    "engine-drive-completedby.db.test.ts (LIVE Flowable 7.1.0 :8082 + LIVE Postgres :55432)": "3/3 PASS on my own run: GREEN claim->assignee==actor (28.5s), RED no-claim->NULL (10.6s), idempotent no-clobber (38.4s). NOTE: on the FIRST cold run 2/3 timed out at vitest's default 60s (emulated-ARM first-deploy JIT); re-run warm with --testTimeout=180000 = clean 3/3.",
+    "anti_case_lock.sh": "PASS (exit 0)",
+    "engine-drive-no-literal-defkey.sh": "PASS",
+    "detel-base-task-from-engine.sh": "PASS",
+    "case_literal_leak_scan": "git diff dev..HEAD -- src/ | grep ТЭЛ/tel-/Закупк/Отпуск/Согласова/zakupki/otpusk => 0 matches in additions. Test slugs are neutral (role-x/wf-step, role-t0672-completer, t0672-*-approve, e-completer-*)."
+  },
+  "mutation_probes": {
+    "builtin_RED_test": "engine-drive-completedby.db.test.ts RED case strips setTaskAssignee from the port (delegating every other method to the real client) -> historic assignee stays NULL. PASS live: proves the claim is the load-bearing line, in the same run as GREEN (cannot fake-green).",
+    "source_mutation_I_ran": "Disabled the claim block in process-projection.ts (`if (false && engine.setTaskAssignee ...)`), re-ran the LIVE GREEN test -> RED: `AssertionError: expected null to be 'e-completer-green'` at line 153. Confirms the src claim line is load-bearing against the REAL engine. Reverted via `git checkout -- src/http/process-projection.ts`; `git diff --stat` on that file = clean.",
+    "worktree_restored": "git status clean after revert; no code file left modified by the judge."
+  },
+  "actor_attribution_analysis": {
+    "verdict": "SOUND — no forgery vector.",
+    "trace": "reconcileInstanceEngineDrive claims engineTaskId to args.actor. args.actor is bound at both post-approve call sites (inbox.ts:2607 main approve, inbox.ts:2341 defer/T-0638) from `const actor = await extractActorSlug(req, () => pool)` (inbox.ts:2144). extractActorSlug (inbox.ts:108) resolves the AUTHENTICATED identity: keycloak mode -> resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername) from the VERIFIED token (401 if no employee matches); dev mode -> x-dev-user header. The request BODY is read only for `action` and `outcome` — there is NO body path that can inject actor/assignee.",
+    "same_actor_as_authz": "The identical `actor` value is used for the approve-grant eligibility check (403 NOT_ELIGIBLE) AND for setTaskAssignee. So the assignee recorded in engine history is exactly the authenticated + authorized actor — a caller cannot mask 'who completed' as someone else beyond what the existing authz already grants. In prod (keycloak) the slug derives from the verified JWT, so it is not caller-controlled. No NEW attack surface introduced by T-0672."
+  },
+  "idempotency_analysis": {
+    "verdict": "SOUND.",
+    "claim_only_on_live_task": "The claim block is nested inside `if (engineTaskId)` — it fires ONLY when getActiveUserTasks returned a live active task. Once a task is completed it disappears from the runtime task list, so a second click/re-drive resolves engineTaskId=null, skips the claim entirely, and falls to the isInstanceEnded branch. The recorded assignee is never overwritten.",
+    "reconcile_on_read_never_claims": "reconcileWaitingInstancesEngineDrive passes completeEngineTask:false (process-projection.ts:2402); the whole completion+claim block is guarded by `if (args.completeEngineTask && ...)` so read-path never claims.",
+    "proven_live": "The idempotent live test re-drives an already-ended instance with actor='someone-else' and asserts rawHistoricAssignee still == the first actor. PASS. Directly refutes the 'second clicker clobbers the completer' concern.",
+    "same_actor_reclaim": "Flowable claim with the same assignee is HTTP-200 idempotent (documented + relied on); a re-driven same-actor approve does not fail on the claim step."
+  },
+  "non_fatal_analysis": {
+    "verdict": "SOUND.",
+    "claim_failure": "A non-budget claim failure logs a console.warn and PROCEEDS to completeUserTask (process-projection.ts:2105-2113). Unit test 'a claim FAILURE is NON-FATAL' asserts order==[setTaskAssignee, completeUserTask] and a normal 200 (not 502) with exactly one instance.ended. No double-complete: complete is called once regardless of claim outcome.",
+    "budget_exhaustion_on_claim": "If the claim call itself exhausts the shared T-0591 deadline it returns ENGINE_DRIVE_TIMEOUT at stage 'complete' (does not fall through to complete). This is EQUIVALENT to pre-fix behaviour under exhaustion: callWithBudget short-circuits every subsequent call once remaining<=0, so complete would have hit BUDGET_EXHAUSTED anyway. The only new effect is one extra in-budget round-trip; worst case is a VISIBLE 502 that the reconcile-on-read net retries and the already-committed human decision is not lost. Consistent with T-0591 fail-visible philosophy — acceptable, non-blocking."
+  },
+  "optionality_analysis": {
+    "verdict": "Does NOT mask a prod silent-skip.",
+    "reason": "setTaskAssignee is optional on the FlowableClient interface + EngineDriveReconcilePort ONLY to spare the dozens of partial test stubs. The sole prod assembler makeFlowableClient always wires it into its returned object (verified src/core/flowable-client.ts return block includes `setTaskAssignee`). There is no separate prod port-construction path that could omit it. The backward-compat unit test ('setTaskAssignee ABSENT ... still completes') exercises stub behaviour, not a legal prod config — it does not legalize a prod instance without the method because no such prod path exists.",
+    "coverage_gap_nit": "No UNIT test asserts the real makeFlowableClient POSTs {action:'claim',assignee} to /runtime/tasks/{id}; that path is covered only by the live db test. Minor coverage observation, non-blocking (the live test exercises the real client end-to-end)."
+  },
+  "T-0441_invariant": "appendInstanceEnded / instance.ended emission path is UNTOUCHED. git diff dev..HEAD of process-projection.ts adds only (a) the optional setTaskAssignee interface method and (b) the claim block before completeUserTask; the ended-detection and instance.ended-append logic is byte-unchanged. inbox-engine-drive AC-8 idempotent-already-ended (200 {engine:'already'}) still passes.",
+  "pre_existing_403_harness": {
+    "status": "CONFIRMED pre-existing on clean dev — NOT a regression of this branch.",
+    "evidence": "engine-drive-generic.db.test.ts returns 403 (expected 403 to be 200) for ALL 4 tests on the branch — including the 3 ORIGINAL T-0571 tests. Ran the SAME file from the main checkout on clean dev (b50308be, which does NOT contain the T-0672 test): the 3 original T-0571 tests fail identical 403. Root cause = the HTTP approve authz harness (resolveRolesForActor over seedApproverGrant) needs full-CI role/grant seeding absent in the local db lane. The completedBy fix itself is proven live by engine-drive-completedby.db.test.ts which drives the reconcile seam DIRECTLY, bypassing the HTTP authz layer.",
+    "recommendation": "Deserves its OWN task (local db-lane approver-grant seeding so engine-drive-generic HTTP tests run locally). Orchestrator to file. Does not block T-0672."
+  },
+  "re_verify_r2": {
+    "trigger": "Post-merge gate saw 14 handler tests of inbox-engine-drive.test.ts fail 403-vs-200 on the T-0672 x T-0756 combination; builder claimed a FAKE conflict (ambient DATABASE_URL, not code) fixed by a hermetic env pin + rebase onto b50308be. Judge re-verified independently.",
+    "branch_state_verified": "task/T-0672 = 5 commits atop b50308be (merge-base confirmed b50308be), HEAD 828cf76e. Integration commit 828cf76e touches ONLY src/__tests__/inbox-engine-drive.test.ts (file-level beforeAll save+delete / afterAll restore of DATABASE_URL) + docs/tasks/T-0672.pr-handoff.json. PRODUCT CODE UNTOUCHED by the integration fix. T-0672 src hunks byte-identical to the r1-reviewed versions (flowable-client.ts identical; process-projection.ts differs from r1 HEAD ONLY by the T-0756 dev-side hunks ~51/~996-1233; diff b50308be..HEAD on that file = exactly the T-0672 interface+claim hunks ~2025/~2320).",
+    "four_quadrant_matrix_my_own_runs": {
+      "rebased_tree_WITH_ambient_DATABASE_URL": "53/53 PASS (hermetic pin works under ambient env)",
+      "rebased_tree_WITHOUT_DATABASE_URL": "53/53 PASS",
+      "dev_side_WITH_ambient_DATABASE_URL": "14 failed / 34 passed (48) — the exact same 'expected 403 to be 200/502' failures. Ran on dev tip bfef9575 (descendant of b50308be, contains NO T-0672 code and NO hermetic pin); verified harness-relevant files (inbox.ts, inbox-engine-drive.test.ts, process-projection.ts, flowable-client.ts) are BYTE-IDENTICAL between b50308be and bfef9575 (the range is client-only T-0659/T-0660), so this run is equivalent to b50308be.",
+      "dev_side_WITHOUT_DATABASE_URL": "48/48 PASS",
+      "conclusion": "Redness is 100% determined by ambient DATABASE_URL, 0% by the tree — builder's fake-conflict forensics CONFIRMED. No semantic T-0672 x T-0756 conflict; no live regression."
+    },
+    "mechanism_verified": "hasDb() = Boolean(process.env['DATABASE_URL']) confirmed at src/http/inbox.ts:529-531; with ambient URL the handlers' authz plane resolves eligibility via getOrgPool() against the REAL database where the in-memory personas hold no role_assignment rows -> 403 NOT_ELIGIBLE. Product path is deliberate fail-closed (T-0331 NF-3) — correct to leave untouched.",
+    "hermetization_weakening_assessment": "Does NOT weaken the suite. (a) The file is memory-mode BY DESIGN (header: 'all run without a live Flowable or Postgres'; FakeAuditDb pools) — under ambient env it never tested anything meaningful, it just failed; the pin restores its designed mode. (b) The pattern mirrors processes-live-instances.test.ts, which pins env in the OPPOSITE direction (sets a fake DATABASE_URL in beforeAll, restores in afterAll) for its hasDb()-branch tests — both files now control env explicitly instead of inheriting ambient. Symmetry verified by reading both files. (c) The 'handler under real-DB authz' class is the domain of the db lane (engine-drive-generic.db.test.ts), which is exactly the pre-existing local 403 gap already tracked as N3 — no NEW coverage lost. Residual class 'unit handler files whose verdict depends on ambient DATABASE_URL may exist elsewhere in src/__tests__' = non-blocking follow-up (builder self-disclosed in pr-handoff note_for_followup); see N4.",
+    "gates_rerun_by_judge_on_rebased_tree": {
+      "tsc_noEmit": "exit 0, 0 errors (my run)",
+      "inbox-engine-drive.test.ts": "53/53 PASS WITH ambient DATABASE_URL AND 53/53 WITHOUT (both my runs) — includes the 5 T-0672 claim-before-complete unit tests, intact",
+      "flowable-client suites": "flowable-client 42/42 + adversarial 3 pass/1 skip (45 pass / 5 skip across the 3 files, my run)",
+      "T-0756-source-record-projection.db.test.ts": "8/8 PASS on live PG (my run) — T-0756 unharmed by the rebase",
+      "process-projection db": "7/7 PASS on live PG (my run)",
+      "engine-drive-completedby.db.test.ts LIVE": "3/3 PASS on the REBASED tree against real Flowable 7.1.0 (:8082, judge-started) + real Postgres (:55432) — FRESH re-run, not carried over from r1. GREEN 61.2s / RED 6.6s / idempotent 16.0s with --testTimeout=180000. NOTE: GREEN again exceeded 60s — reinforces N2 (default vitest timeout == driveDeadlineMs, zero headroom)."
+    }
+  },
+  "findings": [
+    {
+      "id": "T-0672-N1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "branch task/T-0672 topology vs dev",
+      "issue": "[RESOLVED in r2] r1: branch was STALE (merge-base 504312f1, dev had advanced with T-0641 + T-0756); `git diff dev..HEAD` misleadingly showed T-0641 reverted (two-dot artifact). r2: branch rebased onto b50308be, gates re-run green on the rebased tree (see re_verify_r2). T-0641 and T-0756 both intact.",
+      "suggestion": "Done — no action remains. (dev has since moved to bfef9575 with client-only T-0659/T-0660; no overlap with T-0672 files, routine merge.)"
+    },
+    {
+      "id": "T-0672-N2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/engine-drive-completedby.db.test.ts",
+      "issue": "The live suite relies on vitest's DEFAULT 60s per-test timeout, which EQUALS the test's own driveDeadlineMs:60000 — zero headroom for BPMN deploy + poll. On a cold/emulated Flowable the first-deploy JIT warmup pushed 2/3 tests past 60s on my first run (they timed out); a warm re-run with --testTimeout=180000 was clean 3/3. On real x86 CI (ms-fast per the file's own comment) this won't bite, but the equal budgets are fragile.",
+      "suggestion": "Set an explicit per-test testTimeout strictly greater than driveDeadlineMs (e.g. testTimeout=90000 with driveDeadlineMs=60000) so a slow deploy+poll cannot blow the vitest budget before the drive budget. Non-blocking robustness nit."
+    },
+    {
+      "id": "T-0672-N3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/engine-drive-generic.db.test.ts (new T-0672 HTTP-approve test)",
+      "issue": "The completedBy proof at the REAL HTTP approve route cannot be exercised in the local db lane — it returns 403 like the 3 pre-existing T-0571 tests in the same file (confirmed pre-existing on clean dev). So the HTTP-route layer of the fix is unverified locally; only the direct-seam live proof (engine-drive-completedby) runs.",
+      "suggestion": "Track the local approver-grant seeding gap as its own task (orchestrator). The direct-seam live proof is sufficient for THIS merge gate; the HTTP-route test will pass in full CI where grants are seeded. Non-blocking for T-0672."
+    },
+    {
+      "id": "T-0672-N4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__ (handler-level HTTP unit files beyond inbox-engine-drive.test.ts)",
+      "issue": "The r2 forensics exposed a CLASS: any memory-mode unit file exercising HTTP handlers whose authz plane branches on global hasDb()=Boolean(env.DATABASE_URL) has an env-dependent verdict when run with an ambient DATABASE_URL. The integration fix pins only inbox-engine-drive.test.ts (the file the gate exposed); sibling files may carry the same latent non-hermeticity. Builder self-disclosed (pr-handoff note_for_followup).",
+      "suggestion": "Follow-up task (orchestrator): sweep src/__tests__ for handler-level suites that neither pin nor fake DATABASE_URL, apply the same save/delete/restore pin (or a shared vitest setup helper). Additionally consider a DURABLE process rule: post-merge gate and per-side forensic runs must execute under IDENTICAL ambient env. Non-blocking for T-0672."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Post-approve engine-drive claims the userTask for the acting actor BEFORE completeUserTask (single choke-point, both literal-defKey and resolve-by-instance branches)", "covered": true },
+    { "ac": "flowable-client setTaskAssignee POSTs /runtime/tasks/{id} {action:'claim',assignee}; wired into makeFlowableClient", "covered": true },
+    { "ac": "completedBy (act_hi_actinst.assignee) is recorded and read back by getHistoricActivityInstances == processes.ts completedBy — proven live GREEN", "covered": true },
+    { "ac": "Best-effort non-fatal: claim failure logs + proceeds to complete, no 502, degrades to pre-fix NULL", "covered": true },
+    { "ac": "Guarded on optional method presence AND non-empty actor slug", "covered": true },
+    { "ac": "Idempotent: same-actor re-claim 200; re-drive by another actor after ended does NOT clobber recorded assignee (proven live)", "covered": true },
+    { "ac": "T-0441 instance.ended invariant untouched", "covered": true },
+    { "ac": "Backward-compatible with partial port stubs lacking setTaskAssignee", "covered": true },
+    { "ac": "D-064 anti-case: no case literals in src; neutral test slugs; keyed on args.actor not a literal", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Reader/render (processes.ts completedBy=a.assignee, T-0648) was already correct; the defect was writer-side (bare complete, no claim) — confirmed: live RED shows complete-without-claim yields NULL assignee, live GREEN shows claim-then-complete yields actor.",
+    "Attribution source is the authenticated identity (extractActorSlug over KC token / x-dev-user), not the request body — no forgery vector."
+  ]
+}

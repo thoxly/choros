@@ -1,0 +1,100 @@
+{
+  "task_id": "T-0571",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 7381,
+    "passed": 7381,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "src/__tests__/inbox-engine-drive.test.ts :: \"AC-1/AC-4 GENERIC process: base task (unknown defKey to the projection) is resolved by instance identity and completed — 200 {engine:'completed'}\" + ci/checks/db/engine-drive-generic.db.test.ts :: \"generic process #1 (zakupki-approve defKey)\" (live Flowable+Postgres)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "src/__tests__/inbox-engine-drive.test.ts :: 8b/9a (fan-out next_task surfaced after base approve, reconcile-on-read self-heal suite) — proxy coverage; LIVE_PROOF click-through itself is manual per spec (verifiable_as:manual, no dev-stand access in TEST phase)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "src/__tests__/inbox-engine-drive.test.ts :: 8a/8c/9c (instance.ended emitted after last engine task completes) — proxy coverage; live UI observation is manual per spec",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "ci/checks/db/engine-drive-generic.db.test.ts :: \"generic process #2 (otpusk-approve defKey, anti-case AC-4)\" (live Flowable+Postgres, second differently-named process) + src/__tests__/inbox-engine-drive.test.ts :: \"AC-1 generic completion excludes admin-REST\" (second process key vacationApproval)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "NO dedicated machine-check exists for this AC. Covered only as: (1) unit test titled \"AC-5 unit-equivalent\" (inbox-engine-drive.test.ts) which asserts completeUserTask was invoked via the injected FlowableClient mock — it does NOT prove absence of a separate raw admin-REST call elsewhere; (2) my own manual grep during TEST: `awk '/registerInboxRoutes/,0' src/http/inbox.ts | grep -E \"fetch\\(|http\\.request|https\\.request\"` returns empty — the approve handler never calls fetch/http directly, the only engine path is the injected FlowableClient port (type-only import). This is architecturally sound but honestly a manual/code-review finding, not CI-gated. Recorded as verifiable_as:manual in the spec itself, so this is not a regression from the contract — flagging the gap for visibility.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "ci/checks/db/engine-drive-generic.db.test.ts (npm run fitness:db, live Flowable 7.1.0 + Postgres 16, isolated docker-compose project t-0571-test, ports 55433/8092) — 3/3 green, including the live-engine assertion (GET /runtime/tasks) that the completed task is genuinely gone, not just claimed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "src/__tests__/inbox-engine-drive.test.ts -t \"engine-fail-visible\" (3 tests: ENGINE_TASK_NOT_FOUND, AMBIGUOUS_ACTIVE_TASK, ENGINE_DRIVE_FAILED — all assert 502 + typed {error:{code,...}} envelope, never silent 200)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "src/__tests__/inbox-engine-drive.test.ts -t \"idempotent\" (4 tests incl. \"AC-8 idempotent: a legitimate already-ended repeat is 200 {engine:'already'}\") + ci/checks/db/engine-drive-generic.db.test.ts :: \"idempotent repeat (AC-8)\" (live engine)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "git diff dev...HEAD -- 'src/**' | grep '^+' | grep -Ev '^\\+\\+\\+' | grep -E '\"(soglasovanie|role-approver|Согласование|Закупки|task-approve)\"' — empty output (pass per ADR contract FF-6 definition, exit code of grep=1=no-match=pass)",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "FF-1: ci/checks/engine-drive-no-literal-defkey.sh (production check + --self-test, 4 self-test fixtures)",
+      "result": "pass"
+    },
+    {
+      "check": "FF-4: ТЭЛ non-regression — ci/checks/flowable/tel-linear-smoke.sh (deploy+start against live Flowable) + npx vitest run e2e/journeys/loader.test.ts (62 tests, journey authoring contract incl. tel-linear/tel-gateway-routing journeys)",
+      "result": "pass"
+    },
+    {
+      "check": "npx vitest run (full unit suite, non-db)",
+      "result": "pass",
+      "note": "250 files / 4849 tests green, 2 skipped files (pre-existing, unrelated: workerAuth.kc.e2e.test.ts and flowable-client.integration.test.ts require live external deps not available in this lane). No flake observed for forms-from-schema.test.ts in this run (pr-handoff flagged it as a known pre-existing timing flake under full parallel load; ran clean here, 36/36, part of the 4849)."
+    },
+    {
+      "check": "npm run fitness:db (live Postgres 16 + Flowable 7.1.0, isolated docker-compose project t-0571-test, POSTGRES_PORT=55433 FLOWABLE_PORT=8092, torn down after)",
+      "result": "pass",
+      "note": "93 files / 1053 tests green, including ci/checks/db/engine-drive-generic.db.test.ts 3/3 (FF-3/AC-6)."
+    },
+    {
+      "check": "tsc --noEmit",
+      "result": "pass"
+    },
+    {
+      "check": "eslint src",
+      "result": "pass",
+      "note": "0 errors, 34 pre-existing no-console warnings (matches review.json baseline, none introduced by this diff's new lines)."
+    },
+    {
+      "check": "web/ vitest run (full web suite)",
+      "result": "pass",
+      "note": "52 files / 1479 tests green. GAP (non-blocking): no dedicated unit test exercises the new ENGINE_DRIVE_ERROR_MESSAGE map or the two 502-body-consuming call sites in web/src/screens/screen-inbox.jsx directly — coverage here is the absence-of-regression (full suite green) plus manual code read (pure lookup-with-fallback, `ENGINE_DRIVE_ERROR_MESSAGE[code] ?? existingFallback`, same pattern as the pre-existing NOT_ELIGIBLE branch). AC-7's verifiable_as:test traces to the backend FF-2 unit tests per the ADR traceability table, not to a web-layer test, so this is not a contract violation — flagging for visibility only."
+    },
+    {
+      "check": "ci/checks/ux/ux-g5-jargon-denylist.sh",
+      "result": "pass",
+      "note": "0 findings on screen-inbox.jsx (new ENGINE_DRIVE_ERROR_MESSAGE strings clean); 22 pre-existing findings elsewhere in web/, none on new lines."
+    },
+    {
+      "check": "ci/checks/ux/ux-g2-theme-pairing.sh",
+      "result": "pass"
+    }
+  ],
+  "failures": []
+}

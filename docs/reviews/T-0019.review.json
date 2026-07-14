@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0019",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "tsc": "clean",
+    "eslint": "clean (src)",
+    "vitest": "505/505 (21 files) — incl. src/__tests__/actor-event.test.ts 15",
+    "fitness_static": "all static checks green — incl. actor_event_append_only.sh (FF-4), actor_event_no_global_seq.sh (FF-6), actor_event_vocab_pinned.sh (FF-16)",
+    "fitness_db": "163/163 on ISOLATED Postgres (port 55441, own volume, torn down) — actor-event.test.ts 30, cross_tenant.test.ts 37 (now seeds actor_event + actor_event_seq), schema 16, org-structure 8, two_tenant 4, behavior 7, pgTimerStore 25 (dynamic migration-count), pgJobStore 36",
+    "isolated_db_migrations": "migrate pass1 applied 17 file(s) (001-016 + 018; 017 correctly reserved/absent, 018 after 016); pass2 idempotent ('nothing to apply, 17 recorded, 17 files')",
+    "negative_probes_reverified": "owner UPDATE/DELETE -> no-mutate trigger 'append-only forbidden' (restrict_violation); approve_level w/o approve & approve w/o level -> 23514 actor_event_approve_level_iff; choros_app UPDATE/DELETE -> 42501 permission denied (SELECT,INSERT only); cross-tenant actor (tenant-B employee under tenant-A) -> 23503 composite-FK reject; tenant-A ctx querying tenant-B rows -> 0; choros_app no-GUC -> count 0 (default-DENY); approve@L1/L2 accepted",
+    "vocab_golden_mutation_test": "tampered DDL adding 'escalate' to the event CHECK without a vocab bump -> actor_event_vocab_pinned.sh FAILs exit 1 ('non-golden verb: escalate'); golden genuinely catches silent vocabulary expansion"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "src/core/actor-event.ts:276-293 (notImplementedActorEventReader)",
+      "issue": "The reader deny-stub is exported but no test exercises it (only notImplementedActorEventWriter is asserted to reject in src/__tests__/actor-event.test.ts FR-7 block). The reader contract is type-checked but its runtime deny behavior is unverified, unlike the writer's.",
+      "suggestion": "Add a one-line FR-8 fixture asserting each reader method rejects with ActorEventNotImplementedError, symmetric with the existing writer test. Non-blocking — the frozen-not-implemented posture is the same and tsc covers the shape."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/db/actor-event.test.ts:95-116 (appendRow)",
+      "issue": "appendRow hardcodes ts and vocab_version as literal '0, 1' inside the VALUES SQL string rather than parameterizing them, slightly inconsistent with the otherwise fully-parameterized binder. Harmless (both are fixed test constants), but a reader could miss that vocab_version is pinned to 1 in this helper.",
+      "suggestion": "Optionally bind ts/vocab_version as $N params for uniformity. Cosmetic only."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/db/cross_tenant.test.ts:283-291 (seedActorEventSeq)",
+      "issue": "seedActorEventSeq inserts next_seq=1 with ON CONFLICT DO NOTHING; on a shared/persisted silo where a prior run already advanced the counter, the seed is a no-op (fine for the RLS-only isolation probe this file runs, but the value is not asserted). Not a defect for the cross_tenant probe's purpose (visibility isolation), just worth noting the seed is best-effort.",
+      "suggestion": "No change needed — the counter value is irrelevant to the cross_tenant RLS assertion. Flagged for awareness only."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "note": "live: pg_class relrowsecurity AND relforcerowsecurity true; choros_app no-GUC -> count 0 (independently re-verified)"},
+    {"ac": "AC-2", "covered": true, "note": "actor_event added to known_tenant_tables.txt (additive); cross_tenant.test.ts seeds + iterates it, 37/37 pass"},
+    {"ac": "AC-3", "covered": true, "note": "live: PK exactly (tenant_id, seq); object_read index leads with tenant_id"},
+    {"ac": "AC-4", "covered": true, "note": "live: choros_app UPDATE -> 42501 permission denied; row unchanged (re-verified)"},
+    {"ac": "AC-5", "covered": true, "note": "live: choros_app DELETE -> 42501; row survives (re-verified)"},
+    {"ac": "AC-6", "covered": true, "note": "live: owner (choros_migrator) UPDATE+DELETE -> no-mutate trigger restrict_violation 23001 (re-verified independently) — two-layer append-only holds for ALL roles incl. owner"},
+    {"ac": "AC-7", "covered": true, "note": "actor_event_append_only.sh: no UPDATE/DELETE grant to choros_app + BEFORE UPDATE/DELETE triggers present + no DELETE grant on actor_event_seq"},
+    {"ac": "AC-8", "covered": true, "note": "live: duplicate (tenant_id,seq) -> 23505; same seq usable in another tenant (tenants order independently)"},
+    {"ac": "AC-9", "covered": true, "note": "actor_event_no_global_seq.sh: per-tenant counter PK(tenant_id), no global SEQUENCE/serial/nextval/constant advisory lock; live: 8 concurrent appends via actor_event_seq FOR UPDATE -> 8 distinct seq (race serialized, no dup)"},
+    {"ac": "AC-10", "covered": true, "note": "live: actor non-existent -> 23503 FK; actor NULL -> 23502; valid employee accepted"},
+    {"ac": "AC-11", "covered": true, "note": "live: on_behalf_of NULL valid; distinct employee preserved on read; non-existent -> 23503"},
+    {"ac": "AC-12", "covered": true, "note": "static: actorEventPrincipal = COALESCE(onBehalfOf, actor); delegated->principal, self-act->actor"},
+    {"ac": "AC-13", "covered": true, "note": "vocab_pinned.sh lints no kind column; static: human and agent ids validate identically (no kind branch)"},
+    {"ac": "AC-14", "covered": true, "note": "live: role_at_event NULL -> 23502; non-existent role uuid ACCEPTED (no FK); pg_constraint shows only employee FKs (no role/assignment)"},
+    {"ac": "AC-15", "covered": true, "note": "live: object_kind='robot' -> 23514 CHECK; record_id absent from record ACCEPTED (opaque pointer, no component FK)"},
+    {"ac": "AC-16", "covered": true, "note": "live: request->prepare->submit->approve@L1->approve@L2->release reads back in seq order; EXPLAIN shows Index Scan on actor_event_object_read; other object isolated"},
+    {"ac": "AC-17", "covered": true, "note": "vocab_pinned.sh: no data/snapshot/view/payload column, only detail jsonb; static row fixture has no forbidden keys"},
+    {"ac": "AC-18", "covered": true, "note": "live: event='escalate' -> 23514; five verbs accepted; static: closed set asserted"},
+    {"ac": "AC-19", "covered": true, "note": "live: approve+NULL level -> 23514; submit+level=2 -> 23514; level=0 -> 23514; approve@L1/L2 accepted & orderable (all re-verified)"},
+    {"ac": "AC-20", "covered": true, "note": "vocab_pinned.sh golden = {request,prepare,submit,approve,release} + vocab_version NOT NULL; MUTATION-TESTED: adding 'escalate' without bump fails the golden exit 1"},
+    {"ac": "AC-21", "covered": true, "note": "vocab_pinned.sh: no prev_hash/row_hash, no actor_event_head, no FK to audit_event; actor_event_seq is a bare counter (no row_hash) so it is not a head/chain artefact"},
+    {"ac": "AC-22", "covered": true, "note": "static: one guarded submit -> one actor_event input + an audit_event row MAY carry actor_event.id with NO enforced FK (shape permits, does not enforce)"}
+  ],
+  "role_gap_evidence": []
+}

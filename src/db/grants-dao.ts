@@ -1,0 +1,901 @@
+/**
+ * src/db/grants-dao.ts — T-0331 (E15-S0a): Live DB getGrants DAO
+ *
+ * Reusable DAO that resolves an actor's CURRENT role slugs from the live DB
+ * grant source (via role_assignment → role), replacing the in-memory
+ * `rolesForUser` fixture in inbox.ts.
+ *
+ * Design:
+ *  - Conforms to the `GrantSource` interface (grant-resolver.ts §3.2): returns
+ *    the full `Grant[]` array via `getGrantsForSubject` so callers like the PDP
+ *    can use it directly. The `getRoleSlugsForActor` helper is the thin projection
+ *    needed by the inbox (role-slug set for pool-task filtering).
+ *  - Tenant-isolation: every query runs inside a `SET LOCAL choros.tenant_id`
+ *    transaction (RLS). Follows the withTenant pattern from src/db/org.ts.
+ *  - Validity windows: every assignment/grant read filters by the half-open
+ *    [valid_from, valid_until) window (bigint epoch-ms; NULL = unbounded). As of
+ *    T-0397 the GRANT query honors valid_until too (it previously did not), so a
+ *    grant past its valid_until is no longer PDP-active.
+ *  - Dual-control (T-0397): a CRITICAL grant/assignment is PDP-active only when
+ *    its SECOND distinct approver is present (confirmed2_by IS NOT NULL), not on
+ *    confirmed_by alone. "Critical" is the FULL T-0040/T-0044 escalation
+ *    classification (criticalGrantPredicate — a fail-CLOSED SQL superset of the
+ *    write-side dualControlDecision over ALL FOUR escalation axes):
+ *      axis a — operation ∈ {approve, transition}
+ *      axis b — resource_type = effect_resource AND operation = invoke
+ *      axis c — operation = read with a sensitive clearance marker (confidential|restricted)
+ *      Q-2   — operation = read with a present-but-garbage clearance token
+ *    An assignment is critical iff the role it binds holds any EFFECTIVE such grant.
+ *    This closes the B1 read-path hole (review): the WRITE side (grants.ts) lands
+ *    escalating rows semi-confirmed (confirmed2_by NULL = NOT active) on ALL axes,
+ *    but the read side previously only checked axes a/b — so a read grant escalated
+ *    by axis c / Q-2 went PDP-active after ONE approver. The gate now closes every
+ *    axis. Non-critical grants/assignments keep their single-confirm behaviour.
+ *  - Reuse design: `getGrantsForSubject` provides the full Grant[] path for S2
+ *    (executor-resolution, T-0336) and S1 (resolveFor seam, T-0335).
+ *
+ * Tenant-RLS guard: tenant_id is UUID-validated before interpolation (mirrors
+ * org.ts assertUuid pattern — defence-in-depth per T-0013 / T-0116 R-3).
+ */
+
+import pg from "pg";
+import type { Grant, ScopeElement } from "../core/grant-lattice.js";
+import type { ResolveSubject } from "../core/object-handle.js";
+import type { GrantSource } from "../core/grant-resolver.js";
+import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
+// T-0662: single NAMED deactivation predicate for authority actor-resolution.
+// getGrantsForSubject (below) is authority resolver A — it carries ACTOR_ACTIVE_SQL.
+import { ACTOR_ACTIVE_SQL } from "./actor-authority-gate.js";
+
+// ---------------------------------------------------------------------------
+// UUID shape guard (mirrors org.ts — defence-in-depth, T-0116 R-3)
+// ---------------------------------------------------------------------------
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertUuid(value: string, label: string): void {
+  if (!UUID_RE.test(value)) {
+    throw new Error(`${label} must be a valid UUID, got: ${JSON.stringify(value)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0397 — CRITICAL-grant SQL predicate (fail-CLOSED, all four escalation axes)
+//
+// A single SQL boolean expression that is TRUE iff a grant ROW carries a
+// criticality the WRITE-side dual-control gate (src/core/dual-control.ts +
+// role-criticality.ts) would escalate on — so the read-path can gate
+// `confirmed2_by IS NOT NULL` on the SAME classification the write-side used to
+// land the row semi-confirmed. This closes the original B1 hole: the read-side
+// previously only checked axes a/b, so a `read`-operation grant escalated by
+// axis c (sensitive clearance) or Q-2 (garbage clearance token) went PDP-active
+// after ONE approver.
+//
+// THE FOUR AXES (mirrors combineCriticality + nonDerivableReadClearance EXACTLY):
+//   axis a — operation IN ('approve','transition')                       (guarded-transition ops)
+//   axis b — resource_type = 'effect_resource' AND operation = 'invoke'  (T-0034 gateway)
+//   axis c — operation = 'read' AND the grant's clearance marker is a SENSITIVE
+//            DataClass (rank >= 'confidential'): { clearance: confidential|restricted }.
+//   Q-2   — operation = 'read' AND a `clearance` KEY is PRESENT but its value is
+//            NOT a derivable DataClass (a garbage token) — fail-closed implicit
+//            escalate (dual-control.ts nonDerivableReadClearance).
+//
+// CLEARANCE MARKER LOOKUP — mirrors data-classification.ts grantClearance:
+//   the marker is read from "constraint" FIRST; "resource_facet" is the fallback
+//   ONLY when "constraint" carries NO `clearance` KEY. We use the jsonb key-exists
+//   operator `?` to distinguish "key absent" from "key present with JSON null"
+//   (the latter is a present-but-garbage token → Q-2 escalates), matching the TS
+//   readClearancePresence/readClearanceMarker presence semantics precisely.
+//
+// FAIL-CLOSED DISCIPLINE (NF-2): this read gate is a DEFENCE-IN-DEPTH SUPERSET of
+// the write-side decision. The write-side (grants.ts → dualControlDecision) is the
+// single SOURCE of truth that lands NEW critical rows semi-confirmed; this SQL is
+// the read-side enforcement that the second approver actually gates ACTIVATION.
+// Any ambiguity (corrupt clearance, present-but-null) resolves toward MORE control
+// (treat as critical), never less — so the gate can only ever OVER-require the
+// second approver, never silently activate an escalating grant on one approver.
+//
+// SINGLE SOURCE / NO DRIFT: this fragment is defined ONCE and interpolated into
+// the GRANT read predicate (getGrantsForSubject step 3): a CRITICAL grant is
+// PDP-active only with confirmed2_by. A db-integration test
+// (grants-dao-dual-control.db.test.ts) pins the predicate against a REAL Postgres
+// so it cannot silently diverge from the TS criticality axes. The fragment
+// references the bare column names (operation, resource_type, "constraint",
+// resource_facet) so it is valid as the grant query's top-level WHERE clause.
+//
+// T-0605 NOTE: the fragment is NO LONGER used to gate ASSIGNMENT activation. The
+// assignment-active predicate is the canonical
+//   confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)
+// (single source with rights-overview.ts + the write side). Assignment activation
+// keyed on the role's absolute criticality was a self-lock (see the two
+// role_assignment queries below and ADR-T0605). Dual-control for critical RIGHTS
+// stays entirely on the grant (step 3), which is where authority actually lives.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the CRITICAL-grant SQL predicate for a given column alias (e.g. "g" or
+ * "" for the bare grant query). Returns a boolean SQL expression. Pure string
+ * builder — no interpolation of user data (alias is a hard-coded caller constant).
+ *
+ * T-0675 (security, столп 4): EXPORTED so the report-page application-level read
+ * gate (defaultCheckReadGrant, src/http/report-page-render.ts) enforces the SAME
+ * T-0397 grant-row dual-control as this canonical resolver — a SINGLE source for
+ * the criticality classification, not a bespoke re-implementation. The prior read
+ * gate queried `application/read` grants WITHOUT any `confirmed_by`/`confirmed2_by`
+ * predicate, so an UNCONFIRMED (or single-control critical) grant passed the
+ * application-level gate that this canonical path (step 3 below) would reject.
+ */
+export function criticalGrantPredicate(alias: string): string {
+  const p = alias ? `${alias}.` : "";
+  // Clearance marker, constraint-first with resource_facet fallback ONLY when
+  // constraint carries no `clearance` key (mirrors grantClearance constraint-first).
+  const clearanceValue = `(
+        CASE
+          WHEN ${p}"constraint" IS NOT NULL AND jsonb_typeof(${p}"constraint") = 'object'
+               AND (${p}"constraint" ? 'clearance')
+            THEN ${p}"constraint"->>'clearance'
+          WHEN ${p}resource_facet IS NOT NULL AND jsonb_typeof(${p}resource_facet) = 'object'
+               AND (${p}resource_facet ? 'clearance')
+            THEN ${p}resource_facet->>'clearance'
+          ELSE NULL
+        END
+      )`;
+  // Is a `clearance` KEY present at all (constraint-first, then facet)? Uses the
+  // jsonb key-exists `?` operator so a present-but-JSON-null value still counts as
+  // present (→ Q-2 garbage token), exactly like readClearancePresence.
+  const clearancePresent = `(
+        (${p}"constraint" IS NOT NULL AND jsonb_typeof(${p}"constraint") = 'object' AND (${p}"constraint" ? 'clearance'))
+        OR (${p}resource_facet IS NOT NULL AND jsonb_typeof(${p}resource_facet) = 'object' AND (${p}resource_facet ? 'clearance'))
+      )`;
+  return `(
+        -- axis a — guarded-transition op-class
+        ${p}operation IN ('approve', 'transition')
+        -- axis b — T-0034 external-effect gateway
+        OR (${p}resource_type = 'effect_resource' AND ${p}operation = 'invoke')
+        -- axis c + Q-2 — a READ grant carrying a sensitive OR garbage clearance marker
+        OR (
+              ${p}operation = 'read'
+              AND ${clearancePresent}
+              AND (
+                    -- axis c: sensitive DataClass (rank >= 'confidential')
+                    ${clearanceValue} IN ('confidential', 'restricted')
+                    -- Q-2: present clearance KEY whose value is NOT a derivable
+                    -- DataClass token — a garbage/non-string/JSON-null value (the
+                    -- text extraction is NULL for JSON null) is fail-closed critical.
+                    OR ${clearanceValue} IS NULL
+                    OR ${clearanceValue} NOT IN ('public', 'internal', 'confidential', 'restricted')
+                  )
+           )
+      )`;
+}
+
+// The bare-column form is the grant query's top-level WHERE (getGrantsForSubject
+// step 3). T-0605: the g-aliased form (assignment EXISTS sub-query) is gone — the
+// assignment-active predicate no longer depends on the role's absolute criticality.
+const CRITICAL_GRANT_PREDICATE_BARE = criticalGrantPredicate("");
+
+// ---------------------------------------------------------------------------
+// T-0605 / T-0767 — single NAMED assignment-active dual-control predicate.
+//
+// A role_assignment row is dual-control-active iff EITHER it is routine
+// (proposed_by IS NULL — never went through the propose/escalate path, so one
+// confirm is sufficient) OR it is escalating AND a distinct second approver has
+// signed (confirmed2_by IS NOT NULL). This is the canonical fragment defined
+// in getGrantsForSubject/getRoleSlugsForActor below (T-0605 ADR §2) — extracted
+// to a named export (T-0767) so every authority resolver that reads
+// role_assignment activity uses the SAME text, not a bespoke re-derivation.
+//
+// T-0767 finding (review of T-0764): isGenesisOwnerForTenant/loadAdminContext
+// (src/db/org.ts) are a SECOND, PARALLEL authority path (owner/admin authority
+// short-circuits the grant PDP — see org.ts header comments) that resolved
+// role_assignment activity on `confirmed_by IS NOT NULL` ALONE, omitting this
+// disjunct entirely. Real but DORMANT: no INSERT in src/ currently sets
+// proposed_by non-null on role_assignment (T-0764's 58-seed-file audit), so the
+// gap was a structural landmine for a future assignment-level proposal feature,
+// not a live exploit. Exporting the fragment here and importing it into org.ts
+// closes the gap AT THE SOURCE instead of duplicating the literal a third time.
+//
+// alias MUST be the role_assignment table alias used by the caller's query
+// (e.g. "ra") — bare column names (alias === "") are valid too, for a
+// top-level un-aliased role_assignment query.
+// ---------------------------------------------------------------------------
+export function assignmentActiveDualControlPredicate(alias: string): string {
+  const p = alias ? `${alias}.` : "";
+  return `(${p}confirmed2_by IS NOT NULL OR ${p}proposed_by IS NULL)`;
+}
+
+// ---------------------------------------------------------------------------
+// withTenantReadTx — tenant-scoped read transaction (mirrors org.ts withTenant)
+// ---------------------------------------------------------------------------
+
+async function withTenantReadTx<T>(
+  pool: pg.Pool,
+  tenantId: string,
+  fn: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  assertUuid(tenantId, "tenantId");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// getGrantsForSubject — full Grant[] from live DB (GrantSource interface shape)
+//
+// Loads confirmed, in-window role_assignments for the subject (by employee slug),
+// then fetches confirmed grants for those roles.
+//
+// This is the reusable foundation for:
+//   S0a (T-0331): role-slug DAO for inbox.ts
+//   S1 (T-0335):  resolveFor seam (applier needs grant PDP)
+//   S2 (T-0336):  executor resolution via PDP claim-check
+//
+// `nowMs` is used for validity-window filtering: NULL valid_from = effective
+// from the start; NULL valid_until = no end. Half-open window [from, until).
+// This mirrors grant-resolver.ts isEffective semantics exactly.
+// ---------------------------------------------------------------------------
+
+export async function getGrantsForSubject(
+  pool: pg.Pool,
+  tenantId: string,
+  actorSlug: string,
+  nowMs: number,
+): Promise<Grant[]> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    // Step 1: resolve actor slug → employee id (within tenant, RLS-scoped).
+    //
+    // T-0658 [security/системный, столп 4] — `AND deactivated_at IS NULL`
+    // (fail-closed). Without this predicate a DEACTIVATED employee (T-0583/
+    // migration 125: KC login disabled, `deactivated_at` set) still resolved
+    // here — a still-live KC access token (KC `enabled:false` blocks only
+    // future token ISSUANCE, not an already-issued token before its TTL
+    // expires, a window of minutes) then passed EVERY PDP consumer of this
+    // single resolver (invoke.ts, records.ts field/read-visibility, org.ts
+    // capability-token, sandbox-gate-dao.ts, capability-grants-dao.ts,
+    // registry-digest-dao.ts) because steps 2-3 never re-check deactivation —
+    // they only see the employee id this step handed them.
+    //
+    // This mirrors the SAME predicate already applied by every other
+    // deactivation-aware reader in this file (getHoldersForRole,
+    // findTenantOwnerSlug, getAuthoringDraftHolderEmployeeIds,
+    // findTenantOwnerEmployeeId) — getGrantsForSubject was the one PDP-critical
+    // gap T-0588 did not close (it closed the role-HOLDER path, not this
+    // grant-RESOLVER path; inbox.ts's own BLOCK-3/RE-VERIFY gates,
+    // inbox.ts:1413-1417/1631-1643, are a per-path symptom of exactly this
+    // upstream gap — they stay in place as defence-in-depth, now redundant
+    // rather than the only line of defence).
+    //
+    // Human vs agent: this is ONE query against `choros.employee`, with no
+    // branch on `kind` — both human and agent subjects resolve through this
+    // same step (register.ts:364 confirms the agent branch has no separate
+    // resolution path). `deactivated_at` (migration 125) is a column on
+    // `employee` shared by both kinds, but its ONLY write site
+    // (`PATCH /api/users/:employee_id`, user-mgmt.ts) is structurally
+    // restricted to `kind === 'human'` (404 otherwise) — `agent_card`
+    // (migration 032) carries no deactivation column of its own. A
+    // `kind='agent'` row's `deactivated_at` is therefore always NULL in
+    // practice, so this unconditional predicate is a permanent no-op for
+    // agents (never filters a legitimate agent) while fail-closing the human
+    // deactivation gap — no `kind` branch needed for correctness.
+    // T-0662: `deactivated_at IS NULL` sourced from the single named marker
+    // ACTOR_ACTIVE_SQL (src/db/actor-authority-gate.ts). Behaviour is byte-
+    // identical to the T-0658 literal; the name is the anti-recurrence seam the
+    // fitness gate anchors on.
+    const { rows: empRows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.employee
+        WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
+      [tenantId, actorSlug],
+    );
+    if (empRows.length === 0) {
+      // Unknown actor OR deactivated actor → no grants (fail-closed to empty,
+      // not an error — mirrors the "unknown actor" sentinel exactly; a
+      // deactivated actor is indistinguishable from an unknown one to every
+      // PDP consumer, which is the correct fail-closed shape).
+      return [];
+    }
+    const employeeId = empRows[0]!.id;
+
+    // Step 2: load ACTIVE role_assignments for the employee.
+    // confirmed_by IS NOT NULL = confirmed (NF per migration 020 contract).
+    // valid_from/until window: NULL = unbounded on that side.
+    //
+    // T-0605 — CANONICAL assignment-active predicate (single source of truth).
+    // The assignment's activation is gated on the SAME predicate the role-card
+    // read (rights-overview.ts:34-42/295-298) and the write side (grants.ts,
+    // rights-intents.ts hire) use:
+    //     confirmed_by IS NOT NULL
+    //     AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)
+    //     AND in-window
+    // Rationale (ADR-T0605 §2): dual-control (T-0044) requires a SECOND approver
+    // when criticality ESCALATES, not for every assignment to an already-critical
+    // role. A role assignment never changes the role's grant set (from ≡ to ⇒
+    // criticalityDiff.escalates=false), so the write side lands it ROUTINE
+    // (proposed_by=NULL, confirmed_by=actor, confirmed2_by=NULL) and reports "role
+    // assigned". A genuinely-ESCALATING assignment is recorded as semi-confirmed
+    // (proposed_by=actor, confirmed2_by=NULL) and stays inactive until a distinct
+    // second approver sets confirmed2_by — the `proposed_by IS NULL` disjunct
+    // tracks exactly that. The PRIOR T-0397 predicate keyed assignment activation
+    // on the role's ABSOLUTE criticality (holds any approve/transition grant),
+    // which the write side never satisfies for a routine assignment — a self-lock
+    // (holder visible on the card, invisible to the PDP → 403 NOT_ELIGIBLE).
+    // GRANT-level dual-control (step 3 below: a CRITICAL grant is PDP-active only
+    // with confirmed2_by) is the real authority gate for critical rights and is
+    // UNTOUCHED.
+    const { rows: raRows } = await client.query<{ role_id: string }>(
+      `SELECT ra.role_id
+         FROM choros.role_assignment ra
+        WHERE ra.tenant_id = $1
+          AND ra.employee_id = $2
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND ${assignmentActiveDualControlPredicate("ra")}`,
+      [tenantId, employeeId, nowMs],
+    );
+    if (raRows.length === 0) {
+      return [];
+    }
+    const roleIds = raRows.map((r) => r.role_id);
+
+    // Step 3: load ACTIVE grants for those roles.
+    //
+    // T-0397 — PDP dual-control read-path enforcement. A grant is PDP-active iff:
+    //   (1) confirmed_by IS NOT NULL                (first approver — migration 030/031), AND
+    //   (2) it is in its validity window            (valid_from/valid_until — migration 008,
+    //       previously IGNORED for grants → now honored, matching the role_assignment
+    //       query and grant-resolver.ts isEffective), AND
+    //   (3) if it is CRITICAL, confirmed2_by IS NOT NULL (second distinct approver —
+    //       migration 031 dual-control contract). Before T-0397 this column was
+    //       written by grants.ts on the WRITE side (escalating rows land semi-
+    //       confirmed, confirmed2_by NULL = NOT active) but NEVER checked on the
+    //       READ side, so a critical grant went PDP-active after ONE approver.
+    //
+    // "Critical" is the FULL T-0040/T-0044 escalation classification a single grant
+    // row can carry (criticalGrantPredicate — fail-closed superset of the write-side
+    // dualControlDecision over ALL FOUR axes; see its header):
+    //   axis a — operation IN ('approve','transition')
+    //   axis b — resource_type = 'effect_resource' AND operation = 'invoke'
+    //   axis c — operation = 'read' with a sensitive clearance marker (confidential|restricted)
+    //   Q-2   — operation = 'read' with a PRESENT-but-garbage clearance token (fail-closed)
+    // B1 FIX (review): the prior predicate checked ONLY axes a/b, so a read grant
+    // escalated by axis c / Q-2 landed semi-confirmed write-side (confirmed2_by NULL)
+    // yet the read gate treated it as non-critical → ACTIVE after one approver. The
+    // predicate now closes every axis fail-CLOSED.
+    //
+    // valid_from/until are bigint epoch-ms (NULL = unbounded); half-open [from, until).
+    const { rows: grantRows } = await client.query<{
+      id: string;
+      role_id: string;
+      resource_type: string;
+      resource_facet: unknown;
+      operation: string;
+      scope: unknown;
+      constraint: unknown;
+      delegable: boolean;
+      granted_by: string;
+      valid_from: string | null;
+      valid_until: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, role_id, resource_type, resource_facet,
+              operation, scope, "constraint", delegable,
+              granted_by, valid_from, valid_until, created_at
+         FROM choros."grant"
+        WHERE tenant_id = $1
+          AND role_id = ANY($2::uuid[])
+          AND confirmed_by IS NOT NULL
+          AND (valid_from  IS NULL OR valid_from  <= $3)
+          AND (valid_until IS NULL OR valid_until  > $3)
+          AND (
+                NOT ${CRITICAL_GRANT_PREDICATE_BARE}
+                OR confirmed2_by IS NOT NULL
+              )`,
+      [tenantId, roleIds, nowMs],
+    );
+
+    return grantRows.map((g) => ({
+      tenantId,
+      id: g.id,
+      roleId: g.role_id,
+      resourceType: g.resource_type as Grant["resourceType"],
+      resourceFacet: g.resource_facet ?? undefined,
+      operation: g.operation as Grant["operation"],
+      scope: g.scope as Grant["scope"],
+      constraint: g.constraint ?? undefined,
+      delegable: g.delegable,
+      grantedBy: g.granted_by,
+      validFrom: g.valid_from != null ? Number(g.valid_from) : undefined,
+      validUntil: g.valid_until != null ? Number(g.valid_until) : undefined,
+      createdAt: Number(g.created_at),
+    }));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// makeDbGrantSource — build a GrantSource from a pool for use with the PDP
+// (grant-resolver.ts ResolverDeps.grants interface).
+//
+// The GrantSource.getGrants interface takes a ResolveSubject (tenantId +
+// subjectId = employee slug) and nowMs, so it maps cleanly to getGrantsForSubject.
+// This is the reuse seam for S1 / S2 — the inbox uses getRoleSlugsForActor
+// directly; the PDP uses makeDbGrantSource.
+// ---------------------------------------------------------------------------
+
+export function makeDbGrantSource(pool: pg.Pool): GrantSource {
+  return {
+    async getGrants(subject: ResolveSubject, nowMs: number): Promise<Grant[]> {
+      return getGrantsForSubject(pool, subject.tenantId, subject.subjectId, nowMs);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// getRoleSlugsForActor — projection: actor's confirmed, in-window role slugs
+//
+// The thin projection the inbox.ts `rolesForUser` replacement needs: given an
+// actor slug, returns the set of role slugs (e.g. ["fin-ctrl", "role-approver"])
+// that actor holds via confirmed, in-window role_assignments.
+//
+// Role slugs are used by the inbox for pool-task filtering (tab "Из пула") and
+// the claim/approve eligibility gate. They are NOT used for PDP decisions —
+// that path goes through getGrantsForSubject → resolveFor.
+//
+// Returns [] (empty array) for an unknown actor (no employee row, no assignments,
+// or no valid roles) — the same sentinel as the in-memory rolesForUser fallback.
+//
+// T-0366 — fallback slug for KC seed personas:
+//   Under Keycloak auth mode, the KC JWT `sub` is a random UUID that does
+//   not match employee.slug for seed dev personas (e.g. e-larina.slug='e-larina'
+//   but KC sub='f4a5f440-…'). The optional `fallbackSlug` param (preferred_username
+//   from the JWT) is tried ONLY when the primary lookup returns no employee row.
+//
+//   Security invariant: primary is ALWAYS tried first and short-circuits — the
+//   fallback is never consulted for registered users (slug == sub, so primary hits).
+//   The fallback only activates when the primary slug matches NO employee, which
+//   happens exclusively for seed personas whose KC sub was not set from their slug.
+// ---------------------------------------------------------------------------
+
+export async function getRoleSlugsForActor(
+  pool: pg.Pool,
+  tenantId: string,
+  actorSlug: string,
+  nowMs: number = Date.now(),
+  fallbackSlug?: string,
+): Promise<string[]> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    // Resolve actor slug → employee id.
+    // T-0366: try primary first; if no row AND fallback is provided (and distinct),
+    // try the fallback slug. The primary short-circuits so registered users
+    // (slug == sub) never reach the fallback path — no impersonation risk.
+    //
+    // T-0738 [security P1, substrate] — `AND ${ACTOR_ACTIVE_SQL}` (fail-closed).
+    // Judge T-0726 (ADR-T0726 §5.2, actor-active-route-coverage.sh finding
+    // `inbox.ts:GET:/api/inbox[/:id]`) found this was the one remaining employee
+    // actor-lookup left WITHOUT the deactivation predicate. The ALLOWLIST entry
+    // in ci/checks/actor-authority-deactivation-gate.sh ("DOWNSTREAM-GUARDED
+    // authority projection") excused it on the premise that its sole consumer,
+    // inbox.ts, always gates deactivation locally BEFORE calling it — true for
+    // the WRITE paths (claim: inbox.ts findEmployeeById guard ~1869-1871,
+    // approve: ~2276-2278 — both throw 403 before ever reaching
+    // resolveRolesForActor), but FALSE for the READ path: GET /api/inbox
+    // (inbox.ts ~1540) calls resolveRolesForActor directly with NO local gate.
+    // A deactivated actor whose role_assignment was not separately revoked
+    // (deactivation ≠ automatic revocation — ADR-T0658 §"Дыра №2") still saw the
+    // "pool" tab (and its badge count) populated for the role they used to hold,
+    // for the residual ~300s window their already-issued access-JWT stays valid
+    // (T-0702). Fixing it HERE (the single resolver, not a 5th bespoke
+    // per-route gate) closes it for every current AND future consumer — the
+    // WRITE paths are unaffected (they never reach a deactivated actor here
+    // anyway; this is defence-in-depth for them). Applied to BOTH lookups
+    // (primary and the T-0366 fallback) — a deactivated actor must not resolve
+    // roles via EITHER identity. A deactivated primary now falls through to the
+    // fallback exactly like an unknown primary would (fail-closed to empty if
+    // the fallback also misses/is absent — same "deactivated ≈ unknown actor"
+    // sentinel shape getGrantsForSubject already documents).
+    const { rows: empRows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.employee
+        WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
+      [tenantId, actorSlug],
+    );
+
+    let employeeId: string;
+    if (empRows.length > 0) {
+      employeeId = empRows[0]!.id;
+    } else if (fallbackSlug !== undefined && fallbackSlug !== actorSlug) {
+      // Primary slug matched no employee (or matched a DEACTIVATED one — see
+      // T-0738 note above) — try the fallback (preferred_username). T-0738:
+      // same predicate — a deactivated fallback identity must not resolve
+      // roles either.
+      const { rows: fbRows } = await client.query<{ id: string }>(
+        `SELECT id FROM choros.employee
+          WHERE tenant_id = $1 AND slug = $2 AND ${ACTOR_ACTIVE_SQL} LIMIT 1`,
+        [tenantId, fallbackSlug],
+      );
+      if (fbRows.length === 0) {
+        return [];
+      }
+      employeeId = fbRows[0]!.id;
+    } else {
+      return [];
+    }
+
+    // Confirmed, in-window assignments → role slugs in one join.
+    //
+    // T-0605 — CANONICAL assignment-active predicate (same as getGrantsForSubject
+    // step 2 and rights-overview.ts:295-298): the assignment is active on
+    //   confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL)
+    //   AND in-window.
+    // This keeps the claim/approve eligibility gate consistent with the role-card
+    // read and the write side. The prior T-0397 predicate gated activation on the
+    // role's absolute criticality (holds any critical grant), which the write side
+    // never satisfies for a routine assignment (confirmed2_by=NULL) — the exact
+    // self-lock behind the 403 NOT_ELIGIBLE (holder shown on the card, invisible to
+    // the PDP). GRANT-level dual-control stays in getGrantsForSubject step 3.
+    const { rows } = await client.query<{ slug: string }>(
+      `SELECT DISTINCT r.slug
+         FROM choros.role_assignment ra
+         JOIN choros.role r
+           ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE ra.tenant_id = $1
+          AND ra.employee_id = $2
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND ${assignmentActiveDualControlPredicate("ra")}`,
+      [tenantId, employeeId, nowMs],
+    );
+    return rows.map((r) => r.slug);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// getHoldersForRole — T-0380 (D4): role → employee slugs (executor-resolver
+// RoleHolderSource backing). Given a role SLUG, returns the confirmed,
+// in-window employee slugs assigned to that role. This is the reverse of
+// getRoleSlugsForActor (actor → roles) — here we go role → actors.
+//
+// Used by makeDbRoleHolderSource in executor-resolver.ts for the role-pool step.
+// ---------------------------------------------------------------------------
+
+export async function getHoldersForRole(
+  pool: pg.Pool,
+  tenantId: string,
+  roleSlug: string,
+  nowMs: number = Date.now(),
+): Promise<string[]> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ slug: string }>(
+      `SELECT DISTINCT e.slug
+         FROM choros.employee e
+         JOIN choros.role_assignment ra ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+         JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE e.tenant_id = $1
+          AND r.slug = $2
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND e.deactivated_at IS NULL`,
+      [tenantId, roleSlug, nowMs],
+    );
+    return rows.map((r) => r.slug);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// getRoleAssignmentOrgScopesForEmployee — T-0588 (BLOCK-1, review R-1 fix):
+// the CONFIRMED, IN-WINDOW org_scope(s) of a given employee's role_assignment
+// row(s) for a given role.
+//
+// WHY THIS EXISTS: a pool task carries no org-scope of its own (task.role is
+// the only addressing field — recon confirmed no BPMN/task shape threads a
+// department/org context through). The claim route's Tier-2 substitution
+// branch previously defaulted the "task's org-scope" to BOTTOM (empty scope),
+// which made the containment check `isNarrowerOrEqual(BOTTOM, rule.orgScope,
+// oracle)` VACUOUSLY TRUE for every rule (⊥ ⊑ anything) — the org-scope
+// restriction on a Tier-2 substitution_rule was a complete no-op (review R-1,
+// blocking). There is no "tenant-wide"/TOP sentinel in this lattice either
+// (grant-lattice.ts has only BOTTOM/⊥; org authority always resolves through
+// EITHER an explicit org node/set OR the out-of-band isGenesisOwner bypass —
+// confirmed by recon, no TOP construct exists anywhere in this codebase).
+//
+// THE FIX: the only real, task-relevant scope available at claim time is the
+// ABSENT holder's OWN role_assignment.org_scope for the substituted role — the
+// literal department(s) where that person actually held role-X. A Tier-2
+// substitution_rule is honest only when its org_scope is CONTAINED WITHIN
+// (isNarrowerOrEqual) at least one of the absent employee's own active
+// assignments for that role: the rule cannot license MORE reach than the
+// assignment it substitutes for. If the absent employee holds NO active
+// assignment for the role (e.g. it was revoked after the rule was minted),
+// there is nothing to check containment against — the caller must fail
+// closed (deny), not silently treat that as "no restriction".
+//
+// Read-only, additive: mirrors getHoldersForRole's query shape (same JOIN,
+// same active-assignment predicate), narrowed to ONE employee + returning
+// org_scope instead of the slug list.
+// ---------------------------------------------------------------------------
+
+export async function getRoleAssignmentOrgScopesForEmployee(
+  pool: pg.Pool,
+  tenantId: string,
+  employeeSlug: string,
+  roleSlug: string,
+  nowMs: number = Date.now(),
+): Promise<ScopeElement[]> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ org_scope: unknown }>(
+      `SELECT ra.org_scope
+         FROM choros.role_assignment ra
+         JOIN choros.employee e ON e.tenant_id = ra.tenant_id AND e.id = ra.employee_id
+         JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE ra.tenant_id = $1
+          AND e.slug = $2
+          AND r.slug = $3
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $4)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $4)`,
+      [tenantId, employeeSlug, roleSlug, nowMs],
+    );
+    return rows.map((r) => r.org_scope as ScopeElement);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// findTenantOwnerSlug — T-0380 (D4): resolve the slug of the employee holding
+// the 'tenant-owner' role in this tenant.
+//
+// Used by the executor-resolver fallback-owner path (F6/PD-10): when a step's
+// role has no confirmed holders and no substitution applies, the task is routed
+// to the tenant owner. Returns null when no owner row is found (fresh tenant
+// with no seed; callers should treat null as "route to system / no assignee").
+//
+// Mirrors the isGenesisOwnerForTenant query pattern in src/db/org.ts, scoped
+// to return the slug rather than a boolean.
+// ---------------------------------------------------------------------------
+
+export async function findTenantOwnerSlug(
+  pool: pg.Pool,
+  tenantId: string,
+  nowMs: number = Date.now(),
+): Promise<string | null> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ slug: string }>(
+      `SELECT e.slug
+         FROM choros.employee e
+         JOIN choros.role_assignment ra ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+         JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE e.tenant_id = $1
+          AND r.slug = 'tenant-owner'
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+          AND e.deactivated_at IS NULL
+        LIMIT 1`,
+      [tenantId, nowMs],
+    );
+    return rows.length > 0 ? (rows[0]!.slug) : null;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// getAuthoringDraftHolderEmployeeIds — T-0466 (D8-G5): resolve the EMPLOYEE IDs
+// of HUMAN employees who hold a confirmed, in-window `authoring_draft` grant.
+//
+// These are exactly the admins/owners who CAN act on the authoring sandbox, so
+// they are the right recipients for a non-admin's config-request (заявка на
+// настройку): the capture-as-request path (assistant.ts) files a notification to
+// each of them. Reuses the grant model (no new role concept). kind='human' so we
+// never notify agent employees (e.g. assistant-agent, config-agent-seed), who
+// also hold the grant but cannot read a notification center.
+//
+// Returns employee UUIDs (NOT slugs) because choros.notification.recipient_id is
+// uuid with FK → employee(tenant_id, id) (migration 046). Empty when no human
+// holder exists (callers fall back to the tenant owner).
+// ---------------------------------------------------------------------------
+
+export async function getAuthoringDraftHolderEmployeeIds(
+  pool: pg.Pool,
+  tenantId: string,
+  nowMs: number = Date.now(),
+): Promise<string[]> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT DISTINCT e.id
+         FROM choros.employee e
+         JOIN choros.role_assignment ra
+              ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+         JOIN choros."grant" g
+              ON g.tenant_id = ra.tenant_id AND g.role_id = ra.role_id
+        WHERE e.tenant_id = $1
+          AND e.kind = 'human'
+          AND g.resource_type = 'authoring_draft'
+          AND g.confirmed_by IS NOT NULL
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+          AND (g.valid_from  IS NULL OR g.valid_from  <= $2)
+          AND (g.valid_until IS NULL OR g.valid_until  > $2)
+          AND e.deactivated_at IS NULL`,
+      [tenantId, nowMs],
+    );
+    return rows.map((r) => r.id);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// findTenantOwnerEmployeeId — T-0466 (D8-G5): the EMPLOYEE ID of the tenant
+// owner (fallback recipient when no explicit authoring_draft holder exists).
+// Mirrors findTenantOwnerSlug but returns the UUID for notification.recipient_id.
+// ---------------------------------------------------------------------------
+
+export async function findTenantOwnerEmployeeId(
+  pool: pg.Pool,
+  tenantId: string,
+  nowMs: number = Date.now(),
+): Promise<string | null> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT e.id
+         FROM choros.employee e
+         JOIN choros.role_assignment ra ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+         JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE e.tenant_id = $1
+          AND r.slug = 'tenant-owner'
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+          AND e.deactivated_at IS NULL
+        LIMIT 1`,
+      [tenantId, nowMs],
+    );
+    return rows.length > 0 ? rows[0]!.id : null;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// getFieldVisibilityPolicy — T-0419 (D7-3-FU): derive FieldVisibilityPolicy
+// from data_classification rows for a tenant (T-0081 / ADR §4.1).
+//
+// The FieldVisibilityPolicy.roleScopedFields is the set of JSONB field names
+// whose visibility is per-role-scoped. These are the fields classified as
+// 'confidential' or 'restricted' in data_classification — the two classes
+// where a caller's role must EXPLICITLY confer the field (facet narrowing)
+// to see it. 'public' and 'internal' fields remain on the union-floor
+// (whole-resource semantics; most-restrictive post-filter does not hide them).
+//
+// NO new store: data_classification (migration 017) already exists and is
+// RLS-isolated per tenant. This function is the edge-layer assembly described
+// in T-0081 ADR §4.1 / §11. No migration required.
+//
+// Honest-degrade: if the tenant has no data_classification rows (typical for
+// a fresh tenant or one that has not classified any fields), roleScopedFields
+// is empty → policy is a no-op (NF-1, byte-identical to pre-T-0419).
+// ---------------------------------------------------------------------------
+
+export async function getFieldVisibilityPolicy(
+  pool: pg.Pool,
+  tenantId: string,
+): Promise<FieldVisibilityPolicy> {
+  const roleScopedFields = await withTenantReadTx(pool, tenantId, async (client) => {
+    // Query all data_classification rows for the tenant (RLS-scoped).
+    // Fields classified as 'confidential' or 'restricted' are role-scoped:
+    // they are only visible when the actor's covering grant EXPLICITLY confers
+    // them (via resourceFacet.fields). 'public' and 'internal' fields use the
+    // union-floor (whole-resource semantics — not role-scoped).
+    const { rows } = await client.query<{ facet_field: string }>(
+      `SELECT DISTINCT facet_field
+         FROM choros.data_classification
+        WHERE tenant_id = $1
+          AND class IN ('confidential', 'restricted')`,
+      [tenantId],
+    );
+    return new Set(rows.map((r) => r.facet_field));
+  });
+
+  return { roleScopedFields };
+}
+
+// ---------------------------------------------------------------------------
+// filterProvisionedAgentEmployeeIds — [SECURITY def-in-depth, publish-time]:
+// resolve a set of candidate executor ids (authored choros:agentRef values) to
+// the subset that are PROVISIONED agents in this tenant — i.e. a kind='agent'
+// employee row WITH an agent_card row, scoped to `tenantId` (RLS-isolated read).
+//
+// Used by the process-publish path (process-defs.ts) to reject an authored
+// agentTask whose choros:agentRef names a non-existent / non-agent / cross-tenant
+// id BEFORE deploy. The pure publish transform (agent-task-external-mapper.ts)
+// stamps the ref verbatim as the dispatcher's agentEmployeeId, and the pure (and
+// IO-free) bpmn-linter only checks the ref is PRESENT — neither verifies it
+// resolves. This DB-backed reader is that missing resolution, kept OUT of the
+// pure transform/linter (which must stay side-effect-free) and in the DB layer.
+//
+// agent_card's FK pins employee_kind='agent' (migration 032), so an agent_card
+// row already implies kind='agent'; we still JOIN employee + assert e.kind='agent'
+// for an explicit, resilient guarantee and to confirm the employee row exists.
+// Org-less / system agents (NULL agent_card.employee_id, migration 093) are
+// addressed by their agent_card id — NOT an employee id — so they never match
+// here, which is correct: an org-less agent holds no process role and is not a
+// valid agentTask executor (agent-task-external-mapper.ts header).
+//
+// Returns the subset of `ids` that resolve (a Set for O(1) membership at the call
+// site). Inputs are deduped and filtered to well-formed UUIDs up-front: a non-UUID
+// id can never match the uuid employee.id column, so it is inherently unresolved
+// (the caller rejects it) — filtering avoids letting Postgres throw on an invalid
+// uuid cast inside the ANY($2::uuid[]) array.
+// ---------------------------------------------------------------------------
+
+export async function filterProvisionedAgentEmployeeIds(
+  pool: pg.Pool,
+  tenantId: string,
+  ids: readonly string[],
+): Promise<Set<string>> {
+  const candidateIds = Array.from(new Set(ids)).filter((id) => UUID_RE.test(id));
+  if (candidateIds.length === 0) return new Set<string>();
+
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT e.id
+         FROM choros.employee e
+         JOIN choros.agent_card ac
+           ON ac.tenant_id = e.tenant_id AND ac.employee_id = e.id
+        WHERE e.tenant_id = $1
+          AND e.kind = 'agent'
+          AND e.id = ANY($2::uuid[])`,
+      [tenantId, candidateIds],
+    );
+    return new Set<string>(rows.map((r) => r.id));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// resolveRoleSlugsByIds — T-0642 [столп1/P0, publish-time]: role.id → role.slug
+// bulk resolution, scoped to the publishing tenant (RLS-isolated read).
+//
+// Used by the process-publish path (process-defs.ts, via
+// user-task-role-mapper.ts's injected ResolveRoleSlug port) to translate a
+// userTask's authored `choros:assignedRoleId` (the role's UUID — role.id,
+// written by the properties panel from GET /api/org/tenant-state → roles[].id,
+// T-0325) into the SLUG every routing consumer actually matches against:
+// executor-resolver.ts::resolveExecutor's `roleSlug` param, getHoldersForRole's
+// `WHERE r.slug = $2` (just above), and inbox.ts (reads candidateGroups[0] off
+// the live engine task verbatim as roleSlug). Writing the raw UUID into
+// candidateGroups would resolve to an always-empty pool — this bulk lookup is
+// the missing translation.
+//
+// Mirrors filterProvisionedAgentEmployeeIds exactly (same dedup + UUID-filter +
+// tenant-scoped ANY($2::uuid[]) read), but resolves to a VALUE (slug) rather
+// than a boolean membership check — a Map, not a Set. An id that does not
+// resolve (deleted role / never existed / cross-tenant UUID collision) is
+// simply absent from the returned Map; callers degrade (leave that userTask
+// without candidateGroups) rather than fail publish.
+// ---------------------------------------------------------------------------
+
+export async function resolveRoleSlugsByIds(
+  pool: pg.Pool,
+  tenantId: string,
+  roleIds: readonly string[],
+): Promise<Map<string, string>> {
+  const candidateIds = Array.from(new Set(roleIds)).filter((id) => UUID_RE.test(id));
+  if (candidateIds.length === 0) return new Map<string, string>();
+
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ id: string; slug: string }>(
+      `SELECT id, slug
+         FROM choros.role
+        WHERE tenant_id = $1
+          AND id = ANY($2::uuid[])`,
+      [tenantId, candidateIds],
+    );
+    return new Map<string, string>(rows.map((r) => [r.id, r.slug]));
+  });
+}

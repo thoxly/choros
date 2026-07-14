@@ -1,0 +1,138 @@
+{
+  "task_id": "T-0654",
+  "status": "pr_open",
+  "branch": "task/T-0654",
+  "pr_url": "(stand offline — local branch task/T-0654 rebased onto dev@018d2ac8; promote via founder gate)",
+  "rebase_note": "Rebased/merged onto dev@018d2ac8 after the judge's changes_requested: my branch (base a9d95206) preceded T-0721 (DETAIL PDP gate) and T-0722 (LIST read-visibility filter), which merged into dev while I built and live in the exact two route blocks I rewrote. See recompose_pdp_gates below.",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/tasks/T-0654.spec.md",
+    "docs/design/ADR-T0654-processes-split.md",
+    "src/http/process-projection.ts",
+    "src/http/processes.ts",
+    "src/__tests__/processes-list-query.test.ts",
+    "src/__tests__/processes.e2e.test.ts",
+    "src/__tests__/processes-live-instances.test.ts",
+    "src/__tests__/processes-read-visibility.test.ts (rebase: fakeProjection fixture gains required starterActorId)",
+    "ci/checks/db/processes-read-visibility.db.test.ts (rebase: +2 post-PDP total composition tests + total on getInstanceList helper)"
+  ],
+  "recompose_pdp_gates": {
+    "why": "The judge flagged 2 blocking integration seams: a naive rebase would re-open P1 (raw variables/history/starter to any tenant member) and P2 (enumeration — total leaking the count of invisible instances). Both T-0721/T-0722 gates live in the two route blocks part A rewrote.",
+    "LIST_gate_T0722_preserved": "filterProjectionsByReadVisibility (dev) now runs FIRST — before the query pipeline AND before overlayDetailLiveSteps. selectProcessPage operates over the ALREADY PDP-narrowed `visibleProjections`, so {total} = |PDP-visible ∩ query-match|, never the raw tenant count. The enumeration side-channel T-0722 closed stays closed under pagination: a hidden instance can neither appear in instances[] NOR be counted in total. overlay input is drawn from visibleProjections, so a hidden instance never reaches the engine layer either.",
+    "DETAIL_gate_T0721_preserved": "The T-0721 `if (detailVisible)` wrapper is kept AROUND my starter-fold. The starter name resolves in the SAME single batch as the history completers (T-0648 one-call invariant), but that whole body — starter resolve included — executes ONLY when detailVisible; a PDP-hidden instance gets honest-404 and resolves/emits nothing (no raw variables/history/completedBy/starter leak).",
+    "composition_proof": "ci/checks/db/processes-read-visibility.db.test.ts (+2 live-PG tests): a 'seer' with a NARROW record-scoped grant vs a 'blind' actor with none → total(seer) - total(blind) === 2 (exactly the record-bound instances hidden from blind), and total === instances.length for BOTH (post-PDP total, no separately-leaked count). A second test proves a ?status= filter composes AFTER the PDP narrowing. The dev suite's 12 T-0721/T-0722 tests are unchanged and pass (14/14 total in the file).",
+    "gates_guarding_this": "The 4 dev FF-INST-VIS fitness gates that guard the rewritten blocks all PASS: process-detail-read-gate (FF-INST-VIS-1), process-detail-single-resolver (FF-INST-VIS-2), process-list-display-plane-isolation (FF-INST-VIS-3), process-list-tenant-scope-additive (FF-INST-VIS-4)."
+  },
+  "deviations_from_adr": [
+    "None for the delivered scope (part A). The ADR itself scopes the full task and recommends the split below.",
+    "Scope drift vs the 07-05 spec (code beats spec, as the brief warned): spec §5.2 (modeler requires name) is ALREADY delivered by T-0684 — verification only, not built here. Spec §5.3 (detail) is ~80% delivered (deriveInstanceTitle/RecordRef/ActorChip); only starter-name/related-tasks-link/header-record remain (folded into proposed sub-task T-0654-b)."
+  ],
+  "scope_delivered": {
+    "summary": "Part A — the server keystone both UI zones consume: GET /api/processes query params + pagination + deterministic sort + starter identity. Thin core, pg-free display plane, deterministic unit+HTTP tests.",
+    "acceptance_criteria_met": [
+      "AC-A1 ?q= (name/procId/id/node, case-insensitive)",
+      "AC-A2 ?definition= exact procKey",
+      "AC-A3 ?status= exact",
+      "AC-A4 ?started_from/?started_to (epoch-ms|ISO, inclusive, unknown passes)",
+      "AC-A5 ?mine=1 (starterId === reading actor; unknown-starter excluded)",
+      "AC-A6 ?limit/?offset pagination; response {instances,total,limit,offset}; default limit=200 (no regression)",
+      "AC-A7 deterministic total order (startedAt DESC, unknown last, id ASC tiebreak)",
+      "AC-A8 filters applied after tenant-scoped projection (never widen); ?record= composes",
+      "AC-A9 InstanceProjection.starterActorId + additive ProcessInstance startedAtMs/starterId/starterName/starterType; name via resolveActorsDisplay (T-0648), starter folded into the SAME single detail batch as history completers",
+      "AC-A10 processes.ts stays pg-free (FF-7-3); live-overlay only on the returned page (≤limit engine reads)"
+    ]
+  },
+  "split_recommendation": {
+    "why": "Full T-0654 spans two product zones (Работа + Конструктор) and ~1000 LOC of new UI (a full screen rewrite + a brand-new screen with nav) — a mega-diff for one honest review. The brief explicitly welcomes a split. Part 3 (modeler name) is already done (T-0684).",
+    "order_matters": "B before C — the Каталог card's instance-count deep-links into the Процессы grid with ?definition=, which B builds.",
+    "subtasks": [
+      {
+        "id": "T-0654-b",
+        "title": "Экран «Процессы» = грид + доводка деталки (зона Работа)",
+        "covers": "spec parts B + D",
+        "consumes": "part A query params/pagination + starter fields",
+        "scope": "Rewrite the instances section of screen-processes.jsx into a server-filtered grid (search/definition/status/date/mine controls → part-A query params; pagination via total/limit/offset) over PROCESSES_VIEW_COLUMNS (name/process/status/started/actor) + density; starter by name (starterName + ActorChip). Detail polish: «Запущен: <Имя> (<тип>)» from starterName/starterType; «Связанные задачи» → /inbox?instance=<id> (inbox seeds its filter from the ?instance= URL param — server ?instance= scope already exists, T-0710) + chip; promote source-record RecordRef into the header line. Empty/Loading/Error honest; UX gates G2/G5/G7. Move the catalog/связи sections OUT (to T-0654-c). Web tests for the grid + detail.",
+        "risks": "ListViewPanel is records/registry_def-bound — do NOT force-reuse it; render the grid from the static PROCESSES_VIEW_COLUMNS catalog. Saved personal views for processes (ViewSwitcher/config editor) is a further follow-up (original §5 wave B), not this sub-task."
+      },
+      {
+        "id": "T-0654-c",
+        "title": "«Каталог процессов» карточками (зона Конструктор)",
+        "covers": "spec part C",
+        "depends_on": "T-0654-b (deep-link target)",
+        "scope": "New screen in nav-config zone 'constructor' (capability authoring_draft, route e.g. /process-catalog), near Модельер. Definition cards from GET /api/process-catalog: name, status, version(s), instance_count (click → /processes?definition=<procKey>); trigger-links (bindings) rendered ON the card (the third «Связи» table disappears); buttons «В модельер» / «Правила ветвления (DMN)»; remove the duplicate «+ Новый процесс». Slim screen-processes.jsx to instances-only. UX gates G2/G5/G7; no fake buttons. Consider surfacing a versions list in the catalog API (currently only latest version number).",
+        "notes": "CatalogDefinition already carries process_key/name/source/status/version/instance_count; ProcessAppBinding carries trigger_type/application/form for the on-card trigger-links."
+      }
+    ],
+    "already_done": {
+      "id": "spec-part-3-modeler-name",
+      "by": "T-0684",
+      "evidence": "src/core/process-name-policy.ts + web/src/screens/process-name-policy.js (isRejectedProcessName gate on create+publish + editor pre-flight guard); generateUniqueProcessKey auto-key; process-name-policy.test.ts (6 tests, green). Verify in acceptance, do not rebuild."
+    }
+  },
+  "gates_run": {
+    "note": "Re-run AFTER the rebase onto dev@018d2ac8 (post-recompose).",
+    "types": "tsc --noEmit — 0 errors",
+    "build": "npm run build (tsc + seed tsconfig) — 0 errors",
+    "lint": "eslint on all changed files — 0",
+    "tests_targeted": "processes-list-query (20) + processes.e2e (14) + processes-live-instances (35) + processes-read-visibility unit (22) — all green",
+    "tests_full_src": "vitest run src — 5816 passed, 10 skipped, 0 failed",
+    "fitness_db_targeted": "ci/checks/db/processes-read-visibility.db.test.ts on live PG :55432 — 14/14 (dev's 12 T-0721/T-0722 intact + my 2 post-PDP total composition tests)",
+    "process_detail_read_gate": "PASS (FF-INST-VIS-1)",
+    "process_detail_single_resolver": "PASS (FF-INST-VIS-2)",
+    "process_list_display_plane_isolation": "PASS (FF-INST-VIS-3)",
+    "process_list_tenant_scope_additive": "PASS (FF-INST-VIS-4)",
+    "anti_case_lock": "PASS (self-test PASS)",
+    "detel_base_task_from_engine": "PASS",
+    "detel_literal_baseline": "PASS (aggregate 4 < baseline 7)",
+    "http_route_auth_coverage": "PASS (FF-0328-1/2/3, self-test PASS)",
+    "start_route_isolation": "PASS (FF-7-3: processes.ts display plane pg-free)",
+    "read_pdp_anti_case": "PASS (no D-064 literals added under src/, base=018d2ac8)",
+    "ux_gates": "N/A for this slice — server-only, no web/ changes (relevant to sub-tasks B/C)",
+    "fitness_db_full": "NOT RUN in full (148 db files); the ONE affected suite (processes-read-visibility.db.test.ts) run on live PG :55432 = 14/14."
+  },
+  "known_nits_not_fixed": {
+    "F3_total_fold_window": "total is bounded by the ≤500 fold window (readEvents cap in listInstanceProjections) — a tenant with >500 instances reports total capped at what the fold saw. This is a PRE-EXISTING cap (the projection has always folded ≤500), NOT introduced by this task, and left as-is per the coordinator: the projection is an audit fold, not a paginated SQL table; deep-history pagination is a separate concern (ADR rejected-alternatives). Documented, not fixed."
+  },
+  "live_proof_plan": {
+    "note": "Stand offline at handoff. Plan to run once the dev stack (Tailscale 100.121.76.86:3000, PG :55432, Keycloak :8180, Flowable) is back, as a rank-and-file (non-owner) per D-064.",
+    "setup": [
+      "Have a tenant with >25 real process instances across ≥2 definitions and ≥2 starters (start several via record on_create + explicit launch, by two different employees).",
+      "Log in as a rank-and-file employee WITHOUT constructor grants (the anti-case persona)."
+    ],
+    "steps": [
+      "1. GET /api/processes (no params) → 200, body has {instances,total,limit,offset}; total = real instance count; instances.length = min(total,200); order = newest-first (startedAt DESC), ties by id.",
+      "2. GET /api/processes?limit=10&offset=0 then ?offset=10 → two disjoint pages, total constant, no row repeats across pages, deterministic order.",
+      "3. GET /api/processes?definition=<procKey> → only that definition's instances (total drops); ?status=running → only running; both compose with ?q=.",
+      "4. GET /api/processes?q=<substring of a source record's title / definition name> → the operator finds their instance by human text, никогда не по UUID (anti-case).",
+      "5. GET /api/processes?started_from=<iso>&started_to=<iso> → only instances started in the window; an instance outside is absent.",
+      "6. As employee X: GET /api/processes?mine=1 → only instances X started; as employee Y the same query returns Y's set (no cross-leak — FF-5).",
+      "7. GET /api/processes/<instanceId> → detail carries starterName + starterType (человеко-имя, not just a glyph); resolver called exactly once for the request (union of history completers + starter).",
+      "8. Negative: ?definition=<foreign-tenant procKey> and ?record=<foreign record> → honest-empty, never another tenant's rows.",
+      "9. Regression: an existing consumer (current /processes table) still renders — default limit 200 returns the full set for tenants ≤200 instances."
+    ],
+    "expected_red_flags_to_watch": [
+      "starterName absent for all rows → resolveActorsDisplay not wired in server.ts composition root (best-effort degrade is acceptable, but investigate).",
+      "total not matching a manual count → fold window (≤500) exceeded; document/raise the window bound.",
+      "pagination showing duplicates across pages → sort not total (should be impossible given the id tiebreak; would indicate a data id collision)."
+    ]
+  },
+  "risks_integration": [
+    "PDP composition (was the judge's blocking concern, now closed): the T-0722 read-visibility filter runs BEFORE the query pipeline and BEFORE overlay, so total is post-PDP and enumeration stays closed under pagination; the T-0721 detail gate wraps the starter-fold so nothing leaks for a hidden instance. Proven by 4 FF-INST-VIS gates + a live-PG composition test (see recompose_pdp_gates).",
+    "Interim UI: until T-0654-b ships, the current dumb /processes table calls GET /api/processes with no pagination params → default limit=200 (unchanged for tenants ≤200 instances).",
+    "Fold window (F3, known/pre-existing — see known_nits_not_fixed): filtering/pagination/total operate over the last ≤500 instances (readEvents cap). Not introduced here; not fixed per coordinator.",
+    "starterName is best-effort (T-0648 resolver): no resolver / unresolved actor / no-DB path → field simply absent; the frontend must fall back to starterType/starterId (never render a raw UUID).",
+    "listInstanceProjections is called with {limit:500} on the list path (was default 200) — widens the fold window; additive, no behavioral regression."
+  ],
+  "friction_events": [
+    "Worktree had no node_modules — ran npm ci (188 pkgs, ~8s) before any gate could run.",
+    "anti-case-lock caught a D-064 denylisted step-name literal ('Согласование') that I introduced in a TEST FIXTURE — fixed to a neutral term. The gate scans ADDED lines under src/ INCLUDING tests; fixture strings must avoid case-domain vocabulary.",
+    "Adding starter resolution naively made the detail route call resolveActorsDisplay twice (history + starter), tripping the T-0648 'exactly one call per request' invariant — refactored to fold the starter id into the history's single batch resolve.",
+    "REBASE (judge changes_requested): my base a9d95206 preceded T-0721/T-0722, which merged into dev in the exact two route blocks I rewrote — a naive rebase would have re-opened P1 (raw detail leak) + P2 (enumeration via total). Resolved by hand: T-0722 filter runs FIRST (query pipeline over the PDP-narrowed set → total post-PDP), T-0721 if(detailVisible) wraps the starter-fold. The merge also made my new-required InstanceProjection.starterActorId break dev's fakeProjection fixture (tsc) — added the field to the fixture."
+  ]
+}

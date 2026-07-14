@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0605",
+  "status": "ready",
+  "decision": "ЕДИНЫЙ источник правды «назначение роли активно» для всех читателей. PDP-путь (src/db/grants-dao.ts) схлопывается на ТОТ ЖЕ канонический предикат активации назначения, что уже задокументирован и применяется картой роли (src/http/rights-overview.ts:34-42, isActive) и порождается write-side (grants.ts POST /api/role-assignments; rights-intents.ts hire): ASSIGNMENT_ACTIVE := confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL) AND in-window. КОНКРЕТНО: в grants-dao.ts заменяется ветка активации НАЗНАЧЕНИЯ в двух местах — getRoleSlugsForActor (шаг role_assignment→role JOIN, ~строки 434-446) и getGrantsForSubject step-2 (загрузка role_assignment, ~строки 240-255): было «ra.confirmed2_by IS NOT NULL OR NOT EXISTS(SELECT 1 FROM grant g WHERE ... AND CRITICAL_GRANT_PREDICATE_G)», стало «ra.confirmed2_by IS NOT NULL OR ra.proposed_by IS NULL». Критичный-грант NOT EXISTS-подзапрос и функция criticalGrantPredicate/CRITICAL_GRANT_PREDICATE_G БОЛЬШЕ НЕ используются для активации НАЗНАЧЕНИЯ (удаляются из ассignment-предиката), НО criticalGrantPredicate/CRITICAL_GRANT_PREDICATE_BARE ОСТАЁТСЯ на месте для ГРАНТ-уровневого дуал-контроля в getGrantsForSubject step-3 (критичный ГРАНТ активен только при confirmed2_by IS NOT NULL) — это настоящий authority-гейт критичных прав, он НЕ трогается. ПОЧЕМУ это верно: дуал-контроль по контракту T-0044 требует второго подтверждающего когда критичность ЭСКАЛИРУЕТ (criticalityDiff.escalates), а не для каждого назначения к уже-критичной роли. Назначение роли НЕ меняет грант-сет роли ⇒ from≡to ⇒ не эскалирует ⇒ write-side честно кладёт его рутинным (proposed_by=NULL, один подтверждающий). T-0397 ввёл в read-path требование confirmed2_by НА НАЗНАЧЕНИИ для любой критичной роли — требование, которое write-side НИКОГДА не выполняет для рутинного назначения; это самозаклин (держатель видим на карточке, невидим для PDP). Схлопывание на канонический предикат УДАЛЯЕТ вторую расходящуюся интерпретацию, а не добавляет authority-путь (N1). Плюс web-честность: src/screens (screen-inbox.jsx) — claim-обработчик показывает тост на ЛЮБУЮ ошибку, для NOT_ELIGIBLE — человеческий текст. Миграция БД НЕ требуется: все нужные колонки (proposed_by, confirmed_by, confirmed2_by) уже есть (migration 020 + 031); изменение чисто в SQL-предикате DAO.",
+  "rejected_alternatives": [
+    {
+      "option": "Fix write-side: POST /api/role-assignments требует второго подтверждающего когда целевая роль (абсолютно) критична — чтобы совпасть с текущим read-предикатом.",
+      "why_not": "(1) Превращает КАЖДОЕ назначение любой workflow-роли (у которой есть approve/transition-грант) в двухчеловечную церемонию — тяжело и не соответствует семантике T-0044 (второй нужен при ЭСКАЛАЦИИ, а не для рутинного назначения к уже-критичной роли). (2) Не решает bootstrap: в тенанте из одного владельца (или на первичной настройке) НЕТ второго distinct-подтверждающего — владелец никогда не сможет выдать себе роль. Ровно живой факт приёмки. (3) Расходится с hire-путём (rights-intents.ts:435), который УЖЕ кладёт назначение рутинно-активным (proposed_by=NULL) и вешает дуал-контроль на ГРАНТЫ. Внесение противоречия между двумя write-путями."
+    },
+    {
+      "option": "PDP читает ОБА стора (карточный + критичность-гейт) и берёт объединение/пересечение.",
+      "why_not": "Стор ОДИН (choros.role_assignment) — «двух сторов» нет, есть два расходящихся ПРЕДИКАТА над одним. Читать «оба» = увековечить драйф. Единственно честное — один предикат. Плюс это ровно то, чего запрещает дисциплина «no second authority path»."
+    },
+    {
+      "option": "Оставить read-предикат, а на карточке роли ПОКАЗЫВАТЬ держателя как «неактивного/ждёт 2-го подтверждения», чтобы UI совпал с PDP.",
+      "why_not": "Лечит симптом «карточка врёт», но НЕ лечит корень «взять pool-задачу не может никто»: держатель всё равно не получит eligibility одним подтверждением, а второго подтверждающего взять неоткуда (bootstrap). Это узаконивает поломку вместо её устранения. Функция потерь фабрики (D-064) = кейс должен пройти СКВОЗНЯКОМ."
+    },
+    {
+      "option": "Отдельный feature-flag / временный bypass eligibility для владельца тенанта.",
+      "why_not": "Кейс-специфичный обход (нарушение D-064, закон границы), создаёт привилегированный второй путь авторизации, оставляет корневой драйф. Отвергнуто."
+    }
+  ],
+  "object_model": [],
+  "contracts": [
+    "src/db/grants-dao.ts::getRoleSlugsForActor — ассignment-активация: «confirmed2_by IS NOT NULL OR proposed_by IS NULL» (было: OR NOT EXISTS критичный грант роли). criticalGrantPredicate('g') из этого предиката удаляется.",
+    "src/db/grants-dao.ts::getGrantsForSubject step-2 (role_assignment) — тот же канонический ассignment-предикат. Step-3 (grant) — БЕЗ ИЗМЕНЕНИЙ (критичный грант ⇒ confirmed2_by, CRITICAL_GRANT_PREDICATE_BARE остаётся).",
+    "src/db/grants-dao.ts — CRITICAL_GRANT_PREDICATE_G удаляется если после правки не имеет других потребителей; CRITICAL_GRANT_PREDICATE_BARE и criticalGrantPredicate остаются (grant step-3). Проверить потребителей перед удалением.",
+    "web/src/screens/screen-inbox.jsx — claim-обработчик: catch → тост; NOT_ELIGIBLE → человеческий текст «Нет роли для этой задачи — попросите администратора назначить роль…».",
+    "src/__tests__/grants-dao.test.ts — mirror-предикат (fake pool) и фикстуры приводятся к каноническому: ассignment-активность = confirmed2_by OR proposed_by IS NULL; добавить proposed_by в RA-тип фикстур; кейс e-ra-critical переосмыслить как semi-confirmed (proposed_by=actor) чтобы оставался excluded по НОВОЙ причине.",
+    "ci/checks/db/grants-dao-dual-control.db.test.ts — seedAssignment получает параметр proposed (default NULL для рутинных); кейс empAsgAxisC делается semi-confirmed (proposed non-null) чтобы оставаться excluded; кейс empExpiredCrit (рутинный, proposed=NULL) остаётся active.",
+    "ci/checks/db/rights-eligibility-sew.db.test.ts — НОВЫЙ live-PG интеграционный: назначение (proposed=NULL) к approve-роли → getRoleSlugsForActor включает slug; не-держатель → пусто (403-эквивалент). ",
+    "docs/handoff/T-0605.pr-handoff.json — BUILD-фаза."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1/AC-2: рутинное назначение к критичной роли → slug включён; semi-confirmed → исключён.", "ci_check": "npm run fitness:db (grants-dao-dual-control.db.test.ts + rights-eligibility-sew.db.test.ts)"},
+    {"id": "FF-2", "rule": "AC-3: grant-уровневый дуал-контроль цел (критичный грант confirmed2_by=NULL → не активен).", "ci_check": "npm run fitness:db (grants-dao-dual-control.db.test.ts axis-c/axis-a/Q-2 кейсы)"},
+    {"id": "FF-3", "rule": "AC-4: сквозной claim после назначения (live PG); не-держатель 403.", "ci_check": "npm run fitness:db (rights-eligibility-sew.db.test.ts)"},
+    {"id": "FF-4", "rule": "AC-5/AC-10: web показывает ошибку claim человеческим текстом.", "ci_check": "cd web && npx vitest run (screen-inbox тест на тост)"},
+    {"id": "FF-5", "rule": "AC-6: без кейс-литералов.", "ci_check": "bash ci/checks/anti-case-lock.sh"},
+    {"id": "FF-6", "rule": "AC-7: unit-набор зелёный (mirror-предикат обновлён).", "ci_check": "npm test"},
+    {"id": "FF-7", "rule": "AC-8: build зелёный на обоих уровнях.", "ci_check": "npm run build && (cd web && npm run build)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-1"},
+    {"ac": "AC-3", "covered_by": "FF-2"},
+    {"ac": "AC-4", "covered_by": "FF-3"},
+    {"ac": "AC-5", "covered_by": "FF-4"},
+    {"ac": "AC-6", "covered_by": "FF-5"},
+    {"ac": "AC-7", "covered_by": "FF-6"},
+    {"ac": "AC-8", "covered_by": "FF-7"},
+    {"ac": "AC-9", "covered_by": "FF-1"},
+    {"ac": "AC-10", "covered_by": "FF-4"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0605-rights-eligibility-sew.md",
+  "escalation": "Нет. Изменение — коррекция read-предиката DAO под уже-задокументированный канонический контракт активации назначения (rights-overview.ts:34-42); удаляет расходящуюся вторую интерпретацию, не вводит новых прав/данных/секретов/authority-путей. Миграции БД нет (колонки уже существуют)."
+}

@@ -1,0 +1,80 @@
+{
+  "task_id": "T-0139",
+  "status": "ready",
+  "decision": "Reasoning-trace ложится АДДИТИВНО внутрь существующей колонки audit_event.payload (jsonb, миграция 006) как зарезервированный под-объект payload.reasoning — НЕ второй журнал, НЕ новая таблица, НЕ новая колонка, НИКАКОЙ новой миграции. payload уже целиком hash-покрыт каноническим preimage (audit-preimage.ts, поле №11 CANONICAL_FIELD_ORDER), уже tenant-изолирован RLS (006), уже несёт actorType — поэтому trace наследует append-only, tamper-evidence и tenant-изоляцию бесплатно, без vocab bump. Новый PURE IO-free модуль src/core/reasoning-trace.ts экспортирует тип ReasoningTrace {decision, chosen_option, alternatives[], rationale, confidence?, inputs_ref[], model_ref?}, валидатор assertReasoningTrace, attachReasoning(input,trace) (вмёрживает payload.reasoning) и guard assertAgentDecisionHasReasoning(input). Статический реестр decision-точек AGENT_DECISION_EVENT_TYPES={invoke.command, task.completed} определяет, где агент принимает решение. Red-line fail-closed на границе энкодера (НЕ в БД-триггере: только там известны type+actorType): для события type∈реестр И payload.actorType==='agent' guard ОБЯЗАН найти валидный payload.reasoning, иначе бросает ReasoningTraceMissingError ВНУТРИ withTenantTx до appendAuditEvent → транзакция откатывается, строка не пишется. Человеческие/service-события guard пропускает. inputs_ref несёт ссылки (kind+ref), не значения — зеркалит actor_event 'references, never values' (018). Все правки строго аддитивны; appendAuditEvent — единственный sink; конституция/agents/control-plane/actor_event-vocab не трогаются.",
+  "rejected_alternatives": [
+    {"option": "Отдельная таблица reasoning_trace с FK→audit_event", "why_not": "Плодит второй журнал (прямо запрещено задачей), требует своего append-only+RLS+hash механизма; FK через append-only границу хрупок — actor_event AC-21 явно запрещает FK→audit_event. Несоразмерно тонкому ядру."},
+    {"option": "Новая колонка audit_event.reasoning jsonb", "why_not": "Меняет набор колонок → меняет CANONICAL_FIELD_ORDER preimage → vocab bump (FF-3 golden flip), краснит всю цепь и ломает live-verifier. payload уже jsonb и уже hash-покрыт — колонка избыточна."},
+    {"option": "Трасса в actor_event.detail", "why_not": "actor_event — SoD-субстрат с pinned closed-vocab и БЕЗ hash-цепи (018 §2); объяснимость-под-ответственность требует tamper-evidence, которого там нет by design. Decision-события агента уже пишутся в audit_event."},
+    {"option": "Best-effort / опциональная трасса (warn, не fail)", "why_not": "Нарушает red-line 'решение без трассы = нарушение'. Опциональность = объяснимость, которую можно молча пропустить = провал ответственности. Принуждение обязано быть fail-closed."},
+    {"option": "Принуждение БД-триггером (CHECK payload?reasoning)", "why_not": "БД не знает, какое событие — агентское решение (семантика type+actorType, эволюционирующий реестр). CHECK на jsonb-ключ хрупок и дублирует реестр в SQL. Граница энкодера — единственное место со знанием type+actorType, через которое уже идёт весь агентский аудит."},
+    {"option": "confidence-порог / autonomy-downgrade в этом ADR", "why_not": "Запарковано в Stage-2 без критериев разморозки (gap-map зона 3). Вводить порог = новый нерешённый продуктовый выбор. Переносим значение confidence, политику НЕ вводим."}
+  ],
+  "object_model": [
+    {
+      "entity": "ReasoningTrace (под-объект audit_event.payload.reasoning — НЕ новая таблица/колонка)",
+      "fields": [
+        {"name": "decision", "type": "string (slug ^[a-z0-9_.-]+$) — какая decision-точка"},
+        {"name": "chosen_option", "type": "string 1..2000 — выбранный вариант X"},
+        {"name": "alternatives", "type": "Alternative[] 0..N — обязателен, [] допустим (отсутствие ключа = нарушение red-line)"},
+        {"name": "rationale", "type": "string 1..8000 — почему X / почему отвергнуты (ядро ответственности)"},
+        {"name": "confidence", "type": "number 0.0..1.0 — опц.; порогов НЕ вводим"},
+        {"name": "inputs_ref", "type": "InputRef[] 0..N — обязателен; ссылки на входы, НЕ значения"},
+        {"name": "model_ref", "type": "string — опц.; идентификатор модели/версии промта (происхождение)"}
+      ]
+    },
+    {
+      "entity": "Alternative",
+      "fields": [
+        {"name": "option", "type": "string 1..2000 — рассмотренная альтернатива"},
+        {"name": "rejected_because", "type": "string 1..4000 — почему отвергнута"}
+      ]
+    },
+    {
+      "entity": "InputRef (references, never values — зеркало actor_event 018 §3.4)",
+      "fields": [
+        {"name": "kind", "type": "string slug — тип входа (record/grant/process_var/…)"},
+        {"name": "ref", "type": "string — непрозрачный указатель (uuid/handle/key), НЕ инлайн-данные"}
+      ]
+    },
+    {
+      "entity": "AGENT_DECISION_EVENT_TYPES (статический реестр decision-точек в reasoning-trace.ts)",
+      "fields": [
+        {"name": "members", "type": "ReadonlySet<string> = {invoke.command, task.completed}"}
+      ]
+    }
+  ],
+  "contracts": [
+    "src/core/reasoning-trace.ts — PURE, IO-free (НЕ импортирует pg/http/https/net/fetch/child_process). Экспортирует: interface ReasoningTrace/Alternative/InputRef; const AGENT_DECISION_EVENT_TYPES: ReadonlySet<string>; class ReasoningTraceMissingError/ReasoningTraceShapeError.",
+    "assertReasoningTrace(t: unknown): asserts t is ReasoningTrace — бросает ReasoningTraceShapeError на нарушении формы §2.1 (regex decision, диапазоны строк, массивы alternatives/inputs_ref обязательны, confidence∈[0,1] если задан, отвергает зарезервированные сырые ключи payload/record_data/secret/document_body/raw).",
+    "attachReasoning(input: AuditEventInput, trace: ReasoningTrace): AuditEventInput — валидирует trace и возвращает НОВЫЙ input с payload.reasoning вмёрженным (прочие ключи payload сохранены).",
+    "assertAgentDecisionHasReasoning(input: AuditEventInput): void — если input.type∈AGENT_DECISION_EVENT_TYPES И input.payload.actorType==='agent' и payload.reasoning отсутствует/невалиден → throw ReasoningTraceMissingError; иначе no-op (пропускает human/service).",
+    "AuditEventInput импортируется ВЕРБАТИМ из src/core/audit-grant-encoder.ts — НЕ переопределять.",
+    "Call-site (src/http/invoke.ts invoke.command; src/core/lifecycle-audit.ts агентский путь task.completed): вызвать assertAgentDecisionHasReasoning(input) ВНУТРИ той же withTenantTx ДО appendAuditEvent — throw откатывает транзакцию, строка не пишется (fail-closed, нет частичного аудита).",
+    "invoke-body расширяется опц. полем reasoning (тот же ReasoningTrace, валидируется тем же модулем) — day-1 источник трассы до подключения реального рантайма в Stage-2.",
+    "Никаких новых миграций; CANONICAL_FIELD_ORDER и VOCAB_VERSION в audit-preimage.ts НЕ изменяются; appendAuditEvent — единственный sink; конституция/agents/control-plane не трогаются."
+  ],
+  "fitness_functions": [
+    {"id": "FF-RT-REDLINE-STATIC", "rule": "Статическая половина red-line: реестр AGENT_DECISION_EVENT_TYPES непуст и содержит invoke.command+task.completed; на агентских call-site (invoke.ts, lifecycle-audit.ts) присутствует assertAgentDecisionHasReasoning/attachReasoning; ни один агентский путь не пишет decision-событие через appendAuditEvent минуя guard.", "ci_check": "ci/checks/reasoning-trace-redline.sh"},
+    {"id": "FF-RT-REDLINE-TEST", "rule": "Тестовая половина red-line: unit-тест доказывает, что assertAgentDecisionHasReasoning БРОСАЕТ для type∈реестр с actorType==='agent' без payload.reasoning, и ПРОПУСКАЕТ при валидном reasoning и для actorType∈{human,service}; чек гоняет этот тест зелёным.", "ci_check": "ci/checks/reasoning-trace-redline.sh"},
+    {"id": "FF-RT-SHAPE", "rule": "assertReasoningTrace принуждает форму §2.1: обязательны decision(slug-regex)/chosen_option/alternatives(массив)/rationale/inputs_ref(массив); confidence∈[0,1] если задан; Alternative={option,rejected_because}; InputRef={kind,ref}. Невалид → throw. Unit-тест покрывает каждое поле.", "ci_check": "ci/checks/reasoning-trace-shape.sh"},
+    {"id": "FF-RT-APPEND-ONLY", "rule": "reasoning-trace НЕ ослабляет append-only: ноль новых таблиц/колонок в audit_event; CANONICAL_FIELD_ORDER и VOCAB_VERSION в audit-preimage.ts неизменны; нет нового GRANT UPDATE/DELETE на audit_event; reasoning-trace.ts не импортирует pg/http.", "ci_check": "ci/checks/reasoning-trace-append-only.sh"},
+    {"id": "FF-RT-NO-LEAK", "rule": "inputs_ref типизирован как ссылки (kind+ref), не данные; assertReasoningTrace отвергает на верхнем уровне trace сырые ключи (payload/record_data/secret/document_body/raw); reasoning-trace.ts остаётся IO-free (нет network/LLM-вызовов из ядра).", "ci_check": "ci/checks/reasoning-trace-no-leak.sh"},
+    {"id": "FF-RT-SINGLE-SINK", "rule": "Соразмерность: reasoning пишется ТОЛЬКО как payload.reasoning через канонический appendAuditEvent — нет таблицы reasoning_trace, нет CREATE TABLE *reasoning* в migrations/, нет второго sink.", "ci_check": "ci/checks/reasoning-trace-single-sink.sh"}
+  ],
+  "traceability": [
+    {"ac": "AC-1: объектная модель trace (decision/chosen_option/alternatives/rationale/confidence?/inputs_ref)", "covered_by": "§2.1 + ReasoningTrace type + FF-RT-SHAPE"},
+    {"ac": "AC-2: трасса аддитивно в audit_event (payload.reasoning, без нового журнала/колонки)", "covered_by": "§2.1/§2.2 + FF-RT-SINGLE-SINK + FF-RT-APPEND-ONLY"},
+    {"ac": "AC-3: append-only + actor-vocab инварианты сохранены", "covered_by": "§1/§2.1 + FF-RT-APPEND-ONLY"},
+    {"ac": "AC-4: red-line — агентское решение в decision-точке БЕЗ trace = FAIL (fail-closed)", "covered_by": "§2.2 + FF-RT-REDLINE-STATIC + FF-RT-REDLINE-TEST"},
+    {"ac": "AC-5: реестр decision-точек явный и принуждаемый", "covered_by": "§2.2 AGENT_DECISION_EVENT_TYPES + FF-RT-REDLINE-STATIC"},
+    {"ac": "AC-6: tenant-изоляция (RLS) reasoning", "covered_by": "§2.3 (наследует audit_event RLS 006)"},
+    {"ac": "AC-7: tamper-detectable (hash-покрытие)", "covered_by": "§1/§2.1 (payload = поле preimage)"},
+    {"ac": "AC-8: не утекает чувствительное (refs, не values)", "covered_by": "§2.3 + FF-RT-NO-LEAK"},
+    {"ac": "AC-9: соразмерность (нет второй подсистемы)", "covered_by": "§3 + FF-RT-SINGLE-SINK"},
+    {"ac": "AC-10: confidence без новых порогов (Stage-2 не размораживается)", "covered_by": "§2.1/§3"}
+  ],
+  "runtime_target": "Существующий choros dev-стек (single-Postgres substrate + node:http server). НИКАКОЙ новой миграции/таблицы/колонки/внешнего ресурса — reasoning-trace живёт в уже существующей колонке audit_event.payload (006). Новый pure-модуль src/core/reasoning-trace.ts + аддитивные правки агентских call-site энкодеров (invoke.ts, lifecycle-audit.ts) ездят на существующем серверном процессе. Без founder-gate (автономная импл-часть).",
+  "adr_artifact_path": "docs/design/T-0139-reasoning-trace.adr.md",
+  "escalation": ""
+}

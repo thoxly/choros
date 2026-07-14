@@ -1,0 +1,54 @@
+{
+  "task_id": "T-0168",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1105,
+    "passed": 1105,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "notifications.test.ts > AC-1/2/3: choros.notification exists",                                    "result": "pass"},
+    {"ac": "AC-2",  "test": "notifications.test.ts > AC-1/2/3: choros.email_channel_config exists",                           "result": "pass"},
+    {"ac": "AC-3",  "test": "notifications.test.ts > AC-1/2/3: choros.notification_preference exists",                        "result": "pass"},
+    {"ac": "AC-4",  "test": "notifications.test.ts > AC-4: ENABLE + FORCE RLS on all three tables",                           "result": "pass"},
+    {"ac": "AC-5",  "test": "notifications.test.ts > AC-5: tenant isolation policies correctly named",                         "result": "pass"},
+    {"ac": "AC-6",  "test": "notifications.test.ts > AC-6: default-DENY policy — no GUC → 0 rows and INSERT denied",          "result": "pass"},
+    {"ac": "AC-7",  "test": "notifications.test.ts > AC-7: choros_app holds SELECT/INSERT/UPDATE/DELETE",                     "result": "pass"},
+    {"ac": "AC-8",  "test": "notifications.test.ts > AC-8: notification PK (tenant_id, id) + FK → employee",                  "result": "pass"},
+    {"ac": "AC-9",  "test": "notifications.test.ts > AC-9: email_channel_config PK is sole column tenant_id",                 "result": "pass"},
+    {"ac": "AC-10", "test": "notifications.test.ts > AC-10: notification_preference PK (tenant_id, event_kind, recipient_scope)", "result": "pass"},
+    {"ac": "AC-11", "test": "notifications.test.ts > AC-11: idx_notification_unread exists with WHERE (is_read = false)",     "result": "pass"},
+    {"ac": "AC-12", "test": "notifications.test.ts > AC-12: idx_notification_listing exists with all four columns",           "result": "pass"},
+    {"ac": "AC-13", "test": "notifications.test.ts > AC-13: tenant_id leads all composite indexes",                           "result": "pass"},
+    {"ac": "AC-14", "test": "notifications.test.ts > AC-14 (static): known_tenant_tables.txt contains 3 new names, 34 total lines", "result": "pass"},
+    {"ac": "AC-15", "test": "notifications.test.ts > AC-15 (static): no queue/delivery/dispatch in migration files",          "result": "pass"},
+    {"ac": "AC-16", "test": "notifications.test.ts > AC-16: FF-T13 FORCE RLS loop green for all three tables",                "result": "pass"},
+    {"ac": "AC-17", "test": "notifications.test.ts > AC-17: EXPLAIN uses idx_notification_unread, no seq-scan",               "result": "pass"},
+    {"ac": "AC-18", "test": "notifications.test.ts > AC-18: notification has exactly 10 columns per ADR §4.1",                "result": "pass"},
+    {"ac": "AC-19", "test": "notifications.test.ts > AC-19: email_channel_config has exactly 10 columns per ADR §4.2",        "result": "pass"},
+    {"ac": "AC-20", "test": "notifications.test.ts > AC-20: notification_preference has exactly 6 columns per ADR §4.3",      "result": "pass"}
+  ],
+  "secondary_ux": [
+    {
+      "check": "FF-RC6 sibling-gotcha: known_tenant_tables.txt byte-change triggers role-criticality-isolation.sh on branch",
+      "result": "n/a",
+      "note": "Constructive false-positive: T-0168 legitimately adds 3 new tenant table names. FF-RC6 is the sole red check in npm run fitness. Zelenevs post-merge to dev (confirmed by review contract ci_seen.note and memory choros-ci-check-gotchas). Not counted as a product defect."
+    },
+    {
+      "check": "Pre-existing FF-ACT: zero ACT_* tables expected, 56 present (Flowable deployed on dev DB)",
+      "result": "n/a",
+      "note": "Pre-existing failure unrelated to T-0168 tables. Does not touch notification/email_channel_config/notification_preference."
+    },
+    {
+      "check": "Pre-existing cross_tenant.test.ts: seedRowForTable unknown table invoke_proposal",
+      "result": "n/a",
+      "note": "75 tests skipped due to missing seeder for invoke_proposal. Pre-existing; does not reference T-0168 tables."
+    },
+    {
+      "check": "Migration idempotency: runner skips applied migrations via schema_migrations",
+      "result": "pass",
+      "note": "Migrations 046/047/048 already applied to dev Postgres (versions confirmed in choros.schema_migrations). Re-run is safe via CREATE TABLE IF NOT EXISTS + DO-guards."
+    }
+  ],
+  "failures": []
+}

@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0658",
+  "status": "pr_open",
+  "branch": "task/T-0658-resolver-deactivation-gate",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/db/grants-dao.ts",
+    "src/db/org.ts",
+    "src/http/report-page-render.ts",
+    "src/http/rights-intents.ts",
+    "src/http/user-mgmt.ts",
+    "ci/checks/db/grants-dao-subject-deactivation.db.test.ts (NEW)",
+    "ci/checks/db/org-admin-deactivation.db.test.ts (NEW)",
+    "ci/checks/db/rights-intents.db.test.ts (EXTENDED — round 3 self-absence)",
+    "ci/checks/db/user-mgmt.db.test.ts (EXTENDED — round 3 last-owner guard)",
+    "T-0658.spec.md (NEW)",
+    "docs/design/ADR-T0658-resolver-deactivation-gate.md (NEW)",
+    "pr-handoff.json"
+  ],
+  "summary": "T-0658 [security/системный, столп 4]: fail-closed `AND deactivated_at IS NULL` on EVERY live subject->authority resolver so a deactivated (fired) employee whose already-issued KC access token is still within its TTL (KC enabled:false blocks only NEW token issuance) loses ALL authorization inside Choros — plus a last-owner guard preventing the fix from bricking a tenant. FIVE authority paths closed across three rounds: (A) grant path getGrantsForSubject step 1 (grants-dao.ts) — every ordinary PDP consumer; (B) owner/admin parallel resolver org.ts (isGenesisOwnerForTenant + loadAdminContext x2 subqueries) which SHORT-CIRCUITS the grant PDP (round 2, adversarial REAL_HOLE); (C) report-page-render.ts non-owner delegated-reader branch (round 2); (D) rights-intents.ts self-absence — the ONLY authority-WRITING handler in that file not routed through loadAdminContext (round 3, adversarial REAL_HOLE): it resolved the actor by a bespoke inline slug->employee lookup + gated role-holding by a direct role_assignment read, neither checking deactivation, so a deactivated actor with a live token could declare self-absence and on the Tier-2 branch MINT a delegated grant into choros.\"grant\" for a live accomplice (resolver A cannot catch this — the exploited subject is the accomplice, not deactivated; the deactivated party is the WRITER). Round 3 also fixes a SELF-LOCKOUT introduced by the round-2 org.ts gate: deactivating the LAST active tenant-owner made them isGenesisOwner=false with no one left to reactivate them (reactivation authz is loadAdminContext) — a bricked tenant. FIX-2 adds a LAST-OWNER GUARD to PATCH /api/users (active:false path): a pre-check counting OTHER active tenant-owners; if the target is the last, 409 LAST_OWNER before any KC/DB mutation. The systematic anti-recurrence mechanism (an identity-layer gate OR a static fitness gate catching any new slug->employee authority resolver missing the predicate) is carried to a SEPARATE task T-0662 (architect) — this task closes the five concrete holes + fixes the triage honestly, NOT a general refactor. Human vs agent unchanged: deactivated_at is structurally never set for kind='agent' (only writer PATCH /api/users is human-only), so every gate is a no-op for legitimate agents.",
+  "test_proof_of_fix": [
+    "ROUND 1 — ci/checks/db/grants-dao-subject-deactivation.db.test.ts (NEW, 3 tests, live PG): deactivated employee with a fully PDP-active grant -> getGrantsForSubject [] (AC-2); active employee -> grant present (AC-3); kind='agent' -> unaffected (AC-4).",
+    "ROUND 2 — ci/checks/db/org-admin-deactivation.db.test.ts (NEW, 6 tests, live PG): deactivated owner -> isGenesisOwnerForTenant=false AND loadAdminContext.isGenesisOwner=false; deactivated admin -> adminGrants=[]; active owner/admin retain authority. Mutation-verified: reverting org.ts -> 3 gate tests red, 3 positive controls green.",
+    "ROUND 3 FIX-1 — ci/checks/db/rights-intents.db.test.ts (EXTENDED, +2 tests, live PG, via the real createServer() harness): a DEDICATED role with an explicitly delegable+inheritable grant is seeded so the Tier-2 mint path WOULD fire. Positive control: an ACTIVE actor holding that role -> self-absence 200 with tier='tier2' and a real ttl_grant_id minted (proves the seed's mint path is live). Deactivated actor -> self-absence 404 and countMinted() unchanged. MUTATION-VERIFIED: reverting rights-intents.ts (git stash of just that file) makes the SAME deactivated request pass into the handler and MINT — response shows tier='tier2' + ttl_grant_id issued, so 404 flips to 200 with a real grant to the accomplice; the positive control stays green (independent of the gate). Fix restored, byte-identical to intended, both green.",
+    "ROUND 3 FIX-2 — ci/checks/db/user-mgmt.db.test.ts (EXTENDED, +2 tests, live PG, registerUserMgmtRoutes + registerTenant + InMemoryKeycloakUserPort): deactivating the SOLE tenant-owner -> 409 LAST_OWNER, KC never touched (setEnabledCallCount 0), owner still active (deactivated_at NULL). With a SECOND owner seeded, deactivating one owner -> 200; then deactivating the remaining LAST owner (called as that owner, still active) -> 409 LAST_OWNER. MUTATION-VERIFIED: reverting user-mgmt.ts guard makes deactivating the sole owner return 200 (tenant bricked) — both FIX-2 tests go red; guard restored, both green.",
+    "PRE-EXISTING, ZERO diff, all re-run green: grants-dao-deactivated.db.test.ts (T-0588, 7), invoke-grant-resolver.db.test.ts (T-0610, 4), src/__tests__/grants-dao.test.ts — no regression to steps 2-3 / other deactivation-aware readers. The EXTENDED files add only new describe-blocks; every pre-existing test in them still passes unmodified."
+  ],
+  "live_proof_plan": "Security-debt fixes on internal authorization resolvers + a self-lockout guard, none user-facing UI. Strongest available proof is live-Postgres db tests exercising the REAL SQL/handlers each consumer depends on, seeded with the exact failure shapes (deactivated owner/admin/actor/employee with otherwise-active authority; sole-owner deactivation) and proving both directions per path: gap closes and happy-path survives. FIX-1 and FIX-2 are additionally mutation-verified (reverting the specific file flips the security-relevant outcome). A founder click-through adds nothing beyond T-0588's inbox LIVE_PROOF for the symptom; this task closes the whole class at its five sources.",
+  "fix": "1) src/db/grants-dao.ts (round 1) — getGrantsForSubject step 1: +`AND deactivated_at IS NULL`. 2) src/db/org.ts (round 2) — +`AND deactivated_at IS NULL` in the inner slug->employee subquery of isGenesisOwnerForTenant, loadAdminContext step 1 (owner-check), loadAdminContext step 2 (assignment-load); + header comments. 3) src/http/report-page-render.ts (round 2) — +`AND deactivated_at IS NULL` in defaultCheckReadGrant non-owner branch. 4) src/http/rights-intents.ts (round 3, ~line 1199) — +`AND deactivated_at IS NULL` in the self-absence actor-resolve subquery; a deactivated actor -> zero rows -> 404 before the Tier-2 mint. 5) src/http/user-mgmt.ts (round 3) — LAST-OWNER GUARD in PATCH /api/users active:false path: before any KC/DB mutation, if the target is an active tenant-owner AND there is no OTHER active (deactivated_at IS NULL) tenant-owner, throw HttpError(409, 'LAST_OWNER', ...). All predicates are single additive AND clauses; the guard is two count queries in one tenant-scoped tx. No migration. Verified rights-intents.ts's other 4 handlers (hire/fire/substitute/urgent-revoke) all gate via loadAdminContext (already closed by fix 2); line 445 there is a write-target kind lookup, not actor-authority.",
+  "anti_case_erosion": "Not applicable — zero business/case literals added. New/extended fixture slugs are stamp-suffixed (t0658-*, e-t0658-*, r-t0658-*, p-t0658-*). The only fixed slug is the structural 'tenant-owner' (lattice-root name, migration 026). ci/checks/anti-case-lock.sh Phase 1+2 both PASS, aggregate unchanged (18<=18 baseline).",
+  "tests_added": [
+    "ci/checks/db/grants-dao-subject-deactivation.db.test.ts: 3 tests (grant path, round 1)",
+    "ci/checks/db/org-admin-deactivation.db.test.ts: 6 tests (owner/admin path, round 2, mutation-verified)",
+    "ci/checks/db/rights-intents.db.test.ts: +2 tests (self-absence gate, round 3, mutation-verified — active mints / deactivated 404+no-mint)",
+    "ci/checks/db/user-mgmt.db.test.ts: +2 tests (last-owner guard, round 3, mutation-verified — sole-owner 409, second-owner-then-last-protected)"
+  ],
+  "gates": {
+    "npm_ci": "green — 187 packages (installed earlier this session)",
+    "tsc_noemit": "green — 0 errors (all rounds)",
+    "eslint_src": "green — 0 errors, 44 pre-existing no-console warnings (none in files touched by this task)",
+    "npx_vitest_run_full": "green — 283 test files passed, 2 skipped (285); 5488 tests passed, 10 skipped (5498), 0 failed",
+    "npm_run_fitness_db": "green SOLO — 132 files passed, 1267 tests passed, 0 failed (DATABASE_URL=...:55432, --no-file-parallelism). Includes all new/extended files: grants-dao-subject-deactivation 3/3, org-admin-deactivation 6/6, rights-intents.db.test 10/10 (8 pre-existing + 2 new), user-mgmt.db.test 25/25 (23 pre-existing + 2 new); and pre-existing grants-dao-deactivated 7/7 + invoke-grant-resolver 4/4 unchanged. No flake this run.",
+    "grant_resolver_isolation_sh": "green — src/core/grant-resolver.ts not touched",
+    "dual_control_isolation_sh": "green — FF-DC1..DC8, FF-DC11 all PASS; predicates orthogonal to criticalGrantPredicate/confirmed2_by (untouched)",
+    "single_resolver_sh": "green — src/core/object-handle.ts not touched",
+    "report_page_render_isolation_sh": "green — re-verified (T-0181 checks pass)",
+    "http_route_auth_coverage_sh": "green — re-verified after touching http/ files (FF-0328-1/2/3 clean)",
+    "anti_case_lock_sh": "PASS — Phase 1 delegates clean, Phase 2 aggregate 18<=18, 0 new literals"
+  },
+  "handoff_path": "T-0658.spec.md",
+  "deviations_from_adr": [],
+  "open_questions": [],
+  "repainted_tests": [],
+  "repainted_tests_explanation": "None. All changes to existing test files are ADDITIVE new describe-blocks (rights-intents.db.test.ts, user-mgmt.db.test.ts) — every pre-existing test in them passes unmodified (verified: file test counts are old + the new ones only, all green). grep -rn deactivated ci/checks src/__tests__ found no existing test asserting any authority resolver resolves a deactivated subject to non-empty authority (no bug-as-feature). One assertion in the NEW self-absence positive-control test was corrected during authoring (the self-absence route returns 200 with tier='tier2', not 201) — this is a fresh test being written to match real behavior, not a repaint of an existing test.",
+  "friction_events": [
+    "ROUND 3: the self-absence FIX-1 test first used the seeded ROLE_BUDGET and hit 422 NO_DELEGABLE_GRANT under mutation — that role's grants aren't inheritable-delegable for the self-absence mint path, so the 'no grant minted' assertion wasn't load-bearing (the mint couldn't fire regardless). Rewrote the test to seed a DEDICATED role with an explicitly delegable+inheritable grant + an active-actor positive control that proves the mint path is live (200 + ttl_grant_id). Now the mutation genuinely flips 404->200-with-real-mint. Also corrected the expected success status to 200 (the self-absence route returns 200, not 201, on a successful mint).",
+    "Mutation checks used `git stash push -- <file>` to revert exactly one source file, run the live db test, confirm red, then `git stash pop` + `diff` against a saved copy to prove byte-identical restoration. A system reminder fired on each stash (file changed) — expected and harmless.",
+    "vitest default config excludes ci/checks/db/** — new db tests only run under fitness:db (--dir ci/checks/db); used that path + targeted -t filters for the mutation checks."
+  ],
+  "findings_out_of_scope": [
+    "SYSTEMATIZATION -> T-0662 (per coordinator): the fact that five separate authority paths each needed the same predicate is a symptom of no unified identity/deactivation layer. Designing an anti-recurrence mechanism (identity-layer gate OR a static fitness gate that fails any new slug->employee authority resolver missing `deactivated_at IS NULL`) is carried to T-0662 (architect). T-0658 is the point fix, not the general mechanism.",
+    "pdp-explain.ts (src/http/pdp-explain.ts:119) — DIAGNOSTIC explain endpoint loads the subject's grants via its own local grant-source WITHOUT the gate. NOT a security hole: its own authz is loadAdminContext (gated round 2) + self-query. A self-query explain by a deactivated actor could DISPLAY grants the real PDP no longer honors — an explain-FIDELITY divergence, not authorization. Aligning explain fidelity is a follow-up (ADR §9); not fixed here because it authorizes nothing.",
+    "inbox.ts local deactivation gates (T-0588 BLOCK-3/RE-VERIFY) now redundant defence-in-depth. Left in place per additive-only instruction.",
+    "KC token TTL window at the AUTHENTICATION layer is unchanged — a deactivated user can still present a valid token and authenticate; every AUTHORIZATION decision now denies them. KC session/token revocation on deactivation is a separate larger task (spec §7).",
+    "src/db/sod-dao.ts:395 / src/http/rights-sod.ts:273 deliberately NOT gated — SoD is a RESTRICTION; gating would drop a deactivated subject's assignments and SUPPRESS a SoD violation (fail-OPEN for the restriction). Their grant authority is already [] via resolver A. Documented in ADR §3.4."
+  ]
+}

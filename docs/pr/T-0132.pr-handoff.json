@@ -1,0 +1,125 @@
+{
+  "task_id": "T-0132",
+  "status": "pr_open",
+  "branch": "task/T-0132-pilot-rollout-design",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/pilot-adr-foundations.sh",
+    "ci/checks/pilot-adr-structure.sh",
+    "docs/design/T-0132-pilot-rollout.adr.md",
+    "docs/design/T-0132.adr.contract.json",
+    "docs/design/T-0132.review.contract.json",
+    "docs/design/T-0132.test-report.contract.json",
+    "docs/reviews/T-0132.review.md",
+    "docs/specs/T-0132-pilot-rollout.spec.md",
+    "docs/specs/T-0132.spec.contract.json",
+    "docs/test-reports/T-0132.test-report.md",
+    "docs/pr/T-0132.pr-handoff.json",
+    "package.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review iter-1/iter-2 + test-report + pr-handoff) + ci/checks/pilot-adr-*.sh + package.json. Нет src/ изменений.",
+    "FF-файлы (pilot-adr-foundations.sh / pilot-adr-structure.sh) отсутствовали на ветке до TEST-фазы — созданы кодером по ADR §12 (образец ci/checks/sim-adr-*.sh) и зафиксированы коммитом 31ba12c.",
+    "R-1 (blocking iter-1): meet(node,interval)⇒⊥ на живом коде, не set. Закрыт коммитом 1fcd76c: композиция переписана на normalize({kind:\"set\",...}) по grant-lattice.ts:124.",
+    "R-2 (blocking iter-1): amount-проводка read-path помечена [ЖИВОЙ] ошибочно. Закрыта 1fcd76c: пере-разметка → [НОВАЯ B-7]/[НОВАЯ B-8] с дизайном §5.2; resolveFor identity-only честно задокументировано.",
+    "R-3 (nit iter-1): overclaim «прошлый класс blocking снят». Закрыт 1fcd76c: «ГЛАВНОЕ НАБЛЮДЕНИЕ» → «снят для node-оси и срока, но НЕ для amount-оси на read-path».",
+    "R-4 (nit iter-1): §7 разграничитель дезактивируемых грантов vs in-flight. Закрыт 1fcd76c: врезка [iter-2,R-4] добавлена §7.",
+    "Remote PR не открывается: commit на локальной ветке (local-review-handoff pattern; GitHub PR требует scoped agent PAT GT-4, не провижн в этом окружении)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "test_evidence": {
+    "diff_gate": "PASS — docs/** + ci/checks/pilot-adr-*.sh + package.json only (9 files vs dev)",
+    "npm_ci_result": "PASS — tsc 0 errors, eslint 0 errors, npm run fitness all green (FF-1/FF-1b/FF-2..FF-10 + both --self-test PASS), vitest 1389/1395 passed (6 skipped flowable/kc offline)",
+    "review_verdict": "approved iter-2 (21bc00d); 16/16 AC covered; R-1/R-2 blocking + R-3/R-4 nit закрыты 1fcd76c",
+    "test_report": "docs/design/T-0132.test-report.contract.json (verdict=pass, schema VALID)"
+  },
+  "artifacts": {
+    "spec": "docs/specs/T-0132-pilot-rollout.spec.md",
+    "spec_contract": "docs/specs/T-0132.spec.contract.json",
+    "adr": "docs/design/T-0132-pilot-rollout.adr.md",
+    "adr_contract": "docs/design/T-0132.adr.contract.json",
+    "review_iter2_contract": "docs/design/T-0132.review.contract.json (verdict=approved iter-2; R-1/R-2 blocking + R-3/R-4 nit closed 1fcd76c; CN-1 coord note B-7×T-0136)",
+    "review_md": "docs/reviews/T-0132.review.md",
+    "test_report_md": "docs/test-reports/T-0132.test-report.md",
+    "test_report_contract": "docs/design/T-0132.test-report.contract.json (verdict=pass, schema VALID)",
+    "ff_foundations": "ci/checks/pilot-adr-foundations.sh (FF-1/FF-1b)",
+    "ff_structure": "ci/checks/pilot-adr-structure.sh (FF-2..FF-10)"
+  },
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "T-impl-T-0132-B1",
+      "title": "impl: B-1 — Объектная модель PilotDeclaration/PilotGrantBinding + компилятор понятие→set([node,interval])+TTL",
+      "scope": "ADR §3.1/§3.2/§3.3 B-1: TS-типы PilotDeclaration (tenantId/pilotId/implementationId/bundleVersion/nodeAxis/amountAxis/validUntil/state/createdBy) + PilotGrantBinding (pilotId/grantId/derivedScope). Компилятор derivedScope: amountAxis!=null → normalize({kind:'set',members:[node,interval]}) (grant-lattice.ts:124, НЕ meet); amountAxis==null → {kind:'node',hierarchy:'org',...}. TTL через Grant.validUntil. Subset-гейт через живой validateNarrowing (grant-lattice.ts:408) относительно владельческого scope. Миграция БД.",
+      "gates": "pilot-adr-foundations.sh/pilot-adr-structure.sh green; normalize({kind:'set',[node,interval]}).kind==='set' unit-проба (R-1 cement); meet({kind:'node'},{kind:'interval'})===BOTTOM unit-проба; validateNarrowing проходит для пилотного грантов ⊑ владельческого.",
+      "depends_on": ["grant-lattice.ts:124 normalize (ЖИВОЙ)", "grant-lattice.ts:408 validateNarrowing (ЖИВОЙ)", "T-0013 RLS (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0132-B2",
+      "title": "impl: B-2 — State machine пилота + авто-истечение через isEffective",
+      "scope": "ADR §4 B-2: PilotState enum (planned/active/expanded/rolled_back/expired) + переходы. Авто-истечение: expired = производное от isEffective(grant, now)===false (grant-lattice.ts:497), без таймер-демона. Операции старт/расширение/откат + аудит-события pilot.started/pilot.expanded/pilot.rolled_back/pilot.expired в appendAuditEvent.",
+      "gates": "FF-6 зелёный (5 состояний + isEffective + без ручного действия); авто-истечение = следствие resolveFor :511, не хранимый статус; pilot.* аудит-события в единый sink.",
+      "depends_on": ["T-impl-T-0132-B1", "grant-lattice.ts:497 isEffective (ЖИВОЙ)", "appendAuditEvent (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0132-B3",
+      "title": "impl: B-3 — MCP-операции пилота + human-gate расширения + аудит-вокабуляр pilot.*",
+      "scope": "ADR §11 B-3: MCP-операции pilot_declare / pilot_start / pilot_expand / pilot_rollback. Human-gate расширения: новый промоут + validateNarrowing против владельческого (не self-apply). Аудит-вокабуляр pilot.* в тот же sink T-0016.",
+      "gates": "pilot_expand → новый промоут-гейт; validateNarrowing проходит для ослабленного scope ⊑ владельческого; audit_writer_isolation.sh (нет CREATE TABLE); pilot.* события пишутся в appendAuditEvent.",
+      "depends_on": ["T-impl-T-0132-B1", "T-impl-T-0132-B2", "T-0129 промоут (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0132-B4",
+      "title": "impl: B-4 — UX карточки внедрения (пилот как действие + панель мониторинга)",
+      "scope": "ADR §9 B-4: UX-действие/вкладка «пилот» в карточке внедрения (two-floor: декларация на уровне понятий, не редактор решётки). Панель мониторинга = срез единого аудита по pilotId (appendAuditEvent/GrantAuditEvent).",
+      "gates": "NF-5/NF-6: клиент не видит set/node/interval напрямую; мониторинг = фильтр по pilotId, не второй лог; FF-9 зелёный.",
+      "depends_on": ["T-impl-T-0132-B1", "T-impl-T-0132-B2", "T-impl-T-0132-B3"]
+    },
+    {
+      "suggested_id": "T-impl-T-0132-B7",
+      "title": "impl: B-7 (MVP-несущий) — Проводка amount-оси в resolveFor: axisCtx? опциональный параметр",
+      "scope": "ADR §5.2 B-7: расширить сигнатуру resolveFor новым опциональным хвостовым параметром axisCtx?: {[axis:string]:number} (напр. {amount:95000}). Источник значения — поле кейса/записи на PDP-крае (кладётся в axisCtx рядом с handle, не внутрь него, инвариант опаковости handle.ref сохранён). В covering-фильтре resolveFor: при наличии interval-членов scope проверять axisCtx[member.axis] ∈ [member.lo, member.hi]. Обратная совместимость: без axisCtx interval-member без значения оси → грант не покрывает (fail-closed).",
+      "gates": "Существующие resolver-FF (T-0021) не краснеют (новый параметр опциональный, поведение без него не меняется); unit-тест axisCtx задан → interval-предикат срабатывает; unit-тест без axisCtx → fail-closed на interval-scope.",
+      "depends_on": ["T-impl-T-0132-B1", "grant-resolver.ts:489 resolveFor (ЖИВОЙ)"],
+      "cn_1": "ОБЯЗАТЕЛЬНО: свериться с актуальной сигнатурой resolveFor на dev после мержа T-0136 (traceOut? может уже занять 7-ю позицию). Поставить axisCtx? последним. Рассмотреть resolveFor(..., extra?: {trace?; axisCtx?}) если оба параметра сольются."
+    },
+    {
+      "suggested_id": "T-impl-T-0132-B8",
+      "title": "impl: B-8 (MVP-несущий) — Двух-осевой containment org-узел × resource-scope в covering-условии B-7",
+      "scope": "ADR §5.2 B-8: two-axis containment сшивается в covering-условии B-7 как (resource-handle ⊑ resource-scope гранта по живому isNarrowerOrEqual) И (для каждого interval-члена axisCtx[axis] ∈ [lo,hi]) И (субъект ⊑ org-поддерево пилота, через subject/org-membership). Org-узел пилота проецируется в отдельный субъект-предикат, а НЕ кладётся в тот же resource-set (cross-hierarchy set отвергнут: isNarrowerOrEqual:249/269/285 не выражает).",
+      "gates": "Интеграционный тест: кейс субъекта вне org-поддерева → no_grant; кейс с суммой вне интервала → no_grant; кейс в срезе → грант применён; НЕ меняет семантику T-0018 isNarrowerOrEqual/lattice (NF-1).",
+      "depends_on": ["T-impl-T-0132-B7", "grant-lattice.ts:249/269/285 isNarrowerOrEqual (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0132-B5",
+      "title": "impl: B-5 (Stage-2) — Принудительная остановка in-flight боевых инстансов при откате",
+      "scope": "ADR §7 B-5 SEAM-3: kill vs drain для in-flight. Дефолт = drain (in-flight доигрывает по версии бандла, на которой стартовал). Kill = отдельный рисковый путь (реальные боевые инстансы на полпути).",
+      "gates": "Stage-2 — не блокирует MVP.",
+      "depends_on": ["T-impl-T-0132-B2", "T-impl-T-0132-B3"]
+    },
+    {
+      "suggested_id": "T-impl-T-0132-B6",
+      "title": "impl: B-6 (Stage-2) — Жёсткие альтернативы маршрутизации вне-срезовых кейсов",
+      "scope": "ADR §5 B-6 SEAM-2: отклонение или очередь вне-срезовых кейсов вместо консервативного дефолта (маршрутизация по полному процессу). Дефолт = полный процесс (design-owned); альтернативы = Stage-2.",
+      "gates": "Stage-2 — не блокирует MVP.",
+      "depends_on": ["T-impl-T-0132-B1"]
+    }
+  ],
+  "coordination_notes": [
+    {
+      "id": "CN-1",
+      "type": "signature-collision",
+      "description": "B-7 проектирует axisCtx? как 7-й опциональный параметр resolveFor. T-0136 (task/T-0136-pdp-explain, параллельный worktree) уже добавляет 7-м параметром traceOut?: TraceCollector (сверено в его ветке). Позиционная коллизия при мердже в dev. Дизайн не пострадал (оба аддитивно-опциональны, fail-closed). Реализатор B-7 обязан: (1) свериться с сигнатурой resolveFor на dev после мержа T-0136; (2) поставить axisCtx? последним; (3) рассмотреть consolidation в options-объект extra?: {trace?; axisCtx?}.",
+      "blocking": false,
+      "phase": "impl B-7"
+    }
+  ],
+  "rationale": "T-0132 — design-задача (SPEC+ADR+review iter-1/iter-2+FF-чеки). ADR зафиксировал: пилот = продуктовое понятие «ограниченный боевой запуск published-процесса» поверх ЖИВОЙ решётки скоупов T-0018. Три оси среза: org-узел (kind:node, ЖИВОЙ), интервал суммы (kind:interval, ЖИВОЙ примитив), TTL (validUntil+isEffective, ЖИВОЙ). Конъюнкция — через normalize({kind:'set',[node,interval]}) (grant-lattice.ts:124, НЕ meet, R-1). Проводка amount-оси в resolve (B-7) и двух-осевой containment (B-8) — НОВАЯ работа (R-2). Несущие инварианты: GRAN-1 (пилот=published, симуляция=draft, NF-2); ноль второго scope-механизма (NF-1); единый аудит (AC-7/AC-11); drain-by-default откат (AC-9). Review approved iter-2 (16/16 AC). FF-чеки поставлены кодером (pilot-adr-foundations/structure) до TEST. CI PASS (tsc+eslint+fitness+vitest). CN-1: B-7×T-0136 signature — мердж-координация при реализации B-7."
+}

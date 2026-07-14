@@ -1,0 +1,69 @@
+{
+  "task_id": "T-0087",
+  "verdict": "changes_requested",
+  "reviewed_sha": "9c752c9",
+  "impl_sha": "d29eaf6",
+  "ci_seen": {
+    "green": false,
+    "note": "npm run ci exits 1. Single failing check: role-criticality-isolation.sh (FF-RC5/FF-RC6). All other checks green. tsc, eslint, vitest (1002 tests / 6 skipped) all pass. npm run fitness:db not runnable (no DATABASE_URL in this env); T-0087 fitness:db failures are all DATABASE_URL errors — pre-existing db failures (ADV-4, grant-editor 30-vs-29 count, dual-control 031) confirmed pre-T-0087 by git diff."
+  },
+  "role_criticality_fail_analysis": {
+    "class": "a+c",
+    "mechanism": "role-criticality-isolation.sh (T-0040) greps all files changed vs merge-base with dev. FROZEN_PATHS_RE includes 'migrations/.*\\.sql'. T-0087's migrations/044_tier.sql lands in the diff and triggers FF-RC5/FF-RC6. The check has an established MIGRATION_EXCLUDE_RE exclusion list for sibling migrations; it currently lists 030/031/043 (T-0030/T-0044/T-0024) with attribution comments. The check's own comment explains: 'The exclusion list must only name migrations owned by other known tasks; any new T-0040 migration would still be caught.' The precedent is strict: each migration PR that trips this check is REQUIRED to add its entry to MIGRATION_EXCLUDE_RE with an ownership comment (git log: 7786cc9 for 043, edaab9e for 031).",
+    "what_is_wrong_with_coder_claim": "The coder wrote 'green post-merge to dev'. This framing is false: the check does NOT auto-green on merge. The correct fix is adding '044_tier' to MIGRATION_EXCLUDE_RE with an attribution comment, exactly as T-0030/T-0044/T-0024 did. 'Will be green post-merge' is a D-056 violation — the branch must be equivalent to dev, i.e., the fix must be applied on the branch before merge.",
+    "required_fix": "In ci/checks/role-criticality-isolation.sh, extend MIGRATION_EXCLUDE_RE to include 044_tier: MIGRATION_EXCLUDE_RE='^migrations/(030_grant_proposed_confirmed|031_grant_confirmed2_by|043_invoke_proposal|044_tier)\\.sql$' and add a comment block attributing 044_tier.sql to T-0087 (E12.6 tier column on config+data tables). This is a one-line change mirroring the 030/031/043 precedent."
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "ci/checks/role-criticality-isolation.sh:177",
+      "issue": "MIGRATION_EXCLUDE_RE does not include 044_tier.sql, causing role-criticality-isolation.sh to fail with FF-RC5/FF-RC6. This is a required update per established precedent: every sibling migration (030, 031, 043) was added to this list by its owning PR. The branch must be green before merge (D-056); 'post-merge green' is not acceptable.",
+      "suggestion": "Add 044_tier to MIGRATION_EXCLUDE_RE: '^migrations/(030_grant_proposed_confirmed|031_grant_confirmed2_by|043_invoke_proposal|044_tier)\\.sql$' and add an attribution comment block explaining that 044_tier.sql is owned by T-0087 E12.6. One-line change. See commits 7786cc9 (043) and edaab9e (031) as the exact template."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "src/http/artifacts.ts:260",
+      "issue": "decidePromote is called with hardcoded currentTier: 'draft' instead of the actual artifact tier. This makes the NOT_IN_DRAFT code path in decidePromote permanently dead from the endpoint. The ADR §4.3 specifies decidePromote validates 'both the source state and the human-gate signal'; the endpoint bypasses the source-state check entirely. The 409 NOT_IN_DRAFT response still fires (via promoteTier line 195), so correctness is preserved — but the usage violates the contract of decidePromote and makes the code misleading. Any caller reading the handler assumes decidePromote checked the tier; it did not.",
+      "suggestion": "Either: (a) call decidePromote after the FOR UPDATE SELECT (passing the real currentTier from rowRes.rows[0].tier), replacing both the decidePromote call and the manual `if (currentTier !== 'draft')` check inside promoteTier with a single decidePromote call; or (b) rename the pre-DB call to checkAgentGate (extract only the agent-type check) to honestly represent what is being tested. Option (a) is the correct ADR §4.3 alignment."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/tier-isolation.sh:60-70 (FF-1 loop)",
+      "issue": "FF-1 iterates tier_bearing_tables.txt line by line but the grep is applied over ALL_SQL_STRIPPED without anchoring to the specific table name. The check passes if ANY migration contains `ADD COLUMN IF NOT EXISTS tier text NOT NULL DEFAULT 'draft'`, not specifically the one for the table being checked. This means if, say, only application gets the column, the check would still pass for registry_def, grant, and record. Weak for a registry-based anti-drift guard.",
+      "suggestion": "Anchor the per-table grep: grep for '${table}' AND the tier column pattern in the same expression, e.g. grep -iqE \"ALTER TABLE choros\\.\\\"?${table}\\\"?.*ADD COLUMN.*tier|ALTER TABLE.*${table}.*tier\". This matches the `known_tenant_tables.txt` pattern from T-0115 more faithfully. Low urgency (migration is correct; this is a check quality nit), but worth hardening before E12 adds more tables to the registry."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/http/artifacts.ts:43-44",
+      "issue": "DEV_TENANT_ID from process.env is used directly in the withTenantTx call (line 317) without a pre-call UUID validation. assertUuidShape is called inside withTenantTx (line 81), so injection is blocked, but if DEV_TENANT_ID is not a valid UUID the error message is a generic '400 VALIDATION tenantId must be a valid UUID' with no hint that it came from an env var. Low-risk because the default is hardcoded and env vars are operator-controlled.",
+      "suggestion": "Add a startup-time assertion: if DEV_TENANT_ID does not match UUID_RE, throw or log a clear error at module load. Not blocking — the UUID check inside withTenantTx is the safety net."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "note": "migrations/044_tier.sql adds tier NOT NULL DEFAULT 'draft' CHECK(tier IN ('draft','published')) on application, registry_def, grant, record. tier-isolation.sh FF-1 verifies. Live probe in tier_promote_atomic.test.ts (DB not available here)."},
+    {"ac": "AC-2", "covered": true, "note": "Dual mechanism: assertWritable in env-tier.ts (app-layer) + tier_published_locked trigger in 044_tier.sql (DB layer). tier-isolation.sh FF-2a/2b/2c green. Live probe in tier_promote_atomic.test.ts FF-2."},
+    {"ac": "AC-3", "covered": true, "note": "promoteTier (artifacts.ts:167) issues no INSERT/UPDATE on choros.record. FF-3 lint green. Live probe in tier_promote_atomic.test.ts FF-3."},
+    {"ac": "AC-4", "covered": true, "note": "withTenantTx wraps the tier flip + audit append in one transaction (BEGIN/COMMIT/ROLLBACK). Live atomicity probe in tier_promote_atomic.test.ts FF-4/FF-5 (DB not available)."},
+    {"ac": "AC-5", "covered": true, "note": "artifacts.ts:208-227 appends artifact.promoted audit row with actor, subject, tier_from, tier_to, confirmed_by atomically in the same transaction. FF-11e green."},
+    {"ac": "AC-6", "covered": true, "note": "readTierScope returns 'published' by default. env-tier.test.ts 12 tests all green. Live probe in tier_read_scope.test.ts (DB not available)."},
+    {"ac": "AC-7", "covered": true, "note": "decidePromote({actorType:'agent'}) returns FORBIDDEN_AGENT_SELF_PROMOTE; artifacts.ts:264 throws HttpError(403). env-tier.test.ts covers the pure function. actorType sourced from getAuthContext/extractActorWithType (never body). FF-7a/7b/7c green."},
+    {"ac": "AC-8", "covered": true, "note": "No createDatabase/provisionContour call in artifacts.ts or 044_tier.sql. FF-8 green."},
+    {"ac": "AC-9", "covered": true, "note": "readTierScope does not read NODE_ENV/CHOROS_ENV (verified by FF-9 lint and env-tier.test.ts test 'never reads process.env'). Live probe in tier_promote_atomic.test.ts FF-9."},
+    {"ac": "AC-10", "covered": true, "note": "tier='published' is set only in artifacts.ts:204 inside the transactional UPDATE. FF-10 lint scans src/ and finds no other assignment. env-tier.ts itself never assigns tier='published' in code."}
+  ],
+  "role_gap_evidence": [],
+  "notes": {
+    "pre_existing_fitness_db_failures": "ADV-4 (grant-editor.adversarial — 404 on /api/grants), grant-editor.test.ts FF-5/AC-19 (known_tenant_tables count hardcoded to 29, actual is 30 with invoke_proposal from T-0024), dual-control FF-031 column check — all owned by pre-T-0087 tasks, unchanged by this diff.",
+    "authority_stub": "TODO(T-0021) authority check is documented, clearly marked, and FF-11d emits WARN (not FAIL). ADR §4.5 explicitly identifies this as the T-0021 integration seam. Acceptable day-1 honest degrade.",
+    "tier_isolation_sh_all_green": "npm run fitness excluding role-criticality-isolation.sh: all other checks green including tier-isolation.sh (all FF-1..FF-11 pass).",
+    "vitest_1002_pass": "1002 tests pass, 6 skipped (workerAuth.kc, flowable-integration — infra-gated). env-tier.test.ts 12/12 pass."
+  }
+}

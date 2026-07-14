@@ -1,0 +1,78 @@
+{
+  "task_id": "T-0576",
+  "verdict": "pass",
+  "tested_commit": "36d9c06 (post review-fix R-1/R-2/R-3), review approved at 5727c52",
+  "deterministic": {
+    "total": 4903,
+    "passed": 4903,
+    "failed": 0,
+    "breakdown": "vitest 4877 (254 files passed | 2 skipped, 4887 total incl. 10 skipped, exit 0) + 12 adversarial probes (все повели себя ровно как ожидалось: 11 expected-red наблюдённо-red, 1 expected-green idempotency-baseline) + 14 детерминированных ci-script прогонов (anti-case-lock prod ×2 + self-test ×2; 3 делегата prod+self-test = 6; http-route-auth-coverage prod+self-test = 2; frozen-checks-immutable; package-json-no-dup-keys). Полная fitness-цепь (~280 чеков) как единый агрегат: exit 0 — считается одним прогоном сверх total."
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ADVERSARIAL PLANT MATRIX 8/8 (полная, не представительная): для КАЖДОГО класса денилиста временный untracked файл src/anticase-plant-probe.ts с `export const PLANT_PROBE = \"<lit>\";`, прогон боевого anti-case-lock.sh, откат после каждого (git status чист после каждого планта). Результат — ВСЕ 8 красные rc=1 с Phase-2 строкой '<lit> count INCREASED' + 'aggregate count INCREASED': role-approver, soglasovanie, tel-approval, telLinear, e-larina, e-orlov, approvalRequired, gw-approval-threshold. Эшелонированность: для 5 литералов из списков точечных гейтов дополнительно сработали делегаты Phase 1 (read-pdp: role-approver/soglasovanie/tel-/e-larina/e-orlov; detel-baseline: tel-approval); telLinear/approvalRequired/gw-approval-threshold пойманы ТОЛЬКО Phase 2 — доказывает собственную добавленную ценность зонтика (эти классы не ловит никто кроме него). ПЛЮС both-plane (R-3): планты telLinear и e-orlov в web/src/anticase-plant-probe.jsx → оба красные rc=1 через Phase 2 (web-плоскость сканируется). ПЛЮС PoC T-0570-R-1: `export const SNEAKY_ROLE_SLUG = \"role-approver\"; // FORBIDDEN trust me` → красный rc=1, пойман И Phase 2 (trailing-comment строка считается кодом), И делегатом read-pdp (его R-1 фикс жив). --self-test: 5/5 PASS (3 detection-семьи + 2 zero-фикстуры R-1).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "Боевой прогон на чистом дереве: exit 0, каждый литерал == baseline (2/2/1/8/2/2/1/1), aggregate 19 == 19. Baseline независимо пересчитан ревьюером-тестером собственным грепом по той же методологии (совпадает). Both-plane widening (R-3) не сдвинул baseline — подтверждено прогоном.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "Идемпотентность: два последовательных боевых прогона — diff вывода пуст (байт-в-байт), rc=0/0; два последовательных --self-test — diff пуст, rc=0/0.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "read-pdp-anti-case.sh, rights-ui-anti-case.sh, detel-literal-baseline.sh: свежие боевые прогоны + --self-test все 6 exit 0. Файлы делегатов не тронуты ни одним коммитом задачи (git diff dev...HEAD не содержит их; проверено в обоих раундах ревью). См. notes/ECO-1: у rights-ui-anti-case.sh обнаружен СОБСТВЕННЫЙ латентный баг (вне диффа T-0576).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "http-route-auth-coverage.sh боевой: exit 0, FF-0328-1/2/3 PASS; FF-0328-3 печатает ровно одну строку 'PASS (FF-0328-3): src/http/secret-handle.ts byte-unchanged vs merge-base' — process-start.ts не участвует в byte-diff арме. FROZEN_FILES содержит ровно один элемент (прямое чтение кода).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "http-route-auth-coverage.sh --self-test: exit 0, 'SELF-TEST PASS: predicates detect planted violations'.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "Запись task:T-0576/file:ci/checks/http-route-auth-coverage.sh присутствует в frozen-sanctions.jsonl, валидный compact JSON (python json.loads в ревью), соответствует token-формату FF-FCI12 матчера ({\"task\":\"...\"}+{\"file\":\"...\"} на одной строке).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "frozen-checks-immutable.sh: exit 0, печатает SANCTION [FF-FCI12] + AUDIT [FF-FCI12] (class=founder) для правки чужого чека; собственные файлы задачи (anti-case-lock.sh — по HEAD-header T-0576, baseline.json — data, не *.sh) без нареканий. Продублировано внутри полного fitness-прогона (строки 764-766 лога).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "package.json: хвост fitness = '&& bash ci/checks/anti-case-lock.sh && bash ci/checks/anti-case-lock.sh --self-test' строго ПОСЛЕ существующего detel-literal-baseline.sh --self-test звена, ни одно существующее звено не переставлено/не удалено (прямое чтение диффа dev...HEAD). package-json-no-dup-keys.sh: exit 0.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "ПОЛНЫЙ npm run fitness на итоговом дереве (36d9c06): exit 0 сквозняком до конца (~2928 строк лога, ~280 чеков), включая оба новых хвостовых звена — anti-case-lock.sh боевой (Phase 1 делегаты чистые + Phase 2 все 8 == baseline, aggregate 19==19) и --self-test (5/5). Все FAIL-строки в логе — негативные фикстуры self-test'ов чужих чеков (временные пути /tmp, /var/folders/T; тот же известный класс, что задокументирован в T-0575 test-report), реальных красных ноль.",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {"check": "npx vitest run (полный набор)", "result": "pass", "note": "254 files passed | 2 skipped; 4877 tests passed | 10 skipped; exit 0 — совпадает с handoff байт-в-байт (задача не трогает src/**, набор идентичен базе)"},
+    {"check": "npx eslint src", "result": "pass", "note": "0 errors, 36 warnings (pre-existing no-console/style) — совпадает с handoff"},
+    {"check": "npm run build (tsc + seed tsconfig)", "result": "pass", "note": "внутри полной fitness-цепи (звено ~середины), exit 0"},
+    {"check": "мутация baseline (защита от подкраски)", "result": "pass", "note": "снизил gw-approval-threshold 1->0 в anti-case-baseline.json (факт=1 > 0) -> гейт красный rc=1 с явной строкой \"'gw-approval-threshold' count INCREASED (1 > baseline 0)\"; файл восстановлен, git status чист"},
+    {"check": "zero-сценарий (eroded-to-zero, R-1 regression)", "result": "pass", "note": "временно переименовал единственное gw-approval-threshold вхождение в src/core/dmn-gateway.ts -> боевой прогон PASS rc=0 с явной строкой 'gw-approval-threshold: 0 (baseline 1) OK (eroded)' + aggregate 18/19; откачено, чисто"},
+    {"check": "rc>=2 поведение count_literal (вопрос коордиатора)", "result": "documented", "note": "НЕ фатален: `|| true` глушит настоящие ошибки grep (несуществующий root -> молчаливый 0). Зафиксировано как review R-5 (minor, non-blocking): src-плоскость бэкстопнута смертью делегата Phase 1 (проверено живьём: PROJECT_ROOT=/nonexistent detel-literal-baseline.sh умирает rc=1), идиома совпадает с прецедентом read-pdp-anti-case.sh. Follow-up рекомендация: -d asserts на SRC_ROOT/WEB_ROOT в production-ветке"}
+  ],
+  "notes": {
+    "plant_matrix": "8/8 src RED (role-approver, soglasovanie, tel-approval, telLinear, e-larina, e-orlov, approvalRequired, gw-approval-threshold — каждый: rc=1, per-литерал 'count INCREASED' + aggregate FAIL) + 2/2 web RED (telLinear, e-orlov в web/src/*.jsx — both-plane доказан) + PoC T-0570-R-1 RED (литерал + trailing '// FORBIDDEN trust me' — пойман Phase 2 И делегатом read-pdp) + baseline-мутация RED (подкраска вниз ловится). Все планты откачены, дерево чистое после каждого (git status --porcelain пуст).",
+    "ECO-1_foreign_check_bug": "ЭКОСИСТЕМНАЯ находка вне диффа T-0576 (файл чужой, T-0572, задачей не тронут): ci/checks/rights-ui-anti-case.sh:25 PROJECT_ROOT резолвится в <repo>/ci (одним уровнем выше надо: у read-pdp-anti-case.sh корректно ../..) -> производственный scan_diff вызывает git -C <repo>/ci с pathspec web/src/, который резолвится в несуществующий ci/web/src/ -> скан ВСЕГДА пуст -> чек вечно-зелёный. Доказано живьём: untracked web/src/plant.jsx с \"e-orlov\" (литерал из его собственного FORBIDDEN_LITERALS) проходит прямой боевой прогон exit 0. --self-test бага не ловит (работает на temp-репо с явным repo_root). НЕ дефект T-0576 (AC-4 требует лишь нетронутости файлов и зелёных self-test'ов — выполнено); частично КОМПЕНСИРОВАН зонтиком: Phase 2 both-plane скан (R-3) ловит web-планты 8 литералов денилиста в двойных кавычках — доказано плант-матрицей. Остаточная дыра: diff-scoped ловля литералов НЕ из денилиста зонтика (tel-, Согласование, e-configurator) на web-плоскости сейчас не работает вовсе. Заведён follow-up чип 'Починить PROJECT_ROOT в rights-ui-anti-case.sh' (однострочный фикс, потребует санкции — чужой frozen чек).",
+    "known_blindness": "Review R-4 (major, non-blocking, open): матчер двойно-кавычный, web-конвенция одинарные кавычки -> 5 pre-existing одинарно-кавычных кодовых вхождений невидимы гейту ('role-approver' screen-inbox.jsx:835; 'approvalRequired' ×4 gateway-condition-panel.jsx:55/87/90 + screen-dmn-editor.jsx:47). Планты TEST-фазы выполнены в двойных кавычках (методология гейта, честно задокументирована в его header). Follow-up: quote-agnostic матчер + пересчёт baseline (~19->24) в следующей деТЭЛ-волне.",
+    "environment": "Все прогоны локальные, детерминированные (grep/git-based чеки + vitest unit-набор); db-lane/live-стек не требовался мандатом (задача не трогает src/** и миграции — дифф ci/checks + docs + package.json only)."
+  },
+  "failures": []
+}

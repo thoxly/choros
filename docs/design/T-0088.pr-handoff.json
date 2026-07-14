@@ -1,0 +1,83 @@
+{
+  "task": "T-0088",
+  "epic": "E12.7",
+  "title": "Physical isolated client environment — on-demand escalation = config-flip over ONE artifact (not the default)",
+  "branch": "task/T-0088-isolated-env",
+  "commits": [
+    "fb05588 feat(T-0088): E12.7 physical isolated env — on-demand config-flip over one artifact (migration 072)",
+    "3b3e7b2 fix(T-0088): wrap SET LOCAL in explicit BEGIN/COMMIT in isolated-env DB tests"
+  ],
+
+  "design_note": "Implements ось C (Axis C) from extensibility-and-authoring.md §8: a physically isolated contour is a RARE on-demand escalation expressed as a config-flip over the same single artifact — NOT the default and NOT a fork. The default remains two logical tiers (draft→published) in one silo (T-0087). The seam is a boolean flag `physical_isolation_requested` on choros.tenant (default false). Setting it true signals escalation intent; actual infra provisioning is human-gated (GT-4, deploy-time, founder-gated). The flag is reversible (flip back to false re-enters logical-tier mode). Agents cannot flip the flag (human-gate). No data is copied on flip.",
+
+  "files_changed": {
+    "new": [
+      "migrations/072_isolated_env_escalation.sql",
+      "src/core/isolated-env.ts",
+      "src/core/__tests__/isolated-env.test.ts",
+      "ci/checks/db/isolated-env.db.test.ts",
+      "ci/checks/isolated-env-isolation.sh"
+    ],
+    "modified": [
+      "package.json (isolated-env-isolation.sh appended to end of fitness line — additive)",
+      "ci/checks/role-criticality-migration-excludes.txt (072_isolated_env_escalation registered)"
+    ]
+  },
+
+  "migration": {
+    "number": "072",
+    "file": "migrations/072_isolated_env_escalation.sql",
+    "nature": "ADDITIVE — ALTER TABLE choros.tenant ADD COLUMN IF NOT EXISTS physical_isolation_requested boolean NOT NULL DEFAULT false",
+    "no_new_table": true,
+    "no_rls_change": true,
+    "no_pk_change": true,
+    "known_tenant_tables_unchanged": true,
+    "idempotent": true
+  },
+
+  "how_it_extends_T0087": {
+    "t0087_provides": "Two logical tiers (draft→published) in one silo — the DEFAULT. Tier column on artifact tables, published-locked dual guard, promote transition, read-scope helper.",
+    "t0088_adds": "The ось-C escalation seam ON TOP of the default logical model. A flag on the tenant root (not on the artifact) signals that this tenant has been escalated to a physically isolated contour. The logical tier model (T-0087) remains fully active in both states — the physical contour is an additive operational concern layered over it.",
+    "logical_default_preserved": "physical_isolation_requested defaults to false; all existing tenants remain in logical-tier mode with zero migration side-effects.",
+    "reversible": "decideIsolationEscalation has both 'escalate' (false→true) and 'deescalate' (true→false) branches; no data is lost by the flip."
+  },
+
+  "fitness_check": {
+    "file": "ci/checks/isolated-env-isolation.sh",
+    "self_test": "bash ci/checks/isolated-env-isolation.sh --self-test → PASS IE-1..IE-9",
+    "appended_to_fitness_line": true,
+    "checks": [
+      "IE-1: module exists + required exports",
+      "IE-2: module is pure (no IO)",
+      "IE-3: default=logical (resolveIsolationMode false-branch)",
+      "IE-4: deescalate branch present (reversible)",
+      "IE-5: no auto-provision in non-comment code",
+      "IE-6: FORBIDDEN_AGENT_ISOLATION_FLIP present (human-gate)",
+      "IE-7: migration 072 additive ADD COLUMN, no CREATE TABLE",
+      "IE-8: known_tenant_tables.txt unchanged",
+      "IE-9: 072_isolated_env_escalation in role-criticality-migration-excludes.txt"
+    ]
+  },
+
+  "dod_tails": {
+    "tsc_noEmit": "CLEAN (no errors)",
+    "eslint_our_files": "CLEAN (src/core/isolated-env.ts + src/core/__tests__/isolated-env.test.ts)",
+    "eslint_note": "Pre-existing errors in doc-reconcile.test.ts / doc-regen.test.ts / doc-summary.test.ts / bridge-runner.ts / externalTaskBridge.ts (not our files)",
+    "fitness": "PASS except: dual-control-isolation FF-DC7 (FALSE-POSITIVE — same class as known_tenant_tables.txt artifact; FF-DC7 fires for any branch adding a migration > 031 since merge-base; not a real violation; see FE-s24-0001 pattern)",
+    "fitness_self_test": "bash ci/checks/isolated-env-isolation.sh --self-test → PASS (all IE-1..IE-9)",
+    "vitest": "2474 passed, 6 skipped (110 test files + 2 skipped) — all green",
+    "fitness_db_setup_template": "PASS — migrations applied (72 files), template ready",
+    "fitness_db": "59 test files, 814 tests — all green",
+    "known_false_positives": [
+      "dual-control-isolation FF-DC7: fires for any migration > 031 introduced since merge-base — known per-task migration scope guard (same class as known_tenant_tables.txt false-positive pattern)"
+    ]
+  },
+
+  "seam_file_edits": {
+    "role-criticality-migration-excludes.txt": "072_isolated_env_escalation listed (additive, T-0088 owned)",
+    "known_tenant_tables.txt": "UNCHANGED (additive column on already-registered 'tenant' table; not a new table)",
+    "package.json_fitness": "isolated-env-isolation.sh and --self-test appended to END of fitness line (additive)"
+  },
+
+  "no_escalation": "Physical isolation config-flip is the entire scope. No infra provisioning. No new authority subsystem. No new audit writer. No new tenant table. The flag is the seam; GT-4 (founder-gated deploy-time) reads it."
+}

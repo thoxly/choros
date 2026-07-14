@@ -1,0 +1,1521 @@
+/* ============================================================================
+   CHOROS — components.jsx
+   Доменные примитивы. Глифы исполнителей: Человек=круг, Агент=ромб, Сервис=квадрат
+   (форма дублирует цвет — узнаваемость без опоры только на оттенок).
+   ============================================================================ */
+
+import React from 'react';
+const { useState, useEffect, useRef, useCallback, useId } = React;
+import { KNOWN_NAMES } from '../design/icon-registry.js';
+
+/* ----------------------------------------------------------------------------
+   Kit-иконки — линейные, в стиле Lucide (stroke 1.6, currentColor, без эмодзи;
+   см. design/principles.md §2). Локальные для kit, чтобы примитивы были
+   самодостаточны и не зависели от app-shell/icon.jsx (нет циклов, грузятся в
+   витрину через babel-standalone). Размер наследуется от размера шрифта (1em).
+   ---------------------------------------------------------------------------- */
+function KitIcon({ name, size, className = "", strokeWidth = 1.6 }) {
+  const p = { fill: "none", stroke: "currentColor", strokeWidth, strokeLinecap: "round", strokeLinejoin: "round" };
+  const dim = size || "1em";
+  return (
+    <svg className={`chs-kiticon ${className}`} viewBox="0 0 16 16" width={dim} height={dim} aria-hidden="true" focusable="false">
+      {name === "close"     && (<path {...p} d="M4 4l8 8M12 4l-8 8" />)}
+      {name === "alert"     && (<><path {...p} d="M8 2.5L14.5 13.5H1.5z" /><path {...p} d="M8 6.5v3.2" /><circle cx="8" cy="11.6" r="0.8" fill="currentColor" stroke="none" /></>)}
+      {name === "error"     && (<><circle {...p} cx="8" cy="8" r="6" /><path {...p} d="M8 4.6v4.2" /><circle cx="8" cy="11" r="0.8" fill="currentColor" stroke="none" /></>)}
+      {name === "info"      && (<><circle {...p} cx="8" cy="8" r="6" /><path {...p} d="M8 7.4v3.6" /><circle cx="8" cy="5.2" r="0.8" fill="currentColor" stroke="none" /></>)}
+      {name === "success"   && (<><circle {...p} cx="8" cy="8" r="6" /><path {...p} d="M5.3 8.2l1.9 1.9L11 6.2" /></>)}
+      {name === "retry"     && (<><path {...p} d="M13 8a5 5 0 1 1-1.5-3.55" /><path {...p} d="M13 2.5V5h-2.5" /></>)}
+      {name === "inbox"     && (<><path {...p} d="M2 4.5h12v7H2z" /><path {...p} d="M2 9.5h3l1 1.5h4l1-1.5h3" /></>)}
+      {name === "plus"      && (<path {...p} d="M8 3v10M3 8h10" />)}
+      {name === "chevron-down"    && (<path {...p} d="M3.5 6l4.5 4 4.5-4" />)}
+      {/* ── T-0531 additions ──────────────────────────────────────────── */}
+      {name === "star"            && (<><path {...p} d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="currentColor" stroke="none" /></>)}
+      {name === "star-outline"    && (<><path {...p} d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6z" /></>)}
+      {name === "pencil"          && (<><path {...p} d="M11.5 2.5l2 2-8 8-2.5.5.5-2.5z" /><path {...p} d="M10 4l2 2" /></>)}
+      {name === "trash"           && (<><path {...p} d="M3 4.5h10M5.5 4.5V3h5v1.5M6 7v4.5M10 7v4.5" /><rect {...p} x="4" y="4.5" width="8" height="9" rx="1" /></>)}
+      {name === "arrow-up"        && (<path {...p} d="M8 13V3M3.5 7.5L8 3l4.5 4.5" />)}
+      {name === "arrow-down"      && (<path {...p} d="M8 3v10M3.5 8.5L8 13l4.5-4.5" />)}
+      {name === "arrow-left"      && (<path {...p} d="M13 8H3M7.5 3.5L3 8l4.5 4.5" />)}
+      {name === "more-horizontal" && (<><circle cx="3.5" cy="8" r="1.2" fill="currentColor" stroke="none" /><circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none" /><circle cx="12.5" cy="8" r="1.2" fill="currentColor" stroke="none" /></>)}
+      {name === "check"           && (<path {...p} d="M3 8.5l3.5 3.5 6.5-7" />)}
+      {name === "external-link"   && (<><path {...p} d="M7 3H3v10h10V9" /><path {...p} d="M10 2h4v4" /><path {...p} d="M8 8L14 2" /></>)}
+      {name === "search"          && (<><circle {...p} cx="7" cy="7" r="4.5" /><path {...p} d="M10.5 10.5l3 3" /></>)}
+      {name === "chevron-up"      && (<path {...p} d="M3.5 10l4.5-4 4.5 4" />)}
+      {name === "lock"            && (<><rect {...p} x="3" y="7" width="10" height="8" rx="1" /><path {...p} d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" /></>)}
+      {/* ── T-0597 additions (reveal-toggle, находка №3) ──────────────── */}
+      {name === "eye"             && (<><path {...p} d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" /><circle {...p} cx="8" cy="8" r="2" /></>)}
+      {name === "eye-off"         && (<><path {...p} d="M2 2l12 12" /><path {...p} d="M6.6 4.4C7 4.3 7.5 4.3 8 4.3c4 0 6.5 4.5 6.5 4.5s-.8 1.4-2.2 2.6M4.4 5.9C2.8 7 1.5 8.8 1.5 8.8s2.5 4.5 6.5 4.5c.9 0 1.7-.2 2.4-.5" /><path {...p} d="M6.7 9.3a2 2 0 0 0 2.8 -2.8" /></>)}
+      {/* ── T-0649 addition (DateInput trigger) ───────────────────────── */}
+      {name === "calendar"        && (<><rect {...p} x="2" y="3.5" width="12" height="10.5" rx="1" /><path {...p} d="M2 6.5h12" /><path {...p} d="M5 2v3M11 2v3" /></>)}
+      {/* ── fallback: unknown name → visible placeholder + dev-warn ─── */}
+      {!KNOWN_NAMES.has(name) && (
+        <>
+          {typeof process !== 'undefined' && process.env.NODE_ENV !== 'production' &&
+            // eslint-disable-next-line no-console
+            console.warn(`[KitIcon] Unknown name: "${name}". Add it to icon-registry.js.`)}
+          <rect x="2" y="2" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="3 2" />
+          <path d="M5 5l6 6M11 5l-6 6" fill="none" stroke="currentColor" strokeWidth="1" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/* Spinner — индикатор загрузки. prefers-reduced-motion гасит вращение (CSS). */
+function Spinner({ size, className = "" }) {
+  const dim = size || "1em";
+  return (
+    <svg className={`chs-spinner ${className}`} viewBox="0 0 16 16" width={dim} height={dim} aria-hidden="true" focusable="false">
+      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" strokeOpacity="0.22" />
+      <path d="M8 2a6 6 0 0 1 6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+const EXEC_META = {
+  human:   { label: "Человек", cls: "chs-exec--human",   color: "var(--chs-exec-human)" },
+  agent:   { label: "Агент",   cls: "chs-exec--agent",   color: "var(--chs-exec-agent)" },
+  service: { label: "Сервис",  cls: "chs-exec--service", color: "var(--chs-exec-service)" },
+};
+
+/* Глиф исполнителя — простая геометрия (круг/ромб/квадрат) */
+function ExecGlyph({ type, size = 9, filled = true }) {
+  const color = EXEC_META[type]?.color || "currentColor";
+  const fill = filled ? color : "none";
+  const common = { fill, stroke: color, strokeWidth: 1.4 };
+  return (
+    <svg className="chs-exec__glyph" width={size} height={size} viewBox="0 0 10 10" aria-hidden="true">
+      {type === "human"   && <circle cx="5" cy="5" r="4" {...common} />}
+      {type === "agent"   && <rect x="5" y="-0.5" width="7.78" height="7.78" transform="rotate(45 5 5)" rx="0.6" {...common} />}
+      {type === "service" && <rect x="1" y="1" width="8" height="8" rx="0.8" {...common} />}
+    </svg>
+  );
+}
+
+/**
+ * asRenderableText — T-0648 (React error #31 hardening): React refuses to
+ * render a plain object/array as a child ("Objects are not valid as a React
+ * child"). Every primitive here ultimately reaches a bare `{displayName}` (or
+ * similar) JSX slot — this guard makes that CRASH-PROOF even if a caller
+ * mistakenly passes a {type,name,...} actor object instead of its `.name`
+ * string (the exact shape of the /rights/trail regression this task fixes).
+ * Never silently drops information: an unexpected object still surfaces
+ * SOMETHING inspectable (JSON), just never throws.
+ */
+function asRenderableText(value) {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string" || typeof value === "number") return value;
+  if (typeof value === "object") {
+    // Most common accidental shape: a ResolvedActor-like {name, id, ...}.
+    if (typeof value.name === "string") return value.name;
+    try { return JSON.stringify(value); } catch { return String(value); }
+  }
+  return String(value);
+}
+
+/**
+ * MACHINE_ID_RE — a raw machine key (UUID v1–v5) that must NEVER be surfaced as
+ * a PRIMARY human label. Shared by ActorChip (T-0685) and ProcessRef (T-0683,
+ * which re-exports it as PROCESSREF_UUID_RE below) — one definition, two
+ * readers, so the two "is this a raw key?" checks can never drift apart.
+ */
+const MACHINE_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * isMachineActorLabel — T-0685 (D-064, wave-5 human-layer; capstone T-0647
+ * finding on /rights/trail): true when a candidate ActorChip primary label is
+ * itself a bare machine key with no human meaning — a raw UUID (an actor the
+ * batch resolver could not map to an employee, so its name === the raw id) or
+ * an `agent:`/`instance:`/`flw:` synthetic key. Such a value must be DEMOTED
+ * (tooltip / mono chip) exactly like ProcessRef/RecordRef do — never rendered
+ * as the primary text a human reads. A slug fallback ("policy-sync", "e-ghost")
+ * is NOT a machine key: it is a stable human-legible handle and stays primary.
+ */
+export function isMachineActorLabel(value) {
+  if (typeof value !== "string") return false;
+  const s = value.trim();
+  if (s === "") return false;
+  if (MACHINE_ID_RE.test(s)) return true;
+  if (/^(agent|instance|flw):/i.test(s)) return true;
+  return false;
+}
+
+/* ExecutorBadge — единый цвето-иконочный код типа исполнителя.
+ *
+ * T-0648 FIX-1 (a11y, столп 4): the actor TYPE (human/agent/service) must be
+ * in the ACCESSIBLE NAME in EVERY mode — not only visually via the glyph+colour
+ * and not only in `title=` (a hover tooltip is not reliably announced by AT).
+ * Otherwise a screen-reader user hears just the name, cannot tell an agent from
+ * a human, and столп 4 ("agents are visible AS employees") is invisible to them.
+ * We surface the type (and the T-0648 FIX-3 deactivation marker) as a
+ * `chs-sr-only` (visually-hidden) span that reads right after the name, so the
+ * accessible name becomes e.g. "Счёт-агент (агент)" / "И. Петров (человек, деактивирован)".
+ * The glyph stays aria-hidden (decorative — colour/shape duplicate the type).
+ */
+function ExecutorBadge({ type = "human", label, name, bare = false, showLabel = true, deactivated = false }) {
+  const meta = EXEC_META[type] || EXEC_META.human;
+  const displayName = asRenderableText(name) || asRenderableText(label) || meta.label;
+  // Screen-reader suffix: the type is always spoken; deactivation adds a marker.
+  const srSuffix = deactivated ? `(${meta.label}, деактивирован)` : `(${meta.label})`;
+  return (
+    <span
+      className={`chs-exec ${meta.cls} ${bare ? "chs-exec--bare" : ""} ${deactivated ? "chs-exec--deactivated" : ""}`}
+      title={meta.label}
+    >
+      <ExecGlyph type={type} />
+      {showLabel && <span>{displayName}</span>}
+      {/* Type (and deactivation) in the accessible name — announced in ALL modes,
+          including bare/showLabel=false where there is no visible label. */}
+      <span className="chs-sr-only">{showLabel ? ` ${srSuffix}` : `${displayName} ${srSuffix}`}</span>
+    </span>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   ActorChip — T-0648 (D-064, UX-study §3: «UUID и машинный ключ не являются
+   контентом»). Единый примитив показа ЛЮБОГО актора (человек/агент/сервис):
+   глиф по типу (ExecutorBadge/ExecGlyph — переиспользованы, не задублированы)
+   + человекочитаемое имя в основном тексте + сырой id ТОЛЬКО как tooltip/
+   моно-метка (никогда голым текстом в потоке).
+
+   Props:
+     type   — "human" | "agent" | "service" (см. EXEC_META); по умолчанию "human".
+     name   — человекочитаемое имя. Если отсутствует — честный фоллбэк на id
+              (D2 honest-empty: НЕ выдумываем имя, но и не рендерим объект).
+     id     — сырой идентификатор (slug или UUID) — уходит в title/aria и в
+              МОНО-метку (data-testid="technical-id"), не в основной текст.
+     showId — раскрыть моно-метку с id рядом с именем (по умолчанию false —
+              id живёт только в tooltip, чтобы не плодить визуальный шум в
+              плотных списках; экраны с явной колонкой «id» могут showId=true).
+     bare   — без текстовой подписи вовсе (только глиф) — проксируется в
+              ExecutorBadge, id остаётся в title.
+     deactivated — T-0648 FIX-3: сотрудник soft-деактивирован (employee.
+              deactivated_at, приходит с резолвом ResolvedActor.deactivated).
+              Приглушённый визуальный стиль + «(деактивирован)» в accessible-
+              name/тултипе — потерянный сигнал теперь виден в аудите/трейле.
+   ---------------------------------------------------------------------------- */
+function ActorChip({ type = "human", name, id, showId = false, bare = false, deactivated = false }) {
+  const meta = EXEC_META[type] || EXEC_META.human;
+  const safeId = asRenderableText(id);
+  const rawName = asRenderableText(name);
+  // T-0685 (capstone T-0647, /rights/trail «КОМУ»/«КТО-ВЫДАЛ»): when the batch
+  // resolver could NOT map an actor to an employee, the caller's honest fallback
+  // hands us the raw id AS the name (name === id === a UUID). Rendering that as
+  // the PRIMARY text is the exact machine-layer-leaks-into-human-layer defect
+  // this task closes — a bare `e0000000-…-000000000007` in the operator's face.
+  // Mirror ProcessRef/RecordRef: a UUID/`agent:`-shaped label is NEVER primary —
+  // it is DEMOTED to the tooltip + (opt-in) mono chip, and the primary falls to
+  // the honest generic type label. A human-legible SLUG fallback ("policy-sync",
+  // "e-ghost") is NOT a machine key and is kept as primary (unchanged behaviour).
+  const nameIsMachineKey = isMachineActorLabel(rawName);
+  const idIsMachineKey = isMachineActorLabel(safeId);
+  const displayName = (!nameIsMachineKey && rawName) || (!idIsMachineKey && safeId) || meta.label;
+  // The raw id must always remain reachable (tooltip / mono chip) even when it
+  // was demoted from the primary. `shownId` is the id we surface secondarily:
+  // the explicit `id` prop when present, else the machine-key `name` we hid from
+  // the primary (so a UUID passed only as `name` is still tooltip-reachable).
+  const shownId = safeId || (nameIsMachineKey ? rawName : null);
+  // T-0648 FIX-3: deactivation surfaces in the visible tooltip too (not only AT).
+  const typeLabel = deactivated ? `${meta.label} · деактивирован` : meta.label;
+  const tooltip = shownId && shownId !== displayName ? `${typeLabel} · ${shownId}` : typeLabel;
+  return (
+    <span className="chs-actorchip" title={tooltip}>
+      <ExecutorBadge type={type} name={displayName} bare={bare} deactivated={deactivated} />
+      {showId && shownId && <MonoId chip>{shownId}</MonoId>}
+    </span>
+  );
+}
+
+/* MonoId — машинный идентификатор */
+function MonoId({ children, prefix, chip = false, "data-testid": dataTestId = "technical-id", ...rest }) {
+  const cls = `chs-monoid ${chip ? "chs-monoid--chip" : ""}`;
+  // Расщепляем префикс только для простых строк; иначе рендерим как есть.
+  if (typeof children !== "string") {
+    return <span className={cls} data-testid={dataTestId} {...rest}>{children}</span>;
+  }
+  let pre = prefix, restText = children;
+  if (!prefix && children.includes("-")) {
+    const i = children.indexOf("-");
+    pre = children.slice(0, i);
+    restText = children.slice(i);
+  }
+  return (
+    <span className={cls} data-testid={dataTestId} {...rest}>
+      {pre && <span className="chs-monoid__pre">{pre}</span>}{restText}
+    </span>
+  );
+}
+
+/* Mono — общий машинный вывод (числа/таймстампы) */
+function Mono({ children, className = "", ...rest }) {
+  return <span className={`chs-mono ${className}`} {...rest}>{children}</span>;
+}
+
+/* ----------------------------------------------------------------------------
+   RecordRef — T-0648 (D-064, UX-study §3): «запись-источник» ссылалась голым
+   UUID без title и без ссылки (напр. карточка инстанса процесса). Единый
+   примитив: лениво резолвит title записи через GET /api/records/:id и рендерит
+   его как ссылку на саму запись — никогда голый id в основном тексте.
+
+   Deliberately dependency-free (kit modules import only React + design/*, per
+   the existing convention — see the file's own imports): callers that already
+   have their own auth-header helper (devHeaders/authHeaders) pass it in via
+   `headers`, rather than this module reaching into app-shell/dev-auth.js
+   itself (kit stays leaf-level, no auth-layer coupling).
+
+   Title derivation mirrors records-form.js::deriveRecordLabel (first non-empty
+   string/finite-number field value, id-prefix fallback) — same
+   canonical rule, kept as an independent small copy here so the kit layer does
+   not import a screens-layer module (kit → screens would invert the existing
+   screens → components dependency direction).
+
+   Props:
+     recordId    — the record UUID (required to resolve).
+     appId       — the record's owning application id, if already known by the
+                   caller (used to build the link without waiting on
+                   application_id from the fetch response).
+     headers     — optional fetch headers (devHeaders()/authHeaders() from the
+                   caller's own auth layer); defaults to none.
+     fetchImpl   — optional fetch override (tests).
+   ---------------------------------------------------------------------------- */
+function deriveRecordRefLabel(record) {
+  if (!record) return null;
+  const data = record.data && typeof record.data === "object" ? record.data : {};
+  for (const key of Object.keys(data)) {
+    const v = data[key];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  return typeof record.id === "string" ? record.id.slice(0, 8) + "…" : null;
+}
+
+// T-0735 [live-proof anti-uuid finding, batch on top of T-0648/T-0756]: the
+// NON-projection FETCH path's "denied" branch used to render
+// <MonoId chip>{recordId}</MonoId> — a STYLED but still fully-visible raw record
+// UUID (observed live in the «Процессы» grid: a bare
+// `308eb628-2058-4a36-b04a-e10610dfad1a` in 8/25 rows whose source record 404'd
+// under the viewing actor's PDP — GET /api/records/:id denies a record the actor
+// can't read). T-0756 already fixed the instance-DETAIL screen via a server
+// `projection` (no fetch); this closes the OTHER consumers that still fetch
+// (grid, inbox drawer, inbox row, ProcessRef). Single shared sentinel/label with
+// T-0756's projection branch — both style «недоступна» identically
+// (chs-recordref--unresolved), raw id demoted to a tooltip only.
+export const RECORD_UNAVAILABLE_LABEL = "Запись недоступна";
+
+/**
+ * deriveRecordRefDisplay — pure decision for what RecordRef renders on the
+ * NON-projection FETCH path, given its resolved fetch state (mirrors
+ * deriveRecordRefLabel / deriveProcessRefPrimary: hook-free, unit-testable
+ * without a React dispatcher — RecordRef itself uses useState/useEffect and is
+ * not directly mountable in this suite, see actor-chip.test.jsx's documented
+ * split reasoning). The T-0756 `projection` branch is authoritative and handled
+ * separately in RecordRef — this helper is NEVER consulted when a projection is
+ * present.
+ *
+ * An unresolvable record (denied, or resolved with no derivable title) NEVER
+ * surfaces its raw id as primary text — the primary is the honest generic
+ * RECORD_UNAVAILABLE_LABEL sentinel (mirroring ActorChip's own type-label
+ * degrade and T-0756's projection sentinel). The raw id, when present, stays
+ * reachable only via a title tooltip.
+ */
+export function deriveRecordRefDisplay({ state, label, recordId, targetAppId, appId } = {}) {
+  if (state === "loading") return { kind: "loading" };
+  if (state === "resolved" && label) {
+    const resolvedAppId = targetAppId || appId || null;
+    const href = resolvedAppId ? `/apps/${resolvedAppId}/records/${recordId}` : undefined;
+    return href ? { kind: "link", label, href } : { kind: "plain", label };
+  }
+  // denied (404/403/network) or resolved-but-unlabelable: honest sentinel.
+  return recordId ? { kind: "unavailable", tooltip: recordId } : { kind: "empty" };
+}
+
+// T-0756 (E16 §6, capstone T-0691 P1): `projection` — a SERVER-provided safe
+// source-record projection { id, title, typeLabel, canOpen, appId? }. When present
+// it is AUTHORITATIVE: RecordRef renders `title` directly and issues NO
+// /api/records/:id fetch — the fetch is exactly what 404'd for the acting
+// participant (the record is draft-hidden / not READ-granted), collapsing to the
+// raw-UUID <MonoId> fallback this closes. The «открыть» link is offered ONLY when
+// `canOpen` (the record actually opens for this actor); otherwise the human title
+// is shown as plain text, never a dead link and never a raw UUID.
+function RecordRef({ recordId, appId, headers, fetchImpl, projection }) {
+  const hasProjection = projection !== null && typeof projection === "object";
+  const projTitle =
+    hasProjection && typeof projection.title === "string" && projection.title.trim().length > 0
+      ? projection.title.trim()
+      : null;
+  const projLinkAppId = hasProjection && projection.canOpen && projection.appId ? projection.appId : null;
+  const projTargetId = (hasProjection && typeof projection.id === "string" && projection.id) || recordId;
+
+  const [state, setState] = useState(hasProjection ? "resolved" : "loading"); // 'loading'|'resolved'|'denied'
+  const [label, setLabel] = useState(projTitle);
+  const [targetAppId, setTargetAppId] = useState(projLinkAppId || appId || null);
+  const doFetch = fetchImpl || (typeof fetch !== "undefined" ? fetch : undefined);
+
+  useEffect(() => {
+    // T-0756: a server projection is authoritative — never fetch/override it.
+    if (hasProjection) {
+      setLabel(projTitle);
+      setTargetAppId(projLinkAppId); // null unless canOpen — no dead link
+      setState("resolved");
+      return undefined;
+    }
+    if (!recordId || !doFetch) {
+      setState("denied");
+      return undefined;
+    }
+    let cancelled = false;
+    setState("loading");
+    doFetch(`/api/records/${encodeURIComponent(recordId)}`, { headers: headers || {} })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) {
+          setState("denied");
+          return;
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        const derived = deriveRecordRefLabel(data);
+        if (!derived) {
+          setState("denied");
+          return;
+        }
+        setLabel(derived);
+        setTargetAppId(data.application_id || appId || null);
+        setState("resolved");
+      })
+      .catch(() => { if (!cancelled) setState("denied"); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordId, appId, hasProjection, projTitle, projLinkAppId]);
+
+  if (state === "loading") {
+    return <span className="chs-recordref chs-recordref--loading">…</span>;
+  }
+
+  // ── T-0756 projection branch — a server sourceRecord is AUTHORITATIVE
+  //    (title without a fetch, «открыть» only when canOpen). Kept intact; the
+  //    only change is hoisting the sentinel literal to the shared
+  //    RECORD_UNAVAILABLE_LABEL constant (byte-identical text) so this branch
+  //    and the T-0735 fetch path below render «недоступна» from one source.
+  if (hasProjection) {
+    if (state === "denied" || !label) {
+      // projection with no derivable title → human sentinel, never a raw UUID.
+      return <span className="chs-recordref chs-recordref--unresolved">{RECORD_UNAVAILABLE_LABEL}</span>;
+    }
+    const href = targetAppId ? `/apps/${targetAppId}/records/${projTargetId}` : undefined;
+    if (!href) {
+      // No open affordance (canOpen=false, or no known app): show the human
+      // title as PLAIN TEXT — orientation without a dead link (E16 §6).
+      return <span className="chs-recordref">{label}</span>;
+    }
+    return (
+      <a className="chs-recordref chs-recordref--link" href={href} title={`Открыть запись · ${projTargetId}`}>
+        {label}
+      </a>
+    );
+  }
+
+  // ── T-0735 fetch path (NO projection): honest render decision. The old denied
+  //    branch fell into <MonoId chip>{recordId}</MonoId> — a styled but fully
+  //    visible raw record UUID. deriveRecordRefDisplay routes denied /
+  //    resolved-unlabelable to the SAME «Запись недоступна» sentinel
+  //    (chs-recordref--unresolved) as the projection branch, raw id demoted to a
+  //    tooltip only; resolved-with-title reuses the shared link/plain render.
+  //    projTargetId === recordId here (no projection), threaded consistently.
+  const display = deriveRecordRefDisplay({ state, label, recordId: projTargetId, targetAppId, appId });
+  if (display.kind === "empty") {
+    return <span className="chs-recordref chs-recordref--unresolved">—</span>;
+  }
+  if (display.kind === "unavailable") {
+    return (
+      <span className="chs-recordref chs-recordref--unresolved" title={display.tooltip}>
+        {RECORD_UNAVAILABLE_LABEL}
+      </span>
+    );
+  }
+  if (display.kind === "plain") {
+    return <span className="chs-recordref">{display.label}</span>;
+  }
+  return (
+    <a className="chs-recordref chs-recordref--link" href={display.href} title={`Открыть запись · ${projTargetId}`}>
+      {display.label}
+    </a>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   NodeRef — T-0733 (D-064, столп 4 анти-UUID; R-1 из ревью T-0712): org-tree
+   NODE (department/position) display primitive. `department.moved`/
+   `position.moved` (org-move-API, T-0655) audit rows carry the MOVED node as
+   their target — T-0712 already resolves `employee.moved`'s target through
+   ActorChip because the moved entity there IS an actor (choros.employee,
+   human/agent/service identity, EXEC_META glyph). A department/position is
+   NOT an actor — EXEC_META has no glyph for "org node", and forcing one
+   (e.g. the "service" square) would misrepresent a department as a system
+   actor. NodeRef is the sibling primitive for the other half of the org
+   tree: the server's node-resolver.ts (T-0733) batch-resolves
+   department.display_name / position.title (same O(1)-query discipline as
+   T-0648's batchResolveActors) and hands the row a `{id, name, kind,
+   resolved}` shape; NodeRef renders the resolved NAME primary, raw id
+   demoted to a tooltip only (mirrors ActorChip's default showId=false).
+
+   HONEST DEGRADATION (D2): department/position carry NO soft-delete column
+   (unlike employee.deactivated_at) — DELETE /api/departments/:id or
+   /api/positions/:id (AC-9, isGenesisOwner-only) is a HARD delete, so an
+   unresolved node id always means "no longer exists" (or, defensively, a
+   cross-tenant id the tenant-scoped resolver could never see). The server's
+   honest fallback sets `name = id` (mirrors resolveActorDisplay's exact
+   contract — an INTERNAL signal, never meant to reach the screen verbatim);
+   NodeRef demotes any UUID-shaped name the same way ActorChip already does
+   (isMachineActorLabel) and falls back to a kind label instead — the reader
+   always sees legible text, never a bare UUID and never the literal string
+   "undefined".
+
+   Props:
+     kind — "department" | "position" (drives the kind label + fallback text).
+     name — resolved display_name/title, or the server's honest id-fallback.
+     id   — raw node id (uuid) — tooltip only, never a visible primary/chip.
+   ---------------------------------------------------------------------------- */
+const NODE_KIND_META = {
+  department: { label: "Отдел", deletedLabel: "Отдел удалён" },
+  position: { label: "Должность", deletedLabel: "Должность удалена" },
+};
+
+function NodeRef({ kind, name, id }) {
+  const meta = NODE_KIND_META[kind] || { label: "Узел", deletedLabel: "Узел удалён" };
+  const safeId = asRenderableText(id);
+  const rawName = asRenderableText(name);
+  // Mirrors ActorChip's T-0685 demotion guard: an unresolved node's honest
+  // fallback carries name === id (a UUID) — never render that verbatim.
+  const nameIsMachineKey = isMachineActorLabel(rawName);
+  const resolvedName = rawName && !nameIsMachineKey ? rawName : null;
+  const displayName = resolvedName || meta.deletedLabel;
+  const tooltip = safeId ? `${meta.label} · ${safeId}` : meta.label;
+  return (
+    <span
+      className={`chs-noderef ${resolvedName ? "" : "chs-noderef--unresolved"}`}
+      title={tooltip}
+    >
+      {displayName}
+    </span>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   ProcessRef — T-0683 (D-064, wave-5 human-layer; capstone T-0647 finding):
+   the inbox «ПРОЦЕСС» column rendered the raw instance-UUID
+   (`5ec293d1-77d7-11f1-…`) as the PRIMARY identifier on the operator's main
+   screen — the central violation of «прожить решение без единого машинного
+   ключа». Agent-rows showed a bare `agent:` key. This is the sibling primitive
+   to ActorChip/RecordRef (T-0648): show a HUMAN process name as primary + the
+   source record's title (via RecordRef) as the disambiguator; the raw
+   instance-UUID is DEMOTED to a mono secondary chip (never the primary text).
+
+   Deliberately dependency-free (kit convention): the caller passes its own auth
+   `headers` through to the nested RecordRef, exactly as RecordRef itself
+   documents — the kit layer never reaches into app-shell/dev-auth.js.
+
+   Props:
+     processName — the HUMAN process-definition name (from
+                   InstanceInboxTask.processName / InboxItem.processName). When
+                   present it is ALWAYS the primary label.
+     inst        — the raw instance identifier (a UUID for real engine
+                   instances, "INS-7731" for seed fixtures, or "agent:<id>" for
+                   agent-defer rows). Shown only DEMOTED as a mono secondary,
+                   and only when it is NOT a bare machine key with no human
+                   value to add.
+     recordId    — originating record id (InboxItem.recordId); when present a
+                   RecordRef resolves its TITLE as the disambiguator.
+     appId       — record's owning app id, if known (threaded to RecordRef).
+     stepFallback— a human step/task label to use as primary when there is NO
+                   processName AND `inst` is a machine key (agent rows): the
+                   task's own name/step is the best available human handle.
+     headers     — auth headers, passed through to RecordRef.
+     fetchImpl   — fetch override (tests / RecordRef).
+   ---------------------------------------------------------------------------- */
+
+/** UUID (v1–v5) shape — a raw machine key that must never be a primary label.
+ *  T-0685: aliases the shared MACHINE_ID_RE (defined next to asRenderableText)
+ *  so ActorChip and ProcessRef test the SAME UUID shape from one source. */
+const PROCESSREF_UUID_RE = MACHINE_ID_RE;
+
+/**
+ * isMachineInst — true when `inst` is a bare machine key with no human meaning:
+ * a raw UUID, an `agent:<...>` / `instance:<...>` synthetic key, or EMPTY. A
+ * human-friendly fixture label like "INS-7731" is NOT a machine key.
+ *
+ * T-0685: delegates the UUID/`agent:`-prefix test to the shared
+ * isMachineActorLabel (one predicate, no duplicated regex). The ONE intentional
+ * difference lives HERE, at the wrapper: for a process instance a MISSING/EMPTY
+ * inst carries no human value → treated as a machine key (no primary label to
+ * show); isMachineActorLabel keeps empty === NOT-a-machine-key so an empty actor
+ * NAME simply falls through to the next honest fallback (id → type label). Do
+ * NOT collapse these two empty-string policies — they are deliberately opposite.
+ */
+export function isMachineInst(inst) {
+  if (typeof inst !== "string" || inst.trim() === "") return true;
+  return isMachineActorLabel(inst);
+}
+
+/**
+ * deriveProcessRefPrimary — PURE decision (hook-free, unit-testable, mirrors
+ * deriveRecordRefLabel's split): pick the PRIMARY human label for a process
+ * reference, and report whether the raw `inst` still deserves a demoted
+ * secondary chip.
+ *
+ * Order:
+ *   1. processName (human definition name) — always wins when present.
+ *   2. else stepFallback (the task's own human step/name) — for agent/defer
+ *      rows that carry no process definition but do carry a human task label.
+ *   3. else inst when inst is human-friendly (e.g. "INS-7731").
+ *   4. else the honest generic «Процесс» — NEVER the raw UUID/agent: key.
+ *
+ * Returns { label, showInst }:
+ *   - label:    the primary human string (never a bare machine key).
+ *   - showInst: true iff `inst` is human-friendly AND was not already used as
+ *               the primary — a UUID/agent: key is NEVER surfaced as a bare
+ *               secondary text (it lives only in the demoted MonoId chip the
+ *               component renders as tooltip-grade context, if at all).
+ */
+export function deriveProcessRefPrimary({ processName, inst, stepFallback } = {}) {
+  const pn = typeof processName === "string" ? processName.trim() : "";
+  if (pn) return { label: pn, showInst: !isMachineInst(inst) };
+  const sf = typeof stepFallback === "string" ? stepFallback.trim() : "";
+  const machine = isMachineInst(inst);
+  if (!machine) {
+    // inst is human-friendly (e.g. "INS-7731") — use it as primary.
+    return { label: inst.trim(), showInst: false };
+  }
+  // inst is a machine key — never show it as primary. Prefer a human step label.
+  if (sf) return { label: sf, showInst: false };
+  return { label: "Процесс", showInst: false };
+}
+
+function ProcessRef({ processName, inst, recordId, appId, stepFallback, headers, fetchImpl }) {
+  const { label, showInst } = deriveProcessRefPrimary({ processName, inst, stepFallback });
+  const machine = isMachineInst(inst);
+  const rawInst = asRenderableText(inst);
+  return (
+    <span className="chs-processref">
+      <span className="chs-processref__name" title={machine && rawInst ? rawInst : undefined}>
+        {label}
+      </span>
+      {recordId && (
+        <span className="chs-processref__record">
+          <RecordRef recordId={recordId} appId={appId} headers={headers} fetchImpl={fetchImpl} />
+        </span>
+      )}
+      {/* The raw instance id is DEMOTED: a human-friendly fixture id may show as a
+          mono secondary; a UUID/agent: machine key is never surfaced as bare text
+          (it stays in the name's title tooltip only). */}
+      {showInst && rawInst && <MonoId chip>{rawInst}</MonoId>}
+    </span>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   StepRef — T-0687 (D-064, wave-5 human-layer; capstone T-0647 finding): the
+   task-detail drawer led with a RAW BPMN node id as the primary «Шаг» /
+   «Текущий шаг» value — «legal_precheck», a machine key the operator cannot
+   read. This is the step-level sibling of ProcessRef (inst) / ActorChip (actor):
+   a human step label is primary; a bare machine key (snake_case/kebab BPMN id,
+   no space/Cyrillic) is DEMOTED to a mono secondary chip, never the primary
+   text. A step value that ALREADY reads human ("Проверка реквизитов · этап A",
+   any label with a space / «·» / Cyrillic) stays primary unchanged.
+
+   Pure decision (deriveStepLabel) is exported + hook-free so the render branch
+   and the tests agree — the exact split ProcessRef/deriveProcessRefPrimary uses.
+   ---------------------------------------------------------------------------- */
+
+/**
+ * isMachineStepKey — true when `step` is a bare BPMN node id with no human
+ * reading: a snake_case / kebab-case / dotted token that carries NO whitespace,
+ * no Cyrillic, and no «·» separator (e.g. "legal_precheck", "userTask_1",
+ * "approve.step"). An empty/missing step is treated as a machine key (no human
+ * value to show). A value with a space, a «·», or any Cyrillic letter is a
+ * human-authored step name and is NOT a machine key.
+ *
+ * Deliberately DISTINCT from isMachineInst (UUID/`agent:` shape): a step key is
+ * never a UUID — it is a modeler-authored node id whose machine-ness is «looks
+ * like a code token, not a sentence». Kept as its own predicate so the two
+ * checks never drift.
+ */
+export function isMachineStepKey(step) {
+  if (typeof step !== "string") return true;
+  const s = step.trim();
+  if (s === "") return true;
+  // Any space, middle-dot separator, or Cyrillic letter ⇒ human-authored label.
+  if (/\s/.test(s)) return false;
+  if (s.includes("·")) return false;
+  if (/[а-яё]/i.test(s)) return false;
+  // A single-token, space-free, latin/underscore/dot/dash string ⇒ machine key.
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(s);
+}
+
+/**
+ * deriveStepLabel — PURE decision (hook-free, unit-testable, mirrors
+ * deriveProcessRefPrimary): pick the PRIMARY human label for a process step and
+ * report whether the raw key still deserves a demoted mono secondary.
+ *
+ * Returns { label, showKey }:
+ *   - label:   human step name when `step` reads human; else the honest generic
+ *              «Шаг процесса» — NEVER the raw machine node id as primary text.
+ *   - showKey: true iff `step` is a machine key (so the component renders it as a
+ *              demoted mono chip for traceability) — false when `step` is already
+ *              a human label (there is no separate key to show).
+ */
+export function deriveStepLabel(step) {
+  const s = typeof step === "string" ? step.trim() : "";
+  if (s && !isMachineStepKey(s)) return { label: s, showKey: false };
+  // Machine key (or empty): generic human primary; the raw key is demoted.
+  return { label: "Шаг процесса", showKey: s.length > 0 };
+}
+
+function StepRef({ step }) {
+  const { label, showKey } = deriveStepLabel(step);
+  const rawKey = asRenderableText(step);
+  return (
+    <span className="chs-stepref">
+      <span className="chs-stepref__name" title={showKey && rawKey ? rawKey : undefined}>
+        {label}
+      </span>
+      {/* Raw BPMN node id is DEMOTED to a mono secondary — never the primary. */}
+      {showKey && rawKey && <MonoId chip>{rawKey}</MonoId>}
+    </span>
+  );
+}
+
+/* StatusChip */
+const STATUS_META = {
+  running: { label: "Выполняется", cls: "chs-chip--running" },
+  done:    { label: "Завершено",   cls: "chs-chip--done" },
+  failed:  { label: "Ошибка",      cls: "chs-chip--failed" },
+  waiting: { label: "Ожидание",    cls: "chs-chip--waiting" },
+  paused:  { label: "Пауза",       cls: "chs-chip--paused" },
+};
+function StatusChip({ status = "running", label }) {
+  const meta = STATUS_META[status] || STATUS_META.running;
+  return (
+    <span className={`chs-chip ${meta.cls}`}>
+      {/* Dot is decorative — colour/shape duplicates the text label (§1.4.1) */}
+      <span className="chs-chip__dot" aria-hidden="true" />
+      {label || meta.label}
+    </span>
+  );
+}
+
+/* Button — варианты/размеры + disabled (aria-disabled), loading (spinner +
+   aria-busy + блок клика), видимый :focus-visible ring (--chs-color-focus-ring). */
+function Button({ variant = "secondary", size, children, glyph, loading = false, disabled = false, className = "", ...rest }) {
+  const isDisabled = disabled || loading;
+  return (
+    <button
+      type={rest.type || "button"}
+      className={`chs-btn chs-btn--${variant} ${size === "sm" ? "chs-btn--sm" : ""} ${loading ? "chs-btn--loading" : ""} ${className}`}
+      disabled={isDisabled}
+      aria-disabled={isDisabled || undefined}
+      aria-busy={loading || undefined}
+      {...rest}
+    >
+      {loading ? <Spinner className="chs-btn__spinner" /> : glyph}
+      {children}
+    </button>
+  );
+}
+
+/* Input field — явная привязка label↔input (htmlFor/id), aria-invalid на ошибке,
+   hint как aria-describedby, видимый фокус-ринг (через .chs-input). Обе темы
+   читаемы (токены). id автогенерится, если не передан. */
+function Field({ label, mono = false, invalid = false, hint, id, className = "", ...rest }) {
+  const autoId = useId();
+  const inputId = id || `chs-field-${autoId}`;
+  const hintId = hint ? `${inputId}-hint` : undefined;
+  return (
+    <div className="chs-field">
+      {label && <label className="chs-label" htmlFor={inputId}>{label}</label>}
+      <input
+        id={inputId}
+        className={`chs-input ${mono ? "chs-input--mono" : ""} ${invalid ? "chs-input--invalid" : ""} ${className}`}
+        aria-invalid={invalid || undefined}
+        aria-describedby={hintId}
+        {...rest}
+      />
+      {hint && <span id={hintId} className={`chs-hint ${invalid ? "chs-hint--invalid" : ""}`}>{hint}</span>}
+    </div>
+  );
+}
+
+/* BudgetMeter — расход бюджета (токены/деньги), моноширинные числа */
+function BudgetMeter({ used = 0, total = 100, unit = "", label, fmt }) {
+  const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+  const state = pct >= 100 ? "over" : pct >= 80 ? "warn" : "ok";
+  const format = fmt || ((n) => n.toLocaleString("ru-RU"));
+  return (
+    <div className="chs-budget">
+      <div className="chs-budget__head">
+        {label && <span style={{ fontSize: "var(--chs-text-xs)", color: "var(--chs-color-text-muted)" }}>{label}</span>}
+        <span className="chs-budget__val">
+          {format(used)}<span className="chs-budget__total"> / {format(total)}{unit ? " " + unit : ""}</span>
+        </span>
+      </div>
+      <div className="chs-budget__track">
+        <div className={`chs-budget__fill ${state === "warn" ? "chs-budget__fill--warn" : ""} ${state === "over" ? "chs-budget__fill--over" : ""}`} style={{ width: pct + "%" }} />
+      </div>
+    </div>
+  );
+}
+
+/* ReservationMeter — расход с РЕЗЕРВИРОВАНИЕМ: две крыши (на инстанс / на агента).
+   Трек = потолок на агента; отметка = крыша на инстанс; заливка = фактический расход. */
+function ReservationMeter({ used = 0, instanceCap = 0, agentCap = 0, unit = "", label, fmt }) {
+  const format = fmt || ((n) => n.toLocaleString("ru-RU"));
+  const max = agentCap || instanceCap || 1;
+  const pctUsed = Math.max(0, Math.min(100, (used / max) * 100));
+  const pctInst = Math.max(0, Math.min(100, (instanceCap / max) * 100));
+  const ratio = instanceCap > 0 ? used / instanceCap : 0;
+  const state = ratio >= 1 ? "over" : ratio >= 0.8 ? "warn" : "ok";
+  return (
+    <div className="chs-resv">
+      <div className="chs-resv__head">
+        {label && <span className="chs-resv__label">{label}</span>}
+        <span className="chs-resv__val">
+          {format(used)}<span className="chs-resv__den"> / {format(instanceCap)}{unit ? " " + unit : ""}</span>
+        </span>
+      </div>
+      <div className="chs-resv__track">
+        <div className="chs-resv__reserved" style={{ width: pctInst + "%" }} />
+        <div className={`chs-resv__fill chs-resv__fill--${state}`} style={{ width: pctUsed + "%" }} />
+        <span className="chs-resv__cap chs-resv__cap--inst" style={{ left: pctInst + "%" }} />
+      </div>
+      <div className="chs-resv__legend">
+        <span className="chs-resv__roof"><i className="chs-roof chs-roof--inst" />на&nbsp;инстанс <b>{format(instanceCap)}{unit ? " " + unit : ""}</b></span>
+        <span className="chs-resv__roof"><i className="chs-roof chs-roof--agent" />на&nbsp;агента <b>{format(agentCap)}{unit ? " " + unit : ""}</b></span>
+      </div>
+    </div>
+  );
+}
+
+/* RoleAssignment — НАЗНАЧЕНИЕ роли (read): роль · орг-охват · срок действия.
+   A11y (T-0529): если onOpen передан — превращаем в button (keyboard-доступен). */
+function RoleAssignment({ role, scope, validity, expiring = false, onOpen }) {
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        className={`chs-asgn chs-asgn--link`}
+        onClick={onOpen}
+        aria-label={`Роль ${role}, область ${scope}, действует ${validity}${expiring ? ', истекает скоро' : ''}`}
+      >
+        <div className="chs-asgn__main">
+          <span className="chs-asgn__dot" aria-hidden="true" />
+          <span className="chs-asgn__role">{role}</span>
+        </div>
+        <div className="chs-asgn__scope"><span className="chs-asgn__scopeglyph" aria-hidden="true" />{scope}</div>
+        <div className={`chs-asgn__validity ${expiring ? "chs-asgn__validity--exp" : ""}`}>{validity}</div>
+      </button>
+    );
+  }
+  return (
+    <div className="chs-asgn">
+      <div className="chs-asgn__main">
+        <span className="chs-asgn__dot" aria-hidden="true" />
+        <span className="chs-asgn__role">{role}</span>
+      </div>
+      <div className="chs-asgn__scope"><span className="chs-asgn__scopeglyph" aria-hidden="true" />{scope}</div>
+      <div className={`chs-asgn__validity ${expiring ? "chs-asgn__validity--exp" : ""}`}>{validity}</div>
+    </div>
+  );
+}
+
+/* OpKbd — операция гранта (read/write/invoke) — машинный «scope»-чип */
+function OpChip({ op }) {
+  return <span className={`chs-op chs-op--${op}`}>{op}</span>;
+}
+
+/* DerivedChip — производный артефакт (инструмент/поле), помечен как НЕ редактируемый */
+function DerivedChip({ children, kind = "tool", state }) {
+  return (
+    <span className={`chs-derived chs-derived--${kind} ${state ? "chs-derived--" + state : ""}`}>
+      <span className="chs-derived__glyph" />{children}
+    </span>
+  );
+}
+
+/* TaskRow — плотная строка задачи процесса */
+function TaskRow({ status = "running", name, sub, execType = "human", execName, id, budget, ts }) {
+  const markerColor = {
+    running: "var(--chs-color-info)", done: "var(--chs-color-success)",
+    failed: "var(--chs-color-danger)", waiting: "var(--chs-color-warning)",
+    paused: "var(--chs-color-text-faint)",
+  }[status];
+  return (
+    <div className="chs-taskrow">
+      <span className="chs-taskrow__marker" style={{ background: markerColor }} />
+      <div className="chs-taskrow__name">{name}{sub && <small>{sub}</small>}</div>
+      <ExecutorBadge type={execType} name={execName} />
+      <MonoId>{id}</MonoId>
+      <BudgetMeter used={budget?.used} total={budget?.total} unit={budget?.unit} />
+      <Mono className="chs-budget__total" >{ts}</Mono>
+    </div>
+  );
+}
+
+/* AuditEvent — строка аудит-лога */
+function AuditEvent({ ts, actorType = "service", actor, action, target }) {
+  // T-0648 (React error #31 hardening): `actor` must never reach this <b> as a
+  // bare object — asRenderableText coerces defensively (see its own doc-comment).
+  return (
+    <div className="chs-audit">
+      <span className="chs-audit__time">{ts}</span>
+      <span className="chs-audit__rail"><ExecGlyph type={actorType} size={8} /></span>
+      <span className="chs-audit__body">
+        <b>{asRenderableText(actor)}</b> {action} {target && <MonoId chip>{target}</MonoId>}
+      </span>
+    </div>
+  );
+}
+
+/* ============================================================================
+   ОБЯЗАТЕЛЬНЫЙ KIT (OBLIK §2.1) — поверхности и состояния, которые экраны
+   сейчас собирают руками инлайн-стилями. Все цвета/отступы/тени/радиусы — из
+   токенов --chs-*; ноль хардкода. a11y по design/principles.md §4/§6.
+   ============================================================================ */
+
+/* ----- focus-trap + scroll-lock — общая механика для Modal/Drawer ----- */
+const FOCUSABLE = [
+  'a[href]', 'button:not([disabled])', 'textarea:not([disabled])',
+  'input:not([disabled])', 'select:not([disabled])', '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+/* Блокирует прокрутку body, пока хотя бы один оверлей открыт (рефкаунт). */
+let _scrollLockCount = 0;
+let _scrollLockPrev = "";
+function lockBodyScroll() {
+  if (typeof document === "undefined") return;
+  if (_scrollLockCount === 0) {
+    _scrollLockPrev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
+  _scrollLockCount += 1;
+}
+function unlockBodyScroll() {
+  if (typeof document === "undefined") return;
+  _scrollLockCount = Math.max(0, _scrollLockCount - 1);
+  if (_scrollLockCount === 0) document.body.style.overflow = _scrollLockPrev;
+}
+
+/* Фокус-ловушка: фокус на первый элемент при открытии, цикл Tab/Shift-Tab внутри
+   panelRef, восстановление фокуса на триггер при закрытии, scroll-lock + Esc. */
+function useFocusTrap({ open, panelRef, onClose, closeOnEsc = true }) {
+  const restoreRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    restoreRef.current = typeof document !== "undefined" ? document.activeElement : null;
+    lockBodyScroll();
+
+    const panel = panelRef.current;
+    // фокус на первый фокусируемый элемент панели (или саму панель)
+    const focusables = panel ? panel.querySelectorAll(FOCUSABLE) : [];
+    if (focusables.length) focusables[0].focus();
+    else if (panel) panel.focus();
+
+    function onKeyDown(e) {
+      if (e.key === "Escape" && closeOnEsc) {
+        e.stopPropagation();
+        onClose && onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !panel) return;
+      const items = panel.querySelectorAll(FOCUSABLE);
+      if (!items.length) { e.preventDefault(); return; }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !panel.contains(active))) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault(); first.focus();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      unlockBodyScroll();
+      const r = restoreRef.current;
+      if (r && typeof r.focus === "function") r.focus();
+    };
+  }, [open, panelRef, onClose, closeOnEsc]);
+}
+
+/* ----------------------------- Modal / Dialog ----------------------------- */
+/* Затемнённый оверлей (--chs-color-overlay + --chs-shadow-3, НЕ хардкод rgba),
+   центрированная панель. role=dialog/aria-modal/aria-labelledby; фокус-ловушка;
+   Esc и клик по оверлею закрывают; scroll-lock. Заменяет рукотворные модалки. */
+function Modal({ open, onClose, title, children, footer, size = "md", closeOnOverlay = true, closeOnEsc = true, labelId }) {
+  const panelRef = useRef(null);
+  const autoId = useId();
+  const headingId = labelId || (title ? `chs-modal-title-${autoId}` : undefined);
+  useFocusTrap({ open, panelRef, onClose, closeOnEsc });
+  if (!open) return null;
+  return (
+    <div className="chs-overlay" onClick={(e) => { if (closeOnOverlay && e.target === e.currentTarget) onClose && onClose(); }}>
+      <div
+        ref={panelRef}
+        className={`chs-modal chs-modal--${size}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headingId}
+        tabIndex={-1}
+      >
+        {title && (
+          <div className="chs-modal__head">
+            <h2 className="chs-modal__title" id={headingId}>{title}</h2>
+            <button type="button" className="chs-overlay__close" aria-label="Закрыть" onClick={() => onClose && onClose()}>
+              <KitIcon name="close" />
+            </button>
+          </div>
+        )}
+        <div className="chs-modal__body">{children}</div>
+        {footer && <div className="chs-modal__foot">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------- Drawer --------------------------------- */
+/* Боковая панель (right/left). Та же a11y, что у Modal. */
+function Drawer({ open, onClose, title, children, footer, side = "right", closeOnOverlay = true, closeOnEsc = true, labelId }) {
+  const panelRef = useRef(null);
+  const autoId = useId();
+  const headingId = labelId || (title ? `chs-drawer-title-${autoId}` : undefined);
+  useFocusTrap({ open, panelRef, onClose, closeOnEsc });
+  if (!open) return null;
+  return (
+    <div className={`chs-overlay chs-overlay--drawer chs-overlay--${side}`} onClick={(e) => { if (closeOnOverlay && e.target === e.currentTarget) onClose && onClose(); }}>
+      <div
+        ref={panelRef}
+        className={`chs-drawer chs-drawer--${side}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headingId}
+        tabIndex={-1}
+      >
+        {title && (
+          <div className="chs-drawer__head">
+            <h2 className="chs-drawer__title" id={headingId}>{title}</h2>
+            <button type="button" className="chs-overlay__close" aria-label="Закрыть" onClick={() => onClose && onClose()}>
+              <KitIcon name="close" />
+            </button>
+          </div>
+        )}
+        <div className="chs-drawer__body">{children}</div>
+        {footer && <div className="chs-drawer__foot">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------ EmptyState ------------------------------- */
+/* Слот иконки + заголовок + описание + опциональный CTA. principles.md §6. */
+function EmptyState({ icon, title, description, action, compact = false }) {
+  return (
+    <div className={`chs-state chs-state--empty ${compact ? "chs-state--compact" : ""}`} role="status">
+      {icon && <div className="chs-state__icon">{icon}</div>}
+      {title && <div className="chs-state__title">{title}</div>}
+      {description && <div className="chs-state__desc">{description}</div>}
+      {action && <div className="chs-state__action">{action}</div>}
+    </div>
+  );
+}
+
+/* --------------------------- LoadingState / Skeleton --------------------- */
+/* Spinner + текст. prefers-reduced-motion гасит анимацию (CSS). */
+function LoadingState({ label = "Загрузка…", compact = false }) {
+  return (
+    <div className={`chs-state chs-state--loading ${compact ? "chs-state--compact" : ""}`} role="status" aria-live="polite" aria-busy="true">
+      <Spinner className="chs-state__spinner" />
+      {label && <div className="chs-state__desc">{label}</div>}
+    </div>
+  );
+}
+
+/* Skeleton — shimmer-плейсхолдер. variant: line | block | circle.
+   prefers-reduced-motion гасит мерцание (CSS), placeholder остаётся. */
+function Skeleton({ variant = "line", width, height, count = 1, className = "" }) {
+  const style = {};
+  if (width != null) style.width = typeof width === "number" ? `${width}px` : width;
+  if (height != null) style.height = typeof height === "number" ? `${height}px` : height;
+  if (count > 1) {
+    return (
+      <div className={`chs-skeleton-group ${className}`} aria-hidden="true">
+        {Array.from({ length: count }).map((_, i) => (
+          <span key={i} className={`chs-skeleton chs-skeleton--${variant}`} style={style} />
+        ))}
+      </div>
+    );
+  }
+  return <span className={`chs-skeleton chs-skeleton--${variant} ${className}`} style={style} aria-hidden="true" />;
+}
+
+/* ------------------------------- ErrorState ------------------------------ */
+/* Иконка ошибки + сообщение + опциональная «Повторить». principles.md §6. */
+function ErrorState({ title = "Что-то пошло не так", message, onRetry, retryLabel = "Повторить", compact = false }) {
+  return (
+    <div className={`chs-state chs-state--error ${compact ? "chs-state--compact" : ""}`} role="alert">
+      <div className="chs-state__icon chs-state__icon--error"><KitIcon name="error" size={28} /></div>
+      {title && <div className="chs-state__title">{title}</div>}
+      {message && <div className="chs-state__desc">{message}</div>}
+      {onRetry && (
+        <div className="chs-state__action">
+          <Button variant="secondary" size="sm" glyph={<KitIcon name="retry" className="chs-btn__glyph" />} onClick={onRetry}>{retryLabel}</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------- Popover -------------------------------- */
+/* Привязанная плавающая панель (меню/пикеры). Клик-вне и Esc закрывают; базовое
+   позиционирование (placement bottom|top|left|right + align start|end|center).
+   Триггер и панель оборачиваются в inline-relative контейнер.
+   A11y (T-0529): focus-on-open, aria-haspopup/expanded/controls на триггере,
+   role=dialog или menu в зависимости от isMenu prop. */
+function Popover({ open, onClose, trigger, children, placement = "bottom", align = "start", className = "", isMenu = false }) {
+  const rootRef = useRef(null);
+  const panelRef = useRef(null);
+  const autoId = useId();
+  const panelId = `chs-popover-panel-${autoId}`;
+
+  useEffect(() => {
+    if (!open) return undefined;
+    // Focus the panel on open so keyboard users can interact
+    const t = setTimeout(() => {
+      if (panelRef.current) {
+        const focusable = panelRef.current.querySelector(
+          'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+        );
+        if (focusable) focusable.focus();
+        else panelRef.current.focus();
+      }
+    }, 0);
+    function onDocPointer(e) {
+      if (rootRef.current && !rootRef.current.contains(e.target)) onClose && onClose();
+    }
+    function onKey(e) { if (e.key === "Escape") { e.stopPropagation(); onClose && onClose(); } }
+    document.addEventListener("mousedown", onDocPointer, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("mousedown", onDocPointer, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [open, onClose]);
+
+  // Clone the trigger element to inject aria-haspopup / aria-expanded / aria-controls
+  const enhancedTrigger = trigger && React.isValidElement(trigger)
+    ? React.cloneElement(trigger, {
+        'aria-haspopup': isMenu ? 'menu' : 'dialog',
+        'aria-expanded': open,
+        'aria-controls': open ? panelId : undefined,
+      })
+    : trigger;
+
+  return (
+    <span className={`chs-popover-root ${className}`} ref={rootRef}>
+      {enhancedTrigger}
+      {open && (
+        <div
+          id={panelId}
+          ref={panelRef}
+          className={`chs-popover chs-popover--${placement} chs-popover--align-${align}`}
+          role={isMenu ? "menu" : "dialog"}
+          tabIndex={-1}
+        >
+          {children}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/* -------------------------------- Tooltip -------------------------------- */
+/* Подсказка по hover/focus; role=tooltip, доступна с клавиатуры (focus триггера).
+   CSS показывает .chs-tooltip__bubble на :hover/:focus-within — работает без JS.
+   A11y (T-0529): клонирует children чтобы добавить aria-describedby без лишнего
+   focusable wrapper-span; Esc-dismiss. */
+function Tooltip({ label, children, placement = "top", className = "" }) {
+  const autoId = useId();
+  const tipId = `chs-tip-${autoId}`;
+  const [visible, setVisible] = useState(true);
+
+  // Clone children to inject aria-describedby (no extra wrapper focusable element).
+  // Falls back to wrapping span if children is not a single React element.
+  let inner;
+  if (React.isValidElement(children)) {
+    inner = React.cloneElement(children, {
+      'aria-describedby': tipId,
+      onKeyDown: (e) => {
+        if (e.key === 'Escape') { e.stopPropagation(); setVisible(false); }
+        // pass through original handler
+        if (children.props.onKeyDown) children.props.onKeyDown(e);
+      },
+      onFocus: (e) => {
+        setVisible(true);
+        if (children.props.onFocus) children.props.onFocus(e);
+      },
+    });
+  } else {
+    // Fallback: wrap in a span (for plain text children)
+    inner = (
+      <span className="chs-tooltip__trigger" tabIndex={0} aria-describedby={tipId}
+        onKeyDown={(e) => { if (e.key === 'Escape') setVisible(false); }}
+        onFocus={() => setVisible(true)}
+      >
+        {children}
+      </span>
+    );
+  }
+
+  return (
+    <span className={`chs-tooltip ${className}`}>
+      {inner}
+      {visible && (
+        <span className={`chs-tooltip__bubble chs-tooltip__bubble--${placement}`} role="tooltip" id={tipId}>{label}</span>
+      )}
+    </span>
+  );
+}
+
+/* --------------------------------- Toast --------------------------------- */
+/* Транзиентное уведомление (success/error/info/warning через статус-токены).
+   Авто-скрытие (duration, 0 = не скрывать) + ручное закрытие. role=status/alert.
+   Низкоуровневый компонент — для очереди используй ToastViewport/useToasts. */
+const TOAST_ICON = { success: "success", error: "error", info: "info", warning: "alert" };
+function Toast({ tone = "info", title, message, onClose, action }) {
+  return (
+    <div className={`chs-toast chs-toast--${tone}`} role={tone === "error" || tone === "warning" ? "alert" : "status"} aria-live={tone === "error" || tone === "warning" ? "assertive" : "polite"}>
+      <span className="chs-toast__icon"><KitIcon name={TOAST_ICON[tone] || "info"} size={16} /></span>
+      <div className="chs-toast__body">
+        {title && <div className="chs-toast__title">{title}</div>}
+        {message && <div className="chs-toast__msg">{message}</div>}
+      </div>
+      {action && <div className="chs-toast__action">{action}</div>}
+      {onClose && (
+        <button type="button" className="chs-toast__close" aria-label="Закрыть" onClick={onClose}>
+          <KitIcon name="close" size={14} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* --------------------------------- Notice --------------------------------- */
+/* T-0599: персистентная предупреждающая плашка (Alert/notice-паттерн) — в
+   отличие от Toast (транзиентный, auto-dismiss, свой viewport), Notice живёт
+   в потоке экрана, пока условие не снимется (нет duration/onClose). Тот же
+   tone-набор и токены, что Toast (info/warning/error/success), тот же
+   role=alert/status выбор по тону. Первый потребитель — баннер «ассистент
+   не может отвечать» (screen-assistant.jsx), но компонент общий kit-примитив,
+   не one-off inline styling. */
+function Notice({ tone = "info", title, message, action, className = "" }) {
+  return (
+    <div
+      className={`chs-notice chs-notice--${tone} ${className}`.trim()}
+      role={tone === "error" || tone === "warning" ? "alert" : "status"}
+    >
+      <span className="chs-notice__icon"><KitIcon name={TOAST_ICON[tone] || "info"} size={16} /></span>
+      <div className="chs-notice__body">
+        {title && <div className="chs-notice__title">{title}</div>}
+        {message && <div className="chs-notice__msg">{message}</div>}
+      </div>
+      {action && <div className="chs-notice__action">{action}</div>}
+    </div>
+  );
+}
+
+/* useToasts — лёгкая очередь тостов + ToastViewport (фикс-стек). push() ставит
+   тост с авто-дисмиссом; компонент монтирует область сам.
+   A11y (T-0529): pause-on-hover — viewportRef передаётся для очистки таймеров. */
+function useToasts({ duration = 4000 } = {}) {
+  const [toasts, setToasts] = useState([]);
+  const idRef = useRef(0);
+  const timersRef = useRef({});
+  const pausedRef = useRef(false);
+
+  const dismiss = useCallback((id) => {
+    clearTimeout(timersRef.current[id]);
+    delete timersRef.current[id];
+    setToasts((ts) => ts.filter((t) => t.id !== id));
+  }, []);
+
+  const scheduleTimer = useCallback((id, d) => {
+    clearTimeout(timersRef.current[id]);
+    if (d > 0 && !pausedRef.current) {
+      timersRef.current[id] = setTimeout(() => dismiss(id), d);
+    }
+  }, [dismiss]);
+
+  const push = useCallback((toast) => {
+    const id = ++idRef.current;
+    const d = toast.duration != null ? toast.duration : duration;
+    setToasts((ts) => [...ts, { ...toast, id, _duration: d }]);
+    scheduleTimer(id, d);
+    return id;
+  }, [duration, scheduleTimer]);
+
+  const pauseAll = useCallback(() => {
+    pausedRef.current = true;
+    Object.keys(timersRef.current).forEach((id) => {
+      clearTimeout(timersRef.current[id]);
+    });
+  }, []);
+
+  const resumeAll = useCallback((toastList) => {
+    pausedRef.current = false;
+    toastList.forEach((t) => {
+      if (t._duration > 0) scheduleTimer(t.id, t._duration);
+    });
+  }, [scheduleTimer]);
+
+  return { toasts, push, dismiss, pauseAll, resumeAll };
+}
+
+function ToastViewport({ toasts = [], dismiss, pauseAll, resumeAll, position = "bottom-right", ...rest }) {
+  return (
+    <div
+      className={`chs-toast-viewport chs-toast-viewport--${position}`}
+      onMouseEnter={() => pauseAll && pauseAll()}
+      onMouseLeave={() => resumeAll && resumeAll(toasts)}
+      onFocus={() => pauseAll && pauseAll()}
+      onBlur={() => resumeAll && resumeAll(toasts)}
+      {...rest}
+    >
+      {toasts.map((t) => (
+        <Toast key={t.id} tone={t.tone} title={t.title} message={t.message} action={t.action} onClose={() => dismiss && dismiss(t.id)} />
+      ))}
+    </div>
+  );
+}
+
+/* ----------------------------- ConfirmDialog ----------------------------- */
+/* Тонкая обёртка над <Modal size="sm"> для подтверждения действия — заменяет
+   нативный window.confirm. Footer = Отмена (ghost) + Подтвердить (вариант по
+   tone: danger→danger, default→primary). a11y (фокус-ловушка/Esc/scroll-lock)
+   наследуется от Modal. principles.md §4 (опасное действие = модал).
+
+   Расширение T-0526: dual-control поле причины:
+     reason            — текущее значение (string)
+     onReasonChange    — callback(string), если передан — поле рендерится
+     reasonRequired    — если true, «Подтвердить» заблокирован пока reason пуст
+     reasonPlaceholder — placeholder текстового поля
+*/
+function ConfirmDialog({
+  open, title, message,
+  confirmLabel = "Подтвердить", cancelLabel = "Отмена",
+  tone = "danger", onConfirm, onClose, loading = false,
+  reason, onReasonChange, reasonRequired = false, reasonPlaceholder = "Укажите причину",
+}) {
+  const confirmVariant = tone === "danger" ? "danger" : "primary";
+  const confirmDisabled = loading || (reasonRequired && onReasonChange && (!reason || !reason.trim()));
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="sm"
+      title={title}
+      footer={<>
+        <Button variant="ghost" onClick={onClose} disabled={loading}>{cancelLabel}</Button>
+        <Button variant={confirmVariant} onClick={onConfirm} loading={loading} disabled={confirmDisabled}>{confirmLabel}</Button>
+      </>}
+    >
+      {message}
+      {onReasonChange && (
+        <div className="chs-confirm__reason">
+          <Field
+            label="Причина"
+            value={reason || ""}
+            onChange={(e) => onReasonChange(e.target.value)}
+            placeholder={reasonPlaceholder}
+            className="chs-confirm__reason-field"
+          />
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/* -------------------------------- Select --------------------------------- */
+/* Токен-стилизованный нативный <select> с привязкой label↔select (htmlFor/id),
+   aria-invalid на ошибке, hint как aria-describedby. Читаем в ОБЕИХ темах
+   (фон/текст/стрелка — токены). Нативный листбокс (без кастом-рендера): доступен
+   с клавиатуры и экранным ридером из коробки. options: [{value,label,disabled}]
+   ИЛИ строки; children рендерятся как есть, если переданы вместо options. */
+function Select({
+  label, options, value, onChange, invalid = false, hint,
+  placeholder, id, className = "", children, ...rest
+}) {
+  const autoId = useId();
+  const selectId = id || `chs-select-${autoId}`;
+  const hintId = hint ? `${selectId}-hint` : undefined;
+  const opts = (options || []).map((o) =>
+    typeof o === "object" && o !== null ? o : { value: o, label: String(o) }
+  );
+  return (
+    <div className="chs-field">
+      {label && <label className="chs-label" htmlFor={selectId}>{label}</label>}
+      <div className="chs-select-wrap">
+        <select
+          id={selectId}
+          className={`chs-input chs-select ${invalid ? "chs-input--invalid" : ""} ${className}`}
+          value={value}
+          onChange={onChange}
+          aria-invalid={invalid || undefined}
+          aria-describedby={hintId}
+          {...rest}
+        >
+          {placeholder != null && <option value="" disabled>{placeholder}</option>}
+          {children != null
+            ? children
+            : opts.map((o) => (
+                <option key={String(o.value)} value={o.value} disabled={o.disabled}>{o.label}</option>
+              ))}
+        </select>
+        <KitIcon name="chevron-down" className="chs-select__arrow" />
+      </div>
+      {hint && <span id={hintId} className={`chs-hint ${invalid ? "chs-hint--invalid" : ""}`}>{hint}</span>}
+    </div>
+  );
+}
+
+/* ============================================================================
+   T-0547 — DataTable / Card / Badge
+   Семантические примитивы с ARIA-ролями и токенами.
+   ============================================================================ */
+
+/* -------------------------------- Badge ---------------------------------- */
+/* Inline-метка с тоном (нейтральный / info / success / warning / danger).
+   Дублирует тон цвет+текстом (§1.4.1).
+   a11y: aria-label если иконка без текста; иначе span декоративный. */
+const BADGE_TONES = {
+  neutral: "chs-badge--neutral",
+  info:    "chs-badge--info",
+  success: "chs-badge--success",
+  warning: "chs-badge--warning",
+  danger:  "chs-badge--danger",
+};
+function Badge({ tone = "neutral", children, className = "", ...rest }) {
+  const cls = BADGE_TONES[tone] || BADGE_TONES.neutral;
+  return (
+    <span className={`chs-badge ${cls} ${className}`} {...rest}>
+      {children}
+    </span>
+  );
+}
+
+/* --------------------------------- Card ---------------------------------- */
+/* Поверхность с заголовком (head), телом и опциональным подвалом (foot).
+   role=region + aria-labelledby привязывают заголовок к секции.
+   Доступен без CSS (семантика не зависит от отображения). */
+function Card({ title, children, footer, actions, className = "", labelId, role = "region", ...rest }) {
+  const autoId = useId();
+  const headingId = labelId || (title ? `chs-card-title-${autoId}` : undefined);
+  return (
+    <div
+      className={`chs-card ${className}`}
+      role={role}
+      aria-labelledby={headingId}
+      {...rest}
+    >
+      {title && (
+        <div className="chs-card__head">
+          <h2 className="chs-card__title" id={headingId}>{title}</h2>
+          {actions && <div className="chs-card__actions">{actions}</div>}
+        </div>
+      )}
+      <div className="chs-card__body">{children}</div>
+      {footer && <div className="chs-card__foot">{footer}</div>}
+    </div>
+  );
+}
+
+/* ------------------------------- DataTable ------------------------------- */
+/* Семантическая таблица: role=table + aria-label. Шапка sticky (top:0).
+   Использует нативные <table>/<thead>/<tbody>/<tr>/<th>/<td> — AT (скринридеры,
+   ВОЗ WCAG 2.1 SC 1.3.1) понимает таблицу без ARIA-обёрток.
+   Классы .chs-table/.chs-num/.chs-r/.chs-c уже в components.css (DenseTable canon).
+
+   Экспортируемые sub-компоненты: DataTableHead, DataTableBody,
+   DataTableRow, DataTableCell, DataTableHeadCell.
+   Позволяет миксовать нативный HTML (тонкая обёртка) без блокировки кастомизации. */
+
+function DataTable({ children, label, caption, className = "", ...rest }) {
+  return (
+    <div className="chs-table-wrap" style={{ overflowX: 'auto' }}>
+      <table
+        className={`chs-table ${className}`}
+        aria-label={label}
+        {...rest}
+      >
+        {caption && <caption className="chs-sr-only">{caption}</caption>}
+        {children}
+      </table>
+    </div>
+  );
+}
+
+function DataTableHead({ children, ...rest }) {
+  return <thead {...rest}>{children}</thead>;
+}
+
+function DataTableBody({ children, ...rest }) {
+  return <tbody {...rest}>{children}</tbody>;
+}
+
+function DataTableRow({ children, onClick, highlighted = false, faded = false, className = "", ...rest }) {
+  return (
+    <tr
+      className={`${highlighted ? "chs-table__row--hl" : ""} ${faded ? "chs-table__row--faded" : ""} ${className}`}
+      onClick={onClick}
+      style={onClick ? { cursor: 'pointer' } : undefined}
+      {...rest}
+    >
+      {children}
+    </tr>
+  );
+}
+
+function DataTableHeadCell({ children, numeric = false, right = false, center = false, className = "", ...rest }) {
+  const cls = [numeric || right ? "chs-num" : "", center ? "chs-c" : "", className].filter(Boolean).join(" ");
+  return (
+    <th className={cls || undefined} scope="col" {...rest}>
+      {children}
+    </th>
+  );
+}
+
+function DataTableCell({ children, numeric = false, right = false, center = false, className = "", ...rest }) {
+  const cls = [(numeric || right) ? "chs-num" : right ? "chs-r" : "", center ? "chs-c" : "", className].filter(Boolean).join(" ");
+  return (
+    <td className={cls || undefined} {...rest}>
+      {children}
+    </td>
+  );
+}
+
+export {
+  ExecGlyph, ExecutorBadge, ActorChip, MonoId, Mono, RecordRef, NodeRef, ProcessRef, StepRef, StatusChip, Button, Field, Select,
+  BudgetMeter, ReservationMeter, RoleAssignment, OpChip, DerivedChip,
+  TaskRow, AuditEvent, EXEC_META, STATUS_META,
+  KitIcon, Spinner,
+  Modal, Drawer, ConfirmDialog, EmptyState, LoadingState, Skeleton, ErrorState,
+  Popover, Tooltip, Toast, ToastViewport, useToasts, Notice,
+  Badge, Card,
+  DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
+  // T-0648: exported for unit-testability (mirrors records-form.js::deriveRecordLabel,
+  // which is exported for the SAME reason — pure label-derivation logic, no hooks).
+  asRenderableText, deriveRecordRefLabel,
+};
+// T-0683: deriveProcessRefPrimary / isMachineInst are already exported at their
+// `export function` declaration site (pure, hook-free, unit-testable — same
+// split as deriveRecordRefLabel); no duplicate named export here.

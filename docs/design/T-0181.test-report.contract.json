@@ -1,0 +1,43 @@
+{
+  "task_id": "T-0181",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1984,
+    "passed": 1984,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1: Floor-1 renderer returns aggregated JSON", "test": "report-page-render.test.ts (22 unit tests)", "result": "pass"},
+    {"ac": "AC-2: Floor-2 returns raw paginated data with RLS", "test": "report-page-render.test.ts + report_page_render.test.ts live-DB", "result": "pass"},
+    {"ac": "AC-3: invalid floor → 400 FLOOR_MISMATCH", "test": "report-page-render.test.ts + live-DB", "result": "pass"},
+    {"ac": "AC-4: unknown page_id → 404", "test": "report-page-render.test.ts + live-DB", "result": "pass"},
+    {"ac": "AC-5: stale deps → 409 STALE_DEPENDENCIES", "test": "report-page-render.test.ts + live-DB", "result": "pass"},
+    {"ac": "AC-6: no application/read grant → 403 NO_READ_GRANT", "test": "report_page_render_ac6.test.ts: AC-6-DENY-FLOOR1, AC-6-DENY-FLOOR2, AC-6-ALLOW-FLOOR1, AC-6-ALLOW-FLOOR2 (live-DB)", "result": "pass"},
+    {"ac": "AC-7: MAX_DATA_LIMIT enforced", "test": "report-page-render.test.ts unit", "result": "pass"},
+    {"ac": "AC-8: filter.value parameterized", "test": "structural check", "result": "pass"},
+    {"ac": "AC-9: withTenantTx tenant isolation (T-0144)", "test": "report-page-render.test.ts + fitness AC-TX", "result": "pass"},
+    {"ac": "AC-10: Floor-1 PDP gate (checkReadGrant)", "test": "report_page_render_ac6.test.ts ALLOW-FLOOR1 + unit", "result": "pass"},
+    {"ac": "AC-11/AC-12: injectable deps (ReportPageRenderAuthzDeps)", "test": "report-page-render.test.ts unit + fitness AC-REG", "result": "pass"},
+    {"ac": "AC-13: Floor-2 RLS pool per-tenant", "test": "report_page_render.test.ts live-DB", "result": "pass"},
+    {"ac": "AC-14: group_by guard in Floor-1", "test": "report-page-render.test.ts unit", "result": "pass"},
+    {"ac": "AC-16: injectable deps interface exported", "test": "fitness AC-REG", "result": "pass"},
+    {"ac": "AC-Floor1-PDP: genesis-owner short-circuit", "test": "unit + fitness AC-AUTHZ", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "R-6 (nit) scope-containment: grant on App-A covers all tenant pages → T-0193 created", "result": "n/a", "note": "ADR T-0121 §6 states 'через PDP T-0021' as full path; day-1 surrogate acknowledged; T-0193 tracks fix"},
+    {"check": "R-4 (nit) FIELD_KEY_SAFE_RE dashes — documented behavior, no fix", "result": "n/a", "note": "Not blocking"},
+    {"check": "R-5 (nit) denyDeps FakePool no comment — not fixed", "result": "n/a", "note": "Not blocking"},
+    {"check": "rebase onto dev — package.json union-additive (check-report-page-deps.sh + author-report-page-seed.sh + report-page-render-isolation.sh)", "result": "pass", "note": "Single conflict resolved"},
+    {"check": "config-agent-seed.test.ts green on rebased branch", "result": "pass", "note": "8/8 PASS in fitness:db"}
+  ],
+  "failures": [],
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors (pre-existing no-console warnings only)",
+    "fitness_static_checks": "PASS — all checks green including report-page-render-isolation.sh (FF-NF4, AC-AUTHZ, AC-TX, AC-REG all PASS)",
+    "vitest_unit": "1385/1385 passed, 6 skipped (flowable integration offline) — 68 test files",
+    "fitness_db_tests": "599/599 passed — report_page_render.test.ts 9/9, report_page_render_ac6.test.ts 4/4, config-agent-seed.test.ts 8/8, author_report_page_seed.test.ts 11/11, 43 test files",
+    "rebase_merge_base": "3f902e8 (merge T-0179, dev tip)",
+    "tested_commit": "069215f"
+  }
+}

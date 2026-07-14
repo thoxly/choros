@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0660",
+  "verdict": "approved",
+  "gate_seen": {
+    "green": true,
+    "red_rules": []
+  },
+  "themes_checked": [],
+  "steward_note": "r2 (re-verify после закрытия U-1). Единственный blocking r1 — undo-неатомарность — ЗАКРЫТ и передоказан судьёй: (1) паттерн сверен с исходником diagram-js в node_modules — composite-команда через вложенные modeling-вызовы в preExecute ПУБЛИЧНО ДОКУМЕНТИРОВАНА (CommandStack.js doc, строки 84-89: «the command stack will properly group all commands together into a logical unit that may be re- and undone atomically»; ровно паттерн их собственного AppendShapeHandler: $inject=['modeling'], вложение в preExecute/postExecute, execute/revert отсутствуют — оба опциональны в _internalExecute/_internalUndo; atomic-guard бросает на вложение в execute/revert; _pushAction даёт вложенным id базовой; undo() крутит while next.id===action.id). Билдер НЕ вызывает приватные API — только публичные registerHandler+execute; (2) живой undo-тест на РЕАЛЬНОМ bpmn-js Modeler в jsdom стартует с ЧИСТОГО стека (canUndo()===false до сборки — ложный pass исключён), один undo() → canUndo()===false И полная исходная топология (Эскалация/шлюз исчезли из registry, шаг→End_1 восстановлен, cancelActivity вернулся к interrupting), один redo() возвращает всё; судья прогнал СОЛО 4×2/2 (3 повтора + пост-revert) — стабильно; (3) МУТАЦИЯ СУДЬИ: applyEscalationBranch переведён на прямые modeling-вызовы мимо команды → 2/2 undo-теста RED ровно на пине canUndo()===false (expected true to be false) → revert → 2/2 GREEN. Пин настоящий, не тавтология. themes_checked=[] по-прежнему честно: живой real-click в обеих темах — часть объявленного LIVE_PROOF-шва (стенд offline); статика G2 + токены обеих тем зелёные.",
+  "findings": [
+    {
+      "id": "U-1-r2",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/canvas/escalation-branch-builder.js (BuildEscalationBranchHandler + applyEscalationBranch); web/src/canvas/escalation-branch-undo.test.js",
+      "issue": "ЗАКРЫТО (был blocking r1). Один клик = ОДНА undo-запись: composite-команда choros.escalationBranch.build по каноническому diagram-js паттерну (вложенные modeling в preExecute), доказано живым CommandStack и мутацией судьи (см. steward_note). Остаточный nit: живая симметрия undo на реальном канвасе (кнопка панели → Ctrl+Z в браузере) — проверить на той же LIVE_PROOF-фазе, что и edge-DI/темы.",
+      "suggestion": "На LIVE_PROOF: собрать ветку кнопкой на стенде и нажать Ctrl+Z один раз — вся ветка исчезает, граница таймера возвращается к сплошной."
+    },
+    {
+      "id": "U-2",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/canvas/timer-deadline-panel.jsx (interrupt-mode select; escalation-target select)",
+      "issue": "(r1, сохранено) Панель позволяет выставить «Работает параллельно» независимо от кнопки сборки — пользователь может вручную нарисовать зомби-форму в обход аффорданса. НЕ дыра: publish-linter (timer_escalation_no_convergence) — реальный backstop, проверен судьёй живьём независимым probe. Defense-in-depth корректен.",
+      "suggestion": "Опционально: inline-подсказка в панели при non-interrupting без схождения (мягкое предупреждение до 422 на publish). Не blocking."
+    },
+    {
+      "id": "U-3",
+      "severity": "nit",
+      "root": "A",
+      "location": "web/src/canvas/timer-deadline-panel.jsx (пред-существующие select-ы Тип срока/Кому эскалация)",
+      "issue": "(r1, сохранено) Только новый interrupt-mode select несёт aria-label; пред-существующие select-ы панели (из T-0458) без htmlFor/id-ассоциации. Пред-существующий паттерн, НЕ регресс T-0660.",
+      "suggestion": "Follow-up вне T-0660: протянуть htmlFor/id или aria-label на все select-ы bpmn-properties-панели."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    { "ac": "AC7-язык: ноль жаргона в видимом тексте (человеческие «Останавливает шаг»/«Работает параллельно (напоминание)»/«Продолжить»/«Эскалация»)", "covered": true },
+    { "ac": "Токены обеих тем: все --chs-* существуют, G2 theme-pairing PASS, 0 хардкод-цветов в диффе", "covered": true },
+    { "ac": "Фокус/ARIA: interrupt-select aria-label, кнопка aria-disabled+aria-label+человеческая причина, buildNote role=status", "covered": true },
+    { "ac": "Кнопка не «мёртвая»: disabled ВСЕГДА с человеческой причиной (canBuildEscalationBranch возвращает reason на каждой ветке ok:false)", "covered": true },
+    { "ac": "Дисклоужер: interrupt-контрол и кнопка скрыты для промежуточного (свободного) таймера", "covered": true },
+    { "ac": "Undo одного клика откатывает ЦЕЛИКОМ (одна композитная команда; живой CommandStack + мутация судьи RED→GREEN)", "covered": true },
+    { "ac": "Живой real-click в обеих темах (D-062) — held на LIVE_PROOF (стенд offline), статика зелёная", "covered": false }
+  ]
+}

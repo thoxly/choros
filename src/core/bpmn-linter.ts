@@ -1,0 +1,1904 @@
+/**
+ * T-0027: BPMN Deploy-time Linter — Library
+ *
+ * Pure function. No I/O. No network. No DB.
+ *
+ * @deploy-gate-contract
+ * Returns { ok: true } iff the BPMN XML contains no raw-object bindings and is
+ * well-formed per the linter's whitelist parser.
+ *
+ * T-0058/T-0064 MUST call lintBpmn() before accepting any BPMN deploy request
+ * and MUST reject with HTTP 422 if ok: false.
+ * See docs/design/T-0027-bpmn-linter-deploy-contract.md.
+ */
+
+import { tokenize } from "./bpmn-xml-parser.js";
+import type { Attr } from "./bpmn-xml-parser.js";
+import { parseHandle } from "./object-handle.js";
+import {
+  checkBindingCompat,
+  KEY_RE,
+  type BindingField,
+} from "./binding-compat.js";
+import type { DmnRuleTable } from "./dmn-middle.js";
+
+// ---------------------------------------------------------------------------
+// Exported types (frozen public surface — T-0058/T-0064 wire against this)
+// ---------------------------------------------------------------------------
+
+// T-0072: "binding_mismatch" added additively (NF-4 / AC-13 — no existing tests broken).
+// T-0436: "gateway_rule_mismatch" added additively — publish-time coherence guard.
+// T-0456 [D8-R1]: "parallel_gateway_imbalance" added additively — AND split/join
+//   well-formedness guard (balanced split↔join, no dangling parallel gateway).
+// T-0458 [D8-R3]: "timer_malformed" added additively — boundary/intermediate timer
+//   well-formedness guard (valid timer body + boundary attach + outgoing escalation).
+// T-0459 [D8-R4]: "message_event_incoherent" added additively — message/signal
+//   catch coherence guard. A message-catch (receiveTask / intermediateCatchEvent /
+//   boundaryEvent carrying a message|signal definition) MUST have a TIMEOUT (R3) so
+//   it can never wait forever, and must declare a correlation field. Self-contained
+//   (checkMessageEventCoherence) — a sibling task may also touch this file.
+// T-0460 [D8-R5]: "agent_task_incoherent" added additively — authored agentTask
+//   coherence guard. A serviceTask the author marked as an agent step
+//   (choros:executorType="agent") MUST resolve to a known agentRef AND MUST carry the
+//   agent-step external-task shape (flowable:type="external" + flowable:topic) after the
+//   publish transform — otherwise the bridge never enqueues an agent job (half-wired
+//   agent step). Self-contained (checkAgentTaskCoherence) — a sibling task may also
+//   touch this file.
+// T-0612: "timer_escalation_no_convergence" added additively — closes the
+//   "note on whole-process balance ... out of v1 scope" gap this file's own
+//   T-0456 comment named, SCOPED to the one shape that produces a live zombie
+//   instance (act_hi_procinst.end_time stays NULL forever): a NON-INTERRUPTING
+//   boundary timer (cancelActivity="false") whose escalation branch never
+//   reconnects to the main flow before reaching its own endEvent. When the
+//   guarded task completes normally (finishes before the timer fires), Flowable
+//   leaves the escalation branch's token alive forever on that dangling branch
+//   — the main path reaches ITS endEvent, but the PROCESS INSTANCE never ends,
+//   because BPMN only ends an instance when every token has reached an end.
+//   See docs/design/ADR-T0612-purchase-escalation-convergence.md.
+// T-0661 [ADR-T0612 §8 addendum]: "timer_escalation_unresolved_concurrency" added
+//   additively — closes a SECOND, distinct false-negative the T-0612 check above
+//   left open. Flow-convergence (T-0612's rule) is NECESSARY but NOT SUFFICIENT:
+//   a converging exclusiveGateway is an UNCONTROLLED MERGE — when a non-interrupting
+//   boundary timer actually FIRES, it spawns a second, independent concurrent token
+//   (the guarded task's own token stays live), and the merge gateway passes EACH
+//   token through to its outgoing flow independently. If that flow only reaches a
+//   plain endEvent, BPMN requires BOTH tokens to be consumed before the instance
+//   completes — the process hangs until the second, now-moot task is ALSO
+//   completed. Only a scope-terminating construct (a terminateEndEvent, scoped
+//   local to an enclosing subProcess so it does not kill unrelated top-level
+//   branches) can extinguish the second token deterministically. This check
+//   verifies, for every non-interrupting boundary timer whose escalation branch
+//   already passed T-0612's convergence check, that a terminateEndEvent is also
+//   reachable from that branch. See ADR §8 (D5/D6) for the full rationale and the
+//   corrected Flowable join-semantics analysis.
+export type LintViolationType =
+  | "raw_object_binding"
+  | "malformed_xml"
+  | "binding_mismatch"
+  | "gateway_rule_mismatch"
+  | "parallel_gateway_imbalance"
+  | "timer_malformed"
+  | "message_event_incoherent"
+  | "agent_task_incoherent"
+  | "timer_escalation_no_convergence"
+  | "timer_escalation_unresolved_concurrency"
+  // T-0559: publish-coherence — a live (published) process binds a sandbox (draft)
+  // application. Emitted by the publish-time DB-backed gate in process-defs.ts, NOT
+  // by the pure linter (which has no DB). Reuses the LintViolation envelope so the
+  // 422 response renders identically to the other publish-time violations.
+  | "app_binding_unpublished"
+  // T-0643 [анти-кейс/BUG-017]: the step-result TARGET registry a bound process's
+  // approve step would write into (process_app_binding.target_registry_slug, or
+  // the config-primitive default when unset) does not resolve to any registry_def
+  // under the bound application. Pre-T-0643, this condition was ONLY discovered at
+  // the FIRST approve (StepTargetUnresolvedError, 422, src/db/step-applier.ts) —
+  // late (a freshly-authored process+application from the constructor would publish
+  // clean and only fail when a real human tried to approve their first task). This
+  // publish-time gate (buildUnresolvedTargetRegistryViolations, process-defs.ts)
+  // surfaces the SAME misconfiguration early, mirroring app_binding_unpublished's
+  // shape. Emitted by the DB-backed gate, not the pure linter.
+  | "step_target_unresolved";
+
+export interface LintViolation {
+  type: LintViolationType;
+  elementId: string; // BPMN element id attribute, or "" if absent
+  elementKind: string; // "serviceTask" | "userTask" | "sendTask" | "conditionExpression" | "dataObject" | "dataObjectReference" | "malformed_xml"
+  message: string;
+}
+
+export type LintResult =
+  | { ok: true }
+  | { ok: false; violations: LintViolation[] };
+
+// ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
+
+interface ScanContext {
+  elementKind: string;
+  elementId: string;
+  inExtension: boolean;
+  isConditionExpression: boolean;
+  isDataObject: boolean;
+  textBuffer: string;
+}
+
+// ---------------------------------------------------------------------------
+// Scoped element names
+// ---------------------------------------------------------------------------
+
+/** Element local names that carry binding sites we must scan. */
+const SCOPED_ELEMENTS = new Set([
+  "serviceTask",
+  "userTask",
+  "sendTask",
+  "conditionExpression",
+  "dataObject",
+  "dataObjectReference",
+]);
+
+/** Extension element local names that mark the binding zone inside a scoped task. */
+const EXTENSION_CONTAINER_NAMES = new Set([
+  "extensionElements",
+  // Flowable / Camunda / Activiti extension sub-elements
+  "field",
+  "in",
+  "out",
+  "executionListener",
+  "taskListener",
+  "properties",
+  "property",
+  "formProperty",
+  "formField",
+]);
+
+// ---------------------------------------------------------------------------
+// Record-identity / payload keys (ADR §2.3)
+// ---------------------------------------------------------------------------
+
+const RAW_OBJECT_KEYS = new Set([
+  "registryId",
+  "recordId",
+  "applicationId",
+  "data",
+  "fields",
+  "payload",
+  "view",
+]);
+
+// ---------------------------------------------------------------------------
+// Raw-object detector (ADR §2.3 pipeline)
+// ---------------------------------------------------------------------------
+
+/**
+ * Determines whether a candidate string value represents a raw-object binding.
+ *
+ * Pipeline:
+ *   1. Attempt parseHandle(trimmed) first — if it succeeds, value is a valid
+ *      handle: NOT a violation. This short-circuits the secondary scan for
+ *      serialized handles (which contain registryId/recordId nested in ref).
+ *   2. If value starts with '{' (after trimming): attempt JSON.parse.
+ *      - JSON.parse throws → not valid JSON → proceed to secondary scan.
+ *      - JSON.parse succeeds and result is a plain object with record keys → violation.
+ *   3. Secondary embedded-object scan: for EL / script bodies, any embedded
+ *      '{...}' substring is also subjected to the same check.
+ *   4. EL expressions like "${someVar}", primitives, plain strings → false.
+ */
+function isRawObjectBinding(value: string): boolean {
+  const trimmed = value.trim();
+
+  // Step 1: If the trimmed value is a valid serialized handle, it is NOT a violation.
+  // This must come first to avoid false-positives on handles that contain nested
+  // record-identity keys inside their `ref` field.
+  if (trimmed.startsWith("{")) {
+    try {
+      parseHandle(trimmed);
+      // parseHandle succeeded → valid handle → not a violation
+      return false;
+    } catch {
+      // Not a valid handle — continue to step 2
+    }
+
+    // Step 2: attempt JSON.parse on the whole trimmed value
+    const parsed = tryJsonParse(trimmed);
+    if (parsed !== null && isPlainObject(parsed)) {
+      if (hasRawObjectKey(parsed as Record<string, unknown>)) {
+        // Has record keys and is not a valid handle → violation
+        return true;
+      }
+    }
+    // Not a raw-object at top level; fall through to secondary scan
+  }
+
+  // Step 3: Secondary scan — look for embedded JSON objects inside EL / script strings
+  // This catches: ${execution.setVariable('x', {"registryId":"y"})} and similar
+  return containsEmbeddedRawObject(value);
+}
+
+/**
+ * Scans for embedded raw-object literals inside a larger string.
+ * Finds all '{' characters and tests substrings for the raw-object shape.
+ */
+function containsEmbeddedRawObject(value: string): boolean {
+  let searchFrom = 0;
+  while (true) {
+    const braceIdx = value.indexOf("{", searchFrom);
+    if (braceIdx === -1) break;
+
+    // Try to parse a JSON object starting at this brace
+    // We progressively extend the substring until JSON.parse succeeds or we've tried all
+    // Try from the brace to various closing braces
+    const rest = value.slice(braceIdx);
+    const candidate = extractJsonObject(rest);
+    if (candidate !== null) {
+      const parsed = tryJsonParse(candidate);
+      if (parsed !== null && isPlainObject(parsed) && hasRawObjectKey(parsed as Record<string, unknown>)) {
+        // Check if it's a valid handle
+        try {
+          parseHandle(candidate);
+          // Valid handle — continue searching for other objects
+        } catch {
+          return true; // raw object embedded in expression
+        }
+      }
+    }
+
+    searchFrom = braceIdx + 1;
+  }
+  return false;
+}
+
+/**
+ * Attempt to extract a complete JSON object substring starting at position 0.
+ * Returns the shortest valid JSON object string, or null if none found.
+ */
+function extractJsonObject(s: string): string | null {
+  if (!s.startsWith("{")) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"' && !escape) {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        return s.slice(0, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Safe JSON.parse — returns null if parsing fails.
+ */
+function tryJsonParse(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns true if value is a non-null, non-array object.
+ */
+function isPlainObject(value: unknown): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Returns true if the object has at least one record-identity or payload key.
+ */
+function hasRawObjectKey(obj: Record<string, unknown>): boolean {
+  for (const key of Object.keys(obj)) {
+    if (RAW_OBJECT_KEYS.has(key)) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// T-0072: LintOpts — optional second argument for binding compat check
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional opts for lintBpmn (T-0072 additive extension).
+ * bindingSchema: if supplied, triggers binding_mismatch check using
+ *   checkBindingCompat(bindingSchema, bpmnVarNames).
+ * Absent (undefined) → identical behavior to T-0027 (NF-4 / AC-13).
+ *
+ * T-0436: ruleTables — if supplied, triggers gateway_rule_mismatch check.
+ * For every exclusiveGateway with ≥2 conditioned outgoing flows, the gateway's
+ * choros:routingVar is matched against the routing-outcome name of published
+ * rule tables. A mismatch (no table for the variable, or a flow literal not
+ * covered by any rule) produces a gateway_rule_mismatch violation → 422.
+ * Absent (undefined) → no gateway coherence check (identical T-0072 behavior).
+ */
+export interface LintOpts {
+  bindingSchema?: BindingField[];
+  ruleTables?: DmnRuleTable[];
+}
+
+// ---------------------------------------------------------------------------
+// T-0072: EL variable extractor regex (ADR §2.4, NF-5)
+//
+// Best-effort: extracts the ROOT variable name from EL expressions.
+// ${supplier}         → "supplier"
+// ${supplier.name}    → "supplier"   (dot-walk — only root extracted)
+// ${amount > 100}     → "amount"
+// ${a && b}           → "a"          (only first root extracted — known limitation)
+//
+// Ложные отрицания допустимы (NF-5). Ложных срабатываний нет:
+// регекс требует первый символ буква/underscore — цифры/символы не пропускаются.
+// Закреплено этим ADR; полный OGNL/MVEL-парсер вне скоупа T-0072.
+// ---------------------------------------------------------------------------
+
+const EL_VAR_RE = /\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\b/g;
+
+// ---------------------------------------------------------------------------
+// Main lintBpmn function
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates a BPMN 2.0 XML document for raw-object binding violations.
+ *
+ * @deploy-gate-contract
+ * Pure function — no I/O, no network, no DB, no side effects.
+ * T-0058/T-0064 MUST call this before accepting any BPMN deploy request.
+ *
+ * @param xml  - The BPMN 2.0 XML document as a UTF-8 string.
+ * @param opts - Optional. T-0072: if opts.bindingSchema is supplied, an
+ *               additional binding_mismatch check is performed after the
+ *               raw-object check. Without opts the function is byte-for-byte
+ *               identical to T-0027 behavior (NF-4 / AC-13).
+ * @returns { ok: true } if the document passes all checks.
+ *          { ok: false; violations: LintViolation[] } if any violation is found,
+ *          including malformed XML (fail-closed).
+ */
+export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
+  const violations: LintViolation[] = [];
+
+  // T-0072: collect bpmnVarNames during the token walk (only when bindingSchema supplied).
+  // The Set is populated aditively in the token loop below; checkBindingCompat is
+  // called after the walk completes (post-walk, before final violations check).
+  const bpmnVarNames: Set<string> | null = opts?.bindingSchema !== undefined
+    ? new Set<string>()
+    : null;
+
+  // T-0436: collect gateway info during the token walk (only when ruleTables supplied).
+  // gateways: map from gateway elementId (or generated key) to GatewayInfo.
+  //
+  // Fix (review finding): conditions are associated to gateways by sequenceFlow sourceRef,
+  // NOT by variable name. When two gateways share the same routingVar, keying by varName
+  // would merge their branch literals and cause false-positive 422 / misattribution.
+  // Correct design: each <sequenceFlow sourceRef="<gatewayId>"> owns its condition;
+  // we build literalsByGatewayId keyed by the gateway element id.
+  const collectGateways = opts?.ruleTables !== undefined;
+  const gatewayMap = new Map<string, GatewayInfo>(); // key = elementId or index
+  let gatewayIndex = 0;
+  // literalsByGatewayId: maps gateway element id → array of {varName, literal} pairs
+  // collected from the sequenceFlows whose sourceRef points at that gateway id.
+  const literalsByGatewayId = new Map<string, Array<{ varName: string; literal: string }>>();
+  // State for collecting conditionExpression text in this scan.
+  // currentSeqFlowSourceRef: sourceRef of the sequenceFlow currently being parsed.
+  let inCondExprForGateway = false;
+  let condExprBuffer = "";
+  let currentSeqFlowSourceRef = "";
+
+  // T-0456 [D8-R1]: parallelGateway collection — always on (no opts gate; the AND
+  // split/join well-formedness check is structural, needs no rule tables). We track
+  // every parallelGateway element id, and collect ALL sequenceFlow source/target refs.
+  // Refs are RESOLVED to gateways AFTER the full walk (BPMN does NOT guarantee a flow
+  // is declared after its referenced gateway — counting inline would miss earlier flows).
+  const parallelGatewayIds = new Set<string>(); // declared parallelGateway element ids
+  const allFlowSourceRefs: string[] = []; // sourceRef of every sequenceFlow (= outgoing of source node)
+  const allFlowTargetRefs: string[] = []; // targetRef of every sequenceFlow (= incoming of target node)
+
+  // T-0612: full sequenceFlow edge list (paired source→target, same index as the two
+  // arrays above but kept as pairs for graph traversal) + every endEvent element id.
+  // Collected unconditionally (structural, no opts gate) — feeds
+  // checkTimerEscalationConvergence, which needs to WALK the flow graph forward from
+  // an escalation target, not just count in/out arity per node (T-0456's per-gateway
+  // counts are insufficient for this — the defect is a REACHABILITY question: does the
+  // escalation branch ever rejoin a path that reaches the same end as the main flow).
+  const flowEdges: Array<{ source: string; target: string }> = [];
+  const endEventIds = new Set<string>();
+  // T-0661: endEvent ids that carry a <terminateEventDefinition> child (self-close
+  // or paired-empty) — a SCOPE-LOCAL terminate (terminateAll defaults to "false",
+  // which is exactly the D5-required shape; this linter does not need to read
+  // terminateAll itself — see checkTimerEscalationConvergence doc-comment for why
+  // reachability alone is the right question here). Populated via currentEndEventId
+  // below, mirroring the existing currentTimerEvent cursor pattern.
+  const terminateEndEventIds = new Set<string>();
+  let currentEndEventId: string | null = null;
+
+  // T-0458 [D8-R3]: timer event collection — always on (structural well-formedness,
+  // no opts gate). We collect every boundaryEvent / intermediateCatchEvent that carries
+  // a <timerEventDefinition>, plus the timer-body text (timeDuration / timeDate /
+  // timeCycle) and the boundary's attachedToRef. Flows are resolved post-walk (BPMN
+  // does not guarantee a timer's outgoing flow is declared after the timer element).
+  const timerEvents: TimerEventCollect[] = [];
+  // Cursor for the event element currently being parsed (null when not inside one).
+  // Both boundaryEvent and intermediateCatchEvent can host a timerEventDefinition.
+  let currentTimerEvent: TimerEventCollect | null = null;
+  // Tracks which timer-body child (timeDuration/timeDate/timeCycle) we are inside so
+  // the text token can be attributed to it.
+  let inTimerBodyChild: TimerBodyKind | null = null;
+
+  // T-0459 [D8-R4]: message/signal catch collection — always on (structural
+  // well-formedness, no opts gate). We collect every receiveTask /
+  // intermediateCatchEvent / boundaryEvent that carries a <messageEventDefinition>
+  // or <signalEventDefinition>, plus the boundary timers (attachedToRef) so the
+  // coherence check can verify each message-catch is GUARDED BY A TIMEOUT (R3). The
+  // correlationField is read off the choros:correlationField attribute. Resolved
+  // post-walk against the collected boundary-timer attach set.
+  const messageCatchEvents: MessageCatchCollect[] = [];
+  // Cursor for the message-catch element currently being parsed (null when outside).
+  let currentMessageCatch: MessageCatchCollect | null = null;
+
+  // T-0460 [D8-R5]: authored agentTask collection — always on (structural coherence,
+  // no opts gate). Every serviceTask carrying choros:executorType="agent" is collected
+  // off its open tag (executorType / agentRef / flowable:type / flowable:topic are all
+  // open-tag attributes). The coherence check (checkAgentTaskCoherence) verifies each
+  // resolves to a known agentRef AND received the agent-step external shape post-transform.
+  const agentTasks: AgentTaskCollect[] = [];
+  // Every (attachedToRef) of a boundary TIMER — the set of activity/event ids that
+  // have a deadline timer guarding them. A message-catch is timeout-covered iff its
+  // own id (intermediate/receiveTask) or its attachedToRef (boundary message) is in
+  // this set. Populated during the walk; consumed post-walk.
+  const boundaryTimerAttachRefs = new Set<string>();
+
+  // Validate UTF-8 by checking for replacement characters that Node may have
+  // inserted for invalid byte sequences. We operate on a JS string, so we
+  // check for U+FFFD which signals lossy decoding.
+  // Note: if the caller decoded bytes lossily, U+FFFD may appear.
+  // We reject any document containing U+FFFD.
+  if (xml.includes("�")) {
+    return {
+      ok: false,
+      violations: [{
+        type: "malformed_xml",
+        elementId: "",
+        elementKind: "malformed_xml",
+        message: "document contains invalid UTF-8 sequences (U+FFFD replacement character detected)",
+      }],
+    };
+  }
+
+  // Element stack for tracking open elements and scan contexts
+  // Used to detect unclosed tags at end of document (malformed-closed check)
+  const elementStack: Array<{ localName: string; id: string }> = [];
+  const contextStack: ScanContext[] = [];
+  let hadAnyElement = false;
+
+  const tokens = tokenize(xml);
+
+  for (const token of tokens) {
+    if (token.kind === "parse-error") {
+      return {
+        ok: false,
+        violations: [{
+          type: "malformed_xml",
+          elementId: "",
+          elementKind: "malformed_xml",
+          message: token.reason,
+        }],
+      };
+    }
+
+    if (token.kind === "open-tag" || token.kind === "self-close-tag") {
+      const { localName, attrs } = token;
+
+      // Get element id
+      const idAttr = attrs.find((a) => a.name === "id");
+      const elementId = idAttr ? idAttr.value : "";
+
+      hadAnyElement = true;
+      elementStack.push({ localName, id: elementId });
+
+      // Check if this is a scoped element
+      if (SCOPED_ELEMENTS.has(localName)) {
+        const isConditionExpr = localName === "conditionExpression";
+        const isDataObj = localName === "dataObject" || localName === "dataObjectReference";
+
+        const ctx: ScanContext = {
+          elementKind: localName,
+          elementId,
+          inExtension: false,
+          isConditionExpression: isConditionExpr,
+          isDataObject: isDataObj,
+          textBuffer: "",
+        };
+        contextStack.push(ctx);
+
+        // Scan attributes of scoped elements for raw-object bindings
+        // (not needed for conditionExpression/dataObject — those rely on text content)
+        if (!isConditionExpr && !isDataObj) {
+          // Scan all attribute values of the task element itself
+          for (const attr of attrs) {
+            if (attr.name !== "id" && attr.name !== "name") {
+              checkAttrValue(attr, localName, elementId, violations);
+            }
+          }
+        }
+      } else if (contextStack.length > 0) {
+        const ctx = contextStack[contextStack.length - 1];
+
+        // Check if entering an extension element context
+        if (EXTENSION_CONTAINER_NAMES.has(localName)) {
+          ctx.inExtension = true;
+        }
+
+        // Scan attributes of extension elements
+        if (ctx.inExtension || ctx.isDataObject) {
+          for (const attr of attrs) {
+            if (attr.name !== "id" && attr.name !== "name") {
+              checkAttrValue(attr, ctx.elementKind, ctx.elementId, violations);
+            }
+          }
+        }
+
+        // T-0072: varName extraction from extension variable sources (ADR §2.4).
+        // Sources #1/#2: <in name="X"> / <out name="Y"> (call-activity mappings)
+        // Sources #3/#4: <formProperty id="Z"> / <formField id="W"> (form element ids)
+        // Key shape is filtered through KEY_RE to avoid injecting malformed names.
+        if (bpmnVarNames !== null) {
+          extractVarNameFromToken(localName, attrs, bpmnVarNames);
+        }
+      } else if (bpmnVarNames !== null) {
+        // T-0072: extract varNames even from top-level (non-child) occurrences
+        // e.g. <in> / <out> / <formProperty> / <formField> appearing without a
+        // scoped parent in this document. Best-effort.
+        extractVarNameFromToken(localName, attrs, bpmnVarNames);
+      }
+
+      // T-0436: gateway collection — track exclusiveGateway elements for coherence check.
+      // The routingVar attribute is written by gateway-condition-panel.jsx as
+      // choros:routingVar; after namespace prefix stripping by the tokenizer,
+      // the attribute local name is "routingVar".
+      if (collectGateways && localName === "exclusiveGateway") {
+        const routingVarAttr = attrs.find((a) => a.name === "routingVar");
+        const routingVar = routingVarAttr?.value ?? "";
+        const gwKey = elementId || `__gw_${gatewayIndex}`;
+        gatewayIndex++;
+        gatewayMap.set(gwKey, { id: elementId, routingVar, branchLiterals: [] });
+      }
+
+      // T-0436: track sequenceFlow sourceRef so conditionExpression can be associated
+      // to the correct owning gateway by gateway id, NOT by variable name.
+      if (collectGateways && localName === "sequenceFlow") {
+        const sourceRefAttr = attrs.find((a) => a.name === "sourceRef");
+        currentSeqFlowSourceRef = sourceRefAttr?.value ?? "";
+      }
+
+      // T-0456 [D8-R1]: collect parallelGateway element ids (resolved after the walk).
+      if (localName === "parallelGateway") {
+        // An id-less parallelGateway is itself malformed for flow-balance purposes; the
+        // structural check below flags any parallel gateway it can identify. Without an
+        // id we cannot link flows to it, so it would appear as 0/0 (dangling) — which is
+        // the correct outcome. Use a synthetic key so it is still surfaced.
+        parallelGatewayIds.add(elementId || `__pg_anon_${parallelGatewayIds.size}`);
+      }
+
+      // T-0456 [D8-R1]: collect EVERY sequenceFlow's source/target ref. Resolved to
+      // gateways post-walk (declaration order is not guaranteed in BPMN). Independent
+      // of the T-0436 collectGateways flag — runs on every publish.
+      if (localName === "sequenceFlow") {
+        const srcAttr = attrs.find((a) => a.name === "sourceRef");
+        const tgtAttr = attrs.find((a) => a.name === "targetRef");
+        if (srcAttr?.value) allFlowSourceRefs.push(srcAttr.value);
+        if (tgtAttr?.value) allFlowTargetRefs.push(tgtAttr.value);
+        // T-0612: keep the pair together for graph traversal (see flowEdges above).
+        if (srcAttr?.value && tgtAttr?.value) {
+          flowEdges.push({ source: srcAttr.value, target: tgtAttr.value });
+        }
+      }
+
+      // T-0612: collect every endEvent element id — the convergence check needs to
+      // know which reached nodes are a TRUE process end (vs. just "no more collected
+      // edges" for a node this pure structural scan does not otherwise track, e.g. a
+      // userTask that is simply the last node authored so far).
+      if (localName === "endEvent") {
+        if (elementId) endEventIds.add(elementId);
+        // T-0661: open a cursor so a <terminateEventDefinition> child (below) can be
+        // attributed to THIS endEvent's id. Reset on close/self-close (see both
+        // branches further down) — no stack needed, endEvent never nests endEvent.
+        currentEndEventId = elementId || null;
+      }
+
+      // T-0661: a <terminateEventDefinition> child (self-close or paired-empty) marks
+      // its enclosing endEvent as a scope-local terminate. Runs for both open-tag and
+      // self-close-tag tokens (mirrors the timerEventDefinition detection below it).
+      if (currentEndEventId !== null && localName === "terminateEventDefinition") {
+        terminateEndEventIds.add(currentEndEventId);
+      }
+
+      // T-0458 [D8-R3]: timer event collection. boundaryEvent / intermediateCatchEvent
+      // open a timer-event cursor; the <timerEventDefinition> child marks it as a timer;
+      // timeDuration/timeDate/timeCycle children carry the timer body text. Resolved to
+      // outgoing flows post-walk. cancelActivity (interrupting) is read off boundaryEvent.
+      if (localName === "boundaryEvent" || localName === "intermediateCatchEvent") {
+        const attachedToAttr = attrs.find((a) => a.name === "attachedToRef");
+        // cancelActivity defaults to "true" in BPMN when absent (interrupting boundary).
+        const cancelAttr = attrs.find((a) => a.name === "cancelActivity");
+        currentTimerEvent = {
+          id: elementId,
+          kind: localName === "boundaryEvent" ? "boundary" : "intermediate",
+          attachedToRef: attachedToAttr?.value ?? "",
+          cancelActivity: cancelAttr ? cancelAttr.value !== "false" : true,
+          hasTimerDef: false,
+          timerBodyKind: null,
+          timerBody: "",
+        };
+      }
+      if (currentTimerEvent !== null && localName === "timerEventDefinition") {
+        currentTimerEvent.hasTimerDef = true;
+      }
+      if (currentTimerEvent !== null) {
+        const tbk = TIMER_BODY_NAMES[localName];
+        if (tbk !== undefined) {
+          inTimerBodyChild = tbk;
+          currentTimerEvent.timerBodyKind = tbk;
+          // Self-closing <timeDuration/> (no text) leaves body empty → caught as malformed.
+        }
+      }
+
+      // T-0459 [D8-R4]: open a message-catch cursor for the message-family carriers.
+      // receiveTask is itself a message wait; boundaryEvent / intermediateCatchEvent
+      // carry the message/signal via a child <messageEventDefinition>/<signalEventDefinition>.
+      // We open the cursor on ALL three and confirm the message/signal def on the
+      // child (a boundary/intermediate that turns out to carry only a timer def is
+      // discarded — it is a timer, handled by the T-0458 path, not a message-catch).
+      if (
+        localName === "receiveTask" ||
+        localName === "boundaryEvent" ||
+        localName === "intermediateCatchEvent"
+      ) {
+        const attachedToAttr = attrs.find((a) => a.name === "attachedToRef");
+        const corrFieldAttr = attrs.find((a) => a.name === "correlationField");
+        const msgNameAttr = attrs.find((a) => a.name === "messageName");
+        currentMessageCatch = {
+          id: elementId,
+          kind:
+            localName === "receiveTask"
+              ? "receiveTask"
+              : localName === "boundaryEvent"
+                ? "boundaryMessage"
+                : "intermediateMessage",
+          attachedToRef: attachedToAttr?.value ?? "",
+          correlationField: corrFieldAttr?.value ?? "",
+          messageName: msgNameAttr?.value ?? "",
+          // receiveTask IS a message wait by element type; boundary/intermediate must
+          // prove a message|signal child def below.
+          hasMessageDef: localName === "receiveTask",
+        };
+      }
+      if (
+        currentMessageCatch !== null &&
+        (localName === "messageEventDefinition" || localName === "signalEventDefinition")
+      ) {
+        currentMessageCatch.hasMessageDef = true;
+      }
+
+      // T-0460 [D8-R5]: collect authored agent serviceTasks. Everything the coherence
+      // check needs (executorType / agentRef / flowable:type / flowable:topic / id) lives
+      // on the serviceTask OPEN tag, so we collect it inline (no close-tag tracking). Only
+      // serviceTasks the author marked as an agent step are kept.
+      if (localName === "serviceTask") {
+        const executorType = attrs.find((a) => a.name === "executorType")?.value ?? "";
+        if (executorType === "agent") {
+          agentTasks.push({
+            id: elementId,
+            agentRef: attrs.find((a) => a.name === "agentRef")?.value ?? "",
+            flowableType: attrs.find((a) => a.name === "type")?.value ?? "",
+            topic: attrs.find((a) => a.name === "topic")?.value ?? "",
+          });
+        }
+      }
+
+      // T-0436: conditionExpression gateway collection.
+      // When we encounter a <conditionExpression> element (already tracked by
+      // SCOPED_ELEMENTS → contextStack), we also track it in our parallel
+      // gateway buffer. After the close-tag, we parse the condition and add
+      // the literal to the owning gateway via the sequenceFlow's sourceRef.
+      if (collectGateways && localName === "conditionExpression") {
+        inCondExprForGateway = true;
+        condExprBuffer = "";
+      }
+
+      // Self-close: immediately pop the scoped context if it was just pushed
+      if (token.kind === "self-close-tag") {
+        // T-0661: a self-closing <endEvent id="X"/> has no children by definition
+        // (nothing to capture), so close its cursor immediately. A paired
+        // <endEvent>...</endEvent> closes its cursor at the close-tag branch below.
+        if (localName === "endEvent") {
+          currentEndEventId = null;
+        }
+        // T-0458 [D8-R3]: a self-closing timer-body child (<timeDuration/>) carries no
+        // text → leave timerBody empty (caught as malformed) and stop accumulating.
+        if (currentTimerEvent !== null && TIMER_BODY_NAMES[localName] !== undefined) {
+          inTimerBodyChild = null;
+        }
+        // A self-closing boundary/intermediate timer host (no children) cannot carry a
+        // timerEventDefinition, so it is never committed here; reset the cursor anyway.
+        if (
+          currentTimerEvent !== null &&
+          (localName === "boundaryEvent" || localName === "intermediateCatchEvent")
+        ) {
+          if (currentTimerEvent.hasTimerDef) {
+            timerEvents.push(currentTimerEvent);
+            // T-0459 [D8-R4]: a committed BOUNDARY timer guards its attachedToRef.
+            if (currentTimerEvent.kind === "boundary" && currentTimerEvent.attachedToRef) {
+              boundaryTimerAttachRefs.add(currentTimerEvent.attachedToRef);
+            }
+          }
+          currentTimerEvent = null;
+          inTimerBodyChild = null;
+        }
+        // T-0459 [D8-R4]: a self-closing message-catch host (no child def) is not a
+        // message-catch unless it is a receiveTask (which is one by element type).
+        if (
+          currentMessageCatch !== null &&
+          (localName === "receiveTask" ||
+            localName === "boundaryEvent" ||
+            localName === "intermediateCatchEvent")
+        ) {
+          if (currentMessageCatch.hasMessageDef) {
+            messageCatchEvents.push(currentMessageCatch);
+          }
+          currentMessageCatch = null;
+        }
+        elementStack.pop();
+        if (contextStack.length > 0) {
+          const ctx = contextStack[contextStack.length - 1];
+          if (elementStack.length === 0 || elementStack[elementStack.length - 1]?.localName !== ctx.elementKind) {
+            // Check if the self-closed element was the scoped element itself
+            // We need to verify the context was for this element
+            const peeked = contextStack[contextStack.length - 1];
+            if (peeked.elementKind === localName && peeked.elementId === elementId) {
+              // Flush textBuffer for self-closing scoped elements (empty)
+              contextStack.pop();
+            }
+          }
+        }
+      }
+
+      continue;
+    }
+
+    if (token.kind === "text") {
+      if (contextStack.length > 0) {
+        const ctx = contextStack[contextStack.length - 1];
+        // Accumulate text for conditionExpression, dataObject, or extension contexts
+        if (ctx.isConditionExpression || ctx.isDataObject || ctx.inExtension) {
+          ctx.textBuffer += token.value;
+        }
+      }
+      // T-0436: accumulate text for gateway conditionExpression buffer in parallel.
+      if (inCondExprForGateway) {
+        condExprBuffer += token.value;
+      }
+      // T-0458 [D8-R3]: accumulate timer-body text (timeDuration / timeDate / timeCycle).
+      if (currentTimerEvent !== null && inTimerBodyChild !== null) {
+        currentTimerEvent.timerBody += token.value;
+      }
+      continue;
+    }
+
+    if (token.kind === "close-tag") {
+      const { localName } = token;
+
+      // Pop element stack
+      if (elementStack.length > 0) {
+        elementStack.pop();
+      }
+
+      // Check if this closes a scoped element
+      if (contextStack.length > 0) {
+        const ctx = contextStack[contextStack.length - 1];
+
+        if (ctx.elementKind === localName) {
+          // Flush accumulated text for conditionExpression / dataObject
+          if ((ctx.isConditionExpression || ctx.isDataObject) && ctx.textBuffer.trim().length > 0) {
+            checkTextContent(ctx.textBuffer, ctx.elementKind, ctx.elementId, violations);
+          }
+          // T-0072: varName extraction — Source #5: EL ${...} in <conditionExpression> text (ADR §2.4).
+          // Best-effort regex (NF-5): extracts root var name from EL expressions.
+          // Ложные отрицания допустимы; ложные срабатывания исключены (KEY_RE shape).
+          if (bpmnVarNames !== null && ctx.isConditionExpression && ctx.textBuffer.length > 0) {
+            EL_VAR_RE.lastIndex = 0;
+            let elMatch: RegExpExecArray | null;
+            while ((elMatch = EL_VAR_RE.exec(ctx.textBuffer)) !== null) {
+              const varName = elMatch[1];
+              if (varName !== undefined && KEY_RE.test(varName)) {
+                bpmnVarNames.add(varName);
+              }
+            }
+          }
+          contextStack.pop();
+        } else if (EXTENSION_CONTAINER_NAMES.has(localName) && !SCOPED_ELEMENTS.has(localName)) {
+          // Flush text for extension element closing
+          if (ctx.inExtension && ctx.textBuffer.trim().length > 0) {
+            checkTextContent(ctx.textBuffer, ctx.elementKind, ctx.elementId, violations);
+            ctx.textBuffer = "";
+          }
+        }
+      }
+
+      // T-0436: flush gateway conditionExpression buffer on </conditionExpression>.
+      // Associate the parsed literal to the owning gateway by sourceRef (gateway id),
+      // NOT by variable name — fixes false-positive when two gateways share routingVar.
+      if (collectGateways && localName === "conditionExpression" && inCondExprForGateway) {
+        inCondExprForGateway = false;
+        const parsed = parseGatewayCondition(condExprBuffer);
+        if (parsed !== null && currentSeqFlowSourceRef) {
+          // Accumulate literal under the owning gateway's id (sourceRef of the flow).
+          let entries = literalsByGatewayId.get(currentSeqFlowSourceRef);
+          if (entries === undefined) {
+            entries = [];
+            literalsByGatewayId.set(currentSeqFlowSourceRef, entries);
+          }
+          entries.push(parsed);
+        }
+        condExprBuffer = "";
+      }
+
+      // T-0436: clear sequenceFlow tracking state when the sequenceFlow closes.
+      if (collectGateways && localName === "sequenceFlow") {
+        currentSeqFlowSourceRef = "";
+      }
+
+      // T-0661: close the endEvent cursor opened above (paired-tag case; the
+      // self-closing case is already handled in the self-close-tag branch).
+      if (localName === "endEvent") {
+        currentEndEventId = null;
+      }
+
+      // T-0458 [D8-R3]: timer-event close handling. Close a timer-body child to stop
+      // text accumulation; close the host event to commit the collected timer (only if
+      // it actually carried a <timerEventDefinition>).
+      if (currentTimerEvent !== null && TIMER_BODY_NAMES[localName] !== undefined) {
+        inTimerBodyChild = null;
+      }
+      if (
+        currentTimerEvent !== null &&
+        (localName === "boundaryEvent" || localName === "intermediateCatchEvent")
+      ) {
+        if (currentTimerEvent.hasTimerDef) {
+          timerEvents.push(currentTimerEvent);
+          // T-0459 [D8-R4]: a committed BOUNDARY timer guards its attachedToRef.
+          if (currentTimerEvent.kind === "boundary" && currentTimerEvent.attachedToRef) {
+            boundaryTimerAttachRefs.add(currentTimerEvent.attachedToRef);
+          }
+        }
+        currentTimerEvent = null;
+        inTimerBodyChild = null;
+      }
+
+      // T-0459 [D8-R4]: commit the message-catch on close (only when a message|signal
+      // child def was present, or it is a receiveTask). A boundary/intermediate that
+      // carried only a timer def has hasMessageDef=false → discarded (it's a timer).
+      if (
+        currentMessageCatch !== null &&
+        (localName === "receiveTask" ||
+          localName === "boundaryEvent" ||
+          localName === "intermediateCatchEvent")
+      ) {
+        if (currentMessageCatch.hasMessageDef) {
+          messageCatchEvents.push(currentMessageCatch);
+        }
+        currentMessageCatch = null;
+      }
+
+      continue;
+    }
+  }
+
+  // Fail-closed: if any elements were opened but not closed, the document is malformed.
+  // This catches the case of unclosed tags that the tokenizer successfully tokenizes
+  // (each individual token is valid, but the document structure is incomplete).
+  if (hadAnyElement && elementStack.length > 0) {
+    return {
+      ok: false,
+      violations: [{
+        type: "malformed_xml",
+        elementId: "",
+        elementKind: "malformed_xml",
+        message: `document has ${elementStack.length} unclosed element(s): ${elementStack.map((e) => `<${e.localName}>`).join(", ")}`,
+      }],
+    };
+  }
+
+  // T-0072: binding compat check (ADR §2.4 / AC-6 / AC-7).
+  // Runs AFTER the raw-object walk so parse errors short-circuit above.
+  // Only activated when opts.bindingSchema is supplied.
+  if (bpmnVarNames !== null && opts?.bindingSchema !== undefined) {
+    const compatResult = checkBindingCompat(opts.bindingSchema, bpmnVarNames);
+    if (!compatResult.ok) {
+      for (const v of compatResult.violations) {
+        violations.push({
+          type: "binding_mismatch",
+          elementId: "",
+          elementKind: "binding_mismatch",
+          message: v.message,
+        });
+      }
+    }
+  }
+
+  // T-0436: gateway coherence check.
+  // Runs AFTER the raw-object walk so parse errors short-circuit above.
+  // Only activated when opts.ruleTables is supplied.
+  if (collectGateways && opts?.ruleTables !== undefined) {
+    // Attach collected condition literals to each gateway by its element id.
+    // literalsByGatewayId is keyed by the sequenceFlow's sourceRef (= gateway id),
+    // so each gateway only receives literals from its OWN outgoing flows —
+    // no cross-gateway merge even when two gateways share the same routingVar.
+    for (const gw of gatewayMap.values()) {
+      const gwId = gw.id;
+      if (gwId) {
+        const entries = literalsByGatewayId.get(gwId);
+        if (entries !== undefined) {
+          // Merge literals into gw.branchLiterals (deduplicate).
+          for (const entry of entries) {
+            if (!gw.branchLiterals.includes(entry.literal)) {
+              gw.branchLiterals.push(entry.literal);
+            }
+          }
+        }
+      }
+    }
+
+    checkGatewayRuleCoherence(Array.from(gatewayMap.values()), opts.ruleTables, violations);
+  }
+
+  // T-0456 [D8-R1]: parallelGateway (AND split/join) well-formedness — ALWAYS on.
+  // Resolve the collected flow refs into per-gateway in/out counts, then run the
+  // structural coherence check (balanced split↔join, no dangling). Runs on every
+  // publish (structural — no rule tables needed).
+  if (parallelGatewayIds.size > 0) {
+    const parallelGateways: ParallelGatewayInfo[] = [];
+    for (const id of parallelGatewayIds) {
+      // Anonymous (id-less) gateways start with the synthetic prefix and can never be
+      // referenced by a flow → they resolve to 0/0 and are reported as dangling, which
+      // is the correct fail-closed outcome.
+      const isAnon = id.startsWith("__pg_anon_");
+      const realId = isAnon ? "" : id;
+      const outgoing = realId ? allFlowSourceRefs.filter((r) => r === realId).length : 0;
+      const incoming = realId ? allFlowTargetRefs.filter((r) => r === realId).length : 0;
+      parallelGateways.push({ id: realId, incoming, outgoing });
+    }
+    checkParallelGatewayCoherence(parallelGateways, violations);
+  }
+
+  // T-0458 [D8-R3]: timer event well-formedness — ALWAYS on. Resolve the collected
+  // timer events' outgoing flow counts, then run the structural check (valid timer
+  // body + boundary attach + leads-somewhere escalation). Runs on every publish.
+  if (timerEvents.length > 0) {
+    const timers: TimerEventInfo[] = timerEvents.map((t) => ({
+      id: t.id,
+      kind: t.kind,
+      attachedToRef: t.attachedToRef,
+      cancelActivity: t.cancelActivity,
+      timerBodyKind: t.timerBodyKind,
+      timerBody: t.timerBody.trim(),
+      // Resolve outgoing flows by element id (id-less timers resolve to 0 → dangling).
+      outgoing: t.id ? allFlowSourceRefs.filter((r) => r === t.id).length : 0,
+    }));
+    checkTimerCoherence(timers, violations);
+
+    // T-0612: escalation-branch convergence — ALWAYS on, scoped to BOUNDARY timers
+    // only (an intermediate timer has no "guarded task main path" to converge
+    // with — it IS the main path). See checkTimerEscalationConvergence doc-comment.
+    checkTimerEscalationConvergence(timers, flowEdges, endEventIds, terminateEndEventIds, violations);
+  }
+
+  // T-0459 [D8-R4]: message/signal catch coherence — ALWAYS on. Every message-catch
+  // MUST be guarded by a timeout (R3 — spec §3.5 «message-catch ОБЯЗАН иметь таймаут»)
+  // and declare a correlation field. Resolve each catch's timeout-coverage against the
+  // collected boundary-timer attach set, then run the self-contained check.
+  if (messageCatchEvents.length > 0) {
+    const catches: MessageCatchInfo[] = messageCatchEvents.map((m) => ({
+      id: m.id,
+      kind: m.kind,
+      attachedToRef: m.attachedToRef,
+      correlationField: m.correlationField.trim(),
+      messageName: m.messageName.trim(),
+      // A boundary-message catch is timeout-covered when its OWN attachedToRef task
+      // also carries a boundary timer (a deadline on the same guarded activity). A
+      // receiveTask / intermediate-message catch is covered when a boundary timer is
+      // attached directly to IT (attachedToRef === this catch's id).
+      hasTimeout:
+        m.kind === "boundaryMessage"
+          ? m.attachedToRef.length > 0 && boundaryTimerAttachRefs.has(m.attachedToRef)
+          : m.id.length > 0 && boundaryTimerAttachRefs.has(m.id),
+    }));
+    checkMessageEventCoherence(catches, violations);
+  }
+
+  // T-0460 [D8-R5]: authored agentTask coherence — ALWAYS on. Every serviceTask the
+  // author marked as an agent step MUST resolve to a known agentRef AND carry the
+  // agent-step external-task shape (flowable:type="external" + flowable:topic) so the
+  // bridge enqueues a real agent job. A half-wired agent step (missing ref / not
+  // externalised) fails publish (the honest gate). Runs on every publish (structural).
+  if (agentTasks.length > 0) {
+    checkAgentTaskCoherence(agentTasks, violations);
+  }
+
+  if (violations.length === 0) {
+    return { ok: true };
+  }
+  return { ok: false, violations };
+}
+
+// ---------------------------------------------------------------------------
+// T-0456 [D8-R1]: Parallel gateway (AND split/join) well-formedness check
+// ---------------------------------------------------------------------------
+
+/**
+ * Describes one parallelGateway found in the BPMN XML, with its incoming and
+ * outgoing sequenceFlow counts (resolved from flow source/target refs after the
+ * token walk). Pure data; collected by lintBpmn.
+ */
+interface ParallelGatewayInfo {
+  /** Element id of the parallelGateway ("" when the element had no id attribute). */
+  id: string;
+  /** Number of sequenceFlows whose targetRef points at this gateway (join arity). */
+  incoming: number;
+  /** Number of sequenceFlows whose sourceRef points at this gateway (split arity). */
+  outgoing: number;
+}
+
+/**
+ * Validate AND split/join well-formedness for every parallelGateway:
+ *
+ *   - DANGLING: a parallelGateway with 0 incoming or 0 outgoing flows is dangling
+ *     (no token can flow through it / it leads nowhere) → violation. This also
+ *     catches id-less gateways (which cannot be referenced by any flow).
+ *
+ *   - UNBALANCED FORK: a split (1 incoming, ≥2 outgoing) creates N concurrent
+ *     tokens. A diverging+converging gateway (≥2 in AND ≥2 out, a "mixed" gateway)
+ *     is rejected — BPMN best practice and Flowable execution clarity require a
+ *     dedicated split and a dedicated join, not a single mixed gateway. Balanced
+ *     well-formed shapes are: pure SPLIT (1-in / N-out) and pure JOIN (N-in / 1-out).
+ *     A 1-in/1-out parallel gateway is a no-op pass-through (allowed, advisory-clean).
+ *
+ * Note on whole-process balance (every split has a matching join): a full
+ * reachability/path analysis is out of v1 scope (spec §3.2 — "balanced split/join,
+ * no dangling"). Per-gateway arity + no-dangling catches the common authoring
+ * mistakes (fork that never joins back via a mixed gateway; a gateway wired to
+ * nothing). Flowable itself rejects truly unreachable graphs at deploy.
+ *
+ * Pure: no IO, no DB, no side effects.
+ */
+function checkParallelGatewayCoherence(
+  gateways: ParallelGatewayInfo[],
+  violations: LintViolation[],
+): void {
+  for (const gw of gateways) {
+    const elemDesc = gw.id ? `parallelGateway id="${gw.id}"` : "parallelGateway (no id)";
+
+    // Dangling: a parallel gateway with no incoming or no outgoing flow is unreachable
+    // or leads nowhere — a token can never split/join correctly.
+    if (gw.incoming === 0 || gw.outgoing === 0) {
+      violations.push({
+        type: "parallel_gateway_imbalance",
+        elementId: gw.id,
+        elementKind: "parallelGateway",
+        message:
+          `<${elemDesc}> is dangling: it has ${gw.incoming} incoming and ${gw.outgoing} ` +
+          `outgoing sequence flow(s). A parallel (AND) gateway must have at least one ` +
+          `incoming and one outgoing flow; a split needs 1 incoming and ≥2 outgoing, ` +
+          `a join needs ≥2 incoming and 1 outgoing`,
+      });
+      continue;
+    }
+
+    // Mixed split+join in a single gateway: ≥2 incoming AND ≥2 outgoing. Reject —
+    // split and join must be distinct gateways for correct, readable AND semantics.
+    if (gw.incoming >= 2 && gw.outgoing >= 2) {
+      violations.push({
+        type: "parallel_gateway_imbalance",
+        elementId: gw.id,
+        elementKind: "parallelGateway",
+        message:
+          `<${elemDesc}> mixes split and join: it has ${gw.incoming} incoming and ` +
+          `${gw.outgoing} outgoing flows. Use a dedicated AND-split (1 incoming, ≥2 ` +
+          `outgoing) and a dedicated AND-join (≥2 incoming, 1 outgoing) instead of one ` +
+          `mixed parallel gateway`,
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0458 [D8-R3]: Timer / deadline event well-formedness check
+// ---------------------------------------------------------------------------
+
+/**
+ * The three BPMN timer-body child element local names and the timer kind each maps
+ * to. timerEventDefinition must contain exactly one of these with a non-empty body
+ * (an ISO-8601 duration, a fixed date, or a recurring cycle).
+ */
+const TIMER_BODY_NAMES: Record<string, TimerBodyKind> = {
+  timeDuration: "duration",
+  timeDate: "date",
+  timeCycle: "cycle",
+};
+
+/** Which kind of timer body a <timerEventDefinition> carries. */
+type TimerBodyKind = "duration" | "date" | "cycle";
+
+/**
+ * Raw collection record for a timer-bearing event, accumulated during the token walk.
+ * Resolved to a TimerEventInfo (with outgoing flow count) post-walk.
+ */
+interface TimerEventCollect {
+  id: string;
+  kind: "boundary" | "intermediate";
+  attachedToRef: string;
+  cancelActivity: boolean;
+  hasTimerDef: boolean;
+  timerBodyKind: TimerBodyKind | null;
+  timerBody: string;
+}
+
+/**
+ * Resolved timer event: a boundary/intermediate catch event carrying a
+ * <timerEventDefinition>, with its outgoing sequenceFlow count resolved.
+ */
+interface TimerEventInfo {
+  /** Element id ("" when absent). */
+  id: string;
+  /** boundary (attached to a task — the deadline) vs intermediate (inline wait). */
+  kind: "boundary" | "intermediate";
+  /** attachedToRef of a boundary event (the task the deadline guards); "" otherwise. */
+  attachedToRef: string;
+  /** cancelActivity (interrupting). Defaults true. Informational for the message. */
+  cancelActivity: boolean;
+  /** duration | date | cycle, or null if no recognised timer body child was present. */
+  timerBodyKind: TimerBodyKind | null;
+  /** Trimmed timer body text (ISO-8601 duration / date / cron-or-cycle). */
+  timerBody: string;
+  /** Number of outgoing sequenceFlows from this event (where the escalation goes). */
+  outgoing: number;
+}
+
+/**
+ * ISO-8601 duration regex (e.g. PT24H, P1D, P1DT12H, PT30M). The 'P' designator is
+ * required; at least one component must be present. Flowable accepts the standard
+ * ISO-8601 duration grammar for <timeDuration>. We validate the common, well-formed
+ * shape and reject obviously-empty or non-ISO strings (the authoring panel only ever
+ * emits this shape; a hand-edited malformed value is caught here at publish).
+ */
+const ISO8601_DURATION_RE =
+  /^P(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$/;
+
+/**
+ * ISO-8601 date / datetime regex (e.g. 2026-07-01 or 2026-07-01T14:00:00Z). A fixed
+ * deadline date. Also accepts an EL expression (${...}) — a date pulled from a record
+ * field is bound as an EL expression resolved at runtime (spec §3.4: "a date from a
+ * record field"). We accept any non-empty ${...} expression for the date case.
+ */
+const ISO8601_DATE_RE =
+  /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/** EL expression: ${...} (a date pulled from a record field, resolved at runtime). */
+const EL_EXPRESSION_RE = /^\$\{[^}]+\}$/;
+
+/**
+ * Validate the well-formedness of every collected timer event:
+ *
+ *   - NO TIMER BODY: a timerEventDefinition with no timeDuration/timeDate/timeCycle
+ *     child (or an empty one) → violation. Flowable cannot schedule a timer without
+ *     a body; the deadline is undefined.
+ *
+ *   - MALFORMED DURATION/DATE: a timeDuration that is not a valid ISO-8601 duration,
+ *     or a timeDate that is neither an ISO-8601 date nor an EL expression → violation.
+ *     This catches a hand-edited XML deadline that Flowable would reject at deploy.
+ *
+ *   - DANGLING (leads nowhere): a timer event with 0 outgoing sequenceFlows has no
+ *     escalation target — the deadline fires but nothing happens → violation. The
+ *     escalation user-task must be reachable from the timer.
+ *
+ *   - BOUNDARY WITHOUT ATTACH: a boundaryEvent with no attachedToRef is not attached
+ *     to any task — Flowable cannot schedule it relative to an activity → violation.
+ *
+ * Pure: no IO, no DB, no side effects.
+ */
+function checkTimerCoherence(
+  timers: TimerEventInfo[],
+  violations: LintViolation[],
+): void {
+  for (const t of timers) {
+    const elemKind = t.kind === "boundary" ? "boundaryEvent" : "intermediateCatchEvent";
+    const elemDesc = t.id ? `${elemKind} id="${t.id}"` : `${elemKind} (no id)`;
+
+    // 1. No / empty timer body.
+    if (t.timerBodyKind === null || t.timerBody.length === 0) {
+      violations.push({
+        type: "timer_malformed",
+        elementId: t.id,
+        elementKind: elemKind,
+        message:
+          `<${elemDesc}> has a <timerEventDefinition> without a valid deadline: it must ` +
+          `contain a non-empty <timeDuration> (ISO-8601 duration, e.g. PT24H), ` +
+          `<timeDate> (a fixed date or a \${record.field} expression), or <timeCycle>`,
+      });
+      // No body → no point validating the (empty) body shape; still check flows below.
+    } else {
+      // 2. Malformed body shape per kind.
+      if (t.timerBodyKind === "duration" && !ISO8601_DURATION_RE.test(t.timerBody) && !EL_EXPRESSION_RE.test(t.timerBody)) {
+        violations.push({
+          type: "timer_malformed",
+          elementId: t.id,
+          elementKind: elemKind,
+          message:
+            `<${elemDesc}> has a <timeDuration> "${t.timerBody}" that is not a valid ` +
+            `ISO-8601 duration (expected e.g. PT24H, P1D, P1DT12H) nor a \${...} expression`,
+        });
+      } else if (
+        t.timerBodyKind === "date" &&
+        !ISO8601_DATE_RE.test(t.timerBody) &&
+        !EL_EXPRESSION_RE.test(t.timerBody)
+      ) {
+        violations.push({
+          type: "timer_malformed",
+          elementId: t.id,
+          elementKind: elemKind,
+          message:
+            `<${elemDesc}> has a <timeDate> "${t.timerBody}" that is neither an ISO-8601 ` +
+            `date (e.g. 2026-07-01T14:00:00Z) nor a \${record.field} expression`,
+        });
+      }
+      // cycle: accept any non-empty body (cron / R/PT1H grammar is broad — Flowable validates).
+    }
+
+    // 3. Boundary timer must be attached to an activity.
+    if (t.kind === "boundary" && t.attachedToRef.length === 0) {
+      violations.push({
+        type: "timer_malformed",
+        elementId: t.id,
+        elementKind: elemKind,
+        message:
+          `<${elemDesc}> is a boundary timer with no attachedToRef — it must be attached ` +
+          `to the task whose deadline it guards`,
+      });
+    }
+
+    // 4. Dangling: a timer that fires but leads nowhere (no escalation target).
+    if (t.outgoing === 0) {
+      violations.push({
+        type: "timer_malformed",
+        elementId: t.id,
+        elementKind: elemKind,
+        message:
+          `<${elemDesc}> has no outgoing sequence flow — when the deadline fires there is ` +
+          `no escalation target to route to. Connect the timer to the escalation step`,
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0612: Timer/escalation branch convergence check
+//
+// THE ZOMBIE-INSTANCE BUG THIS CLOSES (found live, purchaseApproval acceptance
+// 2026-07-01/07-02): a boundary timer guarding a userTask, authored with
+// cancelActivity="false" (non-interrupting — the escalation is meant to be a
+// REMINDER, not a cancellation of the guarded approval) and an escalation
+// branch that dead-ends at its OWN endEvent instead of reconnecting to the
+// path the guarded task's normal completion takes. When the guarded task
+// finishes BEFORE the deadline fires (the common, happy-path case — the
+// approver was on time), Flowable leaves the escalation branch un-fired but
+// STILL LIVE (a non-interrupting boundary event is not cancelled by the
+// guarded task completing — that is exactly what "non-interrupting" means).
+// The main path reaches its endEvent; the instance nonetheless never ends
+// (act_hi_procinst.end_time stays NULL forever), because BPMN only completes
+// a process instance when EVERY token — including one still parked on a
+// never-fired, never-cancelled boundary event — has reached an end.
+//
+// T-0456's own note ("a full reachability/path analysis is out of v1 scope")
+// left this exact gap open for parallel gateways; this check closes the
+// narrower, tractable, HIGH-VALUE slice of it: only for non-interrupting
+// boundary timers (the shape that actually produced a live zombie instance),
+// verify the escalation branch reconnects to a node also reachable from the
+// guarded task's own outgoing flow(s) — i.e. a converging gateway or a shared
+// downstream node — BEFORE the escalation branch reaches an endEvent of its
+// own. An INTERRUPTING timer (cancelActivity="true", the BPMN default when
+// the attribute is absent) needs no such check: cancelActivity="true" means
+// Flowable cancels the guarded task the instant the timer fires, so there is
+// only ever ONE live token on that boundary — no convergence question arises.
+//
+// ALGORITHM (pure graph reachability over the flowEdges/endEventIds collected
+// during the token walk — no IO, no DB):
+//   1. For each boundary timer with cancelActivity===false and a resolved
+//      escalation target (its first outgoing flow's targetRef):
+//      a. mainReachable = every node reachable by following flowEdges forward
+//         from the GUARDED task's own outgoing flows (attachedToRef's targets),
+//         EXCLUDING the timer element itself (so the timer's own branch is not
+//         trivially "reachable from the main path" through a shared start).
+//      b. Walk forward from the escalation target. If this walk reaches an
+//         endEvent WITHOUT first visiting a node in mainReachable → violation
+//         (the escalation branch has its own, disconnected ending — a zombie
+//         token is guaranteed whenever the timer never fires).
+//      c. If the walk reaches a node in mainReachable before any endEvent →
+//         OK (the branches converge — e.g. into a converging gateway, or the
+//         escalation step itself flows back into the main sequence).
+//      d. If the walk reaches neither (dangles) → already caught as
+//         timer_malformed by checkTimerCoherence (dangling, 0 outgoing) or is
+//         a cycle with no end at all — out of scope here, Flowable's own
+//         deploy-time validation catches genuinely unreachable graphs.
+//
+// Pure: no IO, no DB, no side effects. Graph size is the size of one BPMN
+// document — plain BFS with a visited-set is more than sufficient.
+// ---------------------------------------------------------------------------
+
+function reachableSet(
+  startIds: readonly string[],
+  edges: ReadonlyArray<{ source: string; target: string }>,
+): Set<string> {
+  const adjacency = new Map<string, string[]>();
+  for (const e of edges) {
+    const list = adjacency.get(e.source);
+    if (list) list.push(e.target);
+    else adjacency.set(e.source, [e.target]);
+  }
+  const visited = new Set<string>();
+  const queue: string[] = [...startIds];
+  while (queue.length > 0) {
+    const cur = queue.shift() as string;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    const next = adjacency.get(cur);
+    if (next) {
+      for (const n of next) if (!visited.has(n)) queue.push(n);
+    }
+  }
+  return visited;
+}
+
+/**
+ * Verify every NON-INTERRUPTING boundary timer's escalation branch reconnects
+ * to the guarded task's own downstream path before reaching an endEvent of its
+ * own (T-0612), AND — once that convergence is confirmed — that a scope-local
+ * terminateEndEvent is reachable from the escalation branch (T-0661), so the
+ * second concurrent token a fired timer spawns can actually be extinguished.
+ * See the block comments above for the full rationale and algorithm.
+ * Pure: no IO, no DB, no side effects.
+ */
+function checkTimerEscalationConvergence(
+  timers: TimerEventInfo[],
+  flowEdges: ReadonlyArray<{ source: string; target: string }>,
+  endEventIds: ReadonlySet<string>,
+  terminateEndEventIds: ReadonlySet<string>,
+  violations: LintViolation[],
+): void {
+  for (const t of timers) {
+    // Scope: boundary timers only, non-interrupting only, must resolve to an
+    // escalation target (interrupting timers and dangling timers are handled
+    // elsewhere — see the algorithm note above).
+    if (t.kind !== "boundary") continue;
+    if (t.cancelActivity) continue; // interrupting → no convergence question
+    if (!t.attachedToRef) continue; // already flagged (BOUNDARY WITHOUT ATTACH)
+    const escalationTarget = flowEdges.find((e) => e.source === t.id)?.target;
+    if (!escalationTarget) continue; // already flagged (dangling, 0 outgoing)
+
+    // mainReachable: everything reachable forward from the guarded task's OWN
+    // outgoing flows (NOT from the timer itself, and not from the guarded task
+    // id directly — we want what the task's normal completion leads to).
+    const guardedTaskOutgoing = flowEdges
+      .filter((e) => e.source === t.attachedToRef)
+      .map((e) => e.target);
+    if (guardedTaskOutgoing.length === 0) continue; // guarded task itself dangles — a different check's concern
+    const mainReachable = reachableSet(guardedTaskOutgoing, flowEdges);
+
+    // Walk forward from the escalation target; stop at the first endEvent OR
+    // the first node already in mainReachable (convergence found).
+    const visited = new Set<string>();
+    const queue: string[] = [escalationTarget];
+    let converged = false;
+    let reachedOwnEnd = false;
+    while (queue.length > 0 && !converged) {
+      const cur = queue.shift() as string;
+      if (visited.has(cur)) continue;
+      visited.add(cur);
+      if (mainReachable.has(cur)) {
+        converged = true;
+        break;
+      }
+      if (endEventIds.has(cur)) {
+        reachedOwnEnd = true;
+        continue; // an endEvent has no outgoing flows to expand — nothing more to walk here
+      }
+      for (const e of flowEdges) {
+        if (e.source === cur && !visited.has(e.target)) queue.push(e.target);
+      }
+    }
+
+    if (!converged && reachedOwnEnd) {
+      const elemDesc = t.id ? `boundaryEvent id="${t.id}"` : "boundaryEvent (no id)";
+      violations.push({
+        type: "timer_escalation_no_convergence",
+        elementId: t.id,
+        elementKind: "boundaryEvent",
+        message:
+          `<${elemDesc}> is a NON-INTERRUPTING boundary timer (cancelActivity="false") ` +
+          `whose escalation branch reaches its own endEvent WITHOUT reconnecting to the ` +
+          `guarded task's own downstream path. If the guarded task (attachedToRef="` +
+          `${t.attachedToRef}") completes before the deadline fires, the escalation ` +
+          `branch's token is never cancelled and never reaches an end either — the ` +
+          `process instance never completes (act_hi_procinst.end_time stays NULL forever), ` +
+          `even though the main path finished. Fix: either route the escalation branch ` +
+          `into a gateway that also receives the guarded task's normal completion flow ` +
+          `(so both paths converge before ending), or set cancelActivity="true" if the ` +
+          `escalation is meant to CANCEL the guarded task rather than merely remind`,
+      });
+    } else if (converged) {
+      // T-0661 [ADR §8 D6]: flow-convergence alone is NOT sufficient. A converging
+      // exclusiveGateway is an UNCONTROLLED MERGE — when this timer actually FIRES it
+      // spawns a SECOND, independent token (the guarded task's own token stays live);
+      // the merge passes EACH token through independently. If the convergence only
+      // ever reaches a plain endEvent, BOTH tokens must be consumed before the
+      // instance completes — it hangs until the second, now-moot task is ALSO
+      // completed. Only a scope-local terminateEndEvent can extinguish the second
+      // token deterministically (mutually exclusive with timer_escalation_no_convergence
+      // above — this branch only runs when convergence WAS found).
+      const escReach = reachableSet([escalationTarget], flowEdges);
+      let hasTerminate = false;
+      for (const id of escReach) {
+        if (terminateEndEventIds.has(id)) {
+          hasTerminate = true;
+          break;
+        }
+      }
+      if (!hasTerminate) {
+        const elemDesc = t.id ? `boundaryEvent id="${t.id}"` : "boundaryEvent (no id)";
+        violations.push({
+          type: "timer_escalation_unresolved_concurrency",
+          elementId: t.id,
+          elementKind: "boundaryEvent",
+          message:
+            `<${elemDesc}> is a NON-INTERRUPTING boundary timer (cancelActivity="false") ` +
+            `whose escalation branch RECONNECTS to the guarded task's (attachedToRef="` +
+            `${t.attachedToRef}") downstream path (flow convergence exists) but no ` +
+            `terminateEndEvent is reachable from the escalation branch. When this timer ` +
+            `FIRES, it spawns a SECOND, independent token while the guarded task's own ` +
+            `token stays live — a converging gateway/endEvent is an UNCONTROLLED MERGE ` +
+            `that passes each token through independently, so BOTH the guarded task's ` +
+            `completion AND the escalation's completion must occur before the process ` +
+            `instance completes: it hangs until the second, now-moot task is also ` +
+            `finished. Fix: route the convergence into a scope-local terminateEndEvent ` +
+            `(e.g. inside an embedded sub-process) so the first resolution cancels the ` +
+            `other racing task`,
+        });
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0459 [D8-R4]: Message / signal catch coherence check
+//
+// Self-contained (a sibling task may also touch this file). Kept as a DISTINCT,
+// clearly-named function appended cleanly: it owns its own collection types and is
+// invoked from lintBpmn behind a `messageCatchEvents.length > 0` guard. No shared
+// mutable state with the other checks beyond the `violations` accumulator.
+// ---------------------------------------------------------------------------
+
+/** Which message-family carrier a catch is. */
+type MessageCatchKind = "receiveTask" | "boundaryMessage" | "intermediateMessage";
+
+/**
+ * Raw collection record for a message/signal catch, accumulated during the token
+ * walk. Resolved to a MessageCatchInfo (with timeout coverage) post-walk.
+ */
+interface MessageCatchCollect {
+  id: string;
+  kind: MessageCatchKind;
+  attachedToRef: string;
+  correlationField: string;
+  messageName: string;
+  /** True once a <messageEventDefinition>/<signalEventDefinition> child is seen
+   * (or the carrier is a receiveTask, which is a message wait by element type). */
+  hasMessageDef: boolean;
+}
+
+/**
+ * Resolved message/signal catch: a message-family carrier with its timeout coverage
+ * resolved (whether a boundary timer guards it).
+ */
+interface MessageCatchInfo {
+  /** Element id ("" when absent). */
+  id: string;
+  /** receiveTask | boundaryMessage | intermediateMessage. */
+  kind: MessageCatchKind;
+  /** attachedToRef of a boundary-message catch (the guarded task); "" otherwise. */
+  attachedToRef: string;
+  /** choros:correlationField — the record field whose value is the correlation key. */
+  correlationField: string;
+  /** choros:messageName — the message/signal name the catch waits for. */
+  messageName: string;
+  /** True iff a boundary timer guards this catch (the deadline that prevents
+   * an infinite wait — spec §3.5 R3 «message-catch ОБЯЗАН иметь таймаут»). */
+  hasTimeout: boolean;
+}
+
+/**
+ * Validate the well-formedness of every collected message/signal catch:
+ *
+ *   - NO TIMEOUT (R3 — the load-bearing rule): a message-catch with no guarding
+ *     timer waits FOREVER. spec §3.5 «Сцепка: message-catch ОБЯЗАН иметь таймаут
+ *     (R3) — иначе вечное ожидание». A receiveTask / intermediate-message catch
+ *     must have a boundary timer attached to it; a boundary-message catch's guarded
+ *     task must also carry a boundary timer. Missing → violation (the message would
+ *     park the instance with no escape).
+ *
+ *   - NO CORRELATION FIELD: a message-catch correlates by a business key read from a
+ *     record field (spec §3.5 «корреляция по бизнес-ключу из поля записи»). Without a
+ *     declared correlationField it can never correlate an inbound envelope → violation.
+ *
+ *   - NO MESSAGE NAME: a catch with no messageName cannot be addressed by any
+ *     envelope → violation (it is unreachable).
+ *
+ * Pure: no IO, no DB, no side effects.
+ */
+function checkMessageEventCoherence(
+  catches: MessageCatchInfo[],
+  violations: LintViolation[],
+): void {
+  for (const c of catches) {
+    const elemKind =
+      c.kind === "receiveTask"
+        ? "receiveTask"
+        : c.kind === "boundaryMessage"
+          ? "boundaryEvent"
+          : "intermediateCatchEvent";
+    const elemDesc = c.id ? `${elemKind} id="${c.id}"` : `${elemKind} (no id)`;
+
+    // 1. THE timeout rule (R3) — a message-catch without a timeout = lint error.
+    if (!c.hasTimeout) {
+      violations.push({
+        type: "message_event_incoherent",
+        elementId: c.id,
+        elementKind: elemKind,
+        message:
+          `<${elemDesc}> is a message/signal catch with NO TIMEOUT — it would wait ` +
+          `forever if the message never arrives. Attach a boundary timer (deadline) ` +
+          `to it (spec §3.5 R3: a message-catch MUST have a timeout)`,
+      });
+    }
+
+    // 2. Correlation field must be declared (correlation is by record-field key).
+    if (c.correlationField.length === 0) {
+      violations.push({
+        type: "message_event_incoherent",
+        elementId: c.id,
+        elementKind: elemKind,
+        message:
+          `<${elemDesc}> declares no choros:correlationField — a message-catch ` +
+          `correlates an inbound envelope by a business key taken from a record field; ` +
+          `pick the record field that supplies the correlation key`,
+      });
+    }
+
+    // 3. Message/signal name must be present (otherwise the catch is unaddressable).
+    if (c.messageName.length === 0) {
+      violations.push({
+        type: "message_event_incoherent",
+        elementId: c.id,
+        elementKind: elemKind,
+        message:
+          `<${elemDesc}> declares no choros:messageName — no inbound envelope can be ` +
+          `addressed to it; set the message/signal name the catch waits for`,
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0460 [D8-R5]: Authored agentTask coherence check
+//
+// Self-contained (a sibling task may also touch this file). A serviceTask the author
+// marked with choros:executorType="agent" is an AGENT STEP: at runtime it must become a
+// Flowable external task on the agent-step topic so the (already-wired) D4 dispatcher
+// fires on it. The publish transform (agent-task-external-mapper.ts) materialises that
+// shape; THIS check is the fail-closed gate that no agent step is published half-wired:
+//
+//   - MISSING agentRef: an agent step with no choros:agentRef cannot resolve to an agent
+//     (no agentEmployeeId to load grants/LLM for) → it could never run → violation.
+//
+//   - NOT EXTERNALISED: an agent step that did not receive flowable:type="external" +
+//     flowable:topic (the transform was bypassed, or the author hand-wrote a broken
+//     agent task) would never surface as an agent-step external task → the bridge never
+//     enqueues it → the dispatcher never fires → violation. The topic must be the
+//     dedicated agent-step topic (NOT the tel-intake DMN seam).
+//
+//   - MISSING id: an agent serviceTask with no id cannot be addressed/wired → violation.
+// ---------------------------------------------------------------------------
+
+/** The dedicated agent-step external-task topic (mirrors AGENT_STEP_TOPIC; kept local to
+ * avoid a cross-module import into the linter's frozen-isolated import surface). */
+const AGENT_STEP_TOPIC_LITERAL = "agent-step";
+
+/**
+ * Raw collection record for an authored agent serviceTask, accumulated off its open tag.
+ */
+interface AgentTaskCollect {
+  /** serviceTask/@id ("" when absent). */
+  id: string;
+  /** choros:agentRef — the agent the step runs as (AgentPublic.id == agentEmployeeId). */
+  agentRef: string;
+  /** flowable:type ("external" after the publish transform; "" when not externalised). */
+  flowableType: string;
+  /** flowable:topic ("agent-step" after the publish transform; "" when absent). */
+  topic: string;
+}
+
+/**
+ * Validate the coherence of every authored agent serviceTask. Pure: no IO, no DB, no
+ * side effects.
+ */
+function checkAgentTaskCoherence(
+  agentTasks: AgentTaskCollect[],
+  violations: LintViolation[],
+): void {
+  for (const t of agentTasks) {
+    const elemDesc = t.id ? `serviceTask id="${t.id}"` : "serviceTask (no id)";
+
+    // 1. An agent step must be addressable.
+    if (!t.id) {
+      violations.push({
+        type: "agent_task_incoherent",
+        elementId: "",
+        elementKind: "serviceTask",
+        message:
+          `<${elemDesc}> is an agent step (choros:executorType="agent") with no id — ` +
+          `an agent task must have an id to be wired and addressed`,
+      });
+    }
+
+    // 2. An agent step must resolve to a known agentRef (→ agentEmployeeId).
+    if (!t.agentRef.trim()) {
+      violations.push({
+        type: "agent_task_incoherent",
+        elementId: t.id,
+        elementKind: "serviceTask",
+        message:
+          `<${elemDesc}> is an agent step but declares no choros:agentRef — pick the ` +
+          `agent that runs this step (the dispatcher loads the agent's grants + LLM by ` +
+          `this id); without it the step can never execute`,
+      });
+    }
+
+    // 3. An agent step must carry the agent-step external-task shape post-transform.
+    if (t.flowableType !== "external") {
+      violations.push({
+        type: "agent_task_incoherent",
+        elementId: t.id,
+        elementKind: "serviceTask",
+        message:
+          `<${elemDesc}> is an agent step but is not an external task ` +
+          `(flowable:type="external" is missing) — it would never surface as an ` +
+          `agent-step job and the agent dispatcher would never fire on it`,
+      });
+    } else if (t.topic !== AGENT_STEP_TOPIC_LITERAL) {
+      // It IS external but on the wrong (or absent) topic — the dispatcher polls the
+      // dedicated agent-step topic; any other topic means it is never picked up.
+      violations.push({
+        type: "agent_task_incoherent",
+        elementId: t.id,
+        elementKind: "serviceTask",
+        message:
+          `<${elemDesc}> is an agent step external task but its flowable:topic is ` +
+          `"${t.topic}" — it must be "${AGENT_STEP_TOPIC_LITERAL}" so the agent ` +
+          `dispatcher polls and fires on it`,
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0436: Gateway coherence check (publish-time rule-table link by routing-var)
+// ---------------------------------------------------------------------------
+
+/**
+ * Describes one exclusive gateway found in the BPMN XML, along with the
+ * branch literals collected from its outgoing conditionExpression elements.
+ * Pure data; collected during the token walk (lintBpmn collects these when
+ * opts.ruleTables is provided).
+ */
+interface GatewayInfo {
+  /** Element id of the exclusiveGateway (may be empty string if absent). */
+  id: string;
+  /** choros:routingVar attribute value (after namespace prefix stripping → "routingVar"). */
+  routingVar: string;
+  /** Outgoing flow literal values extracted from ${routingVar == 'value'} conditions. */
+  branchLiterals: string[];
+}
+
+/**
+ * Regex to parse a conditionExpression body in canonical gateway form:
+ * ${varName == 'value'}
+ * Captures: [1] = varName, [2] = value string.
+ * Matches the form written by buildConditionBody() in gateway-condition-panel.jsx.
+ */
+const GATEWAY_CONDITION_RE = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\s*==\s*'([^']*)'\}$/;
+
+/**
+ * Extract the routing variable name and branch literal from a conditionExpression
+ * body string in the canonical gateway form `${varName == 'value'}`.
+ * Returns null if the expression does not match (e.g. non-gateway EL expressions).
+ */
+function parseGatewayCondition(body: string): { varName: string; literal: string } | null {
+  const m = GATEWAY_CONDITION_RE.exec(body.trim());
+  if (!m) return null;
+  return { varName: m[1]!, literal: m[2]! };
+}
+
+/**
+ * Given the collected GatewayInfo[] and the published rule tables, emit
+ * gateway_rule_mismatch violations for any gateway whose routingVar either:
+ *  a) has no published rule table whose routing-outcome name matches it, OR
+ *  b) has a branch literal that cannot be produced by any rule in that table.
+ *
+ * Link strategy (T-0436 architect note): gateway.routingVar === ruleTable's
+ * routing-outcome name. The routing-outcome name of a table is the `name`
+ * field of any `set_routing_outcome` effect across its rules (all rules in a
+ * validated table share one name — enforced by validateDmnRuleTable's
+ * INCONSISTENT_ROUTING_NAME check).
+ *
+ * Pure: no IO, no DB, no side effects.
+ */
+function checkGatewayRuleCoherence(
+  gateways: GatewayInfo[],
+  ruleTables: DmnRuleTable[],
+  violations: LintViolation[],
+): void {
+  // Build a map: routingOutcomeName → Set<string> of producible values.
+  // A table's routing-outcome name is derived from set_routing_outcome effects.
+  const tableOutcomeValues = new Map<string, Set<string>>();
+
+  for (const table of ruleTables) {
+    for (const rule of table.rules) {
+      for (const effect of rule.effects) {
+        if (effect.kind === "set_routing_outcome") {
+          let valueSet = tableOutcomeValues.get(effect.name);
+          if (valueSet === undefined) {
+            valueSet = new Set<string>();
+            tableOutcomeValues.set(effect.name, valueSet);
+          }
+          valueSet.add(effect.value);
+        }
+      }
+    }
+  }
+
+  for (const gw of gateways) {
+    // Skip gateways that have fewer than 2 branch literals (0 or 1 conditioned
+    // flows — nothing to validate: no table link needed for unconditional flows
+    // or single-branch gateways without conditions).
+    if (gw.branchLiterals.length < 2) continue;
+
+    const varName = gw.routingVar;
+    const elemDesc = gw.id ? `exclusiveGateway id="${gw.id}"` : "exclusiveGateway";
+
+    if (!varName) {
+      // No routingVar declared — cannot link to any table. Skip (no violation:
+      // a gateway without choros:routingVar may be using non-table routing logic).
+      continue;
+    }
+
+    const valueSet = tableOutcomeValues.get(varName);
+
+    if (valueSet === undefined) {
+      // No published rule table whose routing-outcome name matches this variable.
+      violations.push({
+        type: "gateway_rule_mismatch",
+        elementId: gw.id,
+        elementKind: "exclusiveGateway",
+        message:
+          `<${elemDesc}> uses routing variable "${varName}" but no published ` +
+          `rule table declares a routing outcome with that name; ` +
+          `publish a rule table that sets routing outcome "${varName}" before publishing this process`,
+      });
+      continue;
+    }
+
+    // Check each branch literal is producible by the table.
+    for (const literal of gw.branchLiterals) {
+      if (!valueSet.has(literal)) {
+        violations.push({
+          type: "gateway_rule_mismatch",
+          elementId: gw.id,
+          elementKind: "exclusiveGateway",
+          message:
+            `<${elemDesc}> has a branch condition "${varName} == '${literal}'" ` +
+            `but the rule table for routing outcome "${varName}" does not produce ` +
+            `the value "${literal}"; update the rule table or remove the branch condition`,
+        });
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0436: varName extraction helper (ADR §2.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts a variable name from a token and adds it to bpmnVarNames if valid.
+ * Sources:
+ *   <in name="X">        / <out name="Y">      → attrs.name value
+ *   <formProperty id="Z"> / <formField id="W"> → attrs.id value
+ * Names not passing KEY_RE are discarded (prevent false positives, NF-5).
+ */
+function extractVarNameFromToken(
+  localName: string,
+  attrs: Attr[],
+  bpmnVarNames: Set<string>,
+): void {
+  if (localName === "in" || localName === "out") {
+    const nameAttr = attrs.find((a) => a.name === "name");
+    if (nameAttr?.value && KEY_RE.test(nameAttr.value)) {
+      bpmnVarNames.add(nameAttr.value);
+    }
+  } else if (localName === "formProperty" || localName === "formField") {
+    const idAttr = attrs.find((a) => a.name === "id");
+    if (idAttr?.value && KEY_RE.test(idAttr.value)) {
+      bpmnVarNames.add(idAttr.value);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for checking values
+// ---------------------------------------------------------------------------
+
+function checkAttrValue(
+  attr: Attr,
+  elementKind: string,
+  elementId: string,
+  violations: LintViolation[],
+): void {
+  if (isRawObjectBinding(attr.value)) {
+    violations.push({
+      type: "raw_object_binding",
+      elementId,
+      elementKind,
+      message: `raw-object binding detected in attribute "${attr.name}" of <${elementKind}${elementId ? ` id="${elementId}"` : ""}>: value contains record-identity or payload keys; use an ObjectHandle instead`,
+    });
+  }
+}
+
+function checkTextContent(
+  text: string,
+  elementKind: string,
+  elementId: string,
+  violations: LintViolation[],
+): void {
+  if (isRawObjectBinding(text)) {
+    violations.push({
+      type: "raw_object_binding",
+      elementId,
+      elementKind,
+      message: `raw-object binding detected in text content of <${elementKind}${elementId ? ` id="${elementId}"` : ""}>: value contains record-identity or payload keys; use an ObjectHandle instead`,
+    });
+  }
+}

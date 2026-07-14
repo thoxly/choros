@@ -1,0 +1,121 @@
+{
+  "task_id": "T-0233",
+  "status": "ready",
+  "decision": "Тонкий pure-core мотор навыка legal_precheck (src/core/agent-precheck-motor.ts — IO-free, без SDK/env/pg/fetch) зависит от инъектируемого порта LlmPort (src/core/llm-port.ts, DI-паттерн как ResolverDeps/SecretResolverPort/AncestryOracle): production-адаптер (src/adapters/openai-llm-port.ts) и тест-стаб — РАЗНЫЕ реализации порта. Оркестратор src/runtime/legal-precheck/run-precheck.ts (единственный новый runtime-путь, узко допущенный FF-COMP-6 к чтению agent_instruction) собирает запрос из T-0123 (readPublished: instruction_text + answer_form), проверяет data-access через единственный PDP resolveFor (T-0021), зовёт модель через порт, классифицирует исход через classifyOutcome (impl контракта T-0220: proceed/defer-to-human/fail-closed, INV-DEFAULT default-to-human) и пишет ровно один аудит через единственный appendAuditEvent (T-0016: agent.blocked/agent.deferred open-vocab). Reasoning разделён в LlmResult (answer наружу vs reasoning? только во внутренний audit под T-0139-маскированием; PrecheckAnswer структурно без reasoning — D-139). Dormant-by-default тремя замками: agent_card.llm_* NULL ⇒ dormantLlmPort, live-флаг deps.liveEnabled=false ⇒ dormantLlmPort, dormantLlmPort.complete() БРОСАЕТ — сетевой вызов в dormant структурно невозможен, исход = defer/fail-closed, никогда не proceed. Тесты/CI инжектят детерминированную стаб-фикстуру: ноль платных/сетевых LLM-вызовов, npm run ci зелёный без OPENAI_API_KEY. Мотор аддитивен — НЕ трогает byte-frozen grant-lattice.ts/object-handle.ts, не вводит новой таблицы/миграции, узко расширяет dormant-gate ровно на legal_precheck-путь.",
+  "rejected_alternatives": [
+    { "option": "Конкретный LLM-SDK (openai) прямо в ядре мотора", "why_not": "Ломает $0-приёмку (NF-1) и тестируемость, делает CI зависимым от кредла/сети. Порт+DI (как ResolverDeps/SecretResolverPort) обязателен." },
+    { "option": "Generic agent-runtime, читающий agent_instruction для любого навыка", "why_not": "Нарушает узость FF-COMP-6 (NF-4) и OOS спеки; T-0233 размораживает РОВНО один навык через узкий allowlist src/runtime/legal-precheck/." },
+    { "option": "Новая таблица agent_step_outcome / DB-backed inbox-task для defer", "why_not": "Нарушает «ничего нового сверх envelope» (T-0220 §9.2) и OOS; inbox day-1 = display-only seed (src/http/inbox.ts, нет task-таблицы в миграциях 043-048). Audit-floor (open-vocab agent.deferred) — канонический DB-backed носитель day-1; inbox-UI = существующий E7-seam." },
+    { "option": "reasoning в теле ответа-исхода", "why_not": "Прямое нарушение D-139 (red-line). Разделение answer vs reasoning? в LlmResult; PrecheckAnswer структурно без reasoning-полей." },
+    { "option": "Live-провод включён по умолчанию", "why_not": "Нарушает dormant-by-default (FR-7); жжёт бюджет, делает приёмку недетерминированной. Три замка: NULL-конфиг / live-флаг / бросающий dormant-порт." },
+    { "option": "proceed как default-ветвь классификатора при неполноте сигнала", "why_not": "Ломает INV-DEFAULT (T-0220 §4); неопределённость → defer/fail, не «агент додумал». proceed достижим только при PDP-allow И обеих confidence-калитках." },
+    { "option": "Свой responseFormat-стор в моторе", "why_not": "Дублирует T-0123 answer_form; форма читается из agent_instruction.answerForm через readPublished (NF-2/AC-10)." },
+    { "option": "Второй резолвер прав для read договора", "why_not": "Нарушает единый PDP (T-0021/NF-2); resolveFor — единственный путь авторизации data-access." }
+  ],
+  "object_model": [
+    {
+      "entity": "LlmRequest (src/core/llm-port.ts)",
+      "fields": [
+        { "name": "instruction", "type": "string (= agent_instruction.instructionText, T-0123)" },
+        { "name": "document", "type": "string (тело демо-договора)" },
+        { "name": "dealContext", "type": "{ amount: number; kind: string; direction: string }" },
+        { "name": "answerForm", "type": "string (= agent_instruction.answerForm, применяемая форма)" }
+      ]
+    },
+    {
+      "entity": "LlmResult (src/core/llm-port.ts)",
+      "fields": [
+        { "name": "confidence", "type": "number [0,1] — самооценка модели (B.5 второй сигнал)" },
+        { "name": "answer", "type": "PrecheckAnswer — безопасное тело наружу (форма answerForm)" },
+        { "name": "reasoning", "type": "string | undefined — INTERNAL ONLY, только в audit под T-0139, никогда наружу (D-139)" }
+      ]
+    },
+    {
+      "entity": "LlmPort (src/core/llm-port.ts, PURE TYPE)",
+      "fields": [
+        { "name": "complete", "type": "(req: LlmRequest) => Promise<LlmResult> — единственный метод; production/stub/dormant — разные impl" }
+      ]
+    },
+    {
+      "entity": "dormantLlmPort / LlmDormantError (src/core/llm-port.ts)",
+      "fields": [
+        { "name": "complete", "type": "() => throw LlmDormantError — dormant-by-default; сетевой вызов структурно невозможен (FR-7/AC-4)" }
+      ]
+    },
+    {
+      "entity": "PrecheckAnswer (src/core/agent-precheck-motor.ts) — D-139: НЕ несёт reasoning",
+      "fields": [
+        { "name": "answerForm", "type": "string — эхо применённой формы (AC-10)" },
+        { "name": "redFlags", "type": "readonly { clause: string; risk: string; severity: 'low'|'med'|'high' }[]" },
+        { "name": "summary", "type": "string — безопасное резюме (НЕ reasoning)" }
+      ]
+    },
+    {
+      "entity": "PrecheckOutcome (src/core/agent-precheck-motor.ts, T-0220)",
+      "fields": [
+        { "name": "proceed", "type": "{ kind:'proceed'; answer: PrecheckAnswer }" },
+        { "name": "defer-to-human", "type": "{ kind:'defer-to-human'; doubtReason: string; signal:'threshold'|'model'|'ambiguity'|'dormant'; inboxTaskRef: string (= id agent.deferred-аудита) }" },
+        { "name": "fail-closed", "type": "{ kind:'fail-closed'; cause:'pdp_deny'|'llm_error'|'llm_timeout'|'egress_block'|'dormant_no_probe'; denyReason?: string (для pdp_deny = reason из resolveFor) }" }
+      ]
+    },
+    {
+      "entity": "OutcomeSignals (src/core/agent-precheck-motor.ts) — вход classifyOutcome",
+      "fields": [
+        { "name": "pdpDenied / pdpReason", "type": "boolean / string? — resolveFor deny → fail-closed (приоритет 1)" },
+        { "name": "llmError", "type": "'llm_error'|'llm_timeout'|'egress_block'|'dormant_no_probe' | undefined → fail-closed" },
+        { "name": "llmDormant", "type": "boolean — live не сконфигурирован → defer/fail, не proceed" },
+        { "name": "modelConfidence / thresholdFailed / ambiguous", "type": "number? / boolean / boolean — confidence-калитки B.5 → defer (приоритет 2)" },
+        { "name": "answer", "type": "PrecheckAnswer | undefined" }
+      ]
+    },
+    {
+      "entity": "PrecheckDeps (src/runtime/legal-precheck/run-precheck.ts)",
+      "fields": [
+        { "name": "llm", "type": "LlmPort — инъектируется: production-адаптер | stub | dormantLlmPort" },
+        { "name": "resolverDeps", "type": "ResolverDeps (T-0021) — для единственного PDP resolveFor" },
+        { "name": "auditWriter", "type": "AuditWriter (T-0016) — единственный audit-sink" },
+        { "name": "liveEnabled", "type": "boolean — live-флаг (deploy-time, из composition root); false ⇒ принудительно dormantLlmPort" }
+      ]
+    }
+  ],
+  "contracts": [
+    "src/core/llm-port.ts: export interface LlmPort { complete(req: LlmRequest): Promise<LlmResult> } — PURE TYPE, no pg/node:http/https/net/fetch/child_process/process.env (зеркалит SecretResolverPort).",
+    "src/core/llm-port.ts: export const dormantLlmPort: LlmPort (complete → throw LlmDormantError); export class LlmDormantError extends Error.",
+    "src/core/agent-precheck-motor.ts: export function classifyOutcome(s: OutcomeSignals): PrecheckOutcome — тотальна, default-to-human (приоритет fail-closed > defer > proceed); proceed ИСКЛЮЧИТЕЛЬНО при !pdpDenied && !llmError && !llmDormant && !thresholdFailed && conf>=threshold && !ambiguous && answer!=null.",
+    "src/runtime/legal-precheck/run-precheck.ts: export async function runLegalPrecheck(tx: PgClientLike, deps: PrecheckDeps, args: { tenantId; agentEmployeeId; documentHandle: ObjectHandle; subject: ResolveSubject; dealContext; nowMs }): Promise<PrecheckOutcome> — один прогон под tenant-tx; data-access через resolveFor (T-0021), форма через readPublished (T-0123), ровно один appendAuditEvent (T-0016).",
+    "REUSE (не меняется): readPublished(tx, employeeId) (src/db/agent-instruction-store.ts); resolveFor(deps, handle, subject, op) (src/core/grant-resolver.ts); AuditWriter.appendAuditEvent(tx, input) (src/db/audit-writer.ts); validateSecretHandleShape/redactHandle/SecretResolverPort (src/core/secret-handle-validator.ts).",
+    "src/adapters/openai-llm-port.ts: export function makeOpenAiLlmPort(deps): LlmPort — единственное место с SDK/секретом (через SecretResolverPort, redactHandle); Stage-deploy, НЕ в приёмке."
+  ],
+  "fitness_functions": [
+    { "id": "FF-LP-1", "rule": "LlmPort экспортирован из src/core/llm-port.ts; мотор/оркестратор принимают порт как инъектируемую зависимость; НИ ОДИН LLM-SDK-импорт в src/core/** и src/runtime/legal-precheck/** (AC-1).", "ci_check": "new ci/checks/llm-port-injectable.sh --self-test: (a) src/core/llm-port.ts экспортирует LlmPort+dormantLlmPort; (b) grep — нет from 'openai'/'@anthropic*'/*-sdk в src/core/** + src/runtime/legal-precheck/**; (c) runLegalPrecheck принимает llm: LlmPort в deps." },
+    { "id": "FF-LP-2", "rule": "PrecheckAnswer/PrecheckOutcome структурно НЕ несут reasoning/trace/raw/chainOfThought; reasoning присваивается ТОЛЬКО в appendAuditEvent-payload, не в answer/исход/res.json (AC-9, D-139).", "ci_check": "new ci/checks/precheck-no-reasoning-egress.sh --self-test: grep — в типах ответа нет reasoning-полей; единственное упоминание result.reasoning на write-стороне внутри appendAuditEvent(...) аргумента; tsc подтверждает форму типа." },
+    { "id": "FF-LP-3", "rule": "Ядро+оркестратор не делают прямого сетевого вызова к LLM (нет fetch/https/SDK вне адаптера); dormantLlmPort бросает; dormant-by-default (AC-4/AC-12).", "ci_check": "new ci/checks/precheck-no-network-in-core.sh --self-test: grep — нет fetch(/https.request/new OpenAI в src/core/** + src/runtime/legal-precheck/**; ассерт dormantLlmPort.complete() бросает." },
+    { "id": "FF-LP-4", "rule": "Runtime-чтение agent_instruction допущено РОВНО на src/runtime/legal-precheck/; прочие runtime-пути (core/engine, worker, adapters, bridge-*) по-прежнему FAIL (AC-11/NF-4).", "ci_check": "extend ci/checks/agent-instruction-runtime-dormant.sh (ALLOWED_RE += src/runtime/legal-precheck/) + new ci/checks/legal-precheck-unpark-narrow.sh --self-test: ассерт runtime-agent_instruction-хиты ⊆ src/runtime/legal-precheck/; негативный self-test: хит в src/worker/src/core/engine ⇒ FAIL." },
+    { "id": "FF-LP-5", "rule": "Data-access навыка ТОЛЬКО через resolveFor; нет второго резолвера/authority на пути (AC-7).", "ci_check": "new ci/checks/legal-precheck-single-resolver.sh --self-test: grep в src/runtime/legal-precheck/ + src/core/agent-precheck-motor.ts — есть resolveFor, нет иной *resolve*/*authorize*/covers*-функции с allow/deny; existing single-resolver.sh зелёный." },
+    { "id": "FF-LP-6", "rule": "Аудит навыка ТОЛЬКО через appendAuditEvent; нет второго audit-writer; success/deferred/blocked эмитят ожидаемый audit_event с эхо answerForm (AC-8/AC-10).", "ci_check": "new ci/checks/legal-precheck-single-audit.sh --self-test: grep — единственный writer = appendAuditEvent; присутствуют строки agent.blocked/agent.deferred; нет прямого INSERT INTO ... audit_event." },
+    { "id": "FF-LP-7", "rule": "Полный npm run ci/npm test/npm run fitness зелёный без OPENAI_API_KEY/LLM-секрета и без сети к провайдеру (стаб-порт); tsc exit 0; vitest-кейсы AC-2/3/5/6/14/15 (AC-12/AC-16/NF-1).", "ci_check": "existing npm run ci (tsc+vitest+fitness) в окружении без LLM-env; unit/db-тесты мотора инжектят src/core/__tests__/stub-llm-port.ts; cross-tenant probe (AC-14) и демо-фикстура ≥5 млн (AC-15) — часть npm test." },
+    { "id": "FF-LP-8", "rule": "Сырого LLM-секрета нет в console.*/appendAuditEvent/res.json/exception; ядро не читает секрет; live-адаптер резолвит через SecretResolverPort+redactHandle (AC-13/NF-3).", "ci_check": "new ci/checks/precheck-secret-custody.sh --self-test: grep — нет сырого llm_secret_handle в логах/audit/response на пути навыка; src/core/llm-port.ts не импортирует секрет/env; existing no-env-in-core.sh зелёный." },
+    { "id": "FF-LP-9", "rule": "Мотор src/core/agent-precheck-motor.ts PURE: нет pg/node:http/https/net/fetch/child_process/process.env (AC-1/AC-16).", "ci_check": "extend coverage via existing ci/checks/no-env-in-core.sh (мотор под src/core/) + FF-LP-1(b)/FF-LP-3 grep; tsc --noEmit exit 0. Byte-frozen grant-lattice.ts/object-handle.ts не трогаются (frozen-checks-immutable.sh зелёный)." }
+  ],
+  "traceability": [
+    { "ac": "AC-1", "covered_by": "§3.1 LlmPort (PURE type, DI) + §3.5 PrecheckDeps; FF-LP-1, FF-LP-9" },
+    { "ac": "AC-2", "covered_by": "§4 поток + §8 stub-llm-port unit-тест (демо-договор ≥5 млн); FF-LP-7" },
+    { "ac": "AC-3", "covered_by": "§3.4 classifyOutcome детерминизм + стаб-фикстура; FF-LP-7 (vitest golden)" },
+    { "ac": "AC-4", "covered_by": "§6 dormant-замки + §3.1 dormantLlmPort бросает → §3.4 не proceed; FF-LP-3" },
+    { "ac": "AC-5", "covered_by": "§4 ветки fail-closed (pdp_deny/llm_error/egress) + §3.3 cause; FF-LP-6 (agent.blocked)" },
+    { "ac": "AC-6", "covered_by": "§5.3 defer → agent.deferred с doubtReason+inboxTaskRef; FF-LP-6" },
+    { "ac": "AC-7", "covered_by": "§5.1 единый resolveFor; FF-LP-5 + existing single-resolver.sh" },
+    { "ac": "AC-8", "covered_by": "§5.1 единый appendAuditEvent; FF-LP-6" },
+    { "ac": "AC-9", "covered_by": "§3.2 PrecheckAnswer без reasoning + §5.2; FF-LP-2" },
+    { "ac": "AC-10", "covered_by": "§3.2/§4 форма из answerForm через readPublished; FF-LP-2 / FF-LP-6 (эхо формы)" },
+    { "ac": "AC-11", "covered_by": "§6 узкий allowlist; FF-LP-4 (extend FF-COMP-6 + legal-precheck-unpark-narrow.sh)" },
+    { "ac": "AC-12", "covered_by": "§1/§6 стаб-порт, $0; FF-LP-3, FF-LP-7" },
+    { "ac": "AC-13", "covered_by": "§5.4 RL-3 custody; FF-LP-8" },
+    { "ac": "AC-14", "covered_by": "§4 шаг 1 (RLS/tenant под resolveFor + SET LOCAL); vitest cross-tenant probe (FF-LP-7)" },
+    { "ac": "AC-15", "covered_by": "§8 демо-договор ≥5 млн как seed/фикстура; FF-LP-7" },
+    { "ac": "AC-16", "covered_by": "§7/§8 tsc/test/fitness зелёные; FF-LP-7, FF-LP-9" }
+  ],
+  "runtime_target": "локально/контейнер (приёмка на стаб-порту, без OPENAI_API_KEY/внешнего ресурса) — choros dev-стек single-Postgres + node:http. Live-провод (реальный LLM) = deploy-time действие фаундера на его среде (config agent_card.llm_* + live-флаг + бюджет) = GT-4 граница фаундера (D-060: бюджет/секреты/необратимое); impl/приёмку НЕ блокирует.",
+  "adr_artifact_path": "docs/design/T-0233-agent-runtime-live-precheck.adr.md",
+  "escalation": ""
+}

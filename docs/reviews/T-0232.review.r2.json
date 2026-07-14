@@ -1,0 +1,101 @@
+{
+  "task_id": "T-0232",
+  "verdict": "changes_requested",
+  "reviewer": "reviewer (adversarial re-review r2, max-rigor — security meta-gate, D-007/D-026)",
+  "date": "2026-06-15",
+  "reviews_commit": "b92cbb3",
+  "supersedes": "docs/reviews/T-0232.review.json (commit 92f8ca6, R-1 blocking)",
+  "ci_seen": {
+    "green": false,
+    "note": "Real meta-gate (ci/checks/frozen-checks-immutable.sh) on task/T-0232 emits EXACTLY ONE violation: FF-FCI1 for the additive edit to frozen-checks-immutable.sh (owned by T-0146) — the documented one-time self-bind bootstrap requiring a founder-class sanction (ADR §2-Q1). Every other check is green; the new delegate own-check passes (2nd-line header '# T-0232 ·'). auto-sanction-additive.sh --self-test is GREEN (all FF-ASA1..5 + 6 new R-1 adversarial cases). The single CI red is the bootstrap, not a coder defect. The blocking finding below (R2-1) is a substantive content defect independent of the CI red."
+  },
+  "r1_disposition": {
+    "r1a_stale_corpus_closed": true,
+    "r1a_evidence": "Built adversarial git history in a clone: an ANCESTOR commit carrying a TRUNCATED corpus.jsonl blob (the exact exploit from r1 — reachable historical sha) is now REJECTED with 'FAIL [ATTEST-R1a]: ... points to a STALE corpus blob'. corpus_ref == current HEAD (matching blob) → ACCEPTED. foreign/nonexistent sha (deadbeef...) → REJECTED ('corpus anchor unreachable'). The three checks (cat-file reachable → merge-base --is-ancestor HEAD → rev-parse blob equality with HEAD) are all present and fire correctly. The r1 stale-corpus hole IS closed for real git shas.",
+    "r1b_families_bound_closed": true,
+    "r1b_evidence": "catalog_enforced_files() parses the real T-0152 catalog (Format A: '### N.N FAMILY' header + '- **Enforced by:**' bullets). OBJECT-HANDLE-ISO → {handle-uuid-binding.sh, no-record-in-variable.sh, object-handle-isolation.sh}; TENANT-ISO does NOT include object-handle-isolation.sh. Thaw of object-handle-isolation.sh citing TENANT-ISO → REJECTED (R-1b). Citing OBJECT-HANDLE-ISO → ACCEPTED. Thaw of frozen-checks-immutable.sh citing OBJECT-HANDLE-ISO → REJECTED. Exhaustive sweep (110 real frozen checks x 12 families) found ZERO exploitable substring-coverage holes against the actual file set. The r1 unbound-families hole IS closed for the current surface."
+  },
+  "adversarial_probes_run": [
+    {"probe": "R1a-1: corpus_ref = ancestor-of-HEAD but DIFFERENT (truncated) corpus blob", "result": "REJECTED via blob-equality check (ref_blob != head_blob). The exact r1 exploit is closed."},
+    {"probe": "R1a-2: corpus_ref = current HEAD sha (matching blob)", "result": "ACCEPTED — legitimate path works, no false negative."},
+    {"probe": "R1a-3: corpus_ref = foreign/nonexistent sha", "result": "REJECTED (cat-file -e fails: corpus anchor unreachable)."},
+    {"probe": "R1b-1: families surface-binding TENANT-ISO vs object-handle-isolation.sh", "result": "REJECTED — family does not cover thawed surface."},
+    {"probe": "R1b-2: exhaustive 110-file x 12-family substring-coverage sweep against REAL files", "result": "0 holes. The substring grep -qF is latent looseness (a FUTURE foreign check named e.g. 'isolation.sh' whose basename is a proper substring of a real enforced path would falsely match) but NO real collision exists today, and the attacker does not control the family's enforced-path list. Downgraded to nit R2-3."},
+    {"probe": "A-1 comment-inclusion: adding a NEW comment line", "result": "ACCEPTED — not over-restricted. The A-1 change only freezes BASE-side comment lines; a '+'-only diff (added comment) satisfies it. Confirmed legit additive comment passes."},
+    {"probe": "A-1..A-4 destructive battery: in-place deny->allow flip / superstring append / line deletion", "result": "ALL REJECTED (verify_additive grep -qxF whole-line freeze). Prior PASS preserved — no regression."},
+    {"probe": "R2-1 (NEW HOLE): live auto_additive sanction line with corpus_ref:\"SELFTEST_SKIP\"", "result": "ACCEPTED — the R-1a git anchor (ancestor+blob) is SILENTLY SKIPPED. The sentinel is honored unconditionally from the JSON line with NO mode-gating. See BLOCKING R2-1."}
+  ],
+  "findings": [
+    {
+      "id": "R2-1",
+      "severity": "blocking",
+      "axis": 6,
+      "location": "ci/checks/auto-sanction-additive.sh:318-320 (corpus_ref == SELFTEST_SKIP branch) + signature :233-235 (no self-test mode param)",
+      "issue": "The R-1a fix introduced a hardcoded sentinel string `SELFTEST_SKIP` that bypasses the ENTIRE corpus-anchor verification (reachability + ancestor-of-HEAD + blob-equality). The bypass is keyed PURELY on the literal value of vrag_attestation.corpus_ref in the JSON sanction line and is NOT gated to self-test invocation — attestation_valid() takes no mode flag, and the live standalone path (line 823) and --verify path (line 417) call it with the real sanction line verbatim. A task authoring a live `auto_additive` sanction can therefore set `\"corpus_ref\":\"SELFTEST_SKIP\"` and the R-1a content-binding (the ADR §2-Q2 'детерминированный якорь … не подделать') is silently skipped in production. This is a partial REOPENING of the exact R-1a hole this commit set out to close: the audit artifact stops proving which corpus the Враг ran against. The code comment says 'for --self-test mode' but nothing enforces it. Scope of damage is bounded (A-1..A-4 still block destructive thaws; R-1b families binding and enemy_segment still enforced — so this is NOT a destructive-thaw bypass), but on the security meta-gate the corpus-anchor integrity is exactly the load-bearing property R-1 was filed for, and a self-inflicted ungated escape hatch is a silent stated-vs-actual divergence — the same defect class as the original R-1.",
+      "suggestion": "Gate SELFTEST_SKIP to actual self-test invocation only. Add a self-test-mode parameter to attestation_valid() (e.g. `attestation_valid <json> [thawed_file] [allow_selftest_skip]`), pass it as true ONLY from the --self-test block, and false (default) from --verify and the live standalone loop. When not in self-test mode, treat corpus_ref==SELFTEST_SKIP as a FAIL ('sentinel not permitted in a live sanction'). Alternatively drop the sentinel entirely and have the self-test build a real ephemeral git repo with a real corpus commit (the probe in this review did exactly that in ~10 lines). Add a self-test case asserting that SELFTEST_SKIP is REJECTED in live (non-self-test) mode."
+    },
+    {
+      "id": "R2-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/auto-sanction-additive.sh:202 AUDIT [FF-FCI12] vs handoff/ADR 'byte-equivalent' (carried from r1 R-2)",
+      "issue": "Carried-forward nit from r1 R-2: the founder FF-FCI12 path is described as 'byte-equivalent' but the AUDIT line additively gains ` class=founder`. Behaviorally equivalent (same grant, same exit code, destructive still founder-gated), the wording is just imprecise. Verify the handoff/ADR reword landed.",
+      "suggestion": "Confirm handoff/ADR says 'behaviorally equivalent; AUDIT additively gains class=founder per AC-7'. No code change."
+    },
+    {
+      "id": "R2-3",
+      "severity": "nit",
+      "axis": 6,
+      "location": "ci/checks/auto-sanction-additive.sh:293 (grep -qF \"${file_basename}\" — substring match)",
+      "issue": "R-1b binds families to the thawed file by `echo \"$enforced_files\" | grep -qF \"$file_basename\"` — a SUBSTRING (not exact-line) match. A future foreign frozen check whose basename is a proper substring of a legitimately-enforced filename (e.g. a hypothetical ci/checks/isolation.sh vs the enforced object-handle-isolation.sh) would falsely satisfy the binding for an unrelated family. Exhaustive sweep confirms ZERO such collisions among the 110 current files, so it is NOT a live hole — and the attacker controls only the thawed basename, not the family's enforced-path list. Latent looseness only, strictly tighter than the prior no-binding state.",
+      "suggestion": "Use an exact match against the full enforced-path set: `echo \"$enforced_files\" | grep -qxF \"$thawed_file\"` (compare the full ci/checks/... relative path, not the basename), so binding is exact. Add a self-test case for a substring-basename non-collision."
+    },
+    {
+      "id": "R2-4",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/auto-sanction-additive.sh:70-83 (A-1 comment inclusion) — ADR §4 deviation",
+      "issue": "A-1 now byte-freezes comment lines too (closing the r1 R-3 comment-deletion residual). This is an intentional, documented deviation from ADR §4 ('не-комментарий'). Confirmed it does NOT over-restrict legitimate additive thaws (adding a comment line is '+'-only and passes). Deviation is recorded in the file header and pr-handoff. Acceptable; just ensure ADR §4 is updated to match so the spec and impl do not silently diverge.",
+      "suggestion": "Update ADR §4 to state comment lines are also byte-frozen by A-1 (or note the deviation explicitly), per reviewer rule 4."
+    }
+  ],
+  "adversarial_verdict": {
+    "r1_closed": false,
+    "r1_closed_note": "r1a (stale/foreign/ancestor corpus) and r1b (families surface-binding) are genuinely closed for real inputs — BUT the r1a fix shipped an ungated SELFTEST_SKIP sentinel (R2-1) that partially REOPENS the corpus-anchor bypass in live mode. The fix is not clean.",
+    "stale_corpus_rejected": true,
+    "stale_corpus_rejected_evidence": "ancestor-but-different-blob → REJECTED; foreign sha → REJECTED; correct HEAD → ACCEPTED (probed against a real adversarial git history in a clone). Caveat: bypassable via SELFTEST_SKIP (R2-1).",
+    "families_tightly_bound": true,
+    "families_tightly_bound_evidence": "TENANT-ISO for object-handle-isolation.sh REJECTED; correct family ACCEPTED; 110x12 exhaustive sweep = 0 exploitable holes. Basename grep is substring not exact (R2-3 nit) but no live collision.",
+    "no_new_holes": false,
+    "no_new_holes_evidence": "R2-1: the fix introduced an ungated SELFTEST_SKIP sentinel that skips the R-1a corpus anchor when present in a LIVE sanction line. New, precise, self-inflicted partial reopening of R-1a.",
+    "destructive_still_rejected": true,
+    "destructive_still_rejected_evidence": "in-place flip / superstring append / line deletion all REJECTED by A-1 (grep -qxF whole-line) — verified independently. Comment-inclusion change does not over-restrict additive (added comment passes). No regression to the prior PASS.",
+    "independent_reverify": true,
+    "independent_reverify_evidence": "Delegate reads `git show BASE_REF:file` (lines 382, 796) and recomputes A-1..A-4 over the extracted base/head; sanctioned_by used only to ROUTE class. Does not trust additive_basis/marker. D-007 held.",
+    "only_blocker_is_bootstrap": false,
+    "only_blocker_is_bootstrap_evidence": "The CI red IS only the bootstrap (FF-FCI1 on frozen-checks-immutable.sh). BUT there is an additional substantive code blocker R2-1 (SELFTEST_SKIP ungated) that is NOT a founder action — so the approve bar ('only remaining item is the founder bootstrap') is not met.",
+    "no_forged_founder_row": true,
+    "no_forged_founder_row_evidence": "git diff origin/dev..HEAD and 66c27da..HEAD on ci/checks/data/frozen-sanctions.jsonl are BOTH EMPTY. Only the two pre-existing founder rows (T-0085, T-0227) present. No fabricated bootstrap founder row; coder correctly left it for founder_decide (status=blocked). No self-green."
+  },
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "note": "FF-ASA1 green; additive accept reproduced"},
+    {"ac": "AC-2", "covered": true, "note": "FF-ASA2; delete reject reproduced"},
+    {"ac": "AC-3", "covered": true, "note": "FF-ASA3; in-place mutation reject reproduced"},
+    {"ac": "AC-4", "covered": true, "note": "FF-ASA4 no-attestation + invalid-family reject"},
+    {"ac": "AC-5", "covered": true, "note": "founder class not accepted as auto_additive"},
+    {"ac": "AC-6", "covered": true, "note": "additive process_instance thaw would PASS"},
+    {"ac": "AC-7", "covered": true, "note": "class=auto_additive vs class=founder machine-distinguishable"},
+    {"ac": "AC-8", "covered": true, "note": "destructive-as-auto_additive → FAIL; founder line → PASS"},
+    {"ac": "AC-9", "covered": true, "note": "jsonl append-only; founder rows byte-preserved (empty diff)"},
+    {"ac": "AC-10", "covered": true, "note": "registered + --self-test; 2nd line '# T-0232 ·'"},
+    {"ac": "AC-11", "covered": true, "note": "no-op outside task branch"},
+    {"ac": "AC-12", "covered": true, "note": "founder regression preserved behaviorally (R2-2 nit)"},
+    {"ac": "AC-13", "covered": false, "note": "blocked on bootstrap founder sanction (expected); end-to-end green not reachable on branch"},
+    {"ac": "R-1a (corpus content-binding)", "covered": false, "note": "stale/foreign/ancestor REJECTED correctly, but SELFTEST_SKIP ungated bypass (R2-1) leaves the binding incomplete in live mode"},
+    {"ac": "R-1b (families surface-binding)", "covered": true, "note": "TENANT-ISO rejected, correct family accepted, 0 real holes"}
+  ],
+  "role_gap_evidence": [
+    "Reinforces r1 SQ11 evidence: the regression introduced by the R-1 fix (R2-1 ungated test sentinel reopening the very anchor it closed) is exactly the class of self-inflicted security-gate defect a generic reviewer rubric under-weights. A security-meta-gate review checklist axis should include 'test-mode escape hatches must be unreachable from production input'."
+  ],
+  "summary": "R-1 is PARTIALLY closed. r1a (stale/foreign corpus anchor): genuinely fixed for real git shas — verified against a constructed adversarial history (ancestor-but-truncated-blob REJECTED, foreign sha REJECTED, correct HEAD ACCEPTED). r1b (families surface-binding): genuinely fixed — TENANT-ISO for object-handle-isolation.sh REJECTED, correct family ACCEPTED, exhaustive 110x12 sweep = 0 holes. Destructive-thaw rejection (A-1..A-4) preserved with NO regression; the A-1 comment-inclusion change does not over-restrict legitimate additive thaws. D-007 independent re-verify held; no forged founder row (coder honestly blocked). HOWEVER the r1a fix introduced ONE new blocking hole R2-1: a hardcoded `SELFTEST_SKIP` corpus_ref sentinel that bypasses the entire corpus-anchor check is honored UNCONDITIONALLY from the JSON sanction line with no self-test-mode gating — a live auto_additive sanction can carry corpus_ref:\"SELFTEST_SKIP\" and silently skip the R-1a binding, partially reopening the exact hole this commit closed. Bounded (A-1..A-4 + R-1b + enemy_segment still hold, so not a destructive bypass) but on the security meta-gate the corpus-anchor integrity is load-bearing → changes_requested with a small fix (gate the sentinel to self-test invocation only; reject it in live mode). Plus 3 nits: substring (not exact) family-basename match (latent, 0 live collisions), 'byte-equivalent' wording (carried), ADR §4 comment-freeze deviation should be reflected in the ADR. Approve bar not met: the additional remaining item R2-1 is a code defect, not the founder bootstrap."
+}

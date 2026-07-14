@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0592",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1108,
+    "passed": 1108,
+    "failed": 0
+  },
+  "tested_commit": "4da4966 (branch task/T-0592-spend-emptystate, base dev@f7348bf)",
+  "coverage_by_ac": [
+    {"ac": "AC-spend-props", "test": "npx vitest run src/screens/screen-spend.test.jsx", "result": "pass"},
+    {"ac": "AC-llm-connections-regression", "test": "npx vitest run src/screens/screen-llm-connections.test.jsx src/screens/__tests__/screen-llm-connections.states.test.jsx src/screens/__tests__/screen-llm-connections.a11y.test.jsx", "result": "pass"},
+    {"ac": "AC-full-web-suite-no-regression", "test": "npx vitest run (весь web/, все тестовые файлы)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "ux-g4-state-primitives.sh (informational mode)", "result": "pass", "note": "0 newly-added hand-rolled state branch findings; exit 0."},
+    {"check": "ux-g4-state-primitives.sh --required", "result": "pass", "note": "Тот же результат в required-режиме: 0 findings, exit 0 — дифф T-0592 не вносит hand-rolled state-ветки, только правит проп существующего kit-примитива EmptyState."}
+  ],
+  "failures": [
+    {
+      "test": "web/src/screens/records-form.test.js",
+      "is_product_defect": false,
+      "root_class": "tooling-gap"
+    },
+    {
+      "test": "web/src/screens/apps-schema.test.js",
+      "is_product_defect": false,
+      "root_class": "tooling-gap"
+    }
+  ],
+  "summary": {
+    "spend_tests": "src/screens/screen-spend.test.jsx: 8/8 passed (source-presence проверки — отсутствие message=, наличие description= на обоих EmptyState, целостность экрана: default export, импорт EmptyState/LoadingState/ErrorState, использование LoadingState/ErrorState в разметке).",
+    "llm_connections_tests": "3 файла, 41/41 passed: screen-llm-connections.test.jsx (26), __tests__/screen-llm-connections.states.test.jsx (9, включая собственную прецедентную message=-проверку REV-3), __tests__/screen-llm-connections.a11y.test.jsx (6). Регрессий нет.",
+    "ux_g4_gate": "ci/checks/ux/ux-g4-state-primitives.sh — прогнан и в informational, и в --required режиме. Оба: 'PASS [G4]', 0 findings, exit 0. Дифф T-0592 меняет только имя пропа на уже используемом kit-примитиве EmptyState — не создаёт новых hand-rolled loading/empty/error веток, гейту не к чему придраться по конструкции фикса.",
+    "full_web_suite": "npx vitest run (полный прогон web/): 57 test-файлов total — 55 passed, 2 failed на этапе СБОРКИ (transform error 'Cannot find package ajv', не test-assertion failure). Внутри 55 успешно собранных файлов: 1108/1108 тестов passed, 0 failed. deterministic.total/passed/failed выше взяты ровно из этого единственного полного прогона (включает в себя spend+llm-connections наборы, отдельно не суммируется повторно)."
+  },
+  "notes": {
+    "unrelated_failures_investigation": "2 failing файла (web/src/screens/records-form.test.js, web/src/screens/apps-schema.test.js) падают с 'Cannot find package ajv' — при чтении этих файлов на dev (git show dev:web/src/screens/records-form.test.js) видно, что импорт `import { Ajv } from 'ajv'` существует УЖЕ на dev, т.е. до диффа T-0592. Оба файла НЕ входят в git diff dev...HEAD (только screen-spend.jsx/.test.jsx + docs/handoff/T-0592.pr-handoff.json изменены). Причина — пакет ajv отсутствует в web/node_modules этого worktree (вероятно npm install/ci не подтянул актуальный lockfile при провижининге worktree). Это pre-existing инфраструктурный гэп worktree, НЕ регрессия фикса T-0592 и не блокирует приёмку этой задачи.",
+    "environment": "Локальный детерминированный прогон, vitest v3.2.6, node environment (тесты spend/llm-connections не монтируют React — grep-based source-presence, как принято в этой части кодовой базы). Живой стек (Postgres/Flowable/KC) не требовался — дифф чисто web/src frontend, без затрагивания data/process слоя."
+  }
+}

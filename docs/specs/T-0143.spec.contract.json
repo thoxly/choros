@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0143",
+  "status": "ready",
+  "summary": "Wire the T-0118 KeyedDigest port from the startMain composition root into the request-path ResolverDeps so the masking equality-oracle fix is active in live HTTP traffic, and add an e2e test proving it.",
+  "functional": [
+    "FR-1: When startMain is called with CHOROS_MASK_DIGEST_KEY, the KeyedDigest built from that key is present on the ResolverDeps passed to makeGrantResolver for every HTTP request reaching the PDP.",
+    "FR-2: When startMain is called without CHOROS_MASK_DIGEST_KEY, keyedDigest is absent or fail-closed; hash-mapped fields drop — never keyless, never raw.",
+    "FR-3: The composition seam is laid out so that any future route calling makeGrantResolver automatically inherits keyedDigest from the root without a second wiring step.",
+    "FR-4: All 13 T-0118 fitness checks remain green; the request-path wiring is additive.",
+    "FR-5: MainHandle.resolverDeps: { keyedDigest: KeyedDigest } field is preserved."
+  ],
+  "non_functional": [
+    "NF-1: No process.env reads introduced under src/core/ — FF-DC9 stays green.",
+    "NF-2: resolveFor / makeGrantResolver / projectFields / visibleFields / grantFacetFields export signatures unchanged (FE-W23-0008).",
+    "NF-3: Backward-compatible degrade — callers that pass ResolverDeps without keyedDigest retain pre-T-0118 behavior (hash → drop, never raw, never keyless)."
+  ],
+  "out_of_scope": [
+    "Changing hash transform semantics, class ladder, or clearance model.",
+    "Adding new HTTP endpoints beyond what is needed to thread keyedDigest.",
+    "Per-tenant key management, key rotation, or DB key-table design.",
+    "Migration (masking is on-read; no persisted hashes exist).",
+    "Re-testing T-0118 HMAC correctness (already covered by FF-T118-2..FF-T118-13).",
+    "Python bindings or non-TypeScript implementations (T-0057 Stage-2)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "When startMain({ env: { CHOROS_MASK_DIGEST_KEY: <32-byte hex> }, listen: false }) is called and resolveFor (or a route that calls it) is invoked with deps from handle.resolverDeps, a field classified as 'restricted' read by a 'public'-clearance subject produces a 64-char lowercase hex string (the keyed HMAC output), not undefined, not the raw value, not the 8-char keyless djb2.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "An e2e test drives a real HTTP request through the actual startMain-wired server (not a manually assembled deps object), reaches makeGrantResolver/resolveFor with a ClassificationSource and the keyedDigest from the composition root, and the response field resolving to the 'hash' transform is a 64-char lowercase hex string — NOT the keyless djb2, NOT the raw value, NOT absent.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "The same e2e test (or sibling) repeats the request with startMain({ env: {} }) (no CHOROS_MASK_DIGEST_KEY). The field that would be hash-masked is ABSENT from the response JSON (dropped, fail-closed). The server starts and responds normally. Raw value and keyless djb2 hex are not present anywhere in the response.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "All tests in src/__tests__/hash-oracle.test.ts pass unchanged after T-0143 is applied.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "src/__tests__/data-classification.test.ts and src/__tests__/grant-resolver.test.ts pass unchanged after T-0143 is applied.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "ci/checks/data-classification-isolation.sh (FF-T118-1 / DC9 forbidden-import check on data-classification.ts for node:crypto, crypto, process.env, process\\.env) returns green after T-0143 is applied.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "startMain({ env: { CHOROS_MASK_DIGEST_KEY: <key> }, listen: false }).resolverDeps.keyedDigest.digest({ value: 'v', tenantId: 't', resourceType: 'r', facetField: 'f' }) returns a string matching /^[0-9a-f]{64}$/. With no key in env, the same call returns undefined.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "grep -rn 'process\\.env' src/core/ returns no new matches introduced by T-0143 (the env boundary stays exclusively in src/main.ts).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "src/__tests__/main-wired-entry.test.ts passes without modification after T-0143 is applied.",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0143-keyed-digest-request-path.spec.md"
+}

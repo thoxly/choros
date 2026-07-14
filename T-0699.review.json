@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0699",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "ci/checks/ux/ux-g7-no-fake-buttons.sh:109 (has_tag_close)",
+      "issue": "Двусторонняя эвристик-дыра bare-`>`: has_tag_close срезает только `=>` и `>=`, поэтому голое сравнение `{x > 5}` в атрибуте переживает и трактуется как закрытие тега. Empirically подтверждено обе стороны: (FN) многостроковый ФЕЙК, где bare-`>` стоит текстуально ПЕРЕД inert-маркерами, преждевременно закрывается и целиком пропускается — старый line-local флагал бы голую строку aria-disabled; (FP) честный контрол с bare-`>` перед своей причиной (title/describedby) ложнится.",
+      "suggestion": "Документировано строителем (комм. стр.62-65); ни один охраняемый контрол этой формы не использует, гейт informational. Если когда-нибудь флипать в required — отслеживать глубину `{...}` (не считать `>` внутри JSX-выражения границей тега). Оставить, усиливает рекомендацию НЕ флипать."
+    },
+    {
+      "id": "N-2",
+      "severity": "nit",
+      "axis": 6,
+      "location": "web/src/app-shell/shell.jsx:917,930,978",
+      "issue": "3 живых ложняка (whole-tree аудит). AccountMenu-контролы `<button aria-disabled=\"true\">` — ЧЕСТНЫЕ: несут видимый бейдж «скоро» и sibling `<span class=chs-account-menu__reason>…в разработке/недоступно…</span>` ПОСЛЕ закрытия тега. Гейт судит только открывающий тег (от `<Tag` до `>`), поэтому причину-соседа не видит — фундаментальный предел block-scope шейпа.",
+      "suggestion": "Как советует строитель: держать informational. Чистка — либо навесить aria-describedby на кнопку, указывающий на reason-span (тогда block-scope вычистит), либо расширить гейт на тело/следующего sibling элемента. Не блокер."
+    },
+    {
+      "id": "N-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/ux/ux-g7-no-fake-buttons.sh:239-247 (self-test honest asserts)",
+      "issue": "Два honest-ассерта self-test (grep 'ЧестнаяДискрайб'/'ЧестнаяТайтл') кросс-режимно СЛАБЫ: проходят даже под line-local-реверт, т.к. под line-local флагается голая строка `aria-disabled=\"true\"`, а метки кнопки в ней нет — ассерт не срабатывает и ложно 'проходит'. То есть половину задачи (устранение ложняков честных) они самостоятельно не стерегут.",
+      "suggestion": "Overall self-test всё равно non-tautological — ассерт 'flag multiline РегрессФейк' ПАДАЕТ под line-local (verified), давая exit 2 при реверте. Реальная защита от FP-регресса = whole-tree аудит (7→3). Информационно; можно усилить honest-ассерты грепом по РЕЗУЛЬТАТУ 'находок 0', не по отсутствию метки. Оставить."
+    },
+    {
+      "id": "N-4",
+      "severity": "nit",
+      "axis": 6,
+      "location": "ci/checks/ux/ux-g7-no-fake-buttons.sh:124-128 (boundary reset)",
+      "issue": "Сброс на границе хунка/файла тихо отбрасывает недозакрытый тег = false-negative by design.",
+      "suggestion": "Риск≈0: настоящий НОВЫЙ фейк — смежные '+' строки в одном хунке (внутри тега нет unchanged-контекста, границу не пересечь); straddle требует '+'-открытия тега при `>` в позднем хунке — при смежных вставках недостижимо. Приемлемо для informational-гейта. Документировано строителем. Оставить."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "has_tag_close не крашит/не зацикливается на arrow `() => foo(a>b)`, generic `<C<T>>`, self-closing `/>`, attr-string `title=\">\"`, fragment `<>`", "covered": true },
+    { "ac": "Многостроковый фейк (aria-disabled + inert onClick на разных строках, причины нет) → FLAG", "covered": true },
+    { "ac": "Одностроковый фейк (старое line-local поведение) всё ещё → FLAG (нет регресса)", "covered": true },
+    { "ac": "Честный многостроковый контрол (reason на строке после aria-disabled, до `>`) → НЕ флагается (ядро задачи)", "covered": true },
+    { "ac": "HARD sr-only+inert (даже с describedby) → FLAG (сохранён)", "covered": true },
+    { "ac": "Whole-tree аудит сошёлся: 6 контролов / 0 настоящих фейков / старые 4 ложняка-строки ушли (7→3) / 3 AccountMenu нового класса", "covered": true },
+    { "ac": "Self-test non-tautological: падает (exit 2) при реверте эвристики к line-local", "covered": true },
+    { "ac": "Все 13 ux-гейтов + self-test зелёные на bash 3.2.57; диф скоуплен (только ux-g7 .sh + pr-handoff)", "covered": true },
+    { "ac": "Рекомендация НЕ флипать в required — согласен (3 живых ложняка + bare-> дыра = ложные блоки при required)", "covered": true }
+  ],
+  "adversarial_summary": {
+    "attack_1_has_tag_close": "no crash/hang on arrows/generics/self-closing/attr-strings/fragments; bare-`>` returns CLOSES = documented known limitation (N-1)",
+    "attack_2_fake_detection": "multi-line + single-line fakes both FLAGGED; sr-only hard-pattern preserved",
+    "attack_3_honest_no_noise": "reason-on-different-line (describedby/title/stub-class) NOT flagged; real shell.jsx/ra-grant-trail shapes clean",
+    "whole_tree_converged": "YES — 6 controls / 0 real fakes / OLD 7 FP-lines -> NEW 3 FP-lines (delta 4) / 3 AccountMenu new-class",
+    "self_test_non_tautological": "YES — РегрессФейк assertion breaks under line-local revert (verified via dev classifier)",
+    "flip_to_required": "AGREE do NOT flip — 3 live AccountMenu FPs + bare-> two-way hole would false-block honest diffs"
+  },
+  "gates_run": {
+    "bash_version": "3.2.57(1) arm64-apple-darwin25 (matches declared bash 3.2 POSIX-ERE compat)",
+    "ux_g7_self_test": "PASS (11 assertions incl 4 new T-0699 probes)",
+    "all_ux_gates": "13/13 PASS (self-test where available, run otherwise)",
+    "ux_g7_diff_mode_real_branch": "0 findings (informational exit 0; --required also exit 0 — branch adds no controls)",
+    "diff_scope": "dev...HEAD = ci/checks/ux/ux-g7-no-fake-buttons.sh + T-0699.pr-handoff.json only"
+  },
+  "role_gap_evidence": []
+}

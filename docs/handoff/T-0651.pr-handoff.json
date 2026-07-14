@@ -1,0 +1,77 @@
+{
+  "task_id": "T-0651",
+  "status": "pr_open",
+  "branch": "task/T-0651-sidebar-workspace",
+  "summary": "Сайдбар как рабочее место (UX-study 2026-07-05 §1, столп 4 предпосылка). Три хода спеки + один переиспользуемый примитив. (A) COLLAPSIBLE-ГРУППЫ, per-user: Конструктор/Наблюдаемость/Администрирование сворачиваются, ДЕФОЛТ СВЁРНУТО (43 пункта → ~10 видимых); РАБОТА — постоянный слой, не сворачивается. Заголовок группы — реальная <button aria-expanded> (клавиатурно), не div-onClick. Состояние per-user через НОВЫЙ generic store choros.user_pref (migration 129) + src/http/user-prefs.ts (GET /api/user-prefs → плоский {key:value}; PUT /:key upsert; DELETE /:key идемпотентно) — ключ sidebar.collapsed_groups; локальный дефолт до async-загрузки (без мигания); honest-degrade при недоступности API → session-only. (B) УПРАВЛЕНИЕ НА МЕСТЕ: «+ Раздел» инлайн в сайдбаре (POST /api/sections, тот же контракт); контекст-меню приложения (⋯: Переименовать / В раздел → / Настроить поля) — РЕЮЗ RenameAppModal/SetSectionModal из screen-apps.jsx (экспортированы, не дублируются); осознанный 3-пунктовый ПОДНАБОР полного /apps-меню (delete/publish остаются на /apps со своими confirm-диалогами). Инлайн-переименование раздела (двойной клик / карандаш; Enter/Escape — паттерн screen-sections.jsx). (C) DnD ПОВЕРХ ▲/▼, не вместо: ручной HTML5 DnD (паттерн kanban-board.jsx T-0582, без библиотеки) для приложений (reorder внутри / перенос между разделами, вкл. пустой раздел и «Без раздела») и разделов (reorder). Кнопки ▲/▼ ОСТАЮТСЯ первоклассными клавиатурными контролами. Drop-логика в чистом sidebar-dnd.js (unit-тесты без DOM). Персист — СУЩЕСТВУЮЩИЕ PATCH-роуты. СЧЁТЧИК «Мои задачи»: counts.mine из GET /api/inbox — ТА ЖЕ лента, что читает экран инбокса (комментарий T-0307 в NavItem приглашал ровно это — счётчик, привязанный к живой ленте, а не статичный seed). Граница: вложенные разделы НЕ делаются (ADR T-0551 §6, повторно подтверждено). FINDING/backend: у choros.application НЕ БЫЛО sort_order (был только у section, migration 113) — приложения внутри раздела сортировались created_at DESC/slug ASC без ручного хука; добавил колонку (migration 129, additive DEFAULT 0) + поддержку в существующем PATCH /api/applications/:id + сортировку внутри группы в groupAppsBySection (эхо находки §6 исследования «у оргструктуры нет move-API»). Move/reorder API разделов УЖЕ существовал (PATCH /api/sections/:id { name, sort_order }, T-0551) — использован как есть, ничего не выдумано.",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "ci_local_detail": {
+    "types": "npx tsc --noEmit — clean (0 errors). npm run build (root: tsc + seed tsc) — clean.",
+    "lint": "npx eslint src — 0 errors (44 pre-existing no-console warnings, none in changed files). Web tier has no strict eslint gate (root config scopes src/**/*.ts only; web lint is best-effort || true) — web correctness gated by npm run build (vite).",
+    "build": "web: vite build — 542 modules, built OK (only pre-existing chunk-size>500kB informational warning). root: tsc + seed tsc — clean.",
+    "tests": "web vitest: 89 files / 2275 tests green (incl. new sidebar-dnd 14, sidebar-app-menu 4, shell.sidebar structural 10, nav-sections +within-group-sort). server vitest: 5560 passed, 1 pre-existing FLAKE (forms-from-schema SP-1 timeout at 10s under full-suite parallel load — passes in isolation at 5.6s, unrelated to this task's files).",
+    "fitness": "npm run fitness:db (135 db files, 631s full run): the 4 files touched/affected by this task — user_prefs_crud (6, NEW), sections_crud (10, +sort_order case), applications_crud (7), schema (16, validates user_pref in known_tenant_tables.txt + RLS contract) — ALL GREEN both in the full run and in isolation. 5 files flaked in the full parallel run (doc-summary/doc-reconcile/doc-regen/records_crud + 1) with timeouts/pollution — ALL PASS in isolation (60/60 re-run green); documented 'параллельные vitest+db флейкуют → соло-числа' phenomenon, none touch user_pref/section/application. bash ci/checks/ux/*.sh — all PASS (anti-uuid, kanban-ux, nav-projection-only, nav-sections-no-hardcode, screen-registry-declares, g2/g4/g5/g6/g8 — g5 informational 51 findings all T-id comment/test refs). bash ci/checks/anti-case-lock.sh — PASS (full D-064 §5 denylist within baseline; no case-content literals added)."
+  },
+  "user_prefs_model": {
+    "table": "choros.user_pref (migration 129)",
+    "columns": "tenant_id uuid, id uuid, actor text, key text, value jsonb, created_at bigint, updated_at bigint; PK (tenant_id,id); UNIQUE (tenant_id,actor,key); RLS FORCE + default-DENY policy (T-0013 verbatim); index (tenant_id,actor)",
+    "reusable_for_study_section_4": "YES — generic tenant+actor-scoped key/value store. This task consumes ONE key (sidebar.collapsed_groups → string[]). A future personal-saved-views feature (study §4, view-primitive owner_actor) reads/writes through the SAME GET/PUT/DELETE with a different key (or its own keys), no new table. value jsonb form is 100% owned by the reading feature, never this table. NOT a FK to employee (soft ref, same as audit_event.actor / list_view.created_by).",
+    "api": "GET /api/user-prefs → {prefs:{key:value}}; PUT /api/user-prefs/:key {value} → upsert; DELETE /api/user-prefs/:key → 204 idempotent. Tenant+actor scoped (RLS + actor filter on every query); no extra privilege gate (a preference costs nothing to write, touches only the writer's own row — theme-toggle's trust model)."
+  },
+  "migration_number": "129 (129_user_pref_and_app_sort_order.sql). Chose 129 deliberately: T-0666 already claims 128 on its own branch (128_process_designer_role_backfill.sql); 129 is clear of it — no filename collision when both merge to dev. Dev currently at 127; 129 is the next-but-one free slot above the in-flight 128.",
+  "files_changed": [
+    "T-0651.spec.md",
+    "docs/design/ADR-T0651-sidebar-workspace.md",
+    "migrations/129_user_pref_and_app_sort_order.sql",
+    "ci/checks/known_tenant_tables.txt",
+    "src/http/user-prefs.ts",
+    "src/http/applications.ts",
+    "src/server.ts",
+    "ci/checks/db/user_prefs_crud.test.ts",
+    "ci/checks/db/sections_crud.test.ts",
+    "web/src/app-shell/user-prefs-api.js",
+    "web/src/app-shell/sidebar-dnd.js",
+    "web/src/app-shell/sidebar-dnd.test.js",
+    "web/src/app-shell/sidebar-app-menu.js",
+    "web/src/app-shell/sidebar-app-menu.test.js",
+    "web/src/app-shell/nav-sections.js",
+    "web/src/app-shell/shell.jsx",
+    "web/src/app-shell/shell.sidebar.test.jsx",
+    "web/src/app-shell/app.css",
+    "web/src/screens/screen-apps.jsx",
+    "docs/handoff/T-0651.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "web/src/screens/screen-apps.jsx: exported the previously module-private RenameAppModal + SetSectionModal (added `export` keyword + a one-line traceability note in each docblock). This is the ADR §4 reuse decision made real — the sidebar context menu reuses the exact T-0567/T-0551 modals instead of duplicating them. No behavior change to /apps; the components are unchanged apart from the export."
+  ],
+  "live_proof_residue": "IMPL complete; live browser proof deferred to the acceptance run (separate D-064 LIVE_PROOF phase, not this impl session). Residual to prove on the stand by a rank-and-file actor: (1) свернуть группу «Конструктор» → перезайти/обновить → остаётся свёрнутой (per-user persist через /api/user-prefs); (2) «+ Раздел» из сайдбара → раздел появляется немедленно; (3) перетащить приложение в другой/пустой раздел → section_id меняется + переживает reload; кнопки ▲/▼ работают (клавиатурный путь); (4) счётчик «Мои задачи» == counts.mine из /api/inbox. Мотор доказан unit-тестами (sidebar-dnd/sidebar-app-menu/user-prefs db/nav-sections) + структурными инвариантами (shell.sidebar.test.jsx); остаётся сквозное живое проживание.",
+  "friction_events": [
+    "Сессия оборвалась транзиентным сбоем API в середине правки shell.jsx (после незакоммиченного BUILD в дереве). Возобновлено ровно с места обрыва по указанию координатора: git status показал spec+design закоммичен (7f5f957), BUILD untracked; доделаны collapsible-обёртка групп, рендер модалок контекст-меню на уровне shell, CSS, и найден+исправлен пропуск в DnD (drop на пустой раздел). Ничего не переделано.",
+    "npm run fitness:db полным прогоном (631s, 135 файлов, --no-file-parallelism) дал 5 red-файлов (doc-summary/doc-reconcile/doc-regen/records_crud + 1) — все ФЛЕЙК под нагрузкой параллельных template-clone (doc-* тратят ~14s/файл и таймаутят; records_crud уперся в 5000ms). Все 5 ЗЕЛЁНЫЕ в изоляции (60/60 re-run). Ни один не трогает user_pref/section/application. Документированный в памяти феномен «параллельные vitest+db флейкуют → соло-числа». Затронутые этой задачей db-файлы (user_prefs_crud/sections_crud/applications_crud/schema) зелёные И в полном прогоне, И в изоляции.",
+    "1 server-vitest флейк: forms-from-schema.test.ts SP-1 таймаут 10s под полной нагрузкой (235s suite); в изоляции 5.6s, зелёный. Не связан с файлами задачи.",
+    "Web-тир не имеет строгого eslint-гейта (root eslint.config.js скопит только src/**/*.ts; web lint = best-effort || to true). Web-корректность гейтится vite build (падает на синтаксис/импорт). Это существующее устройство репо, не отклонение задачи."
+  ],
+  "live_proof": {
+    "verdict": "GREEN",
+    "date": "2026-07-05",
+    "stand": "http://100.121.76.86:3000 (dev @ af7a8fc)",
+    "report": "docs/live-proof/T-0651.live-proof.md",
+    "evidence_dir": "docs/live-proof/T-0651-evidence/",
+    "checks": {
+      "collapsible_groups_default_collapsed": "GREEN — 3 groups (constructor/observability/admin) aria-expanded=false by default, confirmed via GET /api/user-prefs baseline",
+      "expand_collapse_click_and_keyboard": "GREEN — mouse click AND keyboard Enter AND Space all toggle aria-expanded, each fires PUT /api/user-prefs/sidebar.collapsed_groups -> 200",
+      "persist_across_reload": "GREEN — expanded state survives full page.reload() (networkidle), confirmed twice with explicit waitForResponse on the PUT before reload",
+      "add_section_button": "GREEN — POST /api/sections -> 201, confirmed via GET /api/sections; note: empty section (0 apps) is intentionally hidden from sidebar per FF-SECTIONS-EMPTY-HIDDEN until first app is moved in (documented as FINDING, not a bug)",
+      "dnd_app_into_section": "GREEN — real native HTML5 DragEvent dispatch (dragstart/dragenter/dragover/drop/dragend with ~50ms pacing) moved an app between sections; PATCH /api/applications/:id -> 200 with new section_id + recalculated sort_order; survives reload",
+      "arrow_buttons_reorder": "GREEN — up/down arrow buttons on app row work independently of DnD, same PATCH contract, aria-label confirms accessible name",
+      "counter_mine_matches_screen": "GREEN — sidebar counter (0) matches GET /api/inbox counts.mine (0) matches the actual Мои задачи screen Мне tab (0) — same feed, no drift"
+    },
+    "bypasses_found": "none — all 4 checks performed via real UI interaction (click/keyboard/native drag events); network interception used read-only for verification of already-performed UI actions, never to substitute for the UI action itself",
+    "blockers": "none"
+  }
+}

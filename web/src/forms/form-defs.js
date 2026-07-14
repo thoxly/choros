@@ -1,0 +1,297 @@
+/* ============================================================================
+   CHOROS — form-defs.js
+   Разметка form-js (.fjs-*) для двух форм User Task + рантайм, исполняемый
+   ВНУТРИ sandbox-iframe (тогглы select, числовые стрелки, расчёт «итого»,
+   подсветка required, авто-высота через postMessage).
+   Чистый JS — грузится в РОДИТЕЛЬСКОМ документе, отдаёт строки для srcdoc.
+
+   D7-K boundary (T-0480): этот модуль НЕ является рендерером полей и НЕ конкурирует
+   с каталогом контрактов привязки (field-contract.js / binding-contract-catalog.ts).
+   Это ДВЕ ЗАХАРДКоженные ДЕМО-формы ТЭЛ (PURCHASE/APPROVAL) в опаковом sandbox-iframe —
+   поверхность «escape» §6 спеки (истинно-кастомный sandbox-HTML вне основного пути,
+   1% случай), используемая ТОЛЬКО вкладкой «Предпросмотр ТЭЛ-форм» (screen-forms.jsx).
+   Схемо-управляемые формы (инбокс, записи приложения) идут через ЕДИНЫЙ рендерер
+   FieldControl по каталогу — НЕ сюда. Submit-валидация на сервере (forms.ts →
+   form-schema.ts) отвергает чужие/лишние поля (D7-2). Здесь словарь типов = демо-вёрстка,
+   а не четвёртый рендерер.
+   ============================================================================ */
+(function () {
+  /* ---- общие глифы ---- */
+  var CHEVRON =
+    '<svg class="fjs-select-arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>';
+  var CAL =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="11" height="10" rx="1"/><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3"/></svg>';
+  var HUMAN_GLYPH =
+    '<svg class="fjs-exec__glyph" viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4" fill="currentColor" stroke="currentColor" stroke-width="1.4"/></svg>';
+
+  /* ---- генератор select ---- */
+  function select(field, label, value, options, opts) {
+    opts = opts || {};
+    var items = options
+      .map(function (o) {
+        var sel = o.label === value;
+        var mono = o.mono ? '<span class="fjs-dd-mono">' + o.mono + "</span>" : "";
+        return (
+          '<div class="fjs-dropdownlist-item" data-val="' +
+          o.label +
+          '" aria-selected="' +
+          (sel ? "true" : "false") +
+          '">' +
+          o.label +
+          mono +
+          "</div>"
+        );
+      })
+      .join("");
+    return (
+      '<div class="fjs-form-field fjs-form-field-select" data-field="' +
+      field +
+      '">' +
+      '<label class="fjs-form-field-label">' +
+      label +
+      (opts.required ? '<span class="fjs-asterix">*</span>' : "") +
+      "</label>" +
+      '<div class="fjs-select-display" tabindex="0">' +
+      '<span class="fjs-select-value">' +
+      value +
+      "</span>" +
+      CHEVRON +
+      "</div>" +
+      '<div class="fjs-dropdownlist">' +
+      items +
+      "</div>" +
+      "</div>"
+    );
+  }
+
+  /* ============================================================================
+     ФОРМА 1 — ЗАЯВКА НА ЗАКУПКУ
+     T-0370: field keys aligned to registry_def.record_schema «Заявки»
+     (migration 076, slug='purchases'): title (text) + amount (number).
+     Fields without `data-field` are visual-only and are NOT submitted.
+     FF-FORMS1-2: every data-field here has a matching key in form-schema.ts.
+     ============================================================================ */
+  var PURCHASE =
+    '<form class="fjs-container" novalidate>' +
+    '<div class="fjs-form">' +
+    '<div class="fjs-vertical-layout">' +
+
+    // заголовок
+    '<div class="fjs-form-field fjs-form-field-text"><div class="fjs-text-view">' +
+    '<div class="fjs-form-title"><h1>Заявка на закупку</h1>' +
+    '<span class="fjs-form-title-id">PR-2026-0418</span></div>' +
+    "</div></div>" +
+
+    // тема заявки (title) — submitted as data-field="title" (registry «Тема заявки»)
+    '<div class="fjs-form-field fjs-form-field-textfield" data-field="title">' +
+    '<label class="fjs-form-field-label">Тема заявки<span class="fjs-asterix">*</span></label>' +
+    '<input class="fjs-input" type="text" value="Ноутбуки Lenovo ThinkPad T14 Gen 5 (32 ГБ / 1 ТБ)">' +
+    '<div class="fjs-form-field-description">Краткая номенклатура; детальная спецификация — во вложении.</div>' +
+    "</div>" +
+
+    // сумма (amount) — submitted as data-field="amount" (registry «Сумма»).
+    // T-0369: sandbox sends this as a numeric string; coerceFormPayload in forms.ts
+    // converts it to a JS number before validation so a real number is persisted.
+    '<div class="fjs-form-field fjs-form-field-number" data-field="amount">' +
+    '<label class="fjs-form-field-label">Сумма, ₽</label>' +
+    '<div class="fjs-input-group">' +
+    '<input class="fjs-input fjs-input--adorned" type="text" inputmode="decimal" value="496000" data-amount>' +
+    '<span class="fjs-input-adornment">₽</span>' +
+    "</div></div>" +
+
+    // визуальные поля (без data-field — не отправляются в /submit)
+    '<div class="fjs-row">' +
+    '<div class="fjs-column" data-col="2">' +
+    // поставщик — визуальный select (без data-field; подача через реестр контрагентов)
+    '<div class="fjs-form-field fjs-form-field-select">' +
+    '<label class="fjs-form-field-label">Поставщик</label>' +
+    '<div class="fjs-select-display" tabindex="0"><span class="fjs-select-value">ООО «Вектор»</span>' + CHEVRON + "</div>" +
+    "</div></div>" +
+    '<div class="fjs-column">' +
+    // срок поставки — визуальный (без data-field)
+    '<div class="fjs-form-field fjs-form-field-datetime">' +
+    '<label class="fjs-form-field-label">Срок поставки</label>' +
+    '<div class="fjs-input-group"><input class="fjs-input fjs-input--adorned" type="text" value="21.06.2026">' +
+    '<span class="fjs-input-adornment">' + CAL + "</span></div></div></div>" +
+    "</div>" +
+
+    // обоснование — визуальный textarea (без data-field)
+    '<div class="fjs-form-field fjs-form-field-textarea">' +
+    '<label class="fjs-form-field-label">Обоснование</label>' +
+    '<textarea class="fjs-textarea" rows="2">Замена парка устройств отдела разработки с истёкшим сроком амортизации. Согласовано с руководителем направления.</textarea>' +
+    "</div>" +
+
+    '<div class="fjs-form-field fjs-form-field-separator"><hr class="fjs-separator"></div>' +
+
+    // итого
+    '<div class="fjs-form-field fjs-form-field-text"><div class="fjs-text-view">' +
+    '<div class="fjs-amount fjs-amount--ok">' +
+    '<span class="fjs-amount__label">Итого к согласованию</span>' +
+    '<span class="fjs-amount__val" data-total>496 000 ₽</span>' +
+    "</div></div></div>" +
+
+    // кнопки
+    '<div class="fjs-form-field fjs-form-field-button"><div class="fjs-button-group">' +
+    '<button type="submit" class="fjs-button">Отправить на согласование</button>' +
+    '<button type="button" class="fjs-button fjs-button--secondary">Сохранить черновик</button>' +
+    "</div></div>" +
+
+    "</div></div></form>";
+
+  /* ============================================================================
+     ФОРМА 2 — СОГЛАСОВАНИЕ
+     ============================================================================ */
+  var APPROVAL =
+    '<form class="fjs-container" novalidate>' +
+    '<div class="fjs-form">' +
+    '<div class="fjs-vertical-layout">' +
+
+    // заголовок
+    '<div class="fjs-form-field fjs-form-field-text"><div class="fjs-text-view">' +
+    '<div class="fjs-form-title"><h1>Согласование закупки</h1>' +
+    '<span class="fjs-form-title-id">AP-2026-0418-2</span></div>' +
+    "</div></div>" +
+
+    // сводка «что согласуем»
+    '<div class="fjs-form-field fjs-form-field-text"><div class="fjs-text-view">' +
+    '<dl class="fjs-kv">' +
+    "<dt>Заявка</dt><dd><span class=\"fjs-mono fjs-mono--accent\">PR-2026-0418</span></dd>" +
+    '<dt>Инициатор</dt><dd><span class="fjs-exec fjs-exec--human">' +
+    HUMAN_GLYPH +
+    "А. Кравцова</span></dd>" +
+    "<dt>Предмет</dt><dd>Ноутбуки ThinkPad T14 Gen 5 · <span class=\"fjs-mono\">4 шт.</span></dd>" +
+    "<dt>Контрагент</dt><dd>ООО «Вектор» · прямая закупка</dd>" +
+    "</dl></div></div>" +
+
+    // сумма / лимит
+    '<div class="fjs-row">' +
+    '<div class="fjs-column"><div class="fjs-form-field fjs-form-field-text"><div class="fjs-text-view">' +
+    '<div class="fjs-amount fjs-amount--ok"><span class="fjs-amount__label">Сумма заявки</span>' +
+    '<span class="fjs-amount__val">496 000 ₽</span></div>' +
+    "</div></div></div>" +
+    '<div class="fjs-column"><div class="fjs-form-field fjs-form-field-text"><div class="fjs-text-view">' +
+    '<div class="fjs-amount fjs-amount--limit"><span class="fjs-amount__label">Ваш лимит</span>' +
+    '<span class="fjs-amount__val">≤ 500 000 ₽</span></div>' +
+    "</div></div></div>" +
+    "</div>" +
+
+    '<div class="fjs-form-field fjs-form-field-separator"><hr class="fjs-separator"></div>' +
+
+    // решение
+    '<div class="fjs-form-field fjs-form-field-radio" data-field="decision">' +
+    '<label class="fjs-form-field-label">Решение<span class="fjs-asterix">*</span></label>' +
+    '<div class="fjs-radio-group" data-inline="true">' +
+    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="decision" value="ok" checked><span>Согласовать</span></label>' +
+    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="decision" value="reject"><span>Отклонить</span></label>' +
+    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="decision" value="return"><span>Вернуть на доработку</span></label>' +
+    "</div></div>" +
+
+    // комментарий
+    '<div class="fjs-form-field fjs-form-field-textarea" data-field="comment">' +
+    '<label class="fjs-form-field-label">Комментарий<span class="fjs-asterix" data-req-when-reject hidden>*</span></label>' +
+    '<textarea class="fjs-textarea" rows="2" placeholder="Обязателен при отклонении или возврате"></textarea>' +
+    '<div class="fjs-form-field-description">Будет записан в аудит-лог инстанса.</div>' +
+    "</div>" +
+
+    // следующий согласующий
+    '<div class="fjs-row">' +
+    '<div class="fjs-column" data-col="2">' +
+    select("next", "Следующий согласующий", "Е. Ларина · Финдиректор", [
+      { label: "Е. Ларина · Финдиректор" },
+      { label: "Авто по маршруту процесса" },
+      { label: "Без эскалации" }
+    ]) +
+    "</div>" +
+    '<div class="fjs-column"></div>' +
+    "</div>" +
+
+    // проверки
+    '<div class="fjs-form-field fjs-form-field-checklist" data-field="checks">' +
+    '<label class="fjs-form-field-label">Контроль перед согласованием</label>' +
+    '<div class="fjs-checkbox-group">' +
+    '<label class="fjs-checkbox-label"><input type="checkbox" class="fjs-checkbox" checked><span>Бюджет статьи подтверждён</span></label>' +
+    '<label class="fjs-checkbox-label"><input type="checkbox" class="fjs-checkbox" checked><span>Договор проверен · <span class="fjs-mono">ДГ-2231</span></span></label>' +
+    '<label class="fjs-checkbox-label"><input type="checkbox" class="fjs-checkbox"><span>Реквизиты контрагента сверены</span></label>' +
+    "</div></div>" +
+
+    // кнопки
+    '<div class="fjs-form-field fjs-form-field-button"><div class="fjs-button-group">' +
+    '<button type="submit" class="fjs-button">Согласовать</button>' +
+    '<button type="button" class="fjs-button fjs-button--danger">Отклонить</button>' +
+    '<button type="button" class="fjs-button fjs-button--secondary">Вернуть</button>' +
+    "</div></div>" +
+
+    "</div></div></form>";
+
+  /* ============================================================================
+     РАНТАЙМ ВНУТРИ SANDBOX (строка → инлайн-скрипт srcdoc)
+     ============================================================================ */
+  var SANDBOX_SCRIPT = [
+    "(function(){",
+    "  var d=document;",
+    "  function fmt(n){return Math.round(n).toLocaleString('ru-RU').replace(/\\u00a0/g,' ');}",
+    "  function num(v){return parseFloat(String(v).replace(/[^0-9.,-]/g,'').replace(',', '.'))||0;}",
+    // select toggles
+    "  function closeAll(except){d.querySelectorAll('.fjs-select-display').forEach(function(s){if(s!==except){s.removeAttribute('data-open');var dd=s.nextElementSibling;if(dd)dd.removeAttribute('data-open');}});}",
+    "  d.querySelectorAll('.fjs-form-field-select').forEach(function(f){",
+    "    var disp=f.querySelector('.fjs-select-display');var list=f.querySelector('.fjs-dropdownlist');var val=f.querySelector('.fjs-select-value');",
+    // T-0273: a visual-only select (e.g. покупка → Поставщик, T-0370) carries the
+    // .fjs-select-display BUT no .fjs-dropdownlist/.fjs-select-value. Guard against
+    // null here: without the guard `list.querySelectorAll(...)` threw synchronously
+    // during init, aborting the WHOLE IIFE before the submit handler (below) was
+    // ever attached → the native form submit navigated instead of posting fjs-submit
+    // → /api/forms/purchase/submit was never POSTed (deploy-acceptance U2 timeout).
+    "    if(!disp||!list||!val)return;",
+    "    disp.addEventListener('click',function(e){e.stopPropagation();var open=disp.hasAttribute('data-open');closeAll(disp);if(!open){disp.setAttribute('data-open','true');list.setAttribute('data-open','true');}});",
+    "    list.querySelectorAll('.fjs-dropdownlist-item').forEach(function(it){it.addEventListener('click',function(e){e.stopPropagation();list.querySelectorAll('[aria-selected]').forEach(function(x){x.setAttribute('aria-selected','false');});it.setAttribute('aria-selected','true');val.textContent=it.getAttribute('data-val');disp.removeAttribute('data-open');list.removeAttribute('data-open');});});",
+    "  });",
+    "  d.addEventListener('click',function(){closeAll(null);});",
+    // number steppers
+    "  d.querySelectorAll('.fjs-number-arrow-up,.fjs-number-arrow-down').forEach(function(b){b.addEventListener('click',function(){var inp=b.closest('.fjs-input-group').querySelector('.fjs-input');var v=num(inp.value)+parseInt(b.getAttribute('data-step'),10);if(v<0)v=0;inp.value=fmt(v);recalc();});});",
+    // total sync (purchase): mirror amount field → итого display (T-0370: qty/price merged into amount)
+    "  function recalc(){var a=d.querySelector('[data-field=amount] .fjs-input');var t=d.querySelector('[data-total]');if(a&&t){t.textContent=fmt(num(a.value))+' ₽';}}",
+    "  d.querySelectorAll('[data-field=amount] .fjs-input').forEach(function(i){i.addEventListener('input',recalc);});recalc();",
+    // decision → comment required
+    "  var dec=d.querySelectorAll('input[name=decision]');var reqStar=d.querySelector('[data-req-when-reject]');",
+    "  dec.forEach(function(r){r.addEventListener('change',function(){var need=(d.querySelector('input[name=decision]:checked')||{}).value!=='ok';if(reqStar)reqStar.hidden=!need;});});",
+    // auto height — постим РОВНО {type,h} (только высота, не секрет). Из опакового
+    // origin ребёнок надёжно не знает origin родителя, поэтому target='*' ; защита
+    // на РОДИТЕЛЕ — он валидирует source+origin+форму (T-0101 acceptFrameHeight).
+    "  function postH(){var h=d.documentElement.scrollHeight;parent.postMessage({type:'fjs-height',h:h},'*');}",
+    "  if(window.ResizeObserver){new ResizeObserver(postH).observe(d.body);}",
+    "  window.addEventListener('load',postH);postH();setTimeout(postH,200);setTimeout(postH,600);",
+    "  d.addEventListener('input',postH);d.addEventListener('click',function(){setTimeout(postH,140);});",
+    // submit channel — on form submit collect all data-field values and post
+    // {type:'fjs-submit', value:{fieldKey:value}} to the parent. Mirrors the
+    // fjs-height channel: target='*' (opaque origin), parent validates source+origin.
+    // The parent (FormViewer.jsx) uses acceptFrameSubmit() for source+origin+shape gate.
+    "  d.querySelectorAll('form').forEach(function(form){",
+    "    form.addEventListener('submit',function(e){",
+    "      e.preventDefault();",
+    "      var value={};",
+    "      d.querySelectorAll('[data-field]').forEach(function(f){",
+    "        var key=f.getAttribute('data-field');",
+    "        var selVal=f.querySelector('.fjs-select-value');",
+    "        if(selVal){value[key]=selVal.textContent.trim();return;}",
+    "        var radio=f.querySelector('input[type=radio]:checked');",
+    "        if(radio){value[key]=radio.value||radio.closest('label').querySelector('span').textContent.trim();return;}",
+    "        if(f.classList.contains('fjs-form-field-checklist')){",
+    "          var vals=[];f.querySelectorAll('input[type=checkbox]:checked').forEach(function(c){vals.push(c.closest('label').querySelector('span').textContent.trim());});",
+    "          value[key]=vals;return;",
+    "        }",
+    "        var chk=f.querySelector('input[type=checkbox].fjs-checkbox');",
+    "        if(chk){value[key]=chk.checked;return;}",
+    "        var ta=f.querySelector('textarea');",
+    "        if(ta){value[key]=ta.value;return;}",
+    "        var inp=f.querySelector('input');",
+    "        if(inp){value[key]=f.classList.contains('fjs-form-field-number')?num(inp.value):inp.value;}",
+    "      });",
+    "      parent.postMessage({type:'fjs-submit',value:value},'*');",
+    "    });",
+    "  });",
+    "})();"
+  ].join("\n");
+
+  window.CHOROS_FORMS = { purchase: PURCHASE, approval: APPROVAL };
+  window.CHOROS_SANDBOX_SCRIPT = SANDBOX_SCRIPT;
+})();

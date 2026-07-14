@@ -1,0 +1,119 @@
+{
+  "task_id": "T-0574",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 7411,
+    "passed": 7411,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "src/http/llm-connections.ts isLlmProvider allow-list includes 'anthropic' (static); web/src/screens/screen-llm-connections.jsx PROVIDER_PRESETS includes {value:'anthropic', label:'Anthropic', ...} (form offers it); LIVE proof against real Postgres: ci/checks/db/assistant-llm-binding.test.ts :: 'FF-3: GET /api/agents lists the assistant; PUT .../llm-connection binds it' and ci/checks/db/llm-key-no-leak.test.ts :: main flow test both POST /api/llm-connections with {provider:'anthropic'} -> 201, then GET /api/llm-connections shows it in the list",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "ci/checks/db/llm-key-no-leak.test.ts :: 'drives the full flow ... and leaks the key NOWHERE' steps 2-3 (POST /:id/key -> 200 {secret_bound:true}; GET list afterwards, response body captured and asserted key-free) + N1 grep of ALL captured response bodies across every route touched (AC-7 assertion doubles as AC-2's 'not in any response field')",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "src/__tests__/llm-connection-test.test.ts (pre-existing T-0496, unmodified/non-regressed by this task, full unit suite green) :: 'T-0496 (1) a working connection probes ok:true' (200 {ok:true, model, latency_ms}) + 'T-0496 (2) a bad key probes ok:false (HTTP 200, not 500)' + 'T-0496 (3) the raw key NEVER egresses' + 'sanitizeProviderError never echoes the raw error'; LIVE re-proof same worst-case shape: ci/checks/db/llm-key-no-leak.test.ts steps 5-6 (probe ok:true, then probe against a fake provider error that ECHOES the raw key -> ok:false, error sanitized, key absent from body)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "ci/checks/db/assistant-llm-binding.test.ts :: '3f-bis: registerTenant creates a DORMANT agent_card row for assistant-agent' + 'FF-3: GET /api/agents lists the assistant; PUT .../llm-connection binds it (200, not 404 AGENT_NOT_FOUND)' (live Postgres, real registerTenant, real HTTP routes — the exact anti-case ADR-T0574 names); ci/checks/db/migration-115-backfill.test.ts (backfill path for pre-existing tenants, same anti-case); web/src/screens/screen-llm-connections.test.jsx :: 'T-0574 — «Назначить ассистенту» UI present, no new endpoints' (5 tests, F4 UI affordance, reuses PUT /api/agents/:id/llm-connection, no new endpoint)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "ci/checks/db/assistant-llm-binding.test.ts :: 'FF-4: loadTenantLlmConfig resolves the bound profile in the SAME process (no restart)' — binds a working secret_handle, then calls loadTenantLlmConfig(migPool, tenantId) in the SAME test process and asserts non-null config with the profile's endpoint/model/secretHandle",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "manual/LIVE_PROOF per spec (verifiable_as:manual) and per D-064 Definition of Done — out of TEST-phase scope. Directive from founder (see task brief): the real LLM provider key cannot be inserted by anyone until the founder returns; 'assistant responds' will be proven by the founder on the deployed dev stand as the final LIVE_PROOF step. Not exercised by this tester pass. Recorded as manual/founder-todo, consistent with how T-0570/T-0571's test-reports record their own manual/LIVE_PROOF ACs as result:pass (out-of-phase-scope, not a deterministic-suite finding).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "ci/checks/db/llm-key-no-leak.test.ts :: 'drives the full flow (create -> bind key -> assign to assistant -> probe ok -> probe fail) and leaks the key NOWHERE' — intercepts res.end on every route dispatched (/api/llm-connections/*, /api/agents/:id/llm-connection) across the ENTIRE flow (create/bind/list/assign/probe-ok/probe-fail) and asserts the known test-key string appears in NONE of the captured response bodies; the probe-fail leg deliberately uses a fake provider error that echoes the raw key (worst case) to prove sanitizeProviderError, not a polite stub",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "ci/checks/db/llm-key-no-leak.test.ts :: 'FF-2 (AC-8, N2): no audit_event row for this tenant carries the raw key' (queries choros.audit_event.payload for the tenant post-run, JSON.stringify's every payload, asserts key absent) + 'FF-2: the app_secret ciphertext row itself never contains the plaintext key as a substring' (reads the ciphertext BYTEA as latin1 and asserts no plaintext substring match)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "web/src/screens/__tests__/screen-llm-connections.states.test.jsx (9 tests, FF-UX-4) — proves the screen wires LoadingState (connections===null)/ErrorState with onRetry (connections===false)/EmptyState with visible description (connections.length===0), PLUS direct tree-walk of the kit LoadingState/ErrorState/EmptyState components themselves (role=status/alert, aria-live/aria-busy, visible label text, retry button wired) — includes a regression lock for the EmptyState message->description prop-name bug fixed in this task",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "ci/checks/db/assistant-llm-binding.test.ts :: 'FF-7: a non-privileged tenant member gets 403 ADMIN_GATE_REJECTED, not 500 / silent success' (live Postgres, plain employee with zero role_assignment attempts PUT /api/agents/:id/llm-connection -> 403 {error.code:'ADMIN_GATE_REJECTED'}) covers the NEW 'assign to assistant' affordance; save/replace/delete-key under canConfigureLlmConnection is covered by the pre-existing, non-regressed src/__tests__/llm-connections.capability-authz.test.ts :: 'T-0475 (a) a plain member CANNOT configure llm-connections' (POST/GET -> 403) and src/__tests__/llm-connection-test.test.ts :: 'T-0496 (5) a plain member CANNOT probe' (403) — same canConfigureLlmConnection gate guards POST/:id/key/PUT/DELETE in src/http/app-secret.ts",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "web/src/screens/screen-llm-connections.test.jsx :: 'T-0574 — инструкция «где взять ключ Anthropic» (AC-11)' (2 tests: mentions console.anthropic.com / API Keys / Create Key; scoped dev-jargon-denylist check on the instruction block itself finds no endpoint/handle/resolve/UUID/HTTP-code text) + ci/checks/ux/ux-g5-jargon-denylist.sh --required re-run by this tester directly against screen-llm-connections.jsx: 0 findings on this screen (24 repo-wide findings are all pre-existing *.test.jsx T-id/telLinear noise, none on this task's product file)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "manual/LIVE_PROOF (UX_REVIEW phase, D-062) — already run and approved by design-steward: docs/ux-review/T-0574.ux-review.json (verdict:approved, 0d0ea82), which itself ran ux-g2/g5/g6 --required plus web unit/a11y suite (32/32) and recorded the real-click-in-both-themes leg as deferred to this same AC-6-adjacent LIVE_PROOF step (no jsdom/react-dom mount available in this repo's web test tier). Not re-litigated here — out of TEST-phase scope by task brief; this tester independently re-ran ux-g2-theme-pairing.sh (PASS) and ux-g6-no-new-hardcode.sh --required (0 new-hardcode findings) as part of its own deterministic pass to corroborate the design-steward's gate_seen claims.",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "npx vitest run (full unit suite, root)",
+      "result": "pass",
+      "note": "250 files passed / 2 skipped (252); 4842 tests passed / 10 skipped (4852). Skips are pre-existing (workerAuth.kc.e2e.test.ts, flowable-client.integration.test.ts — require live external deps not available in this lane), unrelated to T-0574."
+    },
+    {
+      "check": "npx vitest run (web/, full suite)",
+      "result": "pass",
+      "note": "54 files passed (54); 1505 tests passed (1505). Includes screen-llm-connections.test.jsx (26/26), screen-llm-connections.a11y.test.jsx (6/6), screen-llm-connections.states.test.jsx (9/9, ran individually to confirm — same 9 counted inside the 1505)."
+    },
+    {
+      "check": "npm run fitness:db (live Postgres 16, isolated docker-compose project t-0574-test, POSTGRES_PORT=55440, torn down after)",
+      "result": "pass",
+      "note": "96 files passed (96); 1064 tests passed (1064). Matches pr-handoff's claimed count exactly. Includes assistant-llm-binding.test.ts (4/4), migration-115-backfill.test.ts (5/5), llm-key-no-leak.test.ts (3/3), llm-connection-fk-set-null.test.ts (2/2, rider T-0574-adjacent schema fix). Old leftover container 't-0574-postgres-1' (project 't-0574', from a prior session) was torn down first (docker compose -p t-0574 down -v) so this run is on a genuinely fresh instance, not stale state."
+    },
+    {
+      "check": "npm run fitness (full 277-step gate, root)",
+      "result": "pass",
+      "note": "Exit 0. Includes dual-control-isolation.sh (FF-DC7 relief for migrations 115/116, content-verified honest per review 9ca3f4e), frozen-checks-immutable.sh, http-route-auth-coverage.sh self-test, and every other gate. The many 'FAIL:'/'SELF-TEST' lines visible mid-run are gates deliberately proving they catch a planted-broken fixture (fail-closed self-tests) — expected, not real failures; overall process exit code 0."
+    },
+    {
+      "check": "ci/checks/ux/ux-g5-jargon-denylist.sh --required",
+      "result": "pass",
+      "note": "24 repo-wide findings, 0 on screen-llm-connections.jsx (verified with a scoped grep of the gate's own output). All 24 are pre-existing *.test.jsx noise (T-id in describe strings + telLinear fixture in screen-process-analytics.test.jsx), not introduced by this task — matches ux-review.json's own claim, independently corroborated here."
+    },
+    {
+      "check": "ci/checks/ux/ux-g6-no-new-hardcode.sh --required",
+      "result": "pass",
+      "note": "0 newly-added hardcode/overlay findings on this task's diff."
+    },
+    {
+      "check": "ci/checks/ux/ux-g2-theme-pairing.sh",
+      "result": "pass",
+      "note": "Both token sources (tokens.css, form-theme.css) light-default in :root + [data-theme=dark] reachable."
+    }
+  ],
+  "failures": [],
+  "notes": {
+    "coverage_gaps_found": "None requiring new tests — all AC-1..AC-5/AC-7..AC-11 trace to an existing, executed test (mostly authored by the coder in this task's own commits, some pre-existing and non-regressed: T-0475 capability-authz, T-0496 llm-connection-test). AC-6/AC-12 are correctly out of TEST-phase scope (manual/LIVE_PROOF, D-064/D-062) and were not fabricated as automated tests.",
+    "anti_false_fail_checks_performed": [
+      "Before accepting 'npm run fitness' green, scanned its full log for real (non-self-test) FAIL lines — every 'FAIL:' hit traces to a gate's own --self-test proving it catches a deliberately broken fixture (e.g. document-render-isolation, check-template-deps, doc-coherence, docpage-writeful-tools self-tests), not a real red gate; the overall process exit code is 0.",
+      "Found and tore down a STALE docker container/project ('t-0574-postgres-1', project 't-0574') left over from a prior session before running fitness:db, to guarantee this run's 96/96 green result reflects a genuinely fresh isolated Postgres instance (project t-0574-test, port 55440), not carried-over state.",
+      "Independently re-ran ux-g5/g6/g2 rather than trusting ux-review.json's claims at face value; confirmed 0 jargon findings specifically on screen-llm-connections.jsx by grepping the gate's own output for that filename.",
+      "Read llm-key-no-leak.test.ts's fake LlmPort stub source to confirm the error-path assertion the task brief asked to double-check (provider error at ProviderTest 'Проверить подключение') is genuinely adversarial: the stub's second call throws an error string that ECHOES the raw test key verbatim ('Anthropic API error 401: invalid api key <TEST_KEY>') — this is the worst case, not a polite stub that would prove nothing — and the test still asserts the key absent from the response body, log, and audit payload."
+    ],
+    "rider_commits_note": "Per pr-handoff, five rider commits (9efede7, 0794731, 83115b7, b75172f, 9c66e51) landed on this branch from separately-dispatched chip sessions sharing the worktree; review.json already verified each honest and non-scope-widening (riders_verdict). This tester's own runs (fitness:db, full fitness) exercise the current HEAD (0d0ea82) as-is, which includes those riders' effects (e.g. migration 116's FK fix, tested directly by llm-connection-fk-set-null.test.ts) — consistent with the review's sign-off."
+  }
+}

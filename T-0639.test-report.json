@@ -1,0 +1,31 @@
+{
+  "task_id": "T-0639",
+  "reviewer": "independent-judge",
+  "role": "tester",
+  "verdict": "approved",
+  "summary": "Все гейты зелёные. Тесты покрывают ОБЕ tier-ветки (tier=1 → 'ничего не меняется'/'вступит в силу', НЕ 'получил доступ'; tier=2 → 'получил временный доступ'/'увидит задачи') И fallback при отсутствии tier (с ttl_grant_id и без). Плюс проверка отсутствия жаргона 'Tier' в обоих сообщениях, различимость двух текстов, полнота списка недостающих полей (5/5, включая одиночный org-node), маркеры '*', видимая aria-live-подсказка, неизменность write-пути (один POST на существующий роут).",
+  "gates": {
+    "tsc_noEmit_web": "PASS (exit 0)",
+    "tsc_noEmit_root": "PASS (exit 0)",
+    "web_tests_targeted": "PASS — ra-intents.test.jsx 18/18",
+    "web_tests_full": "PASS — 95 файлов, 2537 тестов",
+    "substitution_isolation": "PASS — FF-SUB1..FF-SUB6 green",
+    "anti_case_lock": "PASS — Phase1+Phase2 denylist в пределах baseline (aggregate 16=16)"
+  },
+  "coverage_assessment": {
+    "tier1_branch": "COVERED — 'tier 1 (role already covered) → says nothing changes right now, no false доступ claim'",
+    "tier2_branch": "COVERED — 'tier 2 (sole holder → grant minted) → says the substitute has access now'",
+    "fallback_no_tier": "COVERED — 'defensive fallback when tier is absent' (withGrant/withoutGrant обе ветки ttl_grant_id)",
+    "no_jargon_leak": "COVERED — 'neither message leaks the internal Tier jargon word'",
+    "missing_fields_helper": "COVERED — все 5 полей поимённо + пустой полный набор",
+    "note": "Тесты строятся на source-presence (grep по .jsx) + unit по чистым функциям, без DOM-mount. Для декларативного экрана это даёт реальное покрытие извлечённых pure-хелперов; интеграция кнопки disabled проверена косвенно (canSubmit = missing.length===0 + source-assert на disabled-условие). Приемлемо в рамках конвенции проекта, но полноценного render-теста disabled-состояния нет — nit, не блок."
+  },
+  "findings": [
+    {
+      "severity": "nit",
+      "what": "Нет DOM-render-теста, доказывающего, что при disabled-кнопке реально монтируется <p> с missing.join и что банер получает data-tier из живого submit. Покрыто source-grep + unit-хелперами, но не интеграционным mount.",
+      "where": "web/src/screens/rights/ra-intents.test.jsx",
+      "why": "Source-presence-тест ломается при рефакторе разметки, но не доказывает поведение в браузере. Конвенция проекта (node-env, без mount) — приемлема; усиление опционально."
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "task_id": "T-0540",
+  "status": "ready",
+  "decision": "Завести поле `section TEXT NULL` в `choros.application` (additive migration). Сайдбар строит подсекции зоны РАБОТА динамически: GET /api/applications → клиентская группировка по app.section (groupAppsBySection()) → нав-секции. Приложение с section=null → fallback-секция «Другое» (не теряется). Создание/удаление/переименование раздела = пользовательское действие через поповер в экране «Приложения» (screen-apps.jsx) или агент (PATCH /api/applications/:id). Граница с E16: рантайм-привязка (триггеры/исходы/связи) — НЕ здесь. Видимость: GET /api/applications гейтируется тенант-изоляцией (RLS) + ресурс-гранты T-0539 если реализованы; клиентская группировка поверх отфильтрованного списка. Комментарий nav-config.js, указывающий «E16 добавит динамические разделы» — исправить на «E-NAV-IA / T-0540» при impl.",
+  "rejected_alternatives": [
+    {
+      "option": "Отдельная таблица nav_section (id, label, order) + FK application.section_id",
+      "why_not": "Раздел — атрибут классификации, не сущность с поведением. Отдельная таблица: лишний DDL, FK, CRUD-эндпоинты. Список разделов = SELECT DISTINCT section. Переименование = batch UPDATE. Пустой раздел не имеет смысла. Свободный текст section TEXT NULL достаточен для MVP."
+    },
+    {
+      "option": "Брать секционирование из modules-nav.ts NavSection",
+      "why_not": "NavSection в modules-nav.ts — иерархия nav_version конструктора (Section→App→Form/List — для сборки решений). Это ДРУГОЙ уровень: конструктор-конфиг ≠ боковая панель пользователя. Смешение создаст неявную зависимость между двумя уровнями."
+    },
+    {
+      "option": "Хардкодить разделы в nav-config.js",
+      "why_not": "Нарушает решение фаундера «нав отражает данные». Изменение бизнес-структуры тенанта требовало бы правки кода и деплоя. Внедренец и агент должны управлять разделами через данные."
+    },
+    {
+      "option": "Серверный эндпоинт GET /api/nav/sections",
+      "why_not": "Дублирует GET /api/applications. Группировка — чистая клиентская функция над уже доступными данными. Дополнительный RTT без пользы; нарушает «одна истина» (приложения уже несут section)."
+    },
+    {
+      "option": "Приложение без раздела — скрыть из нава",
+      "why_not": "Потеря приложения из нава нарушает принцип полноты (аналог FF-MAP T-0538). Fallback-секция «Другое» держит все неклассифицированные приложения."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "Section",
+      "fields": [
+        {"name": "section", "type": "string — свободный текст (бизнес-функция: Финансы/HR/Продажи и т.п.); хранится в choros.application.section TEXT NULL"},
+        {"name": "fallback", "type": "boolean — true для секции «Другое» (приложения с section=null)"},
+        {"name": "apps", "type": "App[] — приложения этой секции (непустой массив; секция без apps невозможна по конструкции groupAppsBySection)"}
+      ]
+    },
+    {
+      "entity": "AppSectionBinding",
+      "fields": [
+        {"name": "application_id", "type": "uuid — FK choros.application.id"},
+        {"name": "section", "type": "string | null — атрибут application.section (null = fallback)"},
+        {"name": "display_name", "type": "string — название приложения (из application.display_name)"},
+        {"name": "tier", "type": "string — статус приложения (draft|published, из application.tier)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "choros.application добавляет колонку section TEXT NULL (migration 108_app_section.sql, additive-safe ALTER TABLE ... ADD COLUMN IF NOT EXISTS).",
+    "GET /api/applications возвращает поле section (null или string) в каждом объекте приложения — additive, старые клиенты игнорируют.",
+    "PATCH /api/applications/:id принимает { section?: string | null } в payload — additive; null = убрать из раздела (перейти в fallback).",
+    "groupAppsBySection(apps: App[]): NavAppSection[] — чистая функция (zero-dep); ни одно приложение не теряется (sum(s.apps.length) === apps.length); секции без apps не возникают; fallback-секция 'Другое' последней если есть null-section приложения.",
+    "Сайдбар зоны РАБОТА: фиксированные пункты (inbox, processes из T-0538) + динамические секции из groupAppsBySection(); пустая секция не рендерится; приложение в нав → navigate('/app-records/' + app.id) (существующий маршрут, инвариант T-0538 §6).",
+    "Комментарий в nav-config.js, указывающий «E16 добавит динамические разделы поверх этой IA-основы (T-0349)» — заменить на «T-0540 (E-NAV-IA) строит динамические разделы из данных app.section; E16 — рантайм-привязка (триггеры/исходы)».",
+    "Видимость: GET /api/applications гейтируется RLS (тенант-изоляция) + ресурс-гранты T-0539 (если реализованы); groupAppsBySection работает поверх отфильтрованного списка без изменений.",
+    "Создание/удаление/переименование раздела реализуется через CRUD field section в существующем экране screen-apps.jsx (AppActions поповер + CreateAppModal поле) — нет отдельного CRUD-контроллера секций."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-SECTIONS-FROM-DATA",
+      "rule": "Подсекции зоны РАБОТА строятся из app.section-данных, не хардкода: нет строк 'Финансы', 'HR', 'Продажи' в nav-config.js / shell.jsx (кроме fallback-метки 'Другое'); секции = результат groupAppsBySection(apps).",
+      "ci_check": "ci/checks/ux/nav-sections-no-hardcode.sh"
+    },
+    {
+      "id": "FF-SECTIONS-FALLBACK",
+      "rule": "Приложение с section=null НЕ теряется в нав: groupAppsBySection([{...section:null}]).flatMap(s=>s.apps).length === 1; fallback-секция 'Другое' присутствует если есть null-section приложения.",
+      "ci_check": "vitest web/src/app-shell/nav-sections.test.js"
+    },
+    {
+      "id": "FF-SECTIONS-EMPTY-HIDDEN",
+      "rule": "Пустая секция не рендерится в сайдбаре: groupAppsBySection([]).length === 0; секция без apps невозможна по конструкции; заголовок секции без пунктов не появляется в нав (аналог правила T-0538 «заголовок без выбора = шум»).",
+      "ci_check": "vitest web/src/app-shell/nav-sections.test.js"
+    },
+    {
+      "id": "FF-SECTIONS-ROUTE-STABLE",
+      "rule": "Клик на приложение в нав → /app-records/:id (существующий маршрут, инвариант T-0538 §6). Нет новых <Route>, нет изменений существующих маршрутов.",
+      "ci_check": "ci/checks/ux/nav-paths-resolve.sh"
+    },
+    {
+      "id": "FF-UX-SECTION-LABEL",
+      "rule": "Метки секций в нав — пользовательский ввод на русском; CI-гейт FF-UX-JARGON T-0538 расширяется на динамические нав-секции (seed-данные: 'Финансы', 'HR' — ок).",
+      "ci_check": "ci/checks/ux/ux-g5-jargon-denylist.sh"
+    }
+  ],
+  "traceability": [
+    {"ac": "разделы из данных (app.section), не хардкод", "covered_by": "design §2, §5.2, FF-SECTIONS-FROM-DATA"},
+    {"ac": "модель данных: где живёт section (таблица choros.application, поле TEXT NULL)", "covered_by": "design §4.1; object_model Section; contracts[0,1]"},
+    {"ac": "как заводится/правится раздел (пользовательское действие через screen-apps или агент)", "covered_by": "design §4.2, §6; contracts[2,7]"},
+    {"ac": "сайдбар строит подсекции зоны РАБОТА из GET applications → groupAppsBySection", "covered_by": "design §5.1-5.5; contracts[3,4]"},
+    {"ac": "пустой раздел / null-section → fallback 'Другое' (не теряется)", "covered_by": "design §5.5; FF-SECTIONS-FALLBACK; contracts[3]"},
+    {"ac": "пустая секция не рендерится в сайдбаре", "covered_by": "design §5.5; FF-SECTIONS-EMPTY-HIDDEN"},
+    {"ac": "создание/удаление/переименование раздела = пользовательское действие (где, какой шов)", "covered_by": "design §6.1-6.3; contracts[7]"},
+    {"ac": "граница с E16 (что НЕ здесь: триггеры/исходы/привязка)", "covered_by": "design §7"},
+    {"ac": "исправить комментарий nav-config.js (E16 → E-NAV-IA)", "covered_by": "design §9; contracts[5]"},
+    {"ac": "видимость гейтируется грантами (связь T-0539)", "covered_by": "design §8; contracts[6]"},
+    {"ac": "impl-зависимость на миграцию зафиксирована, НЕ блокирует дизайн", "covered_by": "design §10; contracts[0]"},
+    {"ac": "инвариант маршруты НЕ меняются (T-0538 §6)", "covered_by": "design §5.4; FF-SECTIONS-ROUTE-STABLE; contracts[4]"}
+  ],
+  "runtime_target": "контейнер (требуется миграция poля section в dev PG) — только для impl; дизайн не блокируется",
+  "adr_artifact_path": "docs/design/T-0540-dynamic-sections.design.md"
+}

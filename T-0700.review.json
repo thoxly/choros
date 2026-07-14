@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0700",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "detail": {
+      "tsc_noEmit": "0 errors (ran)",
+      "unit_configurator": "42/42 (ran)",
+      "unit_assistant_suite": "156/156 across 12 files (ran; superset of claimed 96)",
+      "live_pg": "1/1 via T-0147 clone-DB, PG :55432 (ran; real executeApprovedOpAsDraft, not mocked)",
+      "anti_case_lock": "PASS aggregate 15/baseline 16 (ran)",
+      "eslint_changed_files": "0 errors, 1 pre-existing no-console warning at line 1246 (not in T-0700 diff)"
+    }
+  },
+  "findings": [
+    {
+      "id": "N1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/core/assistant-configurator.ts:194 (TOOL_AUTHOR_BINDING) vs human bind-form picker",
+      "issue": "Discovery-паритет неполон: человеческая форма показывает пикер валидных реестров, а у бота нет тулинга 'перечисли реестры приложения' — модель обязана уже знать точный слаг. REACH-паритет выполнен (параметр объявлен, fail-closed на плохом слаге), но полный experiential-паритет требует introspection-tool.",
+      "suggestion": "Follow-up: тул/контекст со списком registry_def под приложением, чтобы LLM могла смапить имя→слаг без угадывания. Безопасно и сейчас (bad slug → честный отказ, без слепой записи)."
+    },
+    {
+      "id": "N2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/author-binding-target-registry.test.ts + src/__tests__/assistant-configurator.test.ts",
+      "issue": "Полный путь LLM→processToolCall→ApprovedOp→executor не покрыт единым автотестом (LLM-звено отложено, стенд offline). Покрыт двумя половинами (юнит verbatim pass-through + live-PG исполнитель), сходящимися на форме ApprovedOp.args.",
+      "suggestion": "Прогнать live_proof_plan шаги (2)-(3) на живом стенде с BYO-ключом при поднятии — задача PARTIAL до этого. План в handoff достаточен и возвращаем."
+    },
+    {
+      "id": "N3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/__tests__/assistant-configurator.test.ts (AC-T700-3)",
+      "issue": "Негативный assert not.toMatch(/реестр результата/) проходит только из-за родительного падежа в humanReadableReason теста ('реестрА результата'). Хрупко к будущим reason-строкам в номинативе.",
+      "suggestion": "Ассертить отсутствие суффикса точнее, например not.toContain(', реестр результата=')."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-T700-1: схема объявляет targetRegistrySlug и НЕ в required", "covered": true},
+    {"ac": "AC-T700-2: tool-call С параметром → ApprovedOp.args verbatim + changelog называет слаг", "covered": true},
+    {"ac": "AC-T700-3: tool-call БЕЗ параметра → args без ключа, без регресса", "covered": true},
+    {"ac": "live-PG AC-1: реальный альт-слаг записан через реальный исполнитель", "covered": true},
+    {"ac": "live-PG AC-2: несуществующий слаг → честный отказ, строки нет (fail-closed)", "covered": true},
+    {"ac": "live-PG AC-3: без параметра → NULL (реестр по умолчанию, без регресса)", "covered": true},
+    {"ac": "LLM-звено: модель реально заполняет параметр по тексту пользователя", "covered": false}
+  ],
+  "role_gap_evidence": [
+    "Право-гейт на реестр (п.3, самое важное): ИНВЕРСИИ НЕТ. Человек (POST /api/process-app-bindings, process-catalog.ts:406) = withAuth + registryExistsUnderApp (tenant+application+slug existence), без per-registry PDP. Бот (executeApprovedOpAsDraft, assistant.ts:784-793) = ТА ЖЕ existence-валидация, fail-closed, ПЛЮС доп. гейт hasAuthoringDraftGrant (owner/authoring_draft в пересечении агент∩пользователь). Registry-reach envelope идентичен; бот СТРОЖЕ → бот ≤ человек, никогда не шире.",
+    "Протяжка verbatim подтверждена: processToolCall кладёт весь args в ApprovedOp.args (assistant-configurator.ts:898), ни одной точки фильтрации до INSERT, нет serialization-границы (in-process цикл assistant.ts:2326).",
+    "Live-PG честный: импортирует реальный executeApprovedOpAsDraft из src/http/assistant.js (та же функция, что HTTP-маршрут), не мокает; прогнан сам 1/1.",
+    "Диф-скоуп: собственные коммиты T-0700 (75008d44+5ba630a2) = 5 файлов + handoff; лишние файлы в dev..branch — merge-хвосты (dev устарел), не T-0700."
+  ]
+}

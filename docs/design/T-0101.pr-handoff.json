@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0101",
+  "status": "pr_open",
+  "branch": "task/T-0101",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": "blocked-by-preexisting-base-failure"
+  },
+  "files_changed": [
+    "docs/specs/T-0101-forms-sandbox-iframe.spec.md",
+    "docs/specs/T-0101.spec.contract.json",
+    "docs/design/T-0101-forms-sandbox-iframe.adr.md",
+    "docs/design/T-0101.adr.contract.json",
+    "src/core/form-frame-height.ts",
+    "src/__tests__/form-frame-height.test.ts",
+    "web/src/forms/frame-height.js",
+    "web/src/forms/FormViewer.jsx",
+    "web/preview/forms.html",
+    "web/src/forms/form-defs.js",
+    "ci/checks/forms-sandbox-iframe.sh",
+    "package.json",
+    "docs/design/T-0101.pr-handoff.json"
+  ],
+  "new_fitness_checks": [
+    "ci/checks/forms-sandbox-iframe.sh (FF-FORMS2, with --self-test) — appended to the `fitness` script in package.json"
+  ],
+  "security_invariants_verified": [
+    "SI-1 (no allow-same-origin): FormViewer.jsx and both forms.html iframes use sandbox=\"allow-scripts\" with NO allow-same-origin; FF-FORMS2-1 greps every sandbox=\"...\" and fails on any allow-same-origin (self-test proves it catches a synthetic allow-same-origin iframe).",
+    "SI-2 (origin-validated postMessage): the pure acceptFrameHeight (src/core/form-frame-height.ts + web/src/forms/frame-height.js mirror) accepts a height ONLY when e.source===iframe contentWindow AND e.origin==='null' (opaque-origin signature) AND data.type==='fjs-height'; FormViewer.jsx + forms.html receivers delegate to it; 11 unit tests cover wrong source / wrong origin / wrong type. FF-FORMS2-3 self-test catches an origin-blind receiver.",
+    "SI-3 (height clamp / finite): height clamped to [280,20000]; NaN/Infinity/negative/non-numeric rejected (anti-DoS on iframe blow-up); unit-tested.",
+    "form-defs.js child posts exactly {type,h} (only the height, not a secret); target-origin '*' is acceptable because the parent does the validation."
+  ],
+  "deviations_from_adr": [
+    "ADR proposed the canonical pure receiver as web/src/forms/frame-height.js; implementation ALSO adds a TS twin src/core/form-frame-height.ts as the unit-testable + type-checked source of truth, because vitest excludes web/** (vitest.config.js) and tsconfig include is ['src']. The browser frame-height.js mirrors the same contract verbatim; FF-FORMS2-2 asserts BOTH exist, validate origin, and clamp. This strengthens, not weakens, the ADR (test coverage on the exact logic)."
+  ],
+  "friction_events": [
+    "Worktree had no node_modules (fresh provision) — ran `npm ci` (root) and `npm install` in web/ to install vite/react so the web build could be honestly verified; resolved.",
+    "`npx tsc` resolved a global stub ('this is not the tsc command') — used node_modules/.bin/tsc (matching the build script) instead.",
+    "npm run fitness FAILS at ci/checks/secret-handle-isolation.sh (FF-25-3) — three llm_secret_handle hits in T-0233 files (src/runtime/legal-precheck/run-precheck.ts, src/runtime/legal-precheck/__tests__/run-precheck.test.ts, src/adapters/openai-llm-port.ts). PRE-EXISTING base-branch failure: proven by checking out base commit c2d2bba (T-0231 merge, before any T-0101 work) and running secret-handle-isolation.sh → also rc=1. NONE of those files are touched by T-0101. The full fitness chain short-circuits there before reaching my check; running the chain with only that one check tolerated reaches the end and prints PASS [FF-FORMS2]. All T-0101-relevant checks (frozen-checks-immutable, forms-schema-binding, forms-sandbox-iframe + both self-tests, package-json-no-dup-keys) PASS individually."
+  ],
+  "blockers_or_uncertainties": "Pre-existing base-branch fitness failure in secret-handle-isolation.sh (T-0233 fixtures) — NOT introduced by T-0101 and NOT in scope to fix here. Reviewer/founder may want a separate task to whitelist or relocate those T-0233 llm_secret_handle references."
+}

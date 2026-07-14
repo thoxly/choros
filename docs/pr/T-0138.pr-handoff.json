@@ -1,0 +1,119 @@
+{
+  "task_id": "T-0138",
+  "status": "pr_open",
+  "branch": "task/T-0138-write-paths-slice",
+  "merge_target": "dev",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "head_sha": "dfe943b",
+  "review_sha": "a5919db",
+  "test_report_sha": "dfe943b",
+  "files_changed": [
+    "docs/design/T-0138.review.contract.json",
+    "docs/reviews/T-0138.review.md",
+    "src/__tests__/audit-export.e2e.test.ts",
+    "src/__tests__/inbox-claim.e2e.test.ts",
+    "src/http/audit.ts",
+    "src/http/inbox.ts",
+    "web/src/app-shell/shell.jsx",
+    "web/src/screens/screen-inbox.jsx",
+    "docs/test-reports/T-0138.test-report.md",
+    "docs/design/T-0138.test-report.contract.json",
+    "docs/pr/T-0138.pr-handoff.json"
+  ],
+  "verdicts": {
+    "ci": "PASS — tsc 0 errors + eslint 0 errors (2 pre-existing no-console warnings) + fitness 58/58 PASS (frozen-checks-immutable / audit_append_only / audit_writer_isolation / mutation-gateway-isolation) + vitest 1561/1567 (6 skipped)",
+    "vite_build": "PASS — 51 modules clean, 96 kB CSS, 258 kB JS",
+    "review": "approved (a5919db) — 2 nits R-N1/R-N2; both closed in commit dfe943b",
+    "test_report": "pass (15/15 AC; 13 test/live-covered, 2 nit-application ACs)"
+  },
+  "nit_dispositions": {
+    "R-N1": {
+      "status": "closed",
+      "commit": "dfe943b",
+      "note": "FORWARD-OBLIGATION comment expanded to cover all three audit routes. GET /api/audit now has inline FORWARD-OBLIGATION (operation=read, resource=audit_trace). GET /api/audit/:instanceId likewise. GET /api/audit/export existing comment updated to explicitly state all three routes form a single hardening unit. Module docstring rewritten to list all three as ungated."
+    },
+    "R-N2": {
+      "status": "closed",
+      "commit": "dfe943b",
+      "note": "Module docstring at top of audit.ts rewritten. Previous: 'PDP gate: same principal as GET /api/audit (observer role assumed for day-1 seed; production gates via PDP grant check)'. New: 'PDP gate: NONE in dev slice — all three audit routes (GET /api/audit, GET /api/audit/:instanceId, GET /api/audit/export) run without a PDP grant check. Hardening MUST close all three before production: add PDP operation=read on resource=audit_trace for each route (see FORWARD-OBLIGATION comments inline).' Correctly captures that GET /api/audit is open without any principal check, so export is NOT 'same as' the screen-read — it is stricter (401 gate), but both are ungated by PDP."
+    }
+  },
+  "handoff_notes": {
+    "audit_section_no_pdp": "The entire audit section (GET /api/audit, GET /api/audit/:instanceId, GET /api/audit/export) runs without PDP in the dev slice. This is intentional — T-0053 seed-only data (hardcoded AUDIT_SEED fixture, not classified production data). FORWARD-OBLIGATION comments in dfe943b annotate all three routes as requiring a PDP gate before production. Candidate hardening task: 'PDP на audit-чтение/экспорт' — add operation=read, resource=audit_trace check to all three routes together with audit-aware masking (T-0033 maskFields). This task should be materialized before Stage-2 production promotion.",
+    "claim_in_memory": "POST /api/inbox/:id/claim stores claim state in an in-memory CLAIMED Map (process-lifetime). A server restart loses all claim state. This is the intended dev-slice behaviour — state reconstruction not required in dev. For production, claim state must be persisted to Postgres (recommended: add claimed_by + claimed_at columns to inbox seed table or external tasks table). Candidate hardening task: 'Persist claim state to Postgres'.",
+    "new_task_disabled": "The 'Новая задача' button is intentionally disabled with a tooltip ('Запуск нового процесса — будущая задача'). This corresponds to the Flowable start-instance API (start process instance via REST), which is not yet implemented in the dev slice. The forward-obligation is documented in shell.jsx. Candidate future task: 'Flowable start-instance — запуск процесса из UI'."
+  },
+  "handoff_candidates": [
+    {
+      "id": "HC-T-0138-pdp-audit-all-routes",
+      "severity": "medium",
+      "description": "All three audit routes (GET /api/audit, GET /api/audit/:instanceId, GET /api/audit/export) lack PDP gate in dev mode. For production, all three must receive a PDP check: operation=read, resource=audit_trace. Additionally, AuditData payload fields (call/out) may contain sensitive runtime data in production and should be subject to T-0033 maskFields logic before export. This is a single hardening pass that must close all three routes together.",
+      "files": ["src/http/audit.ts"],
+      "proposed_resolution": "Add PDP check (grant-resolver validatePdp or equivalent) in each of the three registerAuditRoutes handlers before returning data. Add maskFields post-processing for audit payload fields that may carry classified data. Create as a separate hardening task targeting Stage-2."
+    },
+    {
+      "id": "HC-T-0138-claim-persist-postgres",
+      "severity": "low",
+      "description": "CLAIMED map in inbox.ts is in-memory only (process-lifetime). Server restart loses all claim state. Acceptable for dev-slice but must be persisted before production deployment.",
+      "files": ["src/http/inbox.ts"],
+      "proposed_resolution": "Add claimed_by + claimed_at to the inbox/tasks data store (Postgres table when T-0053 DB wiring is active). The _resetClaimStateForTests export can be preserved for tests. The claim endpoint should check DB atomically."
+    }
+  ],
+  "founder_walkthrough": {
+    "purpose": "T-0138 closes Gap-map Zone 6 (write-paths): 'Взять задачу' (claim), 'Экспорт лога' (export), 'Новая задача' disabled. All three UI buttons are now wired to live backend routes. This walkthrough confirms the write-path UX on the dev server.",
+    "url": "http://100.121.76.86:8080/ (Tailscale homeserver) or http://localhost:8080/ (local)",
+    "prereqs": [
+      "Server: PORT=8080 node dist/index.js (no DATABASE_URL needed — in-memory mode)",
+      "Build: npm run build && cd web && npm run build"
+    ],
+    "screens": [
+      {
+        "url": "/inbox",
+        "label": "Входящие задачи",
+        "note": "Shows task list with 'Взять' button per pool task. Click 'Взять' on a pool task — button should change to 'Вы взяли' and POST /api/inbox/:id/claim should return 200."
+      },
+      {
+        "url": "/audit",
+        "label": "Аудит инстанса INS-7731",
+        "note": "Shows audit timeline. Click 'Экспорт лога' — browser should download audit-INS-7731-<ts>.json. GET /api/audit/export requires x-dev-user header (set in X_DEV_USER env var or via DevAuth header in app)."
+      }
+    ],
+    "write_path_demo_steps": [
+      {
+        "step": 1,
+        "label": "Claim task",
+        "action": "Navigate to /inbox. Find a task with pool=true status. Click 'Взять'. Expect: button changes state, re-click is idempotent (same user = 200). Second user clicking same task = 409 ALREADY_CLAIMED."
+      },
+      {
+        "step": 2,
+        "label": "Export audit log",
+        "action": "Navigate to /audit. Click 'Экспорт лога'. Expect: browser downloads audit-INS-7731-<timestamp>.json with Content-Disposition: attachment header. File contains full AuditData shape (instance + trace)."
+      },
+      {
+        "step": 3,
+        "label": "New task disabled",
+        "action": "On any screen with the 'Новая задача' button: button is disabled with tooltip 'Запуск нового процесса — будущая задача'. No action taken on click. This is the forward-obligation state until Flowable start-instance is wired."
+      }
+    ],
+    "gate_outcome": "If the founder confirms the write-path UX on dev (claim + export + disabled new-task), T-0138 can be merged to dev."
+  },
+  "deviations_from_adr": [
+    "No ADR changes. T-0138 is a write-path wiring task using the existing HTTP router (router.ts) and in-memory seed pattern (INBOX_SEED, AUDIT_SEED). No new architectural decisions. The CLAIMED map is an explicit dev-slice design: acknowledged in handler docstring and R-N1/R-N2 forward-obligation comments."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "artifacts": {
+    "review_contract": "docs/design/T-0138.review.contract.json",
+    "review_md": "docs/reviews/T-0138.review.md",
+    "test_report_md": "docs/test-reports/T-0138.test-report.md",
+    "test_report_contract": "docs/design/T-0138.test-report.contract.json",
+    "pr_handoff": "docs/pr/T-0138.pr-handoff.json"
+  }
+}

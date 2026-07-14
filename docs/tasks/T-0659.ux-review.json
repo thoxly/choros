@@ -1,0 +1,80 @@
+{
+  "task_id": "T-0659",
+  "role": "design-steward / UX reviewer",
+  "verdict": "approved",
+  "gate_seen": { "green": true },
+  "scope": "web/src/screens/screen-process-editor.jsx (+VIOLATION_TYPE_LABELS, ViolationItem, StatusBanner export), web/src/canvas/editor.css (+8 lines, tokens only)",
+  "themes_checked": ["light", "dark"],
+  "checks": {
+    "g2_theme_pairing": "PASS — no new CSS beyond .chs-banner__violation{,-title,-element,-message}, all values use var(--chs-space-*)/var(--chs-weight-*), no color literals introduced (opacity is a bare number, not a color) — pairs cleanly under both :root and [data-theme=\"dark\"]",
+    "g4_state_primitives": "PASS informational — 0 new hand-rolled state branches",
+    "g5_jargon_denylist": "PASS informational — 0 findings in production code, findings only in test describe() T-id strings",
+    "g6_no_new_hardcode": "PASS — 0 new hardcoded colors/inline overlays; design-token-only CSS additions",
+    "g7_no_fake_buttons": "PASS — 0 new fake-button findings (this task adds no buttons)",
+    "g8_scroll_reachable": "PASS — .chs-screen remains the single reachable scroll owner; the banner grows in normal flow (no fixed height/overflow:hidden ancestor), so a long violation list is not trapped off-screen",
+    "anti_uuid_actor_render": "PASS (exit 0, judge-rerun) — see verdict below on elementId, judged NOT an anti-UUID violation",
+    "terminology_consistency": "checked — 'шлюз' (gateway_condition_panel.jsx, bpmn-properties-panel.jsx, screen-dmn-editor.jsx), 'эскалация' (timer-deadline-panel.jsx, bpmn-palette-provider.js), 'агентский' (rights/ra-data.jsx) are all pre-existing product vocabulary; the 11 new labels reuse this vocabulary rather than inventing new jargon"
+  },
+  "violation_type_labels_review": {
+    "verdict": "readable, approved as-is — no blocking rewording required",
+    "per_label": [
+      { "type": "raw_object_binding", "label": "Несвязанный объект", "assessment": "acceptable but slightly imprecise on its own — the underlying condition is raw record data leaking into an attribute instead of going through a bound reference, which reads more like 'unbound' than 'disconnected'.", "suggested_swap": "«Объект передан без привязки» (parallels the binding_mismatch/gateway_rule_mismatch 'Несовпадение ...' pattern and is closer to what the .message actually says — 'use an ObjectHandle instead')" },
+      { "type": "malformed_xml", "label": "Повреждённый XML", "assessment": "clear; 'XML' is already exposed elsewhere in the editor (Export XML). No change needed." },
+      { "type": "binding_mismatch", "label": "Несовпадение привязки данных", "assessment": "clear, consistent with 'привязка' vocabulary. No change needed." },
+      { "type": "gateway_rule_mismatch", "label": "Несовпадение условия шлюза", "assessment": "clear, consistent with existing 'шлюз' usage. No change needed." },
+      { "type": "parallel_gateway_imbalance", "label": "Разветвление шлюза не сходится", "assessment": "clear. No change needed." },
+      { "type": "timer_malformed", "label": "Некорректно настроен таймер", "assessment": "clear. No change needed." },
+      { "type": "message_event_incoherent", "label": "Несогласованное событие-сообщение", "assessment": "reads clunky — the hyphenated double-noun 'событие-сообщение' plus abstract 'несогласованное' is the weakest title of the 11.", "suggested_swap": "«Событие-сообщение настроено некорректно» (matches the 'Некорректно настроен ...' pattern already used for timer_malformed — same rule family, same phrasing convention)" },
+      { "type": "agent_task_incoherent", "label": "Несогласованно настроен агентский шаг", "assessment": "clear, consistent with 'агентский' usage. No change needed." },
+      { "type": "timer_escalation_no_convergence", "label": "Ветка эскалации таймера не сходится с основным потоком", "assessment": "builder flagged self-doubt on this one — judge's read: it is legible to the target persona (a process builder, not a BPMN engineer) BECAUSE the product already teaches 'эскалация' + convergence in timer-deadline-panel.jsx ('Соедините таймер стрелкой с шагом эскалации'). It is long for an inline title but this is a detail panel, not a chip/badge — length is acceptable here. No change required." },
+      { "type": "app_binding_unpublished", "label": "Привязано неопубликованное приложение", "assessment": "clear. No change needed." },
+      { "type": "step_target_unresolved", "label": "Не определена цель результата шага", "assessment": "slightly abstract in isolation ('цель результата шага') but matches the product's own 'результат шага=сущность' doctrine language that a Choros builder is already immersed in via the app binding/registry UI. Acceptable." }
+    ]
+  },
+  "element_id_on_error_screen": {
+    "question": "Does showing raw elementId (e.g. \"timer_esc_1\") in the violation context line violate the anti-UUID discipline?",
+    "verdict": "No — not the same class of problem, judged acceptable as-is",
+    "reasoning": "The anti-uuid gate (and the doctrine behind it) targets DATABASE-BACKED entity/actor identifiers shown to a user with no way to resolve them to a human-meaningful name (e.g. a raw actor UUID instead of a person's name via an actor-resolver). elementId here is a BPMN diagram-element id AUTHORED BY THE SAME PERSON currently looking at the SAME open diagram in the SAME editor — it is the canvas's own addressing scheme (analogous to a cell reference in a spreadsheet formula error, or a line number in a compiler error), not an opaque foreign-system key. There is no resolver that could turn it into something more 'human' than what the modeler itself assigned. It was ALSO already present pre-fix (buried unreadably inside the truncated JSON blob — JSON.stringify({type,elementId,elementKind,message}) puts elementId right after type), so this is strictly a presentation improvement, not a new exposure.",
+    "non_blocking_followup": "elementKind (e.g. \"boundaryEvent\", \"userTask\") is shown verbatim in raw BPMN camelCase — English technical vocabulary embedded mid-sentence in an otherwise Russian title line. Same pre-existing-content caveat applies (it was already in the pre-fix truncated JSON), but now that it has visual prominence next to a translated title, the English/Russian mix reads more noticeably. Cheap, symmetric follow-up: a small ELEMENT_KIND_LABELS map (same pattern as VIOLATION_TYPE_LABELS, ~7 known kinds) would close this. Not blocking — the current state is still a strict readability win over the pre-fix truncated JSON, and elementKind's role here is identification, not the primary message."
+  },
+  "message_body_language_note": {
+    "observation": "The .message body itself (the part now shown IN FULL) is raw English text with embedded XML syntax (e.g. '<boundaryEvent id=\"timer_esc_1\"> is a NON-INTERRUPTING boundary timer (cancelActivity=\"false\")...'), authored server-side in src/core/bpmn-linter.ts. T-0659's Russian layer is the TITLE + structural framing only — the task's own goal statement ('человеческим русским') is only partially delivered: the CATEGORY is Russian, the DETAIL text is English/XML-technical.",
+    "in_scope_or_not": "Out of scope for T-0659 as correctly scoped by the builder — the server contract (LintViolation.message strings) was explicitly and verifiably untouched (confirmed: zero diff under src/). Translating or humanizing the message bodies would require a server-side change and is a materially different task.",
+    "verdict": "non-blocking, real, worth a follow-up ticket — but net strictly better than the pre-fix state (previously ~12 garbled characters of this same English text were visible; now the whole thing, including the actionable 'Fix:' clause, is readable by anyone comfortable with technical English, e.g. support staff escalating to a developer). Approving T-0659 does not require closing this gap."
+  },
+  "findings": [
+    {
+      "id": "T-0659-UX-N1",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-process-editor.jsx VIOLATION_TYPE_LABELS",
+      "issue": "message_event_incoherent and raw_object_binding titles are the two weakest of the 11 for plain readability (see violation_type_labels_review above).",
+      "suggestion": "Non-blocking text swap, follow-up: 'Событие-сообщение настроено некорректно' and 'Объект передан без привязки' respectively — both optional, current text is not wrong or blocking, just slightly less crisp than the other 9."
+    },
+    {
+      "id": "T-0659-UX-N2",
+      "severity": "nit",
+      "root": "A",
+      "location": "web/src/screens/screen-process-editor.jsx ViolationItem — elementLabel construction",
+      "issue": "elementKind (userTask/serviceTask/boundaryEvent/...) renders as raw English BPMN vocabulary inline with a Russian sentence.",
+      "suggestion": "Follow-up: small ELEMENT_KIND_LABELS map mirroring VIOLATION_TYPE_LABELS, additive/fallback-safe the same way. Not required for this merge."
+    },
+    {
+      "id": "T-0659-UX-N3",
+      "severity": "nit",
+      "root": "A",
+      "location": "src/core/bpmn-linter.ts LintViolation.message (out of this task's file scope)",
+      "issue": ".message bodies are English/XML-technical, not Russian — the fix delivers a Russian category title over an English detail body.",
+      "suggestion": "Follow-up ticket (server-side): either author LintViolation.message in Russian at the source, or add a client-side per-type message template/summary layer. Explicitly not required for T-0659's scope (client-render-only, server contract untouched by design)."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    { "ac": "Full, untruncated lint message reaches the user", "covered": true },
+    { "ac": "Structured, human-readable presentation (title + element context + message)", "covered": true },
+    { "ac": "Russian language for the category/title layer", "covered": true },
+    { "ac": "No new hardcoded colors; design tokens only", "covered": true },
+    { "ac": "No layout breakage risk from long messages (declarative CSS reviewed, correct pattern)", "covered": true },
+    { "ac": "elementId exposure does not violate anti-UUID discipline", "covered": true }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0601",
+  "status": "ready",
+  "decision": "Один источник правды на уровне шелла: .chs-screen (web/src/app-shell/app.css:186) становится единственным легитимным владельцем скролла для маршрутизируемого контента — overflow: hidden заменяется на overflow-y: auto; overflow-x: hidden. .chs-main/.chs-shell НЕ меняются (остаются overflow:hidden — фиксированная рамка вьюпорта; страница целиком не скроллится, только нав .chs-nav__scroll и теперь контент-пейн .chs-screen). Инвентаризация всех 26 screens внутри <div className=\"chs-screen\"><Routes>...</Routes></div> (shell.jsx:1144) разбила их на 3 группы: (A) 16 экранов с собственным bounded-height внутренним скроллером (паттерн height:100%+min-height:0 обёртка → flex:1+min-height:0+overflow(-y):auto узел, напр. .chs-inbox/.chs-inbox__scroll, .chs-org/.chs-org__detail, .chs-audit-screen, .chs-notif-screen/.chs-notif__scroll, .chs-asst, .chs-editor BPMN-канвас, .chs-forms-screen канвас форм) — для них фикс НЕ создаёт двойного скролла, т.к. height:100% (не min-height:100%) заполняет, но никогда не превышает уже ограниченную flex-высоту .chs-screen, значит новый overflow-y:auto у .chs-screen остаётся бездействующим (scrollHeight===clientHeight), внутренний __scroll-узел продолжает делать всю реальную прокрутку как раньше; (B) 9 экранов БЕЗ какого-либо внутреннего scroll-контейнера (голый div/layoutStyle без height/overflow: screen-llm-connections — живой факт приёмки, screen-agents, screen-llm-config, screen-spend, screen-reports, screen-process-analytics, screen-ops-overview, screen-operational-analytics, screen-assistant-prompt) — их контент теперь физически переполняет .chs-screen и браузер рисует реальный, ранее отсутствовавший scrollbar — это и есть исправление бага; (C) screen-login/screen-register рендерятся ДО .chs-shell (auth-гейт shell.jsx:952-962), не затронуты; apps-publish-dialog — суб-компонент Modal, не маршрут. Плюс новый детерминированный статический гейт ci/checks/ux/ux-g8-scroll-reachable.sh (по образцу ux-g2-theme-pairing.sh) — парсит app.css, проверяет правило .chs-screen на отсутствие overflow(-y):hidden и наличие overflow(-y):auto, STRICT, с --self-test (4 фикстуры). Вписан в npm run fitness аддитивно рядом с ux-g5/ux-g6/ux-g2 (и их --self-test), структура &&-цепи сохранена.",
+  "rejected_alternatives": [
+    {
+      "option": "Точечно обернуть каждый из 9 сломанных экранов в .chs-inbox/.chs-inbox__scroll индивидуально, не трогая .chs-screen",
+      "why_not": "Чинит только текущие 9 экранов; оставляет тот же класс бага открытым для любого будущего экрана без своей scroll-обёртки — ровно так этот баг и возник (9 из 26 экранов были написаны без паттерна). Также заметно больше диффа (9 файлов JSX) ради результата, который шелл-уровневая правка даёт одной строкой CSS."
+    },
+    {
+      "option": "Сделать .chs-main или .chs-shell скроллящимся вместо .chs-screen",
+      "why_not": "Сломало бы .chs-nav — левый нав перестал бы быть независимо прокручиваемой колонкой; скролл всего .chs-shell/.chs-main унёс бы нав вместе с контентом за пределы экрана. .chs-screen — правильный уровень: контент-пейн, соседствующий с .chs-topbar (flex:none, не скроллится) и не включающий нав."
+    },
+    {
+      "option": "jsdom рендер-тест (реальный DOM, scrollHeight/getComputedStyle) вместо статического CSS-гейта",
+      "why_not": "Web vitest-тир работает в environment:'node' (web/vitest.config.js) — нет DOM/CSSOM вообще; переключение окружения тира ради одного теста — новая зависимость или отдельный конфиг. Статический CSS-гейт (парсит app.css напрямую, как ux-g2-theme-pairing.sh уже делает для [data-theme=\"dark\"]) детерминирован, zero-dep, достаточен — задача явно допускает 'и/или' между jsdom и статикой."
+    },
+    {
+      "option": "Убрать все внутренние __scroll-паттерны группы (A), оставив скролл только на .chs-screen",
+      "why_not": "Создало бы регрессию: многие экраны группы (A) держат фиксированную шапку (заголовок/кнопки/фильтры) НАД скроллящимся списком — при скролле только внешнего .chs-screen шапка проехала бы вместе со списком, та же UX-регрессия, которую паттерн .chs-inbox/__scroll изначально предотвращает."
+    },
+    {
+      "option": "Добавить overflow-y:auto на каждый голый <div>-экран группы (B) индивидуально, вместо .chs-screen",
+      "why_not": "Работало бы для текущих 9, но это тот же отклонённый 'точечный' вариант — не защищает будущие экраны, на 9 файлов больше диффа без выигрыша."
+    }
+  ],
+  "object_model": [],
+  "contracts": [
+    "web/src/app-shell/app.css::.chs-screen — overflow:hidden заменяется на overflow-y:auto; overflow-x:hidden (см. §1 ADR). .chs-main/.chs-shell без изменений.",
+    "ci/checks/ux/ux-g8-scroll-reachable.sh — новый статический гейт по образцу ux-g2-theme-pairing.sh, STRICT, --self-test с 4 фикстурами.",
+    "package.json::scripts.fitness — ux-g8-scroll-reachable.sh вписан аддитивно сразу после ux-g2-theme-pairing.sh, --self-test — в конце соответствующего self-test блока, структура &&-цепи сохранена.",
+    "docs/handoff/T-0601.pr-handoff.json — BUILD-фаза."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1/AC-2: .chs-screen не имеет overflow(-y):hidden и имеет overflow-y:auto.", "ci_check": "bash ci/checks/ux/ux-g8-scroll-reachable.sh"},
+    {"id": "FF-2", "rule": "AC-3: .chs-main/.chs-shell остаются overflow:hidden.", "ci_check": "ручная проверка diff (единственная тронутая строка — .chs-screen)"},
+    {"id": "FF-3", "rule": "AC-4/AC-5: новый гейт зелёный, --self-test проходит все 4 фикстуры.", "ci_check": "bash ci/checks/ux/ux-g8-scroll-reachable.sh && bash ci/checks/ux/ux-g8-scroll-reachable.sh --self-test"},
+    {"id": "FF-4", "rule": "AC-6: гейт вписан в npm run fitness, структура &&-цепи сохранена.", "ci_check": "grep -c ux-g8 package.json (2 вхождения) + полный npm run fitness зелёный"},
+    {"id": "FF-5", "rule": "AC-7: 100% существующих web-тестов проходят без изменений.", "ci_check": "cd web && npx vitest run"},
+    {"id": "FF-6", "rule": "AC-8: build зелёный на обоих уровнях.", "ci_check": "npm run build && (cd web && npm run build)"},
+    {"id": "FF-7", "rule": "AC-9: anti-case-lock зелёный.", "ci_check": "bash ci/checks/anti-case-lock.sh"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-1"},
+    {"ac": "AC-3", "covered_by": "FF-2"},
+    {"ac": "AC-4", "covered_by": "FF-3"},
+    {"ac": "AC-5", "covered_by": "FF-3"},
+    {"ac": "AC-6", "covered_by": "FF-4"},
+    {"ac": "AC-7", "covered_by": "FF-5"},
+    {"ac": "AC-8", "covered_by": "FF-6"},
+    {"ac": "AC-9", "covered_by": "FF-7"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0601-screen-scroll-unlock.md",
+  "escalation": "Нет. Изменение — однострочная CSS-правка существующего правила плюс новый статический CI-гейт по уже устоявшемуся образцу (ux-g2-theme-pairing.sh). Не меняет продуктовую поверхность, не вводит новых прав/данных/секретов."
+}

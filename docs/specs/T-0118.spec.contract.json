@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0118",
+  "status": "ready",
+  "summary": "Close the T-0033 hash-transform cross-tenant equality oracle (TEST finding F-1): replace the keyless, salt-free djb2 digest with a per-tenant keyed digest scoped to (value, tenant_id, field-identity, secret-key), supplied through an injected port (no pg/fs/crypto/env in the pure data-classification core). Equality is preserved ONLY within (tenant, field) and killed across tenants and across fields (join-preserving compromise); tenant_id-alone keying and entire-equality-removal are rejected. Fail-closed: no key OR no port injected => hash field is dropped, never raw and never the keyless digest. No data migration (masking is on-read, nothing persisted); a migration (number 032, 031 held by T-0044) is needed ONLY if the architect custodies key material in a DB table. One architect contract clause records key-custody (DB-table vs ops-secret) — not a founder blocker, since either satisfies every AC.",
+  "functional": [
+    "FR-1 hash transform becomes a per-tenant keyed digest: digest = f(value, tenant_id, field-identity{resourceType,facetField}, secret-key); changing tenant_id or field changes the digest for the same value (closes the cross-tenant + cross-field oracle)",
+    "FR-2 key material is supplied through an injected port on the ResolverDeps pattern (mirrors GrantSource/RecordSource/ClassificationSource); the pure data-classification.ts core performs no env/fs/crypto read",
+    "FR-3 within-(tenant,field) determinism is preserved: same (value,tenant,field,key) => same digest (T-0033 AC-13 not regressed; mask-on-mask joins/dedup within a tenant survive)",
+    "FR-4 keyed not keyless: a secret key participates so an observer of masked output cannot offline-rainbow/dictionary a guessed value; the old keyless djb2 is no longer a reachable masking output",
+    "FR-5 tenant_id is threaded into buildMaskContext/MaskContext (already validated handle.tenantId===subject.tenantId at the resolver) and into the ONE projection call; no second handle->fields export",
+    "FR-6 fail-closed: port present but no key for tenant (missing/throws) => hash field dropped (key omitted), raw never present; no keyed-port injected => hash field dropped, keyless djb2 never emitted"
+  ],
+  "non_functional": [
+    "NF-1 fail-closed bias: every key-availability ambiguity resolves to drop, never raw and never the keyless digest (T-0033 NF-3)",
+    "NF-2 no new authority subsystem: the keyed-digest capability is a digest-function provider, not a second clearance/visibility algebra (rights-derived-only preserved)",
+    "NF-3 determinism & purity of data-classification.ts preserved (no pg/fs/net/http/node:crypto/process.env import; FF-DC9 / import-ban stays green)",
+    "NF-4 tenant isolation: tenant A's digest cannot be produced by, equal, or aid an attack against tenant B's value (the core fix)",
+    "NF-5 backward-compatible import surface (FE-W23-0008): additive optional params/ports only; resolveFor/makeGrantResolver/projectFields/visibleFields/grantFacetFields unchanged"
+  ],
+  "out_of_scope": [
+    "reversible encryption / tokenization with reversible key custody (T-0033 §6-A #12 gold-plating; hash stays non-reversible)",
+    "removing equality entirely / random per-call nonce (breaks deterministic-token property T-0033 AC-13; rejected per D-1)",
+    "keying the digest on tenant_id alone with no secret (offline brute-force survives; rejected per D-2)",
+    "changing any other transform (reveal/partial/redact/drop), the class ladder, selectTransform gap rules, clearance derivation, or the reclassification guard",
+    "the Postgres ClassificationSource DAO (T-0053) — unchanged",
+    "key rotation / re-keying mechanics and silo secret-distribution operations (follow-up ops concern)",
+    "any UI/web surface (projection-core only)",
+    "TEST robustness note F-2 (throwing-classification-source fail-by-exception) — separate T-0053 contract concern"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "Cross-tenant oracle killed (adversarial): same classified value V and same field, masked under tenant A and tenant B (A!=B) via the hash path => DIFFERENT digests (maskFields(...,tenantA) !== maskFields(...,tenantB) for the hashed field)", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "Within-(tenant,field) determinism preserved (adversarial): same tenant, same field, same value V, two independent mask calls => SAME digest (D-1 join-preserving; T-0033 AC-13 not regressed)", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "Cross-field separation: within one tenant, the same value V classified into two different facetFields => DIFFERENT hash digests", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "Keyed not keyless (anti-rainbow): the hash digest of V depends on secret key material — two different injected keys (all else equal) give different digests, and the digest does NOT equal the old keyless djb2 of V", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Fail-closed on absent key (D-3): keyed-digest port injected but yields no key for the tenant (missing/throws) => a field that would be hash is DROPPED (key omitted), raw never present", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "No-port degrade is fail-closed (D-4): with NO keyed-digest capability injected, a field whose selectTransform returns hash is DROPPED (key omitted) — keyless djb2 NOT emitted; raw never present", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "Core purity preserved (C-4): src/core/data-classification.ts imports no pg/fs/net/http/node:crypto/process.env; data-classification-isolation.sh import ban green (extended to crypto/env tokens)", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "Single projection preserved (C-5): single-resolver.sh green; human-path and agent-path projections byte-identical on a record with a hash-masked field; no new handle->fields export", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "Import surface preserved (FE-W23-0008): resolveFor/makeGrantResolver/projectFields/visibleFields/grantFacetFields still exported; only additive optional params/ports; grant-resolver.test.ts compiles & passes unchanged", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "Determinism overall (T-0033 AC-13 regression guard): deeply-equal full inputs (record, grants, classification rows, tenant, key, now) => deeply-equal masked output; double-invoke maskFields deep-equal", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "Tenant binding is real not cosmetic: the digest changes if tenant_id changes while (resourceType, facetField, value, key) are fixed — tenant is an actual digest input, asserted by varying only tenant_id between two calls", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "No regression in the rest of T-0033: full T-0033 deterministic suite (vitest data-classification + grant-resolver) and fitness shell checks stay green; only hash output semantics change", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "(IF custody=DB) Tenant-isolation of key store: IF a per-tenant key/salt table is added (migration 032), a key row under tenant A is invisible to a session bound to tenant B (FORCE RLS two-tenant probe); table in known_tenant_tables.txt, tenant_id leading PK. Conditional on the §9 architect decision; manual/skipped if custody is non-DB", "verifiable_as": "test"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0118-hash-oracle.spec.md"
+}

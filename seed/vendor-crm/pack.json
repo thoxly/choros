@@ -1,0 +1,93 @@
+{
+  "meta": {
+    "name": "vendor-crm",
+    "version": "1.0.0",
+    "description": "Vendor CRM seed (T-0244): vendor-admin / vendor-readonly roles + grants for customer-subscription registry. Org-plane only; registry-content is in migrations/073_vendor_crm_seed.sql."
+  },
+  "tenant": {
+    "slug": "dev",
+    "display_name": "Choros Dev (founder tenant)"
+  },
+  "departments": [
+    { "slug": "vendor-ops", "display_name": "Vendor Operations", "parent_slug": null }
+  ],
+  "positions": [
+    { "slug": "vendor-admin-pos",    "title": "Vendor Admin",    "department_slug": "vendor-ops" },
+    { "slug": "vendor-readonly-pos", "title": "Vendor Observer", "department_slug": "vendor-ops" }
+  ],
+  "employees": [],
+  "roles": [
+    {
+      "slug": "vendor-admin",
+      "display_name": "Vendor Admin",
+      "description": "Full access to customer-subscription registry. field-grant write-mask on circuit_id/activation_key_issued_at (process-actor-only fields).",
+      "system": false
+    },
+    {
+      "slug": "vendor-readonly",
+      "display_name": "Vendor Read-Only",
+      "description": "Read-only access to customer-subscription registry. Cannot update, transition, or start processes (AC-12).",
+      "system": false
+    }
+  ],
+  "role_assignments": [],
+  "grants": [],
+  "rights_cards": [
+    {
+      "role_slug": "vendor-admin",
+      "name": "Vendor Admin",
+      "dept": "Vendor Operations",
+      "scope": "customer-subscription",
+      "holders": [],
+      "grants": [
+        {
+          "res": "Registry customer-subscription",
+          "uri": "registry:customer-subscription",
+          "ops": ["read", "create", "update", "delete", "transition", "invoke"],
+          "scope": "registry:customer-subscription",
+          "notes": "update write-mask: circuit_id and activation_key_issued_at writeable only by system process actor (field-grant §3.5)"
+        }
+      ],
+      "fields": [
+        { "name": "company_name",   "a": "write" },
+        { "name": "contact_name",   "a": "write" },
+        { "name": "contact_email",  "a": "write" },
+        { "name": "plan",           "a": "write" },
+        { "name": "not_after",      "a": "write" },
+        { "name": "status",         "a": "read"  },
+        { "name": "custom_terms",   "a": "write" },
+        { "name": "notes",          "a": "write" },
+        { "name": "circuit_id",             "a": "read", "write_restricted": "process-actor-only" },
+        { "name": "activation_key_issued_at", "a": "read", "write_restricted": "process-actor-only" }
+      ]
+    },
+    {
+      "role_slug": "vendor-readonly",
+      "name": "Vendor Read-Only",
+      "dept": "Vendor Operations",
+      "scope": "customer-subscription",
+      "holders": [],
+      "grants": [
+        {
+          "res": "Registry customer-subscription",
+          "uri": "registry:customer-subscription",
+          "ops": ["read"],
+          "scope": "registry:customer-subscription"
+        }
+      ],
+      "fields": [
+        { "name": "company_name",   "a": "read" },
+        { "name": "contact_name",   "a": "read" },
+        { "name": "contact_email",  "a": "read" },
+        { "name": "plan",           "a": "read" },
+        { "name": "not_after",      "a": "read" },
+        { "name": "status",         "a": "read" },
+        { "name": "custom_terms",   "a": "read" },
+        { "name": "notes",          "a": "read" },
+        { "name": "circuit_id",             "a": "read" },
+        { "name": "activation_key_issued_at", "a": "read" }
+      ]
+    }
+  ],
+  "process_instances": []
+}

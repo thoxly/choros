@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  T-0612-purchaseApproval-fixed.bpmn20.xml.txt — corrected purchaseApproval model.
+
+  PROVENANCE (T-0612, see docs/design/ADR-T0612-purchase-escalation-convergence.md
+  §1): the purchaseApproval process ("Закупки") is TENANT-AUTHORED case content —
+  it was hand-authored as raw BPMN XML and POSTed directly to POST
+  /api/process-defs → /publish during the 2026-07-01/07-02 live acceptance
+  session (dev tenant ООО Аксон), NOT built via the canvas modeler ("НЕ мышью по
+  канвасу" — session memory choros-acceptance-2026-07-01-zakupki.md). It is NOT
+  committed anywhere in the choros repository (confirmed: no seed pack, no
+  fixture, no template references it — grep across the whole tree finds only
+  descriptive code comments citing it as an example of an already-observed live
+  instance, e.g. src/http/processes.ts, src/http/records.ts,
+  migrations/121_process_app_binding_submit_task_key.sql).
+
+  THIS FILE is the fix artifact for исход (б): a corrected replacement model,
+  ready to be POSTed to the SAME publish endpoint (POST /api/process-defs →
+  /publish) against the live dev tenant during the LIVE_PROOF phase, reproducing
+  the exact process key/shape the case already uses but with the defect closed.
+
+  ===========================================================================
+  THE DEFECT — TWO COMPLETION ORDERS (T-0612 found #1; T-0661 found #2)
+  ===========================================================================
+  The boundary timer guarding "Согласование финдиректора" (task-fin) is
+  non-interrupting (cancelActivity="false" — an explicit choice, since BPMN's
+  own default when the attribute is absent is interrupting=true), escalating to
+  "Эскалация: финдир молчит" (task-esc).
+
+  #1 (T-0612, timer NEVER fires): the escalation branch dead-ended at ITS OWN
+     endEvent. When the director approved BEFORE PT2M, the main token reached
+     the end — but the still-armed, never-fired, never-cancelled boundary timer
+     left act_hi_procinst.end_time NULL forever. FIXED by T-0612 via a
+     converging exclusiveGateway (gw-fin-converge) both branches flow into.
+
+  #2 (T-0661, timer ALREADY fired → BOTH tasks open concurrently): once the
+     PT2M timer fires, a non-interrupting boundary event SPAWNS A SECOND,
+     independent token — task-fin AND task-esc are now BOTH open. A converging
+     exclusiveGateway is an *uncontrolled merge*: it passes EACH incoming token
+     through to its single outgoing flow INDEPENDENTLY — it does NOT "discard
+     the later token" (the T-0612 D2 rationale was mistaken on this point; see
+     ADR §8). So completing task-fin drives one token through gw-fin-converge to
+     a PLAIN endEvent (that token is consumed there), while task-esc's token
+     stays parked — the instance HANGS until BOTH tasks are completed. The
+     symmetric order (complete task-esc first, task-fin left parked) hangs the
+     same way. A plain converging-gateway + none-endEvent CANNOT resolve two
+     concurrent tokens.
+
+  ===========================================================================
+  THE FIX (ADR-T0612 §8, decision D5 — "согласование добивает процесс")
+  ===========================================================================
+  Whichever of the two racing tasks resolves FIRST (the director approving
+  task-fin, or the owner handling the escalation task-esc) must COMPLETE the
+  slice and CANCEL the other still-open task — the escalation is a reminder,
+  and once the decision is made it becomes moot. This requires ACTIVE token
+  cancellation, which only a scope-terminating construct provides.
+
+  Encoding: the fin-approval race is enclosed in an embedded subProcess
+  (sub-fin-approval). Inside it, task-fin's non-interrupting boundary timer
+  escalates to task-esc; BOTH task-fin and task-esc converge into the existing
+  exclusiveGateway gw-fin-converge, which flows to a TERMINATE end event
+  (sub-end-terminate, terminateAll left default=false → SCOPE-LOCAL). The first
+  token to reach the terminate ends the sub-process scope — killing the other,
+  still-parked task's token WITH the scope — and the sub-process completes
+  NORMALLY, firing its single outgoing flow to the shared, top-level endEvent
+  "Заказ размещён". cancelActivity="false" is UNCHANGED (business semantics per
+  ADR §2 D1 preserved: the escalation never revokes the director's authority;
+  it is simply moot once EITHER party decides).
+
+  WHY A SUB-PROCESS (not a top-level terminate): a terminate end event at the
+  TOP level would end the WHOLE process instance, killing any genuinely-parallel
+  top-level branch the full case may run alongside this slice (the case branches
+  on ${amount>500000} upstream — see NOTE ON SCOPE). Scoping the terminate
+  inside the sub-process confines the cancellation to exactly the two racing
+  tasks and NOTHING else — resolving ADR §2 D2's original objection to
+  terminate (foreclosing future parallel branches) while still using terminate
+  where it is the correct, deterministic idiom. See ADR §8 for rejected
+  alternatives (top-level terminate, signal-cancel, runtime task-pairing,
+  "require both to complete").
+
+  This shape PASSES src/core/bpmn-linter.ts's checkTimerEscalationConvergence
+  on BOTH the existing convergence rule (task-fin's and task-esc's flows both
+  reach gw-fin-converge) AND the T-0661 stricter concurrency-resolution rule
+  (a terminateEndEvent is reachable from the escalation branch, so the second
+  concurrent token created when the timer fires can always be extinguished).
+
+  NOTE ON SCOPE: this file reproduces only the finance-director-approval +
+  escalation SLICE of the full purchaseApproval case (start → sub-fin-approval →
+  end). The full case also branches on ${amount>500000} upstream of this slice
+  (per session memory) — that upstream branching is untouched/unaffected by this
+  fix and is not reproduced here since its exact node ids were never captured in
+  any repo artifact (tenant-only state, see ADR §1). Whoever publishes this
+  during LIVE_PROOF should splice this start-fin-branch..end-order-placed slice
+  into the existing upstream structure on the live tenant.
+
+  LIVE_PROOF TIP: the PT2M deadline below is the real case value. To exercise
+  the #2 (fired) orders without waiting 2 real minutes, publish a variant with
+  <timeDuration>PT5S</timeDuration> (or drive it via the smoke script's
+  FIN_DEADLINE override — see ci/checks/flowable/purchase-approval-convergence-
+  smoke.sh) so the escalation task surfaces within seconds.
+-->
+<definitions
+  xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:flowable="http://flowable.org/bpmn"
+  xmlns:choros="http://choros.io/bpmn"
+  targetNamespace="http://choros.io/purchase-approval"
+  xsi:schemaLocation="http://www.omg.org/spec/BPMN/20100524/MODEL
+    http://www.omg.org/spec/BPMN/2.0/20100501/BPMN20.xsd">
+
+  <process id="purchaseApproval" name="Закупки: согласование заявки" isExecutable="true">
+
+    <!-- Entry point of this slice (splice point — see NOTE ON SCOPE above). -->
+    <startEvent id="start-fin-branch" name="Начало (ветка &gt;500000)"/>
+
+    <!--
+      THE FIX (T-0661): the fin-approval race is enclosed in an embedded
+      subProcess so the scope-local terminate end event inside can cancel the
+      losing task's token WITHOUT ending any genuinely-parallel top-level branch.
+    -->
+    <subProcess id="sub-fin-approval" name="Согласование финдиректора (гонка + эскалация)">
+
+      <!-- Embedded sub-processes require exactly one none start event. -->
+      <startEvent id="sub-start"/>
+
+      <!-- UserTask: Согласование финдиректора -->
+      <userTask id="task-fin"
+                name="Согласование финдиректора"
+                flowable:candidateGroups="role-manager">
+        <documentation>
+          Финансовый директор рассматривает заявку на закупку (сумма &gt; 500000)
+          и согласовывает или отклоняет. Согласование продвигает заявку к
+          размещению заказа.
+        </documentation>
+      </userTask>
+
+      <!--
+        Boundary timer: PT2M deadline guarding task-fin, NON-INTERRUPTING
+        (cancelActivity="false" — an explicit, deliberate choice: the escalation
+        is a REMINDER to the owner pool, not a takeover of the finance director's
+        approval authority; see ADR-T0612 §2 D1). Escalates to task-esc on fire.
+        Because it is non-interrupting, firing SPAWNS a second concurrent token —
+        which the scope-local terminate below extinguishes on first resolution.
+      -->
+      <boundaryEvent id="bnd-fin-timeout"
+                     name="Таймаут согласования (2 мин)"
+                     attachedToRef="task-fin"
+                     cancelActivity="false"
+                     choros:timerDeadlineKind="duration"
+                     choros:timerDeadline="PT2M"
+                     choros:escalateTo="owner">
+        <timerEventDefinition>
+          <timeDuration>PT2M</timeDuration>
+        </timerEventDefinition>
+      </boundaryEvent>
+
+      <!-- UserTask: Эскалация — финдир молчит (surfaces ONLY if the timer fires). -->
+      <userTask id="task-esc"
+                name="Эскалация: финдир молчит"
+                flowable:candidateGroups="role-owner">
+        <documentation>
+          Напоминание владельцу: финансовый директор не согласовал заявку в
+          течение 2 минут. Первая из завершившихся задач (согласование финдира
+          ИЛИ обработка эскалации владельцем) добивает процесс — вторая,
+          оставшаяся открытой, снимается вместе со scope субпроцесса (terminate).
+        </documentation>
+      </userTask>
+
+      <!--
+        Converging exclusiveGateway (T-0612): both the director's normal
+        completion AND the escalation's completion flow into it. It is an
+        uncontrolled merge — each arriving token passes through independently.
+      -->
+      <exclusiveGateway id="gw-fin-converge" name="Согласовано / эскалировано"/>
+
+      <!--
+        THE FIX (T-0661): SCOPE-LOCAL terminate end event. terminateAll is left
+        at its default (false) → terminates ONLY this sub-process's executions,
+        killing the other, still-parked racing task's token. The sub-process then
+        completes normally and fires its single outgoing flow to the shared end.
+      -->
+      <endEvent id="sub-end-terminate" name="Решение принято — гонка завершена">
+        <terminateEventDefinition/>
+      </endEvent>
+
+      <!-- Sub-process sequence flows -->
+      <sequenceFlow id="sf-sub-start-fin" sourceRef="sub-start"      targetRef="task-fin"/>
+      <sequenceFlow id="sf-fin-converge"  sourceRef="task-fin"       targetRef="gw-fin-converge"/>
+      <sequenceFlow id="sf-timer-esc"     sourceRef="bnd-fin-timeout" targetRef="task-esc"/>
+      <sequenceFlow id="sf-esc-converge"  sourceRef="task-esc"       targetRef="gw-fin-converge"/>
+      <sequenceFlow id="sf-converge-term" sourceRef="gw-fin-converge" targetRef="sub-end-terminate"/>
+
+    </subProcess>
+
+    <!-- Shared end for this slice (top level — reached once the race resolves). -->
+    <endEvent id="end-order-placed" name="Заказ размещён"/>
+
+    <!-- Top-level sequence flows -->
+    <sequenceFlow id="sf-start-sub"  sourceRef="start-fin-branch" targetRef="sub-fin-approval"/>
+    <sequenceFlow id="sf-sub-end"    sourceRef="sub-fin-approval" targetRef="end-order-placed"/>
+
+  </process>
+
+</definitions>

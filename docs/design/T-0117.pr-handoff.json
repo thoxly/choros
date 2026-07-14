@@ -1,0 +1,99 @@
+{
+  "task_id": "T-0117",
+  "status": "pr_open",
+  "branch": "task/T-0117-flowable-oss-spike",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/specs/T-0117-flowable-oss-spike.spec.md",
+    "docs/specs/T-0117.spec.contract.json",
+    "docs/design/T-0117-flowable-oss-spike.adr.md",
+    "docs/design/T-0117.adr.contract.json",
+    "docs/design/T-0117.review.contract.json",
+    "docs/design/T-0117.test-report.contract.json",
+    "docs/design/stack-flowable-oss-spike-addendum.md",
+    "spikes/flowable-oss/.gitignore",
+    "spikes/flowable-oss/README.md",
+    "spikes/flowable-oss/bpmn/flowable-failing.bpmn20.xml",
+    "spikes/flowable-oss/bpmn/operaton-failing.bpmn20.xml",
+    "spikes/flowable-oss/compose.flowable.yml",
+    "spikes/flowable-oss/compose.operaton.yml",
+    "spikes/flowable-oss/fitness.sh",
+    "spikes/flowable-oss/lib/jq-free-json.sh",
+    "spikes/flowable-oss/lib/seed.sh",
+    "spikes/flowable-oss/measurements.json",
+    "spikes/flowable-oss/run.sh"
+  ],
+  "deviations_from_adr": [
+    "SPIKE artifact, not product code: all changes = docs/design + isolated spikes/flowable-oss/ (FR-1, NF-5). Zero src/ changes — ci_local build/lint/types=true mean UNAFFECTED by this change (no compilation of modified source), not 'passed after execution'. tests=true; fitness=true because measurements.json is committed with verified data (8/8 FF smoke pass, full-run N=300k at N_HISTORY_TARGET=300000; FF-SMOKE-JSON verified clean before commit, measurements.json is evidence, not a gate artifact).",
+    "DESIGN + BUILD methodology documented in ADR; spike harness (spikes/flowable-oss/run.sh) is zero-dep bash+curl+psql-in-container, no TS/Node runtime dependencies. Fitness functions (fitness.sh, spikes/flowable-oss/fitness.sh integrated as per sche ADR §7) are build-phase smoke tests (up/seed-1000/measure/down, no Docker env required for CI gate if smoke/JSON validation only); full-run (N=300k) is a manual BUILD step whose output (measurements.json) is the evidence for founder ratification gate.",
+    "Reviewer nit R-1 (non-blocking, NOT looped per dev-loop nit policy): addendum headline table 'History-cleanup: ~5.5–7.9k rec/s @300k' vs committed measurements.json='5,454 rec/s' — band is correct (spans multiple runs at dev laptop load variance), but wording creates ambiguity. Carry into any T-0058 integration documentation.",
+    "Reviewer nit R-2 (non-blocking, NOT looped per dev-loop nit policy): FF-SMOKE-JSON in fitness.sh overwrites the engine's EngineResult in measurements.json with smoke-level data (N=1000); no git-safe guard. Workaround documented: 'git checkout -- spikes/flowable-oss/measurements.json restores full-run evidence after fitness.sh'. Note in fitness.sh or separate measurements.smoke.json recommended for clarity, carry into spike spike-maintenance or T-0058.",
+    "No remote PR opened: committed to local branch only (local-review-handoff pattern per T-0013/T-0014). Opening a GitHub PR on thoxly/choros requires scoped agent PAT (GT-4 credentials) which is not provisioned in this environment — founder reviews the branch locally via dev-env.",
+    "Addendum status 'awaiting ratification' (founder gate GT/RL-2): engine verdict (go) is spike's measured output; **integration T-0058+ does NOT start until founder ratifies the addendum**. This handoff documents the spike's closure (evidence committed, all 15 AC covered); ratification is the next founder milestone, separate from this PR phase."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "known_issues": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "summary": "Headline table band '~5.5–7.9k rec/s' vs committed 5,454 rec/s — band correct, wording ambiguous",
+      "mitigation": "Addendum §3 correctly states 'last run at 5,454 rec/s'; band spans variance; carry clarity into T-0058 docs"
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "summary": "FF-SMOKE-JSON (fitness.sh) overwrites measurements.json with N=1000 data; no git guard",
+      "mitigation": "Documented: 'git checkout -- spikes/flowable-oss/measurements.json' restores full-run after fitness.sh; consider separate measurements.smoke.json in spike ops."
+    }
+  ],
+  "risks_and_next": [
+    {
+      "risk": "Addendum ratification (GT/RL-2 founder gate) is a separate milestone",
+      "impact": "Integration T-0058 (engine-into-Choros, outbox/external-task bridge) does not start until founder 'approve_task' on the addendum",
+      "next": "Founder reviews addendum (docs/design/stack-flowable-oss-spike-addendum.md) and ratifies via approve_task(T-0117); no code change, just ratification milestone"
+    },
+    {
+      "risk": "Fitness.sh smoke-JSON overwrites full-run measurements if run live on Docker",
+      "impact": "Dev environment re-run of `spikes/flowable-oss/fitness.sh` will clobber measurements.json with N=1000 data unless restored",
+      "next": "Doc note in fitness.sh or separate measurements.smoke.json for future spike operations/maintenance"
+    }
+  ],
+  "measurements_snapshot": {
+    "flowable": {
+      "engine_image": "flowable/flowable-rest:7.1.0",
+      "license": "Apache 2.0",
+      "verdict": "go",
+      "n_history": 300000,
+      "cleanup_throughput_rps": 5454.55,
+      "headroom_factor": 2047.79,
+      "deadletter_list": "available (HTTP 200)",
+      "deadletter_retry": "available (HTTP 204)",
+      "deadletter_move": "available (HTTP 204, dedicated action=move)"
+    },
+    "operaton": {
+      "engine_image": "operaton/operaton:1.0.0",
+      "license": "Apache 2.0",
+      "verdict": "go",
+      "n_history": 300000,
+      "cleanup_throughput_rps": 13636.36,
+      "headroom_factor": 5119.48,
+      "deadletter_list": "available (HTTP 200)",
+      "deadletter_retry": "available (HTTP 204)",
+      "deadletter_move": "parity note — no dedicated move; via set-retries"
+    }
+  },
+  "test_evidence": {
+    "npm_ci_result": "pass (384/384 tests, no src/ changes; product CI unaffected)",
+    "fitness_functions": "8/8 pass (FF-ISOLATION, FF-IMAGES-PINNED, FF-NO-SECRETS, FF-SMOKE-UP, FF-SMOKE-SEED, FF-SMOKE-JSON, FF-SMOKE-DOWN, FF-ADDENDUM)",
+    "acceptance_coverage": "AC-1..AC-15 all covered (see T-0117.test-report.contract.json)"
+  },
+  "rationale": "Spike T-0117 is a BUILD + REVIEW + TEST artifact that proves Flowable 7 OSS (Apache 2.0, no enterprise key) is viable for Choros: both load-bearing capabilities (history-cleanup at 70M/year extrapolation, deadletter management via REST) are present. Operaton is also viable as a fallback. Recommendation: Flowable primary, Operaton fallback. All 15 acceptance criteria covered by measurements.json and addendum. Spike harness is isolated (spikes/ only, NF-5) and does not touch product code. Ready for founder ratification of the addendum (separate gate GT/RL-2)."
+}

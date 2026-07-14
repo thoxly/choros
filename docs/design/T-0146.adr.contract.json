@@ -1,0 +1,135 @@
+{
+  "task_id": "T-0146",
+  "status": "ready",
+  "decision": "Новый pure-bash fitness-чек ci/checks/frozen-checks-immutable.sh с нулевыми новыми зависимостями: читает TASK_ID из имени ветки (шаблон task/T-XXXX-*), вычисляет merge-base с dev/origin/dev (тот же динамический алгоритм, что в dual-control-isolation.sh), собирает список изменённых/удалённых ci/checks/*.sh через git diff --diff-filter=CDMRT (исключая только-добавленные), для каждого файла читает вторую строку и извлекает T-ID из паттерна # T-XXXX · — если совпадает с TASK_ID ветки, файл свой (разрешён), иначе чужой (FAIL + exit 1). Fail-open на нетask-ветках и при недоступном dev. Сам чек имеет заголовок # T-0146 · на строке 2 — на ветке task/T-0146-* он собственный. Регистрируется в конце npm run fitness. Hostile-probe тест — vitest-harness в ci/checks/db/frozen-checks-immutable.test.ts с isolated tmp git-repo.",
+  "rejected_alternatives": [
+    {
+      "option": "Хардкодить список защищённых файлов в отдельном конфиге (owners.json или аналог)",
+      "why_not": "Требует ручного обновления при каждой новой задаче и файле. Само-регистрирующийся механизм через заголовок # T-XXXX · — zero maintenance; новый чек получает защиту автоматически с момента создания."
+    },
+    {
+      "option": "Проверять только hardcoded критические чеки (RC, DC — те, что уже были нарушены)",
+      "why_not": "Защищает только известные на сегодня два файла; любой следующий frozen-чек снова будет уязвим до обновления блок-листа. Механизм заголовка защищает все текущие и будущие чеки автоматически."
+    },
+    {
+      "option": "Blocklisting (список запрещённых к правке файлов) вместо allowlisting через заголовок",
+      "why_not": "Blocklisting требует знать заранее, какие файлы чужие — опять ручное сопровождение. Allowlisting через # T-XXXX · self-contained: файл несёт метаданные владельца внутри себя."
+    },
+    {
+      "option": "Python/Node-скрипт вместо pure bash",
+      "why_not": "NF-1 запрещает новые runtime-зависимости. Все существующие ci/checks/*.sh — bash; единый стиль CI-слоя."
+    },
+    {
+      "option": "Отдельный GitHub Actions job для мета-гейта",
+      "why_not": "Out of scope (spec §7). Мета-гейт запускается в npm run fitness локально и в CI без дополнительного job."
+    },
+    {
+      "option": "Bash harness как отдельный .probe.sh вне vitest",
+      "why_not": "Не интегрируется в npm run fitness:db / CI pipeline. Vitest-harness запускается автоматически вместе с другими ci/checks/db тестами, не требует отдельного вызова."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "CheckState",
+      "fields": [
+        {"name": "TASK_ID", "type": "string — e.g. T-0146, extracted from branch name"},
+        {"name": "BASE_REF", "type": "string (git SHA) — merge-base с dev/origin/dev"},
+        {"name": "changed_sh", "type": "string[] — paths ci/checks/*.sh из git diff --diff-filter=CDMRT"},
+        {"name": "header_tid", "type": "string | '' — T-ID из строки 2 файла (sed -n '2p' | grep -oE)"},
+        {"name": "ERRORS", "type": "int — счётчик нарушений"}
+      ]
+    },
+    {
+      "entity": "ClassificationResult",
+      "fields": [
+        {"name": "file", "type": "string — путь ci/checks/*.sh"},
+        {"name": "owner_tid", "type": "string | '' — T-ID из заголовка файла"},
+        {"name": "is_own", "type": "bool — owner_tid === TASK_ID"},
+        {"name": "disposition", "type": "enum: allowed | violation"}
+      ]
+    }
+  ],
+  "contracts": [
+    "входной контракт: скрипт запускается без аргументов в PROJECT_ROOT или любом пути (вычисляет SCRIPT_DIR сам); читает git-состояние текущего репо",
+    "выходной контракт: exit 0 = зелёный; exit 1 = нарушение; stdout содержит FAIL-строки с именем файла и T-ID владельца",
+    "контракт заголовка: все ci/checks/*.sh задач имеют вторую строку # T-XXXX · <description> (U+00B7 middle dot); чеки без T-ID считаются чужими для любой task-ветки",
+    "контракт собственного чека: ci/checks/frozen-checks-immutable.sh имеет заголовок # T-0146 · на строке 2",
+    "интеграция fitness: bash ci/checks/frozen-checks-immutable.sh добавляется в конец строки fitness в package.json",
+    "интеграция fitness:db: ci/checks/db/frozen-checks-immutable.test.ts запускается через vitest run --dir ci/checks/db",
+    "fail-open: нетask-ветки (dev/main/detached/нет T-XXXX шаблона) и недоступный merge-base → exit 0"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-FCI1",
+      "rule": "На task-ветке с TASK_ID ≠ владелец-чека: любое изменение или удаление ci/checks/*.sh (исключая только-добавленные файлы, diff-filter=A) → FAIL + exit 1 с именем файла",
+      "ci_check": "bash ci/checks/frozen-checks-immutable.sh в npm run fitness (AC-1, AC-2)"
+    },
+    {
+      "id": "FF-FCI2",
+      "rule": "На ветке task/T-0146-*: правка ci/checks/frozen-checks-immutable.sh (заголовок # T-0146 ·) → exit 0 (собственный чек)",
+      "ci_check": "bash ci/checks/frozen-checks-immutable.sh в npm run fitness (AC-3)"
+    },
+    {
+      "id": "FF-FCI3",
+      "rule": "На dev/main/detached HEAD или при недоступном merge-base с dev → exit 0 (fail-open, нет task-контекста)",
+      "ci_check": "bash ci/checks/frozen-checks-immutable.sh в npm run fitness (AC-4)"
+    },
+    {
+      "id": "FF-FCI4",
+      "rule": "Новые ci/checks/*.sh файлы (diff-filter=A) не являются нарушением — добавление нового гейта разрешено",
+      "ci_check": "bash ci/checks/frozen-checks-immutable.sh с diff только ADD → exit 0 (AC-5)"
+    },
+    {
+      "id": "FF-FCI5",
+      "rule": "Удаление существующего ci/checks/*.sh (diff-filter=D) с TASK_ID ≠ владелец → FAIL; удалённые файлы читаются из BASE_REF через git show",
+      "ci_check": "bash ci/checks/frozen-checks-immutable.sh в npm run fitness (AC-6)"
+    },
+    {
+      "id": "FF-FCI6",
+      "rule": "ci/checks/db/*.ts, ci/checks/kc/*.sh, ci/checks/flowable/*.sh не захватываются glob ci/checks/[^/]+\\.sh (только верхний уровень)",
+      "ci_check": "bash ci/checks/frozen-checks-immutable.sh → поддиректории не в changed_sh → exit 0 (AC-12)"
+    },
+    {
+      "id": "FF-FCI7",
+      "rule": "Вторая строка ci/checks/frozen-checks-immutable.sh соответствует паттерну ^# T-0146[[:space:]]· (NF-4)",
+      "ci_check": "grep -E '^# T-0146[[:space:]]' ci/checks/frozen-checks-immutable.sh | head -1 — проверяется как часть npm run fitness или assert внутри скрипта (AC-8)"
+    },
+    {
+      "id": "FF-FCI8",
+      "rule": "package.json содержит bash ci/checks/frozen-checks-immutable.sh в строке скрипта fitness",
+      "ci_check": "grep 'frozen-checks-immutable' package.json (AC-7)"
+    },
+    {
+      "id": "FF-FCI9",
+      "rule": "Hostile-probe красный: vitest harness воспроизводит exclusion-правку T-0035/T-0118 (добавляет строку в dual-control-isolation.sh на ветке task/T-0999-test) → ожидает exit 1 от скрипта",
+      "ci_check": "vitest run --dir ci/checks/db → ci/checks/db/frozen-checks-immutable.test.ts (AC-1, AC-2, AC-10)"
+    },
+    {
+      "id": "FF-FCI10",
+      "rule": "Hostile-probe зелёный: тот же harness правит frozen-checks-immutable.sh на ветке task/T-0146-test → ожидает exit 0",
+      "ci_check": "vitest run --dir ci/checks/db → ci/checks/db/frozen-checks-immutable.test.ts (AC-3, AC-10)"
+    },
+    {
+      "id": "FF-FCI11",
+      "rule": "Чек без T-ID заголовка (actor_event_append_only.sh начинается # FF-4 …) изменён на любой task-ветке → FAIL (header_tid='' ≠ TASK_ID)",
+      "ci_check": "bash ci/checks/frozen-checks-immutable.sh в npm run fitness (AC-11)"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-FCI1, FF-FCI9 — exclusion T-0035: dual-control-isolation.sh (T-0044) ≠ TASK_ID → FAIL"},
+    {"ac": "AC-2", "covered_by": "FF-FCI1, FF-FCI9 — exclusion T-0118: FROZEN_EXCLUDE_RE в dual-control-isolation.sh → FAIL"},
+    {"ac": "AC-3", "covered_by": "FF-FCI2, FF-FCI10 — собственный чек T-0146 → exit 0"},
+    {"ac": "AC-4", "covered_by": "FF-FCI3 — на dev merge-base = HEAD или нет TASK_ID → exit 0"},
+    {"ac": "AC-5", "covered_by": "FF-FCI4 — diff-filter=A новый файл → не в changed_sh → exit 0"},
+    {"ac": "AC-6", "covered_by": "FF-FCI5 — DELETE role-criticality-isolation.sh (T-0040) ≠ TASK_ID → FAIL; git show BASE_REF:path для чтения заголовка удалённого файла"},
+    {"ac": "AC-7", "covered_by": "FF-FCI8 — grep 'frozen-checks-immutable' package.json"},
+    {"ac": "AC-8", "covered_by": "FF-FCI7 — строка 2 ci/checks/frozen-checks-immutable.sh = ^# T-0146[[:space:]]·"},
+    {"ac": "AC-9", "covered_by": "known_tenant_tables.txt — не *.sh, grep ci/checks/[^/]+\\.sh не захватывает .txt файлы"},
+    {"ac": "AC-10", "covered_by": "FF-FCI9 + FF-FCI10 — vitest harness с isolated git-repo, вызов скрипта, проверка exit code"},
+    {"ac": "AC-11", "covered_by": "FF-FCI11 — legacy заголовок без T-ID → header_tid='' ≠ TASK_ID → FAIL"},
+    {"ac": "AC-12", "covered_by": "FF-FCI6 — glob ci/checks/[^/]+\\.sh не захватывает поддиректории"}
+  ],
+  "runtime_target": "локально + CI (GitHub Actions); pure bash, нет внешних ресурсов, нет GT-4; hostile-probe тест в Node/vitest (уже в зависимостях проекта)",
+  "adr_artifact_path": "docs/design/T-0146-frozen-checks-immutable.adr.md",
+  "escalation": ""
+}

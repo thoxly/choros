@@ -1,0 +1,137 @@
+{
+  "task_id": "T-0064",
+  "status": "ready",
+  "summary": "Typed TypeScript REST client (src/core/flowable-client.ts) that wraps Flowable 7 REST: deploy BPMN, start process instance, fetch-and-lock external tasks, complete task (with assertVariableValue guard), and fail task — activating the FF-G3 bridge contract.",
+  "functional": [
+    "FR-1: deployBpmn(xml) — POST /repository/deployments multipart, returns { ok, deploymentId }",
+    "FR-2: startInstance(key, variables?) — POST /runtime/process-instances; variables validated with assertVariableValue before send (fail-closed)",
+    "FR-3: fetchAndLock(topic, workerId, lockMs, max) — POST /runtime/external-jobs/acquire; returns ExternalTask[]",
+    "FR-4: completeTask(taskId, workerId, variables?) — complete locked external task; variables guarded by assertVariableValue; record mutations route through resolveFor",
+    "FR-5: failTask(taskId, workerId, msg, retries, retryMs) — report failure on locked external task",
+    "FR-6: config from env — FLOWABLE_BASE_URL, FLOWABLE_REST_APP_ADMIN_USER_ID, FLOWABLE_REST_APP_ADMIN_PASSWORD",
+    "FR-7: retries and timeouts — configurable timeout (default 10 000 ms), 3 retries with exponential backoff on 5xx/network errors; 4xx not retried",
+    "FR-8: typed error mapping — codes ENGINE_UNAVAILABLE, NOT_FOUND, CONFLICT, UNAUTHORIZED, BAD_BPMN, RECORD_IN_PAYLOAD, TIMEOUT, UNKNOWN; no untyped throws at call-site",
+    "FR-9: zero new infrastructure — pure TS module; no new containers, schemas, or compose changes"
+  ],
+  "non_functional": [
+    "NF-1: uses Node 20 built-in fetch; no new npm HTTP dependency; mockable in vitest via vi.stubGlobal",
+    "NF-2: additive only — does not modify src/core/types.ts, jobStore.ts, or any frozen module; tsc --noEmit passes",
+    "NF-3: FF-G3 active and green — src/core/flowable-client.ts matches flowable*.ts activation pattern; assertVariableValue and resolveFor both present in the file",
+    "NF-4: no hardcoded secret — password only as ${VAR:-dev_default} form; no-committed-secret.sh remains green",
+    "NF-5: unit tests are deterministic (no live HTTP); live integration tests clearly separated and added to CI flowable job only",
+    "NF-6: npm run fitness (all pre-existing checks) remains green after task"
+  ],
+  "out_of_scope": [
+    "External Task <-> JobStore topic mapping — T-0067 (E6.2)",
+    "Lifecycle events and unified audit log — T-0068 (E6.3)",
+    "Keycloak / JWT auth to Flowable — future task; Basic Auth follows T-0058 pattern",
+    "Flowable history API",
+    "BPMN linting before deploy — T-0027 linter is a separate call-site; client's deployBpmn() does not call it",
+    "Process management UI or catalog",
+    "Production Flowable config / JVM tuning — E0.7 (founder-gated RL-1)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "src/core/flowable-client.ts exists and tsc --noEmit passes with zero new type errors.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "deployBpmn(xml) sends POST /repository/deployments (multipart) and returns { ok: true; deploymentId: string } on HTTP 201 — unit test with mocked HTTP.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "deployBpmn(xml) returns { ok: false; code: 'BAD_BPMN' } on HTTP 400 — unit test with mocked HTTP.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "startInstance(key) sends POST /runtime/process-instances with {processDefinitionKey: key} and returns { ok: true; instanceId: string } on HTTP 201 — unit test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "startInstance(key, variables) where variables contains a raw record object (assertVariableValue rejects) returns { ok: false; code: 'RECORD_IN_PAYLOAD' } without calling the engine — unit test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "fetchAndLock(topic, workerId, lockMs, max) sends POST /runtime/external-jobs/acquire and returns { ok: true; tasks: ExternalTask[] } on HTTP 200 — unit test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "fetchAndLock with an empty queue (HTTP 200, empty data array) returns { ok: true; tasks: [] } without error — unit test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "completeTask(taskId, workerId) sends the Flowable 7 external-task complete endpoint and returns { ok: true } on HTTP 204 — unit test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "completeTask(taskId, workerId, variables) where variables contains a raw record object returns { ok: false; code: 'RECORD_IN_PAYLOAD' } without calling the engine — unit test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "completeTask(taskId, workerId, variables) where all variables pass assertVariableValue calls the engine and returns { ok: true } on HTTP 204 — unit test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "failTask(taskId, workerId, msg, retries, retryMs) sends the Flowable 7 external-task fail endpoint and returns { ok: true } on HTTP 204 — unit test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "On HTTP 5xx (first call), the client retries up to the configured limit before returning { ok: false; code: 'ENGINE_UNAVAILABLE' } — unit test with mocked HTTP sequence.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "On request timeout (no response within timeoutMs), the client returns { ok: false; code: 'TIMEOUT' } — unit test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "FF-G3 active and green: bash ci/checks/flowable-bridge-contract.sh exits 0 after this task — bridge present and compliant (assertVariableValue and resolveFor both referenced in src/core/flowable-client.ts).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "Live deploy smoke (CI): with Flowable running, deployBpmn(choros-smoke.bpmn20.xml content) returns { ok: true; deploymentId: <non-empty string> }.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "Live start-instance smoke (CI): after deploy, startInstance('chorosSmoke') returns { ok: true; instanceId: <non-empty string> }.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "Live fetch-and-lock smoke (CI): after starting a chorosSmoke instance, fetchAndLock('smoke-topic', 'ci-worker', 30000, 1) returns { ok: true; tasks: [{ id, topic: 'smoke-topic', ... }] }.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "Live complete smoke (CI): completeTask(task.id, 'ci-worker') on the fetched task returns { ok: true } and the process instance is no longer in the running external-jobs list for the topic.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-19",
+      "text": "All pre-existing fitness functions (npm run fitness) remain green: no-committed-secret.sh, flowable-bridge-contract.sh, mutation-gateway-isolation.sh, FF-FL-1..FF-FL-12, FF-G1..FF-G8, RBAC checks.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-20",
+      "text": "FLOWABLE_BASE_URL, FLOWABLE_REST_APP_ADMIN_USER_ID, FLOWABLE_REST_APP_ADMIN_PASSWORD are the only env vars introduced; their names appear in src/core/flowable-client.ts.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0064-engine-rest-client.spec.md"
+}

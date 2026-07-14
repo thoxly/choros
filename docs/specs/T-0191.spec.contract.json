@@ -1,0 +1,80 @@
+{
+  "task_id": "T-0191",
+  "status": "ready",
+  "summary": "PDP-гейт на force-path PUT/PATCH /api/registry-defs/:id. T-0177 оставил TODO(T-0021)-стаб — любой актор проходил деструктив с force=true. T-0191 заменяет стаб реальным injectable PDP-гейтом: RegistryDefAuthzDeps.checkDestructiveGrant (loadAdminContext + genesis-owner short-circuit + adminGrants.some(resourceType='mgmt_object:schema_destructive', operation='apply')). Без гранта → 403 NO_SCHEMA_DESTRUCTIVE_GRANT. Operation 'apply' не расширяет frozen union — interce принимает string, widening-cast только в тестах (паттерн T-0024/T-0077).",
+  "functional": [
+    "FR-1: RegistryDefAuthzDeps интерфейс с checkDestructiveGrant(pool, tenantId, actorId, nowMs) → Promise<{ok:true}|{ok:false;reason:string}>.",
+    "FR-2: defaultCheckDestructiveGrant: loadAdminContext → isGenesisOwner short-circuit → adminGrants.some(g.delegable && g.resourceType==='mgmt_object:schema_destructive' && g.operation==='apply').",
+    "FR-3: force-ветка updateSchemaInTx заменяет TODO(T-0021)-стаб вызовом deps.checkDestructiveGrant; !ok → HttpError(403, 'NO_SCHEMA_DESTRUCTIVE_GRANT').",
+    "FR-4: registerRegistryDefRoutes принимает третий необязательный параметр deps?: RegistryDefAuthzDeps = defaultRegistryDefAuthzDeps.",
+    "FR-5: TODO-стаб '// TODO(T-0021)' и 'void actor;' удалены из registry-defs.ts."
+  ],
+  "non_functional": [
+    "NF-1: Нет нового ACL-механизма — только loadAdminContext (T-0030/T-0018); org.ts не меняется.",
+    "NF-2: Frozen Operation union не расширяется; RegistryDefAuthzDeps.operation: string (не Operation).",
+    "NF-3: registerRegistryDefRoutes сохраняет (router, _poolHint?) в первых двух параметрах.",
+    "NF-4: Невырождение T-0177-тестов: schema_change_api.test.ts AC-10 корректируется под требование гранта.",
+    "NF-5: tsc --noEmit exit 0; npm test exit 0; npm run fitness exit 0; fitness:db зелёный."
+  ],
+  "out_of_scope": [
+    "Расширение Operation union или ResourceType union в grant-lattice.ts.",
+    "Изменение org.ts / loadAdminContext.",
+    "Новые DB-миграции (grant-строки создаются в тестах).",
+    "MCP-tool для schema-change (T-0121f).",
+    "Аудит PDP-check (аудит деструктива уже в T-0177)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "RegistryDefAuthzDeps интерфейс экспортирован из registry-defs.ts; tsc exit 0.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "registerRegistryDefRoutes принимает deps? третьим параметром; default = производственный impl.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "PUT/PATCH force=true + denyAll-fake → 403 NO_SCHEMA_DESTRUCTIVE_GRANT (no-DB unit test).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "PUT/PATCH force=false с деструктивной dep → 409 (гейт НЕ вызывается); дендения T-0177 AC-9 невырождается.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "TODO-стаб '// TODO(T-0021)' и 'void actor;' отсутствуют в src/http/registry-defs.ts (grep fitness).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "genesis-owner всегда проходит force-path (defaultCheckDestructiveGrant isGenesisOwner=true → ok).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "live: force=true + сидированный grant mgmt_object:schema_destructive/apply → 200 force_applied (fitness:db).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "live: force=true + актор без гранта (не genesis-owner) → 403 NO_SCHEMA_DESTRUCTIVE_GRANT (fitness:db).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "npm test (vitest) exit 0 — все T-0177-тесты (schema_change_api) зелёные.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "npm run fitness exit 0 (включая registry-defs-pdp-isolation.sh).",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0191-registry-defs-pdp.spec.md"
+}

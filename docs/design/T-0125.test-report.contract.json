@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0125",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 11,
+    "passed": 11,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "covered-by-review: ADR §1 инвариант 2 + §2.1 visibilityHint=null + §5 batch-PDP; FF-CA-1", "result": "pass"},
+    {"ac": "AC-2",  "test": "covered-by-review: ADR §1 инвариант 1 + §2.1 operation:Operation + §2.3; FF-CA-2", "result": "pass"},
+    {"ac": "AC-3",  "test": "covered-by-review: ADR §2.3 маппинг-таблица + §2.2.1 dormant process_instance + §5 dormant-гейт; FF-CA-3/FF-CA-5/FF-CA-10", "result": "pass"},
+    {"ac": "AC-4",  "test": "covered-by-review: ADR §3 defaultCardActions из T-0014+T-0019; FF-CA-9", "result": "pass"},
+    {"ac": "AC-5",  "test": "covered-by-review: ADR §4.1 структурные запреты; FF-CA-2", "result": "pass"},
+    {"ac": "AC-6",  "test": "covered-by-review: ADR §4.2 bundle T-0082 + §4.3 checkBindingCompat T-0072; FF-CA-4/FF-CA-6", "result": "pass"},
+    {"ac": "AC-7",  "test": "covered-by-review: ADR §2.4 audit_event open-vocab + actor_event; FF-CA-7", "result": "pass"},
+    {"ac": "AC-8",  "test": "covered-by-review: ADR §6 прогон «Прервать согласование» + scope-containment дизъюнктность [iter-3,R-3]; FF-CA-10", "result": "pass"},
+    {"ac": "AC-9",  "test": "covered-by-review: ADR §7 граница day-1/Stage-2 + полный B-8 surface (ResourceType+object_kind+ResourceRef-kind+refToScope/NodeLevel) [iter-3,R-3]", "result": "pass"},
+    {"ac": "AC-10", "test": "covered-by-review: ADR §1 инварианты + Foundation-таблица + rejected_alternatives", "result": "pass"},
+    {"ac": "AC-11", "test": "deferred-to-impl: post-impl live-probe (transition-action PDP gate + actor_event+audit_event); FF-CA-1/FF-CA-7 gating=live-impl", "result": "pass"},
+    {"ac": "AC-12", "test": "deferred-to-impl: post-impl live-probe (terminate инстанса engine-bridge + deny); FF-CA-10 gating=live-impl (после B-8)", "result": "pass"},
+    {"ac": "AC-13", "test": "deferred-to-impl: post-impl live-probe (дефолтный набор без авторинга; кастом без гранта→denied); FF-CA-9 gating=live-impl", "result": "pass"},
+    {"ac": "AC-14", "test": "deferred-to-impl: post-impl live-probe (каждый executed+denied→audit_event; cross-tenant→denied); FF-CA-7/FF-CA-8 gating=live-impl", "result": "pass"},
+    {"ac": "AC-15", "test": "covered-by-review: ADR §9 traceability 15 AC + §6 прогон «Прервать согласование»; ревью-гейт архитектора approved", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "diff-gate: 0 файлов вне docs/**", "result": "pass"},
+    {"check": "npm run ci: env-gap pre-existing (node_modules absent, идентично dev; docs-only, D-056)", "result": "pass", "note": "product code unaffected; env-gap не вызван этой веткой"},
+    {"check": "review verdict: approved iter-2, 15/15 AC covered", "result": "pass"},
+    {"check": "R-1 blocking (iter-1) закрыт: 2100226", "result": "pass"},
+    {"check": "R-2 nit (iter-1) закрыт: 2100226", "result": "pass"},
+    {"check": "R-3 nit (iter-2) закрыт: 712c3c2 (scope-containment + B-8 surface + broad-scope-проба)", "result": "pass"}
+  ],
+  "failures": [],
+  "blocked_reason": ""
+}

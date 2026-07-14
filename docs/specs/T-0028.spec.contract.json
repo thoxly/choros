@@ -1,0 +1,83 @@
+{
+  "task_id": "T-0028",
+  "status": "ready",
+  "summary": "Build the engine state-mutation guard: a CI isolation check proving no writable record accessor escapes the gateway module boundary, plus a fail-closed assertVariableValue call at JobStore.complete that rejects raw record objects in external-task payloads; seal the contract the future Flowable bridge must satisfy.",
+  "functional": [
+    "FR-1: No module outside src/core/grant-resolver.ts and its composition root may import or invoke a writable record accessor directly (module boundary invariant, CI-checkable).",
+    "FR-2: Every location that writes a value into Job.variables (or any future variable-map path) calls assertVariableValue and rejects {ok:false} payloads before storage.",
+    "FR-3: JobStore.complete validates each value in any payload data passed by a worker; a raw record object causes complete to return RECORD_IN_PAYLOAD and the job state is NOT advanced (fail-closed, all-or-nothing).",
+    "FR-4: When a record mutation is needed (future bridge), the call goes through resolveFor(deps, handle, subject, op) with the appropriate op from T-0018 Operation enum — no second write path is introduced.",
+    "FR-5: Absence of the guard call at a variable-write boundary is detectable in CI (isolation check) and defaults to rejection, not silent allow.",
+    "FR-6: Spec seals the contract for the future Flowable bridge (T-0058+): bridge MUST validate result payloads with assertVariableValue and route record mutations through resolveFor."
+  ],
+  "non_functional": [
+    "NF-1: No new external dependencies — pure TS + node:crypto stdlib.",
+    "NF-2: Additive changes only; CompleteResult gains RECORD_IN_PAYLOAD error code, no existing codes removed; object-handle.ts / grant-lattice.ts / grant-resolver.ts exports unmodified.",
+    "NF-3: Complete payload rejection is hard (RECORD_IN_PAYLOAD returned), not silent stripping — fail-closed discipline.",
+    "NF-4: All Layer-A and Layer-B fitness functions run in npm run ci with no external resource; deferred FF-G3 probe authored now, activates when bridge path exists.",
+    "NF-5: Proportional scope — T-0028 does not build the Flowable bridge, implement MutatingRecordSource, or add record-mutation logic."
+  ],
+  "out_of_scope": [
+    "Building the Flowable external-task bridge (T-0058, T-0064, T-0067).",
+    "Implementing MutatingRecordSource (deferred to T-0053 and bridge tasks).",
+    "BPMN deploy-time linter (T-0027).",
+    "Postgres RLS no-direct-DAO-path at the DB layer (T-0053).",
+    "Value-aware masking, data classification, facet algebra (T-0033 / E4.3).",
+    "Any runtime behavior keyed on the Flowable engine (tokens, BPMN execution, boundary events).",
+    "Modifying resolveFor internals — T-0028 uses resolveFor, does not rewrite it."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Isolation check — no writable accessor outside gateway: ci/checks/mutation-gateway-isolation.sh exits 0 on the current codebase, confirming no module outside src/core/grant-resolver.ts imports a symbol that mutates record fields.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "Complete payload — raw record rejected fail-closed: A JobStore.complete call where payload data includes a value for which assertVariableValue returns {ok:false} returns {ok:false, code:'RECORD_IN_PAYLOAD'} and leaves the job in LOCKED state (unchanged).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Complete payload — clean payload succeeds: A JobStore.complete call with only handles and inert literals continues to return {ok:true} and advance the job to COMPLETED. No regression on existing complete behaviour.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "Complete payload — all-or-nothing: A payload with one invalid value and N valid values returns RECORD_IN_PAYLOAD; the job does NOT advance even if only one value fails.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "assertVariableValue is called at the complete boundary: A static grep over src/core/jobStore.ts confirms the complete method calls assertVariableValue (or a thin wrapper) before advancing job state. The call is not optional.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "No second mutation path introduced: ci/checks/mutation-gateway-isolation.sh asserts no new *mutate*/*write*/*persist* function mapping a ResourceRef to record fields appears outside src/core/grant-resolver.ts.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "Additive — existing exports unchanged: git diff --name-only for this task's commit does NOT include edits to object-handle.ts or grant-lattice.ts; CompleteResult error codes include RECORD_IN_PAYLOAD alongside the existing four; tsc --noEmit passes.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "Bridge contract authored: docs/specs/T-0028-engine-mutation-guard.spec.md §2/FR-6 states the Flowable bridge (T-0058+) MUST validate payloads with assertVariableValue and route mutations through resolveFor; the deferred fitness function FF-G3 is present in ci/checks/ as a probe (exits 0 when bridge path absent, activates when bridge path exists).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "No regression on existing CI: All pre-existing fitness functions (single-resolver.sh, no-record-in-variable.sh, object-handle-isolation.sh, grant-resolver-isolation.sh, audit_append_only.sh) remain green.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "Write-op path is typed: Any invocation of resolveFor with a write op compiles against the T-0018 Operation type with no cast; the permitted write ops {create, update, delete, approve, transition} are enforced by the type system, no ad-hoc string accepted.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0028-engine-mutation-guard.spec.md"
+}

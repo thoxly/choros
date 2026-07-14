@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0614",
+  "status": "ready",
+  "decision": "InstanceProjection (src/http/process-projection.ts) — единственный pg-несущий модуль в цепочке processes.ts→process-projection.ts→choros.audit_event (processes.ts display-plane-pure, FF-DISPLAY-4/FF-7-3) — получает три новых honest-резолвленных поля вместо литералов в projectionToInstance (processes.ts:201-231). (1) definitionName:string — батч SELECT DISTINCT ON (process_key) process_key,name FROM choros.process_definition WHERE tenant_id=$1 AND process_key=ANY($2) ORDER BY process_key,version DESC (тот же паттерн что process-catalog.ts listProcessDefRows), выполняется внутри уже открытого withTenant tenant-scoped клиента в readEvents; фолбэк — переиспользованный fallbackDefinitionName(procKey) из src/core/process-catalog-view.ts (не задублирован вторым хардкодом). (2) stepsDone/stepsKnownTotal:number — вычислены из уже прочитанных этой же функцией данных (baseApproved + count approved next_task rows этого инстанса = done; done + concurrentSteps.length = known-total для waiting, done=total для done) — честный 'known so far' счётчик, НЕ полный BPMN-граф-прогресс (требовал бы live-Flowable запроса на каждый read либо парсинга+кеша BPMN XML — явно отвергнуто ADR T-0278 §2.3 как disproportionate; follow-up O1). (3) starterActorKind:'human'|'agent' — findEmployeeById(pool,tenantId,row.actor), тот же паттерн что inbox.ts:1370-1379 actorKind, non-fatal degrade к 'human' на ошибку/отсутствие; батчинг по distinct-actor через Promise.all (не N+1). projectionToInstance строит execs:[p.starterActorKind] — один честно известный исполнитель (тот, кто стартовал инстанс), НЕ безусловная пара ['human','agent']. 'service' не фабрикуется — choros.employee.kind реально принимает только human|agent (migrations/093 agent_type — под-классификация внутри agent, не отдельный service-kind); появление source-of-truth — follow-up O2. Три литерала (name/progress/execs) удалены из processes.ts; display-plane-purity не нарушена (данные идут через InstanceProjection, новый pg-импорт в processes.ts не добавлен).",
+  "rejected_alternatives": [
+    {
+      "option": "Читать choros.process_definition/choros.employee напрямую в processes.ts (новый pg импорт в этом файле).",
+      "why_not": "Файл явно помечен display-plane-pure (комментарий :10-15, FF-DISPLAY-4/FF-7-3); гейты pack-serve-no-write.sh/start-route-isolation.sh проверяют отсутствие pg/src/db/* импортов в этом файле. Все новые данные идут ЧЕРЕЗ InstanceProjection, экспортированный уже pg-несущим process-projection.ts — канонический паттерн ADR T-0278 §2.3."
+    },
+    {
+      "option": "Полный BPMN-парсинг для точного progress.total в этой задаче.",
+      "why_not": "Требует либо live-запроса к движку на каждый GET /api/processes (ADR T-0278 §2.3 уже отвергла live-Flowable запрос на read-путь как disproportionate), либо парсинга+кеширования BPMN XML на user-task-узлы — заметно бОльшая работа (нужно решить источник/кеш/версионирование). Честный known-so-far счётчик — минимально-честный шаг вместо фабрикации; полный total — follow-up O1."
+    },
+    {
+      "option": "Оставить execs двух-элементным (['human','agent']) как 'безопасный дефолт'.",
+      "why_not": "Ровно та фабрикация, которую задача просит убрать (D-064): показ несуществующего исполнителя вводит в заблуждение о том, кто реально ведёт процесс. Один честно резолвленный starterActorKind — меньше, но правдиво."
+    },
+    {
+      "option": "Протянуть actor-kind по КАЖДОМУ шагу инстанса (не только стартовавшему) в этой задаче.",
+      "why_not": "Потребовало бы менять appendTaskApproved/appendNextTaskEvent (каждое событие несёт resolved actor-kind) и менять InstanceProjection (execs — массив по шагам, не одно значение). Больший периметр правки write-пути ради UI-поля — follow-up O3."
+    },
+    {
+      "option": "Считать stepsKnownTotal через уникальные task_step метки за всё время жизни инстанса.",
+      "why_not": "На AND-split ветки параллельны, не последовательны; простое уникальное множество переоценивало бы total на инстансах с повторно эскалированным/переоткрытым шагом (escalated-строки той же метки). Формула done+concurrentSteps.length явно ограничена 'известно сейчас', не пытается восстановить историческую уникальность меток — проще и не переоценивает."
+    }
+  ],
+  "object_model": [],
+  "contracts": [
+    "src/http/process-projection.ts — InstanceProjection получает definitionName:string, stepsDone:number, stepsKnownTotal:number, starterActorKind:'human'|'agent' (ADDITIVE — существующие поля inst/procKey/role/step/status/startedAt/inboxTaskId/concurrentSteps/recordId не изменены).",
+    "src/http/process-projection.ts — readEvents дополнительно SELECT choros.process_definition (process_key→name, латест версия, tenant-scoped, внутри уже открытого withTenant клиента) и резолвит distinct row.actor через findEmployeeById (batched Promise.all, non-fatal degrade 'human').",
+    "src/http/process-projection.ts — listInstanceProjections вычисляет approved-next-task-count per instance (симметрично существующему pending-фолду) для stepsDone/stepsKnownTotal.",
+    "src/http/processes.ts — projectionToInstance: name=p.definitionName, progress={done:p.stepsDone,total:p.stepsKnownTotal}, execs=[p.starterActorKind] — три литерала ('Канонический линейный ТЭЛ', {done:2,total:3}/{done:3,total:3}, ['human','agent']) удалены; файл не импортирует pg/src/db/* (display-plane-purity сохранена).",
+    "src/core/process-catalog-view.ts — fallbackDefinitionName переиспользован (экспорт без изменений), не задублирован вторым хардкодом в process-projection.ts.",
+    "docs/handoff/T-0614.pr-handoff.json — BUILD-фаза."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1/AC-2: два инстанса разных process_key с разными modeler-именами получают разные name; движковый-only ключ получает fallbackDefinitionName, не 500/пустую строку.", "ci_check": "npm test (process-projection.test.ts / processes-live-instances.test.ts)"},
+    {"id": "FF-2", "rule": "AC-3/AC-4: progress.done/total вычисляются из фактического числа пройденных/известных шагов инстанса, растут с approved next_task, не заморожены на 2/3 или 3/3 безусловно.", "ci_check": "npm test (process-projection.test.ts)"},
+    {"id": "FF-3", "rule": "AC-5/AC-6: execs = [employee.kind актёра-стартовавшего] через findEmployeeById; актёр не найден/ошибка → честный degrade к ['human'], не 500.", "ci_check": "npm test (process-projection.test.ts)"},
+    {"id": "FF-4", "rule": "AC-7: регресс — существующие поля InstanceProjection и существующие consumers (reconcileInstanceTimers, reconcileInstanceEngineDrive, reconcileInboxEngineDriveOnRead, makeEngineMessageSubscriptionSource) не сломаны.", "ci_check": "npm test (полный набор src/__tests__)"},
+    {"id": "FF-5", "rule": "AC-8: без новых кейс-литералов, ТЭЛ-агрегат в processes.ts не растёт (в идеале падает).", "ci_check": "bash ci/checks/anti-case-lock.sh && bash ci/checks/detel-literal-baseline.sh && bash ci/checks/detel-base-task-from-engine.sh"},
+    {"id": "FF-6", "rule": "AC-9/AC-10: полный тестовый набор + build + fitness:db зелёные.", "ci_check": "npm test && npm run build && npm run fitness:db"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-1"},
+    {"ac": "AC-3", "covered_by": "FF-2"},
+    {"ac": "AC-4", "covered_by": "FF-2"},
+    {"ac": "AC-5", "covered_by": "FF-3"},
+    {"ac": "AC-6", "covered_by": "FF-3"},
+    {"ac": "AC-7", "covered_by": "FF-4"},
+    {"ac": "AC-8", "covered_by": "FF-5"},
+    {"ac": "AC-9", "covered_by": "FF-6"},
+    {"ac": "AC-10", "covered_by": "FF-6"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0614-instance-name-detel.md",
+  "escalation": "Нет. Чисто READ-путь honest-резолва трёх полей вместо трёх литералов; новые запросы — read-only SELECT внутри уже открытой tenant-scoped транзакции + переиспользование существующего findEmployeeById. Display-plane-purity processes.ts не нарушена. Никакого нового authority/write-пути."
+}

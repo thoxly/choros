@@ -1,0 +1,119 @@
+{
+  "task_id": "T-0041",
+  "status": "ready",
+  "summary": "Add egress_policy(tenant_id, id, class, allowed_endpoint, description, created_at, updated_at) as a new first-class policy-axis table expressing which DataClass values may egress to which client-hosted LLM endpoint patterns. The table is tenant-isolated (FORCE RLS, T-0013 invariants), deny-by-default (absence of row = egress not permitted), schema-dormant on day-1 (no runtime code reads it — enforcement is Stage-2 E5.10/T-0045). Migration 038. DataClass join axis imported from T-0033/data-classification.ts. No new TS runtime module. Seam contract frozen for T-0045 (Stage-2 runtime gate) and T-0033 (DataClass axis).",
+  "functional": [
+    "FR-1 egress_policy table with 7 columns: tenant_id (uuid NOT NULL), id (uuid NOT NULL), class (text NOT NULL, DataClass CHECK), allowed_endpoint (text NOT NULL), description (text NULL), created_at (bigint NOT NULL), updated_at (bigint NOT NULL); PK(tenant_id, id); UNIQUE(tenant_id, class, allowed_endpoint)",
+    "FR-2 T-0013 isolation invariants: tenant_id leading PK, ENABLE+FORCE RLS, USING/WITH CHECK tenant-isolation policy, choros_app SELECT/INSERT/UPDATE/DELETE only",
+    "FR-3 class CHECK constraint enumerates DataClass closed set: IN ('public','internal','confidential','restricted') — same axis as data_classification.class (T-0033); no class value outside this set accepted at DB level",
+    "FR-4 deny-by-default schema invariant: absence of a row for (class, allowed_endpoint) means egress NOT permitted; no catch-all 'allow all' row seeded for any tenant",
+    "FR-5 allowed_endpoint is a plain text endpoint pattern (e.g. base URL); no FK to secret-handle or agent_card (BYO-LLM secret custody is T-0025, out of scope)",
+    "FR-6 ci/checks/known_tenant_tables.txt updated with 'egress_policy' (alphabetical) in the same commit as migration 038",
+    "FR-7 no runtime code reads egress_policy on day-1 (schema-dormant); table seeded empty for dev tenant (deny-by-default is the out-of-box state)"
+  ],
+  "non_functional": [
+    "NF-1 cross-tenant isolation: row inserted under tenant A invisible to session bound to tenant B (FORCE RLS mechanism)",
+    "NF-2 no parallel policy store: no second egress-policy representation (config file, env var, hardcoded list) in src/; DB table is sole source of truth for the egress-policy axis",
+    "NF-3 migration 038 idempotent (re-run = no error)",
+    "NF-4 no new npm dependency introduced by T-0041",
+    "NF-5 migration seam: only files numbered 038 (and optionally 039 for a seed split); no file numbered 032-037 or 040+ added",
+    "NF-6 frozen foundations untouched: data-classification.ts, grant-lattice.ts, grant-resolver.ts, object-handle.ts, and all pre-existing migrations byte-unchanged; tsc --noEmit passes",
+    "NF-7 schema dormancy verifiable: grep -r 'egress_policy' src/ (excluding __tests__/, migrations/, ci/) returns 0 matches in any .ts file"
+  ],
+  "out_of_scope": [
+    "runtime egress enforcement at agent call-time (E5.10 / T-0045) — Stage-2, parked until founder opens Stage-2",
+    "BYO-LLM secret-handle custody (T-0025 / E5.5) — endpoint text pattern, not a credential handle",
+    "UI for managing egress_policy rows (admin surfaces, frontend tasks)",
+    "endpoint-pattern matching semantics (prefix/exact/glob — Stage-2 / T-0045 design concern)",
+    "per-field egress granularity (axis is class×endpoint, not field×endpoint; field→class via T-0033)",
+    "hash-transform keyed digest mechanics (T-0118 — class/endpoint level policy, no transform coupling)",
+    "budget/cost policy (T-0023 / E4.9) — separate axis",
+    "SoD constraints over egress policy rows",
+    "audit-log writer for egress_policy changes (T-0016/T-0031 are the audit mechanisms; T-0041 only stores timestamps)",
+    "adding an egress column to data_classification (T-0033 ADR §3.3 explicitly excludes this)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Migration file migrations/038_egress_policy.sql exists; creates table choros.egress_policy with PK (tenant_id, id), UNIQUE (tenant_id, class, allowed_endpoint), and all 7 columns from FR-1.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "egress_policy has ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Tenant-isolation policy: USING (tenant_id = current_setting('choros.tenant_id', true)::uuid) with identical WITH CHECK clause.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "Cross-tenant read: a row inserted under tenant A returns 0 rows when session is bound to tenant B.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Cross-tenant write: an INSERT with tenant A's tenant_id under tenant B's session is rejected (RLS violation).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "class CHECK constraint: INSERT with class = 'top_secret' is rejected; INSERT with each of 'public', 'internal', 'confidential', 'restricted' succeeds.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Logical uniqueness: a second INSERT with the same (tenant_id, class, allowed_endpoint) is rejected by the UNIQUE constraint.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "choros_app role has SELECT, INSERT, UPDATE, DELETE on egress_policy and no DDL rights.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "ci/checks/known_tenant_tables.txt contains 'egress_policy'; the cross-tenant CI tests pass for egress_policy without modification to test source.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "Migration 038 is idempotent: running the migration runner twice produces no error.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "No Choros runtime code imports or reads egress_policy on day-1: grep -r 'egress_policy' src/ (excluding __tests__/, migrations/, ci/) returns 0 matches in any .ts file.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Migration seam: T-0041's commit adds ONLY files numbered 038 (and optionally 039); no file numbered 032-037 or 040+ is introduced.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "Frozen foundations: data-classification.ts, grant-lattice.ts, grant-resolver.ts, object-handle.ts, and all pre-existing migration files are byte-unchanged; tsc --noEmit passes.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "No dev-seed rows of 'allow all' form in migration 038/039; if any seed rows exist they are specific to a named test-tenant policy; if no seed rows, the table starts empty for the dev tenant (deny-by-default).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "description column is nullable; a row with description = NULL is accepted.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-16",
+      "text": "The class column value in egress_policy is type-compatible with DataClass from src/core/data-classification.ts; a static TS type-level contract test asserts the egress_policy.class type is assignable to DataClass.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0041-egress-policy.spec.md"
+}

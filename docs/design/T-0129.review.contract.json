@@ -1,0 +1,54 @@
+{
+  "task_id": "T-0129",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0129-implementation-loop.adr.md §16 FF-5 / §12",
+      "issue": "FF-5 формулирует ci_check как «§12 содержит 7 строк примитивов», но §12 фактически содержит 8 строк: примитив #2 «Симуляция» намеренно разбит на режим-1 (MVP) и режим-2/3 (MVP-late), обе строки пронумерованы 2. Все 7 примитивов рамки §5 при этом классифицированы. Live-чек, считающий ровно 7 строк (==7), мис-файрнет (покраснеет) на валидном ADR.",
+      "suggestion": "Переформулировать ci_check FF-5 на «§12 покрывает все 7 НОМЕРОВ примитивов рамки §5» (а не «==7 строк»), допустив >1 строки на примитив; самотест-фикстура (6 примитивов ⇒ красный) остаётся валидной."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0129-implementation-loop.adr.md §10.1 / §5.1",
+      "issue": "Адверсариальная атака «промоут полбандла (формы без грантов)» отбита НЕЯВНО: атомарность связки восстановима из coherence_hash (§5.1) + bundle-coherence гард (§6) + «компоненты версионируются вместе», и tier — атрибут бандла целиком (§11 гарантия 1). Но ADR нигде не утверждает ДОСЛОВНО, что promote all-or-nothing на гранулярности бандла (нельзя промоутнуть подмножество компонентов).",
+      "suggestion": "Добавить в §10.2 один абзац: «promote оперирует бандлом как НЕДЕЛИМОЙ единицей — нельзя промоутнуть подмножество компонентов; coherence_hash гарантирует, что published-версия = ровно тот draft, что прошёл прогон». Закрывает атаку насмерть."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0129-implementation-loop.adr.md §16 / §14",
+      "issue": "§16 описывает скрипты ci/checks/impl-loop-adr-*.sh и их --self-test в present tense, но скрипты физически ещё не существуют в дереве — их создаёт build (логично, design-only ADR). Прецедент design-ревью T-0119 явно нёс ноту «скрипт ещё нет — создаёт impl-задача», чтобы исполнимость fitness не читалась как «уже в дереве».",
+      "suggestion": "Добавить в §16 (или сослаться на §14 B-задачу) явную строку: «doc-линтеры impl-loop-adr-*.sh поставляет build-задача декомпозиции §14; на design-фазе их assertions заземлены grep-конкретикой по реальным токенам и проходят против настоящего ADR». Снимает двусмысленность."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true},
+    {"ac": "AC-19", "covered": true},
+    {"ac": "AC-20", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

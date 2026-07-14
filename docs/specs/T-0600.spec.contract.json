@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0600",
+  "status": "ready",
+  "summary": "Два дефекта честности LLM-контура, оба воспроизведены на живом факте приёмки («Ошибка LLM-порта: OpenAI API error 401: {raw json}»). Дефект A: src/server.ts::makeLlmPortFactory (единственный production composition root для ассистента, server.ts:1048) падает на глобальный env-ключ DEEPSEEK_API_KEY для ЛЮБОГО tenantId, у которого per-tenant loadTenantLlmConfig вернул null — BYO-доктрина нарушена: тенант без своего назначенного профиля молча пользуется чужим/общим серверным ключом. Разведка call-sites подтвердила: это ЕДИНСТВЕННЫЙ продовый вызов; тесты инжектят свой llmPortFactory-стаб (другой composition root, не затронуты); ci/checks/db/assistant-llm-binding.test.ts (T-0574, комментарий C4) документирует env-fallback как НАМЕРЕННОЕ поведение на момент T-0574 — T-0600 меняет это решение для tenant-resolution пути, не ломая тот тест (он проверяет только состояние agent_card после регистрации, не поведение вызова). Фикс: makeLlmPortFactory перестаёт применять env-fallback (шаг 2) к резолюции per-tenant конфига — при null сразу dormantLlmPort → честный 503 (T-0573). Дефект B: два независимых catch-места (src/core/assistant-configurator.ts::runConfiguratorLoop :1194-1205 и src/core/process-gen-loop.ts::runProcessGenLoop :230-250) ГЛОТАЮТ LlmUnavailableError локально и печатают err.message (которое для 401/403 от провайдера, src/adapters/openai-llm-port.ts::_post :282-285, содержит ПОЛНОЕ сырое тело ответа провайдера) прямо в handlerResult.text/outcome.message — обходя честный classifyLlmUnavailability/respondLlmUnavailable путь (T-0573) целиком, отвечая обычным 200 с утёкшим JSON. Фикс: оба catch-места заменяют сырой err.message на канонический русский текст без жаргона (новый класс 'provider_auth_failed' для 401/403 с явным упоминанием причины — 'ключ отклонён провайдером'), полное тело — только в console.error лог.",
+  "functional": [
+    "F1. makeLlmPortFactory НЕ использует DEEPSEEK_API_KEY как fallback для реального tenantId, у которого loadTenantLlmConfig вернул null — переходит сразу к dormantLlmPort.",
+    "F2. DEEPSEEK_API_KEY/DEEPSEEK_HANDLE/deepseekSecretResolver код не обязательно удаляется физически — граница решается в DESIGN (мёртвый код с пояснением vs удаление), но НИ В КАКОМ случае не применяется к tenant-resolution пути ассистента.",
+    "F3. Новый различимый класс ошибки provider-auth-fail (401/403 от провайдера) — классифицируется отдельно для выбора текста, но НЕ меняет внешний контракт classifyLlmUnavailability (оба класса остаются 'unavailable').",
+    "F4. Никакое сырое тело провайдера не доходит до чата — ни в обычном пути (уже честно, не трогается), ни в configurator loop, ни в process-gen loop. Полное тело — только в серверный console.error.",
+    "F5. Канонические новые тексты по-русски, без жаргона (без 'порт'/'adapter'/'endpoint'/кода статуса/сырого JSON): provider-auth-fail = 'Ключ LLM отклонён провайдером. Проверьте или замените ключ в LLM-соединениях.'",
+    "F6. Существующий T-0573 503-путь (classifyLlmUnavailability, respondLlmUnavailable, ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN/_NON_ADMIN) структурно не меняется — новый provider-auth-fail класс дополняет, не заменяет."
+  ],
+  "non_functional": [
+    "N1. BYO-доктрина: тенант без своего LLM-профиля не получает боевой вызов через чужой/общий ключ ни при каких условиях на реальном composition root.",
+    "N2. grantsPool===null ветка (dev без DB) не затрагивается фиксом — роут не регистрируется вовсе, уже честно деградирует.",
+    "N3. Без кейс-литералов (D-064, ci/checks/anti-case-lock.sh).",
+    "N4. Жаргон-гейт (assistant-llm-message-jargon.sh + --self-test) зелёный без изменений своего кода.",
+    "N5. Secret custody (RL-3) не затронута — полное provider-тело в логах не содержит сырой API-ключ (ключ не входит в error-текст адаптера).",
+    "N6. LlmPort/LlmUnavailableError/classifyLlmUnavailability публичные типы структурно не ломаются — существующие T-0573/T-0595/T-0599 тесты проходят."
+  ],
+  "out_of_scope": [
+    "O1. Формат самого LlmUnavailableError.message в openai-llm-port.ts не меняется (нужен для логов/cause) — дефект в том, ГДЕ это message печатается пользователю, не в том, что оно несёт.",
+    "O2. UI-баннер (T-0599) не расширяется.",
+    "O3. Провайдер-agnostic классификация ВСЕХ HTTP-кодов (429/500 и т.д.) отдельными классами — только 401/403 явно упомянуты в задаче, остальное остаётся общим honest-503.",
+    "O4. Полное физическое удаление DEEPSEEK_API_KEY-механизма из кодовой базы — решается в DESIGN по критерию наименьшего риска, не обязательный scope."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "makeLlmPortFactory(tenantId, pool) для тенанта без per-tenant LLM-конфига возвращает dormantLlmPort, даже когда DEEPSEEK_API_KEY установлен в окружении процесса.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "Живой DB-тест: реально зарегистрированный тенант (дормантный assistant-agent) → POST сообщения при DEEPSEEK_API_KEY установленном в окружении теста → честный 503 LLM_UNAVAILABLE, не реальный сетевой вызов.", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "Существующий ci/checks/db/assistant-llm-binding.test.ts (C4/3f-bis) — без изменений, проходит.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "Существующий ci/checks/db/assistant-llm-unavailable.test.ts (FF-5/FF-6/FF-1/FF-2/anti-mask) — без изменений, проходит.", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "Новый unit-тест: классификатор provider-auth-fail (401 с provider JSON телом) даёт канонический русский текст без фрагментов исходного JSON и без токенов денилиста.", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "То же для 403.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "runConfiguratorLoop: ctx.llm.chat() throw с сырым provider-телом в .message → finalText не содержит подстрок сырого тела, содержит канонический русский текст.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "runProcessGenLoop: то же для outcome.message (cause: 'error').", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "Существующий src/core/__tests__/process-gen-loop.test.ts ('error port → llm_error with cause=error') проходит без изменений сигнатуры.", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "bash ci/checks/ux/assistant-llm-message-jargon.sh и --self-test — зелёные, без изменений.", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "bash ci/checks/anti-case-lock.sh — зелёный, без новых кейс-литералов.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "npm test (root), npm run build, npm run fitness:db — зелёные.", "verifiable_as": "fitness"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0600-llm-fallback-honesty.spec.md"
+}

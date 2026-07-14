@@ -1,0 +1,143 @@
+{
+  "task_id": "T-0024",
+  "status": "ready",
+  "decision": "Model the invoke-grant as an ordinary row in the existing choros.grant table (operation='invoke', resource_type='agent', lattice scope over the org hierarchy, target role carried in resource_facet.agent_role_id) with NO new authority subsystem. Two new HTTP routes POST /api/invoke/request (propose) and POST /api/invoke/command (execute-stub) read the caller from X-Dev-User, resolve the target agent's assigned role from agent_card + role_assignment, and decide via the SAME T-0018 lattice primitives the PDP uses (isNarrowerOrEqual/isEffective) composed in one coversInvoke helper. request durably inserts a row into a new tenant-isolated table choros.invoke_proposal (migration 043, status='proposed') and emits invoke.request; command emits invoke.command and returns 202 {invocation_id} with dispatch as a day-1 no-op stub. Both audit writes go through the single canonical appendAuditEvent seam (T-0031/T-0068) via a new pure encoder encodeInvokeAuditEvent mirroring encodeGrantAuditEvent. All shared-file changes are strictly additive: no edits to grant-lattice.ts, grant-resolver.ts, grants.ts, or router.ts logic.",
+  "rejected_alternatives": [
+    {
+      "option": "Edit the ResourceType union in grant-lattice.ts to add 'agent' (or thread an 'agent' kind through ObjectHandle and route through resolveFor).",
+      "why_not": "grant-lattice.ts and object-handle.ts are frozen seams under the additive-only sister contract. Editing the union risks the 122-test count regression (AC-13) and resolveFor's frozen signature (AC-14). The DB column is plain TEXT and the existing widening cast (resourceType as Grant['resourceType']) already used in grants.ts covers 'agent' transparently; the invoke covering-check keys on operation, not resource_type."
+    },
+    {
+      "option": "Thread a synthetic record-shaped ObjectHandle for the target agent through resolveFor(.., 'invoke') to satisfy NF-2 literally.",
+      "why_not": "ObjectHandle has no agent kind (only application/registry/record) and its signature is frozen (AC-14). Forcing an agent target into a record handle is a lie that would either corrupt the record-resolution path or require editing the frozen seam. We satisfy NF-2's INTENT (no second decision path, reuse the T-0018 algebra) by composing the same exported lattice primitives the PDP itself uses, in one isolated coversInvoke helper."
+    },
+    {
+      "option": "Declare FK from invoke_proposal.caller_id/target_id to choros.employee(tenant_id,id).",
+      "why_not": "T-0017 FK-lesson: cross-table FKs that may not exist in bare/partial schema sequences cause BUILD bounces. effect_resource (022) set the precedent of a self-contained PK with logical references validated in the app layer; invoke_proposal follows it. target_id is validated against agent_card at the HTTP boundary (FR-8) regardless."
+    },
+    {
+      "option": "Write a local invoke-audit writer (separate INSERT into audit_event) for speed.",
+      "why_not": "Violates NF-3 and the T-0031 one-preimage-rule lesson: two preimage rules on the same vocab-pinned audit_event/audit_head tables make a verifier false-positive tamper and break density verification on a mixed chain. Invoke audit MUST go through appendAuditEvent (the same sink grant/lifecycle audit uses)."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "invoke_proposal (new table, migration 043, choros schema)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid NOT NULL (leading PK column, T-0013)"},
+        {"name": "id", "type": "uuid NOT NULL"},
+        {"name": "caller_id", "type": "uuid NOT NULL (invoking employee id)"},
+        {"name": "target_id", "type": "uuid NOT NULL (target agent employee id)"},
+        {"name": "goal", "type": "text NOT NULL"},
+        {"name": "context", "type": "jsonb NULL"},
+        {"name": "status", "type": "text NOT NULL CHECK (status IN ('proposed','cancelled'))"},
+        {"name": "created_at", "type": "bigint NOT NULL (epoch-ms)"},
+        {"name": "PRIMARY KEY", "type": "(tenant_id, id)"}
+      ]
+    },
+    {
+      "entity": "invoke-grant (logical shape of an existing choros.grant row — NO schema change)",
+      "fields": [
+        {"name": "operation", "type": "TEXT = 'invoke'"},
+        {"name": "resource_type", "type": "TEXT = 'agent'"},
+        {"name": "scope", "type": "jsonb ScopeElement {kind:'node',hierarchy:'org',nodeId,nodeLevel} (or set/tags) — org subtree the invoke right covers"},
+        {"name": "resource_facet", "type": "jsonb { agent_role_id: uuid } — target agent's assigned role id"},
+        {"name": "delegable", "type": "boolean default true (FR-7; sub-delegation gated by validateNarrowing)"}
+      ]
+    },
+    {
+      "entity": "InvokeAuditEvent (new pure encoder type in audit-grant-encoder.ts, additive export)",
+      "fields": [
+        {"name": "kind", "type": "'invoke.request' | 'invoke.command'"},
+        {"name": "actor", "type": "string (caller employee id)"},
+        {"name": "targetAgentId", "type": "string (→ AuditEventInput.subject)"},
+        {"name": "agentRoleId", "type": "string"},
+        {"name": "orgScope", "type": "unknown (matched org ScopeElement → AuditEventInput.scope)"},
+        {"name": "goal", "type": "string"},
+        {"name": "payload", "type": "{ mode: 'request'|'command', target_agent_id, agent_role_id, org_scope, goal }"}
+      ]
+    }
+  ],
+  "contracts": [
+    "POST /api/invoke/request  body:{target_agent_id:uuid, goal:string, context?:object} → 400 VALIDATION (target not agent_card/kind!='agent'/bad body) | 403 FORBIDDEN (no covering invoke-grant; no row, no audit) | 201 Created {id} + invoke_proposal(status='proposed') + 'invoke.request' audit (INSERT+audit in one withTenantTx).",
+    "POST /api/invoke/command  body:{target_agent_id:uuid, goal:string, context?:object} → 400 | 403 (as above) | 202 Accepted {invocation_id:uuid} + 'invoke.command' audit; dispatch = no-op stub.",
+    "coversInvoke(grant, target, now, oracle): boolean = grant.operation==='invoke' && isEffective(grant, now) && grant.resourceFacet.agent_role_id === target.roleId && isNarrowerOrEqual(target.orgScope, grant.scope, oracle). Composes ONLY T-0018 exports; owns no new lattice math.",
+    "encodeInvokeAuditEvent(e: InvokeAuditEvent, nowMs: number, idOverride?: string): AuditEventInput — pure, IO-free; type=e.kind, actor=e.actor, subject=e.targetAgentId, scope=e.orgScope, via=null, proposed_by=null, confirmed_by=null, payload={mode,target_agent_id,agent_role_id,org_scope,goal}.",
+    "resolveFor signature UNCHANGED (AC-14): resolveFor(deps, handle, subject, op, invokeCtx?, guardCtx?) — T-0024 adds NO parameter and routes the agent-target decision through coversInvoke (composed PDP primitives), not through a record-shaped handle.",
+    "Grant create/revoke (FR-6): existing POST /api/grants {operation:'invoke',resource_type:'agent',resource_facet:{agent_role_id}} and POST /api/grants/:id/revoke — ZERO new grant-API code; existing handlers accept the new TEXT values and emit grant.create/grant.revoke.",
+    "Route wiring: src/http/invoke.ts exports registerInvokeRoutes(router, pool); wired in server.ts under the existing if(grantsPool) block — additive, no edit to existing registrations."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-IG-1",
+      "rule": "invoke_proposal is a real tenant table: listed in known_tenant_tables.txt AND migration 043 has ENABLE+FORCE RLS + tenant-isolation policy on the choros.tenant_id GUC + choros_app DML grant.",
+      "ci_check": "New ci/checks/invoke-grant-isolation.sh: grep -qx 'invoke_proposal' ci/checks/known_tenant_tables.txt; assert migrations/043_invoke_proposal.sql contains 'ENABLE ROW LEVEL SECURITY','FORCE ROW LEVEL SECURITY',\"current_setting('choros.tenant_id'\",'TO choros_app'. Appended to npm run fitness. Also covered live by ci/checks/db/schema.test.ts FF-RLS."
+    },
+    {
+      "id": "FF-IG-2",
+      "rule": "Migration-number discipline: T-0024 owns ONLY slot 043; no edit to 041/042 (sister seam).",
+      "ci_check": "invoke-grant-isolation.sh: assert migrations/043_invoke_proposal.sql exists and is the ONLY migration file added by this branch in the 04x range (git diff --name-only <merge-base>..HEAD ∩ migrations/); fail if any migrations/041_* or 042_* is in the diff."
+    },
+    {
+      "id": "FF-IG-3",
+      "rule": "resolveFor's exported signature is byte-unchanged (additive-only, AC-14).",
+      "ci_check": "invoke-grant-isolation.sh: git diff <merge-base>..HEAD -- src/core/grant-resolver.ts must not alter the line 'export async function resolveFor(' or its parameter block (assert the resolveFor parameter lines are absent from the diff hunks)."
+    },
+    {
+      "id": "FF-IG-4",
+      "rule": "grant-lattice.ts is byte-unmodified ⇒ the 122 T-0018 fitness tests are preserved by construction (AC-13).",
+      "ci_check": "invoke-grant-isolation.sh: git diff --quiet <merge-base>..HEAD -- src/core/grant-lattice.ts must exit 0 (mirrors the frozen-file check in grant-resolver-isolation.sh)."
+    },
+    {
+      "id": "FF-IG-5",
+      "rule": "No second authority store: src/http/invoke.ts derives the decision from T-0018 grant rows only (no *_acl / field_visibility / record_rights / local permission table).",
+      "ci_check": "invoke-grant-isolation.sh: grep -nE '(_acl|field_visibility|record_rights|invoke_acl)' src/http/invoke.ts (excluding comment lines) must be empty."
+    },
+    {
+      "id": "FF-IG-6",
+      "rule": "Audit through the canonical seam only: invoke.ts references appendAuditEvent/encodeInvokeAuditEvent and contains NO direct INSERT into audit_event/audit_head (NF-3).",
+      "ci_check": "invoke-grant-isolation.sh: assert grep -E 'INSERT INTO[^;]*(audit_event|audit_head)' src/http/invoke.ts is empty; assert invoke.ts references 'appendAuditEvent' or 'encodeInvokeAuditEvent'."
+    },
+    {
+      "id": "FF-IG-7",
+      "rule": "Fail-closed: a 403 (no covering grant) leaves invoke_proposal row-count and audit_event count unchanged; the grant-check (coversInvoke) runs before any INSERT (NF-4, AC-2, AC-4).",
+      "ci_check": "src/__tests__/invoke-grant.test.ts assertions: request/command with no grant → 403, proposal count and audit count unchanged. Lint half in invoke-grant-isolation.sh: assert coversInvoke is invoked before the 'INSERT INTO choros.invoke_proposal' literal in invoke.ts."
+    },
+    {
+      "id": "FF-IG-8",
+      "rule": "Tenant isolation is real not decorative (AC-10): a query under a different choros.tenant_id GUC returns zero foreign-tenant proposals.",
+      "ci_check": "ci/checks/db/schema.test.ts (FF-RLS, npm run fitness:db) now sees invoke_proposal as a known table and asserts FORCE RLS; plus a cross-tenant probe in invoke-grant.test.ts."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR §4.3 request route → 201 + invoke_proposal(status='proposed'); test request-happy"},
+    {"ac": "AC-2", "covered_by": "ADR §4.2 step5 fail-closed 403 no row; FF-IG-7; test request-no-grant"},
+    {"ac": "AC-3", "covered_by": "ADR §4.3 command route → 202 {invocation_id}; test command-happy"},
+    {"ac": "AC-4", "covered_by": "ADR §4.2 step5 403; test command-no-grant"},
+    {"ac": "AC-5", "covered_by": "ADR §4.4 encodeInvokeAuditEvent type='invoke.request', actor/subject/payload.mode; test request-audit"},
+    {"ac": "AC-6", "covered_by": "ADR §4.4 type='invoke.command', payload.mode='command'; test command-audit"},
+    {"ac": "AC-7", "covered_by": "ADR §4.3 step1 agent_card lookup → 400 VALIDATION for non-agent/human; test target-not-agent"},
+    {"ac": "AC-8", "covered_by": "ADR §4.5 existing POST /api/grants accepts operation='invoke',resource_type='agent'; test grant-create-invoke"},
+    {"ac": "AC-9", "covered_by": "ADR §4.5 revoke sets valid_until; §4.2 step4 isEffective excludes it → 403; test revoke-then-request-403"},
+    {"ac": "AC-10", "covered_by": "ADR §3.1 FORCE RLS + policy; FF-IG-8; live schema.test.ts + cross-tenant probe"},
+    {"ac": "AC-11", "covered_by": "ADR §4.2 step4 isNarrowerOrEqual(target_org_scope, g.scope) → sub-delegated narrower grant covers only its subtree; test sub-delegated-scope"},
+    {"ac": "AC-12", "covered_by": "ADR §3.1 + FF-IG-1 known_tenant_tables.txt row; §7 frozen-file tension note"},
+    {"ac": "AC-13", "covered_by": "ADR §4.1 + FF-IG-4 grant-lattice.ts byte-unmodified ⇒ 122 tests preserved"},
+    {"ac": "AC-14", "covered_by": "ADR §4.2 design-note + FF-IG-3 resolveFor signature byte-unchanged"}
+  ],
+  "runtime_target": "container — existing choros dev stack (single-Postgres substrate + node:http server). Migration 043 runs via the existing migrations/run.mjs lexicographic runner; routes ride the existing server process. No new external resource, no founder gate (GT-4). Production auth for the routes is T-0060's scope; day-1 uses X-Dev-User.",
+  "adr_artifact_path": "docs/design/T-0024-invoke-grant.adr.md",
+  "escalation": "",
+  "open_forks": [
+    {
+      "fork": "NF-2 literal reading: 'HTTP handlers call resolveFor(.., invoke)'. resolveFor is built around ObjectHandle (application/registry/record), has no agent kind, and its signature is frozen (AC-14). This ADR satisfies NF-2's INTENT by composing the same exported T-0018 lattice primitives (isNarrowerOrEqual/isEffective) in coversInvoke rather than threading a synthetic record handle through resolveFor.",
+      "options": ["(a) compose-the-primitives in invoke.ts — chosen day-1, zero frozen-seam edits", "(b) extend ObjectHandle with an 'agent' kind and route through resolveFor in a future task — larger refactor the frozen-seam contract forbids now"],
+      "owner": "orchestrator/coder confirm (a) at IMPL; architect's recommendation is (a)"
+    },
+    {
+      "fork": "Sister-check tension: adding invoke_proposal to known_tenant_tables.txt is REQUIRED by schema.test.ts strict mode (AC-12) but trips grant-trail-no-new-table.sh Check-1 (a T-0031-scoped freeze of that file vs dev merge-base).",
+      "options": ["(a) accept the expected pre-merge RED (per choros-ci-check-gotchas: sibling frozen-file checks redden in-flight, green post-merge) — architect's stance, do NOT weaken T-0031's guard", "(b) orchestrator rebases T-0024 onto a dev already carrying the row", "(c) orchestrator scope-limits Check-1 to T-0031's migration window"],
+      "owner": "orchestrator (control-plane call, not architecture); architect recommends (a)"
+    }
+  ]
+}

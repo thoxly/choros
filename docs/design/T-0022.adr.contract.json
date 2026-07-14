@@ -1,0 +1,105 @@
+{
+  "task_id": "T-0022",
+  "status": "ready",
+  "decision": "Three additive migrations — 019_role.sql, 020_role_assignment.sql, 021_grant_role_fk.sql — plus two known_tenant_tables.txt lines and updates to the two affected DB-fitness test files (schema.test.ts FF-FK-RESOLVE, cross_tenant.test.ts seed dispatcher). role and role_assignment are plain T-0013 tenant tables (tenant_id leading PK, FORCE RLS, default-DENY, choros_app DML). org_scope is jsonb NOT NULL carrying the EXISTING grant-lattice.ts org-ScopeElement shape (node or set, hierarchy=org, nodeLevel in {department,position}) — no new scope algebra, no DB structural CHECK (mirrors grant.scope jsonb). Validity window valid_from/until bigint NULL, half-open, no from<until CHECK. proposed_by/confirmed_by text NULL with confirmed_by IS NULL => proposal (zero grants) / NOT NULL => confirmed, realized at the resolution boundary not a DB CHECK. Migration 021 promotes grant.role_id to a named tenant-scoped FK grant_role_id_fkey -> role(tenant_id,id) (pure additive ALTER; verified safe — grant table is empty in dev base). The role->grant resolution chain is fixed as a CONTRACT consumed by T-0053; src/core/grant-resolver.ts and grant-lattice.ts are NOT edited (NF-6/AC-20, enforced by grant-resolver-isolation.sh). All DB-level ACs were validated live against an isolated Postgres (001-016+019-021 applied, idempotent re-run, full negative-path + cross-tenant probes under real choros_app).",
+  "rejected_alternatives": [
+    {"option": "A new org-scope algebra / separate scope_dept_id+scope_pos_id columns", "why_not": "NF-3 violation — second scope grammar. grant-lattice.ts org-ScopeElement already encodes node-or-set over the org hierarchy with working AncestryOracle containment; reusing it as jsonb keeps ONE scope model that T-0029 reads."},
+    {"option": "Normalized link table role_assignment_scope(assignment_id, node_id, node_level) for the SET", "why_not": "Over-engineering (rubric ax.5). The set is small, read whole by the resolver, and the lattice consumes a single serialized ScopeElement; grant.scope jsonb set the precedent for scope-sets-as-jsonb."},
+    {"option": "DB CHECK that org_scope is well-formed (hierarchy=org, nodeId resolves)", "why_not": "Inconsistent with grant.scope jsonb (no structural CHECK). nodeId existence is a cross-table predicate not expressible as a column CHECK; write-API is the validation seam. DB enforces NOT NULL + valid jsonb (the type does that)."},
+    {"option": "DB CHECK valid_from <= valid_until", "why_not": "AC-10 explicitly forbids it — window sanity is application-layer, matching grant. A confirmed-but-expired window is a legitimate stored state the resolver filters at read time."},
+    {"option": "Fold the FK into 020 or back-patch 008 instead of a separate 021", "why_not": "Splitting keeps each migration independently appliable and the FK a pure additive ALTER after role exists; back-patching 008 would rewrite frozen history and break the recorded schema_migrations version."},
+    {"option": "UNIQUE(employee_id, role_id) on role_assignment", "why_not": "FR-2 — same role in different subtree/window is a real case; de-dup is application-layer, consistent with grant having no such constraint."},
+    {"option": "Edit grant-resolver.ts to wire role->grant now", "why_not": "NF-6/AC-20 — T-0033 edits the resolver in parallel (write-conflict); DB-backed getGrants is T-0053 per the T-0021 ADR. T-0022 ships the column contract only."},
+    {"option": "A person_grant / agent_role fork for human vs agent subjects", "why_not": "AC-22 — roles are ONE table; both employee kinds bind through the single role_assignment (employee.id is kind-agnostic, the org tables already unified human/agent in one employee table)."}
+  ],
+  "object_model": [
+    {"entity": "role", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL (leading PK col, no default)"},
+      {"name": "id", "type": "uuid NOT NULL (frozen NF-4; FK target of grant.role_id)"},
+      {"name": "slug", "type": "text NOT NULL (UNIQUE(tenant_id,slug); idempotency key)"},
+      {"name": "display_name", "type": "text NOT NULL"},
+      {"name": "description", "type": "text NULL"},
+      {"name": "created_at", "type": "bigint NOT NULL (epoch-ms)"},
+      {"name": "updated_at", "type": "bigint NOT NULL (epoch-ms)"}
+    ]},
+    {"entity": "role_assignment", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL (leading PK col)"},
+      {"name": "id", "type": "uuid NOT NULL"},
+      {"name": "employee_id", "type": "uuid NOT NULL (FK (tenant_id,employee_id)->employee(tenant_id,id))"},
+      {"name": "role_id", "type": "uuid NOT NULL (FK (tenant_id,role_id)->role(tenant_id,id))"},
+      {"name": "org_scope", "type": "jsonb NOT NULL (grant-lattice org ScopeElement node-or-set; NOT NULL + valid jsonb only, no structural CHECK)"},
+      {"name": "valid_from", "type": "bigint NULL (epoch-ms; NULL=since-beginning; half-open window)"},
+      {"name": "valid_until", "type": "bigint NULL (epoch-ms; NULL=no-end; no CHECK vs valid_from)"},
+      {"name": "source", "type": "text NOT NULL (free string, no CHECK enum)"},
+      {"name": "granted_by", "type": "text NOT NULL (same shape as grant.granted_by)"},
+      {"name": "proposed_by", "type": "text NULL (proposer; NULL when direct)"},
+      {"name": "confirmed_by", "type": "text NULL (NULL => proposal/zero grants; NOT NULL => confirmed)"},
+      {"name": "created_at", "type": "bigint NOT NULL (epoch-ms)"},
+      {"name": "updated_at", "type": "bigint NOT NULL (epoch-ms)"}
+    ]},
+    {"entity": "grant (mutation, migration 021)", "fields": [
+      {"name": "grant_role_id_fkey", "type": "named tenant-scoped FK (tenant_id,role_id)->role(tenant_id,id); no column/floor change"}
+    ]},
+    {"entity": "org_scope JSON (existing ScopeElement, not a new type)", "fields": [
+      {"name": "node", "type": "{kind:'node',hierarchy:'org',nodeId:<department.id|position.id>,nodeLevel:'department'|'position'}"},
+      {"name": "set", "type": "{kind:'set',members:[org-node ScopeElements]} (empty set = lattice bottom, zero reach, schema-valid)"}
+    ]}
+  ],
+  "contracts": [
+    "PK both tables: (tenant_id, id). UNIQUE(tenant_id, slug) on role only. No UNIQUE(employee_id, role_id) on role_assignment.",
+    "FKs (all tenant-scoped, NF-2): role_assignment(tenant_id,employee_id)->employee(tenant_id,id); role_assignment(tenant_id,role_id)->role(tenant_id,id); grant(tenant_id,role_id)->role(tenant_id,id) named grant_role_id_fkey (migration 021).",
+    "RLS both tables: ENABLE+FORCE ROW LEVEL SECURITY; policy USING/WITH CHECK tenant_id=current_setting('choros.tenant_id',true)::uuid; GRANT SELECT,INSERT,UPDATE,DELETE TO choros_app.",
+    "T-0053 resolution contract (interface point, grant-resolver.ts NOT edited): effective grants = grants attached via grant.role_id to roles for which subject has a role_assignment that is (a) confirmed (confirmed_by IS NOT NULL), (b) in-window (isEffective half-open over valid_from/valid_until), (c) whose org_scope admits the org context via the EXISTING AncestryOracle. Proposal => 0 grants; out-of-window => 0 grants.",
+    "C-1 COMPAT (FE-W23-0008): ci/checks/db/schema.test.ts FF-FK-RESOLVE breaks post-021 — 'grant.role_id carries no FK' inverts and not.toContain('role') inverts. coder MUST update it to a positive grant_role_id_fkey->role assertion, admit role/role_assignment as valid FK targets, and extend the FK-pairs arrayContaining (role_assignment->employee, role_assignment->role, grant->role). This file is in ci/checks/db/, NOT in the AC-20 frozen src/core/ set.",
+    "C-2 COMPAT (FE-W23-0008): ci/checks/db/cross_tenant.test.ts seedRowForTable dispatcher default-throws 'unknown table' — adding role/role_assignment to the fixture makes the generic KNOWN_TENANT_TABLES iteration throw. coder MUST add case 'role' and case 'role_assignment' to the dispatcher + seedState (role after tenant; role_assignment after employee+role). cross-tenant-fitness.sh tokens (KNOWN_TENANT_TABLES/appUrl/migratorUrl) stay satisfied.",
+    "No other KNOWN_TENANT_TABLES consumer breaks: two_tenant.test.ts does not iterate the list; object-handle.test.ts uses a local constant; pgTimerStore references it only in a comment (verified by grep over all consumers).",
+    "Seed-ordering invariant for downstream: any future grant seed MUST reference a role seeded in 019 (019 role precedes any grant data; grant table is empty today so 021 FK validation finds no orphan).",
+    "T-0029 reads role_assignment.org_scope as the non-widenable lattice-shaped admin boundary; T-0039 owns proposed_by/confirmed_by workflow + source='llm-proposed'; T-0019 references role.id point-in-time (NOT a live FK, role.id never re-keyed); T-0032 evaluates SoD over confirmed in-window role_assignment rows."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "role & role_assignment exist as tenant tables, in known_tenant_tables.txt + information_schema", "ci_check": "schema.test.ts FF-2 over ALL_BASELINE (fixture gains both) via npm run fitness:db (AC-1/AC-2/AC-19)"},
+    {"id": "FF-2", "rule": "FORCE RLS (relrowsecurity AND relforcerowsecurity) on both; default-DENY => 0 rows without GUC under choros_app", "ci_check": "schema.test.ts FF-RLS + cross_tenant.test.ts no-GUC probe (AC-3)"},
+    {"id": "FF-3", "rule": "cross-tenant isolation: choros_app in tenant-A sees 0 tenant-B rows for both tables", "ci_check": "cross_tenant.test.ts AC-1/AC-2 iteration over KNOWN_TENANT_TABLES after C-2 seed cases (AC-4)"},
+    {"id": "FF-4", "rule": "tenant_id is column 1 AND leads every index/FK on both tables", "ci_check": "schema.test.ts FF-LEAD (iterates KNOWN_TENANT_TABLES) (AC-5)"},
+    {"id": "FF-5", "rule": "UNIQUE(tenant_id,slug) on role: dup => 23505; cross-tenant same slug OK", "ci_check": "dedicated test on role (AC-6) — verified live"},
+    {"id": "FF-6", "rule": "role_assignment FKs tenant-scoped: absent/cross-tenant employee or role => 23503", "ci_check": "dedicated test (AC-7/AC-8) — verified live"},
+    {"id": "FF-7", "rule": "org_scope jsonb NOT NULL: NULL => 23502; valid node+set jsonb round-trips byte-equivalently", "ci_check": "dedicated test (AC-9) — verified live"},
+    {"id": "FF-8", "rule": "window bigint NULL x all 4 null-combos insertable; no CHECK on from>until", "ci_check": "dedicated test (AC-10) — verified live (9999>1 accepted)"},
+    {"id": "FF-9", "rule": "proposed_by/confirmed_by text NULL independently; source/granted_by text NOT NULL (NULL => 23502)", "ci_check": "information_schema.columns + insert tests (AC-11/AC-12) — verified live"},
+    {"id": "FF-10", "rule": "grant_role_id_fkey exists -> role(tenant_id,id); bad role_id => 23503; tenant-scoped (cross-tenant role ref => 23503)", "ci_check": "schema.test.ts FF-FK-RESOLVE after C-1 + dedicated regression test (AC-13/AC-14) — verified live"},
+    {"id": "FF-11", "rule": "seeds present + idempotent: >=1 role incl tenant-owner + >=1 functional; >=1 assignment wiring real employee->role->dept node; re-run = same counts", "ci_check": "seed-count test after double-run (AC-15/AC-16) — verified live (re-run no-op)"},
+    {"id": "FF-12", "rule": "migrations apply cleanly twice (fresh compose PG); 019-021 in schema_migrations; 2nd run no-op", "ci_check": "two_tenant.test.ts runMigrations() + runner idempotency (AC-17) — verified live"},
+    {"id": "FF-13", "rule": "exactly 019_role.sql,020_role_assignment.sql,021_grant_role_fk.sql; NO 017/018 file", "ci_check": "static check over migrations/ (AC-18)"},
+    {"id": "FF-14", "rule": "known_tenant_tables.txt gains exactly role+role_assignment; anti-decorative guard passes", "ci_check": "schema.test.ts anti-decorative block (AC-19)"},
+    {"id": "FF-15", "rule": "git diff shows NO change to src/core/grant-resolver.ts or src/core/grant-lattice.ts", "ci_check": "grant-resolver-isolation.sh Check-3 git diff --quiet HEAD (AC-20)"},
+    {"id": "FF-16", "rule": "every seeded role_assignment.org_scope parses as a lattice ScopeElement, hierarchy==='org', nodeLevel in {department,position}", "ci_check": "parse via exported lattice types over seed rows (AC-21)"},
+    {"id": "FF-17", "rule": "no second role/principal table in 019-021 (person_grant/agent_role/human_role)", "ci_check": "static lint over the 3 migration files (AC-22)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "migration 019 + known_tenant_tables.txt line role; schema.test.ts FF-2 + cross_tenant.test.ts (FF-1/FF-3)"},
+    {"ac": "AC-2", "covered_by": "migration 020 + known_tenant_tables.txt line role_assignment; same probes (FF-1/FF-3)"},
+    {"ac": "AC-3", "covered_by": "FORCE RLS + default-DENY policy in 019/020 (FF-2) — verified live relforcerowsecurity=t"},
+    {"ac": "AC-4", "covered_by": "RLS isolation, cross_tenant.test.ts iteration after C-2 seed cases (FF-3) — verified live (tenant-A ctx => 0 tenant-B rows)"},
+    {"ac": "AC-5", "covered_by": "tenant_id leading PK + composite FK lead with tenant_id (FF-4)"},
+    {"ac": "AC-6", "covered_by": "UNIQUE(tenant_id,slug) on role (FF-5) — verified live 23505 + cross-tenant slug OK"},
+    {"ac": "AC-7", "covered_by": "role_assignment FK (tenant_id,employee_id) (FF-6) — verified live 23503"},
+    {"ac": "AC-8", "covered_by": "role_assignment FK (tenant_id,role_id) (FF-6) — verified live 23503"},
+    {"ac": "AC-9", "covered_by": "org_scope jsonb NOT NULL (FF-7) — verified live 23502 on NULL; node+set jsonb insert OK"},
+    {"ac": "AC-10", "covered_by": "valid_from/until bigint NULL, no CHECK (FF-8) — verified live from>until accepted"},
+    {"ac": "AC-11", "covered_by": "proposed_by/confirmed_by text NULL (FF-9) — verified live via information_schema"},
+    {"ac": "AC-12", "covered_by": "source/granted_by text NOT NULL (FF-9) — verified live 23502 on NULL source"},
+    {"ac": "AC-13", "covered_by": "migration 021 named FK + schema.test.ts FF-FK-RESOLVE update C-1 (FF-10) — verified live 23503 on bad role_id"},
+    {"ac": "AC-14", "covered_by": "FK tenant-scoped (FF-10) — verified live: grant tenant-A ref role-only-in-tenant-B => 23503"},
+    {"ac": "AC-15", "covered_by": "019 seed (tenant-owner + budget-approver, ON CONFLICT DO NOTHING) (FF-11) — verified live role_count=2, re-run no-op"},
+    {"ac": "AC-16", "covered_by": "020 seed (e-mironov->budget-approver, org_scope=fin dept node, confirmed) (FF-11/FF-16) — verified live ra_count=1"},
+    {"ac": "AC-17", "covered_by": "migrations/run.mjs lexicographic + idempotent + ON CONFLICT seeds (FF-12) — verified live: 2nd run 'nothing to apply'"},
+    {"ac": "AC-18", "covered_by": "file set 019/020/021, none 017/018 (FF-13)"},
+    {"ac": "AC-19", "covered_by": "known_tenant_tables.txt +2 lines, anti-decorative guard (FF-14)"},
+    {"ac": "AC-20", "covered_by": "no src/core edit; grant-resolver-isolation.sh Check-3 (FF-15) — only migrations/ + ci/checks/db/ touched"},
+    {"ac": "AC-21", "covered_by": "seed org_scope is org-node ScopeElement (FF-16) — verified live shape {kind:node,hierarchy:org,nodeLevel:department}"},
+    {"ac": "AC-22", "covered_by": "one role table, single role_assignment binds both employee kinds (FF-17)"}
+  ],
+  "runtime_target": "контейнер (local compose Postgres, existing T-0053 single-Postgres substrate) -> founder-gated dev/prod promote (GT-4, standard per-migration gate). No new external resource, no escalation.",
+  "adr_artifact_path": "docs/design/T-0022-roles-assignments.adr.md",
+  "escalation": ""
+}

@@ -1,0 +1,106 @@
+{
+  "task_id": "T-0244",
+  "status": "ready",
+  "branch": "task/T-0244",
+  "pr_url": "local:task/T-0244",
+  "base_ref": "8ec86d3",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "test_counts": {
+    "total_passed": 2606,
+    "total_skipped": 6,
+    "t0244_new": 40,
+    "t0244_status_model": 30,
+    "t0244_issue_key": 10
+  },
+  "files_changed": [
+    "ci/checks/customer-subscription-pdp-arbiter.sh",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "ci/checks/dual-control-isolation.sh",
+    "ci/checks/entitlement-port-injectable.sh",
+    "ci/checks/no-killswitch-in-core.sh",
+    "ci/checks/no-killswitch-in-crm.sh",
+    "ci/checks/role-criticality-migration-excludes.txt",
+    "ci/checks/vendor-crm-seed-idempotent.sh",
+    "docs/design/T-0244-customer-subscription.adr.md",
+    "docs/specs/T-0244-customer-subscription.spec.md",
+    "migrations/073_vendor_crm_seed.sql",
+    "package.json",
+    "seed/vendor-crm/customer-subscription.schema.json",
+    "seed/vendor-crm/pack.json",
+    "seed/vendor-crm/processes/customer-onboarding.bpmn",
+    "src/adapters/t0242-entitlement-port.ts",
+    "src/core/customer-subscription/__tests__/issue-key.test.ts",
+    "src/core/customer-subscription/__tests__/status-model.test.ts",
+    "src/core/customer-subscription/__tests__/stub-entitlement-port.ts",
+    "src/core/customer-subscription/entitlement-port.ts",
+    "src/core/customer-subscription/status-model.ts",
+    "src/runtime/customer-onboarding/issue-key.ts"
+  ],
+  "deliverables": {
+    "application_seed": "migrations/073_vendor_crm_seed.sql — idempotent INSERT: vendor-crm (is_system=true) application + customer-subscription registry_def; ON CONFLICT DO NOTHING throughout",
+    "pack_json": "seed/vendor-crm/pack.json — T-0140-compatible seed-pack-as-code; imports org-plane resources via T-0140 importer",
+    "record_schema": "seed/vendor-crm/customer-subscription.schema.json — JSON Schema draft-07; 6 required fields + 2 optional masked fields (circuit_id, activation_key_issued_at)",
+    "bpmn_process": "seed/vendor-crm/processes/customer-onboarding.bpmn — linear 4-UserTask + 1-ServiceTask BPMN 2.0; T-0058 surface; no cycles",
+    "status_model": "src/core/customer-subscription/status-model.ts — pure status machine; 6 states {draft,trial,active,expired,custom,archived}; exported CUSTOMER_TRANSITIONS + isAllowedTransition + availableTransitions + isCustomerStatus",
+    "entitlement_port": "src/core/customer-subscription/entitlement-port.ts — PURE TYPE; injectable EntitlementPort interface + dormantEntitlementPort (fail-closed) + EntitlementDormantError; zero IO imports; mirrors LlmPort pattern (T-0233)",
+    "orchestrator": "src/runtime/customer-onboarding/issue-key.ts — runIssueKey: PDP→port→actor_event→audit; IssueKeyDeps with liveEnabled gate (lock #2); no src/vendor imports",
+    "stage_adapter": "src/adapters/t0242-entitlement-port.ts — Stage-deploy placeholder; dormant by default (liveEnabled=false); export shape matches EntitlementPort",
+    "test_stub": "src/core/customer-subscription/__tests__/stub-entitlement-port.ts — StubEntitlementPort for unit tests",
+    "roles": "migrations/073_vendor_crm_seed.sql — vendor-admin + vendor-readonly role rows (idempotent)"
+  },
+  "fitness_checks": {
+    "FF-1": "customer-subscription-pdp-arbiter.sh — JSON Schema draft-07 validation gate",
+    "FF-2": "customer-subscription-pdp-arbiter.sh — status enum consistency between schema and TS",
+    "FF-3": "customer-subscription-pdp-arbiter.sh — transition table correctness (archived=terminal)",
+    "FF-4": "customer-subscription-pdp-arbiter.sh — PDP arbiter isolation; no rogue auth tokens; no duplicate card-action module",
+    "FF-5": "entitlement-port-injectable.sh — EntitlementPort exports present; frozen signature fields; no SDK imports; IssueKeyDeps accepts entitlement",
+    "FF-6": "entitlement-port-injectable.sh — dormantEntitlementPort is fail-closed (throws EntitlementDormantError)",
+    "FF-7": "no-killswitch-in-crm.sh — no vendor/activation import in T-0244 zone; no src/vendor import in issue-key.ts; entitlement-port.ts is pure (no IO imports)",
+    "FF-8": "no-killswitch-in-core.sh — additive RELIEF for customer-subscription/ zone (auto_additive sanction); real invariant preserved for all other core files",
+    "FF-9": "vendor-crm-seed-idempotent.sh — migration 073 has ON CONFLICT DO NOTHING; pack.json valid; roles present; BPMN exists; status enum sync",
+    "FF-10": "vendor-crm-seed-idempotent.sh — no CREATE TABLE in migration 073 (pure seed)",
+    "FF-11": "vendor-crm-seed-idempotent.sh — BPMN linearness (no boundary events / compensations)",
+    "FF-12": "vendor-crm-seed-idempotent.sh — seed idempotency top-level gate",
+    "FF-13": "customer-subscription-pdp-arbiter.sh + entitlement-port-injectable.sh — --self-test modes; all checks have self-test harness"
+  },
+  "frozen_check_sanctions": [
+    {
+      "file": "ci/checks/no-killswitch-in-core.sh",
+      "owner": "T-0198",
+      "class": "auto_additive",
+      "families": ["NO-KILLSWITCH-IN-CORE"],
+      "corpus_ref": "8ec86d3",
+      "rationale": "EntitlementPort pure-type in src/core/customer-subscription/ uses word 'entitlement' as port name; additive RELIEF block post-sweep; real invariant (no kill-switch in core) preserved"
+    },
+    {
+      "file": "ci/checks/dual-control-isolation.sh",
+      "owner": "T-0044",
+      "class": "auto_additive",
+      "families": ["TENANT-ISO"],
+      "corpus_ref": "8ec86d3",
+      "rationale": "Migration 073 is a pure INSERT seed (no CREATE TABLE, no RLS, no tenant table); additive RELIEF post-loop cancels false-red; T-0044 dual-control confirmed2_by invariant fully intact"
+    }
+  ],
+  "non_frozen_check_modifications": [
+    {
+      "file": "ci/checks/role-criticality-migration-excludes.txt",
+      "reason": "data file (not .sh, not protected by frozen-checks-immutable); added '073_vendor_crm_seed' exclude entry"
+    }
+  ],
+  "deviations_from_adr": [
+    "Step 5c (field write of circuit_id + activation_key_issued_at into record.data) is modelled as audit-intent only in this phase; real field write happens when record-CRUD-stack lands (B-11 boundary). The intent is audited via customer.key_issued event which carries circuit_id and not_after. This is consistent with ADR §3.6 note on 'record-write-path boundary'.",
+    "actor_event verb for the active transition uses 'release' (closest available verb in the closed verb set) per issue-key.ts comment. No new verb introduced per T-0019 vocab-pinned gate."
+  ],
+  "no_merge_to_main": true,
+  "no_github_pr": true,
+  "no_foreign_worktree_edits": true,
+  "no_t0242_import": true,
+  "friction_events": [],
+  "notes": "All local gates green: tsc --noEmit (exit 0), npm run fitness (FITNESS_EXIT=0), npx vitest run (2606 passed | 6 skipped), eslint on T-0244 files only (0 errors). Pre-existing eslint errors in doc-reconcile.test.ts / doc-regen.test.ts / doc-summary.test.ts are BASE_REF failures, not introduced by T-0244. 4 commits on task/T-0244: 110e197 (feat), 84ae5b7 (fix: migration relief), 90676a9 (fix: eslint void destructure), a3e5722 (fix: remove unused import). Dogfooding note: vendor-crm app + customer-subscription registry are now managed within Choros itself (T-0140 seed-pack-as-code), fulfilling the choros-customer-subscription-mgmt directive."
+}

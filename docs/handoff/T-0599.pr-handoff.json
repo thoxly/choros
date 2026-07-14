@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0599",
+  "status": "pr_open",
+  "branch": "task/T-0599-assistant-banner",
+  "pr_url": "local:task/T-0599-assistant-banner",
+  "summary": "Проактивный баннер «LLM-ключ не подключён» на экране ассистента, ДО отправки сообщения (сегодня статус узнаётся только после честного 503 T-0573/T-0595). Разведка нашла и починила баг честности в существующем GET /api/agents (src/http/agents-list.ts): llm_bound читал ТОЛЬКО устаревшее agent_card.llm_secret_handle (migration 094 deprecation) и ЛОЖНО показывал false для агентов, привязанных через актуальный именованный-connection путь (llm_connection_id, T-0498, /llm-connections). listAgentsTx теперь LEFT JOIN choros.llm_connection и резолвит llm_secret_handle через COALESCE(lc.secret_handle, ac.llm_secret_handle) — ТОТ ЖЕ предикат, что реальный рантайм-резолвер src/db/agent-provision.ts::readConfiguredAgentLlmConfig использует при настоящем LLM-вызове. Клиент: новый хук useAssistantLlmStatus (screen-assistant.jsx) переиспользует GET /api/agents (без admin-гейта, без нового эндпойнта), находит assistant-agent по slug, показывает баннер ТОЛЬКО когда loading завершился И llm_bound доказанно false (честная неизвестность — сетевая ошибка/запись не найдена — трактуется как 'не показывать', не как 'точно сломано'). Admin-статус для deep-link кнопки читается СИНХРОННО из уже резолвленного клиентского кэша getNavCapabilities() (active-tenant.js, заполняется shell.jsx auth-bootstrap до монтирования любого защищённого экрана) — без нового HTTP-запроса. Баннер живой: перечитывает статус on-mount и on-focus (F7 — покрывает сценарий 'привязал ключ на /llm-connections → вернулся в тред'). Новый kit-компонент Notice (components.jsx, рядом с Toast) — персистентная warning-плашка на --chs-* токенах. 503-путь T-0573/T-0595 не тронут — баннер это превенция, честный 503 остаётся страховкой.",
+  "mechanism": {
+    "status_source": "GET /api/agents (src/http/agents-list.ts, T-0271/T-0473) — БЕЗ admin-гейта, безопасно для любого аутентифицированного участника тенанта. Поле llm_bound (уже существовало) теперь резолвится честно: listAgentsTx LEFT JOIN choros.llm_connection на ac.llm_connection_id, COALESCE(lc.secret_handle, ac.llm_secret_handle) IS NOT NULL — тот же порядок резолюции, что src/db/agent-provision.ts::readConfiguredAgentLlmConfig (реальный рантайм-резолвер, используемый src/server.ts::makeLlmPortFactory при настоящем LLM-вызове). Ассистент идентифицируется по slug==='assistant-agent' (тот же идентификатор, которым пользуется сам рантайм-резолвер и register.ts/migration 118 seed).",
+    "admin_decision": "Клиент (AssistantLlmBanner, screen-assistant.jsx) читает admin-статус СИНХРОННО из getNavCapabilities() (web/src/app-shell/active-tenant.js) — module-level кэш, заполняемый ОДИН РАЗ за сессию shell.jsx auth-bootstrap (resolveNavCapabilities(), ДО монтирования любого защищённого маршрута, включая /assistant). isAdmin = navCaps.isGenesisOwner || zones.includes('admin') — ТОТ ЖЕ предикат, что nav-config.js::projectZones использует для решения видимости admin-зоны в сайдбаре. Кнопка «Открыть LLM-соединения» — чистая клиентская навигация (navigate('/llm-connections')), НЕ обходит серверный гейт T-0595 (тот управляет ДЕТАЛЯМИ honest-503 envelope на сервере, не видимостью самой страницы в навигации). Не выбран admin-only GET /api/llm-connections как источник статуса, т.к. он 403'ит не-админа (canConfigureLlmConnection) — систематическая ошибка на каждую загрузку экрана для builder-роли.",
+    "client": "useAssistantLlmStatus() хук: fetch('/api/agents') on-mount + on window focus; {loading, llmBound: boolean|null}. showLlmBanner = !loading && llmBound===false — рендерится строго на доказанном факте, не на unknown. AssistantLlmBanner использует новый kit-компонент Notice (tone='warning', допустимый action-слот с кнопкой только для admin). Текст стилистически зеркалит ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN/_NON_ADMIN (T-0595) — web/ не импортирует src/ (раздельные пакеты), поэтому текст держится своей строкой, но той же формулировкой (страница названа фактическим титулом «LLM-соединения», не-админ направлен к администратору без голого пути)."
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npx tsc --noEmit — 0 ошибок",
+    "lint": true,
+    "lint_result": "npx eslint src (root, TS-слой) — 0 errors через npm run ci. web/package.json lint-скрипт (eslint web/src --ext .jsx) уже был неработоспособен ДО этой задачи (нет eslint.config.* в web/, ошибка 'No files matching the pattern' воспроизводится и на dev@edff87e без моих изменений, git stash подтвердил) — не в скоупе T-0599, не блокирует.",
+    "types": true,
+    "types_result": "покрыто tsc --noEmit (тот же прогон, что build)",
+    "tests": true,
+    "tests_result": "root vitest run: 254 файла passed | 2 skipped (256), 4891 тестов passed | 10 skipped (4901), exit 0 — включая расширенный src/__tests__/agents-list.test.ts (9/9, +4 новых на 4 комбинации COALESCE). web vitest run: 59 файлов passed (59), 1604 теста passed (1604), exit 0 — включая новый screen-assistant.llm-banner.test.js (21/21) и НЕИЗМЕНЁННЫЙ screen-assistant.error-envelope.test.js (12/12, AC-9 регресс-guard). Живой Postgres (docker-compose postgres:16, DATABASE_URL localhost:55432): npm run fitness:db — 104 файла passed (104), 1099 тестов passed (1099), exit 0, включая расширенный ci/checks/db/assistant-llm-binding.test.ts (6/6 — 4 старых T-0574 + 2 новых T-0599 FF-1/FF-2, живой Postgres подтверждает llm_bound:false до bind и llm_bound:true после bind СВЯЗАННОЙ через llm_connection.secret_handle, ПРИ ЭТОМ agent_card.llm_secret_handle остаётся NULL — доказывает сигнал идёт из JOIN, не побочного эффекта записи в устаревшую колонку). Контейнер остановлен (docker-compose stop postgres) по завершении.",
+    "fitness": true,
+    "fitness_result": "npm run fitness (полная цепочка ~250+ чеков) — exit 0 после коммита BUILD-фазы (до коммита ожидаемо FAIL — db-isolation-no-test-change.sh сравнивает untracked diff vs HEAD, тот же гейт/паттерн, что документирован в T-0595 friction; зелёный сразу после git commit). npm run ci (tsc+eslint+fitness+vitest) — exit 0. Точечно: bash ci/checks/ux/ux-g2-theme-pairing.sh → PASS; bash ci/checks/ux/ux-g5-jargon-denylist.sh → PASS, 28 pre-existing findings (T-id в describe-блоках *.test.jsx, тот же baseline, что T-0595/T-0597 — 0 новых); bash ci/checks/ux/ux-g6-no-new-hardcode.sh → PASS, 0 новых hardcode/overlay findings (Notice/CSS используют исключительно --chs-* токены); bash ci/checks/ux/assistant-llm-message-jargon.sh (+ --self-test) → PASS (не тронут — 503-путь T-0573/T-0595 нетронут, AC-9/N6)."
+  },
+  "files_changed": [
+    "docs/specs/T-0599-assistant-banner.spec.md",
+    "docs/specs/T-0599.spec.contract.json",
+    "docs/adr/ADR-T0599-assistant-banner.md",
+    "docs/adr/T-0599.adr.contract.json",
+    "src/http/agents-list.ts",
+    "src/__tests__/agents-list.test.ts",
+    "ci/checks/db/assistant-llm-binding.test.ts",
+    "web/src/components/components.jsx",
+    "web/src/components/components.css",
+    "web/src/app-shell/app.css",
+    "web/src/screens/screen-assistant.jsx",
+    "web/src/screens/__tests__/screen-assistant.llm-banner.test.js",
+    "docs/handoff/T-0599.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "Нет отклонений от ADR-T0599. Единственное уточнение силы: живой DB-тест (AC-1/AC-2) добавлен как 2 новых it()-блока в СУЩЕСТВУЮЩИЙ ci/checks/db/assistant-llm-binding.test.ts (T-0574), а не отдельный новый файл — ADR §4 п.3 допускал оба варианта ('ci/checks/db/* или новый файл рядом с assistant-llm-unavailable.test.ts'); переиспользование существующих helper'ов (registerOne/cleanup/request) этого файла было соразмернее, т.к. FF-4 того же файла уже строит идентичный bind+secret_handle фикстур-путь."
+  ],
+  "friction_events": [
+    "Worktree был provisioned без node_modules (root и web) — npm ci --maxsockets=3 в обоих перед первым tsc/vitest прогоном (тот же паттерн, что T-0595/T-0597 friction notes).",
+    "npm run fitness падал на FF-T147-2 (db-isolation-no-test-change.sh) ДО коммита BUILD-фазы — гейт сравнивает изменения ci/checks/db/*.test.ts против HEAD, а не против dev; ожидаемо и задокументировано в T-0595's friction — зелёный сразу после git commit тестового файла. Не итерация, а известный порядок фаз (commit BUILD → повторный npm run fitness).",
+    "web/package.json lint-скрипт (eslint web/src --ext .jsx) оказался неработоспособным (нет eslint.config.* в web/, ошибка 'No files matching the pattern') — воспроизведено И на dev@edff87e (git stash + повтор команды) до моих изменений, следовательно pre-existing дефект, не регрессия T-0599 и не блокер (root npm run ci покрывает eslint src на TS-слое; web-тесты верифицированы через vitest напрямую).",
+    "Живой Postgres для db-fitness (AC-1/AC-2 требуют реальный HTTP+DB) отсутствовал в среде — поднят через docker-compose up -d postgres (образ postgres:16, порт 55432) + npm run migrate + npm run fitness:db:setup-template; контейнер остановлен (docker-compose stop postgres) по завершении верификации."
+  ]
+}

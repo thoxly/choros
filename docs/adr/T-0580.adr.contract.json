@@ -1,0 +1,90 @@
+{
+  "task_id": "T-0580",
+  "status": "ready",
+  "decision": "Второй флейвор поля computed («Итог») — скаляр-формула — как аддитивная x-formula-аннотация РЯДОМ с x-rollup (не замена). Вычисление — собственный БЕЗОПАСНЫЙ evaluator в src/core/: рекурсивно-нисходящий (Pratt) парсер над ЗАКРЫТЫМ токен-алфавитом (цифры, . + - * / ( ), идентификатор [A-Za-z0-9_], пробел) → замороженный AST (num|ref|unary|binary) → тайп-чекер (число⊕дата) → tree-walking интерпретатор. БЕЗ eval/new Function/vm/import()/доступа к прототипам — инъекция кода = P0 закрывается тем, что пользовательская строка НИКОГДА не превращается в исполняемый JS (закрытый алфавит глушит ;$`{}[]'\":,! и .-в-идентификаторе; FIELD_REF — плоский hasOwnProperty-lookup в scope, не цепочка прототипов). Грамматика v1: +−*/, унарный минус, скобки, приоритет (*/>+−), лево-ассоциативность; дата-семантика ровно два правила: date±N(дни,целое,floor)→date(ISO YYYY-MM-DD) и date−date→number(дни); money=числовой скаляр (T-0509); проценты/НДС/сроки живут в формуле пользователя (данные тенанта), НЕ в коде платформы (D-064). Расчёт — ЧИСТАЯ in-memory функция над record.data + уже-вычисленными derived (rollup/matrix), встроенная в существующий computeAllDerivedFields (derived-fields-dao.ts) как четвёртый DerivedFieldSpec.kind='formula' — прецедент computeEmbeddedRollup (rollup-contract.ts:439). Формулы разрешаются в ТОПОЛОГИЧЕСКОМ порядке графа зависимостей (ацикличность — гейт авторинга, детерминизм NF-6) ПОСЛЕ не-формульных derived. Значение read-only, НЕ хранится в record.data (PD-20), отдаётся в derived-map на READ (records.ts:1762) и оверлеится в переменные процесса на старте (records.ts:892, тот же контур после T-0575). x-formula — generic x-ключ: stripXExtensions (record-schema-validator.ts:174) уже срезает его до AJV-compile → БЕЗ правки whitelist и БЕЗ миграций (JSONB-данные в record_schema). Тайп-чек+ацикличность+лимиты — на авторинге (сохранение схемы); null-семантика (null-операнд→null всего выражения, /0→null, нечисло→null) + defense-in-depth пределы глубины — на расчёте. Редактор формулы в конструкторе полей (переключатель Агрегат/Формула в FieldRow: Агрегат→существующий RollupConfigEditor, Формула→новый FormulaConfigEditor с textarea, справкой сиблинг-полей, инлайн-валидацией через шаренный core-парсер, honest-empty, kit/G-гейт). Клиентское превью в форме опционально (NF-4), ТЕМ ЖЕ core evalFormula — сервер источник правды (не повторить BUG-016). runtime=сервер; внешних ресурсов/GT-4 нет.",
+  "rejected_alternatives": [
+    {"option": "A1. new Function(expr) / безопасный-eval с sandboxed-scope", "why_not": "инъекция кода = P0 (NF-1); любой Function-путь исполняет произвольный JS, песочница через with/прокси хрупка и обходима (constructor.constructor). Собственный AST-обход — единственный контракт без исполнения пользовательского кода."},
+    {"option": "A2. Готовая npm-либа (expr-eval / mathjs / jsep)", "why_not": "нарушает zero-dep (pg-single-dep.sh, deps={ajv,pg}); mathjs тянет eval-подобные пути и мегабайты; либа в чистом ядре против конвенции. Грамматика v1 крошечная — Pratt-парсер ~150 строк дешевле аудита сторонней либы на инъекцию."},
+    {"option": "A3. Материализовать результат формулы в record.data", "why_not": "ломает PD-20 (derived НИКОГДА не в data; на этом стоит no-rollup-of-rollup и честная null-семантика); материализация добавила бы инвалидацию кэша при правке зависимых полей (класс багов). Расчёт на READ+оверлей — уже работающий контур."},
+    {"option": "A4. Новый тип поля 'formula' рядом с 'computed'", "why_not": "computed уже = вычисляемое/read-only/не-в-data/единый readout-рендерер; формула — второй флейвор ТОЙ ЖЕ семантики (как rollup vs rollup-embedded под одним x-rollup). Новый тип раздул бы FIELD_TYPES/форм-контракт/list-cell без выгоды."},
+    {"option": "A5. SQL-вычисление формулы в БД (как rollup GROUP BY)", "why_not": "rollup идёт в БД, т.к. агрегирует ДРУГИЕ строки; скаляр-формула оперирует полями ЭТОЙ записи (уже в памяти), как computeEmbeddedRollup. Выражение в SQL = интерполяция пользовательского выражения в запрос (SQL-инъекция, тот же P0) + потеря чистого юнит-тестируемого ядра."},
+    {"option": "A6. Плоский Promise.all для формул (как сейчас для derived)", "why_not": "формула-на-формулу требует порядка; параллельный проход даёт гонку 'формула видит ещё-не-посчитанную формулу' → недетерминизм (нарушает NF-6). Топосорт (ацикличность гарантирована авторингом) — детерминированный порядок."},
+    {"option": "A7. Разрешить today()/now() для дедлайнов от 'сегодня' в v1", "why_not": "нарушает детерминизм NF-6 — одна запись даёт разное значение в разные дни, ломает воспроизводимость тестов/переменных процесса. Дедлайн v1 = дата-поле + срок-поле (обе из данных). today() — осознанный future-scope (O-1), требует отдельного решения о времени-как-входе."}
+  ],
+  "object_model": [
+    {"entity": "FormulaFieldDef (src/core/formula-contract.ts)", "fields": [
+      {"name": "expr", "type": "string (исходное выражение, source of truth, <=500)"},
+      {"name": "result_type", "type": "\"number\" | \"date\" (кэш вывода тайп-чекера)"}
+    ]},
+    {"entity": "FormulaAst (src/core/formula-parser.ts, замороженный union)", "fields": [
+      {"name": "num", "type": "{ kind:\"num\"; value:number }"},
+      {"name": "ref", "type": "{ kind:\"ref\"; field:string }"},
+      {"name": "unary", "type": "{ kind:\"unary\"; op:\"-\"; operand:FormulaAst }"},
+      {"name": "binary", "type": "{ kind:\"binary\"; op:\"+\"|\"-\"|\"*\"|\"/\"; left:FormulaAst; right:FormulaAst }"}
+    ]},
+    {"entity": "DerivedFieldSpec (rollup-contract.ts, += вариант)", "fields": [
+      {"name": "kind", "type": "\"rollup\" | \"rollup-embedded\" | \"matrix-lookup\" | \"formula\" (NEW)"},
+      {"name": "fieldKey", "type": "string"},
+      {"name": "def (для formula)", "type": "FormulaFieldDef"},
+      {"name": "ast (для formula)", "type": "FormulaAst (распарсен один раз в extractDerivedFields)"}
+    ]},
+    {"entity": "DerivedFieldMap (derived-fields-dao.ts, тип значения расширен)", "fields": [
+      {"name": "[fieldKey]", "type": "number | string | null (было number|null; string=ISO-date результата формулы)"}
+    ]},
+    {"entity": "x-formula (аннотация свойства record_schema, JSONB)", "fields": [
+      {"name": "type (свойства)", "type": "\"number\" (result_type=number) | \"string\"+x-date:true (result_type=date)"},
+      {"name": "x-formula.expr", "type": "string"},
+      {"name": "x-formula.result_type", "type": "\"number\" | \"date\""}
+    ]}
+  ],
+  "contracts": [
+    "parseFormula(src:string): {ok:true; ast:FormulaAst} | {ok:false; error} — лексер над закрытым токен-алфавитом + Pratt-парсер; лимиты длины(<=500)/глубины(<=32). Чистый (без I/O). Любой символ вне алфавита → лексическая ошибка (глушит инъекцию).",
+    "typeCheckFormula(ast, fieldTypes:Record<string,\"number\"|\"date\"|...>): {ok:true; result_type:\"number\"|\"date\"} | {ok:false; error} — FIELD_REF существуют и допустимого типа (number/integer/money/date/computed-derived); выводит result_type по типовой таблице (число±число→число, date±дни→date, date−date→число; иные дата-комбинации→ошибка). Чистый.",
+    "validateFormulaFieldDef(raw:unknown): Result<FormulaFieldDef> — форма аннотации (зеркало validateRollupFieldDef): expr non-empty <=500, result_type∈{number,date}. Чистый.",
+    "evalFormula(ast:FormulaAst, scope:Record<string,unknown>): number | string | null — интерпретатор; scope=record.data+derived; null-распространение, /0→null, нечисло→null, дата-семантика (дни целые floor, результат ISO YYYY-MM-DD); FIELD_REF через Object.prototype.hasOwnProperty.call(scope,key) (не цепочка прототипов); предел глубины обхода (defense-in-depth). Чистый, детерминирован, без часов/сети/побочек.",
+    "detectFormulaCycles(specs:DerivedFieldSpec[]): {ok:true; order:string[]} | {ok:false; cycle:string[]} — топосорт графа формула-полей (рёбра=FIELD_REF на другое формула-поле); порядок вычисления или цикл. Чистый.",
+    "extractDerivedFields (rollup-contract.ts) += распознавание x-formula → DerivedFieldSpec kind='formula' (парсит expr→ast один раз); свойство с ОБОИМИ x-formula и x-rollup → skip как невалидное (взаимоисключающие флейворы, не угадывать). Сигнатура не меняется; схемы без x-formula → прежний результат.",
+    "computeAllDerivedFields (derived-fields-dao.ts) += ветка kind==='formula': (1) считает rollup/rollup-embedded/matrix параллельно как сейчас; (2) scope={...record.data, ...derivedNonFormula}; (3) формулы в топо-порядке detectFormulaCycles, каждый результат дописывается в scope; (4) evalFormula чистый (без client, как rollup-embedded). Изоляция сбоя сохранена (per-field swallow-to-null derived-fields-dao.ts:273; SAVEPOINT старта records.ts:883).",
+    "DerivedFieldMap значение: number|null → number|string|null (ЕДИНСТВЕННОЕ расширение public-типа, правило 7). Импортёры: records.ts сериализует map в JSON as-is (строка проходит); клиентский derived[key] рендер отображает ISO-строку в readout-ячейке (date-формат — web BUILD, число не ломается).",
+    "web: formula-contract.js/formula-parser.js — один источник с core (импорт скомпилированного core в web-бандл предпочтительно; иначе шаренная копия под fitness-паритетом). apps-schema.js buildRecordSchema += формула-режим (эмитит {type, x-formula} по §2.3); parseRecordSchema/schemaToFormFields += восстановление режима+expr; FormulaConfigEditor в screen-app-schema.jsx (переключатель Агрегат/Формула в FieldRow).",
+    "Миграции НЕ требуются: x-formula = данные внутри record_schema JSONB (как x-rollup), никакого ALTER; stripXExtensions (generic x-) не задет; AJV-strict не задет. (Следующий свободный № — 123 — только если понадобится демо-сид К4, вне ядра задачи.)",
+    "Совместимость: computed уже read-only/не-required/не-в-data (records-form.js:787, apps-schema.js:523) — формула-режим наследует эти инварианты (никакого нового write-пути). Существующие computed(rollup)-поля работают без изменений (x-rollup парсится/считается как раньше)."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "Безопасность P0: parser/evaluator (src/core/formula-*.ts + web-копия) НЕ содержат eval(, new Function, Function(, require(, import(, \\bvm\\b, process., globalThis, __proto__, child_process, constructor.constructor, обратных кавычек с ${.", "ci_check": "bash ci/checks/formula-evaluator-isolation.sh (grep-denylist; хит=exit 1) + --self-test (плантует new Function → детектор срабатывает)"},
+    {"id": "FF-2", "rule": "Чистота ядра: formula-*.ts не импортирует pg/node:*, не читает process.env, импортирует только из src/core/.", "ci_check": "bash ci/checks/formula-evaluator-isolation.sh (import-скан, зеркало cross-app-refs-isolation.sh CA1) + периметр no-env-in-core.sh/pg-single-dep.sh"},
+    {"id": "FF-3", "rule": "Zero-dep: package.json dependencies остаётся ровно {ajv,pg} — ни expr-eval/mathjs/jsep.", "ci_check": "bash ci/checks/pg-single-dep.sh (существует; расширить allowlist-ассерт при необходимости)"},
+    {"id": "FF-4", "rule": "Анти-кейс D-064: диф не добавляет бизнес-констант (ставка НДС 0.2/20, имена демо-полей) в src/,web/src/ сверх baseline.", "ci_check": "bash ci/checks/anti-case-lock.sh (baseline не растёт)"},
+    {"id": "FF-5", "rule": "Инъекция отвергается (юнит): parseFormula над process.exit(1)/require('fs')/constructor.constructor(...)/a;b/${x}/__proto__/a.b → {ok:false}; ни один не исполняется.", "ci_check": "vitest run src/core/__tests__/formula-parser.test.ts -t \"injection rejected\" (AC-6)"},
+    {"id": "FF-6", "rule": "Арифметика+приоритет+унарный (юнит): 100000*(1+0.2)→120000; 2+3*4→14; (2+3)*4→20; -a+b.", "ci_check": "vitest run src/core/__tests__/formula-eval.test.ts -t \"arithmetic\" (AC-3)"},
+    {"id": "FF-7", "rule": "Дата-семантика (юнит): date+30→ISO+30дн; date−date→дни(целое); date+date/date*2 → тайп-ошибка.", "ci_check": "vitest run src/core/__tests__/formula-eval.test.ts -t \"date\" (AC-4)"},
+    {"id": "FF-8", "rule": "Ошибки расчёта (юнит): null-операнд→результат null(не 0); /0→null(не Infinity/NaN/throw); нечисло→null.", "ci_check": "vitest run src/core/__tests__/formula-eval.test.ts -t \"null and div-by-zero\" (AC-5)"},
+    {"id": "FF-9", "rule": "Валидация авторинга (юнит): несуществующее поле/недопустимый тип/цикл(a=b+1,b=a+1)/самоссылка/пустая формула → отказ.", "ci_check": "vitest run src/core/__tests__/formula-typecheck.test.ts src/core/__tests__/formula-cycles.test.ts (AC-7)"},
+    {"id": "FF-10", "rule": "Лимиты (юнит): строка>500 / глубина AST>32 / >32 ссылок → отказ авторинга; порченая переглубокая AST на расчёте → null (не stack overflow).", "ci_check": "vitest run src/core/__tests__/formula-limits.test.ts (AC-8)"},
+    {"id": "FF-11", "rule": "Дискриминация флейворов (юнит): extractDerivedFields над x-formula → kind:formula; над x-rollup → прежнее; ОБА на одном свойстве → skip/невалидно.", "ci_check": "vitest run src/__tests__/rollup-contract.test.ts -t \"formula flavor\" (AC-12)"},
+    {"id": "FF-12", "rule": "Round-trip авторинга (web юнит): buildRecordSchema формула-режим → x-formula; parseRecordSchema восстанавливает режим+expr; rollup round-trip не сломан.", "ci_check": "vitest run web/src/screens/apps-schema.test.js -t \"formula\" (AC-13)"},
+    {"id": "FF-13", "rule": "Регрессия rollup: существующие computed(rollup)-тесты зелёные без правки самих тестов.", "ci_check": "vitest run src/__tests__/rollup-contract.test.ts web/src/screens/apps-schema.test.js web/src/screens/records-form*.test.js (AC-14)"},
+    {"id": "FF-14", "rule": "Интеграция (fitness:db, живой PG): запись с формула-полем на READ → корректное значение в derived-map; формула в field_mapping on_create → вычислена в переменных процесса (не undefined).", "ci_check": "vitest run --dir ci/checks/db ci/checks/db/formula-derived.db.test.ts (lane fitness:db; AC-15)"},
+    {"id": "FF-UX-1", "rule": "Редактор формулы: kit-токены (нет hardcode цветов), контраст обеих тем, честные Empty/Loading/Error, без dev-жаргона (AST/eval/parse error), бейдж≡контент.", "ci_check": "bash ci/checks/ux/ux-g6-no-new-hardcode.sh && bash ci/checks/ux/ux-g2-theme-pairing.sh && bash ci/checks/ux/ux-g5-jargon-denylist.sh над screen-app-schema.jsx (D-062/OBLIK G-гейт)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§2.3/§2.4 x-formula+derived-контур; живой стенд; FF-14"},
+    {"ac": "AC-2", "covered_by": "§2.2 дата-семантика; FF-7; живой стенд"},
+    {"ac": "AC-3", "covered_by": "§2.1 грамматика + §2.5 evalFormula; FF-6"},
+    {"ac": "AC-4", "covered_by": "§2.2 типовая таблица; FF-7"},
+    {"ac": "AC-5", "covered_by": "§2.5 null-распространение/div0→null; FF-8"},
+    {"ac": "AC-6", "covered_by": "§2.1 закрытый токен-алфавит + §2.5; FF-1/FF-5"},
+    {"ac": "AC-7", "covered_by": "§3 typeCheckFormula + detectFormulaCycles; FF-9"},
+    {"ac": "AC-8", "covered_by": "§2.5 лимиты (авторинг+расчёт); FF-10"},
+    {"ac": "AC-9", "covered_by": "§2.5 нет eval/Function; FF-1"},
+    {"ac": "AC-10", "covered_by": "§2/§3 чистое ядро; FF-2"},
+    {"ac": "AC-11", "covered_by": "§1/§4 zero-dep + D-064; FF-3/FF-4"},
+    {"ac": "AC-12", "covered_by": "§2.3 взаимоисключение + §3 extractDerivedFields; FF-11"},
+    {"ac": "AC-13", "covered_by": "§2.6/§3 web round-trip; FF-12"},
+    {"ac": "AC-14", "covered_by": "§2 аддитивность (rollup не тронут); FF-13"},
+    {"ac": "AC-15", "covered_by": "§2.4 контур derived на READ+старте; FF-14"}
+  ],
+  "runtime_target": "сервер (Node, тот же процесс READ/старт) + чистое ядро src/core/ (без БД/сети) + статический web-бандл. Внешних ресурсов НЕТ: без миграций (x-formula=JSONB-данные), без новых сервисов/секретов/сети. GT-4 не требуется.",
+  "adr_artifact_path": "docs/adr/ADR-T0580-scalar-formulas.md",
+  "escalation": ""
+}

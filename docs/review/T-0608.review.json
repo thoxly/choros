@@ -1,0 +1,89 @@
+{
+  "task_id": "T-0608",
+  "verdict": "approved",
+  "reviewed_sha": "f7a8995",
+  "prior_reviewed_sha": "fd96ae2",
+  "base_sha": "6ae4299a6560e2850fbcafb74a3956a1a2dc691f",
+  "review_rounds": [
+    {"round": 1, "sha": "fd96ae2", "verdict": "request-changes", "reason": "blocking F-1/UX-1 — dedupHolders схлопывал легитимно-различные-по-охвату назначения по employee_id и отзывал лишнее одним кликом"},
+    {"round": 2, "sha": "f7a8995", "verdict": "approved", "reason": "F-1 закрыт композитным ключом дедупа (employee+scope+window); over-revoke устранён; F-2 gap закрыт регресс-тестами; мутация воспроизводит дефект"}
+  ],
+  "ci_seen": {
+    "green": true,
+    "_note": "Раунд 2 (f7a8995) прогнан СОЛО и ПОСЛЕДОВАТЕЛЬНО (первый параллельный прогон дал ложные красные из-за (1) гонки чтения screen-rights.jsx под мутацией и (2) DB-pollution двух suite на :55432 — pipe глотает exit-код, числам параллельных прогонов не верю). Чистые соло-прогоны: cd web && npx vitest run → 1690 passed (62 файла, exit 0, +6 к 1684 за composite-key/scopeText тесты); npm test (root) → 4965 passed | 10 skipped (260 файлов, exit 0); npm run build (tsc + seed) → exit 0; DATABASE_URL=…:55432 npm run fitness:db → 1110 passed | 1 failed, где failed = doc-reconcile.db.test.ts (4 таймаута @5000ms) — НЕ тронут T-0608 (git diff 6ae4299..f7a8995 не содержит doc-reconcile/doc-regen), в ИЗОЛЯЦИИ зелёный → чистый timing-флейк класса doc-* (брифом велено изолировать). Тронутый fitness-файл rights-overview.db.test.ts в изоляции ЗЕЛЁНЫЙ (2 passed: org_scope/valid_from/valid_until surfaced). tier-isolation.sh → PASS (FF-1..11). anti-case-lock.sh → PASS (aggregate 24=24). Контракты spec/adr/pr-handoff валидны (3× validate.py exit 0)."
+  },
+  "claim_verifications": [
+    {
+      "claim": "(F-1 fix) dedupAssignments по КОМПОЗИТНОМУ ключу (employee_id + JSON(org_scope) + valid_from + valid_until) — разные охваты = отдельные строки",
+      "verdict": "verified",
+      "evidence": "screen-rights.jsx assignmentIdentityKey: `${employee_id}::${JSON.stringify(org_scope??null)}::${valid_from??''}::${valid_until??''}`. dedupAssignments группирует по этому ключу — истинные дубли (идентичный scope+window) схлопываются, различные охваты остаются отдельными записями, каждая со своим .ids. Разумное замечание автора в комментарии: false-negative (равные-но-переставленные ключи JSON) даёт лишнюю строку, но НИКОГДА не over-collapse → не воспроизводит blocking over-revoke. Мутация (ключ→employee_id-only) красит 4 теста, включая (а) two-scopes→two-rows и (б) revoke-scope-A-не-тащит-scope-B — over-revoke воспроизводится, значит тест реально пинит."
+    },
+    {
+      "claim": "(F-1 fix) RevokeAssignmentButton таргетит только ids конкретного назначения; ConfirmDialog называет охват",
+      "verdict": "verified",
+      "evidence": "WhoCanDoWhat теперь рендерит holderAssignments = dedupAssignments(role.assignments); каждая строка → RevokeAssignmentButton ids={a.ids} (только ids этой identity, т.е. одного охвата) + scopeLabel={scopeText(a.org_scope,dictionaries)}. ConfirmDialog message: «Отозвать роль у: X (охват: Y)? Доступ по этому назначению пропадёт сразу; другие охваты этого человека сохранятся.» Каждый охват — отдельная строка держателя со своим ScopeSummary и своим Отозвать. Revoke отдела-А не трогает отдел-Б (тест (б) зелёный, мутация красит). Отзыв лишнего устранён."
+    },
+    {
+      "claim": "(F-1 fix) holderCount = distinct employee_id (люди), честно",
+      "verdict": "verified",
+      "evidence": "holderCount = new Set((r.assignments||[]).map(a=>a.employee_id)).size — считает РАЗНЫХ ЛЮДЕЙ (человек с двумя охватами = один человек). Это ОТДЕЛЬНЫЙ от dedupAssignments вопрос ('сколько человек' vs 'сколько назначений') — не путает. Рейл-бейджи держателей тоже дедупят по employee_id (один глиф на человека — компактный обзор). Тест 'counts DISTINCT employees' зелёный (2 при 3 строках/4 грантах)."
+    },
+    {
+      "claim": "(F-1 fix) rights-overview.ts аддитивно отдаёт valid_from/valid_until",
+      "verdict": "verified",
+      "evidence": "OverviewAssignment +valid_from:number|null +valid_until:number|null; loadTenantState маппит valid_from/until через Number()/null-safe. Аддитивно (расширяет форму, не сужает). fitness rights-overview.db.test.ts обновлён (assert toHaveProperty org_scope/valid_from/valid_until) и ЗЕЛЁНЫЙ в изоляции. Клиентский dedup теперь имеет полную композитную identity."
+    },
+    {
+      "claim": "(а-г, е) не сломаны F-1-фиксом",
+      "verdict": "verified",
+      "evidence": "git diff cd3c899..f7a8995 --name-only: тронуты ТОЛЬКО rights-слой (screen-rights.jsx/.test.jsx, ra-overview-forms.jsx, rights-overview.ts, rights-overview.db.test.ts) + docs + app.css. Исходники пунктов а/б/в/г/е (process-projection.ts, screen-inbox.jsx, format.js, dev-auth.js, screen-record-detail.jsx, seed-write.ts) НЕ тронуты. Полные соло-прогоны root (4965) + web (1690) зелёные — регрессии в а/б/в/г/е невозможны."
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "blocking",
+      "status": "RESOLVED",
+      "resolved_sha": "f7a8995",
+      "axis": 2,
+      "location": "web/src/screens/rights/screen-rights.jsx (dedupHolders→dedupAssignments/assignmentIdentityKey/holderCount) + ra-overview-forms.jsx (RevokeAssignmentButton scopeLabel) + src/http/rights-overview.ts (valid_from/until)",
+      "issue": "[РАУНД 1, закрыто] dedupHolders группировал role_assignment по employee_id одному, игнорируя org_scope/окно — вопреки migrations/020:29-32 ('multiple assignments legitimately coexist by org_scope/window'). Это (1) скрывало разные охваты в один бейдж и (2) отзывало ВСЕ охваты одним кликом с ConfirmDialog помеченным только именем = отзыв лишнего гранта.",
+      "resolution": "Дедуп переведён на композитный ключ employee_id+JSON(org_scope)+valid_from+valid_until (assignmentIdentityKey). Различные охваты → отдельные строки держателя, каждая со своим ScopeSummary и своим Revoke таргетящим только свои ids. Истинные дубли (идентичный scope+window) схлопываются и отзываются вместе — корректно. ConfirmDialog называет охват и явно сообщает 'другие охваты этого человека сохранятся'. rights-overview.ts аддитивно отдаёт окно. Проверено: (а) 2 разных scope→2 строки (зелёный), (б) revoke scope-A не тащит scope-B (зелёный), мутация employee_id-only → 4 теста красные (over-revoke воспроизводится)."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "status": "RESOLVED",
+      "resolved_sha": "f7a8995",
+      "axis": 1,
+      "location": "web/src/screens/rights/screen-rights.test.jsx",
+      "issue": "[РАУНД 1, закрыто] Тест-фикстура использовала employee-дубли без org_scope → закрепляла неверную модель, не ловила F-1.",
+      "resolution": "Фикстуры переписаны: twoScopesOnePerson (semyonFin/semyonCs с разными node-scope), semyonFinDupe (истинный дубль). Явные регресс-тесты (а)/(б) + 'different validity WINDOW keeps separate' + 'TRUE duplicates collapse'. Мутация подтверждает, что теперь гейт ловит дефект."
+    },
+    {
+      "id": "F-3",
+      "severity": "nit",
+      "status": "RESOLVED",
+      "resolved_sha": "f7a8995",
+      "axis": 3,
+      "location": "web/src/screens/rights/screen-rights.jsx:254+ (holder row) + app.css .chs-ov-holder__scope",
+      "issue": "[РАУНД 1, инфо] Охват держателя нигде не показывался в секции держателей (ScopeSummary был только у грантов).",
+      "resolution": "Каждая строка держателя теперь рендерит свой <ScopeSummary scope={a.org_scope}> (muted secondary, .chs-ov-holder__scope) — разные охваты визуально различимы."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "(а) стейл-задача самолечится reconcileInboxEngineDriveOnRead + регресс-пин", "covered": true},
+    {"ac": "(б) base-дубль скрывается на наличие next_task, реальная задача не теряется (инвариант T-0571 §2.1)", "covered": true},
+    {"ac": "(в) ACTION_ERROR_MESSAGE/actionErrorMessage — человеческие тексты approve/complete", "covered": true},
+    {"ac": "(г) formatPersonName + display_name, honest fallback, без миграции", "covered": true},
+    {"ac": "(д) holderCount вместо grantCount — distinct people", "covered": true},
+    {"ac": "(д) дедуп держателей по КОМПОЗИТНОМУ ключу — разные охваты отдельны, revoke не отзывает лишнее", "covered": true},
+    {"ac": "(е) fetchWithAuthRetry на 7 сайтах screen-inbox, retry-once, dev passthrough", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "F-1 fix проверен независимым чтением assignmentIdentityKey/dedupAssignments/RevokeAssignmentButton + rights-overview.ts, не из handoff — композитный ключ реально включает scope+window, разные охваты не схлопываются.",
+    "Мутация (ключ→employee_id-only) воспроизводит blocking over-revoke: 4 теста красные, включая (а)/(б). Восстановлено, tree clean.",
+    "Ложные красные первого параллельного прогона диагностированы как гонка (мутация-файл + DB-pollution :55432) — все гейты перепрогнаны СОЛО и ПОСЛЕДОВАТЕЛЬНО, зелёные. doc-reconcile-таймаут изолирован как pre-existing флейк (не тронут T-0608, в изоляции зелёный).",
+    "Скоуп F-1-фикса ограничен rights-слоем (git diff --name-only) — а/б/в/г/е не задеты, подтверждено полными соло-прогонами."
+  ]
+}

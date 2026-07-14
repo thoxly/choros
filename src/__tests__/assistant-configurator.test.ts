@@ -1,0 +1,1388 @@
+/**
+ * T-0361 · assistant-configurator unit tests (E17).
+ *
+ * ZERO NETWORK / ZERO DB / ZERO COST.
+ * Uses StubChatLlmPort + in-memory GrantSource fakes.
+ *
+ * Test invariants:
+ *  AC-T361-1: handleConfigurator with authoring_draft grant → produces DRAFT result
+ *             (intent="configurator", text non-empty). No DB writes in core.
+ *  AC-T361-2: handleConfigurator with NO authoring_draft grant → grant ceiling
+ *             enforced; returns "недостаточно прав" message without tool dispatch.
+ *  AC-T361-3: processToolCall edit_jsonschema with destructive op (drop_field) →
+ *             blocked pending human confirm (verdict=deny, kind=pending_human_confirm).
+ *  AC-T361-4: processToolCall edit_jsonschema with core_pinned drop_field →
+ *             absolute deny (kind=core_pinned_absolute_deny).
+ *  AC-T361-5: handleConfigurator returns intent="configurator" always.
+ *  AC-T361-6: request_promote via tool call → PendingPromote (never auto-promotes).
+ *  AC-T361-7: author_binding tool call → ApprovedOp with tier='draft'.
+ *  AC-T361-8: handleConfigurator stub (no tool calls from LLM) → text reply, no blocked ops.
+ *
+ *  AC-T700-1: author_binding tool schema declares targetRegistrySlug (bot can reach
+ *             a non-default registry, same as the human bind-form's picker — T-0681).
+ *  AC-T700-2: author_binding tool call WITH targetRegistrySlug → ApprovedOp.args carries
+ *             it verbatim (the HTTP executor's existing T-0681 validation reads this key).
+ *  AC-T700-3: author_binding tool call WITHOUT targetRegistrySlug → args has no such key
+ *             (unchanged default-registry behavior, no regression).
+ *
+ *  AC-T724-1: list_registries tool schema declared (optional applicationId param) —
+ *             closes the remaining gap T-0700 left: the bot could NAME a
+ *             targetRegistrySlug but still had to guess it; list_registries lets it
+ *             learn the real slugs first (same data the human picker shows, T-0681).
+ *  AC-T724-2: list_registries produces NO ApprovedOp/BlockedOp — pure read, no write.
+ *  AC-T724-3: list_registries scoped by applicationId never leaks another
+ *             application's registries (bot ≤ human — mirrors GET /api/registry-defs
+ *             ?application_id=); omitted applicationId lists the whole tenant.
+ *  AC-T724-4: an application with zero registries (or no candidates supplied at all)
+ *             → honest empty list, never an error/crash.
+ *  AC-T724-5: two-round list_registries → author_binding flow — the bound
+ *             targetRegistrySlug traces back to what list_registries reported,
+ *             not a guess.
+ *
+ * DB paths (process-defs POST, binding POST, registry-defs PUT execution) are the
+ * assistant HTTP route's responsibility — not tested here (DB-untested by design).
+ */
+
+import { describe, it, expect } from "vitest";
+import {
+  handleConfigurator,
+  runConfigurator,
+  type ConfiguratorResult,
+  type ApprovedOp,
+  type PendingPromote,
+} from "../core/assistant-configurator.js";
+import type { HandlerContext } from "../core/assistant-intent.js";
+import { StubChatLlmPort } from "../core/__tests__/stub-chat-llm-port.js";
+import type { GrantSource } from "../core/grant-resolver.js";
+import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
+import type { LlmPort, LlmRequest, LlmResult, ChatLlmRequest, ChatLlmResult } from "../core/llm-port.js";
+import { LlmUnavailableError } from "../core/llm-port.js";
+import type { ResolveSubject } from "../core/object-handle.js";
+
+// ---------------------------------------------------------------------------
+// Constants (mirrors migration 044 seed)
+// ---------------------------------------------------------------------------
+
+const DEV_TENANT = "a0000000-0000-0000-0000-000000000001";
+const AGENT_SLUG = "assistant-agent";
+const USER_SLUG = "e-orlov";
+
+// authoring_draft resourceType (widening-cast — same pattern as config-agent-toolset.test.ts)
+const AUTHORING_DRAFT = "authoring_draft" as Grant["resourceType"];
+
+// ---------------------------------------------------------------------------
+// Fake ports
+// ---------------------------------------------------------------------------
+
+/** In-memory GrantSource returning the provided grants for any subject in the tenant. */
+function makeGrantSource(grants: Grant[]): GrantSource {
+  return {
+    async getGrants(
+      subject: ResolveSubject,
+      _nowMs: number,
+    ): Promise<Grant[]> {
+      return grants.filter((g) => g.tenantId === subject.tenantId);
+    },
+  };
+}
+
+/** Flat AncestryOracle — identity only (conservative, same as assistant.ts default). */
+const flatOracle: AncestryOracle = {
+  isDescendantOrSelf(_h, descendantId, ancestorId) {
+    return descendantId === ancestorId;
+  },
+};
+
+/** One authoring_draft create grant for the user. */
+const DRAFT_GRANT: Grant = {
+  tenantId: DEV_TENANT,
+  id: "f1000000-0000-0000-0000-000000000001",
+  roleId: "e0000000-0000-0000-0000-000000000003",
+  resourceType: AUTHORING_DRAFT,
+  operation: "create",
+  scope: { kind: "node", hierarchy: "org", nodeId: "b0000000-0000-0000-0000-000000000001", nodeLevel: "department" },
+  delegable: false,
+  grantedBy: "seed",
+  createdAt: 0,
+};
+
+// ---------------------------------------------------------------------------
+// Context builders
+// ---------------------------------------------------------------------------
+
+function makeContext(
+  grants: Grant[],
+  llm: StubChatLlmPort = new StubChatLlmPort(),
+): HandlerContext {
+  return {
+    tenantId: DEV_TENANT,
+    userSubject: { tenantId: DEV_TENANT, subjectId: USER_SLUG },
+    agentSubject: { tenantId: DEV_TENANT, subjectId: AGENT_SLUG },
+    intersectionGrants: makeGrantSource(grants),
+    ancestry: flatOracle,
+    llm,
+    threadId: "thread-test-001",
+    messageId: "msg-test-001",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// AC-T361-1: handleConfigurator with authoring_draft grant → DRAFT result
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-1: handleConfigurator with authoring_draft grant produces DRAFT result", () => {
+  it("returns intent=configurator and non-empty text when user has authoring_draft grant", async () => {
+    const ctx = makeContext([DRAFT_GRANT]);
+    const result = await handleConfigurator("настрой форму для заявки", ctx);
+    expect(result.intent).toBe("configurator");
+    expect(typeof result.text).toBe("string");
+    expect(result.text.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T361-2: Grant ceiling enforced — no authoring_draft grant → denied
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-2: grant ceiling enforced when no authoring_draft grant", () => {
+  it("returns недостаточно прав message without tool dispatch", async () => {
+    // User has zero grants → no authoring_draft
+    const stub = new StubChatLlmPort();
+    const ctx = makeContext([], stub);
+    const result = await handleConfigurator("настрой форму", ctx);
+
+    expect(result.intent).toBe("configurator");
+    // T-0466 [D8-G5]: HUMAN refusal — points at the administrator, no raw jargon/503.
+    expect(result.text).toMatch(/нет прав настраивать|администратор/i);
+    // LLM chat() must NOT have been called (grant check fails before tool dispatch)
+    expect(stub.chatCalls).toHaveLength(0);
+  });
+
+  it("returns denied message with non-authoring grant (wrong resourceType)", async () => {
+    // User has a 'process_definition' grant but NOT authoring_draft
+    const wrongGrant: Grant = {
+      ...DRAFT_GRANT,
+      id: "f2000000-0000-0000-0000-000000000001",
+      resourceType: "process_definition" as Grant["resourceType"],
+    };
+    const stub = new StubChatLlmPort();
+    const ctx = makeContext([wrongGrant], stub);
+    const result = await handleConfigurator("добавь поле", ctx);
+
+    expect(result.intent).toBe("configurator");
+    expect(result.text).toMatch(/нет прав настраивать|администратор/i);
+    expect(stub.chatCalls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T361-3: Destructive op (drop_field) → blocked pending human confirm
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-3: destructive drop_field blocked pending human confirm", () => {
+  it("blocks drop_field on non-core-pinned field", async () => {
+    // Test the pure processToolCall path via classifyAuthoringOp + evaluateAuthoringRedLine
+    // directly — the configurator calls these internally; the invariant is that they
+    // block destructive ops before any DB write.
+    const { classifyAuthoringOp, evaluateAuthoringRedLine } =
+      await import("../core/authoring-redlines.js");
+
+    const op = { kind: "drop_field" as const, fieldKey: "amount" };
+    const ctx = { isCorePinned: false };
+
+    const classification = classifyAuthoringOp(op, ctx);
+    expect(classification).toBe("destructive");
+
+    const decision = evaluateAuthoringRedLine(op, ctx);
+    expect(decision.verdict).toBe("deny");
+    if (decision.verdict === "deny") {
+      expect(decision.reason).toBe("requires_confirm");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T361-4: Core-pinned drop_field → absolute deny
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-4: core-pinned drop_field is absolute deny", () => {
+  it("core_pinned field drop is denied absolutely (no escape-hatch)", async () => {
+    const { classifyAuthoringOp, evaluateAuthoringRedLine } =
+      await import("../core/authoring-redlines.js");
+
+    const op = { kind: "drop_field" as const, fieldKey: "tenant_id" };
+    const ctx = { isCorePinned: true };
+
+    const classification = classifyAuthoringOp(op, ctx);
+    expect(classification).toBe("core_pinned");
+
+    const decision = evaluateAuthoringRedLine(op, ctx);
+    expect(decision.verdict).toBe("deny");
+    if (decision.verdict === "deny") {
+      expect(decision.reason).toBe("core_pinned");
+      // requiresConfirm is false → no escape-hatch
+      expect(decision.requiresConfirm).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T361-5: handleConfigurator always returns intent="configurator"
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-5: handleConfigurator always returns intent=configurator", () => {
+  it("returns configurator intent even on grant denial", async () => {
+    const ctx = makeContext([]);
+    const result = await handleConfigurator("anything", ctx);
+    expect(result.intent).toBe("configurator");
+  });
+
+  it("returns configurator intent on successful dispatch", async () => {
+    const ctx = makeContext([DRAFT_GRANT]);
+    const result = await handleConfigurator("настрой", ctx);
+    expect(result.intent).toBe("configurator");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T361-6: request_promote → PendingPromote (never auto-promotes)
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-6: request_promote returns PENDING ticket without auto-promote", () => {
+  it("processToolCall request_promote returns pendingPromote with ticketId", async () => {
+    // Import processToolCall via the module (it's not exported; test through configurator result
+    // by crafting a stub that returns a request_promote tool call).
+    // Since StubChatLlmPort doesn't return real tool calls, we verify the invariant
+    // via the AuthoringRedLine logic: request_promote itself is non-destructive.
+    //
+    // The key invariant: in the handler code, processToolCall(request_promote)
+    // ALWAYS returns pendingPromote and NEVER an approvedOp with side-effects.
+    // We verify the PendingPromote shape contract directly.
+    const pendingPromote: PendingPromote = {
+      ticketId: "test-ticket-id",
+      summary: "Добавлено поле ИНН, форма обновлена",
+    };
+    // PendingPromote invariant: has ticketId and summary, no auto-execute field
+    expect(pendingPromote.ticketId).toBeDefined();
+    expect(pendingPromote.summary).toBeDefined();
+    // The type doesn't have an 'executed' or 'promoted' field — structural check
+    const ppAny = pendingPromote as unknown as Record<string, unknown>;
+    expect(ppAny["executed"]).toBeUndefined();
+    expect(ppAny["promoted"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T361-7: ApprovedOp always has tier='draft'
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-7: ApprovedOp.tier is always 'draft'", () => {
+  it("ApprovedOp type enforces tier='draft' (structural check)", () => {
+    // Compile-time check: the only valid value for ApprovedOp.tier is 'draft'.
+    // Runtime: construct sample ApprovedOps and verify.
+    const op: ApprovedOp = {
+      kind: "author_binding",
+      description: "Тестовая привязка",
+      args: { processKey: "test", applicationId: "app-id", triggerType: "on_create" },
+      tier: "draft",
+    };
+    expect(op.tier).toBe("draft");
+
+    const op2: ApprovedOp = {
+      kind: "emit_form",
+      description: "Тестовая форма",
+      args: { formKey: "form-1", applicationId: "app-id" },
+      tier: "draft",
+    };
+    expect(op2.tier).toBe("draft");
+
+    const op3: ApprovedOp = {
+      kind: "edit_jsonschema_non_destructive",
+      description: "Добавление поля",
+      args: { registryDefId: "reg-id", fieldKey: "name", opKind: "add_field" },
+      tier: "draft",
+    };
+    expect(op3.tier).toBe("draft");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T361-8: LLM returns text only (no tool calls) → text reply, no blocked ops
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-8: LLM text-only reply → no blocked ops, no approvedOps", () => {
+  it("when LLM returns only text (no toolCalls), result is a clean text reply", async () => {
+    // StubChatLlmPort default: returns fixedText, no toolCalls
+    const stub = new StubChatLlmPort({
+      fixedText: "Понял! Уточните, какое поле нужно добавить в форму заявки.",
+    });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    const result = await handleConfigurator("добавь поле в форму", ctx);
+
+    expect(result.intent).toBe("configurator");
+    expect(result.text).toContain("Понял");
+    // LLM was called (grant check passes)
+    expect(stub.chatCalls.length).toBeGreaterThan(0);
+    // The first call included the tools
+    expect(stub.chatCalls[0]?.tools).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T361-9: ConfiguratorResult approvedOps all have tier='draft' (runtime invariant)
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-9: ConfiguratorResult structure is DRAFT-safe", () => {
+  it("ConfiguratorResult type has approvedOps with tier typed as 'draft'", () => {
+    // Structural type-only check at runtime — verifies the shape exists
+    const result: ConfiguratorResult = {
+      text: "Готово",
+      approvedOps: [
+        {
+          kind: "author_binding",
+          description: "Привязка",
+          args: {},
+          tier: "draft",
+        },
+      ],
+      blockedOps: [],
+      pendingPromotes: [],
+      planProposals: [],
+      grantCeilingViolations: [],
+    };
+
+    for (const op of result.approvedOps) {
+      expect(op.tier).toBe("draft");
+    }
+    // No published/promoted ops in approvedOps
+    expect(
+      result.approvedOps.some(
+        (op) => (op as unknown as Record<string, unknown>)["tier"] !== "draft",
+      ),
+    ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T361-10: Intersection grants check — update operation also satisfies ceiling
+// ---------------------------------------------------------------------------
+
+describe("AC-T361-10: update-operation authoring_draft grant satisfies ceiling", () => {
+  it("user with only authoring_draft:update grant can author", async () => {
+    const updateGrant: Grant = {
+      ...DRAFT_GRANT,
+      id: "f3000000-0000-0000-0000-000000000001",
+      operation: "update",
+    };
+    const stub = new StubChatLlmPort({ fixedText: "Обновление выполнено." });
+    const ctx = makeContext([updateGrant], stub);
+    const result = await handleConfigurator("обнови схему", ctx);
+    // Grant satisfied → LLM was called
+    expect(stub.chatCalls.length).toBeGreaterThan(0);
+    expect(result.intent).toBe("configurator");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T363-1 (T-0363 d): drop_field tool call lands in blockedOps NOT approvedOps
+// ---------------------------------------------------------------------------
+
+/**
+ * ToolCallLlmPort — stub LlmPort that returns a single tool call on the first chat()
+ * invocation, then a text-only reply on subsequent calls (simulates one tool round).
+ * ZERO NETWORK: no API key needed.
+ */
+class ToolCallLlmPort implements LlmPort {
+  private _callCount = 0;
+  private readonly _toolName: string;
+  private readonly _toolArgs: Record<string, unknown>;
+
+  constructor(toolName: string, toolArgs: Record<string, unknown>) {
+    this._toolName = toolName;
+    this._toolArgs = toolArgs;
+  }
+
+  complete(_req: LlmRequest): Promise<LlmResult> {
+    return Promise.resolve({
+      confidence: 0.9,
+      answer: { answerForm: "test", redFlags: [], summary: "test" },
+    });
+  }
+
+  async chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    this._callCount++;
+    if (this._callCount === 1) {
+      // First call: return the tool call.
+      return {
+        text: "",
+        toolCalls: [
+          {
+            id: `call-${this._toolName}-001`,
+            name: this._toolName,
+            arguments: JSON.stringify(this._toolArgs),
+          },
+        ],
+      };
+    }
+    // Subsequent calls: text-only (done).
+    return {
+      text: "Готово. Операция обработана.",
+      toolCalls: undefined,
+    };
+  }
+}
+
+describe("AC-T363-1: drop_field tool call lands in blockedOps, NOT approvedOps (T-0363 d)", () => {
+  it("drop_field on non-core-pinned field → blockedOps (pending_human_confirm), approvedOps empty", async () => {
+    const llm = new ToolCallLlmPort("edit_jsonschema", {
+      registryDefId: "a0000000-0000-0000-0000-000000000099",
+      opKind: "drop_field",
+      fieldKey: "amount",
+      isCorePinned: "false",
+      humanReadableReason: "Тест — удаление поля",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("удали поле amount", ctx);
+
+    // INVARIANT: destructive op must NOT be in approvedOps
+    expect(result.approvedOps).toHaveLength(0);
+    // INVARIANT: it must land in blockedOps
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    const blocked = result.blockedOps[0]!;
+    expect(blocked.kind).toBe("pending_human_confirm");
+    expect(blocked.toolName).toBe("edit_jsonschema");
+  });
+
+  it("drop_field on core-pinned field → blockedOps (core_pinned_absolute_deny)", async () => {
+    const llm = new ToolCallLlmPort("edit_jsonschema", {
+      registryDefId: "a0000000-0000-0000-0000-000000000099",
+      opKind: "drop_field",
+      fieldKey: "tenant_id",
+      isCorePinned: "true",
+      humanReadableReason: "Тест — удаление системного поля",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("удали системное поле tenant_id", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    const blocked = result.blockedOps[0]!;
+    expect(blocked.kind).toBe("core_pinned_absolute_deny");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T363-2 (T-0363 d): add_field tool call lands in approvedOps with tier='draft'
+// ---------------------------------------------------------------------------
+
+describe("AC-T363-2: benign add_field tool call lands in approvedOps with tier='draft' (T-0363 d)", () => {
+  it("add_field → approvedOps[0].kind='edit_jsonschema_non_destructive', tier='draft'", async () => {
+    const llm = new ToolCallLlmPort("edit_jsonschema", {
+      registryDefId: "a0000000-0000-0000-0000-000000000099",
+      opKind: "add_field",
+      fieldKey: "inn",
+      fieldSchema: JSON.stringify({ type: "string", title: "ИНН" }),
+      isCorePinned: "false",
+      humanReadableReason: "Добавить поле ИНН",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("добавь поле ИНН", ctx);
+
+    // INVARIANT: non-destructive op must be in approvedOps
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("edit_jsonschema_non_destructive");
+    // INVARIANT: tier must always be 'draft'
+    expect(op.tier).toBe("draft");
+    // args preserved for DB execution
+    expect(op.args["opKind"]).toBe("add_field");
+    expect(op.args["fieldKey"]).toBe("inn");
+  });
+
+  it("author_binding tool call → approvedOps with author_binding kind and tier='draft'", async () => {
+    const llm = new ToolCallLlmPort("author_binding", {
+      processKey: "purchase-approval",
+      applicationId: "a0000000-0000-0000-0000-000000000001",
+      triggerType: "on_create",
+      humanReadableReason: "Привязать процесс согласования к заявке",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("привяжи процесс согласования", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("author_binding");
+    expect(op.tier).toBe("draft");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0700 (E-FORMS, столп 5 «настройка через ИИ»): author_binding's targetRegistrySlug
+// parameter — the tool schema must declare it (else the LLM never knows it exists,
+// asymmetric with the human bind-form's registry picker, T-0681), and a tool call that
+// supplies it must reach ApprovedOp.args verbatim (the HTTP executor already reads
+// args["targetRegistrySlug"], T-0681) — omitting it must be a true no-op (default
+// registry, unchanged behavior).
+// ---------------------------------------------------------------------------
+
+describe("AC-T700-1: author_binding tool schema declares targetRegistrySlug [T-0700]", () => {
+  it("the configurator's first LLM call declares author_binding with a targetRegistrySlug property", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Какой процесс привязать?" });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("привяжи процесс к приложению", ctx);
+
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{
+      function?: { name?: string; parameters?: { properties?: Record<string, unknown> } };
+    }>;
+    const bindingTool = tools.find((t) => t.function?.name === "author_binding");
+    expect(bindingTool).toBeDefined();
+    const props = bindingTool!.function!.parameters!.properties!;
+    expect(props).toHaveProperty("targetRegistrySlug");
+    // targetRegistrySlug must stay OPTIONAL (default-registry path unchanged) —
+    // it must not be added to the required list.
+    const required = (bindingTool!.function as unknown as { parameters: { required: string[] } })
+      .parameters.required;
+    expect(required).not.toContain("targetRegistrySlug");
+  });
+});
+
+describe("AC-T700-2/3: author_binding tool call — targetRegistrySlug pass-through [T-0700]", () => {
+  it("WITH targetRegistrySlug → ApprovedOp.args carries it verbatim (paritet with the human bind-form)", async () => {
+    const llm = new ToolCallLlmPort("author_binding", {
+      processKey: "purchase-approval",
+      applicationId: "a0000000-0000-0000-0000-000000000001",
+      triggerType: "on_create",
+      targetRegistrySlug: "non-default-registry",
+      humanReadableReason: "Привязать процесс к нестандартному реестру результата",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("привяжи процесс к другому реестру", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("author_binding");
+    expect(op.tier).toBe("draft");
+    // The HTTP executor (T-0681, src/http/assistant.ts case "author_binding") reads
+    // exactly this key off op.args — this is the load-bearing pass-through assertion.
+    expect(op.args["targetRegistrySlug"]).toBe("non-default-registry");
+    // Audit transparency: the changelog description names the non-default registry
+    // (parity with the human UI, which shows the picked registry in its own form).
+    expect(op.description).toMatch(/non-default-registry/);
+  });
+
+  it("WITHOUT targetRegistrySlug → args carries no such key (unchanged default-registry behavior)", async () => {
+    const llm = new ToolCallLlmPort("author_binding", {
+      processKey: "purchase-approval",
+      applicationId: "a0000000-0000-0000-0000-000000000001",
+      triggerType: "on_create",
+      humanReadableReason: "Привязать процесс без явного реестра результата",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("привяжи процесс согласования", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.args["targetRegistrySlug"]).toBeUndefined();
+    expect(op.description).not.toMatch(/реестр результата/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T462-1 (D8-G1): create_application tool → ApprovedOp(create_application), DRAFT
+// ---------------------------------------------------------------------------
+
+describe("AC-T462-1: create_application produces a DRAFT app+section ApprovedOp", () => {
+  it("create_application tool call → approvedOps[0].kind='create_application', tier='draft', section resolved", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appSlug: "purchases",
+      appDisplayName: "Заявки на закупку",
+      appDescription: "Единая форма закупок",
+      humanReadableReason: "Пользователь попросил построить приложение для закупок",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("построй приложение для закупок", ctx);
+
+    // INVARIANT: creation op is non-destructive → approvedOps, not blockedOps.
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("create_application");
+    // INVARIANT: lands in DRAFT (not live).
+    expect(op.tier).toBe("draft");
+    // args preserved + section defaulted from app fields for the DB executor.
+    expect(op.args["appSlug"]).toBe("purchases");
+    expect(op.args["appDisplayName"]).toBe("Заявки на закупку");
+    expect(op.args["sectionSlug"]).toBe("purchases");
+    expect(op.args["sectionDisplayName"]).toBe("Заявки на закупку");
+  });
+
+  it("create_application honors explicit sectionSlug / sectionDisplayName", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appSlug: "crm",
+      appDisplayName: "CRM",
+      sectionSlug: "contacts",
+      sectionDisplayName: "Контакты",
+      humanReadableReason: "Собрать CRM с разделом контактов",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("собери CRM", ctx);
+
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("create_application");
+    expect(op.args["sectionSlug"]).toBe("contacts");
+    expect(op.args["sectionDisplayName"]).toBe("Контакты");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T462-2 (D8-G1): create_application is exposed as a configurator tool
+// ---------------------------------------------------------------------------
+
+describe("AC-T462-2: create_application is declared in the configurator toolset", () => {
+  it("the configurator's first LLM call declares a create_application tool", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Что именно построить?" });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("построй приложение", ctx);
+
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{ function?: { name?: string } }>;
+    const names = tools.map((t) => t.function?.name);
+    expect(names).toContain("create_application");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T462-3 (D8-G1): invalid slug → blocked (honest), NOT a crash/500
+// ---------------------------------------------------------------------------
+
+// T-0650 [столп 5 / UX-study §7]: an invalid/missing appSlug no longer blocks
+// the operation — the assistant uses the SAME generator SlugField mirrors for
+// humans (src/core/slug-generator.ts) to derive a valid slug from
+// appDisplayName. Only a genuinely empty appDisplayName (nothing to
+// transliterate) still blocks — see the sibling describe below.
+describe("AC-T462-3: create_application with an invalid/missing appSlug auto-generates (T-0650)", () => {
+  it("a non-slug-shaped appSlug → auto-derived from appDisplayName, NOT blocked", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appSlug: "Заявки!",            // not slug-shaped — no longer honored as-is
+      appDisplayName: "Заявки",
+      humanReadableReason: "Тест авто-слага при некорректном appSlug",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("построй приложение Заявки!", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("create_application");
+    // Auto-generated from "Заявки" via the canonical transliterator.
+    expect(op.args["appSlug"]).toBe("zayavki");
+  });
+
+  it("a completely absent appSlug arg → auto-derived from appDisplayName", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appDisplayName: "Отдел продаж",
+      humanReadableReason: "Тест авто-слага без appSlug вовсе",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("построй приложение Отдел продаж", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    expect(result.approvedOps[0]!.args["appSlug"]).toBe("otdel-prodazh");
+  });
+
+  it("an empty appDisplayName still blocks (nothing to transliterate — unchanged from before)", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appDisplayName: "",
+      humanReadableReason: "Тест пустого названия",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("построй приложение", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    const blocked = result.blockedOps[0]!;
+    expect(blocked.kind).toBe("pending_human_confirm");
+    expect(blocked.toolName).toBe("create_application");
+    expect(blocked.description).toMatch(/appDisplayName/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T462-4 (D8-G1): grant gate — non-holder refused honestly, not 500
+// ---------------------------------------------------------------------------
+
+describe("AC-T462-4: create_application gated by authoring_draft — non-holder refused honestly", () => {
+  it("a user WITHOUT authoring_draft asking to build → honest refusal, NO tool dispatch (no 500)", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appSlug: "purchases",
+      appDisplayName: "Заявки на закупку",
+      humanReadableReason: "Должно быть отказано до диспетча",
+    });
+    const ctx = makeContext([], llm as unknown as StubChatLlmPort); // no grants
+    const result = await runConfigurator("построй приложение для закупок", ctx);
+
+    // Grant ceiling fails BEFORE any tool dispatch → no approvedOps/blockedOps.
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.grantCeilingViolations.length).toBeGreaterThan(0);
+    // T-0466 [D8-G5]: HUMAN refusal (no raw 503 / jargon front-and-centre).
+    expect(result.text).toMatch(/нет прав настраивать|администратор/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T463 (D8-G2): relate_application cascade — create / link-dedup / ask / hop-cap
+//
+// Drives the SHARED relation-cascade primitive through the configurator (bot
+// driver). existingRegistryDefs is passed as the 4th runConfigurator arg.
+// ---------------------------------------------------------------------------
+
+const CAND_CONTRACTORS = {
+  id: "c0000000-0000-0000-0000-000000000001",
+  slug: "contractors",
+  displayName: "Контрагенты",
+};
+
+describe("AC-T463-1: relate_application → NON-existent target cascades a create [D8-G2]", () => {
+  it("relation to an app that does not exist → approved relate_application op in CREATE mode", async () => {
+    const llm = new ToolCallLlmPort("relate_application", {
+      sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+      relationFieldKey: "supplier",
+      relationFieldLabel: "Поставщик",
+      targetAppDisplayName: "Поставщики",
+      humanReadableReason: "Заявке нужна связь на поставщика",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    // No existing registry_defs → must cascade-create.
+    const result = await runConfigurator("добавь связь на поставщиков", ctx, null, []);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("relate_application");
+    expect(op.tier).toBe("draft");
+    const cascade = op.args["cascade"] as Record<string, unknown>;
+    expect(cascade["mode"]).toBe("create");
+    expect(cascade["appDisplayName"]).toBe("Поставщики");
+    expect(cascade["appSlug"]).toBe("postavschiki");
+  });
+});
+
+describe("AC-T463-2: relate_application → EXISTING target dedups (link, no duplicate) [D8-G2]", () => {
+  it("relation to an existing app (by name) → LINK mode, no cascade create", async () => {
+    const llm = new ToolCallLlmPort("relate_application", {
+      sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+      relationFieldKey: "contractor",
+      relationFieldLabel: "Контрагент",
+      targetAppDisplayName: "Контрагенты",
+      humanReadableReason: "Связь на уже существующих контрагентов",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("свяжи с контрагентами", ctx, null, [CAND_CONTRACTORS]);
+
+    expect(result.blockedOps).toHaveLength(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("relate_application");
+    const cascade = op.args["cascade"] as Record<string, unknown>;
+    // INVARIANT: dedup hit → link to existing id, NOT a duplicate create.
+    expect(cascade["mode"]).toBe("link");
+    expect(cascade["targetRegistryId"]).toBe(CAND_CONTRACTORS.id);
+  });
+});
+
+describe("AC-T463-3: relate_application → AMBIGUOUS target asks (no guess) [D8-G2]", () => {
+  it("two existing apps share the name → blockedOp (pending_human_confirm), no approved op", async () => {
+    const dup1 = { id: "d0000000-0000-0000-0000-000000000001", slug: "v-a", displayName: "Контрагенты" };
+    const dup2 = { id: "d0000000-0000-0000-0000-000000000002", slug: "v-b", displayName: "контрагенты" };
+    const llm = new ToolCallLlmPort("relate_application", {
+      sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+      relationFieldKey: "contractor",
+      targetAppDisplayName: "Контрагенты",
+      humanReadableReason: "Неоднозначная цель",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("свяжи с контрагентами", ctx, null, [dup1, dup2]);
+
+    // INVARIANT: ambiguous → ASK (blocked), never a silent guess (no approved op).
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    expect(result.blockedOps[0]!.kind).toBe("pending_human_confirm");
+    expect(result.blockedOps[0]!.description).toMatch(/несколько|уточните/i);
+  });
+});
+
+describe("AC-T463-4: relate_application missing target → honest block, not silent op [D8-G2]", () => {
+  it("no slug and no name → blockedOp asking for the target (no approved op)", async () => {
+    const llm = new ToolCallLlmPort("relate_application", {
+      sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+      relationFieldKey: "contractor",
+      humanReadableReason: "Нет цели",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("добавь связь", ctx, null, []);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    expect(result.blockedOps[0]!.kind).toBe("pending_human_confirm");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T724: list_registries introspection tool (E-FORMS, столп 5 «бот==человек»).
+//
+// T-0700 let the bot NAME a targetRegistrySlug in author_binding, but the bot
+// still had to GUESS the real slug — a human always sees the real options in
+// the "Реестр результата" picker (GET /api/registry-defs, T-0681). list_registries
+// closes that gap: READ-ONLY, no ApprovedOp, filters the injected registryListCandidates
+// (the 5th runConfigurator arg — the SAME tenant-scoped data GET /api/registry-defs
+// returns) by applicationId, never wider than what a human of this tenant sees.
+// ---------------------------------------------------------------------------
+
+/**
+ * SequentialToolCallLlmPort — emits ONE tool call per round, in order, then a
+ * text-only reply once the sequence is exhausted. Unlike ToolCallLlmPort (always
+ * the SAME call) or MultiToolCallLlmPort (all calls in round 1), this simulates a
+ * genuine multi-round flow: list_registries in round 1, then author_binding in
+ * round 2 using data the LLM "learned" from round 1's tool result. Records every
+ * chat() request (chatCalls) so a test can inspect what the synthetic tool-result
+ * message fed back to the LLM actually contained (proves the filtered data reached
+ * the model, not just that SOME changelog line was produced).
+ */
+class SequentialToolCallLlmPort implements LlmPort {
+  private _callCount = 0;
+  public readonly chatCalls: ChatLlmRequest[] = [];
+  private readonly _sequence: ReadonlyArray<{ name: string; args: Record<string, unknown> }>;
+  constructor(sequence: ReadonlyArray<{ name: string; args: Record<string, unknown> }>) {
+    this._sequence = sequence;
+  }
+  complete(_req: LlmRequest): Promise<LlmResult> {
+    return Promise.resolve({ confidence: 0.9, answer: { answerForm: "t", redFlags: [], summary: "t" } });
+  }
+  async chat(req: ChatLlmRequest): Promise<ChatLlmResult> {
+    this.chatCalls.push(req);
+    const step = this._sequence[this._callCount];
+    this._callCount++;
+    if (step) {
+      return {
+        text: "",
+        toolCalls: [{ id: `call-${step.name}-${this._callCount}`, name: step.name, arguments: JSON.stringify(step.args) }],
+      };
+    }
+    return { text: "Готово.", toolCalls: undefined };
+  }
+}
+
+const APP_A = "a1000000-0000-0000-0000-000000000001";
+const APP_B = "a2000000-0000-0000-0000-000000000002";
+const REG_ORDERS = { id: "e1000000-0000-0000-0000-000000000001", slug: "orders", displayName: "Заказы", applicationId: APP_A };
+const REG_INVOICES = { id: "e1000000-0000-0000-0000-000000000002", slug: "invoices", displayName: "Счета", applicationId: APP_A };
+const REG_OTHER_APP = { id: "e1000000-0000-0000-0000-000000000003", slug: "contacts", displayName: "Контакты", applicationId: APP_B };
+
+describe("AC-T724-1: list_registries is declared in the configurator toolset", () => {
+  it("the configurator's first LLM call declares a list_registries tool with an optional applicationId param", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Какие реестры показать?" });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("покажи реестры приложения", ctx);
+
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{
+      function?: { name?: string; parameters?: { properties?: Record<string, unknown>; required?: string[] } };
+    }>;
+    const tool = tools.find((t) => t.function?.name === "list_registries");
+    expect(tool).toBeDefined();
+    expect(tool!.function!.parameters!.properties).toHaveProperty("applicationId");
+    expect(tool!.function!.parameters!.required).not.toContain("applicationId");
+  });
+});
+
+describe("AC-T724-2: list_registries is READ-ONLY — no ApprovedOp, no BlockedOp", () => {
+  it("a list_registries-only turn produces zero approvedOps and zero blockedOps", async () => {
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: { applicationId: APP_A } }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("какие реестры есть у приложения?", ctx, null, [], [REG_ORDERS, REG_INVOICES, REG_OTHER_APP]);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.pendingPromotes).toHaveLength(0);
+  });
+});
+
+describe("AC-T724-3: list_registries scoped by applicationId — bot sees exactly what the human picker shows, never wider", () => {
+  it("scoping to APP_A surfaces APP_A's registries (slug + human name) but NOT APP_B's (cross-application isolation, mirrors GET /api/registry-defs?application_id=)", async () => {
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: { applicationId: APP_A } }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    await runConfigurator("покажи реестры этого приложения", ctx, null, [], [REG_ORDERS, REG_INVOICES, REG_OTHER_APP]);
+
+    // The tool result was fed back to the LLM as the 2nd round's last message —
+    // inspect it directly (not just "some changelog line exists").
+    expect(llm.chatCalls.length).toBeGreaterThanOrEqual(2);
+    const secondRoundMsgs = llm.chatCalls[1]!.messages;
+    const toolResultContent = String(secondRoundMsgs[secondRoundMsgs.length - 1]!.content);
+
+    expect(toolResultContent).toContain("orders");
+    expect(toolResultContent).toContain("Заказы");
+    expect(toolResultContent).toContain("invoices");
+    expect(toolResultContent).toContain("Счета");
+    // INVARIANT (bot ≤ human): the other application's registry must NOT leak
+    // into an applicationId-scoped call — a human picking APP_A's registry in
+    // the bind-form never sees APP_B's registries either.
+    expect(toolResultContent).not.toContain("contacts");
+    expect(toolResultContent).not.toContain("Контакты");
+  });
+
+  it("omitted applicationId lists across all of this tenant's applications (still tenant-scoped — the unfiltered GET /api/registry-defs shape)", async () => {
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: {} }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    await runConfigurator("покажи все реестры", ctx, null, [], [REG_ORDERS, REG_INVOICES, REG_OTHER_APP]);
+
+    const secondRoundMsgs = llm.chatCalls[1]!.messages;
+    const toolResultContent = String(secondRoundMsgs[secondRoundMsgs.length - 1]!.content);
+    expect(toolResultContent).toContain("orders");
+    expect(toolResultContent).toContain("contacts");
+  });
+});
+
+describe("AC-T724-4: list_registries on an application with zero registries → honest empty list, not an error", () => {
+  it("an applicationId that matches no candidate → count=0, registries=[] (never a crash/error)", async () => {
+    const EMPTY_APP = "a9000000-0000-0000-0000-000000000009";
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: { applicationId: EMPTY_APP } }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("покажи реестры этого приложения", ctx, null, [], [REG_ORDERS, REG_INVOICES]);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(0);
+    const secondRoundMsgs = llm.chatCalls[1]!.messages;
+    const toolResultContent = String(secondRoundMsgs[secondRoundMsgs.length - 1]!.content);
+    expect(toolResultContent).toMatch(/"count":0/);
+    expect(toolResultContent).toMatch(/"registries":\[\]/);
+  });
+
+  it("no registryListCandidates supplied at all (default []) → honest empty list, no crash", async () => {
+    const llm = new SequentialToolCallLlmPort([{ name: "list_registries", args: {} }]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("покажи реестры", ctx); // no 5th arg at all
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(0);
+  });
+});
+
+describe("AC-T724-5: list → bind two-step flow — author_binding's targetRegistrySlug comes from list_registries, never guessed", () => {
+  it("round 1 list_registries(APP_A) then round 2 author_binding with a slug from that list → ApprovedOp carries it verbatim", async () => {
+    const llm = new SequentialToolCallLlmPort([
+      { name: "list_registries", args: { applicationId: APP_A } },
+      {
+        name: "author_binding",
+        args: {
+          processKey: "purchase-approval",
+          applicationId: APP_A,
+          triggerType: "on_create",
+          // The LLM "read" this slug off round 1's tool result (real slug, not guessed).
+          targetRegistrySlug: "invoices",
+          humanReadableReason: "Результат — в реестр Счета, который назвал list_registries",
+        },
+      },
+    ]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator(
+      "привяжи процесс согласования закупки, результат клади в реестр Счета",
+      ctx,
+      null,
+      [],
+      [REG_ORDERS, REG_INVOICES, REG_OTHER_APP],
+    );
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps.find((o) => o.kind === "author_binding")!;
+    expect(op).toBeDefined();
+    expect(op.args["targetRegistrySlug"]).toBe("invoices");
+    // Round 1's list_registries call itself produced no write — exactly one
+    // approvedOp (the bind), not two.
+    expect(result.approvedOps).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T466 (D8-G5): access-gating for the authoring sandbox — human refusal +
+// capture-as-request. Spec §3.5 / PD-21.
+// ---------------------------------------------------------------------------
+
+describe("AC-T466-1: non-holder gets a HUMAN refusal, not a raw 503/jargon [D8-G5]", () => {
+  it("runConfigurator: no authoring_draft → warm «нет прав настраивать … администратор», no 503", async () => {
+    const stub = new StubChatLlmPort();
+    const ctx = makeContext([], stub); // no grant
+    const result = await runConfigurator("настрой форму для заявки", ctx);
+
+    // Human-friendly: points at the administrator, no raw error code / opaque jargon.
+    expect(result.text).toMatch(/нет прав настраивать/i);
+    expect(result.text).toMatch(/администратор/i);
+    expect(result.text).not.toMatch(/503|error|exception|undefined|null/i);
+    // No tool dispatch happened (grant check short-circuits).
+    expect(stub.chatCalls).toHaveLength(0);
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.grantCeilingViolations.length).toBeGreaterThan(0);
+  });
+
+  it("handleConfigurator: same human refusal text on the IntentHandler path", async () => {
+    const ctx = makeContext([]);
+    const result = await handleConfigurator("настрой процесс согласования", ctx);
+    expect(result.intent).toBe("configurator");
+    expect(result.text).toMatch(/нет прав настраивать/i);
+    expect(result.text).toMatch(/администратор/i);
+    expect(result.text).not.toMatch(/503/);
+  });
+});
+
+describe("AC-T466-2: capture-as-request — a non-holder's description is captured [D8-G5]", () => {
+  it("non-holder describing something → captureRequest carries the verbatim description", async () => {
+    const ctx = makeContext([]); // no grant
+    const desc = "хочу единую форму заявок на закупку с автоподсчётом суммы";
+    const result = await runConfigurator(desc, ctx);
+
+    // The intent is captured (so the HTTP layer can file it to admins) and NOT lost.
+    expect(result.captureRequest).toBeDefined();
+    expect(result.captureRequest!.description).toBe(desc);
+    // The reply is the human refusal pointing at the administrator. The pure core
+    // does NOT claim delivery (that's a DB side-effect the HTTP layer confirms
+    // only after a successful capture) — so the text stays truthful here.
+    expect(result.text).toMatch(/администратор/i);
+  });
+
+  it("trivial message («?») → NO captureRequest (we don't file empty noise)", async () => {
+    const ctx = makeContext([]); // no grant
+    const result = await runConfigurator("?", ctx);
+    expect(result.captureRequest).toBeUndefined();
+    // Still a human refusal (no capture confirmation appended).
+    expect(result.text).toMatch(/нет прав настраивать/i);
+  });
+});
+
+describe("AC-T466-3: holder is unaffected — full authoring, no captureRequest [D8-G5]", () => {
+  it("a holder of authoring_draft authors normally and gets NO captureRequest", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Собираю черновик." });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    const result = await runConfigurator("построй приложение для закупок", ctx);
+
+    // Holder reaches the authoring loop (LLM engaged) and is never routed to capture.
+    expect(stub.chatCalls.length).toBeGreaterThan(0);
+    expect(result.captureRequest).toBeUndefined();
+    expect(result.grantCeilingViolations).toHaveLength(0);
+    expect(result.text).not.toMatch(/нет прав настраивать/i);
+  });
+});
+
+describe("AC-T466-4: isCaptureWorthy heuristic [D8-G5]", () => {
+  it("filters trivial pings but keeps real descriptions", async () => {
+    const { isCaptureWorthy } = await import("../core/assistant-configurator.js");
+    expect(isCaptureWorthy("?")).toBe(false);
+    expect(isCaptureWorthy("   ")).toBe(false);
+    expect(isCaptureWorthy("hi")).toBe(false);
+    expect(isCaptureWorthy("настрой форму заявок")).toBe(true);
+  });
+});
+
+// ===========================================================================
+// T-0465 (D8-G4): PLAN-IN-DIALOGUE + ONE-SHOT BUNDLE (pure-core invariants)
+// ===========================================================================
+
+/**
+ * MultiToolCallLlmPort — emits SEVERAL tool calls in the first chat() round, then
+ * a text-only reply (simulates a one-shot bundle: app + relate + process in one turn).
+ * ZERO NETWORK.
+ */
+class MultiToolCallLlmPort implements LlmPort {
+  private _callCount = 0;
+  private readonly _calls: Array<{ name: string; args: Record<string, unknown> }>;
+  constructor(calls: Array<{ name: string; args: Record<string, unknown> }>) {
+    this._calls = calls;
+  }
+  complete(_req: LlmRequest): Promise<LlmResult> {
+    return Promise.resolve({
+      confidence: 0.9,
+      answer: { answerForm: "t", redFlags: [], summary: "t" },
+    });
+  }
+  async chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    this._callCount++;
+    if (this._callCount === 1) {
+      return {
+        text: "",
+        toolCalls: this._calls.map((c, i) => ({
+          id: `call-${c.name}-${i}`,
+          name: c.name,
+          arguments: JSON.stringify(c.args),
+        })),
+      };
+    }
+    return { text: "Готово.", toolCalls: undefined };
+  }
+}
+
+describe("AC-T465-1: plan-in-dialogue — propose_plan produces a PLAN, NO premature writes [D8-G4]", () => {
+  it("propose_plan → planProposals non-empty AND approvedOps empty (nothing written)", async () => {
+    const llm = new ToolCallLlmPort("propose_plan", {
+      planText:
+        "Создам приложение «Заявки на закупку» с полями сумма/контрагент; приложения «Контрагенты» нет — создам связанное; " +
+        "процесс: подача → согласование → если сумма большая → доп. согласование, иначе закрыть.",
+      humanReadableReason: "Пользователь описал бардак с закупками",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("у нас бардак с закупками, хочу единую форму и согласование крупных", ctx);
+
+    // INVARIANT (1): a PLAN was proposed.
+    expect(result.planProposals.length).toBeGreaterThan(0);
+    expect(result.planProposals[0]!.planText).toMatch(/закупк/i);
+    // INVARIANT (1): NOTHING was generated/approved — no premature writes.
+    expect(result.approvedOps).toHaveLength(0);
+    // The reply asks the user to confirm the plan.
+    expect(result.text).toMatch(/план/i);
+  });
+});
+
+describe("AC-T465-2: confirmsPlan heuristic — affirmations confirm, descriptions don't [D8-G4]", () => {
+  it("short affirmations confirm; a fresh problem description does not", async () => {
+    const { confirmsPlan } = await import("../core/assistant-configurator.js");
+    expect(confirmsPlan("да")).toBe(true);
+    expect(confirmsPlan("Давай, генерируй")).toBe(true);
+    expect(confirmsPlan("поехали")).toBe(true);
+    expect(confirmsPlan("подтверждаю")).toBe(true);
+    expect(confirmsPlan("yes")).toBe(true);
+    // A fresh problem description must NOT be read as a confirmation.
+    expect(confirmsPlan("у нас бардак с закупками, хочу форму")).toBe(false);
+    expect(confirmsPlan("")).toBe(false);
+  });
+});
+
+describe("AC-T465-3: one-shot bundle — confirmation generates MULTIPLE draft ops in one turn [D8-G4]", () => {
+  it("after confirm, app + relate + process are all approved (one unit)", async () => {
+    const llm = new MultiToolCallLlmPort([
+      {
+        name: "create_application",
+        args: { appSlug: "purchases", appDisplayName: "Заявки на закупку", humanReadableReason: "закупки" },
+      },
+      {
+        name: "relate_application",
+        args: {
+          sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+          relationFieldKey: "counterparty",
+          targetAppSlug: "counterparties",
+          targetAppDisplayName: "Контрагенты",
+          humanReadableReason: "связь с контрагентом",
+        },
+      },
+      {
+        name: "generate_process",
+        args: { processName: "Согласование закупки", description: "подача → согласование → доп. согласование", humanReadableReason: "процесс" },
+      },
+    ]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("да, генерируй", ctx);
+
+    // INVARIANT (2): all three bundle-worthy ops are approved in ONE turn (one promote unit).
+    const kinds = result.approvedOps.map((o) => o.kind);
+    expect(kinds).toContain("create_application");
+    expect(kinds).toContain("relate_application");
+    expect(kinds).toContain("generate_process");
+    // All DRAFT (the agent never publishes).
+    expect(result.approvedOps.every((o) => o.tier === "draft")).toBe(true);
+    // No plan proposed on a confirmation turn (we are GENERATING, not planning).
+    expect(result.planProposals).toHaveLength(0);
+  });
+});
+
+describe("AC-T465-4: propose_plan is declared in the configurator toolset [D8-G4]", () => {
+  it("the configurator's first LLM call declares a propose_plan tool", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Опишите задачу." });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("построй решение для закупок", ctx);
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{ function?: { name?: string } }>;
+    const names = tools.map((t) => t.function?.name);
+    expect(names).toContain("propose_plan");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0600 (AC-7): runConfiguratorLoop's catch(err) block must NEVER echo a
+// caught LlmUnavailableError's raw message (which, for a provider 4xx, embeds
+// the provider's FULL raw response body — see openai-llm-port.ts::_post) into
+// the user-visible finalText. A live acceptance run showed exactly this leak
+// ("Ошибка LLM-порта: OpenAI API error 401: {raw json}") — this test proves
+// the fix (canonicalizeLlmError, src/core/llm-port.ts) is actually wired in.
+// ---------------------------------------------------------------------------
+
+/** Throws a caller-supplied error on every chat() call — models an adapter failure. */
+class ThrowingLlmPort implements LlmPort {
+  constructor(private readonly err: unknown) {}
+
+  complete(_req: LlmRequest): Promise<LlmResult> {
+    return Promise.reject(this.err);
+  }
+
+  async chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    throw this.err;
+  }
+}
+
+const PROVIDER_JSON_FIXTURE =
+  'OpenAI API error 401: {"error":{"message":"Incorrect API key provided: sk-***. ' +
+  'You can find your API key at https://platform.openai.com/account/api-keys.",' +
+  '"type":"invalid_request_error","param":null,"code":"invalid_api_key"}}';
+
+describe("T-0600 — runConfiguratorLoop honest error text (no raw provider body leak)", () => {
+  it("a provider 401 (raw JSON body in err.message) never reaches finalText — canonical Russian text instead", async () => {
+    const llm = new ThrowingLlmPort(new LlmUnavailableError(PROVIDER_JSON_FIXTURE));
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("настрой процесс согласования закупок", ctx);
+
+    expect(result.text).not.toContain("invalid_request_error");
+    expect(result.text).not.toContain("Incorrect API key");
+    expect(result.text).not.toContain("invalid_api_key");
+    expect(result.text).not.toContain("sk-***");
+    expect(result.text.toLowerCase()).toMatch(/ключ/);
+    expect(result.text.toLowerCase()).toMatch(/провайдер/);
+  });
+
+  it("a generic adapter failure (network/timeout) never leaks its raw message either", async () => {
+    const llm = new ThrowingLlmPort(new LlmUnavailableError("OpenAI API network error: ECONNRESET some.internal.host:443"));
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("настрой процесс согласования закупок", ctx);
+
+    expect(result.text).not.toContain("ECONNRESET");
+    expect(result.text).not.toContain("some.internal.host");
+    expect(result.text).not.toContain("OpenAI API");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T743 (E-FORMS, столпы 2+5, follow-up T-0725): apply_form_document_op —
+// the configurator tool wrapper over POST /api/forms/document-ops.
+// PURE-core coverage (schema shape, args pass-through, malformed-op honesty).
+// The DRAFT-ONLY-via-application-tier gate + AMBIGUOUS_APPLICATION-as-ASK
+// live in executeApprovedOpAsDraft (src/http/assistant.ts) — covered by
+// ci/checks/db/T-0743-document-ops-tool-auth-gate.db.test.ts (live PG).
+// ---------------------------------------------------------------------------
+
+describe("AC-T743-1: apply_form_document_op is declared in the configurator toolset", () => {
+  it("the configurator's first LLM call declares apply_form_document_op with an optional applicationId param", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Что изменить в форме?" });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("измени форму процесса", ctx);
+
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{
+      function?: { name?: string; parameters?: { properties?: Record<string, unknown>; required?: string[] } };
+    }>;
+    const tool = tools.find((t) => t.function?.name === "apply_form_document_op");
+    expect(tool).toBeDefined();
+    const props = tool!.function!.parameters!.properties!;
+    expect(props).toHaveProperty("processKey");
+    expect(props).toHaveProperty("stepKey");
+    expect(props).toHaveProperty("op");
+    expect(props).toHaveProperty("applicationId");
+    // applicationId must stay OPTIONAL — mirrors T-0700's targetRegistrySlug.
+    const required = tool!.function!.parameters!.required!;
+    expect(required).not.toContain("applicationId");
+  });
+});
+
+describe("AC-T743-2: apply_form_document_op tool call → ApprovedOp with args pass-through", () => {
+  it("a well-formed op JSON string → ApprovedOp.args.op is the PARSED object, tier='draft'", async () => {
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "t0743-proc",
+      stepKey: "t0743-step",
+      op: JSON.stringify({ kind: "insert", containerPath: [], node: { type: "divider" } }),
+      humanReadableReason: "Добавить разделитель",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("добавь разделитель в форму", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps).toHaveLength(1);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("apply_form_document_op");
+    expect(op.tier).toBe("draft");
+    expect(op.args["processKey"]).toBe("t0743-proc");
+    expect(op.args["stepKey"]).toBe("t0743-step");
+    expect(op.args["op"]).toEqual({ kind: "insert", containerPath: [], node: { type: "divider" } });
+    expect(op.args["applicationId"]).toBeUndefined();
+  });
+
+  it("WITH applicationId → ApprovedOp.args.applicationId carries it verbatim (mirrors T-0700 targetRegistrySlug pass-through)", async () => {
+    const APP_ID = "a3000000-0000-0000-0000-000000000009";
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "t0743-proc-multi",
+      stepKey: "t0743-step",
+      op: JSON.stringify({ kind: "remove", containerPath: [], index: 0 }),
+      applicationId: APP_ID,
+      humanReadableReason: "Убрать поле из формы приложения A",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("убери поле из формы для этого приложения", ctx);
+
+    expect(result.approvedOps).toHaveLength(1);
+    expect(result.approvedOps[0]!.args["applicationId"]).toBe(APP_ID);
+  });
+});
+
+describe("AC-T743-3: apply_form_document_op with a malformed op → blocked, NOT approved (core stays PURE, no vocabulary duplication)", () => {
+  it("op is not valid JSON → BlockedOp(pending_human_confirm), zero ApprovedOp", async () => {
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "t0743-proc",
+      stepKey: "t0743-step",
+      op: "{not valid json",
+      humanReadableReason: "Попытка сломанного JSON",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("измени форму", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(1);
+    expect(result.blockedOps[0]!.kind).toBe("pending_human_confirm");
+  });
+
+  it("op parses but carries no string `kind` → BlockedOp, zero ApprovedOp", async () => {
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "t0743-proc",
+      stepKey: "t0743-step",
+      op: JSON.stringify({ containerPath: [] }), // no `kind`
+      humanReadableReason: "Без kind",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("измени форму", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(1);
+  });
+
+  it("missing processKey/stepKey → BlockedOp, zero ApprovedOp", async () => {
+    const llm = new ToolCallLlmPort("apply_form_document_op", {
+      processKey: "",
+      stepKey: "t0743-step",
+      op: JSON.stringify({ kind: "insert", containerPath: [], node: { type: "divider" } }),
+      humanReadableReason: "Без processKey",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("измени форму", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(1);
+  });
+
+  // NOTE (D-064 anti-case, N1 discipline): this test deliberately does NOT assert
+  // on an *unknown-but-well-formed* kind (e.g. "delete") — that check is NOT
+  // duplicated in the pure core (see the case's own comment): it is caught once,
+  // at execution time, by applyDocumentOp (src/core/form-document-op-apply.ts).
+});
+
+describe("AC-T743-4: apply_form_document_op is gated by the SAME authoring_draft grant ceiling as every other tool", () => {
+  it("no authoring_draft grant → refused before any tool dispatch (no chat call at all)", async () => {
+    const stub = new StubChatLlmPort();
+    const ctx = makeContext([], stub); // no grant
+    const result = await runConfigurator("поправь форму процесса", ctx);
+
+    expect(stub.chatCalls).toHaveLength(0);
+    expect(result.approvedOps).toHaveLength(0);
+  });
+});

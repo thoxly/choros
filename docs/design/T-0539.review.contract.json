@@ -1,0 +1,70 @@
+{
+  "task_id": "T-0539",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "F1-seam-grounded",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/db/org.ts:674-794 · src/core/capability-authz.ts · web/src/app-shell/active-tenant.js:61 · src/server.ts",
+      "issue": "Шов ЗАЗЕМЛЁН — НЕ выдуман (security-театра нет). loadAdminContext(pool,tenantId,actorEmployeeId,nowMs) реально существует (src/db/org.ts:674) и возвращает ровно {isGenesisOwner, adminGrants, adminOrgScope} (строка 794), тип AdminContext в src/core/scoped-admin.ts:97. adminGrants грузятся через resource_type LIKE 'mgmt_object:%' — что заземляет маппинг АДМИН=adminGrants.length>0. capability-authz.ts существует с токенами authoring_draft / llm_connection:configure / system_agent:operate и предикатом holdsLlmConnectionConfigure(grants) — точный прецедент для предлагаемого holdsObservabilityRead + observability:read (free-text resourceType cast, миграция не нужна). /api/my-tenant — действительно единственный фронт-identity (active-tenant.js:61). resolveActorSlugFromAuth существует в src/server.ts. Все ссылки реальны.",
+      "suggestion": "Принять как есть; ни одной ссылки на несуществующий код."
+    },
+    {
+      "id": "F2-no-second-layer",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ADR §2.1/§3 · docs/design/T-0018-grant-authority.adr.md (NF-1, FF-A4)",
+      "issue": "Второго permission-слоя НЕТ. Тезис «нав-видимость = проекция одного резолвера» доктринально заякорен: T-0018 §2 буквально «tools, masked fields, record-rights — derived projections… there is no second permission subsystem», FF-A4 линтит параллельный *_acl/store. Эндпоинт /api/me/nav-capabilities — тонкая обёртка над loadAdminContext + SELECT capability-грантов, НЕ дублирует PDP. Rejected-таблица явно отвергает nav_acl и hardcode role-checks. projectZones — единственное место маппинга, разделяемое сервером и фронтом.",
+      "suggestion": "—"
+    },
+    {
+      "id": "F3-fail-closed",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ADR §8 · §5 visibleZones · FF-FAILCLOSED",
+      "issue": "Fail-closed корректен и машинно-проверяем. visibleZones(null)→['work'], degraded:true→['work'], 401/5xx/dev-no-db/loading → только зона РАБОТА. Ни один путь деградации не открывает admin/observability/constructor. Honest first-run (§7): приглашённый без грантов ⇒ zones:['work'], owner ⇒ isGenesisOwner ⇒ полный набор. Зеркалит T-0021 default-deny на нав-слое. FF-FAILCLOSED (vitest) делает это гейтом, не дисциплиной."
+    },
+    {
+      "id": "F4-owner-only-not-reopened",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ADR §4.2 ownerOnly / §6 · docs/design/T-0409-sod-authz.md",
+      "issue": "Owner-only НЕ переоткрыт. T-0409 фиксирует SoD-writes на isGenesisOwner (owner-only, НЕ scoped-admin). ADR рендерит SoD-редактор/free-form/смену суперпользователя через ownerOnly:true ⇒ сверка navSet.isGenesisOwner, БЕЗ нового зеркального grant-axis. Согласовано с T-0409; non-goal 5 явно это фиксирует."
+    },
+    {
+      "id": "F5-zonemap-and-new-grant",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ADR §4.3/§6 observability:read",
+      "issue": "Карта зона→право соответствует политике фаундера (РАБОТА=пол/capability:null; КОНСТРУКТОР=authoring_draft; НАБЛЮДАЕМОСТЬ=новый observability:read; АДМИН=mgmt_object:* ∨ isGenesisOwner). Новый грант observability:read заводится корректно по прецеденту authoring_draft (free-text resource_type, нет DB CHECK, миграция не требуется) — подтверждено в capability-authz.ts (comment: 'same widening-cast precedent as authoring_draft'). Предикат holdsObservabilityRead зеркалит holdsLlmConnectionConfigure. Owner-короткое-замыкание у вызывающего."
+    },
+    {
+      "id": "F6-t0538-forward-ref",
+      "severity": "nit",
+      "axis": 6,
+      "location": "ADR §Foundation / §4.2 · web/src/app-shell/nav-config.js",
+      "issue": "Foundation-строка ADR утверждает, что nav-config.js уже несёт NavItem.{zone,capability,audience,frequency,order} и экспортирует ZONES. На dev это пока НЕ так: файл экспортирует NAV (строка 49), NavItem-typedef = {id,label,icon,path,screen,soon,hidden,status,count}, группы используют space, а не zone. Это НЕ фабрикация шва — ADR явно объявляет T-0538 потребляемой зависимостью ('Потребляет: T-0538 — мета-поля {zone,audience,capability,frequency,order} на NavItem — каркас'). Серверный (security-несущий) шов реален полностью; недостающая часть — фронт-каркас несмерженного сиблинга.",
+      "suggestion": "Coder-зависимость: T-0539 нельзя начать раньше, чем T-0538 поставит ZONES + мета-поля NavItem. Зафиксировать depends_on T-0539→T-0538 в плане, иначе SCREEN_REGISTRY/visibleZones не на что навесить."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "Хэндофф валиден (validate.py adr → exit 0)", "covered": true},
+    {"ac": "Шов заземлён в реальный код (loadAdminContext, capability-authz.ts, токены, /api/my-tenant)", "covered": true},
+    {"ac": "Нет второго permission-слоя (проекция T-0018 NF-1, эндпоинт = обёртка)", "covered": true},
+    {"ac": "Fail-closed (резолвер down → только РАБОТА, honest first-run)", "covered": true},
+    {"ac": "Карта зона→право соответствует политике фаундера + новый observability:read корректен", "covered": true},
+    {"ac": "Fitness-функции машинно-проверяемы (FF-NAV-PROJ/SCREEN-DECL/FAILCLOSED/ZONEMAP/OWNERONLY)", "covered": true},
+    {"ac": "Owner-only не переоткрыт (T-0409 / isGenesisOwner)", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "loadAdminContext РЕАЛЕН: src/db/org.ts:674 → возвращает {isGenesisOwner, adminGrants, adminOrgScope} (src/db/org.ts:794); AdminContext в src/core/scoped-admin.ts:97.",
+    "adminGrants = SELECT ... WHERE resource_type LIKE 'mgmt_object:%' (src/db/org.ts) — заземляет АДМИН=adminGrants.length>0.",
+    "capability-authz.ts РЕАЛЕН: токены authoring_draft/llm_connection:configure/system_agent:operate + предикат holdsLlmConnectionConfigure(grants) (строка 83) — прецедент для holdsObservabilityRead.",
+    "/api/my-tenant — единственный фронт-identity-fetch (web/src/app-shell/active-tenant.js:61); resolveActorSlugFromAuth существует (src/server.ts).",
+    "T-0018 NF-1: 'derived projections… there is no second permission subsystem' + FF-A4 линтит параллельный store — тезис 'проекция, не второй слой' доктринально заякорен.",
+    "T-0409: SoD-writes owner-only через isGenesisOwner — ownerOnly:true в ADR согласован, axis не переоткрыт.",
+    "КАВЕАТ: nav-config.js на dev ещё экспортирует NAV (не ZONES) и старый NavItem без zone/capability — мета-каркас приходит из несмерженного T-0538 (consumed-dep, объявлено явно)."
+  ]
+}

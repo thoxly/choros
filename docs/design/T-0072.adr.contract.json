@@ -1,0 +1,183 @@
+{
+  "task_id": "T-0072",
+  "status": "ready",
+  "decision": "Единый источник истины named-binding контракта реализуется тремя аддитивными артефактами без правки замороженного ядра: (1) tenant-таблица form_binding (migration 045, T-0013-дисциплина: tenant_id leading PK, ENABLE+FORCE RLS, policy current_setting('choros.tenant_id',true)::uuid, GRANT DML choros_app, регистрация в ci/checks/known_tenant_tables.txt) с fields jsonb массивом {key,type,required,label?}, где key физически тождествен имени Flowable-переменной (контракт field-key==variable-name = отсутствие маппинга); (2) новый чистый модуль src/core/binding-compat.ts экспортирует checkBindingCompat(fields, bpmnVarNames: ReadonlySet<string>): BindingCompatResult + типы BindingField/BindingViolation/BindingCompatResult (no I/O, зеркалит purity bpmn-linter.ts); (3) аддитивное расширение src/core/bpmn-linter.ts — LintViolationType += 'binding_mismatch', lintBpmn получает второй опциональный параметр opts?:{bindingSchema?:BindingField[]}, при наличии извлекает bpmnVarNames поверх существующего tokenize() (без правки bpmn-xml-parser.ts) из <in name>/<out name>/<formProperty id>/<formField id>/EL ${var} в conditionExpression и вызывает checkBindingCompat. lintBpmn(xml) без второго аргумента — байт-в-байт поведение T-0027. Плюс CLI-флаг --binding-schema, HTTP GET/POST /binding через withTenantTx + auth-middleware с конвенциональной ролью process_designer (НЕ новый grant-lattice resource_type, НЕ authoring_draft-конверт T-0077), dev-seed в 045 (purchase-approval/purchase-form: supplier/category/decision).",
+  "rejected_alternatives": [
+    {
+      "option": "Две колонки (field_key + variable_name) с маппинг-таблицей между ними",
+      "why_not": "Противоречит ADR §4 инварианту field-key==variable-name. Две колонки СОЗДАЮТ возможность рассинхрона, которую T-0072 призван исключить. Единственный ключ = тождество по конструкции: невозможно рассинхронизировать имена, которых нет."
+    },
+    {
+      "option": "Новый resource_type 'binding'/'authoring_draft' + operation в grant-lattice для защиты POST /binding через PDP",
+      "why_not": "grant-lattice.ts — frozen authority core (нельзя править в T-0072). ResourceType union (application|registry|record|mgmt_object:*|effect_resource) и Operation union не содержат binding. Спека FR-6 явно требует конвенциональную роль process_designer через существующий auth-middleware, не новую таблицу/грант. POST /binding = запись источника истины (admin-lane), не draft-эмиссия кода config-агента (authoring_draft-конверт T-0077)."
+    },
+    {
+      "option": "Создать роль process_designer строкой в role/role_assignment + гранты в migration 045",
+      "why_not": "Спека явно out-of-scope: 'T-0072 проверяет наличие роли через существующий auth, но не создаёт новую роль-строку'. Раздувает миграцию 045 за её единственный шов (form_binding). RBAC-seed роли — владелец RBAC, не T-0072. Помечено как развилка §7.2."
+    },
+    {
+      "option": "Второй XML-парсер / правка bpmn-xml-parser.ts для извлечения varNames",
+      "why_not": "bpmn-xml-parser.ts — frozen tokenizer (T-0027 security-gate, fail-closed-whitelist). Дублирование парсера = parser-differential риск. varNames извлекаются ПОВЕРХ существующего token-stream внутри bpmn-linter.ts, аддитивно к walk-циклу, без изменения сигнатуры tokenize()."
+    },
+    {
+      "option": "Полный OGNL/MVEL/JUEL-парсер для извлечения переменных из EL-выражений",
+      "why_not": "NF-5: best-effort regex ${([A-Za-z_]\\w*)} достаточен для day-1 compat-check; ложные отрицания на сложных выражениях допустимы, ложные срабатывания — нет. Полный EL-парсер = новая зависимость или сотни строк, диспропорционально проблеме. Явно out-of-scope спеки."
+    },
+    {
+      "option": "Менять сигнатуру lintBpmn на lintBpmn(xml, bindingSchema) обязательным вторым аргументом",
+      "why_not": "Ломает обратную совместимость T-0027 (NF-4/AC-13) — все существующие вызовы lintBpmn(xml) и тесты T-0058/T-0064 покраснели бы. Второй параметр ОПЦИОНАЛЕН (opts?), поведение одно-арг вызова заморожено."
+    },
+    {
+      "option": "severity-градация (missing_in_bpmn = warn, missing_in_schema = error) в checkBindingCompat",
+      "why_not": "AC-4/AC-6 и §9-гард-3 требуют ОБА направления как блокирующие (ok:false). Дифференциация severity — продуктовое решение, преждевременное на уровне чистой функции (политику эскалации владеет caller). Аддитивное поле severity — будущая задача, не T-0072. Помечено как развилка §7.1."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "form_binding (tenant-table, migration 045)",
+      "fields": [
+        { "name": "tenant_id", "type": "uuid NOT NULL (leading PK)" },
+        { "name": "id", "type": "uuid NOT NULL (second PK component, self-contained, no cross-table FK)" },
+        { "name": "process_key", "type": "text NOT NULL (= Flowable processDefinitionKey)" },
+        { "name": "form_key", "type": "text NOT NULL (= formKey in <userTask>)" },
+        { "name": "fields", "type": "jsonb NOT NULL (array of BindingField)" },
+        { "name": "version", "type": "integer NOT NULL DEFAULT 1 (increment on UPDATE)" },
+        { "name": "created_at", "type": "bigint NOT NULL (epoch ms)" },
+        { "name": "updated_at", "type": "bigint NOT NULL (epoch ms)" }
+      ]
+    },
+    {
+      "entity": "BindingField (binding-compat.ts, exported)",
+      "fields": [
+        { "name": "key", "type": "string (required; = field-key = Flowable variable-name; matches /^[A-Za-z_][A-Za-z0-9_]*$/, ≤255)" },
+        { "name": "type", "type": "string (required; logical field type; not validated vs object-schema in T-0072)" },
+        { "name": "required", "type": "boolean (required; UI/validation obligatory flag)" },
+        { "name": "label", "type": "string (optional; Floor-1 relabel; NOT part of compat-check)" }
+      ]
+    },
+    {
+      "entity": "BindingViolation (binding-compat.ts, exported)",
+      "fields": [
+        { "name": "type", "type": "\"missing_in_schema\" | \"missing_in_bpmn\"" },
+        { "name": "fieldKey", "type": "string (variable/key name at center of mismatch)" },
+        { "name": "message", "type": "string (human-readable)" }
+      ]
+    },
+    {
+      "entity": "BindingCompatResult (binding-compat.ts, exported)",
+      "fields": [
+        { "name": "ok", "type": "true | false" },
+        { "name": "violations", "type": "BindingViolation[] (present when ok: false)" }
+      ]
+    },
+    {
+      "entity": "LintViolationType (bpmn-linter.ts, extended additively)",
+      "fields": [
+        { "name": "value", "type": "\"raw_object_binding\" | \"malformed_xml\" | \"binding_mismatch\"" }
+      ]
+    },
+    {
+      "entity": "lintBpmn opts (bpmn-linter.ts, new optional second param)",
+      "fields": [
+        { "name": "bindingSchema", "type": "BindingField[] | undefined (optional; when present, triggers compat-check; absent = T-0027 behaviour)" }
+      ]
+    }
+  ],
+  "contracts": [
+    "export function checkBindingCompat(fields: BindingField[], bpmnVarNames: ReadonlySet<string>): BindingCompatResult — pure, no I/O/DB/net; same input = same output",
+    "export interface BindingField { key: string; type: string; required: boolean; label?: string }",
+    "export type BindingViolationType = 'missing_in_schema' | 'missing_in_bpmn'",
+    "export interface BindingViolation { type: BindingViolationType; fieldKey: string; message: string }",
+    "export type BindingCompatResult = { ok: true } | { ok: false; violations: BindingViolation[] }",
+    "compat policy: ok:true iff Set(fields.map(f=>f.key)) === bpmnVarNames as sets (incl. both empty); v in bpmnVarNames not in keys → missing_in_schema; f.key not in bpmnVarNames → missing_in_bpmn; BOTH blocking (ok:false)",
+    "export type LintViolationType = 'raw_object_binding' | 'malformed_xml' | 'binding_mismatch' (additive union extension; existing T-0027 tests unaffected)",
+    "export function lintBpmn(xml: string, opts?: { bindingSchema?: BindingField[] }): LintResult — second param optional; lintBpmn(xml) byte-identical to T-0027",
+    "bpmnVarNames extraction (inside lintBpmn over existing tokenize() stream, no bpmn-xml-parser.ts change): name attr of <in>/<out>; id attr of <formProperty>/<formField>; EL_VAR_RE /\\$\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\b/g over conditionExpression text-content",
+    "GET /tenants/:tenantId/processes/:processKey/forms/:formKey/binding → 200 {fields,version} | 404",
+    "POST /tenants/:tenantId/processes/:processKey/forms/:formKey/binding body {fields} → 201 create / 200 update (version+=1, updated_at) / 400 invalid schema / 401 no auth / 403 no process_designer role; via withTenantTx (SET LOCAL choros.tenant_id) + auth-middleware",
+    "POST validation: each field.key matches /^[A-Za-z_][A-Za-z0-9_]*$/ (≤255); key/type/required required; no duplicate key in fields array (Set(keys).size === fields.length)",
+    "CLI: lint-bpmn [--binding-schema <path>] <file.bpmn> — exit 0/1, violations to stderr as JSON; without flag = T-0027 behaviour",
+    "migration 045_form_binding.sql: DDL + ENABLE+FORCE RLS + tenant-isolation policy + GRANT SELECT,INSERT,UPDATE,DELETE choros_app + 1 idempotent dev-seed row (ON CONFLICT DO NOTHING); idempotent on re-run",
+    "FROZEN (not touched): grant-lattice.ts, grant-resolver.ts, bpmn-xml-parser.ts — additive-only on bpmn-linter.ts/CLI/router"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "checkBindingCompat returns ok:true iff Set(fields[].key) equals bpmnVarNames (both empty and both equal non-empty); variable in bpmnVarNames absent from fields[].key → violation type='missing_in_schema' ok:false; key in fields[] absent from bpmnVarNames → violation type='missing_in_bpmn' ok:false",
+      "ci_check": "vitest run src/__tests__/binding-compat.test.ts — AC-3, AC-4 green"
+    },
+    {
+      "id": "FF-2",
+      "rule": "binding-compat.ts is pure: imports no pg/fs/net/http/child_process; reads no process.env/import.meta; no Date.now; no global mutation — same input same output",
+      "ci_check": "ci/checks/binding-compat-isolation.sh (grep forbidden imports/process.env in src/core/binding-compat.ts, exit 1 if found) + tsc --noEmit"
+    },
+    {
+      "id": "FF-3",
+      "rule": "lintBpmn(xml, {bindingSchema}) extracts bpmnVarNames from name attr of <in>/<out>, id attr of <formProperty>/<formField>, and EL ${var} in conditionExpression; these participate in checkBindingCompat producing binding_mismatch on mismatch; lintBpmn(xml) without opts returns result identical to T-0027",
+      "ci_check": "vitest run src/__tests__/bpmn-linter.test.ts — AC-6, AC-7 green (new cases) + all pre-existing T-0027 cases green"
+    },
+    {
+      "id": "FF-4",
+      "rule": "Additive LintViolationType: adding 'binding_mismatch' does not modify any existing exported member; all existing src/__tests__/bpmn-linter.test.ts (T-0027) cases pass byte-unchanged; tsc --noEmit clean with extended union",
+      "ci_check": "vitest run src/__tests__/bpmn-linter.test.ts (T-0027 subset green) + tsc --noEmit"
+    },
+    {
+      "id": "FF-5",
+      "rule": "form_binding follows tenant-table discipline: tenant_id leading PK, ENABLE+FORCE RLS, tenant-isolation policy on current_setting('choros.tenant_id',true)::uuid, UNIQUE(tenant_id,process_key,form_key), choros_app DML grant; listed in ci/checks/known_tenant_tables.txt",
+      "ci_check": "ci/checks/db/schema.test.ts (reflects RLS/policy/grant on form_binding) + grep form_binding ci/checks/known_tenant_tables.txt"
+    },
+    {
+      "id": "FF-6",
+      "rule": "Cross-tenant isolation: a form_binding row inserted for tenant A (via migrator/bypass) is invisible to a choros_app session bound to tenant B (SELECT returns 0 rows)",
+      "ci_check": "vitest run ci/checks/db/cross_tenant.test.ts — new form_binding case (tenant-A row, tenant-B probe → 0 rows)"
+    },
+    {
+      "id": "FF-7",
+      "rule": "migration 045 idempotent: dev-seed row uses ON CONFLICT DO NOTHING; re-running migrations/run.mjs produces no error and no duplicate row; GET dev-tenant/purchase-approval/purchase-form/binding → 200 with keys supplier/category/decision",
+      "ci_check": "vitest run ci/checks/db/schema.test.ts (re-apply 045 idempotency) + binding HTTP integration test (dev-seed GET)"
+    },
+    {
+      "id": "FF-8",
+      "rule": "POST /binding rejects invalid schema: field.key not matching /^[A-Za-z_][A-Za-z0-9_]*$/ → 400; duplicate key in fields → 400; missing key/type/required → 400; request without auth identity → 401",
+      "ci_check": "vitest run src/__tests__/binding-http.test.ts — AC-10 (auth) + key-validation/dup-key cases"
+    },
+    {
+      "id": "FF-9",
+      "rule": "POST upsert idempotency: first POST → 201; repeat POST same (tenant,process_key,form_key) → 200 with version incremented by exactly 1 and fields replaced; GET reflects latest fields/version",
+      "ci_check": "vitest run src/__tests__/binding-http.test.ts — AC-9, AC-10 (upsert)"
+    },
+    {
+      "id": "FF-10",
+      "rule": "CLI lint-bpmn --binding-schema ./schema.json ./process.bpmn: on binding_mismatch → violations to stderr + exit 1; without --binding-schema → behaviour identical to T-0027 CLI (exit 0 on clean, 1 on raw-object/malformed)",
+      "ci_check": "vitest run src/__tests__/bpmn-linter.test.ts — AC-8 (child_process spawn fixture)"
+    },
+    {
+      "id": "FF-11",
+      "rule": "Frozen foundation untouched (byte-level): change does not modify grant-lattice.ts, grant-resolver.ts, or bpmn-xml-parser.ts; bpmn-linter.ts / CLI / router changes are additive only",
+      "ci_check": "ci/checks/binding-compat-isolation.sh — git diff --name-only HEAD asserts no change to grant-lattice.ts/grant-resolver.ts/bpmn-xml-parser.ts"
+    },
+    {
+      "id": "FF-12",
+      "rule": "Exported type surface present: BindingField, BindingViolation, BindingCompatResult, checkBindingCompat exported from src/core/binding-compat.ts; LintViolationType in bpmn-linter.ts includes 'binding_mismatch'; tsc --noEmit green",
+      "ci_check": "tsc --noEmit + grep export of named types in src/core/binding-compat.ts"
+    }
+  ],
+  "traceability": [
+    { "ac": "AC-1", "covered_by": "§2.1 form_binding DDL (PK(tenant_id,id), UNIQUE(tenant_id,process_key,form_key), ENABLE+FORCE RLS, policy, GRANT DML) + §8 migration 045 seam + FF-5, FF-7" },
+    { "ac": "AC-2", "covered_by": "§4 RLS-механика (FORCE RLS, choros_app NOBYPASSRLS) + §8 known_tenant_tables registration + FF-5, FF-6" },
+    { "ac": "AC-3", "covered_by": "§3 compat-policy (ok:true iff set-equality, incl. both-empty) + FF-1" },
+    { "ac": "AC-4", "covered_by": "§3 compat-policy bidirectional violations (missing_in_schema = bpmn var without field; missing_in_bpmn = field without bpmn var; both ok:false) + §3 terminology normalization note + FF-1" },
+    { "ac": "AC-5", "covered_by": "§1.2 / §5 purity of binding-compat.ts (no pg/fs/net/http; no process.env) + FF-2" },
+    { "ac": "AC-6", "covered_by": "§1.3 additive lintBpmn(xml,opts) + binding_mismatch on mismatch; §5 frozen one-arg behaviour + FF-3, FF-4" },
+    { "ac": "AC-7", "covered_by": "§2.4 bpmnVarNames extraction table (in/out name, formProperty/formField id, EL ${var} in conditionExpression over existing tokenize() stream) + FF-3" },
+    { "ac": "AC-8", "covered_by": "§6 CLI contract (--binding-schema flag, stderr+exit 1 on mismatch, no-flag = T-0027) + FF-10" },
+    { "ac": "AC-9", "covered_by": "§6 HTTP GET contract (200 {fields,version} | 404) via withTenantTx + FF-9" },
+    { "ac": "AC-10", "covered_by": "§4 POST via withTenantTx + auth-middleware (401 no auth) + §2.2 schema validation (400) + upsert version+=1 + FF-8, FF-9" },
+    { "ac": "AC-11", "covered_by": "§1 + §8 dev-seed (purchase-approval/purchase-form, fields supplier/category/decision) ON CONFLICT DO NOTHING + FF-7" },
+    { "ac": "AC-12", "covered_by": "§2.3 exported type surface + §6 contracts + §1.3 LintViolationType extension + FF-12" },
+    { "ac": "AC-13", "covered_by": "§5 additive union extension invariant (no existing T-0027 test compares full type-set) + FF-4" }
+  ],
+  "runtime_target": "local — npm run ci (tsc --noEmit && eslint src && npm run fitness && vitest run) + migration 045 applied to dev-Postgres via migrations/run.mjs. No new infra. checkBindingCompat and extended lintBpmn are in-process pure calls; T-0058/T-0064 deploy-gate will pass bindingSchema (loaded from form_binding) at real deploy — future integration, not T-0072 scope.",
+  "adr_artifact_path": "docs/design/T-0072-named-binding.adr.md",
+  "escalation": "Three forks flagged, NOT decided (out of T-0072 architect rights): (1) severity-grading of violations (warn vs error) — product decision, ADR fixes both-blocking per AC-4/AC-6/§9-guard-3; (2) dev-role process_designer creation/seed — RBAC-seed owner, spec out-of-scope; (3) object-schema (registry_def.record_schema) ↔ form_binding coherence — ADR §9 guard 4, separate E11.x task."
+}

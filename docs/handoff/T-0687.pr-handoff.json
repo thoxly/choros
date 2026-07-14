@@ -1,0 +1,69 @@
+{
+  "task_id": "T-0687",
+  "status": "pr_open",
+  "branch": "task/T-0687",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "web/src/components/components.jsx",
+    "web/src/components/components.css",
+    "web/src/app-shell/app.css",
+    "web/src/screens/screen-inbox.jsx",
+    "web/src/screens/screen-app-schema.jsx",
+    "web/src/components/step-ref.test.jsx",
+    "web/src/screens/screen-inbox.test.jsx",
+    "web/src/screens/screen-app-schema.test.jsx",
+    "docs/handoff/T-0687.pr-handoff.json"
+  ],
+  "summary": "Two human-layer sub-bugs from capstone T-0647. (A) task-detail drawer: was leaking machine keys as PRIMARY values («Шаг: legal_precheck», «Инстанс: agent:», «Ключ процесса: telLinear») and never showed the source RECORD. Now: «Шаг»/«Текущий шаг» render through the NEW StepRef primitive (step-level sibling of ProcessRef/ActorChip — human step name primary, raw BPMN node id DEMOTED to a mono chip); an explicit «Запись» row renders the source record's title+link via the REUSED RecordRef (T-0648); the raw instance-UUID + procKey are collapsed into a single demoted «Идентификаторы» line (no bare «Инстанс»/«Ключ процесса» primary rows). The inbox LIST row now carries record context on the task NAME (RecordRef, so the 8× identical «Проверить: агенту…»/«Подача заявки» names are distinguishable) and humanizes the step subtitle via the SAME deriveStepLabel. (B) registry_def «набор полей»: the first «Настроить поля» for an app with zero sets forced «+ Новый набор полей» before ANY field could be added — the internal registry_def abstraction leaked. Now the schema screen auto-opens the create-editor seeded with a default set («Основные поля») when the app has zero sets, so the operator lands directly on the field list; server auto-slugs it (osnovnye-polya) via the existing T-0650 path. Client-only — no server/DB delta.",
+  "deviations_from_adr": [
+    "No ADR authored (P2 UI task, sibling of T-0683/T-0684/T-0648). Followed the established human-layer pattern verbatim: pure exported decision helper (isMachineStepKey/deriveStepLabel) + kit primitive (StepRef) + honest demotion, exactly mirroring deriveProcessRefPrimary/ProcessRef.",
+    "REUSE not new resolvers: RecordRef (T-0648) resolves the source record TITLE client-side (lazy GET /api/records/:id, PDP/tenant enforced by that endpoint) — used unchanged in the drawer's «Запись» row and the list name. StepRef is a NEW component but is a thin sibling of ProcessRef, not a new resolver — it consumes the step string the projection already carries (task_step). No server resolver added; the projection's definitionName (resolveDefinitionNames path, T-0614) already feeds the human process name.",
+    "B: auto-create is a client-side auto-OPEN of the existing create-editor seeded with a default name, NOT a new server route. It POSTs to the existing POST /api/registry-defs with only display_name (slug omitted → server auto-generates, T-0650). Idempotent by construction: the auto-open latch (autoOpenedRef) fires at most once per app, and only while the app has zero sets — once any set exists (or the user cancels) it never re-fires, so it can never plow a second default set."
+  ],
+  "friction_events": [
+    "Worktree had no node_modules — ran `npm ci --maxsockets=3` at root AND `npm install` in web/ before any gate could run (web tier needs its own react/@vitejs install).",
+    "anti-case-lock (rights-ui-anti-case + detel-literal-baseline) flagged case-literals I put in NEW comment/test lines — EXACTLY the T-0683 friction. Two hits: (1) a multi-line JSX `{/* */}` comment in screen-inbox.jsx contained the literals 'telLinear'/'agent:' — the gate's comment-strip only recognizes lines starting with //,*,/* so a wrapped comment continuation line counts as CODE; reworded the comment to drop the literals. (2) I used 'Согласование счёта · узел Проверка' as a human-step test example — 'Согласование' is on the rights-ui-anti-case FORBIDDEN_LITERALS list; replaced with the neutral 'Проверка реквизитов · этап A' (still reads human: space + «·» + Cyrillic). Gate + self-test green after both fixes.",
+    "The StepRef component-tree test initially asserted the raw key was 'NOT a bare text leaf' anywhere in the tree — wrong, because the DEMOTED MonoId chip legitimately renders the key as secondary text. Corrected the test to read the PRIMARY name span (className chs-stepref__name) in isolation and assert the key is absent THERE (never primary), while separately confirming it stays reachable in the demoted chip."
+  ],
+  "gate_numbers": {
+    "tsc": "0 errors",
+    "web_vitest": "2493 passed (94 files)",
+    "server_vitest": "not run — zero src/ (server) files changed; client-only diff",
+    "web_build": "vite build ok — 545 modules, 2.26s",
+    "fitness_db": "not run — no server/DB path touched (client-only)",
+    "anti_case_lock": "PASS (both phases + --self-test; full D-064 §5 denylist within baseline, aggregate 16=baseline 16)",
+    "anti_uuid_actor_render": "PASS + --self-test PASS (0 bare raw-identifier renders under web/src/screens/)",
+    "ux_gates": "ux-g2-theme-pairing PASS; ux-g6-no-new-hardcode 0 new; ux-g5-jargon-denylist informational (pre-existing baseline only)",
+    "server_lint": "0 errors, 44 warnings (pre-existing, all in src/; web/src ignored by root config as designed)"
+  },
+  "mutation_pins": [
+    "web (deriveStepLabel, step-ref.test.jsx): making a machine key ('legal_precheck') the primary label → RED (primary must be 'Шаг процесса', never the raw key; showKey must be true so the key is demoted).",
+    "web (isMachineStepKey, step-ref.test.jsx): treating a human label ('Проверка реквизитов · этап A') as a machine key, or a snake_case id as human → RED (6 boundary cases pinned).",
+    "web (StepRef tree, step-ref.test.jsx): reverting the primary name span to echo the raw node id → RED (primaryNameText must not contain 'legal_precheck').",
+    "web (drawer, screen-inbox.test.jsx): reverting «Шаг» to <Mono>{detail.item.step}</Mono>, or «Текущий шаг» to <span style={S.val}>{detail.projection.step}</span>, or dropping the «Запись» RecordRef row, or re-adding bare «Инстанс»/«Ключ процесса» rows, or reverting the list name RecordRef / humanized step subtitle → RED (6 source pins).",
+    "web (shouldAutoOpenDefaultSet, screen-app-schema.test.jsx): dropping the alreadyAuto latch (fires twice) OR the zero-sets guard (fires when a set exists) → RED — the two idempotency pins that prove auto-«main» is never duplicated.",
+    "web (screen-app-schema wiring): removing the autoOpenedRef latch, the [appId] reset, or the create-only defaultName seeding → RED (3 source pins)."
+  ],
+  "reuse": {
+    "RecordRef_T0648": "Reused unchanged for the drawer «Запись» row AND the list task-name record context — same lazy GET /api/records/:id + PDP/tenant-safe title derivation, no new resolver.",
+    "resolveDefinitionNames_path_T0614_T0683": "The projection's definitionName (from the resolveDefinitionNames batch) still feeds the drawer's human process name — untouched; StepRef only humanizes the step string that path already carries.",
+    "ProcessRef_T0683": "Left in place in both the drawer and list Процесс column; StepRef is its step-level sibling (same isMachine*/derive* split), not a replacement.",
+    "T0650_auto_slug": "The auto-«main» set reuses the existing POST /api/registry-defs slug-omitted auto-generation — no slug logic added."
+  },
+  "auto_main_idempotent": "YES. shouldAutoOpenDefaultSet returns true only when defs loaded AND length===0 AND editor closed AND not-yet-auto-opened. The autoOpenedRef latch (a ref, reset only on appId change) makes the auto-open fire at most once per app; once any set exists length>0 makes it false permanently. So the create POST happens at most once from the auto path, and a repeat name would 23505→409 anyway — but the latch means the repeat never even fires. A user cancel keeps the latch set and drops to the honest empty-state (manual «Новый набор полей» still works).",
+  "friction_findings": [
+    "recordId reachability: A's record context depends on InboxItem.recordId / projection.recordId, which are present ONLY for processes started via on_create from a record (T-0414/T-0356). Manually-started processes and legacy defer rows carry no recordId — the drawer «Запись» row and the list name RecordRef are simply omitted for those (honest absence, not a broken link). This is the same limitation T-0683's ProcessRef record disambiguator already has.",
+    "The drawer projection section still shows the raw instance-UUID + procKey (now demoted under «Идентификаторы») rather than removing them entirely — kept for operator/support traceability, but never as leading/primary rows. If a future task decides these carry zero operator value they can be dropped without touching the humanized rows above them."
+  ],
+  "live_proof_todo": [
+    "On a reachable stand, as a rank-and-file employee: open the inbox, open a task whose process was started from a record; confirm the drawer «Шаг» reads a human step (or «Шаг процесса» + demoted key, never bare 'legal_precheck'), the «Запись» row shows the source record title as a working link, and the projection section shows NO bare «Инстанс: agent:» / «Ключ процесса: telLinear» primary rows.",
+    "In the same inbox, confirm two same-named tasks («Подача заявки» etc.) are now distinguishable by the record title appended to each name.",
+    "As an app owner, open «Настроить поля» for a BRAND-NEW app with zero field sets; confirm it lands directly on the field editor (pre-seeded «Основные поля»), add a field, save; confirm no «+ Новый набор полей» step was required and exactly ONE set was created (no duplicate «main»). Re-enter the same screen and confirm it now shows the list (does NOT auto-open again)."
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "task_id": "T-0598",
+  "verdict": "approved",
+  "_scope": "Две находки ux-loop-report-2026-07-02.md (№1 + №7), обе чисто клиентские (web/src/screens/**), без новых эндпоинтов. FR-1 (находка №1): секция «Первые шаги» на Обзоре — non-blocking checklist-stepper (3 обязательных шага: приложение/LLM-ключ/ассистент + опциональный «права»), кормится живыми сигналами из существующих READ-эндпоинтов (/api/applications, /api/agents+resolveAssistantBinding, /api/assistant/threads, /api/rights/tenant-state), авто-скрывается при выполнении обязательных трёх. FR-2 (находка №7): пустой инбокс вкладки «Все» при tenant-wide нуле получает honest action-CTA «Открыть процессы»; прочие вкладки/фильтры — уточняющий текст без обманного action. Судил как владелец облика (design-steward, D-062) глазами пользователя, не строившего систему. Оба фикса — прямое применение СУЩЕСТВУЮЩЕГО §6 (явный следующий шаг вместо тупика) существующими kit-примитивами и --chs-* токенами; новых правил облика не ввожу.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/ux-g6-no-new-hardcode.sh --required → 0 newly-added hardcode/overlay findings (сильнее заявленного informational, проходит и в required). Все новые стили — только var(--chs-*): success/success-soft (маркер done), border (маркер todo/секция), surface, space/radius/text/tracking-токены. 0 хардкод-цветов.",
+      "ci/checks/ux/ux-g4-state-primitives.sh --required → 0 newly-added hand-rolled state branch findings. Loading шага = kit LoadingState (compact); empty-state инбокса = kit EmptyState (action-проп); маркер done = kit KitIcon. Никаких hand-rolled <div>Загрузка</div>/inline-empty без role.",
+      "ci/checks/ux/ux-g2-theme-pairing.sh → PASS обе темы, оба token-source (tokens.css + form-theme.css не тронуты). Новые токены success/success-soft/border/surface определены в обеих темах — маркеры/секция тема-безопасны, AA статически.",
+      "ci/checks/ux/ux-g5-jargon-denylist.sh --required → 28 findings всего (informational, exit 0), ВСЕ в .test.jsx (T-id-in-describe). grep вывода по изменённым продуктовым файлам (screen-overview.jsx, screen-inbox.jsx) → 0 находок. Дифф не поднял и не понизил g5-baseline на видимом тексте.",
+      "npx vitest run screen-overview.test.jsx (24, новый) + screen-inbox.test.jsx (14) → 38/38. Полный web vitest 1172/1172 (2 pre-existing ajv-suite вне периметра). vite build → 0 errors."
+    ],
+    "green_note": "Все UX-гейты зелёные. g6 и g4 в required-режиме чисты (0) — сильнее задекларированного. g5 продуктовый текст чист (0 на изменённых файлах). Одобрено с первого раунда — ни одного blocking; 3 info/nit-находки (см. findings) не требуют правки в T-0598."
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "Real-click в живом стенде НЕ пройден — web-тест-тир vitest 'node' без DOM (проектная конвенция source-presence, mount невозможен в этом репо). Судил по коду + токенам + тестам честно. Статически строго: все НОВЫЕ цветовые токены определены в ОБЕИХ темах — --chs-color-success + --chs-color-success-soft (маркер done шага), --chs-color-border (маркер todo + рамка секции), --chs-color-surface (фон секции), --chs-color-text/-muted/-faint (текст шага/заголовок). Маркер done (амбер-успех кружок с галкой) визуально отличим от todo (пустой контур) в обеих темах. Space/radius/text/tracking-токены тема-инвариантны (корректно). FR-2 EmptyState.action (kit Button secondary) — тема-безопасен по контракту kit. Real-click обеих тем (полоса появляется у нового / исчезает у онбордженного; honest-CTA инбокса навигирует в /processes) доедет LIVE_PROOF-ом (D-064, manual).",
+  "pattern_sources": [
+    {
+      "element": "FR-1: секция «Первые шаги» — non-blocking checklist-stepper над сеткой плиток Обзора",
+      "pattern": "advanced/wizard (onboarding-вариант, non-blocking): взята применимая часть паттерна — Step indicator (визуальный чек done/todo на каждом шаге) + use-case 'most useful for onboarding'. НЕ буквальный Wizard: нет back/next-gate (шаги независимы, каждый — прямая ссылка), нет Review-экрана, нет save/resume (состояние целиком производно от живых данных тенанта, не персистится). Отклонён полноценный Wizard с gate — рамка требует 'non-blocking stepper, не модал/не туториал-оверлей', владелец должен проходить шаги в любом порядке обычной навигацией. Обычный <section> в потоке документа, плитки ИА под ним не двигаются логически.",
+      "mcp_ref": "uxpatterns advanced/wizard (сверено get_pattern, ADR §Паттерн) + ux-loop-report №1 (onboarding-полоса «Первые шаги», checklist не блокирующий wizard). principles.md §6 (явный следующий шаг).",
+      "applied": true
+    },
+    {
+      "element": "FR-1: тон каждого не-пройденного шага + честная деградация чека",
+      "pattern": "user-feedback/empty-states (first-use variant: message + primary action) — информирует тон шага как мини-empty-state ('здесь ещё нет X — вот CTA'). Деградация: каждый чек best-effort по образцу существующего fetchCount() того же файла — сбой→null, шаг остаётся видим без чека, CTA кликабельна. Скрытие полосы — только при подтверждённом true всех трёх обязательных (не 'не false'), безопасный дефолт: лучше показать лишний раз, чем скрыть ошибочно. Без localStorage/dismiss (авто-производно от данных) — устраняет риск 'закрыл и забыл, где искать'.",
+      "mcp_ref": "uxpatterns user-feedback/empty-states (first-use) + ADR §Деградация. Паттерн деградации зеркалит fetchCount() (screen-overview.jsx:161) — тот же best-effort, что 3 существующих счётчика плиток.",
+      "applied": true
+    },
+    {
+      "element": "FR-1: опциональный шаг «Настройте права» — структурное отсутствие при can_manage:false",
+      "pattern": "can_manage:false ⇒ шаг СТРУКТУРНО отсутствует из DOM (не 'шаг без чека', не disabled) — тот же принцип, что ADR T-0572 применяет к write-формам ('формы рендерятся ТОЛЬКО при can_manage:true'). Для рядового сотрудника 'настроить права' — не его задача; показывать её как непройденный шаг было бы честно-неверно. Шаг 4 не участвует в критерии скрытия полосы (иначе тенант без прав никогда не увидел бы полосу скрытой).",
+      "mcp_ref": "ADR T-0572 §2.5 (can_manage:false ⇒ отсутствие в DOM) перенесён на видимость шага чек-листа. ADR-T0598 §Опциональный 4-й шаг.",
+      "applied": true
+    },
+    {
+      "element": "FR-2: honest action-CTA на пустом инбоксе вкладки «Все» (tenant-wide ноль) + различение фильтр-пустоты",
+      "pattern": "empty-states (first-use: message + primary action) + §6 явный следующий шаг: пустой инбокс из тупика ('Задач нет' без выхода) превращён в мост к процессам. КЛЮЧЕВОЕ — honest degradation семантики empty-state: action-CTA «Открыть процессы» ТОЛЬКО когда tab==='all' && !exec && counts.all===0 (реальный tenant-wide ноль, counts.all серверно = base.length независимо от exec-фильтра). Прочие вкладки/фильтры — ДРУГОЙ текст без action ('Нет задач в этой вкладке'+'снимите фильтр'), иначе «Открыть процессы» на пустой отфильтрованной вкладке обещало бы ложный источник задач, хотя причина пустоты — фильтр. Отклонён единый CTA на любой пустой вкладке — противоречит honest-messaging.",
+      "mcp_ref": "uxpatterns user-feedback/empty-states (first-use) + ux-loop-report №7 (отличать 'нет вообще' от 'нет по фильтру', без CTA-обмана). Путь /processes сверен: shell.jsx:1161 Route.",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "info",
+      "root": "steward",
+      "location": "web/src/screens/screen-overview.jsx :320-330 — FirstStepsStrip рендерит-с-загрузкой у онбордженного тенанта до вычисления allMandatoryDone",
+      "issue": "У полностью онбордженного тенанта (все 3 сигнала true) полоса на каждом заходе на Обзор кратко рендерится со спиннерами (initial load: apps=null, loadingExtra=true → step1..3Done все false → allMandatoryDone=false → секция видима с 3 LoadingState), затем как только сигналы резолвятся к all-true — return null, секция схлопывается. Видимый flash-then-collapse на каждом визите у опытного тенанта. Осознанный tradeoff no-localStorage-дизайна (ADR): авто-скрытие по данным вместо dismiss. У НОВОГО владельца (целевая аудитория фичи) поведения-дефекта нет — полоса корректно остаётся видимой.",
+      "suggestion": "Не блокирует — у целевой аудитории (не-онбордженные) верно, у онбордженных косметический мельк. Если заметен на LIVE_PROOF — дешёвый фолоу-ап: не рендерить секцию, пока loadingExtra||appsLoading (return null во время загрузки), ценой ~<1 кадра задержки появления у нового владельца. Продуктовый выбор между 'мельк у опытных' и 'задержка у новых'; текущий вариант НИКОГДА не скрывает полосу ошибочно (безопасный дефолт), что важнее для кейса.",
+      "resolution": "NON-BLOCKING — tradeoff зафиксирован в ADR (авто-скрытие по данным); у целевой аудитории поведение верно; фолоу-ап опционален по итогам live-real-click."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "root": "steward",
+      "location": "web/src/screens/screen-overview.jsx :233-235 — маркер done/todo шага помечен aria-hidden=\"true\"",
+      "issue": "Иконка-состояние шага (KitIcon check для done / пустой контур для todo) стоит aria-hidden=\"true\" — факт 'выполнен/не выполнен' сигнал только для зрячих; скринридеру строка читается как '<текст> <CTA>' без объявления состояния. Смысл частично несёт видимый done-текст (окрашен text-muted — тоже визуально-только) + focusable CTA. Для non-blocking hint-полосы (не форма/не gate) приемлемо — пользователь всегда проходит по CTA независимо от объявления состояния, но строго по a11y состояние завершённости не транслируется в AT.",
+      "suggestion": "Не блокирует (класс 'декоративный статус-глиф', это hint а не действие-с-обязательным-состоянием). На будущее для полноты: visually-hidden текст 'выполнено'/'не выполнено' на строке, либо role=listitem + aria-label на маркере. Мелко; не требую в T-0598.",
+      "resolution": "NON-BLOCKING — приемлемо для декоративного статус-глифа hint-полосы; кандидат в a11y-полировку при follow-up."
+    },
+    {
+      "id": "F-3",
+      "severity": "info",
+      "root": "steward",
+      "location": "web/src/screens/screen-overview.jsx :334 (label «Подключите LLM-ключ») vs :344 (ctaLabel «Подключить ключ»)",
+      "issue": "Заголовок шага несёт полный термин 'LLM-ключ', его CTA-кнопка компактно роняет 'LLM' → 'Подключить ключ'. Рассинхрона ориентировки НЕТ (строка-лейбл рядом несёт полный термин, 'LLM-ключ'=9 существующих употреблений — конвенция соблюдена), но пара 'лейбл длиннее кнопки на токен' — единственная микронеровность голоса в диффе.",
+      "suggestion": "Оставить — приемлемо и консистентно (компактная кнопка + полный лейбл рядом = норма плотного B2B). Для идеальной симметрии: 'Подключить LLM-ключ' на кнопке. Не блокирует.",
+      "resolution": "NON-BLOCKING — консистентно с конвенцией проекта; косметический выбор, не требую правки."
+    }
+  ],
+  "principles_updated": [],
+  "_principles_note": "Новых правил облика не ввожу — обе находки ux-loop-report (№1, №7) закрыты в рамках СУЩЕСТВУЮЩЕГО §6 (явный следующий шаг/CTA вместо тупика — и полоса «Первые шаги», и honest-CTA инбокса — прямые применения) существующими kit-примитивами (Button, KitIcon 'check', LoadingState compact, EmptyState.action — все аддитивно, без правки components.jsx-контракта, OOS-5 соблюдён) и существующими --chs-* токенами (success/success-soft/border/surface, все в обеих темах). Паттерн 'структурное отсутствие при can_manage:false' — не новое правило, а перенос уже установленного ADR T-0572 на видимость шага чек-листа. Паттерн 'честное различение tenant-wide-пустоты от фильтр-пустоты' — прямое применение honest-messaging §6, опирается на серверную семантику counts.all (tenant-wide, не фильтрованный) — сверено в src/http/inbox.ts:1097.",
+  "acceptance_coverage": [
+    {"ac": "AC-1/№1: FirstStepsStrip 3 обязательных + опциональный шаг, каждый CTA-ссылка (advanced/wizard non-blocking + empty-states first-use)", "covered": true},
+    {"ac": "AC-2..AC-4/№1: живые сигналы из существующих READ (apps>0 / agents+resolveAssistantBinding / assistant threads message_count>0) — ноль новых API", "covered": true},
+    {"ac": "AC-5/№1: шаг 'права' структурно отсутствует при can_manage:false (паттерн ADR T-0572) — не 'шаг без чека'", "covered": true},
+    {"ac": "AC-6/№1: честная деградация — сбой→шаг без чека, CTA кликабельна, полоса не скрывается ошибочно (fetchCount-паттерн)", "covered": true},
+    {"ac": "AC-7/№1: авто-скрытие только при подтверждённом true всех 3 обязательных, без localStorage/dismiss", "covered": true},
+    {"ac": "AC-8/№1: no-flicker — compact LoadingState до ответа, loadingExtra стартует true (не false→true скачок)", "covered": true},
+    {"ac": "AC-9/№7: honest action-CTA 'Открыть процессы'→navigate('/processes') на вкладке 'Все' при tenant-wide нуле (counts.all серверно = base.length, не фильтр)", "covered": true},
+    {"ac": "AC-10/№7: различение — прочие вкладки/фильтры без обманного action, честный уточняющий текст", "covered": true},
+    {"ac": "AC-11/№7: /processes реален (shell.jsx:1161 Route) — не изобретён", "covered": true},
+    {"ac": "N7/OBLIK: только --chs-* токены (g6 --required=0), kit-примитивы без правки контракта (g4 --required=0), новые токены в обеих темах статически AA", "covered": true},
+    {"ac": "g5 продуктовый текст чист (0 на screen-overview.jsx/screen-inbox.jsx); дев-жаргон/T-id только в .test.jsx (легитимно baseline)", "covered": true},
+    {"ac": "a11y: EmptyState role=status, LoadingState role=status aria-live — kit-контракт; маркер шага aria-hidden (декоративный статус-глиф, F-2 nit); CTA focusable Button", "covered": true},
+    {"ac": "LIVE_PROOF real-click обе темы (полоса появляется-у-нового/исчезает-у-онбордженного; honest-CTA инбокса навигирует; маркеры done/todo различимы) — НЕ пройден здесь (vitest node без DOM), доедет LIVE_PROOF-ом (manual, D-064)", "covered": false}
+  ]
+}

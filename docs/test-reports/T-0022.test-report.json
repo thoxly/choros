@@ -1,0 +1,114 @@
+{
+  "task_id": "T-0022",
+  "verdict": "pass",
+  "phase": "TEST",
+  "tested_object": {
+    "branch": "task/T-0022-roles-assignments",
+    "head": "e1bfc94",
+    "base": "d948f6b",
+    "scope": "roles + assignments: migrations 019_role / 020_role_assignment / 021_grant_role_fk; known_tenant_tables.txt (+role,+role_assignment); ci/checks/db schema.test.ts + cross_tenant.test.ts + role-assignment*.test.ts; role-migration-set.sh; package.json fitness wiring"
+  },
+  "deterministic": {
+    "total": 665,
+    "passed": 665,
+    "failed": 0
+  },
+  "ci_run": {
+    "harness": "isolated Postgres (postgres:16) on POSTGRES_PORT=55452, own compose project + volume t0022test_pgdata, torn down after; 55432 untouched",
+    "tsc_noEmit": "clean (exit 0)",
+    "eslint_src": "clean (exit 0)",
+    "fitness_static": "all static shell checks green (exit 0) — incl. role-migration-set.sh (AC-18/22), grant-resolver-isolation.sh (AC-20, frozen src/core unmodified), cross-tenant-fitness.sh",
+    "vitest_unit_e2e": "512 passed / 0 failed / 5 skipped (22 files, 1 skipped) — run with NO DATABASE_URL, exactly as `npm run ci` invokes the vitest leg",
+    "fitness_db_isolated": "153 passed / 0 failed (9 files) against live PG 55452 — org-structure 8, schema 16, two_tenant 4, role-assignment 19, role-assignment-scope 1, behavior 7, cross_tenant 37, pgTimerStore 25, pgJobStore 36",
+    "migration_run_1": "19 files applied (001-016 + 019-021); NO 017/018 (reserved T-0033/T-0019)",
+    "migration_run_2": "nothing to apply (19 already recorded, 19 files) — idempotency confirmed (AC-17)",
+    "schema_migrations_rows": 19
+  },
+  "false_fail_discipline": {
+    "observed": "An initial full `vitest run` with DATABASE_URL still exported showed 10 failures across externalWorker.e2e.test.ts (7), health.test.ts (2), org.e2e.test.ts (1).",
+    "diagnosis": "Tester-environment artifact, NOT a product defect and NOT a T-0022 regression. (1) T-0022's diff touches none of those files (verified: git diff base..HEAD is confined to migrations/, ci/checks/db/, known_tenant_tables.txt, role-migration-set.sh, package.json, docs). (2) health.test.ts AC-1 explicitly asserts timer.timerLagMs IS NULL 'Without DATABASE_URL' — my leftover DATABASE_URL connected a real timer store, inverting the assertion; the e2e default-store tests likewise hit a live DB with undefined ids ('invalid input syntax for type uuid: undefined'). (3) Re-running `vitest run` with DATABASE_URL unset (the env `npm run ci` actually uses for that leg) → 512 passed / 0 failed. The failures are pure env-coupling of my own harness run.",
+    "root_class": "tooling-gap (tester run env), resolved by removing DB env from the vitest leg; no product fix needed"
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "cross_tenant.test.ts AC-1/AC-2 iteration over KNOWN_TENANT_TABLES (table=role): tenant-A context → only tenant-A rows, tenant-B=0; schema.test.ts FF-2 existence in information_schema + known_tenant_tables.txt fixture", "result": "pass"},
+    {"ac": "AC-2", "test": "cross_tenant.test.ts AC-1/AC-2 iteration (table=role_assignment), identical cross-tenant probe; schema.test.ts FF-2 existence", "result": "pass"},
+    {"ac": "AC-3", "test": "cross_tenant.test.ts AC-3 no-GUC default-DENY (choros_app NOBYPASSRLS, no GUC → 0 rows on both); schema.test.ts FF-RLS relrowsecurity AND relforcerowsecurity=true. Hand-reconfirmed live on 55452: choros_app default-DENY held", "result": "pass"},
+    {"ac": "AC-4", "test": "cross_tenant.test.ts AC-4 — KNOWN_TENANT_TABLES iteration with role+role_assignment seed cases (C-2): seed tenant-A and tenant-B via migrator URL, probe app URL in tenant-A → tenant-B rows = 0 for both new tables; all pre-existing tables still pass", "result": "pass"},
+    {"ac": "AC-5", "test": "schema.test.ts FF-LEAD: tenant_id is column 1 AND leads every index/FK; iterates KNOWN_TENANT_TABLES (includes role, role_assignment)", "result": "pass"},
+    {"ac": "AC-6", "test": "role-assignment.test.ts AC-6·FF-5: duplicate (tenant_id, slug) on role → 23505; same slug in another tenant OK", "result": "pass"},
+    {"ac": "AC-7", "test": "role-assignment.test.ts AC-7·FF-6: role_assignment FK (tenant_id, employee_id)→employee; absent employee_id → 23503; cross-tenant employee ref → 23503", "result": "pass"},
+    {"ac": "AC-8", "test": "role-assignment.test.ts AC-8·FF-6: role_assignment FK (tenant_id, role_id)→role; absent role_id → 23503; cross-tenant role ref → 23503. Independently reconfirmed by adversarial probe (e)", "result": "pass"},
+    {"ac": "AC-9", "test": "role-assignment.test.ts AC-9·FF-7: org_scope NULL → 23502; valid node jsonb and set jsonb both insert and round-trip. Reconfirmed by adversarial probe (d) live", "result": "pass"},
+    {"ac": "AC-10", "test": "role-assignment.test.ts AC-10·FF-8: all 4 (valid_from, valid_until) null-combos insert; from>until accepted (no CHECK); columns bigint NULL per information_schema", "result": "pass"},
+    {"ac": "AC-11", "test": "role-assignment.test.ts AC-11·FF-9: proposal (confirmed_by NULL) and confirmed row both insert; proposed_by independently nullable; types text NULL per information_schema", "result": "pass"},
+    {"ac": "AC-12", "test": "role-assignment.test.ts AC-12·FF-9: source NULL → 23502; granted_by NULL → 23502; arbitrary non-empty source string accepted (no CHECK enum)", "result": "pass"},
+    {"ac": "AC-13", "test": "role-assignment.test.ts AC-13·FF-10 + schema.test.ts FF-FK-RESOLVE (C-1 positive grant_role_id_fkey assertion): grant with non-existent role_id → 23503; grant referencing existing role succeeds; regression guard (same insert succeeded pre-021 — proven in adversarial probe a)", "result": "pass"},
+    {"ac": "AC-14", "test": "role-assignment.test.ts AC-14·FF-10: grant in tenant-A referencing role only in tenant-B → 23503 (composite tenant-scoped FK)", "result": "pass"},
+    {"ac": "AC-15", "test": "role-assignment.test.ts AC-15·FF-11: dev tenant has tenant-owner + ≥1 functional role; re-seed no-op (ON CONFLICT DO NOTHING). Live: role_count=2 after double-run", "result": "pass"},
+    {"ac": "AC-16", "test": "role-assignment.test.ts AC-16·FF-11: seeded assignment resolves real employee (e-mironov) → role (budget-approver) → dept node (fin), confirmed_by set, org_scope hierarchy=org/nodeLevel=department; idempotent", "result": "pass"},
+    {"ac": "AC-17", "test": "node migrations/run.mjs applied twice on fresh 55452 PG: run1 = 19 applied, run2 = 'nothing to apply (19 already recorded, 19 files)'; 19 schema_migrations rows; 019-021 present", "result": "pass"},
+    {"ac": "AC-18", "test": "role-migration-set.sh (FF-13): exactly 019_role.sql / 020_role_assignment.sql / 021_grant_role_fk.sql present; NO 017/018 file. Static check green; confirmed live (migration run shows no 017/018)", "result": "pass"},
+    {"ac": "AC-19", "test": "schema.test.ts anti-decorative guard 'no choros base table missing from fixture' passes with role+role_assignment in known_tenant_tables.txt (file gained exactly those 2 lines)", "result": "pass"},
+    {"ac": "AC-20", "test": "grant-resolver-isolation.sh Check-3 (git diff over frozen src/core): grant-resolver.ts AND grant-lattice.ts unmodified — fitness static green; T-0022 diff confirmed to not touch src/core", "result": "pass"},
+    {"ac": "AC-21", "test": "role-assignment-scope.test.ts AC-21: every seeded role_assignment.org_scope parses as a grant-lattice ScopeElement (node|set), hierarchy==='org', nodeLevel∈{department,position} — parsed via exported lattice types, no new parser", "result": "pass"},
+    {"ac": "AC-22", "test": "role-migration-set.sh (FF-17): static lint over 019-021 finds no second role/principal table (no person_grant/agent_role/human_role); single role + single role_assignment binding both employee kinds", "result": "pass"}
+  ],
+  "secondary_ux": [],
+  "adversarial_probes": [
+    {
+      "id": "a",
+      "what": "R-1 promote-hazard LIVE repro: on a fresh isolated DB (55453) apply 001-020 only, INSERT a grant row with an arbitrary orphan role_id (99999999-…) as old code would, THEN apply migration 021.",
+      "expected": "If R-1 is real, the immediate-VALIDATE FK (no NOT VALID) scans pre-existing rows at apply time and 021 fails with 23503.",
+      "result": "CONFIRMED (promote-hazard reproduced). 021 ERROR: insert or update on table \"grant\" violates foreign key constraint \"grant_role_id_fkey\"; DETAIL Key (tenant_id, role_id)=(a0…0001, 99999999-…) is not present in table \"role\". So: a long-lived contour that accumulated a non-seeded grant.role_id BEFORE 021 runs would REJECT the promote. NOT a code defect — on the clean-replay dev/prod target the grant table is empty (008 seeds no grant data), so 021 applies cleanly there; the spec/ADR scope it exactly to clean-replay. This is the latent hazard the reviewer flagged as R-1, now demonstrated concretely for the founder."
+    },
+    {
+      "id": "b",
+      "what": "confirmed_by self-confirmation: seed a proposal (confirmed_by NULL) as migrator, then as the real choros_app role (NOBYPASSRLS, GUC=dev tenant) UPDATE confirmed_by NULL → 'self-via-app'.",
+      "expected": "Determine whether any app-role caller can self-confirm a proposal (no DB-level proposer≠confirmer authority).",
+      "result": "CONFIRMED — choros_app CAN flip confirmed_by from NULL to any value (after_update_confirmed_by=self-via-app). There is NO DB-layer distinction between who-proposed and who-may-confirm; RLS only scopes by tenant_id. BY DESIGN for T-0022: FR-4 fixes only column semantics; the confirm-authority workflow (LLM-proposes/human-confirms, proposer≠confirmer) is explicitly T-0039 (OS-1, out of scope), and proposal-inertness at resolution is owed by T-0053. SECURITY NOTE for orchestrator: the red-line 'no grant minted without confirmation' is currently CONTRACT-ONLY — neither a resolver filter (T-0053) nor a confirm-authority check (T-0039) exists yet, so the column alone enforces nothing. Matches reviewer R-2."
+    },
+    {
+      "id": "c",
+      "what": "DELETE a role that is still referenced by role_assignment / grant — observe RESTRICT vs CASCADE and compare to ADR.",
+      "expected": "ADR §4 defers delete/archival 'beyond FK referential integrity' → expect default NO ACTION (RESTRICT), not silent CASCADE/orphaning.",
+      "result": "CONFIRMED — all 3 FKs into role (grant_role_id_fkey, role_assignment→role, role_assignment→employee) are confdeltype='a' NO ACTION. DELETE of seeded budget-approver role REJECTED: 23503 'still referenced from table role_assignment'. A live-referenced role cannot be deleted out from under assignments/grants. Correct, safe, and consistent with the frozen-role.id (NF-4) guarantee — no defect."
+    },
+    {
+      "id": "d",
+      "what": "Garbage jsonb org_scope: insert role_assignment with org_scope = '[]', '{\"x\":1}', JSON-null literal, and SQL NULL.",
+      "expected": "Structurally-meaningless-but-valid jsonb accepted (no CHECK, by design); SQL NULL rejected (NOT NULL floor holds).",
+      "result": "CONFIRMED — '[]', '{\"x\":1}', and the JSON 'null' literal ALL inserted (count=3); SQL NULL → 23502. The DB enforces only NOT NULL + valid-jsonb (FR-3/ADR §2: structural validation is application/write-API layer, mirroring grant.scope). NOTE: even the JSON 'null' scalar passes the NOT-NULL column (NOT NULL guards SQL-null, not the json-null literal), so the DB floor is thinner than 'a real scope' — consistent with the no-structural-CHECK design and AC-9 scope; downstream write-API (T-0029) owns shape validation. Documented, not a defect."
+    },
+    {
+      "id": "e",
+      "what": "Cross-tenant composite FK: create a role only in tenant-B, then INSERT a role_assignment in tenant-A with a valid tenant-A employee but role_id = the tenant-B role.",
+      "expected": "Composite FK (tenant_id, role_id)→role(tenant_id, id) rejects → 23503 (role_id alone is insufficient).",
+      "result": "CONFIRMED — 23503 'violates foreign key constraint role_assignment_tenant_id_role_id_fkey; Key (tenant_id, role_id)=(a0…0001, eb…00bb) is not present in table role'. The (tenant_id, role_id) pair must resolve in-tenant; a foreign-tenant role cannot be borrowed even with a valid same-tenant employee. NF-2 tenant isolation at the referential layer is real, not decorative."
+    }
+  ],
+  "integration_honesty_d056": {
+    "verdict": "honest",
+    "evidence": "All db tests use real pg.Client against live Postgres via withClient(migratorUrl())/appUrl() — no vi.mock, no stub, no fake. NO describe.skip/it.skip green-skip guard: if DATABASE_URL is unset, _helpers.migratorUrl() THROWS, so the suite errors rather than silently passing — the gate cannot go green without a real DB. The 153 db assertions are genuine live-PG behavior; the hand-run negatives (23503/23502/23505) match what the automated tests assert. fitness:db ran against an isolated, freshly-migrated Postgres (55452), not a warm/shared DB."
+  },
+  "failures": [],
+  "friction": [
+    {
+      "id": "FE-T0022-001",
+      "title": "Migration 021 grant FK is immediate-VALIDATE (no NOT VALID) → promote-hazard on a data-bearing contour",
+      "detail": "Reproduced LIVE (adversarial probe a): applying 021 to a DB that already holds a grant row with a non-seeded role_id fails with 23503 at ALTER time, because grant_role_id_fkey is added as an immediately-validated FK that scans every existing grant row. Safe on the clean-replay dev/prod target (grant table empty in the 008 base; ADR §1.4 verified this), but any long-lived contour that ever wrote a grant.role_id not resolving to a seeded role BEFORE 021 runs would REJECT the promote. The reviewer's own R-1 cites a concrete parallel-branch volume (t-0115) holding 82 non-seeded grant role_ids that would fail 021. Mitigation if a grant-write path lands before this merges to a long-lived contour: ADD CONSTRAINT … NOT VALID + a separate VALIDATE CONSTRAINT after a reconciliation pass, or assert grant-empty as a pre-021 guard.",
+      "root_class": "product-defect",
+      "severity": "low",
+      "blocking": false,
+      "note": "Latent/promote-time hazard, not a current-gate failure (clean-replay target is safe today). Carry to the orchestrator/founder as a promote-discipline item, matching reviewer R-1. Non-blocking for T-0022 verdict."
+    },
+    {
+      "id": "FE-T0022-002",
+      "title": "No-grant-without-confirmation red-line is contract-only; confirmed_by self-settable by any app-role caller",
+      "detail": "Reproduced LIVE (adversarial probe b): choros_app can UPDATE confirmed_by NULL→arbitrary, self-confirming a proposal — there is no DB-layer proposer≠confirmer authority. This is the documented day-1 boundary (FR-4 columns now; workflow = T-0039; resolver inertness = T-0053), but it means the E3.5 red-line 'no grant minted without confirmation' is enforced NOWHERE yet: not at the resolver (no DB getGrants body — verified, grep finds no code reading role_assignment.confirmed_by) and not at a confirm-authority gate. Recording so 'columns exist' is not mistaken for 'proposals are inert'. Carry as an explicit T-0053 acceptance criterion (confirmed_by IS NOT NULL AND isEffective filter) and a T-0039 confirm-authority criterion.",
+      "root_class": "tooling-gap",
+      "severity": "low",
+      "blocking": false,
+      "note": "Cross-task carry (T-0053 + T-0039), matching reviewer R-2. Correct per T-0022 scope; flagged for downstream so the red-line is actually executed somewhere."
+    }
+  ]
+}

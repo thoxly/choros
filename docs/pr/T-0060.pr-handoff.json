@@ -1,0 +1,120 @@
+{
+  "task_id": "T-0060",
+  "status": "pr_open",
+  "branch": "task/T-0060",
+  "merge_target": "dev",
+  "base_commit": "9824d17",
+  "head_commit": "97d5c89",
+  "pr_url": "https://github.com/thoxly/choros/pull/8",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E1.4: аутентификация воркер-эндпоинтов через Keycloak JWT (withAuth-декоратор на 4 эндпоинтах: POST /jobs, POST /external-task/fetch-and-lock, POST /external-task/:id/complete, POST /external-task/:id/fail). stdlib-only RS256+ES256 (ieee-p1363 → DER конвертация); нет jsonwebtoken/jose/jwks-rsa. JWKS-кэш TTL с force-refresh. Fail-closed: 401 при любом отказе подписи/клеймов, 503 при недоступности KC. Dev-mode (x-dev-user) нетронут. 5 fitness-чеков (FF-3/4/5/6/8). kc CI-job для live-kc тестов. Фикс R-1 (ES256 ieee-p1363) и R-2 (FF-6 в fitness) из review. 23/23 AC покрыто; 10/10 adversarial проб. AC-22 (live-kc) не запускался локально — корректно пропускается без KEYCLOAK_URL; CI job kc покрывает в изолированной среде.",
+  "commits": [
+    {
+      "sha": "7b97b5d",
+      "phase": "SPEC",
+      "message": "T-0060 SPEC: auth worker-эндпоинтов Keycloak JWT — спека аналитика, контракт валиден"
+    },
+    {
+      "sha": "495faac",
+      "phase": "DESIGN",
+      "message": "T-0060 DESIGN: ADR auth воркер-эндпоинтов — withAuth-декоратор, stdlib RS256+JWKS-кэш, fail-closed 401/503; контракт валиден"
+    },
+    {
+      "sha": "b42ce6e",
+      "phase": "BUILD",
+      "message": "T-0060 BUILD: E1.4 Auth воркер-эндпоинтов (Keycloak JWT)"
+    },
+    {
+      "sha": "39e816f",
+      "phase": "REVIEW",
+      "message": "T-0060 REVIEW: changes_requested — R-1 ES256 raw-vs-DER (всегда 401), R-2 FF-6 не в fitness"
+    },
+    {
+      "sha": "d1b2d1e",
+      "phase": "BUILD",
+      "message": "T-0060 BUILD-fix: review R-1 ES256 ieee-p1363 + тесты, R-2 FF-6 в fitness"
+    },
+    {
+      "sha": "4ec080e",
+      "phase": "REVIEW",
+      "message": "T-0060 REVIEW: approved — R-1/R-2 resolved (d1b2d1e), 897 pass, fitness+FF-6 зелёные"
+    },
+    {
+      "sha": "97d5c89",
+      "phase": "TEST",
+      "message": "T-0060 TEST: pass — 23/23 AC, 10/10 адверсариальных проб (alg-confusion, JWKS-края, skew-границы), дефектов нет"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "d1b2d1e",
+      "first_review_commit": "39e816f",
+      "blocking_resolved": ["R-1", "R-2"],
+      "nits_non_blocking": ["R-3", "R-4"],
+      "artifact": "docs/reviews/T-0060.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 903,
+      "passed": 897,
+      "skipped": 6,
+      "failed": 0,
+      "skip_note": "6 skipped = 1 live-kc e2e (workerAuth.kc.e2e.test.ts, requires KEYCLOAK_URL) + 4 flowable integration + 1 flowable-client adversarial",
+      "ac_coverage": "23/23",
+      "adversarial_probes": "10/10",
+      "tested_commit": "97d5c89",
+      "run_details": {
+        "tsc": "exit 0 (0 errors)",
+        "vitest": "897 pass / 6 skip / 0 fail",
+        "fitness_static": "all checks green (43 + FF-6)",
+        "live_kc": "not-run-live (AC-22 gated on KEYCLOAK_URL; kc CI job covers in isolated env)"
+      },
+      "artifact": "docs/test-reports/T-0060.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "vitest_run": "pass (897/897 deterministic tests)",
+      "fitness_static": "pass (FF-3/FF-4/FF-5/FF-6/FF-8 + 39 pre-existing)",
+      "live_kc_ci": "kc job in ci.yml: isolated KC container, workerAuth.kc.e2e.test.ts runs with real KEYCLOAK_URL"
+    }
+  },
+  "files_changed": [
+    ".github/workflows/ci.yml",
+    "ci/checks/worker-auth-config-failfast.sh",
+    "ci/checks/worker-auth-env-docs.sh",
+    "ci/checks/worker-auth-public-surface.sh",
+    "ci/checks/worker-auth-single-branch.sh",
+    "ci/checks/worker-auth-zero-dep.sh",
+    "docker-compose.yml",
+    "docs/design/T-0060-worker-endpoint-auth.adr.md",
+    "docs/design/T-0060.adr.contract.json",
+    "docs/environments.md",
+    "docs/reviews/T-0060.review.json",
+    "docs/specs/T-0060-worker-endpoint-auth.spec.md",
+    "docs/specs/T-0060.spec.contract.json",
+    "docs/test-reports/T-0060.test-report.json",
+    "package.json",
+    "src/__tests__/jwks-cache.test.ts",
+    "src/__tests__/workerAuth.kc.e2e.test.ts",
+    "src/__tests__/workerAuth.test.ts",
+    "src/http/auth.ts",
+    "src/http/externalWorker.ts"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) merges feature branch into dev after all gates pass",
+    "founder_gate": "dev→main promotion is founder-gated (GT-3). Что проверить: (1) withAuth применён на POST /jobs, POST /external-task/fetch-and-lock, POST /external-task/:id/complete, POST /external-task/:id/fail; (2) stdlib-only — нет jsonwebtoken/jose/jwks-rsa в package.json; (3) ES256 работает через ieee-p1363 dsaEncoding; (4) dev-mode (x-dev-user) без изменений; (5) kc CI job изолирован с KC-контейнером; (6) AC-22 live-kc пропускается без KEYCLOAK_URL.",
+    "infra_changes": "docker-compose.yml: добавлен keycloak-сервис для локального dev. ci.yml: добавлен job kc (live-kc тесты). Нет новых миграций. Безопасно мержить в dev.",
+    "known_limitation": "AC-22 (live Keycloak end-to-end) не запускался локально — требует docker compose up keycloak. workerAuth.kc.e2e.test.ts корректно пропускается без KEYCLOAK_URL. CI job kc обеспечивает покрытие в изолированной среде с реальным Keycloak."
+  },
+  "friction_events": []
+}

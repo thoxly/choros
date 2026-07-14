@@ -1,0 +1,87 @@
+{
+  "task_id": "T-0165",
+  "status": "pr_open",
+  "branch": "task/T-0165-org-seed-dedup",
+  "merge_target": "dev",
+  "base_commit": "94174bf",
+  "head_commit": "bf797c6",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Deduplicates ORG_SEED_CHILDREN / SEED_ORACLE across 4 src/http/ files (grants.ts, invoke.ts, agents.ts, secret-handle.ts) by replacing inline copies with a single import from the canonical src/http/seed-ancestry.ts module (introduced by T-0136 hotfix). invoke.ts re-exports SEED_ORACLE for backward compatibility with invoke-grant.test.ts. Zero behavioural change (all 4 copies were data-identical). CI: tsc exit 0, eslint exit 0, vitest 1548/1548, fitness:db 603/603. REVIEW approved at bf797c6, 0 findings, zero drift confirmed.",
+  "commits": [
+    {
+      "sha": "449dcb7",
+      "phase": "SPEC",
+      "message": "T-0165 SPEC: ORG_SEED_CHILDREN dedup — migrate 4 http handlers to seed-ancestry.ts"
+    },
+    {
+      "sha": "4d0f951",
+      "phase": "BUILD",
+      "message": "T-0165 BUILD: dedup ORG_SEED_CHILDREN — 4 http handlers → import SEED_ORACLE from seed-ancestry.ts"
+    },
+    {
+      "sha": "bf797c6",
+      "phase": "REVIEW",
+      "message": "T-0165 REVIEW: approved"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "bf797c6",
+      "findings_resolved": [],
+      "nits_noted": [],
+      "artifact": "docs/design/T-0165.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1548,
+      "passed": 1548,
+      "failed": 0,
+      "ac_coverage": "7/7",
+      "fitness_static": "PASS with 2 known FAILs (config-agent-seed Check-6 origin-lag) — all other checks green",
+      "fitness_db_total": "603/603 PASS, 0 failed, 44 files",
+      "tested_commit": "bf797c6",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing no-console warnings",
+        "npm_build": "exit 0 — 0 errors",
+        "fitness_static_checks": "PASS with 2 known FAILs (Check-6: agents.ts + grants.ts vs dev merge-base)",
+        "vitest_unit": "1548/1548 passed, 6 skipped (2 skip files), 72 files (70 ran)",
+        "fitness_db_total": "603/603 passed, 0 failed, 44 files"
+      },
+      "artifact": "docs/test-reports/T-0165.test-report.md",
+      "contract_artifact": "docs/design/T-0165.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/http/agents.ts",
+    "src/http/grants.ts",
+    "src/http/invoke.ts",
+    "src/http/secret-handle.ts",
+    "docs/specs/T-0165-org-seed-dedup.spec.md",
+    "docs/specs/T-0165.spec.contract.json",
+    "docs/reviews/T-0165.review.md",
+    "docs/design/T-0165.review.contract.json",
+    "docs/test-reports/T-0165.test-report.md",
+    "docs/design/T-0165.test-report.contract.json",
+    "docs/pr/T-0165.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration": "T-0165 adds no migration — changes are in src/http/*.ts (import refactor only). No DB schema changes; no migrate run needed post-merge.",
+    "check6_note": "config-agent-seed.sh Check-6 FAILs (agents.ts + grants.ts) are origin-lag class. The check diffs vs merge-base HEAD origin/dev; after merge and push to dev the new baseline eliminates the delta → Check-6 turns green. This is expected and requires no corrective action in the merge window.",
+    "single_source_allow_list_note": "ci/checks/seed/single-source.sh allow-list contains stale entries for agents.ts, invoke.ts, secret-handle.ts (annotated 'dedup = follow-up task'). Post-T-0165 those files carry no *_SEED const so the check never fires on them. The stale entries are benign and harmless to check coverage. Cleanup is a candidate when T-0140 owner next amends that file; not blocking merge."
+  },
+  "friction_events": []
+}

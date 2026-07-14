@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0532",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "nit",
+      "axis": 2,
+      "location": "web/src/screens/rights/ra-intents.jsx:10",
+      "issue": "validateNarrowing remains in a JSDoc/comment invariant block (Инвариант I-2). Not user-facing rendered text — stays in a /* ... */ file header comment. Not a violation per design §D (only JSX render output is gated). Acceptable as developer docs.",
+      "suggestion": "If the comment is updated in a future pass, replace validateNarrowing with plain Russian. Not blocking."
+    },
+    {
+      "id": "F-02",
+      "severity": "nit",
+      "axis": 2,
+      "location": "web/src/screens/rights/ra-intents.jsx:111",
+      "issue": "JSON.stringify(result.data, null, 2) inside <pre> in ResultBanner.ok branch. This is a debug/success diagnostic dump for admin users (shows the raw API response after a successful intent), not a user-facing field value. Pre-existed on dev branch unchanged by this diff — not introduced by T-0532. Design §D exemption applies to API-body display; this is analogous. Acceptable.",
+      "suggestion": "Could be wrapped with formatJsonReadable in a future cleanup. Not blocking for this task."
+    },
+    {
+      "id": "F-03",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/lib/format.js:273-299 (formatDuration)",
+      "issue": "formatDuration handles only simple single-unit patterns (PxxD, PTxxH, PTxxM). Combined durations like P1DT6H fall through to returning the raw ISO string. The design marks this as a bonus/followup (§E last row), so scope is correct — but the limitation is not documented in the function's JSDoc.",
+      "suggestion": "Add a note to the JSDoc: 'Note: only single-unit patterns supported; compound durations (P1DT6H) return the raw string.' Not blocking."
+    },
+    {
+      "id": "F-04",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/rights/ra-grant-trail.jsx:51",
+      "issue": "scopeDisplay fallback (else branch for unknown scope kinds) still uses JSON.stringify(s). This is a non-targeted site — not listed in the design's fitness table (§E) for this task. Pre-existed on dev. Out of T-0532 scope but worth a follow-up.",
+      "suggestion": "Replace with formatJsonReadable(s) in a follow-up task."
+    },
+    {
+      "id": "F-05",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/lib/format.js:134-144 (formatEnum)",
+      "issue": "When value is a string not found in ENUM_LABELS or labelMap, formatEnum returns the raw value as-is. For machine enum values like 'service' or unknown future statuses this gives the correct fallback. However for truly unknown values it silently passes through in English. This is per-spec (design §A: 'Если нет в каталоге — value возвращается as-is'). No issue — just confirming spec-match.",
+      "suggestion": "No action required — by design."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "format.js чистый — 5 функций без React/side-effects/сети, null-safe", "covered": true },
+    { "ac": "ra-grant-trail: toISOString→formatDate", "covered": true },
+    { "ac": "screen-record-detail: JSON.stringify→formatJsonReadable, res.status→formatError", "covered": true },
+    { "ac": "screen-process-editor: JSON.stringify в violations→formatJsonReadable", "covered": true },
+    { "ac": "ra-intents: Tier/HTTP-жаргон убран, formatError подключён", "covered": true },
+    { "ac": "field-renderer: HTTP res.status→formatError", "covered": true },
+    { "ac": "Сборка npm run build зелёная", "covered": true },
+    { "ac": "formatDuration добавлен (bonus из §E дизайна)", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

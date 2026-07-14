@@ -1,0 +1,191 @@
+{
+  "task_id": "T-0061",
+  "status": "ready",
+  "decision": "Deliver Choros E0.6 as: (a) one `choros` service block added to repo-root `docker-compose.yml` (additive, all three existing service blocks untouched), built from a multi-stage Dockerfile (web-builder→app-builder→runtime on node:20-slim); env vars with dev-only defaults; depends_on postgres/keycloak/flowable (service_healthy); host port ${APP_PORT:-3000}:3000; (b) `docker-compose.prod.yml` override using required-form `${VAR}` (no :-default) for all sensitive vars, KC command switched to `start` (prod mode), volumes renamed with `_prod` suffix, NODE_ENV=production; (c) `.env.prod.example` committed with REPLACE_* placeholder values only (RL-3); (d) `.gitignore` extended with `.env.prod`; (e) `ci/checks/compose-prod-config.sh` covering static fitness for AC-1..AC-12. Mechanism: compose override-files (base=dev defaults, override=prod required-form) — the standard single-artifact mode-as-config pattern (tenancy ADR §7). No src/ files touched (T-0068 owns index.ts concurrently). Migrations run in-process via existing `migrations/run.mjs` (silo-upgrade semantic, tenancy ADR §5). KC full prod hardening (TLS, KC_PROXY=edge, KC_HOSTNAME_URL) deferred to E0.7 (honest gap, founder-gated).",
+  "rejected_alternatives": [
+    {
+      "option": "docker compose --profile prod (profiles)",
+      "why_not": "Profile syntax is less visible than a dedicated override file; the two-file merge model is the documented standard for dev/prod parity; profiles do not naturally enforce required-form variables without additional tooling. Override-files is the compose canonical mechanism for mode-as-config."
+    },
+    {
+      "option": "Separate docker-compose.dev.yml + docker-compose.prod.yml (no shared base)",
+      "why_not": "Requires duplicating all three existing service blocks (postgres/kc/flowable) into both files; violates DRY and makes future additive changes require two edits per service. The base+override model keeps each service edited once."
+    },
+    {
+      "option": "Two Dockerfiles (Dockerfile.dev, Dockerfile.prod)",
+      "why_not": "Contradicts one-artifact mode-as-config (tenancy ADR §7); doubles Dockerfile maintenance surface; the same image with different env vars is standard and sufficient."
+    },
+    {
+      "option": "External migration step / init-container in compose",
+      "why_not": "Adds compose orchestration complexity (condition: service_completed_successfully hacks or wrapper scripts); the existing migrations/run.mjs runner is already called in-process from server.ts when DATABASE_URL is set; the silo-upgrade semantic (tenancy ADR §5) maps directly to migrate-then-serve."
+    },
+    {
+      "option": "H2 for KC internal store in dev, Postgres in prod",
+      "why_not": "Already decided in T-0054 §1.1: KC uses the shared Postgres instance (single-substrate principle). Switching to H2 for dev would violate mode=config invariant and require a second KC store-mode override in the prod file."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "choros service (docker-compose.yml additive block)",
+      "fields": [
+        {"name": "build", "type": "string — '.' (repo root Dockerfile)"},
+        {"name": "environment.DATABASE_URL", "type": "string — ${DATABASE_URL:-postgres://choros_migrator:choros_dev_pw@postgres:5432/choros} (DEV default)"},
+        {"name": "environment.CHOROS_AUTH_MODE", "type": "string — ${CHOROS_AUTH_MODE:-dev} (DEV default)"},
+        {"name": "environment.KEYCLOAK_PORT", "type": "string — ${KEYCLOAK_PORT:-8180}"},
+        {"name": "environment.KEYCLOAK_REALM", "type": "string — ${KEYCLOAK_REALM:-choros}"},
+        {"name": "environment.KC_ISSUER", "type": "string — ${KC_ISSUER:-http://keycloak:8180/realms/choros}"},
+        {"name": "environment.NODE_ENV", "type": "string — ${NODE_ENV:-development}"},
+        {"name": "environment.PORT", "type": "string — ${PORT:-3000}"},
+        {"name": "ports", "type": "list — [\"${APP_PORT:-3000}:3000\"]"},
+        {"name": "depends_on.postgres.condition", "type": "string — service_healthy"},
+        {"name": "depends_on.keycloak.condition", "type": "string — service_healthy"},
+        {"name": "depends_on.flowable.condition", "type": "string — service_healthy"},
+        {"name": "healthcheck.test", "type": "list — CMD-SHELL wget -q -O /dev/null http://localhost:${PORT:-3000}/health"}
+      ]
+    },
+    {
+      "entity": "docker-compose.prod.yml (override file)",
+      "fields": [
+        {"name": "services.postgres.environment.POSTGRES_PASSWORD", "type": "string — ${POSTGRES_PASSWORD} (required, no default)"},
+        {"name": "services.postgres.environment.POSTGRES_USER", "type": "string — ${POSTGRES_USER} (required)"},
+        {"name": "services.postgres.environment.POSTGRES_DB", "type": "string — ${POSTGRES_DB} (required)"},
+        {"name": "services.keycloak.command", "type": "string — 'start --import-realm' (not start-dev)"},
+        {"name": "services.keycloak.environment.KEYCLOAK_ADMIN_PASSWORD", "type": "string — ${KEYCLOAK_ADMIN_PASSWORD} (required)"},
+        {"name": "services.keycloak.environment.KC_DB_PASSWORD", "type": "string — ${POSTGRES_PASSWORD} (required)"},
+        {"name": "services.flowable.environment.SPRING_DATASOURCE_PASSWORD", "type": "string — ${POSTGRES_PASSWORD} (required)"},
+        {"name": "services.flowable.environment.FLOWABLE_REST_APP_ADMIN_PASSWORD", "type": "string — ${FLOWABLE_REST_APP_ADMIN_PASSWORD} (required)"},
+        {"name": "services.choros.environment.DATABASE_URL", "type": "string — ${DATABASE_URL} (required)"},
+        {"name": "services.choros.environment.NODE_ENV", "type": "string — 'production' (literal)"},
+        {"name": "volumes.choros_pgdata_prod", "type": "named volume — physically isolated from dev choros_pgdata"}
+      ]
+    },
+    {
+      "entity": "Dockerfile (multi-stage)",
+      "fields": [
+        {"name": "stage web-builder", "type": "node:20-alpine — npm ci + npm run build in web/; outputs web/dist/"},
+        {"name": "stage app-builder", "type": "node:20-alpine — npm ci + tsc; outputs dist/"},
+        {"name": "stage runtime", "type": "node:20-slim — copies dist/, package*.json, web/dist/, migrations/; npm ci --omit=dev; EXPOSE 3000; CMD [node,dist/index.js]"},
+        {"name": ".dockerignore", "type": "excludes node_modules, dist, .env*, .git, ci, docs, spikes, .claude, web/node_modules"}
+      ]
+    },
+    {
+      "entity": ".env.prod.example (committed template)",
+      "fields": [
+        {"name": "POSTGRES_PASSWORD", "type": "string — REPLACE_WITH_SECURE_PASSWORD (placeholder)"},
+        {"name": "KEYCLOAK_ADMIN_PASSWORD", "type": "string — REPLACE_WITH_SECURE_PASSWORD (placeholder)"},
+        {"name": "FLOWABLE_REST_APP_ADMIN_PASSWORD", "type": "string — REPLACE_WITH_SECURE_PASSWORD (placeholder)"},
+        {"name": "DATABASE_URL", "type": "string — contains REPLACE_WITH_SECURE_PASSWORD (placeholder)"},
+        {"name": "CHOROS_AUTH_MODE", "type": "string — keycloak (non-secret, expected prod value)"},
+        {"name": "NODE_ENV", "type": "string — production (non-secret)"}
+      ]
+    },
+    {
+      "entity": "ci/checks/compose-prod-config.sh",
+      "fields": [
+        {"name": "shebang", "type": "#!/usr/bin/env bash + set -euo pipefail"},
+        {"name": "step1", "type": "docker compose -f docker-compose.yml config -q (FF-T61-1)"},
+        {"name": "step2", "type": "docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q with placeholder env (FF-T61-2)"},
+        {"name": "step3", "type": "grep no-default-creds in prod overlay (FF-T61-3)"},
+        {"name": "step4", "type": "grep _prod suffix volumes (FF-T61-4)"},
+        {"name": "step5", "type": "grep REPLACE in .env.prod.example credentials (FF-T61-5)"},
+        {"name": "step6", "type": "grep .env.prod in .gitignore (FF-T61-6)"},
+        {"name": "step7", "type": "assert choros service present with required fields (FF-T61-7)"},
+        {"name": "step8", "type": "assert Dockerfile exists (FF-T61-8 static part)"},
+        {"name": "step9", "type": "grep start-dev absent in prod overlay keycloak (FF-T61-9)"},
+        {"name": "step10", "type": "assert host port uniqueness (FF-T61-10)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "docker-compose.yml choros service: build='.', environment with dev defaults (${VAR:-dev_value}), depends_on postgres+keycloak+flowable (condition: service_healthy), ports ['${APP_PORT:-3000}:3000'], healthcheck on /health or TCP:3000.",
+    "docker-compose.prod.yml: ALL sensitive vars (PASSWORD, SECRET, KEY, TOKEN) in ${VAR} form (no :-default); keycloak.command='start --import-realm' (not start-dev); NODE_ENV=production for choros; volumes with _prod suffix; no new Postgres service (NF-3 single-instance invariant).",
+    "Dockerfile: 3-stage build (web-builder node:20-alpine, app-builder node:20-alpine, runtime node:20-slim); EXPOSE 3000; CMD ['node','dist/index.js']; migrations/ included in runtime stage (silo-upgrade semantic); no .env* baked in.",
+    ".dockerignore: excludes node_modules, dist, .env*, .git, ci, docs, spikes, .claude, web/node_modules; does NOT exclude web/src/ or migrations/.",
+    ".env.prod.example: committed to repo; every sensitive value contains 'REPLACE'; copy-and-fill instructions inline; no real credential.",
+    ".gitignore: contains .env.prod (exact or pattern .env.); also .env.*.local if absent.",
+    "ci/checks/compose-prod-config.sh: set -euo pipefail; PASS/FAIL stdout; exit 0 on all-green, exit 1 on first failure; covers FF-T61-1..FF-T61-10 statically (no Docker daemon required for grep/yaml checks; docker compose config -q needs compose CLI).",
+    "No src/ files modified (T-0068 owns index.ts concurrently — strict non-interference).",
+    "docs/environments.md: new §7 table listing choros-app env vars (DATABASE_URL, CHOROS_AUTH_MODE, PORT, APP_PORT, NODE_ENV, KC_ISSUER, KEYCLOAK_PORT, KEYCLOAK_REALM) with dev defaults and prod required notes.",
+    "npm run fitness: compose-prod-config.sh added to the fitness script chain in package.json."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T61-1",
+      "rule": "docker compose -f docker-compose.yml config -q exits 0 without any .env file (dev mode, all defaults present).",
+      "ci_check": "ci/checks/compose-prod-config.sh step 1: docker compose -f docker-compose.yml config -q; non-zero exit → FAIL. (AC-1)"
+    },
+    {
+      "id": "FF-T61-2",
+      "rule": "docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q exits 0 when all required vars provided via --env-file with placeholder-replaced values.",
+      "ci_check": "ci/checks/compose-prod-config.sh step 2: create temp env file from .env.prod.example with sed replacing REPLACE_* with dummy non-empty strings; docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file $tmp config -q; non-zero exit → FAIL. (AC-2)"
+    },
+    {
+      "id": "FF-T61-3",
+      "rule": "docker-compose.prod.yml must NOT contain ${VAR:-default} form for PASSWORD, SECRET, TOKEN, KEY variables — only ${VAR} (required form).",
+      "ci_check": "ci/checks/compose-prod-config.sh step 3: grep -E '(PASSWORD|SECRET|TOKEN|KEY).*:-' docker-compose.prod.yml; any match → FAIL; zero matches → PASS. (AC-3)"
+    },
+    {
+      "id": "FF-T61-4",
+      "rule": "Prod overlay volumes use _prod suffix; dev volume name choros_pgdata does not appear bare in the prod overlay.",
+      "ci_check": "ci/checks/compose-prod-config.sh step 4: grep 'choros_pgdata:' docker-compose.prod.yml | grep -v _prod → FAIL if match; grep 'choros_pgdata_prod' docker-compose.prod.yml → FAIL if absent. (AC-4)"
+    },
+    {
+      "id": "FF-T61-5",
+      "rule": ".env.prod.example exists and every sensitive value line (PASSWORD/SECRET/KEY/TOKEN) contains REPLACE or is empty.",
+      "ci_check": "ci/checks/compose-prod-config.sh step 5: [[ -f .env.prod.example ]] || FAIL; grep -iE '(PASSWORD|SECRET|KEY|TOKEN)=' .env.prod.example | grep -vE '(REPLACE|=\\s*$)' → FAIL if match. (AC-5)"
+    },
+    {
+      "id": "FF-T61-6",
+      "rule": ".gitignore contains .env.prod (exact or .env. pattern).",
+      "ci_check": "ci/checks/compose-prod-config.sh step 6: grep -E '^\\.env\\.prod$|^\\.env\\.' .gitignore → FAIL if no match. (AC-6)"
+    },
+    {
+      "id": "FF-T61-7",
+      "rule": "docker-compose.yml has a choros service with build, depends_on (postgres+keycloak+flowable), port 3000.",
+      "ci_check": "ci/checks/compose-prod-config.sh step 7: grep 'choros:' docker-compose.yml → FAIL if absent; grep 'depends_on' after choros block includes postgres, keycloak, flowable; grep '3000' in ports section. (AC-7)"
+    },
+    {
+      "id": "FF-T61-8",
+      "rule": "Dockerfile exists in repo root. Full docker build is gated in CI (docker build -t choros-ci-test .) exits 0.",
+      "ci_check": "Static (compose-prod-config.sh): [[ -f Dockerfile ]] || FAIL. CI build step (ci.yml): docker build -t choros-ci-test . exits 0. (AC-8)"
+    },
+    {
+      "id": "FF-T61-9",
+      "rule": "docker-compose.prod.yml keycloak command contains 'start' (not 'start-dev').",
+      "ci_check": "ci/checks/compose-prod-config.sh step 9: grep 'start-dev' docker-compose.prod.yml → FAIL if match; grep 'command:.*start' docker-compose.prod.yml → FAIL if absent. (AC-9)"
+    },
+    {
+      "id": "FF-T61-10",
+      "rule": "All host port defaults in docker-compose.yml are unique (no two services share same default host port).",
+      "ci_check": "ci/checks/compose-prod-config.sh step 10: extract all :- port defaults from port mappings; assert set is unique; assert 3000 not in {55432,8180,9000,8082}. (AC-11)"
+    },
+    {
+      "id": "FF-T61-11",
+      "rule": "ci/checks/no-committed-secret.sh continues to exit 0 after T-0061 changes (no unexpected password literal in new files).",
+      "ci_check": "npm run fitness (already includes no-committed-secret.sh); new choros service in docker-compose.yml uses only allowed dev defaults (choros_dev_pw is in ALLOWED_DEV_DEFAULTS); docker-compose.prod.yml has no literal passwords. (AC-12)"
+    },
+    {
+      "id": "FF-T61-12",
+      "rule": "docker compose up -d brings all 4 services (postgres, keycloak, flowable, choros) to healthy/running state without manual intervention.",
+      "ci_check": "CI integration job: docker compose up -d --wait; docker compose ps shows all 4 services healthy. Extends existing integration job that already covers KC+flowable smokes. (AC-13)"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§3.2 choros service dev defaults; FF-T61-1"},
+    {"ac": "AC-2", "covered_by": "§3.3 prod overlay required-form; §3.4 .env.prod.example; FF-T61-2"},
+    {"ac": "AC-3", "covered_by": "§3.3 no :- in prod overlay; FF-T61-3"},
+    {"ac": "AC-4", "covered_by": "§3.3 _prod volume names; FF-T61-4"},
+    {"ac": "AC-5", "covered_by": "§3.4 REPLACE_* placeholders only; FF-T61-5"},
+    {"ac": "AC-6", "covered_by": "§3.1 .gitignore extend; FF-T61-6"},
+    {"ac": "AC-7", "covered_by": "§3.2 choros service block with all required fields; FF-T61-7"},
+    {"ac": "AC-8", "covered_by": "§1.1/1.2/3.5 Dockerfile multi-stage; FF-T61-8"},
+    {"ac": "AC-9", "covered_by": "§1.4 KC prod-mode gap; §3.3 command override; FF-T61-9"},
+    {"ac": "AC-10", "covered_by": "§3.2 additive only — existing postgres/keycloak/flowable blocks untouched; existing CI smokes unchanged"},
+    {"ac": "AC-11", "covered_by": "§3.2 port 3000 (unique vs 55432/8180/9000/8082); FF-T61-10"},
+    {"ac": "AC-12", "covered_by": "§3.3 required-form (no literal); §3.4 placeholders; FF-T61-11"},
+    {"ac": "AC-13", "covered_by": "§3.2 depends_on + healthcheck; §1.3 migrations in-process; FF-T61-12"}
+  ],
+  "runtime_target": "Dev: Docker Compose on developer machine / ephemeral CI runner (unattended, docker compose up). Prod: Docker Compose on founder's home server (/srv/choros, Tailscale) — GT-4 scope is E0.7 (founder-gated). T-0061 commits NO prod secret and provisions NO server; it delivers compose artefacts that E0.7 picks up as-is.",
+  "adr_artifact_path": "docs/design/T-0061-dev-prod-stacks.adr.md",
+  "escalation": ""
+}

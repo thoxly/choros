@@ -1,0 +1,845 @@
+/**
+ * src/core/register.ts — T-0342 (E14): Pure registration service.
+ *
+ * PURE: no http import. All IO behind injected interfaces (FF-5 / FF-HIRE-6).
+ *
+ * Exports:
+ *   RegisterRequest          — validated input shape
+ *   RegisterResponse         — success response shape
+ *   registerTenant           — pure service: validate → KC-first → DB-tx → compensation
+ *   humanizeEmailLocalPart   — T-0770: owner employee display_name derivation (NOT the raw email)
+ *
+ * Flow:
+ *   1. Validate orgName/email/password (throw VALIDATION on failure)
+ *   2. kc.createHumanUser (throw EMAIL_TAKEN / AUTH_UNAVAILABLE on failure)
+ *   3. DB transaction: tenant(self-ref) + role(tenant-owner) + employee(slug=sub) + confirmed role_assignment
+ *      + T-0373 (PD-7): assistant-agent employee + role-configurator + their role_assignments + authoring_draft grants
+ *      + T-0574: agent_card row for assistant-agent (3f-bis) — makes it addressable
+ *        for PUT /api/agents/:id/llm-connection (else 404 AGENT_NOT_FOUND)
+ *   4. On DB failure after KC create → best-effort kc.deleteUser (FF-2) then rethrow
+ *
+ * Migrations: employee/role/role_assignment/tenant/grant tables exist (ADR §3).
+ * T-0574 adds NO new migration for register.ts itself (agent_card already exists,
+ * migration 032/093) — only migrations/115_assistant_agent_card_backfill.sql for
+ * PRE-EXISTING tenants registered before this change.
+ * resolveActorTenant/extractActor signatures UNCHANGED (FF-7).
+ */
+
+import { randomUUID } from "node:crypto";
+import pg from "pg";
+import type { KeycloakUserPort } from "../keycloak/admin-port.js";
+import { humanEmployeeSlugExists } from "../db/org.js";
+import { RESOURCE_ROOT_NODE_ID, READER_ROLE_SLUG } from "./read-visibility.js";
+
+// ---------------------------------------------------------------------------
+// Request / Response shapes (ADR §4 wire contract)
+// ---------------------------------------------------------------------------
+
+export interface RegisterRequest {
+  orgName: string;   // 1..120 chars, trimmed
+  email: string;     // RFC-lite email
+  password: string;  // ≥ 8 chars
+}
+
+export interface RegisterResponse {
+  tenantId: string;    // UUID of the new tenant
+  tenantSlug: string;  // URL-safe slug derived from orgName
+  userId: string;      // KC user UUID (= employee.slug = future JWT sub)
+  email: string;
+}
+
+// ---------------------------------------------------------------------------
+// Deps shape (injected; no env reads in core)
+// ---------------------------------------------------------------------------
+
+export interface RegisterDeps {
+  pool: pg.Pool;
+  kc: KeycloakUserPort;
+  nowMs(): number;
+}
+
+// ---------------------------------------------------------------------------
+// Slug derivation — pure (ADR §4)
+// ---------------------------------------------------------------------------
+
+const SLUG_MAX = 80;
+
+/**
+ * Russian Cyrillic → latin transliteration map.
+ * Applied before the [^a-z0-9-] filter so Cyrillic names produce readable slugs.
+ * e.g. "Браузер Приёмка" → "brauzer-priyomka"
+ */
+const CYRILLIC_MAP: Record<string, string> = {
+  а: "a",  б: "b",  в: "v",  г: "g",  д: "d",
+  е: "e",  ё: "e",  ж: "zh", з: "z",  и: "i",
+  й: "y",  к: "k",  л: "l",  м: "m",  н: "n",
+  о: "o",  п: "p",  р: "r",  с: "s",  т: "t",
+  у: "u",  ф: "f",  х: "h",  ц: "ts", ч: "ch",
+  ш: "sh", щ: "sch", ъ: "",  ы: "y",  ь: "",
+  э: "e",  ю: "yu", я: "ya",
+};
+
+/** Replace each Cyrillic character with its latin equivalent (lower-case input expected). */
+function transliterateCyrillic(s: string): string {
+  return s.replace(/[а-яё]/g, (ch) => CYRILLIC_MAP[ch] ?? ch);
+}
+
+/**
+ * slugify(orgName) → transliterate Cyrillic → lower, [a-z0-9-], collapse dashes, truncate.
+ * Consistent with deriveKcClientId pattern in agent-hire.ts.
+ * "Браузер Приёмка" → "brauzer-priyomka"
+ */
+export function slugifyOrgName(orgName: string): string {
+  const slug = transliterateCyrillic(orgName.toLowerCase())
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return (slug || "org").slice(0, SLUG_MAX);
+}
+
+// ---------------------------------------------------------------------------
+// Owner display name — pure (T-0770, pillar 7: onboarding first impression)
+// ---------------------------------------------------------------------------
+
+/**
+ * humanizeEmailLocalPart(email) — derive a human-presentable display name
+ * from the LOCAL PART of an email when no real name was collected at
+ * registration (self-registration's RegisterRequest carries no name field —
+ * ADR §4 wire contract is orgName/email/password only, T-0741's own
+ * regression guard documents this as a deliberate, pre-existing scope
+ * boundary). Without this, the freshly-minted owner employee's display_name
+ * defaulted to the RAW EMAIL ("lp-w8-owner@example.com"), which then surfaced
+ * verbatim in the app header and every actor-chip — the very first thing a
+ * new owner sees reads as a machine artifact, not a person (T-0770).
+ *
+ * "lp-w8-owner@example.com"  → "Lp W8 Owner"
+ * "founder@acme.com"         → "Founder"
+ * "john.doe+test@corp.io"    → "John Doe Test"
+ *
+ * Deliberately NOT a "real name" guess — just a safe, non-breaking default
+ * that is never the literal email string. Pure; never throws (always returns
+ * a non-empty string — falls back to a generic RU label if the local part is
+ * made up entirely of separator characters).
+ */
+export function humanizeEmailLocalPart(email: string): string {
+  const at = email.indexOf("@");
+  const local = at > 0 ? email.slice(0, at) : email;
+  const words = local
+    .split(/[._+-]+/)
+    .filter((w) => w.length > 0)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1));
+  const joined = words.join(" ").trim();
+  return joined || "Новый пользователь";
+}
+
+// ---------------------------------------------------------------------------
+// Validation — pure, throws VALIDATION
+// ---------------------------------------------------------------------------
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export class RegisterError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = "RegisterError";
+  }
+}
+
+/**
+ * ValidationError extends RegisterError so the HTTP route's `instanceof RegisterError`
+ * guard catches it and emits 400 VALIDATION (ADR §4 / AC-9 / R-1 fix).
+ */
+class ValidationError extends RegisterError {
+  constructor(message: string) {
+    super("VALIDATION", message);
+    this.name = "ValidationError";
+  }
+}
+
+function validateRequest(req: RegisterRequest): void {
+  const name = req.orgName?.trim();
+  if (!name || name.length < 1 || name.length > 120) {
+    throw new ValidationError("orgName must be 1–120 characters");
+  }
+  if (!req.email || !EMAIL_RE.test(req.email)) {
+    throw new ValidationError("email must be a valid email address");
+  }
+  if (!req.password || req.password.length < 8) {
+    throw new ValidationError("password must be at least 8 characters");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DB conflict helpers
+// ---------------------------------------------------------------------------
+
+function isUniqueViolation(err: unknown): boolean {
+  return !!(err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23505");
+}
+
+// ---------------------------------------------------------------------------
+// registerTenant — the pure core service (ADR §2 / §4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive a slug candidate from a base slug + optional attempt index.
+ * Attempt 0  → base slug (no suffix)
+ * Attempt 1+ → base-<6-char base36 derived from a fresh randomUUID>
+ * This keeps slugs pretty for the common case (first registrant of a name)
+ * while guaranteeing uniqueness under concurrent same-name registrations.
+ */
+function slugCandidate(base: string, attempt: number): string {
+  if (attempt === 0) return base;
+  // Take the first 6 hex chars of a fresh UUID, convert to base36 for brevity
+  const hex = randomUUID().replace(/-/g, "").slice(0, 8);
+  const suffix = parseInt(hex, 16).toString(36).slice(0, 6);
+  // Ensure total length stays within SLUG_MAX
+  const trimmedBase = base.slice(0, SLUG_MAX - 7); // 7 = "-" + 6 chars
+  return `${trimmedBase}-${suffix}`;
+}
+
+/** Maximum number of slug insert attempts before giving up with ORG_TAKEN. */
+const SLUG_MAX_ATTEMPTS = 5;
+
+/**
+ * Registers a new tenant with owner membership.
+ *
+ * Sequence:
+ *   1. Validate request
+ *   2. Create KC user (KC-first, as per ADR §2 decision)
+ *   3. DB transaction in the new tenant's scope:
+ *      - INSERT tenant (self-ref: tenant_id = id) — retried on slug unique-violation
+ *      - INSERT role (slug='tenant-owner')
+ *      - INSERT employee (slug=kcSub, kind='human')
+ *      - INSERT role_assignment (confirmed, org_scope=set([]))
+ *   4. On any DB failure after KC create → kc.deleteUser (best-effort compensation FF-2) + rethrow
+ *
+ * Slug uniqueness: slug collisions (23505) are retried up to SLUG_MAX_ATTEMPTS times
+ * with a random suffix (attempt 1+). Two orgs with the same display name BOTH succeed.
+ */
+export async function registerTenant(
+  deps: RegisterDeps,
+  req: RegisterRequest,
+): Promise<RegisterResponse> {
+  // Step 1: Validate
+  validateRequest(req);
+  const orgName = req.orgName.trim();
+  const baseSlug = slugifyOrgName(orgName);
+
+  // SECURITY — case-fold normalization (T-0633 round-3). Keycloak 25.0.6
+  // LOWERCASES a username at creation. Self-registration uses the email as the
+  // Keycloak username, so we case-fold it ONCE here and use the SAME normalized
+  // value for the anti-collision guard, the KC `username`, the stored
+  // employee.slug's sibling email, and the response — guard side and the form
+  // KC actually stores can never diverge. (RFC-5321 leaves the local part
+  // case-sensitive, but KC folds it regardless; recording the folded form is
+  // what keeps the later login — which KC also folds — resolvable.)
+  const normalizedEmail = req.email.trim().toLowerCase();
+
+  // SECURITY — anti-collision (T-0633, defense-in-depth). Self-registration
+  // sets the Keycloak username to `normalizedEmail`, which validateRequest
+  // already constrains to an email (always contains '@'), while seeded persona
+  // slugs (e-owner, e-orlov, e-configurator …) are never email-shaped — so a
+  // collision is structurally impossible on today's flow. This guard makes the
+  // invariant EXPLICIT and future-proofs it: should self-registration ever
+  // accept a free-form username, it must NOT be able to mint a KC user whose
+  // username == a seeded persona's employee slug (which the cross-tenant
+  // preferred_username → slug identity fallback would then resolve to the
+  // forest-owner). Keyed on the NORMALIZED (lowercased) value for the same
+  // case-collision reason POST /api/users lowercases its login. Same guard,
+  // same canonical query as POST /api/users.
+  if (await humanEmployeeSlugExists(deps.pool, normalizedEmail)) {
+    throw new RegisterError(
+      "LOGIN_RESERVED",
+      "This login is already in use — choose a different one",
+    );
+  }
+
+  // Step 2: KC-first — create human user. username == email == normalizedEmail
+  // (lowercased above) so the KC username matches what KC would fold to anyway
+  // and the anti-collision guard checked the identical string.
+  let kcUserId: string;
+  try {
+    const result = await deps.kc.createHumanUser({
+      username: normalizedEmail,
+      email: normalizedEmail,
+      password: req.password,
+      actorType: "human",
+    });
+    kcUserId = result.userId;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? (err as { code?: string }).code;
+    // Self-registration uses the (normalized) email AS the KC username, so a KC
+    // LOGIN_TAKEN (username clash) and EMAIL_TAKEN (email clash) are the SAME
+    // user-facing condition here — the account with that email already exists.
+    // Fold both into EMAIL_TAKEN so the message stays honest for this flow
+    // (T-0633 round-3). POST /api/users, where login ≠ email, keeps them
+    // distinct.
+    if (code === "EMAIL_TAKEN" || code === "LOGIN_TAKEN") {
+      throw new RegisterError("EMAIL_TAKEN", "An account with that email already exists");
+    }
+    throw new RegisterError("AUTH_UNAVAILABLE", "Registration service unavailable — try again later");
+  }
+
+  // Step 3: DB transaction in the new tenant's scope
+  // Retry the entire transaction on slug unique-violation (23505) so that two
+  // different companies sharing a display name can both register successfully.
+  const tenantId = randomUUID();
+  const roleId = randomUUID();
+  const employeeId = randomUUID();
+  const assignmentId = randomUUID();
+  // T-0373 (PD-7): IDs for per-tenant assistant-agent + configurator role + grants
+  const configuratorRoleId = randomUUID();
+  const agentEmployeeId = randomUUID();
+  const ownerRaConfiguratorId = randomUUID();
+  const agentRaConfiguratorId = randomUUID();
+  const grantCreateId = randomUUID();
+  const grantUpdateId = randomUUID();
+  // T-0475 [E-AGENTS L4]: capability grants on role-configurator — llm_connection:
+  // configure + system_agent:operate (spec §6). Granting them to role-configurator
+  // (which the owner holds via 3g) keeps the configurator the platform-admin role.
+  const grantLlmConnConfigureId = randomUUID();
+  const grantSystemAgentOperateId = randomUUID();
+  // T-0469 [auth]: IDs for the role-constructor-admin role + its delegable
+  // org-object grants. The role is SEEDED but NOT auto-assigned — the owner
+  // grants it to whoever should be a constructor-admin (owner-rights MINUS
+  // owner-deletion). See the seeding block below for the boundary rationale.
+  const constructorAdminRoleId = randomUUID();
+  const caGrantIds = {
+    deptCreate: randomUUID(),
+    deptUpdate: randomUUID(),
+    deptDelete: randomUUID(),
+    posCreate: randomUUID(),
+    posUpdate: randomUUID(),
+    posDelete: randomUUID(),
+    empCreate: randomUUID(),
+    empUpdate: randomUUID(),
+    roleCreate: randomUUID(),
+    roleUpdate: randomUUID(),
+    roleDelete: randomUUID(),
+  };
+  // T-0570 (D3, READ-PDP): IDs for the default-open READ grant seed —
+  // role-reader + its two role_assignments (owner, assistant-agent) + the
+  // single tenant-wide READ grant scoped at the RESOURCE_ROOT sentinel.
+  const readerRoleId = randomUUID();
+  const ownerRaReaderId = randomUUID();
+  const agentRaReaderId = randomUUID();
+  const readGrantId = randomUUID();
+  // T-0666 [substrate/P0]: id for the process_designer role — the
+  // conventional (non-PDP-grant) role checkRole (src/http/binding.ts) looks
+  // up by exact slug for form-binding / floor1-editor / dmn-rule-table save
+  // access. SEEDED but NOT auto-assigned (same posture as
+  // role-constructor-admin above): the owner already gets access via the
+  // isGenesisOwnerForTenant bypass in checkRole (ADR-T0666 §2.1) — this row
+  // only makes the role exist so the owner CAN delegate it to a staff
+  // form-builder through the existing rights-assignment machinery.
+  const processDesignerRoleId = randomUUID();
+  const ts = deps.nowMs();
+
+  let tenantSlug: string | undefined;
+
+  for (let attempt = 0; attempt < SLUG_MAX_ATTEMPTS; attempt++) {
+    const candidateSlug = slugCandidate(baseSlug, attempt);
+
+    const client = await deps.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // SET LOCAL sets the tenant GUC so RLS WITH CHECK passes for self-ref tenant row
+      await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await client.query("SET LOCAL search_path TO choros");
+
+      // 3a. Insert tenant (self-referential: tenant_id = id, migration 013 pattern)
+      try {
+        await client.query(
+          `INSERT INTO choros.tenant (tenant_id, id, slug, display_name, created_at)
+           VALUES ($1, $1, $2, $3, $4)`,
+          [tenantId, candidateSlug, orgName, ts],
+        );
+      } catch (err) {
+        if (isUniqueViolation(err)) {
+          await client.query("ROLLBACK");
+          // slug collision — try next candidate (don't compensate yet: still have retries)
+          if (attempt < SLUG_MAX_ATTEMPTS - 1) {
+            continue;
+          }
+          // Exhausted retries — compensate and surface ORG_TAKEN
+          await deps.kc.deleteUser(kcUserId);
+          throw new RegisterError("ORG_TAKEN", `An organization with a similar name already exists`);
+        }
+        throw err;
+      }
+
+      // 3b. Insert role (slug='tenant-owner', per-tenant)
+      await client.query(
+        `INSERT INTO choros.role (tenant_id, id, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, 'tenant-owner', 'Tenant Owner', $3, $3)`,
+        [tenantId, roleId, ts],
+      );
+
+      // 3c. Insert employee (slug=kcSub, kind='human', position_id=NULL).
+      // display_name (T-0770): humanized local-part of the email, NOT the raw
+      // email — the register form collects no name field (ADR §4), so this is
+      // the safe non-breaking default; a real name can still be set later via
+      // the existing employee-edit UI.
+      await client.query(
+        `INSERT INTO choros.employee (tenant_id, id, slug, kind, display_name, position_id, created_at, updated_at)
+         VALUES ($1, $2, $3, 'human', $4, NULL, $5, $5)`,
+        [tenantId, employeeId, kcUserId, humanizeEmailLocalPart(normalizedEmail), ts],
+      );
+
+      // 3d. Insert confirmed role_assignment (org_scope=set([]), confirmed_by=employeeId for self-bootstrap)
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope, granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)`,
+        [
+          tenantId,
+          assignmentId,
+          employeeId,
+          roleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,  // self-bootstrap: both granted_by and confirmed_by are the genesis owner employee
+          ts,
+        ],
+      );
+
+      // -----------------------------------------------------------------------
+      // T-0373 (PD-7): Tenant-zero seeding — every new tenant gets:
+      //   3e. role-configurator: the role that holds authoring_draft grants.
+      //   3f. assistant-agent employee (kind='agent', slug='assistant-agent'): the
+      //       agent side of the intersection check in assistant.ts. Without this row,
+      //       getGrantsForSubject returns [] for the agent → intersection always empty.
+      //   3g. role_assignment: owner (employeeId) → role-configurator (CONFIRMED).
+      //   3h. role_assignment: assistant-agent → role-configurator (CONFIRMED).
+      //   3i. grant: authoring_draft / create for role-configurator (CONFIRMED).
+      //   3j. grant: authoring_draft / update for role-configurator (CONFIRMED).
+      //
+      // Idempotency: ON CONFLICT DO NOTHING on each INSERT (PK = (tenant_id, id)).
+      // For a fresh tenant these IDs are newly generated → no conflict possible.
+      // For existing seeded tenants (migration 088) with fixed UUIDs, this code
+      // path is never reached (registerTenant only runs for new self-registrations).
+      //
+      // Scope: {"kind":"set","members":[]} = ⊥ (bottom). Per grant-lattice.ts:
+      //   isNarrowerOrEqual(⊥, ⊥) → true (⊥ ⊑ anything).
+      // hasAuthoringDraftGrant (assistant-configurator.ts:300) only checks
+      // resourceType + operation on the intersection output — scope matching in
+      // makeIntersectionGrantSource uses isNarrowerOrEqual(agentScope, userScope)
+      // which returns true when agentScope = userScope = ⊥. So ⊥ scoped grants
+      // correctly unlock the configurator for the intersection check while remaining
+      // the least-authority scope possible.
+      // -----------------------------------------------------------------------
+
+      // 3e. Insert role-configurator (grants authoring_draft on this tenant)
+      await client.query(
+        `INSERT INTO choros.role
+           (tenant_id, id, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, 'role-configurator', 'Конфигуратор системы', $3, $3)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, configuratorRoleId, ts],
+      );
+
+      // 3f. Insert assistant-agent employee (kind='agent', slug='assistant-agent')
+      await client.query(
+        `INSERT INTO choros.employee
+           (tenant_id, id, slug, kind, display_name, position_id, created_at, updated_at)
+         VALUES ($1, $2, 'assistant-agent', 'agent', 'Ассистент (AI-агент)', NULL, $3, $3)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, agentEmployeeId, ts],
+      );
+
+      // 3f-bis (T-0574): agent_card row for assistant-agent — makes it ADDRESSABLE
+      // for PUT /api/agents/:id/llm-connection (else 404 AGENT_NOT_FOUND, ADR
+      // T-0574 §1) and visible in GET /api/agents (registry-driven, FROM
+      // agent_card). employee_id = agentEmployeeId (adresses like a workforce
+      // agent — no addressing-contract change, C1/C2). agent_type='assistant'
+      // (taxonomy, migration 093). kc_client_id='assistant-agent-'||tenantId —
+      // per-tenant deterministic, globally UNIQUE (migration 092), NOT a
+      // Keycloak service account (the assistant never authenticates as one — it
+      // is an internal tenant chat-helper), NOT a hardcoded value.
+      //
+      // The LLM-config columns (endpoint / model / the RL-3 opaque-handle
+      // column / the named-connection FK / autonomy threshold) are
+      // DELIBERATELY OMITTED from the column list (not written as literal
+      // NULLs) — all are NULL-defaulting columns (migration 032/094), so
+      // omission reaches the exact same dormant state the ADR asks for. This
+      // keeps register.ts out of the T-0025 custody allow-set
+      // (ci/checks/secret-handle-isolation.sh FF-25-3): register.ts is not,
+      // and must not become, a custody site for that column — it is resolved
+      // later, only through the allow-listed DAO (src/db/agent-provision.ts),
+      // once the owner assigns a connection profile (T-0498).
+      // ON CONFLICT DO NOTHING keeps this idempotent (fresh id per attempt →
+      // never conflicts on a genuinely new tenant; harmless no-op otherwise).
+      await client.query(
+        `INSERT INTO choros.agent_card
+           (tenant_id, id, employee_id, employee_kind, agent_type, kc_client_id,
+            created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, 'agent', 'assistant', $3, $4, $4)
+         ON CONFLICT DO NOTHING`,
+        // kc_client_id computed in JS (not `'...' || $1::text` in-SQL) — binding
+        // the SAME placeholder ($1 = tenantId, a uuid column) both bare AND
+        // ::text-cast in one statement makes Postgres's parameter-type inference
+        // ambiguous ("inconsistent types deduced for parameter $1"), caught by
+        // this task's own live-Postgres test (assistant-llm-binding.test.ts).
+        [tenantId, agentEmployeeId, `assistant-agent-${tenantId}`, ts],
+      );
+
+      // 3g. role_assignment: owner → role-configurator (CONFIRMED, self-bootstrap)
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          ownerRaConfiguratorId,
+          employeeId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,
+          ts,
+        ],
+      );
+
+      // 3h. role_assignment: assistant-agent → role-configurator (CONFIRMED)
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          agentRaConfiguratorId,
+          agentEmployeeId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,
+          ts,
+        ],
+      );
+
+      // 3i. grant: authoring_draft / create for role-configurator (CONFIRMED)
+      await client.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+            "constraint", delegable, granted_by, proposed_by, confirmed_by,
+            valid_from, valid_until, created_at)
+         VALUES ($1, $2, $3, 'authoring_draft', NULL, 'create', $4::jsonb,
+                 NULL, false, 'registration', NULL, 'registration',
+                 NULL, NULL, $5)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          grantCreateId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          ts,
+        ],
+      );
+
+      // 3j. grant: authoring_draft / update for role-configurator (CONFIRMED)
+      await client.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+            "constraint", delegable, granted_by, proposed_by, confirmed_by,
+            valid_from, valid_until, created_at)
+         VALUES ($1, $2, $3, 'authoring_draft', NULL, 'update', $4::jsonb,
+                 NULL, false, 'registration', NULL, 'registration',
+                 NULL, NULL, $5)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          grantUpdateId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          ts,
+        ],
+      );
+
+      // 3j-bis. T-0475 [E-AGENTS L4]: capability grants on role-configurator.
+      //   llm_connection:configure → configure LLM connections + keys (spec §6).
+      //   system_agent:operate     → configure/run a SYSTEM agent (spec §6, tied to
+      //                              authoring_draft — seeded explicitly so the
+      //                              capability exists in the lattice on its own).
+      // CAPABILITY (not mgmt_object): delegable=false, ⊥-scope, resource_type carries
+      // the capability token verbatim (free-text grant column). The owner holds these
+      // via the 3g owner→role-configurator assignment (belt-and-suspenders with the
+      // code owner-short-circuit); any human assigned role-configurator inherits them.
+      await client.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+            "constraint", delegable, granted_by, proposed_by, confirmed_by,
+            valid_from, valid_until, created_at)
+         VALUES
+           ($1, $2, $4, 'llm_connection:configure', NULL, 'configure', $5::jsonb,
+            NULL, false, 'registration', NULL, 'registration', NULL, NULL, $6),
+           ($1, $3, $4, 'system_agent:operate', NULL, 'operate', $5::jsonb,
+            NULL, false, 'registration', NULL, 'registration', NULL, NULL, $6)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          grantLlmConnConfigureId,
+          grantSystemAgentOperateId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          ts,
+        ],
+      );
+
+      // -----------------------------------------------------------------------
+      // T-0469 [auth]: Tenant-zero seeding of role-constructor-admin.
+      //
+      // role-constructor-admin = OWNER RIGHTS *MINUS* OWNER-DELETION. It carries
+      // DELEGABLE mgmt_object grants that the seed-write.ts org routes honour
+      // (assertOrgObjectAuthority), so a holder gets owner-like AUTHORING power
+      // over departments / positions / employees / roles without being the
+      // genesis owner.
+      //
+      // THE SECURITY BOUNDARY — what is DELIBERATELY ABSENT from this grant set:
+      //   - NO mgmt_object:employee/delete grant. Employee DELETION is owner-only
+      //     (DELETE /api/employees keeps a strict isGenesisOwner gate AND the grant
+      //     set here cannot cover it even if a future refactor routed it through
+      //     the delegation helper). A constructor-admin can hire/edit people but
+      //     never remove one.
+      //   - NO mgmt_object:grant grant. The role/assignment-minting authority is
+      //     NOT delegated, so a constructor-admin can never mint a role_assignment
+      //     (and seed-write never touches role_assignment at all), and therefore
+      //     can never grant/replace/remove the tenant-owner. The owner stays the
+      //     un-parented delegation root.
+      //   - NO freeform scope. All grants are ⊥-scoped lattice elements.
+      //
+      // Scope ⊥ = {"kind":"set","members":[]}. isNarrowerOrEqual(⊥, ⊥) = true and
+      // ⊥ ⊑ anything = true (grant-lattice.ts), so an assignment of this role
+      // (org_scope ⊥, like the owner/configurator assignments) makes the synthetic
+      // child (scope = adminOrgScope = ⊥) pass both the org-axis and resource-axis
+      // gates of validateAdminDelegation. delegable=true is required for the
+      // resource-axis covering check.
+      //
+      // The role is SEEDED-BUT-UNASSIGNED: registerTenant assigns it to nobody.
+      // The owner confirms a role_assignment to make a real person a constructor-
+      // admin (via the existing rights machinery), so no person silently gains
+      // these rights on registration.
+      //
+      // Idempotency: ON CONFLICT DO NOTHING (fresh IDs → never conflicts on a new
+      // tenant; safe no-op if the same path is re-run).
+      // -----------------------------------------------------------------------
+
+      // 3k. role-constructor-admin role row.
+      await client.query(
+        `INSERT INTO choros.role
+           (tenant_id, id, slug, display_name, description, created_at, updated_at)
+         VALUES ($1, $2, 'role-constructor-admin', 'Конструктор-администратор',
+                 $3, $4, $4)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          constructorAdminRoleId,
+          "Owner-like org authoring (departments/positions/employees/roles) MINUS " +
+            "owner-deletion: no employee delete, no role_assignment/owner mutation.",
+          ts,
+        ],
+      );
+
+      // 3l. Delegable mgmt_object grants for role-constructor-admin.
+      //     resource_type ∈ {department, position, employee, role}; operations
+      //     create/update (+delete for dept/position/role). employee:delete and
+      //     mgmt_object:grant are intentionally OMITTED (owner-only boundary).
+      const caGrants: Array<{ id: string; rt: string; op: string }> = [
+        { id: caGrantIds.deptCreate, rt: "mgmt_object:department", op: "create" },
+        { id: caGrantIds.deptUpdate, rt: "mgmt_object:department", op: "update" },
+        { id: caGrantIds.deptDelete, rt: "mgmt_object:department", op: "delete" },
+        { id: caGrantIds.posCreate, rt: "mgmt_object:position", op: "create" },
+        { id: caGrantIds.posUpdate, rt: "mgmt_object:position", op: "update" },
+        { id: caGrantIds.posDelete, rt: "mgmt_object:position", op: "delete" },
+        { id: caGrantIds.empCreate, rt: "mgmt_object:employee", op: "create" },
+        { id: caGrantIds.empUpdate, rt: "mgmt_object:employee", op: "update" },
+        { id: caGrantIds.roleCreate, rt: "mgmt_object:role", op: "create" },
+        { id: caGrantIds.roleUpdate, rt: "mgmt_object:role", op: "update" },
+        { id: caGrantIds.roleDelete, rt: "mgmt_object:role", op: "delete" },
+      ];
+      for (const g of caGrants) {
+        await client.query(
+          `INSERT INTO choros."grant"
+             (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+              "constraint", delegable, granted_by, proposed_by, confirmed_by,
+              valid_from, valid_until, created_at)
+           VALUES ($1, $2, $3, $4, NULL, $5, $6::jsonb,
+                   NULL, true, 'registration', NULL, 'registration',
+                   NULL, NULL, $7)
+           ON CONFLICT DO NOTHING`,
+          [
+            tenantId,
+            g.id,
+            constructorAdminRoleId,
+            g.rt,
+            g.op,
+            JSON.stringify({ kind: "set", members: [] }),
+            ts,
+          ],
+        );
+      }
+
+      // -----------------------------------------------------------------------
+      // T-0570 (D3, READ-PDP): Tenant-zero seeding of the default-open READ
+      // grant — every new tenant gets:
+      //   3m. role-reader: the platform role that holds the tenant-wide READ
+      //       grant (ADR §2.2). NOT a case-specific persona/role (NF-4).
+      //   3n. role_assignment: owner (employeeId) → role-reader (CONFIRMED).
+      //   3o. role_assignment: assistant-agent → role-reader (CONFIRMED) — same
+      //       human==agent single-path discipline as role-configurator (FR-6).
+      //   3p. grant: read/record, scope = RESOURCE_ROOT sentinel (CONFIRMED).
+      //
+      // Founder decision (ratified 2026-07-02, spec §"Founder decision"):
+      // default-open inside a tenant THROUGH a seeded grant — sujenie (narrowing
+      // visibility) is a grant-configuration act, never a platform code change.
+      //
+      // Scope = {kind:"node", hierarchy:"resource", nodeLevel:"application",
+      // nodeId: RESOURCE_ROOT_NODE_ID} — the sentinel the composite resource-
+      // ancestry oracle (src/db/resource-ancestry.ts) special-cases as "covers
+      // every resource node in this tenant's tree" in O(1) (ADR §2.1 rule 2). It
+      // is the SAME sentinel for every tenant; RLS + this transaction's own
+      // tenant_id column are what keep it from crossing tenants (NF-3) — the
+      // nodeId itself carries no tenant identity.
+      //
+      // resource_facet = NULL (whole-resource) ⇒ every field is in the union-
+      // floor (field-level narrowing, if ever configured, layers on TOP via a
+      // narrower grant's resourceFacet — FR-3/FR-4, this seed does not narrow
+      // fields itself). delegable = true so a narrower READ grant can be
+      // delegated FROM this one via the existing validateNarrowing gate (FR-3
+      // sujenie-as-config, no platform code path).
+      //
+      // Idempotency: ON CONFLICT DO NOTHING (PK = (tenant_id, id)); fresh IDs on
+      // a new tenant never conflict.
+      // -----------------------------------------------------------------------
+
+      // 3m. Insert role-reader (holds the tenant-wide default-open READ grant)
+      await client.query(
+        `INSERT INTO choros.role
+           (tenant_id, id, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, $3, 'Читатель (по умолчанию)', $4, $4)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, readerRoleId, READER_ROLE_SLUG, ts],
+      );
+
+      // 3n. role_assignment: owner → role-reader (CONFIRMED, self-bootstrap)
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          ownerRaReaderId,
+          employeeId,
+          readerRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,
+          ts,
+        ],
+      );
+
+      // 3o. role_assignment: assistant-agent → role-reader (CONFIRMED) — human
+      // and agent share the identical READ-PDP path (FR-6): no separate,
+      // wider/narrower agent-only read grant.
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          agentRaReaderId,
+          agentEmployeeId,
+          readerRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,
+          ts,
+        ],
+      );
+
+      // 3p. grant: read/record, scope = RESOURCE_ROOT sentinel (CONFIRMED,
+      // delegable — so a narrower grant can be delegated from it, FR-3).
+      await client.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+            "constraint", delegable, granted_by, proposed_by, confirmed_by,
+            valid_from, valid_until, created_at)
+         VALUES ($1, $2, $3, 'record', NULL, 'read', $4::jsonb,
+                 NULL, true, 'registration', NULL, 'registration',
+                 NULL, NULL, $5)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          readGrantId,
+          readerRoleId,
+          JSON.stringify({
+            kind: "node",
+            hierarchy: "resource",
+            nodeLevel: "application",
+            nodeId: RESOURCE_ROOT_NODE_ID,
+          }),
+          ts,
+        ],
+      );
+
+      // -----------------------------------------------------------------------
+      // T-0666 [substrate/P0]: seed the process_designer role — SEEDED but NOT
+      // auto-assigned (same posture as role-constructor-admin, 3k above). The
+      // owner already gets form-save access via checkRole's isGenesisOwnerForTenant
+      // bypass (ADR-T0666 §2.1); this row exists solely so the role IS an
+      // assignable principal (the owner can delegate it to a staff form-builder
+      // through the existing rights-assignment machinery — before this seed the
+      // role could not be assigned to anyone because it did not exist).
+      //
+      // Idempotency: ON CONFLICT DO NOTHING (fresh id per attempt → never
+      // conflicts on a genuinely new tenant).
+      // -----------------------------------------------------------------------
+
+      // 3q. role-process-designer (slug MUST be exactly 'process_designer' —
+      // checkRole in src/http/binding.ts matches this literal slug).
+      await client.query(
+        `INSERT INTO choros.role
+           (tenant_id, id, slug, display_name, description, created_at, updated_at)
+         VALUES ($1, $2, 'process_designer', 'Конструктор форм',
+                 $3, $4, $4)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          processDesignerRoleId,
+          "Platform role gating form-binding / floor1-editor / dmn-rule-table " +
+            "save access (checkRole, T-0072/T-0666) — seeded, not auto-assigned; " +
+            "the owner has access via the checkRole owner bypass regardless.",
+          ts,
+        ],
+      );
+
+      await client.query("COMMIT");
+      tenantSlug = candidateSlug;
+    } catch (err) {
+      try { await client.query("ROLLBACK"); } catch { /* ignore */ }
+      // Compensation: KC user was created but DB failed — delete KC user (FF-2)
+      // Skip compensation if error is already a RegisterError (ORG_TAKEN already compensated above)
+      if (!(err instanceof RegisterError)) {
+        await deps.kc.deleteUser(kcUserId); // best-effort
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    // Transaction committed — exit the retry loop
+    break;
+  }
+
+  return {
+    tenantId,
+    tenantSlug: tenantSlug!,
+    userId: kcUserId,
+    email: normalizedEmail,
+  };
+}

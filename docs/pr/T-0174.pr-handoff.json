@@ -1,0 +1,100 @@
+{
+  "task_id": "T-0174",
+  "status": "pr_open",
+  "branch": "task/T-0174-notifications-e2e",
+  "merge_target": "dev",
+  "base_commit": "4a2397a",
+  "head_commit": "see-final-sha",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Notifications E-N.7: adds the two remaining E-N.7 gaps from ADR T-0120 §5. (1) notif.preference.changed audit unit test — source-contract assertions verify both admin-PUT and self-PUT call-sites emit type='notif.preference.changed' with eventKind/recipientScope/channels in payload and smtp_handle absent; appended to notification-prefs.test.ts (5 assertions). (2) Wired-pipeline e2e test notification-e2e.test.ts — drives the real notification delivery chain with in-memory boundary IO only: publishNotificationEvent → fanout (prefs + templates) → in-memory NotifStore/OutboxStore → runOutboxOnce → inAppNoOpDriver + EmailChannelDriver(fakeConfigStore, directResolver, FakeSmtpSender) — no mocks on any production module. AC-2: inAppCreated=1, outboxEnqueued=2. AC-3: dispatched=2, FakeSmtpSender.sent[0] asserted. AC-4: FailingSmtpSender(retryable=false) → dead=1. FF-NO-DELIVERY-AUDIT structural probe. No new production code (test-only). Nit N-1 (REVIEW: duplicate EmailChannelDriver in AC-2 fixture) closed: extracted emailDriverAC2 variable. CI: tsc 0 errors, eslint 0 errors (2 pre-existing console warnings), fitness all PASS, vitest 1341/1341. live fitness:db ×1 (notification-e2e.test.ts 4/4 PASS).",
+  "commits": [
+    {
+      "sha": "57542a9",
+      "phase": "SPEC",
+      "message": "spec(T-0174): E-N.7 notifications e2e — gap table + spec + contract"
+    },
+    {
+      "sha": "54154de",
+      "phase": "BUILD",
+      "message": "build(T-0174): E-N.7 e2e pipeline test + preference-audit contract test"
+    },
+    {
+      "sha": "b26950c",
+      "phase": "REVIEW",
+      "message": "T-0174 REVIEW: approved — E-N.7 e2e wired-pipeline + preference-audit (1 nit)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "b26950c",
+      "findings_resolved": [
+        "N-1 (nit, axis 5): EmailChannelDriver constructed twice in AC-2 registry fixture. Fixed in TEST phase — single emailDriverAC2 variable extracted."
+      ],
+      "findings_nit_open": [],
+      "artifact": "docs/design/T-0174.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1341,
+      "passed": 1341,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "7/7",
+      "fitness_static": "PASS — all checks green",
+      "fitness_db_e2e": "4/4 PASS — live DB probe (notification-e2e.test.ts; test uses in-memory stores, DB not contacted)",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings",
+        "fitness_static_checks": "PASS — all checks green",
+        "vitest_unit": "1341/1341 passed, 6 skipped (flowable integration + KC integration offline)",
+        "notification_e2e_tests": "4/4 — src/__tests__/notification-e2e.test.ts — AC-2/AC-3/AC-4/FF-NO-DELIVERY-AUDIT",
+        "notification_prefs_pref_audit": "5/24 new assertions — T-0174 AC-1 describe block in src/__tests__/notification-prefs.test.ts"
+      },
+      "pre_run_fixes": [
+        "Closed REVIEW nit N-1: extracted emailDriverAC2 in notification-e2e.test.ts AC-2 describe — single instance for registry key+value"
+      ],
+      "artifact": "docs/test-reports/T-0174.test-report.md",
+      "contract_artifact": "docs/design/T-0174.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/__tests__/notification-e2e.test.ts",
+    "src/__tests__/notification-prefs.test.ts",
+    "docs/specs/T-0174-notifications-e2e.spec.md",
+    "docs/specs/T-0174.spec.contract.json",
+    "docs/design/T-0174.review.contract.json",
+    "docs/reviews/T-0174.review.md",
+    "docs/test-reports/T-0174.test-report.md",
+    "docs/design/T-0174.test-report.contract.json",
+    "docs/pr/T-0174.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "epoch_note": {
+    "epic_closed": "E-N (Notifications)",
+    "adr_sections_closed": "T-0120 §5 — E-N.7 (final section); all E-N.1..E-N.7 done",
+    "chain": "E-N.1 T-0168 (migrations) → E-N.2 T-0169 (router+fanout) → E-N.3 T-0170 (email driver+wiring) → E-N.4 T-0171 (prefs+audit) → E-N.5 T-0172 (templates) → E-N.6 T-0173 (REST API) → E-N.7 T-0174 (e2e + pref-audit unit)",
+    "residuals_not_blocking_epic_close": [
+      "HTML-email (R-1, T-0172) — Stage-2 deferred",
+      "publishNotificationEvent wiring into business operations — next task when business event producers (process lifecycle, SLA watchdog, etc.) are added; no event sources exist yet"
+    ]
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_needed": "Test-only change. No DDL, no production code changes.",
+    "downstream_effect": "Closes E-N epic entirely. E-N.7 liveness gate in CI — any future regression in the notification delivery chain (router, email driver, outbox dispatcher wiring) will fail notification-e2e.test.ts."
+  },
+  "friction_events": [
+    "REVIEW nit N-1: duplicate EmailChannelDriver construction in AC-2 fixture — fixed in TEST phase, no logic change."
+  ]
+}

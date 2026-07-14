@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0219",
+  "status": "ready",
+  "branch": "task/T-0219",
+  "phases_completed": ["SPEC", "DESIGN/ADR", "BUILD", "PR-HANDOFF"],
+  "summary": "intake-agent skill built into the S2 «Триаж» slot of the linear ТЭЛ (T-0218): agent_card (dormant) + role-intake-agent (no approve grant) + draft-first classifier instruction as additive actor-seed, PLUS a deterministic classifier-demonstrator (pure function) that produces category/budget_article/direction + a TYPED route with a reasoning-trace. Closes the T-0218 review «route = prose» flag with the typed IntakeRoute.",
+  "route_shape_chosen": {
+    "type": "IntakeRoute { steps: IntakeApprover[] (order, role: fin_controller|legal|cfo, reason, mandatory:true), legal_required: boolean, approver_chain: string[] }",
+    "derivation": "deterministic from amount (reference-tel §1.4): always fin_controller; amount ≥ 5_000_000₽ → add legal (mandatory legal review) then cfo.",
+    "s3_link": "route.legal_required === (amount ≥ TEL_LEGAL_THRESHOLD_RUB) === legalGateFires(amount) === legal-precheck slot trigger (T-0234). S2 output feeds S3 dealContext { amount, kind: category, direction } (exact runLegalPrecheck signature, T-0233). T-0234 reads legal_required machine-readably — no prose link, additive merge."
+  },
+  "how_intake_agent_seeded": {
+    "role": "role-intake-agent — read(request)+update(classification) grants ONLY, NO approve/exec/invoke (structural moat). Existing from T-0218 DEMO_ROLE_INTAKE / DEMO_GRANTS_INTAKE.",
+    "employee": "a-intake (kind=agent) — existing from T-0218 DEMO_EMPLOYEE_INTAKE.",
+    "agent_card": "DEMO_AGENT_CARD_INTAKE (NEW) — kc_client_id=agent-intake, llm_endpoint/llm_model/llm_secret_handle/autonomy_threshold ALL null = DORMANT (form of migration 032). Zero paid LLM.",
+    "instruction": "DEMO_INTAKE_INSTRUCTION (NEW) — T-0123 AgentInstructionDraft: instruction_text (classifier rules), answer_form='intake_triage_v1', instruction_meta (category→article справочник + threshold), tier='draft' (DRAFT-FIRST; promote draft→published is a separate human gate, not seeded).",
+    "plane": "additive actor-seed plane (NOT display; FF-PACK-2 8/8 untouched); applied through importer/public API path, NOT direct PG. Edits to tel-scenario.ts confined to the S2/intake section."
+  },
+  "how_trace_surfaced": "classifyIntake returns reasoning_trace: { claim, basis }[] — structured in-process «why» (e.g. 'category=it_expense' basis 'keyword лиценз'; 'route.legal_required=true' basis 'amount ≥ threshold'). Surfaced on S2 in the walkthrough (scripts/demo-tel-walkthrough.ts narrateScreen). D-139: it is a safe-level structured trace (claim+basis, not chain-of-thought verbatim) parallel to the answer, never an external egress.",
+  "no_approve_grant_confirmed": true,
+  "no_paid_llm_confirmed": "agent_card dormant (llm_* null) + classifier is pure-compute (no LLM, no network, no agent_instruction read). FF-INTAKE-1 check (4)/(6) assert this statically.",
+  "files_changed": {
+    "SPEC": [
+      "docs/specs/T-0219-intake-agent.spec.md",
+      "docs/specs/T-0219-intake-agent.spec.contract.json"
+    ],
+    "DESIGN": [
+      "docs/design/T-0219-intake-agent.adr.md",
+      "docs/design/T-0219-intake-agent.adr.contract.json"
+    ],
+    "BUILD": [
+      "src/runtime/intake/intake-types.ts (NEW — typed IntakeRoute, closes review flag)",
+      "src/runtime/intake/classify-intake.ts (NEW — pure deterministic classifier-demonstrator)",
+      "src/runtime/intake/__tests__/classify-intake.test.ts (NEW — 13 tests)",
+      "seed/demo/tel-scenario.ts (added DEMO_AGENT_CARD_INTAKE + DEMO_INTAKE_INSTRUCTION + INTAKE_ANSWER_FORM in the S2/intake section, after DEMO_GRANTS_INTAKE — localized, additive, S3 slot untouched)",
+      "seed/demo/tel-scenario.js (recompiled by seed/tsconfig.json — tracked like seed/cli.js/importer.js)",
+      "scripts/demo-tel-walkthrough.ts (S2 narration now runs classifyIntake + surfaces classification/trace; summary records dormant agent_card + draft instruction)",
+      "ci/checks/intake-agent-seed.sh (NEW — FF-INTAKE-1, # SELF-TEST: + --self-test)",
+      "package.json (wired FF-INTAKE-1 into fitness chain tail with --self-test)"
+    ],
+    "PR-HANDOFF": ["docs/design/T-0219.pr-handoff.json"]
+  },
+  "tel_scenario_lines_touched": "Only the S2/intake section: appended DemoAgentCard type + DEMO_AGENT_CARD_INTAKE + INTAKE_ANSWER_FORM + DemoAgentInstructionDraft type + DEMO_INTAKE_INSTRUCTION immediately AFTER the existing DEMO_GRANTS_INTAKE block. The legal_precheck slot (LEGAL_PRECHECK_SLOT, S3) and all T-0234 surfaces were NOT modified.",
+  "gate_results": {
+    "tsc": "pass (exit 0)",
+    "eslint": "pass (0 errors; 2 pre-existing no-console warnings in src/bridge-runner.ts + src/core/externalTaskBridge.ts, unrelated)",
+    "build": "pass (tsc + seed/tsconfig.json both clean)",
+    "fitness_static": "pass (full npm run fitness chain green incl. FF-INTAKE-1 + --self-test)",
+    "vitest": "pass (intake suite 13/13; full suite green)",
+    "fitness_demo_db": "skipped-needs-infra (Postgres) — seed-apply-smoke / no-cross-tenant-org require a live DB. The actor-seed apply-path is exercised offline via scripts/demo-tel-walkthrough.ts --dry-run (classifier output + trace + dormant card + draft instruction surfaced)."
+  },
+  "vitest_counts": { "intake_suite": "13 passed", "full_suite": "see gate_results" },
+  "new_fitness_checks": ["FF-INTAKE-1 (ci/checks/intake-agent-seed.sh) — static, has # SELF-TEST: + --self-test; asserts artifacts present, route typed, moat (no approve grant), agent_card dormant, instruction draft-first + answer_form, classifier pure"],
+  "touched_frozen": false,
+  "deviations_from_adr": [
+    "TEL_LEGAL_THRESHOLD_RUB is declared in src/runtime/intake/classify-intake.ts (canonical for src) AND mirrored in seed/demo/tel-scenario.ts (the seed already owned it). Reason: tsconfig rootDir=src forbids src→seed imports; both are 5_000_000 and the threshold equality to the seed copy is asserted by FF-INTAKE-1 (and the gate test on legalGateFires alignment). Not a second source of truth in spirit — a single literal mirrored across a build boundary."
+  ],
+  "friction": [
+    "FE-T0219-1: node_modules absent in the fresh worktree — npm ci required before gates (one-time).",
+    "FE-T0219-2: tsconfig rootDir=src forbids src→seed imports, so the ≥5M threshold literal is mirrored in src + seed (both 5_000_000), reconciled by FF-INTAKE-1 instead of a shared import.",
+    "FE-T0219-3: /api/agents/hire (the live agent_card creation endpoint) is bound to DEV_TENANT_ID and requires Keycloak — not a clean path to seed an agent_card on the showcase/demo tenant at walkthrough time. Per T-0218 §6.2 the agent_card/instruction are carried as typed actor-seed declarations (dormant card + draft instruction) + surfaced via the deterministic demonstrator; live HTTP agent_card seeding on the demo tenant is deferred to the seed-apply-smoke / deploy path."
+  ],
+  "blockers_or_uncertainties": "none — no founder-only fork. Real LLM live-wire for the intake-agent on prod = deploy-time (key/env), not a blocker for this impl task (agent_card seeded dormant).",
+  "pr_handoff_path": "docs/design/T-0219.pr-handoff.json",
+  "ready_for_review": true
+}

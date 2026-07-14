@@ -1,0 +1,81 @@
+{
+  "task_id": "T-0653",
+  "role": "reviewer (security + data adversarial)",
+  "verdict": "approved",
+  "base": "dev (merge-base d4c516e5)",
+  "diff_reviewed": "git diff dev...task/T-0653 (14 files, +2306/-213)",
+  "summary": "Fix-forward for the view-primitive + server-side inbox search/filter/group task. All 12 review defects + the 2 addendum SECURITY blockers were re-verified adversarially. Both security blockers are REALLY closed (verified structurally, by test, and against live PG). One latent, currently-inert migration idempotency bug found (non-blocking) — follow-up chip spawned.",
+
+  "security_8_cross_user_leak": {
+    "status": "closed",
+    "evidence": [
+      "src/http/records.ts:1837-1845 — resolveViewApplication view lookup now carries `AND (owner_actor IS NULL OR owner_actor = $3)`; $3 = `actor`.",
+      "`actor` is bound at the LIST handler (records.ts:1920) from extractActor(req,pool) — Keycloak mode resolves ctx.sub→employee slug via resolveActorSlugFromAuth; dev mode uses x-dev-user (the dev auth mechanism). NEVER from request body or an arbitrary header.",
+      "extractActor in records.ts and list-views.ts are byte-identical in logic → the `actor` slug used in the owner clause is exactly the slug list-views.ts writes into owner_actor on create (ownerActor = personal ? actor : null). Clause therefore matches the caller's own personal views correctly.",
+      "Attack B→A: foreign personal view id → SELECT returns 0 rows → viewRow null → `throw HttpError(404, NOT_FOUND)` (records.ts:1846-1848). Indistinguishable from genuine not-found — no existence oracle. Common views (owner_actor IS NULL) remain visible to all.",
+      "list-views.ts CRUD (GET/PATCH/DELETE/getView/listViews/listSourceViews) all owner-scoped via ownerVisibilityClause; PATCH/DELETE resolve owner FIRST and only skip configurator gate for the caller's OWN personal view — a common view still requires the configurator privilege.",
+      "Test: src/__tests__/records-view-application.test.ts defect#8 cases (owner clause present + ACTOR bound as owner param, not body; foreign view → 404). Live PG: ci/checks/db/list-view-registry.db.test.ts AC-2 (cross-tenant 404) passed."
+    ]
+  },
+
+  "data_9_name_uniqueness": {
+    "status": "closed",
+    "evidence": [
+      "migration 130 applied to live PG (localhost:55432): schema_migrations has '130_list_view_source_owner'; list_view.source NOT NULL DEFAULT 'records', owner_actor nullable, registry_def_id/application_id now nullable.",
+      "Old table UNIQUE constraint list_view_tenant_id_registry_def_id_name_key is GONE (0 unique constraints remain); old index list_view_one_default GONE.",
+      "New partial index list_view_name_scoped_uniq (tenant, source, COALESCE(reg_def,zero-uuid), COALESCE(owner,''), name) present; new list_view_one_default_scoped + list_view_source_owner_idx present.",
+      "Live-PG proof ci/checks/db/list-view-registry.db.test.ts 'defect #9': two DIFFERENT owners reuse same personal-view name on same reg_def → BOTH succeed; same-owner dup → 23505; AC-10 (≤1 default per scope) still 23505s. All 10 tests passed against real choros_app (NOBYPASSRLS) role.",
+      "COALESCE sentinels correctly prevent NULL-not-equal-to-self from allowing duplicate inbox/processes views."
+    ]
+  },
+
+  "defects_12plus2_status": {
+    "closed_verified": {
+      "#1 grouped counts<->bodies": "grouped mode returns entire filtered set (capped 500) + groups computed from SAME rows; page/totalPages=1; groupTruncated flag when over cap. Test asserts groupSum == items.length (unfiltered AND with q=).",
+      "#2 loadMore hidden in grouped": "render gated on !groupByProcess AND server reports totalPages:1 (belt+suspenders). Test defect#2.",
+      "#3 counts respect q/filters": "per-tab counts computed over filteredBase (exec + q/process/status/deadline applied first). Tests assert counts.all == filtered items length and shrink under q=/status=.",
+      "#4 canApprove on defer path": "defer branch sets canApprove when row.role===approverRole (same resolved role as instance path). Symmetric code; client gates on t.mine && t.canApprove.",
+      "#5 dead inbox-dispatch removed": "'inbox' no longer a source-view → 400 VIEW_SOURCE_INVALID; personal inbox view lives in user_pref('inbox.view') T-0651; source-view path proven on 'processes'. records path untouched (backcompat).",
+      "#7 collapsedGroups pruned": "useEffect on [groups] keeps only keys of live groups; returns prev unchanged when no change. Test defect#7.",
+      "#10 canApprove via resolveDefaultApproverRole": "resolveDefaultApproverRole() reads CHOROS_DEFAULT_APPROVER_ROLE env, falls back to APPROVER_ROLE. Real config-primitive, not a literal rename. Matches InboxItem.canApprove doc-comment.",
+      "#11 loadSeq stale-response drop": "monotonic ++loadSeq.current claimed up-front; checked before every setItems/setError commit; loadMore binds to current token (never advances). Test defect#11.",
+      "#12 dead Field import removed": "no bare Field import; only FieldControl (used). Test defect#12."
+    },
+    "note": "#6/#8/#9 addressed as above (loadSeq/#6 systemically closed by #11; #8/#9 = the two security/data blockers)."
+  },
+
+  "backcompat_regress": {
+    "status": "clean",
+    "evidence": [
+      "records source (T-0581) path unchanged: validateViewConfig by type untouched; AC-9 byte-identical default (no-view-param) path asserted + FF-VR-6 gate PASS.",
+      "migration 130 additive: existing rows get source='records', owner_actor NULL (today's common-tenant semantics). GET /api/records without view params unchanged.",
+      "view-registry-no-pdp-bypass, view-query-injection-safe, view-registry-rls, view-registry-type-open, view-registry-anti-case gates all PASS."
+    ]
+  },
+
+  "blocking_findings": [],
+
+  "non_blocking": [
+    {
+      "id": "NB-1",
+      "severity": "P3-latent",
+      "file": "migrations/130_list_view_source_owner.sql",
+      "finding": "The ELSE fallback in the constraint-DROP DO-block compares array_agg(a.attname) (type name[]) to ARRAY['name','registry_def_id','tenant_id'] (type text[]). Postgres has no name[]=text[] operator → re-applying the file raw errors 'operator does not exist: name[] = text[]'. The migration's self-documented idempotency ('повтор безопасен') is therefore INACCURATE for the fallback.",
+      "why_not_blocking": "Currently INERT: (1) migrations/run.mjs skips already-recorded versions so 130 never re-executes in prod/CI; (2) on the real migration graph, migration 123 declares UNIQUE(tenant_id,registry_def_id,name) inline → auto-named list_view_tenant_id_registry_def_id_name_key, so the PRIMARY IF-EXISTS path always matches on first apply and the buggy ELSE is never reached. Verified: 130 is correctly applied to live PG (old constraint dropped, scoped indexes present).",
+      "fix": "cast array_agg(a.attname::text ...) or compare against ARRAY[...]::name[]; verify by double-applying the file via psql ON_ERROR_STOP=1.",
+      "followup_chip": "task_71236546"
+    },
+    {
+      "id": "NB-2",
+      "severity": "P3-coverage",
+      "finding": "canApprove on the DEFER path (defect #4) has no dedicated server-response unit test; it is only covered indirectly by symmetry with the instance path (which is tested) and the client-side D-064 pin (screen-inbox.test.jsx:524).",
+      "why_not_blocking": "Code is symmetric with the tested instance path; both set canApprove from the same resolved approverRole."
+    },
+    {
+      "id": "NB-3",
+      "severity": "P4",
+      "finding": "INBOX_GROUP_ROW_CAP (500) truncation path is not exercised by a >500-row test (seed is modest; test asserts groupTruncated absent). The slice+flag logic is trivial.",
+      "why_not_blocking": "Straightforward code; forcing 500+ rows in a unit test is disproportionate."
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0179",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1363,
+    "passed": 1363,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "check-report-page-deps.sh RD-1: bundle_members.txt contains report_page_dep|choros_table", "result": "pass"},
+    {"ac": "AC-2",  "test": "bundle-coherence.sh passes (file NOT changed, ≥5 members)", "result": "pass"},
+    {"ac": "AC-3",  "test": "frozen-checks-immutable FF-FCI1: check-report-page-deps.sh exists, T-0179 owner", "result": "pass"},
+    {"ac": "AC-4",  "test": "check-report-page-deps.sh exit 0", "result": "pass"},
+    {"ac": "AC-5",  "test": "RD-1: report_page_dep|choros_table in bundle_members.txt", "result": "pass"},
+    {"ac": "AC-6",  "test": "RD-2: migrations/052_report_page_dep.sql exists", "result": "pass"},
+    {"ac": "AC-7",  "test": "RD-3: dep_kind IN CHECK pattern in migration 052", "result": "pass"},
+    {"ac": "AC-8",  "test": "RD-4: UNIQUE (tenant_id,page_id,registry_def_id,field_key) in migration 052", "result": "pass"},
+    {"ac": "AC-9",  "test": "RD-5: stale boolean NOT NULL in migration 052", "result": "pass"},
+    {"ac": "AC-10", "test": "RD-6: report_page_dep in known_tenant_tables.txt", "result": "pass"},
+    {"ac": "AC-11", "test": "RD-7 --self-test: absent bundle_members.txt → exit 1", "result": "pass"},
+    {"ac": "AC-12", "test": "DB-1 (live): all non-stale field_key in registry_def.record_schema (report_page_bundle_deps.test.ts)", "result": "pass"},
+    {"ac": "AC-13", "test": "DB-2 (live): stale=true rows logged, not blocking", "result": "pass"},
+    {"ac": "AC-14", "test": "DB-3 (live): no orphan report_page_dep", "result": "pass"},
+    {"ac": "AC-15", "test": "npm run fitness exit 0 (check-report-page-deps.sh in chain)", "result": "pass"},
+    {"ac": "AC-16", "test": "tsc --noEmit exit 0", "result": "pass"},
+    {"ac": "AC-17", "test": "frozen-checks-immutable.sh exit 0 (bundle-coherence.sh untouched)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "config-agent-seed.sh static (T-0077)", "result": "pass", "note": "PASS: config-agent-seed — all checks green"},
+    {"check": "config-agent-seed.test.ts (live-DB, 8 tests)", "result": "pass", "note": "8/8 PASS post-rebase (migration 053 + author_report_page from T-0180 on branch)"},
+    {"check": "author_report_page_seed.test.ts (live-DB, 11 tests)", "result": "pass", "note": "11/11 PASS"},
+    {"check": "report_page_bundle_deps.test.ts (live-DB, 3 tests)", "result": "pass", "note": "3/3 PASS: DB-1 (2 fixture-schema skips by design), DB-2, DB-3"},
+    {"check": "N-1 cross-ref nit", "result": "pass", "note": "Closed: explicit division-of-responsibility comment block added to check-report-page-deps.sh header"}
+  ],
+  "failures": []
+}

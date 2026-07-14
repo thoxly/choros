@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             targetNamespace="http://www.flowable.org/processdef">
+  <process id="emptyProcess" name="Empty Process" isExecutable="true">
+    <startEvent id="start"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="flow1" sourceRef="start" targetRef="end"/>
+  </process>
+</definitions>

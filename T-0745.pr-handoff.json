@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0745",
+  "status": "pr_open",
+  "branch": "task/T-0745",
+  "ci_local": {
+    "build": true,
+    "build_result": "node_modules/.bin/tsc --noEmit -p tsconfig.json (root) -> 0 errors. node_modules were not present in the worktree at task start (neither repo root nor web/) -- npm ci --maxsockets=3 was run in both locations before any gate could execute (environment setup, not a code deviation).",
+    "lint": true,
+    "lint_result": "npx eslint src/http/rights-intents.ts -> 0 findings. npx eslint ci/checks/db/rights-intents.db.test.ts -> 0 findings. npx eslint web/src --ext .jsx (root) -> ra-intents.jsx carries exactly ONE finding, the PRE-EXISTING 'selId' unused var at line 63 inside OrgPicker (a function this task never touches, already documented in T-0720's/T-0731's handoffs for the same file). ra-intents.test.jsx: 0 findings. Zero new lint findings introduced by this task; the other ~100 findings the full web/src sweep reports are pre-existing, in unrelated files (screen-ops-overview.jsx, screen-process-editor.jsx, etc.).",
+    "types": true,
+    "types_result": "Covered by the tsc --noEmit run above (root). No web-scoped tsconfig.json in this repo; JSX typecheck happens implicitly via vitest/esbuild transform, which is also green (see tests below).",
+    "tests": true,
+    "tests_result": "web: npx vitest run src/screens/rights/ra-intents.test.jsx -> 60/60 passed (41 pre-existing + 19 new T-0745 tests: substituteCoverageWarning pure-fn coverage [6], useSubstitutionCoverage source-presence [3], SubstitutionCoverageHint shared-block source-presence [3], SubstituteForm force_tier2+coverage wiring [3], SelfAbsenceForm force_tier2+coverage wiring [4]). root: npx vitest run src/__tests__/rights-intents.test.ts src/__tests__/rights-intents.self-absence.authz.test.ts src/__tests__/rights-intents.fire-owner.authz.test.ts -> 14/14 passed, unchanged. root live-PG (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros): npx vitest run --dir ci/checks/db --no-file-parallelism ci/checks/db/rights-intents.db.test.ts -> 15/15 passed (10 pre-existing + 5 new T-0745 tests for GET /api/rights/intents/substitution-coverage: holder->true, non-holder->false+honest holder_count, 400 on missing params, 400 on malformed UUID, an ordinary non-admin actor can still read it [self-service parity proof]).",
+    "fitness": true,
+    "fitness_result": "Full fitness suite intentionally NOT run per task instruction (targeted gates only). Ran: bash ci/checks/rights-ui-no-new-write.sh -> PASS (the new route is GET, not POST, and its path is /api/rights/intents/*, not grants|role-assignments -- the gate's own regex never fires). bash ci/checks/rights-ui-anti-case.sh -> PASS (0 anti-case literals added under web/src/; an earlier draft accidentally had a self-referential unit test that literally spelled the denylist as string constants, which the SAME gate then (correctly) flagged as a hit on itself -- removed that redundant test in favour of a comment pointing at the existing repo-wide gates, which already cover this invariant). bash ci/checks/rights-ui-frozen-write.sh -> PASS (all 7 frozen write-core files byte-unchanged vs base). bash ci/checks/ux/ux-g5-jargon-denylist.sh -> PASS (informational mode, exit 0 regardless; ra-intents.jsx lives under web/src/screens/rights/, outside this gate's web/src/screens/*.jsx non-recursive glob, so it is not even scanned -- same pre-existing gap T-0731 noted). bash ci/checks/substitution-isolation.sh -> PASS (FF-SUB1..6 all green; src/core/substitution.ts itself was NOT touched by this task -- only its already-exported substituteProvidesCoverage is imported/reused). bash ci/checks/anti-case-lock.sh -> PASS (Phase 1 delegate gates + Phase 2 full D-064 denylist both within baseline, aggregate unchanged/improved). bash ci/checks/http-route-auth-coverage.sh -> PASS (FF-0328-1/2/3 all green; the new GET route is withAuth-wrapped in the same file/pattern as every sibling route here)."
+  },
+  "files_changed": [
+    "src/http/rights-intents.ts",
+    "web/src/screens/rights/ra-intents.jsx",
+    "web/src/screens/rights/ra-intents.test.jsx",
+    "ci/checks/db/rights-intents.db.test.ts",
+    "docs/tasks/T-0745.spec.md",
+    "T-0745.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "T-0729.assessment.md is an ASSESSMENT (design phase, three options evaluated), not a ratified per-part ADR -- this task follows the founder-facing recommendation of section 4/5 (variant (в)+(б), (в) already delivered by T-0744) and mini-specs the (б) part locally as docs/tasks/T-0745.spec.md. No ADR-level literal deviation.",
+    "Scope discipline: the assessment's variant-(б) UX list (§3) names THREE items -- (1) annotate every option in the substitute picker with 'who holds the role', (2) an inline warning banner on selection, (3) surface force_tier2. This task's own instructions (orchestrator prompt) named only (2)+(3) as the deliverable -- (1) is a nice-to-have enhancement (per-option annotation requires threading the holder set into the picker's option list, a materially bigger UI change) that was NOT explicitly requested and is deliberately left out (proportionality, coder role §5). Documented in T-0745.spec.md §1 as an explicit, intentional scope cut, not an oversight.",
+    "The new read GET /api/rights/intents/substitution-coverage was not pre-specified anywhere -- it was designed during this task (T-0745.spec.md §2) after confirming neither GET /api/org/tenant-state (no role_assignment data at all) nor the existing GET /api/rights/tenant-state (self-scope privacy-filters assignments to caller-only, which would produce FALSE NEGATIVES for an ordinary employee's self-absence warning) can honestly answer 'does this stand-in hold role X' for every caller. The new endpoint is a minimal, additive READ (no schema/table change, reuses the exact role_assignment predicate already used twice in this file for tier determination, plus T-0744's substituteProvidesCoverage verbatim) -- flagged here for visibility since it was not literally named in the task brief, even though the brief's own investigation questions (\"нужен ли новый read-эндпоинт\") anticipated exactly this decision point."
+  ],
+  "design_summary": {
+    "warning_client_or_server": "Hybrid, decisive signal from the SERVER: GET /api/rights/intents/substitution-coverage computes provides_coverage by reusing T-0744's substituteProvidesCoverage over a live role_assignment holder query; the client (useSubstitutionCoverage hook) only renders that answer via the pure substituteCoverageWarning(...) function. A purely client-side check was rejected -- the client has no reliable holder data (see deviations above); a purely post-submit server advisory field was rejected -- the warning must be visible BEFORE submit, while the force_tier2 checkbox choice can still be made.",
+    "force_tier2_exposed": "Yes, in BOTH SubstituteForm and SelfAbsenceForm, as a checkbox labelled honestly in Russian ('Выдать замещающему собственный временный доступ сразу') with a hint describing exactly what it does ('ограниченный временный грант (не шире прав замещаемой роли) немедленно -- независимо от того, есть ли другие держатели роли') -- no 'force_tier2' or 'Tier-N' jargon anywhere in visible text (regression-locked in ra-intents.test.jsx). The checkbox pipes straight into the EXISTING, already-tested force_tier2 body param (rights-intents.ts:744 registerSubstitute, :1231 registerSelfAbsence) -- zero new server mint logic.",
+    "consistency_with_T0720_T0731": "The warning text was written to the SAME no-jargon, honest-about-current-mechanics discipline those two tasks established for substituteResultMessage/selfAbsenceResultMessage (no promise of automatic escalation; states plainly what the system does, not what it might do). It additionally reflects T-0744's owner-claim fix (merged into base before this task): the warning correctly says an orphaned task falls to the tenant owner ('владельцу тенанта' -- the SAME term already used elsewhere in the product, e.g. screen-org.jsx/screen-users.jsx), not to the stand-in -- this is new, T-0745-specific honesty (T-0720/T-0731 predate T-0744 and could not have said this).",
+    "T0744_predicate_reuse": "Literal reuse, not re-derivation: the new server route imports substituteProvidesCoverage from src/core/substitution.ts (unchanged, untouched module) and calls it exactly as computeEffectivePool does internally -- substituteProvidesCoverage({ ttlGrantId: null, substituteEmployeeId }, roleHolderSet). The holder-set query mirrors the SAME role_assignment predicate (confirmed_by IS NOT NULL, in-window) already used twice in this file (registerSubstitute/registerSelfAbsence's poolRows queries) for tier determination -- so the pre-submit warning can never disagree with what the write path itself will decide."
+  },
+  "gate_counts": {
+    "web_vitest_ra_intents": "60/60 (41 pre-existing + 19 new)",
+    "root_vitest_unit_rights_intents": "14/14 (unchanged)",
+    "root_vitest_live_pg_rights_intents_db": "15/15 (10 pre-existing + 5 new)",
+    "named_ci_gates_run": [
+      "tsc --noEmit: 0 errors",
+      "rights-ui-no-new-write.sh: PASS",
+      "rights-ui-anti-case.sh: PASS",
+      "rights-ui-frozen-write.sh: PASS",
+      "ux-g5-jargon-denylist.sh: PASS (informational)",
+      "substitution-isolation.sh: PASS (FF-SUB1..6)",
+      "anti-case-lock.sh: PASS",
+      "http-route-auth-coverage.sh: PASS (bonus, sanity-checked the new route's withAuth wrapping)"
+    ]
+  },
+  "live_proof_plan": [
+    "Stand is currently offline -- this is a PLAN, not an executed run (mirrors T-0720/T-0731's live_proof_plan shape).",
+    "1. Seed/pick two employees A (holds role R) and B (does NOT hold role R) in the same tenant, plus a role R with A as ONE confirmed holder.",
+    "2. Log in as an admin/owner, open Rights -> Бытовые операции прав (/rights/intents) -> 'Подмена' (SubstituteForm). Pick any absent employee, role R, and B as 'Замещает'.",
+    "3. Expected: within ~1 request-roundtrip after picking B, an inline warning banner appears: 'Замещающий сейчас не держит «R» -- пока роль покрыта другими держателями, подмена сработает в рамках его собственных прав. Если все держатели станут недоступны, задачи роли уйдут не к нему, а владельцу тенанта (роль будет считаться незаполненной). Чтобы доступ получил именно этот сотрудник -- включите ниже «выдать собственный временный доступ».' A checkbox 'Выдать замещающему собственный временный доступ сразу' is visible below it, unchecked by default.",
+    "4. Switch 'Замещает' to A instead (who DOES hold R) -- the warning banner must disappear (checkbox stays visible).",
+    "5. Switch back to B, tick the checkbox, fill remaining required fields, submit. Expected: 201, response tier: 2, and (server invariant, unchanged by this task) a TTL'd delegable=false grant minted for B -- confirm via GET /api/rights/tenant-state or DB that B's inbox now shows role-R tasks immediately (same mechanism force_tier2 already exercises in ci/checks/db/rights-intents.db.test.ts FF-SUB-3).",
+    "6. Repeat steps 2-5 on 'Я в отпуске' (SelfAbsenceForm) as employee A declaring their own absence and nominating B -- same warning text (mutatis mutandis, this form has no 'Отсутствует' picker), same checkbox, same tier-2 outcome when checked.",
+    "7. Regression: open both forms WITHOUT touching the substitute picker at all -- neither SubstitutionCoverageHint block (warning OR checkbox) renders (substituteId is empty), matching the pre-T-0745 form layout exactly for an untouched form.",
+    "8. Regression: confirm GET /api/rights/intents/substitution-coverage with a role_id the caller's tenant does NOT own returns 200 with holder_count: 0 / provides_coverage: false (never a cross-tenant leak) -- resolveTenant derives tenant strictly from the caller's own employee row, the query is tenant-scoped."
+  ],
+  "friction_events": [
+    "The worktree had no node_modules installed at task start (neither repo root nor web/) -- every gate (tsc, vitest, eslint) failed with misleading errors until npm ci --maxsockets=3 was run in both locations. Not a code defect, environment cold-start cost noted per coder role friction-telemetry (same finding T-0731's handoff recorded for the same worktree pattern).",
+    "First draft of a client-side anti-case regression test literally spelled out the D-064 denylist ('role-approver', 'soglasovanie', etc.) as string array elements inside an assertion -- ci/checks/rights-ui-anti-case.sh then (correctly) flagged the TEST FILE ITSELF as a violation, since the gate is a naive git-diff text grep with no awareness of test-vs-denylist intent. Removed the redundant test (the repo-wide gates already cover this invariant for any web/src/ diff) and replaced it with a comment explaining why a parallel unit test would be self-defeating."
+  ]
+}

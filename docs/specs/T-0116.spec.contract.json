@@ -1,0 +1,102 @@
+{
+  "task_id": "T-0116",
+  "status": "ready",
+  "summary": "Таблица choros.app_timer (FORCE RLS, partial-индекс по (tenant_id, due_at) WHERE state='pending'), SECURITY DEFINER-функция next_due_buckets() возвращает только агрегат (tenant_id, count), двухфазный tenant-scoped dispatcher (SET LOCAL + FOR UPDATE SKIP LOCKED LIMIT N), метрика timer.timerLagMs в GET /health как P1-сигнал тихого отказа.",
+  "functional": [
+    "Таблица choros.app_timer: tenant_id, id, due_at, state (pending/firing/done/cancelled), kind, payload jsonb",
+    "Partial-индекс (tenant_id, due_at) WHERE state='pending' для эффективной выборки",
+    "FORCE RLS + permissive-политика на GUC choros.tenant_id; fail-closed без GUC",
+    "SECURITY DEFINER-функция next_due_buckets(p_due_before bigint) → агрегат (tenant_id uuid, timer_count bigint) — без строк данных",
+    "Двухфазный dispatcher: фаза-1 вызывает next_due_buckets(), фаза-2 per-tenant tx SET LOCAL + FOR UPDATE SKIP LOCKED LIMIT N, state → 'firing'",
+    "GET /health расширяется полем timer.timerLagMs: number | null (lag старейшего просроченного pending-таймера)"
+  ],
+  "non_functional": [
+    "tenant_id — ведущая колонка во всех составных индексах app_timer (T-0013 §3.1)",
+    "ci/checks/known_tenant_tables.txt пополняется строкой app_timer — cross-tenant CI-тест подхватывает без изменений",
+    "Raw pg-queries, parameterised, без ORM (ADR NF-4)",
+    "choros_app имеет EXECUTE на next_due_buckets(), но не DDL (choros_migrator — owner)",
+    "GET /health при ошибке Postgres в timer-запросе → status: degraded, timer.timerLagMs: null (не краш)"
+  ],
+  "out_of_scope": [
+    "Прикладные обработчики таймеров (inbox-эскалация, lease-renew-логика, retry-логика)",
+    "BPMN boundary-timers Flowable (ACT_* таблицы)",
+    "LISTEN/NOTIFY как wake-up механизм (poll-режим, ADR §1)",
+    "Redis / внешний брокер",
+    "multi-consumer fan-out одного таймера",
+    "REST API CRUD поверх app_timer"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "INSERT INTO choros.app_timer от choros_app без установленного GUC choros.tenant_id → Postgres бросает ошибку (fail-closed)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "SELECT от choros_app в контексте TENANT_A (SET LOCAL) → строки с tenant_id=TENANT_B не возвращаются (0 строк при явном WHERE tenant_id=TENANT_B)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "ci/checks/known_tenant_tables.txt содержит строку 'app_timer'; все AC-1..AC-9 T-0115 cross-tenant CI-теста проходят без изменений самого теста",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "Вызов choros.next_due_buckets(p_due_before) от choros_app без GUC choros.tenant_id → возвращает агрегат (tenant_id, timer_count) без ошибки (SECURITY DEFINER не требует GUC)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Результат next_due_buckets() содержит ровно 2 колонки (tenant_id, timer_count) — ни id, ни payload, ни due_at, ни любые другие поля строки таймера не возвращаются",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "fetchAndFire в контексте TENANT_A (SET LOCAL) захватывает только pending-таймеры с due_at <= now этого тенанта; строка TENANT_B остаётся в state='pending'",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "fetchAndFire с LIMIT N возвращает ≤ N строк; оставшиеся pending-таймеры (> N) не переходят в state='firing'",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "FOR UPDATE SKIP LOCKED: второй параллельный fetchAndFire для того же тенанта не захватывает строки, уже залоченные первым (rowCount1 + rowCount2 ≤ числа ready-строк)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "GET /health при наличии хотя бы одного pending-таймера с due_at <= now → timer.timerLagMs >= 0 (number, не null)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "GET /health при отсутствии просроченных pending-таймеров → timer.timerLagMs: null",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "GET /health при ошибке Postgres в timer-запросе → status: 'degraded', timer.timerLagMs: null (эндпоинт не падает)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "После применения миграций 011_+ partial-индекс (tenant_id, due_at) WHERE state='pending' существует в pg_indexes; имя индекса содержит 'app_timer'",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "После миграций таблица choros.app_timer существует с колонками tenant_id, id, due_at, state, kind, payload (минимальный обязательный набор)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "choros.app_timer имеет FORCE ROW LEVEL SECURITY (pg_tables.rowsecurity=true AND pg_class.relforcerowsecurity=true)",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0116-app-timer.spec.md"
+}

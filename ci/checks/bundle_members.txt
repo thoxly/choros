@@ -1,0 +1,23 @@
+# bundle_members.txt — T-0082 bundle coherence registry
+#
+# Format: name|kind|source|table_or_path|key_column
+#
+# kind=choros_table  — materialized as a Choros DB table; subject to
+#                      static existence + DDL-invariant checks.
+# kind=external      — lives in Flowable or not yet a table; deferred.
+#                      Deferral contract: docs/design/T-0082-bundle-deferral-contract.md
+#
+# FROZEN CONTRACT: adding a new member = one TSV line + pass bundle-coherence.sh.
+# Promoting external→choros_table is a DoD requirement for the task that
+# creates the table (see deferral contract).
+
+object-schema|choros_table|migrations/004_registry_def.sql|registry_def|record_schema
+grants|choros_table|migrations/008_grant.sql|grant|resource_type
+report_page_dep|choros_table|migrations/052_report_page_dep.sql|report_page_dep|dep_kind
+template_dep|choros_table|migrations/060_template_def.sql|template_dep|dep_kind
+doc_page|choros_table|migrations/061_doc_page.sql|doc_page|scope
+doc_ref|choros_table|migrations/061_doc_page.sql|doc_ref|ref_kind
+doc_log|choros_table|migrations/061_doc_page.sql|doc_log|op
+bpmn-process|external|flowable-engine|deployments-api|—
+form-code|external|deferred|—|—
+form-json-schema|external|deferred|—|—

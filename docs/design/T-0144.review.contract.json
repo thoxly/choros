@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0144",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "notes": "tsc PASS, npm run fitness 309/0 PASS, vitest unit 1098/1113 (9 pre-existing failures in externalWorker.e2e.test.ts+health.test.ts — 0 diff lines from T-0144); fitness:db grant-editor.test.ts 16/16 × 2 runs, no count growth"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "scripts/cleanup-test-grants.ts:24",
+      "issue": "RESOLVED: TEST_ACTORS now contains exactly 2 FR-6 markers: 'test' and 'd0000000-0000-0000-0000-0000000000ff'. The undocumented 'e-owner' marker has been removed.",
+      "suggestion": "Closed."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "ci/checks/db/grant-editor.test.ts (all 5 afterAll blocks)",
+      "issue": "RESOLVED: T-0185 (migration 050) fixed tier_published_locked BEFORE DELETE trigger (RETURN NEW → RETURN OLD). Double run of grant-editor.test.ts now stable: 16/16 PASS each run, 'test'/UUID granted_by counts = 0, no growth.",
+      "suggestion": "Closed."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "note": "PASS: grant-editor 16/16 × 2 runs; test/UUID marker count=0, does not grow"},
+    {"ac": "AC-2", "covered": false, "note": "ENV-BLOCKED: genesis-owner-seed AC-12 fails due to 240 accumulated e-owner rows (pre-T-0185 residue, not T-0144 regression). Orchestrator sanitation SQL provided below to restore count=17."},
+    {"ac": "AC-3", "covered": true, "note": "All expect() calls preserved, verified by diff"},
+    {"ac": "AC-4", "covered": true, "note": "freeformGrantId = json.id before first expect(), grant-editor.test.ts"},
+    {"ac": "AC-5", "covered": true, "note": "TEST_ACTORS = ['test', 'd0000000-0000-0000-0000-0000000000ff'] — exactly 2 FR-6 markers"},
+    {"ac": "AC-6", "covered": true, "note": "git diff dev -- migrations/ = empty, no migration files touched"}
+  ],
+  "e_owner_focus": {
+    "genesis_safe": true,
+    "genesis_granted_by": "seed",
+    "cleanup_actors": ["test", "d0000000-0000-0000-0000-0000000000ff"],
+    "genesis_at_risk": false,
+    "explanation": "Genesis grants (migration 026) use granted_by='seed', which is absent from TEST_ACTORS. 'e-owner' has been removed from TEST_ACTORS — cleanup script no longer touches e-owner rows.",
+    "adv3_risk": "Closed: e-owner removed from TEST_ACTORS, so ADV-3 victim grant is no longer at risk from cleanup script."
+  },
+  "idempotency_result": {
+    "run1_count": "0 (test/UUID markers); grant-editor 16/16 PASS",
+    "run2_count": "0 (test/UUID markers); grant-editor 16/16 PASS",
+    "run2_stable": true,
+    "root_cause": "RESOLVED: T-0185 migration 050 fixed tier_published_locked trigger RETURN OLD",
+    "code_correct": true,
+    "env_broken": false
+  },
+  "sanitation_predicate": {
+    "safe_delete_sql": "DELETE FROM choros.\"grant\" WHERE tenant_id = 'a0000000-0000-0000-0000-000000000001' AND role_id = 'e0000000-0000-0000-0000-000000000001' AND resource_type LIKE 'mgmt_object:%' AND granted_by = 'e-owner'",
+    "expected_rowcount": 15,
+    "explanation": "These 15 rows are ADV-3 beforeAll residue accumulated over pre-T-0185 runs where DELETE was suppressed. granted_by='e-owner' is never used by the genesis seed migration (which uses 'seed'). Safe to delete when test suite is not running concurrently.",
+    "must_not_match": [
+      "granted_by='seed' (genesis grants, different value)",
+      "resource_type='authoring_draft' or 'record' (different resource types, excluded by LIKE)",
+      "role_id != DEV_ROLE_OWNER (budget-approver and other roles not targeted)",
+      "Any row with a real UUID in granted_by (production operation)"
+    ],
+    "race_risk": "If orchestrator runs sanitation while ADV-3 beforeAll has executed but afterAll has not yet run, the victim grant will be deleted and ADV-3a/b will fail. Safe only when fitness:db is not running concurrently."
+  },
+  "role_gap_evidence": []
+}

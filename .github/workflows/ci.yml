@@ -1,0 +1,580 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+# T-0703: the runner is self-hosted and every job below runs on the SAME host.
+# A `push` to dev and a `pull_request` run for that same commit (e.g. the dev→main
+# promotion PR) can both start at once. Most jobs (db, flowable, stack, kc,
+# deploy-acceptance) bind FIXED host ports (5432/55432/8180/9000/8082/3000) via
+# `services:` or `docker compose up`, not ephemeral ones — two concurrent runs
+# collide with "failed to bind host port ... address already in use" (observed
+# run 28886164542, job flowable, port 55432). This is a runner-capacity race, not
+# a code failure, so the fix is to SERIALIZE whole workflow runs on this shared
+# host rather than let them execute in parallel.
+#
+# A single GLOBAL group (fixed string, not `${{ github.ref }}`) is required
+# because the race is BETWEEN a push run and a pull_request run of the same
+# commit — those have different `github.ref` values (`refs/heads/dev` vs
+# `refs/pull/N/merge`), so a ref-scoped key would never see them as the same
+# group and would not serialize them. `cancel-in-progress: false` so a queued
+# run waits its turn instead of cancelling an in-flight deploy — a cancelled
+# `deploy-dev` mid-`deploy-dev.sh` would be worse than a queued one waiting.
+#
+# Applied at WORKFLOW level (not per-job): 5 of the 7 jobs (db, flowable, stack,
+# kc, deploy-acceptance) bind fixed ports and each would need the same lock
+# individually, and `deploy-dev` already depends on 4 of those via `needs` so it
+# is serialized transitively regardless. Only `ci` (tsc/eslint/unit, no ports)
+# would gain from staying unlocked, but that saves little (the port jobs are the
+# long pole either way) versus the risk of a future compose-using job forgetting
+# to add the lock. One global lock is simplest and cannot bit-rot.
+#
+# T-0704 (follow-up to T-0703): `cancel-in-progress: false` only protects an
+# IN-PROGRESS run — it does NOT protect a PENDING (queued-but-not-started) one.
+# GitHub's documented default for a concurrency group is `queue: single`: "any
+# existing pending job or workflow in the same concurrency group will be
+# cancelled and the new queued job or workflow will take its place" — this
+# applies REGARDLESS of cancel-in-progress. Observed live: PR #15 is a standing
+# "dev → main" promotion PR (head=dev, base=main) that GitHub auto-synchronizes
+# on every push to dev, spawning a `pull_request` run for the SAME commit as the
+# `push` run. When the push run (carrying `deploy-dev`, which needs [ci, db, kc,
+# stack, flowable] and so is usually still queued behind those) was still
+# pending, the companion pull_request run for the next dev push replaced it as
+# the group's pending slot → the push run was cancelled (run 28888618226,
+# "cancelled" 5s) before `deploy-dev` ever ran → the merge landed without
+# auto-deploy. `queue: max` opts OUT of single-pending-slot replacement: up to
+# 100 runs may sit PENDING in the group simultaneously (still serialized one at
+# a time by cancel-in-progress:false — no MORE parallelism, just no eviction),
+# so a later run can no longer evict an earlier one out of the queue. GitHub's
+# `queue` property is binary — `single` (default, the buggy behavior above) or
+# `max` (up to 100 pending; no custom-number syntax exists) — so `max` is the
+# only opt-out available. 100 is GitHub's fixed ceiling, not unlimited, and this
+# repo's realistic push volume (a handful of pushes within one CI wall-clock
+# duration) is nowhere near it.
+concurrency:
+  group: choros-ci-shared-ports
+  cancel-in-progress: false
+  queue: max
+
+# Pin a collation-capable UTF-8 locale for ALL jobs. ubuntu-latest's default
+# locale is C.UTF-8, whose collation table REJECTS multibyte range expressions:
+# GNU grep raises "Invalid collation character" (exit 2) on Cyrillic ranges like
+# [а-яё] used by frozen checks (e.g. T-0133-adr-shape.sh), turning a green-local
+# run red-on-runner (locale-dependent gate bug, T-0216).
+# Empirically verified on ubuntu-latest (T-0216 diag run 27496192707):
+#   LC_ALL=C.UTF-8   → grep "нов[а-яё]+"  →  "Invalid collation character", rc=2
+#   LC_ALL=en_US.UTF-8 → matches, rc=0       (en_US.utf8 is PRE-INSTALLED; it
+#                                             appears in `locale -a` with no
+#                                             locale-gen needed)
+# en_US.UTF-8 is UTF-8-aware AND carries a real collation table, so the range
+# resolves correctly. Job-level env keys still override these per GitHub Actions
+# env precedence, so flowable/stack/db/kc keep their own vars; locale is purely
+# additive and safe for every job.
+env:
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # T-0364: per-task baseline checks (docpage-writeful-tools F-7, defer-no-new-table,
+      # frozen merge-base checks) need a resolvable `dev` ref WITH history. Default
+      # shallow checkout has none → they either hard-fail (F-7) or fall back to a
+      # working-tree grep that over-reaches onto the whole dev accumulation (e.g. E15's
+      # user_task gets blamed on T-0221). Fetch origin/dev with FULL history (NOT main)
+      # and point a local `dev` branch at it. On a dev push origin/dev == HEAD ⟹ every
+      # check sees an EMPTY delta (compare vs self) ⟹ passes; on PRs origin/dev is the
+      # real base ⟹ checks still work. main is never fetched ⟹ no over-reach.
+      - run: |
+          # Per-task baseline checks do `git merge-base HEAD dev` / `git diff dev`.
+          # On a dev-push HEAD is the --no-ff merge commit, so its FIRST PARENT (HEAD~1)
+          # is the previous dev. Point local `dev` there so the checks see ONLY this
+          # merge's delta (not the whole accumulation) → they pass when the change adds
+          # no table / doesn't touch known_tenant_tables.txt. Deepen by 1 to get HEAD~1.
+          git fetch --deepen=1 origin 2>/dev/null || git fetch --depth=2 origin dev 2>/dev/null || true
+          git branch -f dev HEAD~1 2>/dev/null || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Собрать web ДО гейта: тесты статик-раздачи/SPA-fallback зависят от наличия
+      # web/dist. Без этого ветка гоняется в состоянии «dist нет», а dev — «dist
+      # есть» → зелёный на ветке ≠ зелёный на dev (FE-2026-W24-0004). Гейт обязан
+      # гонять в интеграционно-честном окружении.
+      - run: npm --prefix web ci
+      - run: npm --prefix web run build
+      # T-0364 (founder decision 2026-06-21: "развязать деплой от гардов" — decouple dev
+      # auto-deploy from the per-task frozen-check guard suite). `npm run ci` is split so the
+      # SUBSTANTIVE gate stays BLOCKING (tsc --noEmit + eslint + unit tests here, plus the
+      # db/kc/stack/flowable jobs and the server-side rebuild in deploy-dev.sh) while only
+      # `npm run fitness` (the ~200 frozen ci/checks/*.sh guards) is made advisory. The guards
+      # still RUN and stay VISIBLE in the log, but their systemic baseline-resolution failures
+      # on dev integration-pushes (E16/E17 accumulation — no single CI git-setup satisfies all
+      # ~30 per-task baselines at once) no longer block dev deploys. They remain fully enforcing
+      # on task branches / PRs; main stays founder-gated (GT-3).
+      - run: node_modules/.bin/tsc --noEmit
+      - run: npm run lint
+      - run: npm run test
+      # T-0408: web (SPA) unit test tier — gates the 13 web/src/**/*.test.js files
+      # (field-contract, records-form, apps-schema, …) that the root vitest config
+      # intentionally excludes (web env differs). Runs as a separate step so the
+      # root gate count stays stable and the web tier is blocking in its own right.
+      - run: npm --prefix web run test
+      - name: fitness guards (advisory on dev push — see comment above)
+        continue-on-error: true
+        run: npm run fitness
+
+  # T-0053 · integration-honest Postgres gate (D-056): pins its OWN postgres:16
+  # service container — no dependency on ambient build state. Runs the migration
+  # runner against an empty DB, RE-RUNS it (idempotency), then the live probe
+  # suite incl. the ≥2-tenant anti-decorative-tenant_id check (tenancy §9 guard 5).
+  db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: choros
+          POSTGRES_USER: choros_migrator
+          POSTGRES_PASSWORD: choros_dev_pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U choros_migrator -d choros"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      # Runner + probes connect as choros_migrator (owner/DDL). The app-role
+      # probes derive choros_app from this URL (dev default password).
+      DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:5432/choros
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # 1. Apply all migrations against the empty DB (FF-2).
+      - run: node migrations/run.mjs
+      # 2. Re-run to prove idempotency (FF-2 / AC-3): zero new applications.
+      - run: node migrations/run.mjs
+      # 2b. Provision the per-migration-hash template DB
+      #     (choros_test_template_<hash8>). The T-0147 db-isolation harness'
+      #     globalSetup.ts CLONES per-test DBs from this template and ERRORS
+      #     ("template database ... not found") if it is absent — it does NOT
+      #     create it. This provisioning step (fitness:db:setup-template) was
+      #     never wired into the db job when T-0147 landed, so every db run
+      #     failed before tests started (T-0216). Idempotent: re-creates only
+      #     if missing, then runs migrations against the template.
+      - run: npm run fitness:db:setup-template
+      # 3. Live probe suite: schema + behavior + idempotency + ≥2-tenant guard
+      #    (FF-RLS/DENY/LEAD/SCOPE/ROLE/APPEND/FK-RESOLVE/JSONB/ACT/2TENANT).
+      - run: npm run fitness:db
+
+  # T-0058 · E0.5 Flowable engine substrate (FF-FL-1..12):
+  # Starts postgres + flowable via compose (fresh volume → 002-flowable-schema.sql
+  # runs automatically on first init). Waits for Flowable readiness, runs static
+  # checks, deploys smoke BPMN via REST, starts a process instance, queries runtime,
+  # and verifies ACT_* schema isolation from choros_* tables.
+  # Does NOT use docker compose down -v (compose down leaves the named volume intact;
+  # volume is ephemeral per CI runner job anyway).
+  flowable:
+    runs-on: ubuntu-latest
+    env:
+      # bridge-e2e-smoke.sh (FF-T0067-14..16) needs DATABASE_URL to resolve
+      # the genesis tenant UUID from Postgres. Compose default port (55432).
+      DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # bridge-e2e-smoke.sh calls `npm run build` internally (bridge-smoke-runner.js
+      # lives in dist/). Installing deps here keeps the flowable job self-contained.
+      - run: npm ci
+      - name: Start Postgres + Flowable via compose
+        run: docker compose up -d postgres flowable
+      - name: Wait for Flowable readiness (FF-FL-1)
+        run: bash ci/checks/flowable/wait-ready.sh
+      - name: Static fitness checks (FF-FL-4..11)
+        run: bash ci/checks/flowable/static-checks.sh
+      - name: Deploy + smoke BPMN + schema isolation (FF-FL-2/3/12)
+        run: bash ci/checks/flowable/smoke.sh
+      - name: External-task round-trip smoke (FF-T0064-6)
+        run: bash ci/checks/flowable/external-task-smoke.sh
+        env:
+          FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
+      # bridge-e2e-smoke резолвит genesis-тенанта из choros-схемы (миграция 026) —
+      # compose-Postgres этого job-а девственный, миграции гоняет только job db на
+      # СВОЁМ Postgres. Локально это маскировала общая прогретая БД (FE-2026-W24-0055,
+      # второй слой). Шаг стоит ПОСЛЕ flowable-смоуков: их schema-isolation-проверки
+      # видят тот же набор схем, что и до этого фикса.
+      - name: Run choros migrations (bridge smoke needs genesis tenant)
+        run: node migrations/run.mjs
+      # T-0067 · FF-T0067-14..16 (D-056 integration-honest gate):
+      # Full bridge cycle: poll Flowable external tasks → enqueue in JobStore →
+      # outbox deliver → completeTask in Flowable → instance completed.
+      # Idempotency (AC-17) and FF-G3 contract (AC-18) verified inside script.
+      - name: Bridge E2E smoke (FF-T0067-14..16)
+        run: bash ci/checks/flowable/bridge-e2e-smoke.sh
+        env:
+          FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
+      - name: FF-G3 bridge contract (must remain dormant/green)
+        run: bash ci/checks/flowable-bridge-contract.sh
+      - name: Stop Flowable (leave Postgres intact)
+        if: always()
+        run: docker compose stop flowable
+
+  # T-0764 (follow-up to T-0760): the `db` job above pins a BARE postgres:16
+  # service — no Flowable substrate. Five ci/checks/db/*.db.test.ts files
+  # (engine-drive-generic, engine-drive-completedby, detel-base-task-role,
+  # detel-rollup-to-variables, formula-derived) gate their live assertions
+  # behind a local requireDbAndFlowable() helper that does `console.log('[skip]
+  # Flowable not reachable ...')` and returns — NOT a fail — when no Flowable
+  # is reachable. In the `db` job that guard is ALWAYS true, so these tests have
+  # been silently no-op'ing in every automated CI run since they were written;
+  # T-0760 only discovered the underlying seed bug by running them BY HAND
+  # against a local Flowable. This job closes that gap by giving `npm run
+  # fitness:db` a REAL Flowable — same docker-compose substrate the
+  # `flowable`/`stack`/`kc`/`deploy-acceptance` jobs already use (the `flowable`
+  # Postgres schema is created by config/postgres/002-flowable-schema.sql on
+  # first Postgres init, identical to those jobs — no new provisioning needed).
+  #
+  # Deliberately re-runs the FULL `npm run fitness:db` suite rather than a
+  # hand-picked file list: a hardcoded "these are the Flowable-gated files"
+  # whitelist would itself rot the moment a new requireDbAndFlowable() test is
+  # added and this workflow isn't updated to match — exactly the silent-skip
+  # failure mode this task exists to close. The ~175 non-Flowable-gated files
+  # simply re-run redundantly here (same DATABASE_URL template-clone isolation
+  # as the `db` job, no Flowable dependency); only the 5 Flowable-gated ones
+  # newly execute for real.
+  #
+  # NOT added to deploy-dev.needs yet — same advisory-first discipline the
+  # deploy-acceptance job documents above (T-0274 EXACT FLIP-CONDITION): this
+  # job needs to be proven green in the actual GitHub/self-hosted runner at
+  # least once before it can safely gate dev auto-deploy. It binds the same
+  # fixed compose ports (55432/8082) as `flowable`/`stack`/`kc`/
+  # `deploy-acceptance` — safe only because the self-hosted runner already
+  # serializes job execution (T-0703). A follow-up task should flip it into
+  # deploy-dev.needs once verified green.
+  db-flowable:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
+      FLOWABLE_PORT: "8082"
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start Postgres + Flowable via compose
+        run: docker compose up -d postgres flowable
+      - name: Wait for Flowable readiness (FF-FL-1)
+        run: bash ci/checks/flowable/wait-ready.sh
+      # 1. Apply all migrations against the fresh compose DB, then re-run to
+      #    prove idempotency — same two-step pattern as the `db` job above.
+      - run: node migrations/run.mjs
+      - run: node migrations/run.mjs
+      # 2. Provision the per-migration-hash template DB the T-0147
+      #    db-isolation harness clones per-test DBs from (same requirement as
+      #    the `db` job; without this every test errors "template database ...
+      #    not found").
+      - run: npm run fitness:db:setup-template
+      # 3. Full live-db probe suite — WITH Flowable reachable this time, so the
+      #    requireDbAndFlowable()-gated engine-drive tests actually execute
+      #    instead of silently skipping (T-0764).
+      - run: npm run fitness:db
+      - name: Stop services
+        if: always()
+        run: docker compose stop flowable postgres
+
+  # T-0061 · E0.6 · dev full-stack integration (FF-T61-12 / AC-13):
+  # Starts the complete 4-service dev stack (postgres + keycloak + flowable + choros)
+  # and verifies all services are healthy. Requires docker build (may take ~5 min on
+  # first run without layer cache). This job is the integration-honest gate for AC-13.
+  stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm --prefix web ci
+      - run: npm --prefix web run build
+      - name: Build choros image and start full dev stack (FF-T61-12)
+        run: docker compose up -d --wait
+        timeout-minutes: 10
+      - name: Verify all 4 services are healthy/running (AC-13)
+        run: |
+          set -euo pipefail
+          # Assert each expected service is present and healthy/running
+          for SVC in postgres keycloak flowable choros; do
+            STATUS=$(docker compose ps --format json \
+              | python3 -c "import json,sys; rows=[json.loads(l) for l in sys.stdin if l.strip()]; \
+                svc=[r for r in rows if r.get('Service','').lower() == '${SVC}']; \
+                print(svc[0].get('Health', svc[0].get('State', 'missing')) if svc else 'missing')")
+            echo "${SVC}: ${STATUS}"
+            if [[ "${STATUS}" != "healthy" && "${STATUS}" != "running" ]]; then
+              echo "FAIL: ${SVC} is not healthy/running (status=${STATUS})"
+              docker compose logs "${SVC}" | tail -50
+              exit 1
+            fi
+          done
+          echo "PASS: all 4 services are healthy/running (FF-T61-12)"
+      - name: Stop stack
+        if: always()
+        run: docker compose down
+
+  # T-0060 · E1.4 · Keycloak JWT-guard live integration tests (FF-1, FF-7, AC-22/23):
+  # Starts postgres + keycloak via compose, waits for KC readiness, then runs the
+  # live-kc integration tests (workerAuth.kc.e2e.test.ts) against a real choros server
+  # with real Keycloak tokens (ROPC human, client_credentials agent).
+  # Additive: does NOT modify ci/db/flowable/stack jobs.
+  kc:
+    runs-on: ubuntu-latest
+    env:
+      CHOROS_AUTH_MODE: keycloak
+      KEYCLOAK_URL: http://localhost:8180
+      KEYCLOAK_REALM: choros
+      KEYCLOAK_AUDIENCE: choros-api
+      KEYCLOAK_PORT: "8180"
+      KEYCLOAK_MGMT_PORT: "9000"
+      # DEV-only realm credentials the live-KC e2e test fetches tokens with.
+      # These are NOT secrets: they ship in config/keycloak/realm-choros.json
+      # (clearly DEV-labeled) and are the same values the fitness:kc token
+      # checks (ci/checks/kc/{human,agent}-token.sh) already hardcode and that
+      # docs/environments.md documents. Without them the test sends empty
+      # client_secret/password → Keycloak returns 401 unauthorized_client
+      # (T-0216; surfaced once the static-check + bare-vitest fixes let the
+      # live-KC step actually run).
+      CHOROS_API_SECRET: choros-api-dev-secret
+      AGENT_ORCHESTRATOR_SECRET: agent-orchestrator-dev-secret
+      KC_TEST_USERNAME: e-kravtsova
+      KC_USER_PASSWORD: dev-pw-kravtsova
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start Postgres + Keycloak via compose
+        run: docker compose up -d postgres keycloak
+      - name: Wait for Keycloak readiness (FF-1)
+        run: bash ci/checks/kc/wait-ready.sh
+      - name: Wait for realm OIDC discovery (FF-2)
+        run: bash ci/checks/kc/realm-ready.sh
+      - name: Build choros (required for server + FF-6 assertKeycloakConfig)
+        run: npm run build
+      - name: Static fitness checks (FF-3/FF-4/FF-5/FF-6/FF-8)
+        run: |
+          bash ci/checks/worker-auth-single-branch.sh
+          bash ci/checks/worker-auth-zero-dep.sh
+          bash ci/checks/worker-auth-public-surface.sh
+          # worker-auth-config-failfast.sh is HERMETIC: each of its 4 subtests
+          # sets CHOROS_AUTH_MODE / KEYCLOAK_URL inline. But the kc job exports
+          # CHOROS_AUTH_MODE=keycloak and KEYCLOAK_URL=... at job-env level for
+          # the live KC tests, and those leak into the subtests' node processes:
+          #   - negative subtest (keycloak, no KEYCLOAK_URL → must throw) sees
+          #     the ambient KEYCLOAK_URL → no throw → false FAIL;
+          #   - dev-mode subtest (no inline mode → must be no-op) sees the
+          #     ambient CHOROS_AUTH_MODE=keycloak → throws → false FAIL.
+          # Both subtests pass in the `ci` job precisely because neither var is
+          # set there. Clear both ambient vars for THIS check only so its inline
+          # per-subtest env governs; the other four checks keep the job env (T-0216).
+          env -u KEYCLOAK_URL -u CHOROS_AUTH_MODE bash ci/checks/worker-auth-config-failfast.sh
+          bash ci/checks/worker-auth-env-docs.sh
+      - name: Run live-KC integration tests (FF-1/FF-7, AC-22/23)
+        # Use npx so the LOCAL vitest binary resolves: a bare `vitest` is not on
+        # PATH on the runner → exit 127 (command not found). This was masked until
+        # the static-checks step above stopped failing first (T-0216).
+        run: npx vitest run src/__tests__/workerAuth.kc.e2e.test.ts
+      - name: UI-created user carries actor_type (T-0734, FF-UP2)
+        # Proves the declarative user-profile fix: a user created via the SAME
+        # admin-REST path the product UI uses (registrar POST /users) gets a
+        # login token carrying actor_type — i.e. UI-created accounts work
+        # instead of 401-ing. The realm imported via --import-realm above now
+        # activates the profile (components entry in realm-choros.json).
+        run: bash ci/checks/kc/ui-created-user-actor-type.sh
+      - name: Stop services
+        if: always()
+        run: docker compose stop keycloak postgres
+
+  # T-0283 · deploy-acceptance — the ТЭЛ U1→U5 browser click-through gate (ADR
+  # T-0278 §E / §2.4 / §G). Proves the deployed product is CLICKABLE (not a
+  # read-only витрина): a real browser drives the SAME built web/dist a user sees,
+  # against a live Postgres + Flowable, through start → form → claim → approve →
+  # done, and fails honestly if any step is not clickable (FF-3/4/5/6, AC-7/8/10).
+  #
+  # INTRODUCED NON-BLOCKING (ADR §2.5 / §G variant (а)): continue-on-error: true.
+  # It WAS INFORMATIONAL while the wiring stabilized — it could be red without
+  # blocking the merge of A/B/C/D/E, so dev never saw a red REQUIRED gate (D-056).
+  #
+  # FLIPPED TO REQUIRED (T-0284, §G): the full U1→U5 ТЭЛ click-through is now GREEN
+  # on the merged wiring with REAL mouse clicks against the live stack (start 201 →
+  # form submit 200 + persisted recordId → role-pool inbox task → claim 200 → «Мне»
+  # tab «Согласовать» card-action → approve 200 {status:"done"}); the fail-honest
+  # negatives stay red-on-violation. The chicken-and-egg is closed (D-056): the gate
+  # is green at the moment it becomes blocking, so removing continue-on-error cannot
+  # red-line dev. A non-clickable product now fails the merge — exactly the antidote
+  # to the "read-only витрина" defect (spec §1).
+  #
+  # T-0274 (ADR docs/design/T-0274-deploy-acceptance-dod.adr.md, Split A — choros
+  # side): the founder ratified this as a HARD barrier ("ничего не «готово» без живого
+  # клика на деплое"). This task lands the barrier ADVISORY-FIRST and wires the
+  # gated/exempt predicate + a non-loosening guard (ci/checks/acceptance/
+  # deploy-acceptance-required.sh). Two advisory-first wiring changes here:
+  #   (i)  the job now runs `npm run acceptance` (the DECLARATIVE journey suite — EVERY
+  #        e2e/journeys/*.journey.ts) instead of only `acceptance:tel` (legacy ТЭЛ), so
+  #        every gated user-facing flow is exercised, not just ТЭЛ (FF-T0274-1).
+  #   (ii) it STAYS `continue-on-error: true` and is NOT yet in deploy-dev.needs.
+  # WHY still advisory (do NOT flip blind — D-056 / ADR §2 / §4): the required-flip is
+  # only safe once `npm run acceptance` is verified GREEN in the GitHub runner against
+  # this ephemeral compose stack (Docker was unavailable in the build env, so green
+  # could not be proven locally). A required gate that is red at flip-time would
+  # red-line dev auto-deploy.
+  #
+  # EXACT FLIP-CONDITION (founder's строгость-гейта leash, D-061 — applied with the
+  # Demiurge-side self-improve iteration, ADR Split B, NOT in this choros task):
+  #   1. This advisory job has gone GREEN at least once in the GitHub runner (proof).
+  #   2. THEN, together: delete `continue-on-error: true` below, AND add
+  #      `deploy-acceptance` to deploy-dev.needs (→ [ci, db, kc, stack, flowable,
+  #      deploy-acceptance]), AND set BARRIER_MODE_OVERRIDE=required (or change the
+  #      pinned BARRIER_MODE) in deploy-acceptance-required.sh so the guard enforces
+  #      and locks the hard barrier (anti re-loosening, FF-T0274-2).
+  # The guard FORBIDS doing only one of the two (half-flip) — see the script header.
+  deploy-acceptance:
+    runs-on: ubuntu-latest
+    # T-0274: kept ADVISORY (continue-on-error) per the EXACT FLIP-CONDITION above —
+    # the journeys are not yet proven green in the GitHub runner, so flipping required
+    # would risk red-lining dev (D-056). The founder flips it under GO; the
+    # ci/checks/acceptance/deploy-acceptance-required.sh guard then locks it.
+    continue-on-error: true
+    env:
+      DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
+      FLOWABLE_REST_BASE_URL: http://localhost:8082/flowable-rest/service
+      FLOWABLE_PORT: "8082"
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
+      # T-0273: the lifecycle bridge (startLifecycleBridge) is gated on FLOWABLE_BASE_URL
+      # and only polls FLOWABLE_TOPICS. Without these the `tel-intake` triage external task
+      # is never completed → the DMN gateway never sets approvalRequired → CS-1's
+      # «Доп. согласование» extra-approval task never spawns. Same `.../flowable-rest/service`
+      # base + host-published :8082 as FLOWABLE_REST_BASE_URL. Bridge admin creds use the
+      # FLOWABLE_ADMIN_USER/PASSWORD names (distinct from FLOWABLE_REST_APP_ADMIN_*).
+      FLOWABLE_BASE_URL: http://localhost:8082/flowable-rest/service
+      FLOWABLE_TOPICS: tel-intake
+      FLOWABLE_ADMIN_USER: admin
+      FLOWABLE_ADMIN_PASSWORD: choros_flowable_dev_pw
+      DEMO_TENANT_SLUG: dev
+      ACCEPTANCE_PORT: "3100"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm --prefix web ci
+      # Reuse the stack-up pattern of the `stack`/`flowable` jobs: bring up the real
+      # Postgres + Flowable (no mocks — NF1/FF-3), then run choros migrations so the
+      # `dev` tenant (e-orlov/e-larina) and audit schema exist.
+      - name: Start Postgres + Flowable via compose
+        run: docker compose up -d --wait postgres flowable
+        timeout-minutes: 10
+      - name: Wait for Flowable readiness
+        run: bash ci/checks/flowable/wait-ready.sh
+      - name: Run choros migrations (seed dev tenant + audit schema)
+        run: node migrations/run.mjs
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      # T-0274 (FF-T0274-1): run the DECLARATIVE journey suite (`npm run acceptance`,
+      # EVERY e2e/journeys/*.journey.ts + the fail-honest negative) — not only the
+      # legacy `acceptance:tel` ТЭЛ spec — so every gated user-facing flow is exercised
+      # against the live no-mock stack. Both share the same gate wiring (build web/dist +
+      # tsc, launch the choros server from THIS checkout pointed at the live stack,
+      # deterministic bootstrap, then Playwright). Still ADVISORY (continue-on-error
+      # above): a red journey is visible but cannot red-line dev until the founder flips
+      # it required (see EXACT FLIP-CONDITION in the job comment). `acceptance:tel`
+      # stays available as the legacy back-compat reference script.
+      - name: Deploy-acceptance journey suite (acceptance)
+        run: npm run acceptance
+      - name: Stop services
+        if: always()
+        run: docker compose stop flowable postgres
+
+  # T-0364 (founder decision 2026-06-21): dev auto-deploy, folded into this workflow.
+  # WHY a job here (not the standalone deploy-dev.yml): a `workflow_run` trigger only
+  # activates from the workflow file on the DEFAULT branch (main, founder-gated GT-3) —
+  # ours lived only on dev, so it was dormant and never fired. A job with `needs` runs
+  # from dev's OWN workflow copy on a push. It gates on the SUBSTANTIVE jobs (ci =
+  # tsc/eslint/unit + db/kc/stack/flowable integration), NOT on the advisory fitness
+  # guards (per the founder's "развязать деплой от гардов"). deploy-acceptance is
+  # informational and intentionally excluded from `needs`. Runs only on push to dev.
+  # Requires repo secrets: DEPLOY_SSH_KEY (private key for ubuntu@homeserver-vm) and
+  # TAILSCALE_AUTHKEY (reusable, tag:ci — the server is Tailscale-only). Never touches
+  # main or prod.
+  deploy-dev:
+    name: Deploy to dev (homeserver-vm)
+    runs-on: ubuntu-latest
+    needs: [ci, db, kc, stack, flowable]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    steps:
+      - uses: actions/checkout@v4
+      # Secrets cannot be referenced in a job-level `if:` (GitHub rejects the workflow —
+      # that was the original deploy-dev.yml bug). So gate at the STEP level: this precheck
+      # reads the secret into env and the deploy steps run only when both are present.
+      # Missing TAILSCALE_AUTHKEY ⟹ deploy is SKIPPED (job stays green, log says why) and
+      # auto-activates the moment the founder adds the secret. No red noise in the interim.
+      - name: Precheck deploy secrets
+        id: precheck
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$TS_KEY" ] || [ -z "$SSH_KEY" ]; then
+            echo "::notice::Auto-deploy SKIPPED — missing secret(s): \
+              $([ -z "$TS_KEY" ] && echo TAILSCALE_AUTHKEY) $([ -z "$SSH_KEY" ] && echo DEPLOY_SSH_KEY). \
+              Add them in repo Settings → Secrets to enable dev auto-deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Both deploy secrets present — proceeding to deploy."
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Connect to Tailscale
+        if: steps.precheck.outputs.ready == 'true'
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          tags: tag:ci
+      - name: Install SSH key
+        if: steps.precheck.outputs.ready == 'true'
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H 100.121.76.86 >> ~/.ssh/known_hosts 2>/dev/null || true
+      - name: Deploy
+        if: steps.precheck.outputs.ready == 'true'
+        env:
+          DEPLOY_HOST: "100.121.76.86"
+          DEPLOY_USER: "ubuntu"
+          DEPLOY_DIR: "/srv/choros"
+          SSH_KEY_PATH: "/home/runner/.ssh/deploy_key"
+        run: bash scripts/deploy-dev.sh
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

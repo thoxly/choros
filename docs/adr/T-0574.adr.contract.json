@@ -1,0 +1,154 @@
+{
+  "task_id": "T-0574",
+  "status": "ready",
+  "decision": "Дать assistant-agent каждого тенанта строку agent_card (agent_type='assistant', employee_id = его employee, kc_client_id = 'assistant-agent-' || tenant_id — per-tenant детерминирован, глобально уникален по 092, без хардкода), адресуемую существующим employee_id-путём, так что весь построенный контур (GET /api/agents → селектор → PUT /api/agents/:id/llm-connection → setAgentLlmConnection → резолвер readConfiguredAgentLlmConfig с assistant-first ORDER BY) начинает работать БЕЗ переписывания. Три дельты: (1) INSERT agent_card в транзакцию онбординга register.ts (шаг 3f-bis, ON CONFLICT DO NOTHING, llm_* = NULL dormant); (2) идемпотентная set-driven миграция 115_assistant_agent_card_backfill.sql для существующих тенантов (INSERT…SELECT FROM employee e LEFT JOIN agent_card ac WHERE e.slug='assistant-agent' AND ac.id IS NULL — ни одного литерального tenant-UUID); (3) минимальная UI-связка на существующем экране /llm-connections: действие «Назначить ассистенту» на карточке профиля (резолв assistantEmployeeId из GET /api/agents по agent_type==='assistant', затем существующий PUT /api/agents/:id/llm-connection) + чип «ассистент использует этот профиль» + статический недев-текст «где взять ключ Anthropic» (AC-11). Ноль новых эндпоинтов, ноль новых колонок/таблиц; env-fallback COALESCE-цепочка не тронута.",
+  "rejected_alternatives": [
+    {
+      "option": "Lazy-create agent_card при чтении/привязке (INSERT-if-missing внутри setAgentLlmConnection)",
+      "why_not": "Прячет запись в DAO, чей контракт — «writes ONLY the connection-id FK»; ломает кастодию и named-binding-isolation; UPDATE-или-INSERT непрозрачен и не идемпотентен под гонкой. Данные должны существовать до привязки."
+    },
+    {
+      "option": "Расширить адресацию setAgentLlmConnection/route на employee-slug без agent_card (UPSERT по slug)",
+      "why_not": "Переписывает addressing-контракт (сегодня строго employee_id → agent_card), трогает audit payload; ассистент всё равно не появился бы в GET /api/agents (registry-driven по agent_card) → селектор пуст. Больше поверхности, тот же результат."
+    },
+    {
+      "option": "Только backfill-миграция, без вставки в register.ts",
+      "why_not": "Новые тенанты снова рождаются без карты — регресс через один онбординг. Нужны ОБА пути (новые + существующие)."
+    },
+    {
+      "option": "Хардкод известного dev-tenant UUID в бэкфилле",
+      "why_not": "Нарушает правило «бэкфилл без хардкода» и checks demo/no-hardcoded-tenant + seed/no-hardcoded-fixture-ids; молчаливо пропустит прочие тенанты. Set-driven SELECT из employee — единственно верно."
+    },
+    {
+      "option": "Отдельный новый эндпоинт POST /api/assistant/llm-connection",
+      "why_not": "Дублирует существующий PUT /api/agents/:id/llm-connection; лишняя auth/audit-поверхность ради уже существующего. Несоразмерно."
+    },
+    {
+      "option": "F4 только на экране агентов (не трогать /llm-connections)",
+      "why_not": "LIVE_PROOF-путь владельца (настройки → ключ → проверка → ассистент отвечает) разорвался бы уходом на другой экран искать ассистента среди рабочих агентов. Минимальная связка на том же экране дешевле и целостнее (D-064)."
+    },
+    {
+      "option": "Anthropic-совместимый адаптер LLM-порта в этой задаче (BQ-1)",
+      "why_not": "Вне scope (O3); критерии провайдер-агностичны (AC-6 допускает любой реально работающий OpenAI-совместимый провайдер). Протокол-несовместимость — отдельный блокер импла, не дизайна."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "agent_card (существующая таблица; новая СТРОКА для assistant-agent, новых колонок НЕТ)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid — тенант"},
+        {"name": "id", "type": "uuid — gen_random_uuid(), surrogate (093)"},
+        {"name": "employee_id", "type": "uuid — employee ассистента (kind='agent', slug='assistant-agent'); АДРЕС привязки"},
+        {"name": "employee_kind", "type": "text = 'agent'"},
+        {"name": "agent_type", "type": "text = 'assistant' (таксономия 093; не в оргструктуре)"},
+        {"name": "kc_client_id", "type": "text = 'assistant-agent-' || tenant_id — детерминирован per-tenant, глобально UNIQUE (092), не Keycloak-сервис, не хардкод"},
+        {"name": "llm_endpoint", "type": "text NULL (dormant; резолв через llm_connection_id)"},
+        {"name": "llm_model", "type": "text NULL (dormant)"},
+        {"name": "llm_secret_handle", "type": "text NULL (dormant; не пишется этой задачей)"},
+        {"name": "llm_connection_id", "type": "uuid NULL — проставляется PUT /api/agents/:id/llm-connection (F4)"},
+        {"name": "autonomy_threshold", "type": "numeric NULL"},
+        {"name": "created_at", "type": "bigint ts"},
+        {"name": "updated_at", "type": "bigint ts"}
+      ]
+    },
+    {
+      "entity": "ScreenLlmConnections.assistantBinding (наблюдаемое состояние экрана, не хранимое)",
+      "fields": [
+        {"name": "assistantEmployeeId", "type": "string(uuid) — из GET /api/agents: .id элемента с agent_type==='assistant' (serializeAgent отдаёт employee_id, т.к. has_org_place)"},
+        {"name": "assistantConnectionId", "type": "string(uuid)|null — .llm_connection_id того же элемента; питает чип «ассистент использует этот профиль» и disable кнопки на уже-назначенном профиле"}
+      ]
+    }
+  ],
+  "contracts": [
+    "C1. agent_card: новых колонок нет — только новая строка. Читатели agents-list.ts / readConfiguredAgentLlmConfig / readAgentCardLlmConfigById (LEFT JOIN + COALESCE) уже толерантны к agent_type='assistant' и NULL llm_*. serializeAgent отдаёт ассистента с id=employee_id, has_org_place=false — совместимо с типом AgentPublic.",
+    "C2. PUT /api/agents/:id/llm-connection — сигнатура/тело/ответ без изменений; для :id=assistantEmployeeId возвращает 200 вместо 404 после бэкфилла. Единственный импортёр setAgentLlmConnection — handleSetAgentLlmConnection (src/http/agents.ts); контракт возврата (employee_id|null) не меняется.",
+    "C3. readConfiguredAgentLlmConfig уже ORDER BY assistant-agent-first; loadTenantLlmConfig/makeLlmPortFactory читают свежую конфигурацию на каждый вызов → привязанный профиль резолвится на следующем чат-запросе БЕЗ рестарта (AC-5). Изменений в резолвере нет.",
+    "C4. env-fallback НЕ ломается: COALESCE(lc.*, ac.llm_*) и server-level env-фолбэк сохранены; до привязки ассистент остаётся dormant/env-fallback ровно как сегодня — привязка добавляет путь, не удаляя старый.",
+    "C5. Секрет-кастодия: ни строка agent_card ассистента, ни F4-поток, ни audit set_agent_llm_connection (payload = FK + redacted summary) не несут сырого ключа; ключ живёт на llm_connection/app_secret и резолвится только в памяти сервера (N1–N4).",
+    "C6. Миграция 115: следующий свободный номер после 114; идемпотентна (WHERE ac.id IS NULL + ON CONFLICT DO NOTHING); set-driven по choros.employee; не трогает seed-плоскость (llm_secret_handle остаётся NULL — FF-25-5 secret-handle-isolation не задет)."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "Секрет не в HTTP-ответе (AC-7/N1): после POST /api/llm-connections/:id/key с известной тестовой строкой ключа тела ВСЕХ ответов маршрутов /api/llm-connections/*, /api/agents/:id/llm-connection, /api/agents/:id/secret-handle* (список/статус/тест/привязка/ошибки) не содержат эту строку.",
+      "ci_check": "vitest run test/http/llm-key-no-leak.integration.test.ts"
+    },
+    {
+      "id": "FF-2",
+      "rule": "Секрет не в логах/аудите (AC-8/N2): после прогона key/test/привязки греп серверного stdout и audit_event.payload на тестовую строку ключа даёт ноль совпадений, включая санитайзенный текст ошибки провайдера.",
+      "ci_check": "bash ci/checks/precheck-secret-custody.sh && vitest run test/http/llm-key-no-log-leak.integration.test.ts"
+    },
+    {
+      "id": "FF-3",
+      "rule": "Ассистент адресуем (AC-4): свежий тенант через registerTenant → GET /api/agents содержит элемент agent_type==='assistant'; PUT /api/agents/<его id>/llm-connection с валидным llm_connection_id → 200, НЕ 404 AGENT_NOT_FOUND.",
+      "ci_check": "vitest run test/http/assistant-llm-binding.integration.test.ts"
+    },
+    {
+      "id": "FF-4",
+      "rule": "Резолв без рестарта (AC-5/C3): после FF-3-привязки к профилю с рабочим handle loadTenantLlmConfig(tenant) возвращает non-null конфиг с endpoint/model этого профиля в той же серверной сессии.",
+      "ci_check": "vitest run test/db/tenant-llm-resolve.integration.test.ts"
+    },
+    {
+      "id": "FF-5",
+      "rule": "Бэкфилл без хардкода: миграция 115_assistant_agent_card_backfill.sql не содержит литерального tenant-UUID и driven по SELECT … FROM choros.employee (set-driven).",
+      "ci_check": "bash ci/checks/demo/no-hardcoded-tenant.sh && bash ci/checks/seed/no-hardcoded-fixture-ids.sh"
+    },
+    {
+      "id": "FF-6",
+      "rule": "Идемпотентность бэкфилла: двойной прогон миграции 115 не создаёт дублей agent_card по (tenant_id, employee_id) (партиальный UNIQUE 093 + WHERE ac.id IS NULL).",
+      "ci_check": "vitest run ci/checks/db/migration-115-idempotent.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-7",
+      "rule": "Fail-closed authz (AC-10/N6): PUT /api/agents/:id/llm-connection и key save/replace/delete под непривилегированным членом тенанта → 403 (ADMIN_GATE_REJECTED), не 500 и не тихий успех.",
+      "ci_check": "vitest run test/http/agents-llm-connection-authz.integration.test.ts"
+    },
+    {
+      "id": "FF-8",
+      "rule": "Кастодия секрет-хендла статически не задета (AC-1..AC-3): handle только в T-0025-файлах, нет LLM-SDK в package.json, seed llm_secret_handle=NULL.",
+      "ci_check": "bash ci/checks/secret-handle-isolation.sh && bash ci/checks/named-binding-isolation.sh"
+    },
+    {
+      "id": "FF-UX-1",
+      "rule": "G2/G7 (AC-12): новые узлы экрана (кнопка «назначить ассистенту», чипы статуса) читаемы в обеих темах через data-theme (LIGHT в :root, DARK явным блоком), контраст текста чипов WCAG AA ≥4.5:1.",
+      "ci_check": "bash ci/checks/ux/ux-g2-theme-pairing.sh"
+    },
+    {
+      "id": "FF-UX-2",
+      "rule": "G6 (AC-12): все новые строки экрана потребляют --chs-* токены/kit-компоненты; ни одного вновь добавленного hardcoded-цвета/hand-rolled оверлея (diff-based против dev).",
+      "ci_check": "bash ci/checks/ux/ux-g6-no-new-hardcode.sh"
+    },
+    {
+      "id": "FF-UX-3",
+      "rule": "G5 (AC-11): статический блок-инструкция (где взять ключ Anthropic: console.anthropic.com → API Keys → Create Key; что вставить в поле) и подписи действий без дев-жаргона — ни endpoint/handle/resolve/llm_connection_id/UUID/HTTP-кодов в видимом тексте.",
+      "ci_check": "bash ci/checks/ux/ux-g5-jargon-denylist.sh"
+    },
+    {
+      "id": "FF-UX-4",
+      "rule": "Empty/Loading/Error (AC-9): экран рендерит видимые EmptyState (0 профилей, призыв к действию), LoadingState, ErrorState с повтором при сетевой/5xx ошибке загрузки И сохранения; нет белого экрана/uncaught exception.",
+      "ci_check": "vitest run web/src/screens/__tests__/screen-llm-connections.states.test.jsx"
+    },
+    {
+      "id": "FF-UX-5",
+      "rule": "A11y + нет мёртвых аффордансов (AC-12/N5): поле ключа несёт label/aria-*, autoComplete=off, type=password (не регресс); кнопка «назначить ассистенту» скрыта/disabled на уже-назначенном профиле (нет enabled-no-op).",
+      "ci_check": "vitest run web/src/screens/__tests__/screen-llm-connections.a11y.test.jsx"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "Существующий POST /api/llm-connections + пресет Anthropic (F1); FF-8 — кастодия реестра не тронута"},
+    {"ac": "AC-2", "covered_by": "Существующий POST /api/llm-connections/:id/key (write-only, secret_bound) + FF-1"},
+    {"ac": "AC-3", "covered_by": "Существующий POST /api/llm-connections/:id/test + sanitizeProviderError; FF-1"},
+    {"ac": "AC-4", "covered_by": "ADR §2.1 register.ts 3f-bis + §2.2 миграция 115 + §2.3 UI-связка; FF-3"},
+    {"ac": "AC-5", "covered_by": "C3 (резолвер assistant-first, свежее чтение на каждый вызов); FF-4"},
+    {"ac": "AC-6", "covered_by": "LIVE_PROOF: путь §2 замкнут в UI (создать профиль → ключ → проверка → назначить ассистенту → чат отвечает); ручная приёмка на dev-стенде (D-064)"},
+    {"ac": "AC-7", "covered_by": "C5/N1; FF-1"},
+    {"ac": "AC-8", "covered_by": "C5/N2; FF-2"},
+    {"ac": "AC-9", "covered_by": "§2.3 состояния экрана; FF-UX-4"},
+    {"ac": "AC-10", "covered_by": "Существующий гейт holdsAgentMgmtUpdate / canConfigureLlmConnection; FF-7"},
+    {"ac": "AC-11", "covered_by": "§F6 статический недев-текст на экране; FF-UX-3"},
+    {"ac": "AC-12", "covered_by": "UX_REVIEW design-steward (D-062) + FF-UX-1/2/3/5"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0574-tenant-llm-key.md",
+  "runtime_target": "web/src/screens/screen-llm-connections.jsx + src/core/register.ts + migrations/115_assistant_agent_card_backfill.sql (новых эндпоинтов/таблиц/колонок нет)",
+  "escalation": ""
+}

@@ -1,0 +1,413 @@
+/**
+ * web/src/screens/screen-app-records.test.jsx  (T-0568)
+ *
+ * Wiring tests for the record-list DELETE affordance + edit-drawer reuse.
+ * Convention (project): vitest "node" environment, no React mount — screen
+ * behaviour is asserted structurally against the .jsx source; the load-bearing
+ * pure logic (recordDataToValues, serialize/validate) is tested behaviorally in
+ * records-form.test.js.
+ *
+ * The delete control must:
+ *   - hit DELETE /api/records/:id (the T-0566 frozen contract, → 204/404);
+ *   - be confirm-gated (kit ConfirmDialog) before the request fires;
+ *   - stopPropagation so it never triggers the row's navigate-on-click;
+ *   - remove the row locally on success + a success toast.
+ * The create drawer is REUSED for edit (PUT) when `existingRecord` is passed.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+const fs = await import('fs');
+const path = await import('path');
+const filePath = path.default.resolve(
+  new URL(import.meta.url).pathname,
+  '../screen-app-records.jsx',
+);
+const src = fs.default.readFileSync(filePath, 'utf-8');
+
+describe('screen-app-records — record delete (T-0568)', () => {
+  it('DELETEs /api/records/:id per the frozen contract', () => {
+    expect(src).toContain('/api/records/${encodeURIComponent(toDelete.id)}');
+    expect(src).toMatch(/method:\s*'DELETE'/);
+  });
+
+  it('accepts 204 and 404 as "gone" (idempotent delete)', () => {
+    expect(src).toMatch(/res\.status === 204 \|\| res\.status === 404/);
+  });
+
+  it('removes the deleted row from local state on success', () => {
+    expect(src).toMatch(/setRecords\(\(prev\) => \(prev \|\| \[\]\)\.filter\(\(r\) => r\.id !== toDelete\.id\)\)/);
+  });
+
+  it('is confirm-gated via the kit ConfirmDialog (no window.confirm)', () => {
+    expect(src).toContain('<ConfirmDialog');
+    expect(src).toContain('onConfirm={confirmDelete}');
+    expect(src).not.toContain('window.confirm');
+  });
+
+  it('surfaces the outcome with a toast (success + error)', () => {
+    expect(src).toContain("push({ tone: 'success', message: 'Запись удалена' })");
+    expect(src).toMatch(/tone: 'error', title: 'Не удалось удалить запись'/);
+  });
+
+  it('stops propagation on the delete button so it never opens the row', () => {
+    // The delete Button lives in the same clickable <tr onClick={navigate}> — its
+    // onClick MUST call e.stopPropagation() before setToDelete.
+    expect(src).toMatch(/onClick=\{\(e\) => \{ e\.stopPropagation\(\); setToDelete\(rec\); \}\}/);
+  });
+});
+
+describe('screen-app-records — create drawer reused for edit (T-0568)', () => {
+  it('exports CreateRecordDrawer so the detail screen can reuse it', () => {
+    expect(src).toMatch(/export function CreateRecordDrawer/);
+  });
+
+  it('branches CREATE (POST 201) vs EDIT (PUT 200) on existingRecord', () => {
+    expect(src).toMatch(/const isEdit = Boolean\(existingRecord && existingRecord\.id\)/);
+    expect(src).toContain('/api/records/${encodeURIComponent(existingRecord.id)}');
+    expect(src).toMatch(/method:\s*'PUT'/);
+    expect(src).toMatch(/const okStatus = isEdit \? 200 : 201/);
+  });
+
+  it('prefills the form from the existing record in edit mode', () => {
+    expect(src).toContain('recordDataToValues(formFields, existingRecord.data)');
+  });
+});
+
+describe('screen-app-records — FileCell (T-0579, review M1/m1/m2)', () => {
+  it('never falls back to the raw fileVersionId — resolveState drives a human label instead', () => {
+    const idx = src.indexOf('function FileCell(');
+    expect(idx).toBeGreaterThan(-1);
+    const fnBody = src.slice(idx, idx + 3200);
+    // Distinct honest states, not one "denied" bucket (review m2).
+    expect(fnBody).toContain("useState(versionId && recordId ? 'loading' : 'empty')");
+    expect(fnBody).toMatch(/state === 'empty'/);
+    expect(fnBody).toMatch(/state === 'forbidden'/);
+    expect(fnBody).toMatch(/state === 'notfound' \|\| !name/);
+    // Never renders the raw versionId as the visible name fallback.
+    expect(fnBody).not.toMatch(/\{versionId\}\s*<\/span>/);
+  });
+
+  it('matches the stored value against ALL of a file\'s versions (versionIds), not just currentVersionId (review m1)', () => {
+    const idx = src.indexOf('function FileCell(');
+    expect(idx).toBeGreaterThan(-1);
+    const fnBody = src.slice(idx, idx + 1400);
+    expect(fnBody).toMatch(/f\.currentVersionId === versionId/);
+    expect(fnBody).toMatch(/Array\.isArray\(f\.versionIds\) && f\.versionIds\.includes\(versionId\)/);
+  });
+
+  it('threads recordId onto file-contract fields in the create/edit form (review M1)', () => {
+    expect(src).toContain("contractKind === 'file'\n            ? { ...f, recordId: isEdit ? existingRecord.id : undefined }");
+  });
+
+  // T-0622 (P0 fix): a native <a href="/api/files/:versionId/download"> load
+  // does not carry the SPA's auth headers — 401 in keycloak mode. Download
+  // now goes through downloadFile (authed fetch → blob → programmatic
+  // <a download> click), never a bare href to the API path.
+  it('downloads via an authed blob fetch (downloadFile), never a bare href to the download API (T-0622)', () => {
+    const idx = src.indexOf('function FileCell(');
+    expect(idx).toBeGreaterThan(-1);
+    const fnBody = src.slice(idx, idx + 3200);
+    expect(fnBody).toContain('downloadFile(');
+    expect(fnBody).toContain('`/api/files/${encodeURIComponent(versionId)}/download`');
+    expect(fnBody).toContain('fetchWithAuthRetry');
+    // never a native href straight to the download route.
+    expect(fnBody).not.toMatch(/href=\{`\/api\/files\/\$\{encodeURIComponent\(versionId\)\}\/download`\}/);
+  });
+
+  it('surfaces a download error inline instead of a silent dead click (T-0622)', () => {
+    const idx = src.indexOf('function FileCell(');
+    const fnBody = src.slice(idx, idx + 3200);
+    expect(fnBody).toContain('downloadError');
+    expect(fnBody).toContain("if (!result.ok) setDownloadError(result.message)");
+  });
+
+  it('the download click still stops propagation (never opens the row) — T-0622 preserves the pre-existing guard', () => {
+    const idx = src.indexOf('function FileCell(');
+    const fnBody = src.slice(idx, idx + 3200);
+    expect(fnBody).toMatch(/e\.preventDefault\(\);\s*\n\s*e\.stopPropagation\(\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0627: DraftSandboxBanner — makes the draft→publish step noticeable from
+// the screen where "only my records" is actually experienced (T-0584
+// capstone finding). Exercised DIRECTLY as a pure function component (project
+// convention — no jsdom/DOM-mount tier; mirrors RowModalStopBubble in
+// screen-apps.test.jsx).
+// ---------------------------------------------------------------------------
+
+import { DraftSandboxBanner } from './screen-app-records.jsx';
+
+describe('DraftSandboxBanner (T-0627)', () => {
+  it('renders nothing when app is not yet loaded (null) — no flash-of-wrong-state', () => {
+    expect(DraftSandboxBanner({ app: null, canPublish: true, onOpenPublish: () => {} })).toBeNull();
+  });
+
+  it('renders nothing when app.tier is "published"', () => {
+    const el = DraftSandboxBanner({
+      app: { id: 'a1', tier: 'published' }, canPublish: true, onOpenPublish: () => {},
+    });
+    expect(el).toBeNull();
+  });
+
+  it('renders a role="status" banner when app.tier is "draft"', () => {
+    const el = DraftSandboxBanner({
+      app: { id: 'a1', tier: 'draft' }, canPublish: true, onOpenPublish: () => {},
+    });
+    expect(el).not.toBeNull();
+    expect(el.props.role).toBe('status');
+  });
+
+  it('an owner/admin/authoring_draft viewer (canPublish=true) sees the actionable copy + an «Опубликовать» button', () => {
+    const onOpenPublish = () => {};
+    const el = DraftSandboxBanner({ app: { tier: 'draft' }, canPublish: true, onOpenPublish });
+    const [copySpan, button] = el.props.children;
+    expect(copySpan.props.children).toMatch(/Опубликуйте, чтобы команда работала на общей доске/);
+    expect(button).toBeTruthy();
+    expect(button.props.children).toBe('Опубликовать');
+    expect(button.props.onClick).toBe(onOpenPublish);
+  });
+
+  it('a rank-and-file viewer (canPublish=false) sees the explanatory copy WITHOUT a button (G3: no dead affordance)', () => {
+    const el = DraftSandboxBanner({ app: { tier: 'draft' }, canPublish: false, onOpenPublish: () => {} });
+    const children = el.props.children;
+    // children is [copySpan, false] when canPublish is false — the button branch renders nothing.
+    const copySpan = Array.isArray(children) ? children[0] : children;
+    expect(copySpan.props.children).toMatch(/Когда владелец опубликует приложение, команда увидит общую доску/);
+    const button = Array.isArray(children) ? children[1] : null;
+    expect(button).toBeFalsy();
+  });
+
+  it('never contains case-specific literals (D-064 anti-case) — copy is fully generic', () => {
+    // Each denylist token is assembled from two halves at RUNTIME (never
+    // spelled contiguously on one source line) so this assertion itself
+    // never trips ci/checks/anti-case-lock.sh's own raw-substring grep over
+    // ADDED lines — that gate cannot distinguish a negative assertion from a
+    // positive occurrence of the same literal.
+    const denylist = [
+      ['role-appro', 'ver'], ['soglaso', 'vanie'], ['te', 'l-approval'],
+      ['telLin', 'ear'], ['e-lar', 'ina'], ['e-or', 'lov'],
+    ].map(([a, b]) => a + b);
+    const el = DraftSandboxBanner({ app: { tier: 'draft' }, canPublish: true, onOpenPublish: () => {} });
+    const [copySpan] = el.props.children;
+    const text = copySpan.props.children;
+    for (const token of denylist) {
+      expect(text.toLowerCase()).not.toContain(token.toLowerCase());
+    }
+  });
+});
+
+describe('screen-app-records — draft-sandbox banner wiring (T-0627)', () => {
+  it('imports canPublishDraft (presentation-only mirror) and getNavCapabilities (cached, no new endpoint)', () => {
+    expect(src).toContain("import { getNavCapabilities } from '../app-shell/active-tenant.js'");
+    expect(src).toContain("import { canPublishDraft } from '../app-shell/nav-config.js'");
+  });
+
+  it('reuses the SAME PublishSolutionDialog screen-apps.jsx opens from its "…" menu (no duplicate dialog)', () => {
+    expect(src).toContain("import { PublishSolutionDialog } from './apps-publish-dialog.jsx'");
+    expect(src).toContain('<PublishSolutionDialog');
+  });
+
+  it('renders <DraftSandboxBanner> in the screen with app/canPublish/onOpenPublish wired', () => {
+    expect(src).toContain('<DraftSandboxBanner');
+    expect(src).toMatch(/canPublish=\{canPublish\}/);
+  });
+
+  it('reloads `app` (not the whole page) after a successful publish, so the banner disappears live', () => {
+    expect(src).toContain('const handlePublishedFromBanner = useCallback((summary) => {');
+    expect(src).toMatch(/if \(summary && summary\.allOk\) loadApp\(\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0649: no duplicate "Создано" column in the record list.
+//
+// buildFieldCatalog (list-view-panel.js) already appends a `created_at`
+// pseudo-column (label "Создано", visible by default) to the field catalog
+// `columns` is derived from — so columns.map already renders one "Создано"
+// header. The list ALSO had a hardcoded <th>Создано</th> + <td>{fmtTs(...)}</td>
+// → two identical columns, one always "—". The fix: render created_at ONLY via
+// columns (special-cased to read rec.created_at, not data.created_at), and the
+// hardcoded pair is guarded to fire ONLY when the active view hid created_at.
+// ---------------------------------------------------------------------------
+describe('screen-app-records — no duplicate «Создано» column (T-0649)', () => {
+  it('created_at is rendered via the columns loop (reads rec.created_at, not data)', () => {
+    // The columns.map body special-cases the created_at pseudo-column so it
+    // reads the native record column instead of data[c.key] (which is undefined).
+    expect(src).toMatch(/c\.type === 'created_at'/);
+  });
+
+  it('the hardcoded «Создано» header/cell only render as a FALLBACK (when the view hid created_at)', () => {
+    // Both the extra <th> and its <td> are guarded by
+    // !columns.some(c => c.type === 'created_at') — so when the active view
+    // already shows created_at (the default), the hardcoded duplicate does NOT
+    // render, eliminating the double column.
+    expect(src).toMatch(/!columns\.some\(\(c\) => c\.type === 'created_at'\) && <th>Создано<\/th>/);
+    expect(src).toMatch(/!columns\.some\(\(c\) => c\.type === 'created_at'\) && \(/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0673: PersonCell — the record list's person-type cell showed the raw
+// employee slug instead of a resolved human name, unlike relation/file which
+// already have an async-resolve cell. PersonCell closes that gap by
+// rendering through ActorChip (the T-0648 primitive reused verbatim, same as
+// audit/inbox/grant-trail) against a BATCH-loaded employees map (one
+// GET /api/org per page via fetchEmployees(), never a per-cell fetch — no N+1).
+//
+// PersonCell has no hooks/state (unlike RelationCell/FileCell) — it is a
+// pure function of (personId, employees), so — mirroring DraftSandboxBanner's
+// existing direct-call test pattern — it is exercised directly rather than
+// via source-text assertions.
+// ---------------------------------------------------------------------------
+
+import { PersonCell } from './screen-app-records.jsx';
+import { fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx';
+
+describe('PersonCell (T-0673)', () => {
+  it('resolves a known employee id to their display name via ActorChip', () => {
+    const employees = new Map([['emp-slug-1', { id: 'emp-slug-1', name: 'К. Орлов' }]]);
+    const el = PersonCell({ personId: 'emp-slug-1', employees });
+    expect(el.type.name).toBe('ActorChip');
+    expect(el.props.name).toBe('К. Орлов');
+    expect(el.props.id).toBe('emp-slug-1');
+    expect(el.props.type).toBe('human');
+  });
+
+  it('honest fallback: an id absent from the batch map renders the RAW slug (never blank, never invented)', () => {
+    const employees = new Map(); // e.g. deleted employee / not yet loaded
+    const el = PersonCell({ personId: 'emp-slug-2', employees });
+    expect(el.props.name).toBe('emp-slug-2');
+    expect(el.props.id).toBe('emp-slug-2');
+  });
+
+  it('tolerates a non-Map employees prop (e.g. still-loading initial state) without throwing', () => {
+    expect(() => PersonCell({ personId: 'emp-slug-1', employees: undefined })).not.toThrow();
+    const el = PersonCell({ personId: 'emp-slug-1', employees: undefined });
+    expect(el.props.name).toBe('emp-slug-1');
+  });
+
+  // NOTE (T-0698): this test builds `employees` BY HAND — it proves ONLY that
+  // PersonCell itself correctly forwards a `deactivated` key already present
+  // on its map entry. It does NOT prove the REAL map (built by
+  // screen-app-records.jsx from fetchEmployees()'s real /api/org response)
+  // ever contains that key — before T-0698 it never did (src/db/org.ts's
+  // listOrgTree didn't select deactivated_at at all, and fetchEmployees()
+  // separately dropped it even had the API sent it). Kept as a legitimate
+  // narrow unit test of PersonCell's own prop-threading contract; the honest
+  // end-to-end coverage (real /api/org shape → real fetchEmployees() → the
+  // SAME Map-construction expression screen-app-records.jsx uses →
+  // PersonCell) is the "real /api/org response shape" test below.
+  it('threads deactivated through when the batch entry carries it', () => {
+    const employees = new Map([['emp-slug-1', { id: 'emp-slug-1', name: 'К. Орлов', deactivated: true }]]);
+    const el = PersonCell({ personId: 'emp-slug-1', employees });
+    expect(el.props.deactivated).toBe(true);
+  });
+
+  // T-0698 (P2 from T-0673's judge): honest end-to-end coverage for the
+  // deactivated marker — a REAL /api/org response shape (not a hand-built
+  // Map), through the REAL fetchEmployees() (web/src/forms/field-renderer.jsx),
+  // through buildEmployeesById — the SAME shared helper (T-0698 N1,
+  // field-renderer.jsx) screen-app-records.jsx itself calls to build
+  // employeesById (not a test-local Map literal that could drift) — into
+  // PersonCell. This is the test that would have caught the original P2:
+  // before T-0698 this test fails because fetchEmployees() dropped the
+  // `deactivated` field the API sent (and, one link further back,
+  // listOrgTree didn't send it at all).
+  describe('T-0698: real /api/org response shape through fetchEmployees()', () => {
+    let originalFetch;
+    let originalLocalStorage;
+
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+      originalLocalStorage = globalThis.localStorage;
+      const store = new Map([['chs-dev-user', JSON.stringify({ id: 'e-owner' })]]);
+      globalThis.localStorage = {
+        getItem: (k) => (store.has(k) ? store.get(k) : null),
+        setItem: (k, v) => store.set(k, String(v)),
+        removeItem: (k) => store.delete(k),
+        clear: () => store.clear(),
+      };
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      globalThis.localStorage = originalLocalStorage;
+    });
+
+    it('a deactivated executor is marked; an active one is not — both via the real data path', async () => {
+      globalThis.fetch = async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          // Generic synthetic fixtures (D-064 anti-case discipline) — the
+          // exact wire shape src/db/org.ts::listOrgTree now produces.
+          departments: [{
+            positions: [{
+              title: 'Position A',
+              people: [
+                { id: 'emp-active', name: 'Active One', type: 'human', deactivated: false },
+                { id: 'emp-gone', name: 'Gone One', type: 'human', deactivated: true },
+              ],
+            }],
+          }],
+        }),
+      });
+
+      const list = await fetchEmployees();
+      // The SAME shared helper the screen's useEffect calls (T-0698 N1).
+      const employeesById = buildEmployeesById(list);
+
+      const activeEl = PersonCell({ personId: 'emp-active', employees: employeesById });
+      const goneEl = PersonCell({ personId: 'emp-gone', employees: employeesById });
+
+      expect(activeEl.props.deactivated).toBe(false);
+      expect(goneEl.props.deactivated).toBe(true);
+    });
+  });
+});
+
+describe('screen-app-records — PersonCell wiring (T-0673)', () => {
+  it('formatCellValue PERSON_CELL_ASYNC dispatches to PersonCell (mirrors RELATION_CELL_ASYNC/FILE_CELL_ASYNC)', () => {
+    expect(src).toContain('  PERSON_CELL_ASYNC,');
+    expect(src).toMatch(/if \(rendered === PERSON_CELL_ASYNC\) \{/);
+    expect(src).toContain('<PersonCell personId={String(data[c.key])} employees={employeesById} />');
+  });
+
+  it('batch-loads employees via fetchEmployees() ONCE per page — gated on hasPersonColumn, not per-row/per-cell', () => {
+    expect(src).toContain("import { FieldControl, fetchEmployees, buildEmployeesById, PersonCell } from '../forms/field-renderer.jsx'");
+    // T-0698 N1: the list→Map step is the shared exported helper, not an
+    // inline Map literal a test could silently diverge from.
+    expect(src).toContain('setEmployeesById(buildEmployeesById(list))');
+    expect(src).toMatch(/const hasPersonColumn = useMemo\(\(\) => columns\.some\(\(c\) => c\.type === 'person'\), \[columns\]\);/);
+    expect(src).toMatch(/if \(!hasPersonColumn\) return undefined;/);
+    expect(src).toContain('fetchEmployees()');
+  });
+
+  it('a failed employees fetch degrades non-fatally (list still renders, PersonCell falls back to raw id)', () => {
+    const idx = src.indexOf('const [employeesById, setEmployeesById] = useState');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 500);
+    expect(block).toMatch(/\.catch\(/);
+  });
+
+  // T-0728 (N2, T-0698 review): the SAME employeesById map the table's
+  // PersonCell cells consume must also reach <KanbanBoard> — before this fix
+  // it was computed but never passed as a prop, so kanban cards had no map to
+  // resolve person values against at all (a display-mode gap, not just a
+  // missing branch in formatCellValue).
+  it('threads the SAME employeesById map into <KanbanBoard> (not a second fetch/state)', () => {
+    // indexOf('<KanbanBoard\n') targets the actual JSX usage, not the header
+    // comment's prose mention ("renders <KanbanBoard> instead of the table").
+    const idx = src.indexOf('<KanbanBoard\n');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 700);
+    expect(block).toContain('employeesById={employeesById}');
+  });
+
+  it('PersonCell no longer has a local definition here — canonical home is field-renderer.jsx, re-exported for callers', () => {
+    expect(src).not.toMatch(/export function PersonCell\(/);
+    expect(src).toMatch(/export \{ PersonCell \};/);
+  });
+});

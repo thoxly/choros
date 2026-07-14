@@ -1,0 +1,67 @@
+{
+  "task_id": "T-0722",
+  "status": "pr_open",
+  "branch": "task/T-0722",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": false
+  },
+  "summary": "P2 из архитектурной оценки T-0714 (docs/tasks/T-0714.assessment.md, опция c, фаза 2 — по прямому указанию оркестратора, T-0721 закрыла фазу 1/DETAIL как база этой ветки). GET /api/processes (LIST) отдавал definitionName/шаг/status/сырой recordId КАЖДОГО инстанса тенанта любому его члену (и любому агенту через тот же API — столпы 4/6), независимо от READ-грантана запись-источник — enumeration/existence-сайдченнел вокруг того же READ-PDP (T-0570), который DETAIL (T-0721) уже закрыла для variables/history. Фикс: присутствие инстанса в instances[] наследуется от READ-видимости записи-источника, ЕДИНЫЙ authority-путь — isRecordReadable, реюз без второй authority-математики. Новая функция filterProjectionsByReadVisibility (process-projection.ts) — батчевая (НЕ N+1) сестра isInstanceDetailVisible: собирает DISTINCT UUID-формы recordId по всему списку, резолвит их ancestry ОДНИМ SQL-запросом (loadRecordRowAncestryBatch, tenant-scoped, id = ANY($2::uuid[])), фильтрует; record-less → не сужен (симметрично фазе 1); malformed/deleted/foreign recordId → honest-drop БЕЗ похода в БД для malformed (не роняет весь список одной плохой строкой). LIST-хендлер (processes.ts) реюзит ТОТ ЖЕ startDeps.resolveReadVisibility, что DETAIL уже зовёт — ZERO изменений в server.ts (T-0721 уже закрыла wiring asymmetry для всего startDeps-объекта). Фильтр применяется ДО overlayDetailLiveSteps (не тратит live-engine round-trip на отброшенный инстанс) и ДО сборки ответа. Осознанное отклонение от буквы задачи задокументировано в ADR §2.3: фильтр реализован как батч + чистая in-memory isRecordReadable-фильтрация над уже tenant-scoped результатом (тот же паттерн, что records.ts's T-0570 LIST READ-PDP уже использует — единственный существующий прецедент в кодовой базе), а не SQL WHERE НА САМОЙ containment-математике (не SQL-выразима без дублирования authority-логики, что нарушило бы NF-5); требование 'счётчики после фильтра' выполнено буквально — endpoint не несёт отдельного total/count поля, единственный instances[] вычислен ПОСЛЕ фильтра. Мини-spec/ADR — docs/tasks/T-0722.spec.md / T-0722.adr.md.",
+  "files_changed": [
+    "src/http/process-projection.ts",
+    "src/http/processes.ts",
+    "src/__tests__/processes-read-visibility.test.ts",
+    "ci/checks/db/processes-read-visibility.db.test.ts",
+    "ci/checks/process-list-display-plane-isolation.sh (NEW, FF-INST-VIS-3)",
+    "ci/checks/process-list-tenant-scope-additive.sh (NEW, FF-INST-VIS-4)",
+    "package.json (fitness chain — appended, additive tail)",
+    "docs/tasks/T-0722.spec.md (NEW)",
+    "docs/tasks/T-0722.adr.md (NEW)",
+    "T-0722.pr-handoff.json (NEW)"
+  ],
+  "tests_added": [
+    {
+      "file": "src/__tests__/processes-read-visibility.test.ts",
+      "covers": "16 новых unit-тестов (fake pg pool, без живого PG): 'T-0722 · GET /api/processes LIST narrowed' describe (7 тестов) — deny без гранта, allow с широким грантом, mixed-visibility (record-less остаётся + record-bound denied дропается, count = ТОЛЬКО видимое), deleted-record deny даже с грантом, record-less unnarrowed, honest-degrade без резолвера; 'T-0722 · filterProjectionsByReadVisibility' прямой юнит-описание (9 тестов) — record-less kept, allow/deny по гранту, deleted-record dropped, malformed (non-UUID) recordId дропается БЕЗ похода в pool (проверено трекинг-пулом), нет record-bound проекций → батч-запрос вообще не идёт, порядок входного массива сохраняется. Устаревший T-0721 тест 'LIST is UNAFFECTED — phase-1 scope is DETAIL only' удалён (тот геп теперь закрыт этой задачей) с explicit-комментарием-указателем."
+    },
+    {
+      "file": "ci/checks/db/processes-read-visibility.db.test.ts",
+      "covers": "6 новых live-PG тестов (T-0147 clone-механика, choros_app пул, реальный RLS), зеркалящих существующую DETAIL-сьюту (T-0721): FF-INST-VIS list-a (deny без READ-гранта на запись-источник — инстанс отсутствует в instances[]); FF-INST-VIS list-b (allow с default-open RESOURCE_ROOT грантом); record-less fallback (инстанс без recordId видим актору с нулём грантов); mixed-visibility/count-correctness (T-0722 spec §4.1(b)) — актор с УЗКИМ record-scoped грантом (recordScope(), self-match rule, НЕ RESOURCE_ROOT) видит ТОЛЬКО свой инстанс, не инстанс СОСЕДНЕЙ записи того же тенанта; tenant isolation (actor тенанта A с широким грантом не видит инстанс тенанта B в LIST); honest-degrade (pre-gate сервер — LIST не тронут). 12/12 зелёных (6 pre-existing DETAIL без единого изменения + 6 новых LIST)."
+    }
+  ],
+  "gates": {
+    "tsc_noemit": "green — node_modules/.bin/tsc --noEmit (корень), 0 ошибок.",
+    "eslint": "green — npx eslint src/http/processes.ts src/http/process-projection.ts src/__tests__/processes-read-visibility.test.ts, 0 ошибок.",
+    "vitest_targeted": "green — npx vitest run src/__tests__/processes-read-visibility.test.ts src/__tests__/processes-live-instances.test.ts src/__tests__/processes.e2e.test.ts — 3 файла, 63/63 зелёных (41 pre-existing без единого изменения + 22 новых/изменённых). Дополнительно прогнан весь набор из 19 тест-файлов, зависящих от process-projection.ts (inbox-*, message-*, transition-*, timer-firing-loop, process-started-record-id) — 193/193 зелёных, регрессий нет (изменения — только НОВЫЕ экспорты, существующие функции не тронуты).",
+    "vitest_db_targeted": "green — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism processes-read-visibility.db.test.ts (T-0147 template-clone, реальный PG :55432) — 12/12 зелёных.",
+    "FF_INST_VIS_3": "green — bash ci/checks/process-list-display-plane-isolation.sh && bash ci/checks/process-list-display-plane-isolation.sh --self-test — оба PASS.",
+    "FF_INST_VIS_4": "green — bash ci/checks/process-list-tenant-scope-additive.sh && bash ci/checks/process-list-tenant-scope-additive.sh --self-test — оба PASS.",
+    "FF_INST_VIS_1_2_regression": "green (регрессия проверена) — bash ci/checks/process-detail-read-gate.sh(+--self-test) && bash ci/checks/process-detail-single-resolver.sh(+--self-test) — DETAIL-гейт T-0721 не задет.",
+    "sibling_start_route_isolation": "green (регрессия проверена, по указанию оркестратора) — bash ci/checks/start-route-isolation.sh — FF-7-3 (processes.ts pg-free) не задет.",
+    "http_route_auth_coverage": "green (по указанию оркестратора) — bash ci/checks/http-route-auth-coverage.sh && --self-test — оба PASS.",
+    "anti_case_lock": "green — bash ci/checks/anti-case-lock.sh — Phase 1 (delegate-гейты) + Phase 2 (repo-wide денилист) оба PASS, агрегат не вырос (15 vs baseline 16, не менялся этой задачей).",
+    "fitness_full": "НЕ прогонялся локально целиком (по явному указанию оркестратора задачи — только targeted-гейты выше). npm run fitness:db (полный, ~140+ файлов) НЕ прогонялся — тоже по явному указанию; прогнан ТОЛЬКО целевой изменённый файл.",
+    "package_json_no_dup_keys": "green — bash ci/checks/package-json-no-dup-keys.sh."
+  },
+  "deviations_from_adr": [
+    "Задача просила фильтр 'в SQL WHERE (не пост-фильтр по уже-собранной странице)'. Реализовано как батч (ОДИН SQL-запрос на ancestry всех recordId сразу, не N+1) + чистая in-memory isRecordReadable-фильтрация над РЕЗУЛЬТАТОМ — байт-в-байт та же архитектура, что records.ts's T-0570 READ-PDP на СВОЁМ LIST уже использует (единственный существующий прецедент в кодовой базе; там же прямой doc-comment 'filter the already-loaded page ... no per-row DB call'). Containment-математика (isNarrowerOrEqual/isEffective над org/resource-ancestry-графом) НЕ SQL-выразима напрямую без дублирования authority-логики в SQL, что нарушило бы NF-5 (единая authority-математика, FF-INST-VIS-2/4c). Требование (b) — 'пагинация/счётчики после фильтра' — выполнено буквально: у GET /api/processes нет отдельного total/count/nextCursor поля вовсе (проверено — ни в текущем коде, ни в web/src/screens/screen-processes.jsx нет потребления такого поля), единственный instances[] вычислен ПОСЛЕ фильтра — нет второго числа, которое могло бы рассинхрониться. T-0710-класс риска (LIMIT-окно скрывает реально существующую строку) не применим: readEvents's внутренний limit=200-cap пред-существует этой задаче, не клиентская пагинация, и не ухудшается фильтром (фильтр сужает УЖЕ полученный результат фолда, не участвует в том, что фолд туда положил) — см. ADR §2.3 / spec §4.1 для полного разбора."
+  ],
+  "design_decisions": [
+    "Батч, не переиспользование isInstanceDetailVisible в цикле — DETAIL обрабатывает 1 инстанс/запрос (1 SELECT приемлем), LIST — до 200 (внутренний readEvents-cap), цикл был бы явным N+1. filterProjectionsByReadVisibility — новая функция, isInstanceDetailVisible НЕ тронута (не расширять диф T-0721 сверх необходимого).",
+    "Malformed (non-UUID) recordId пре-валидируется UUID_RE ПЕРЕД батч-запросом (в отличие от DETAIL's loadRecordRowAncestry, которая не валидирует) — иначе ОДНА legacy-строка уронила бы весь батч-SELECT cast-ошибкой, роняя ВЕСЬ список вместо одного инстанса (DETAIL безопасно ловит это per-request try/catch на ЕДИНСТВЕННОМ инстансе; LIST — нет).",
+    "Record-less инстансы НЕ сужены (симметрично фазе 1/T-0721) — process-definition-scoped read-грант не существует в латтисе сегодня (T-0714 §5 фаза 3, could, вне объёма).",
+    "Порядок: READ-visibility фильтр ДО overlayDetailLiveSteps (экономит live-engine round-trip на отброшенных инстансах) и ДО существующего ?record=-фильтра T-0708 (тот применяется после маппинга в ProcessInstance[], как и раньше — не тронут).",
+    "Нулевые изменения в server.ts / process-start.ts — resolveReadVisibility уже wired T-0721-ом на ВЕСЬ startDeps-объект, LIST-хендлер просто вызывает ТОТ ЖЕ инжектированный резолвер, что DETAIL уже вызывает."
+  ],
+  "open_questions": [
+    "Живая проверка (стенд offline на момент задачи) не исполнена браузером — см. live_proof_plan ниже.",
+    "Фаза 3 (process-definition-scoped грант для record-less инстансов) из оценки T-0714 — вне объёма этой задачи, отдельный follow-up (T-0714 §7 п.3).",
+    "Hardening-пункт T-0714 §7 п.4 ('не помещать чувствительные значения в переменные процесса', опционально) — вне объёма этой задачи."
+  ],
+  "live_proof_plan": "Когда стенд вернётся online — прожить браузером ДВУМЯ юзерами на одном тенанте:\n\n1. Найти (или создать) ДВЕ записи в реестре (запись A и запись B) + по одному инстансу процесса на каждую, стартованному через create=start-триггер (recordId привязан к инстансу — проверить через GET /api/processes?record=<id> или карточку записи «Связанные процессы»).\n2. Юзер A: имеет READ-грант ТОЛЬКО на запись A (не на запись B, не default-open). Открыть /processes → ожидание: список содержит ТОЛЬКО инстанс записи A — инстанс записи B ОТСУТСТВУЕТ в списке целиком (не редактированная строка — строки нет вовсе). Открыть деталку инстанса A — variables/history видны (T-0721, уже доказано отдельно).\n3. Юзер B: обычный член тенанта БЕЗ READ-гранта ни на запись A, ни на запись B (рядовой сотрудник другого отдела, не владелец). Открыть /processes → ожидание (ГЛАВНАЯ ПРОВЕРКА ЭТОГО ФИКСА): список НЕ содержит НИ инстанс A, НИ инстанс B — оба честно отсутствуют (в отличие от пред-T-0722 поведения, где юзер B видел обе карточки в списке, только деталка 404-ила).\n4. Контрольная проверка регресса record-less: если на стенде есть инстанс, стартованный ЯВНО (не create=start, /api/processes/start, без recordId) — юзер B ДОЛЖЕН по-прежнему видеть эту карточку в списке (record-less unnarrowed, фаза-1/2 scope, by design).\n5. Контрольная проверка регресса ?record=: карточка записи A (открытая юзером A) со ссылкой «Связанные процессы» (?record=<id записи A>) должна по-прежнему показывать инстанс A (T-0708-фильтр не тронут этой задачей).\n6. Контрольная проверка инбокса: юзер B, будучи держателем ЗАДАЧИ инстанса B (если применимо), должен ПО-ПРЕЖНЕМУ уметь открыть /inbox/<taskId> и выполнить свой шаг — инбокс-путь не гейтится ни этой задачей, ни T-0721.\n\nАртефакты: 2 скриншота списка /processes (юзер A — одна строка «запись A»; юзер B — список короче на обе связанные-с-записью строки, либо пуст если других инстансов нет) + скриншот деталки записи A с блоком «Связанные процессы» (доказывает, что T-0708-фильтр цел).",
+  "friction_events": []
+}

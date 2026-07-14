@@ -1,0 +1,146 @@
+{
+  "task_id": "T-0176",
+  "status": "pr_open",
+  "branch": "task/T-0176-report-page-compat",
+  "merge_target": "dev",
+  "base_commit": "54ad067",
+  "head_commit": "9a067c3",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Pure TS module src/core/report-page-compat.ts implementing checkReportPageDepFields (structural compat check: dep.fieldKey ∈ recordSchema.properties → ok:true / missing_in_schema violations) + classifyReportPageFloor (machine boundary Floor-1 ↔ Floor-2 via closed vocab). 39 unit tests (18 AC covered). FF-COMPAT-PURE fitness check (report-page-compat-isolation.sh, 4 assertions: file exists / no I/O imports / ADR ref / public surface exports). All CI gates green: tsc 0 errors, eslint 0 errors, fitness all PASS, vitest 1146/1146 passed. No FF-RC6 false-positive (no DDL/known_tenant_tables.txt change). REVIEW approved (0 blocking, 2 nits: R-1 doc gap carry to T-0177; R-2 CLOSED via 2 filter edge probes).",
+  "commits": [
+    {
+      "sha": "054eac9",
+      "phase": "SPEC",
+      "message": "spec(T-0176): SPEC report-page-compat — checkReportPageDepFields + classifyReportPageFloor"
+    },
+    {
+      "sha": "11b68aa",
+      "phase": "BUILD",
+      "message": "feat(T-0176): BUILD report-page-compat.ts — checkReportPageDepFields + classifyReportPageFloor"
+    },
+    {
+      "sha": "10fda4b",
+      "phase": "REVIEW",
+      "message": "T-0176 REVIEW: approved — checkReportPageDepFields + classifyReportPageFloor"
+    },
+    {
+      "sha": "9a067c3",
+      "phase": "TEST",
+      "message": "T-0176 nit R-2: filter sub-object edge probes"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "10fda4b",
+      "findings_resolved": [],
+      "findings_nit": [
+        "R-1 — DepViolation.message is present in implementation but not listed in ADR §3 minimal type definition (FR-3 omits it). Field is additive, mirrors BindingViolation per NF-1. Doc gap; carry to T-0177 ADR/spec update.",
+        "R-2 — CLOSED: filter sub-object edge probes (filter without field_key → Floor-2; filter without value → Floor-2) added in commit 9a067c3."
+      ],
+      "artifact": "docs/design/T-0176.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1146,
+      "passed": 1146,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "18/18",
+      "fitness_static": "PASS — all checks green including FF-COMPAT-PURE",
+      "tested_commit": "9a067c3",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 2 cosmetic no-console warnings (pre-existing), 0 errors",
+        "fitness_static_checks": "PASS — all checks green, FF-RC6 fully green (no known_tenant_tables.txt change)",
+        "vitest_unit": "1146/1146 passed, 6 skipped (flowable integration offline)",
+        "report_page_compat_tests": "39/39 — src/__tests__/report-page-compat.test.ts — all AC-4..AC-14 + purity sanity + registryDefId scenarios covered"
+      },
+      "artifact": "docs/test-reports/T-0176.test-report.md",
+      "contract_artifact": "docs/design/T-0176.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/core/report-page-compat.ts",
+    "src/__tests__/report-page-compat.test.ts",
+    "ci/checks/report-page-compat-isolation.sh",
+    "docs/specs/T-0176-report-page-compat.spec.md",
+    "docs/specs/T-0176.spec.contract.json",
+    "docs/design/T-0176.review.contract.json",
+    "docs/reviews/T-0176.review.md",
+    "docs/test-reports/T-0176.test-report.md",
+    "docs/design/T-0176.test-report.contract.json",
+    "docs/pr/T-0176.pr-handoff.json",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "description": "DepViolation.message field is present in the implementation (line 57 report-page-compat.ts) but is not listed in ADR §3 minimal DepViolation type definition, nor in FR-3 spec. The field is additive and mirrors BindingViolation per NF-1. No behavior impact.",
+      "follow_up_candidate": "T-0177 ADR/spec update: add 'message: string' to ADR §3 DepViolation interface to close documentation gap."
+    }
+  ],
+  "downstream_api_surface": {
+    "note": "The following exported symbols form the stable API surface for T-0177 (schema-change API / lossy_narrowing extension). Callers must import from src/core/report-page-compat.ts.",
+    "exports": [
+      {
+        "name": "checkReportPageDepFields",
+        "signature": "function checkReportPageDepFields(deps: PageDep[], recordSchema: JsonSchema): DepCompatResult",
+        "note": "Core pure function — structural compat check for report page deps vs registry schema. T-0177 adds lossy_narrowing violations on top of missing_in_schema."
+      },
+      {
+        "name": "classifyReportPageFloor",
+        "signature": "function classifyReportPageFloor(pageDef: unknown): { requiredFloor: '1' | '2'; reason: string }",
+        "note": "Machine boundary Floor-1 ↔ Floor-2. Closed vocab (ADR §4). T-0177 does not change this function."
+      },
+      {
+        "name": "PageDep",
+        "kind": "interface",
+        "fields": "{ registryDefId: string; fieldKey: string; depKind: DepKind }",
+        "note": "Row mirror of report_page_dep. Stable shape for T-0177 callers."
+      },
+      {
+        "name": "DepViolation",
+        "kind": "interface",
+        "fields": "{ type: DepViolationType; registryDefId: string; fieldKey: string; message: string }",
+        "note": "One violation instance. T-0177 adds 'lossy_narrowing' to DepViolationType vocab; message field is additive (R-1 nit)."
+      },
+      {
+        "name": "DepCompatResult",
+        "kind": "type",
+        "shape": "{ ok: true } | { ok: false; violations: DepViolation[] }",
+        "note": "Discriminated union result — same pattern as BindingCompatResult from T-0072."
+      },
+      {
+        "name": "JsonSchema",
+        "kind": "interface",
+        "fields": "{ properties?: Record<string, unknown> }",
+        "note": "Minimal schema type. T-0177 may extend with 'items' or 'type' for narrowing checks."
+      },
+      {
+        "name": "DepKind",
+        "kind": "type",
+        "shape": "'read' | 'aggregate'",
+        "note": "Closed vocab. Additive-only extension."
+      }
+    ]
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "ff_rc6_note": "FF-RC6 is FULLY GREEN on this branch — T-0176 is a pure TS module addition with no DDL, no known_tenant_tables.txt changes.",
+    "no_db_changes": "T-0176 adds only TS source, tests, and fitness check. No migrations, no docker-compose changes. Safe to merge to dev immediately.",
+    "downstream_effect": "Unblocks T-0177 (schema-change API / lossy_narrowing) which extends checkReportPageDepFields with a second violation type. All exported symbols listed in downstream_api_surface are stable post-merge."
+  },
+  "friction_events": []
+}

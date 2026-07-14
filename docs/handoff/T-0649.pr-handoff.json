@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0649",
+  "status": "pr_open",
+  "branch": "task/T-0649-field-controls-p1",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "T-0649.spec.md",
+    "docs/design/ADR-T0649-field-controls.md",
+    "web/src/forms/field-renderer.jsx",
+    "web/src/forms/field-contract.js",
+    "web/src/lib/format.js",
+    "web/src/screens/records-form.js",
+    "web/src/screens/apps-schema.js",
+    "web/src/screens/screen-app-records.jsx",
+    "web/src/components/components.jsx",
+    "web/src/design/icon-registry.js",
+    "web/src/forms/field-renderer.test.jsx",
+    "web/src/forms/field-renderer-d76.test.jsx",
+    "web/src/forms/field-renderer-d77.test.jsx",
+    "web/src/forms/field-renderer-t0649.test.jsx",
+    "web/src/lib/format.test.js",
+    "web/src/screens/records-form.test.js",
+    "web/src/screens/apps-schema.test.js",
+    "web/src/screens/screen-app-records.test.jsx",
+    "docs/handoff/T-0649.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "MoneyInput made HOOK-FREE (no useState focus-toggle) vs the ADR's implied focus/blur raw-vs-grouped display swap: the web test harness (vitest node env, no jsdom/react-dom/react-test-renderer) cannot invoke a hook-using component as a plain function, which is this codebase's established control-testing convention. Trade-off: grouping is always shown (derived from the value prop each render), not swapped to raw-on-focus — a common industry pattern; cursor may jump to end when a grouping separator is inserted mid-type. Data integrity is unaffected (onChange stores the raw numeric string).",
+    "DateInput implemented as native <input type=date> + transparent-text + дд.мм.гггг overlay (NOT a bespoke popover calendar): keeps full native keyboard/a11y/picker semantics (proven working live) with zero regression risk, avoids a from-scratch calendar widget; locale-independent numeric display achieved via the overlay.",
+    "datetime type scoped to the CLIENT record/form stack (apps-schema.js/records-form.js/field-contract.js/field-renderer.jsx) — NOT extended into the server binding-contract-catalog.ts/field-type-dictionary.ts (BPMN form-binding) nor view-config.ts/view-query.ts (view filter/sort operators). Those are separate larger subsystems the UX study did not flag for datetime; datetime degrades safely to a filterable/sortable string there. See FINDINGS."
+  ],
+  "friction_events": [
+    "Session-continuity scare: coordinator reported a transient API failure lost the final report and warned nothing was committed. On resume, git status + git diff --stat confirmed ALL in-tree edits had actually persisted (no rework needed) — continued exactly from the pending test-authoring step.",
+    "An invisible non-breaking space (U+00A0) was inserted by the editor into groupThousands' separator replacement string, causing a byte-mismatch test failure that rendered as visually-identical strings in the vitest diff. Diagnosed via charCodeAt; normalized to a regular ASCII space (U+0020) for testability; MoneyInput's onChange strips all whitespace (incl. NBSP via \\s) before storing.",
+    "anti-case-lock.sh RED on the first gate pass: a new test fixture used seeded-persona literals (e-larina/Е. Ларина) which the D-064 anti-case gate forbids even in tests. Replaced with generic synthetic fixtures (emp-1/Human One/Position A); gate green.",
+    "Server-suite flake (non-blocking): src/__tests__/forms-from-schema.test.ts SP-1 timed out under full-parallel load (10192ms) once, passed solo (4225ms). Unrelated to this change (web/src-only diff); re-ran solo → green.",
+    "Three pre-existing field-renderer tests (money/date structural tree-walks) went RED after wrapping money/date in the new MoneyInput/DateInput sub-components — expected structural consequence of the refactor; updated the tests to invoke the (now-exported, hook-free) sub-components, matching the file's existing RelationPickerField/DateRangeField pattern."
+  ],
+  "live_proof": {
+    "verdict": "GREEN",
+    "date": "2026-07-05",
+    "stand": "http://100.121.76.86:3000 (dev @ af7a8fc)",
+    "report": "docs/live-proof/T-0649.live-proof.md",
+    "evidence_dir": "docs/live-proof/T-0649-evidence/",
+    "checks": {
+      "money_kopecks_intact": "GREEN — typed 150000.5, POST /api/records stored exact 150000.5 (no rounding), list/detail/edit-form all display \"150 000,50 ₽\" (grouped thousands, kopecks preserved) confirming the documented P1 fix (formatCellValue previously used maximumFractionDigits:0 which silently rounded to \"150 001 ₽\")",
+      "person_field_loads_and_searches": "GREEN — dropdown populated with all 7 real tenant employees on open (not \"Не удалось загрузить\"), typed \"Ларина\" and list filtered to exactly one matching employee, selection stored as employee slug, re-editing correctly re-highlights the same employee by name",
+      "date_format_ddmmyyyy": "GREEN — native <input type=date> with dd.mm.yyyy overlay confirmed on all 4 surfaces: create form, list column, record detail, edit form re-population — all show 15.08.2026, never raw ISO"
+    },
+    "findings_beyond_scope": [
+      "P1: list and record-detail screens display the person field as the raw employee slug (e-larina) instead of a resolved display name, unlike relation/file types which have dedicated async-resolve cell components (RELATION_CELL_ASYNC/FILE_CELL_ASYNC). The formatCellValue code comment (records-form.js:1270-1278) explicitly says the caller SHOULD pre-resolve via GET /api/org but screen-app-records.jsx never does this for type===\"person\". The PersonPicker itself resolves correctly bidirectionally in the create/edit form (confirmed live) — only the read-only list/detail rendering is affected. Not a blocker for this task (all 3 requested checks are GREEN) but a real UX debt worth a follow-up task."
+    ],
+    "bypasses_found": "none — all checks performed via real UI (typed values, clicked selections); network interception used read-only for verifying already-performed UI actions",
+    "blockers": "none"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "task_id": "T-0641",
+  "status": "pr_open",
+  "branch": "task/T-0641",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/tasks/T-0641.spec.md",
+    "src/http/process-defs.ts",
+    "src/__tests__/process-defs.lanetimer-publish.test.ts"
+  ],
+  "deviations_from_adr": [
+    "Kept the pre-existing per-mapper ensureFlowableNamespace calls in agent-task-external-mapper.ts (T-0635) and user-task-role-mapper.ts (T-0642) instead of removing them once the centralized chokepoint was added — they are now redundant (the chokepoint alone is sufficient) but removing them would touch already-merged, already-tested code with zero behavioural upside; ensureFlowableNamespace is idempotent so the duplicate calls are harmless.",
+    "Changed buildUnfilledRoleWarnings's input from row.bpmn_xml to the fully publish-wired publishXml — a necessary consequence of relocating lane/timer out of draft-save (row.bpmn_xml no longer carries their candidateGroups at all), not requested verbatim by the task brief but required for the warnings feature to keep working post-relocation; also fixes a pre-existing, unrelated gap where T-0642's assignedRoleId-derived candidateGroups were never checked by this warning either."
+  ],
+  "friction_events": [
+    "None — task-owned worktree/branch were already correctly set up; no dependency, DB, or environment issues encountered. One pre-existing, unrelated test flake (forms-from-schema.test.ts > SP-1, a 10s timeout) reproduces in isolation on this same worktree with zero relation to the files this task touches — not caused by this change, not fixed by this change."
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0573",
+  "verdict": "approved",
+  "_scope": "Assistant «demo→live» разблокировка. web/ дельта (git diff dev...HEAD -- web/): (1) nav-config.js — бейдж пункта «Ассистент» status:demo→live (снят демо-бейдж «данные иллюстративные»); (2) новый чистый модуль assistant-error-text.js — извлечение человекочитаемого текста из канонического envelope {error:{code,message}}; (3) screen-assistant.jsx — две точки потребления (503-ветка ~166, non-ok-ветка ~183) теперь читают текст через assistantErrorText вместо плоского d.message (фикс ревью R-1). Судится СОРАЗМЕРНО: рендер-путь сообщения (MessageBubble ~514) НЕ менялся — новый текст приходит в существующий канал chs-asst__msg-text. Ключевой вопрос фазы — честность бейджа live (G7) и человекочитаемость honest-503.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/assistant-llm-message-jargon.sh (FF-UX-7, посвящённый гейт этого сообщения) → PASS: message содержит /llm-connections, dev-jargon отсутствует",
+      "ci/checks/ux/ux-g5-jargon-denylist.sh (mode=INFORMATIONAL) → exit 0. 24 findings по всему web/ — ИСКЛЮЧИТЕЛЬНО в *.test.jsx (T-id в describe-строках + telLinear в тест-фикстуре screen-process-analytics.test.jsx): pre-existing repo-wide шум, НЕ на новых строках T-0573, не видимый продуктовый текст. Новый видимый текст T-0573 (honest-503 из assistant-messages.ts) — чист: без LLM_NOT_CONFIGURED/endpoint/secretHandle/stack/OpenAILlmPort/raw-exception",
+      "ci/checks/ux/ux-g2-theme-pairing.sh → PASS: оба token-source (tokens.css + form-theme.css) — light-default в :root + [data-theme=dark] reachable"
+    ],
+    "green_note": "assistant-llm-message-jargon.sh — ПОСВЯЩЁННЫЙ жёсткий гейт именно для honest-503-строки (не informational): он один достаточен для G5-вердикта по видимому тексту T-0573 и он зелёный. G5-denylist (repo-wide, informational) держу как контекст: 24 шумовых finding'а не введены T-0573."
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "n/a-delta-визуально: рендер-путь honest-503 НЕ добавлен и НЕ изменён T-0573. Текст сообщения (msg.text) приходит в СУЩЕСТВУЮЩИЙ канал MessageBubble → <div className=\"chs-asst__msg-text\">{msg.text}</div> (screen-assistant.jsx:514); стили — app.css:1088 (типографика, наследует .chs-asst__msg--asst .chs-asst__msg-text :1104), обе темы уже покрыты через var(--chs-*)-токены и подтверждены G2. Ни одного нового инлайн-стиля/рукотворного элемента/новой state-ветки T-0573 не вводит — изменён только ИСТОЧНИК текста (assistantErrorText вместо d.message). Real-click в двух темах для смены источника text-строки не требуется. Бейдж live рендерится тем же путём, что и остальные live-пункты (shell.jsx — live не рисует badge вовсе), тем-специфичной поверхности не добавляет.",
+  "g7_badge_verdict": {
+    "pillar": "G7 (бейдж ≡ содержимому)",
+    "verdict": "honest",
+    "reasoning": "Семантика 'demo' в системе ОПРЕДЕЛЕНА явно (nav-config.js:16): «рендерит, но данные mock/seed ИЛИ действия не функциональны»; aria/tooltip — «демо — данные иллюстративные (mock)» (shell.jsx:242,423). После T-0573 у ассистента: (а) контур существует у ВСЕХ тенантов (backfill migration 118, AC-1 — migrations/118_assistant_tenant_zero_backfill.sql, 307 строк); (б) действие «отправить» ФУНКЦИОНАЛЬНО — оно либо отвечает реальным LLM, либо возвращает ЧЕСТНЫЙ 503 с actionable-состоянием (respondLlmUnavailable, assistant.ts:1160→sendErrorEnvelope 503 LLM_UNAVAILABLE, оба пути: dormant :1799 + adapter-failure :2024); (в) данные НЕ иллюстративные — mock/seed убран. Значит семантика 'demo' («mock-данные ИЛИ нефункциональное действие») теперь ФАКТИЧЕСКИ ЛОЖНА → снятие бейджа не decoration-ahead-of-fact, а КОРРЕКЦИЯ ставшего ложным бейджа. 'live' НЕ утверждает «LLM отвечает прямо сейчас» — оно утверждает «реальный контур, отвечает реальным состоянием, действие работает», что истинно ДАЖЕ до того как хоть один тенант вставил ключ (тогда честный ответ = 503 «подключите ключ» со ссылкой, а не тишина/мок/краш). Согласен с код-ревьюером: все три опоры легитимности на месте. G7 держит.",
+    "caveat": "Единственная поверхность, которая честно НЕ финальна до вставки ключа — не бейдж, а сама honest-503-подсказка: она даёт путь /llm-connections как ТЕКСТ, а не как клик (см. F-1). Это делает бейдж честным, но переход к действию не бесшовным."
+  },
+  "pattern_sources": [
+    {
+      "element": "honest-503 сообщение ассистента (LLM недоступен)",
+      "pattern": "existing themed message channel — MessageBubble <div className=\"chs-asst__msg-text\">{msg.text}</div> (screen-assistant.jsx:514), стили app.css:1088/:1104 на var(--chs-*)-токенах",
+      "applied": true
+    },
+    {
+      "element": "nav-бейдж «Ассистент» live",
+      "pattern": "existing NavStatus contract — status:'live' не рендерит бейдж (демо-бейдж рисуется ТОЛЬКО для 'demo', shell.jsx:242/:422), поведение как у всех соседних live-пунктов constructor-зоны",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-assistant.jsx:514 (MessageBubble render msg.text) + src/core/assistant-messages.ts:16 (текст с '(/llm-connections)')",
+      "issue": "Мёртвый аффорданс перехода: honest-503 честно называет, ГДЕ действовать («страница «Подключения LLM» (/llm-connections)»), но msg.text рендерится ПЛОСКИМ текстовым узлом — /llm-connections не кликабелен, нет linkify/anchor. При этом ТОТ ЖЕ экран уже умеет клик-навигацию для бот-ответов: navigate(msg.surface.canvasPath) (:554) и navigate(dl.path) для deep-links (:576) — но 503-ответ не несёт ни surface, ни deepLinks, поэтому кликнуть некуда. Усугубление: экран ассистента — audience:'builder' (constructor-зона), а /llm-connections живёт в admin-зоне (nav-config.js:162, audience:'admin', capability:'mgmt_object:*') → билдер-не-админ видит путь, который не может ни кликнуть, ни достать через собственную навигацию (admin-зона ему скрыта). НЕ blocking: сообщение честное, путь корректный и существует (маршрут /llm-connections зарегистрирован, shell.jsx:1177), для админа достижим через nav; но это реальный шов «честно сказали → бесшовно перейти нельзя», а бесшовность — столп продукта.",
+      "suggestion": "Отдать 503-ответу deepLink-дескриптор (как уже делают bundle-ответы), чтобы MessageBubble отрисовал кнопку «Открыть подключения LLM» → navigate('/llm-connections') — тем же паттерном, что :576, без нового UI-примитива. Тогда путь в тексте станет опорным, а не единственным способом перехода. Отдельной задачей (правка и backend-envelope, и рендера) — вне дельты T-0573."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "root": "B",
+      "location": "src/core/assistant-messages.ts:16-18 (ASSISTANT_LLM_UNAVAILABLE_MESSAGE)",
+      "issue": "Формулировка «не подключён рабочий LLM-ключ … проверьте ключ на странице «Подключения LLM» (/llm-connections)» — человекочитаема, без дев-жаргона (проходит FF-UX-7-гейт), с явным действием. Мелкий вкус: «(/llm-connections)» в скобках голым слэш-путём внутри прозы — это техническая деталь, торчащая в бизнес-текст; человек читает «Подключения LLM» как название страницы, а слэш-путь ему ничего не добавляет (и подчёркивает мёртвость аффорданса из F-1). Не вводит в заблуждение, действие ясно и без пути.",
+      "suggestion": "Когда появится клик-переход (F-1) — убрать голый «(/llm-connections)» из прозы: название страницы «Подключения LLM» + кликабельная кнопка несут и «куда», и «как» без технического слэш-пути. До этого путь оставить (он единственный ключ к переходу). Nit на будущее, не блокирует."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "AC-1 backfill — контур ассистента существует у всех тенантов (migration 118) как основание для снятия demo", "covered": true},
+    {"ac": "AC-4/AC-9 — демо-бейдж снят как СЛЕДСТВИЕ доказанного backfill + живого прохода владельца, не косметика впереди факта (G7 honest)", "covered": true},
+    {"ac": "AC-6/AC-7 — honest-503 человекочитаем, содержит /llm-connections, без dev-jargon (assistant-llm-message-jargon.sh PASS)", "covered": true},
+    {"ac": "R-1 fix — обе точки потребления экрана (503 + non-ok) читают текст из канонического envelope d.error.message через assistantErrorText, а не плоский d.message → пользователь реально видит серверный текст со ссылкой на реальной поверхности", "covered": true},
+    {"ac": "G5 dev-jargon на видимом тексте T-0573 — чисто; G2 theme-pairing — оба token-source light-default+dark-reachable", "covered": true}
+  ]
+}

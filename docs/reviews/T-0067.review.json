@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0067",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "live_smoke": "pass",
+  "ci_detail": {
+    "tsc": "exit 0",
+    "eslint": "exit 0 (2 no-console warnings, 0 errors)",
+    "fitness_static": "exit 0 (all 28+ static checks green incl. FF-G3 flowable-bridge-contract)",
+    "vitest": "701 tests pass (15 skipped integration), 0 regressions",
+    "fitness_db": "273 tests pass on isolated POSTGRES_PORT=55473 (migrations×2 idempotent, cross_tenant green)",
+    "live_bridge_e2e": "bridge-e2e-smoke.sh PASS on isolated compose (FLOWABLE_PORT=18086): deploy→start→fetchAndLock→2 tasks enqueued→idempotency re-poll 0 new jobs→task_completed outbox→completeTask in Flowable→instance completed"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/bridge-runner.ts:48-70",
+      "issue": "GUC set on a single acquired pool connection via `client.query('SET ...')`, then client.release(). Subsequent pool.query() calls in runBridgeOnce (via jobStore.enqueue) can be dispatched to different pool connections that do not have the GUC set. Works by coincidence in CI smoke (pool of 1 active connection) but is unreliable if pool ever has >1 slot.",
+      "suggestion": "Follow bridge-smoke-runner.ts pattern: register pool.on('connect', ...) to set the GUC on every new connection, then prime the pool. Alternatively, expose a method on PostgresJobStore to set the GUC at the store level (like outboxDispatcher uses its own claimBatch GUC pattern)."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/externalTaskBridge.ts:222",
+      "issue": "`const pool = jobStore[\"pool\"] as pg.Pool` — private field access via string index, bypassing TypeScript encapsulation. Compiles but is fragile (rename of private field breaks silently at runtime, not at compile time).",
+      "suggestion": "Add a package-internal getter or expose pool through the interface. Given ADR §4.3 already describes `lookupExternalTaskId(pool, tenantId, jobId)` with injected pool, the cleanest fix is to accept `pool` explicitly in `makeExternalTaskDeliver(flowableClient, pool, onDispatched?)` instead of extracting it from jobStore internals."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/core/externalTaskBridge.ts:139",
+      "issue": "`void workerId;` comment says it's \"referenced below for clarity\" but workerId IS passed directly to `flowableClient.fetchAndLock` on line 150-155 and the `void` is redundant noise.",
+      "suggestion": "Remove the `void workerId` line — workerId is clearly used below."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true},
+    {"ac": "AC-19", "covered": true},
+    {"ac": "AC-20", "covered": true},
+    {"ac": "AC-21", "covered": true}
+  ],
+  "role_gap_evidence": [],
+  "deep_analysis": {
+    "idempotency_end_to_end": "SAFE. fetchAndLock: Flowable lock prevents double-fetch by second bridge instance for lockDurationMs. enqueue: pgJobStore ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING + SELECT-back guarantees exactly-one job row (migration 023 partial unique index). Double-claim at outbox: pgOutboxStore.claimBatch uses FOR UPDATE SKIP LOCKED → only one dispatcher claims a given row; markDispatched advances ONLY from 'dispatching' state (monotonic forward T-0019). completeTask double-call: completeTask NOT_FOUND → idempotentSuccess:true → row goes dispatched, not retried. End-to-end: no window for duplicate job creation or double Flowable signal.",
+    "split_brain_worker_lock_expired": "ADR §2.B reasoning verified CORRECT. No-op is the right choice. (1) retriesLeft>0: T-0063 re-queues job as CREATED; if bridge also called failTask(retries=0), Flowable would go down error boundary while Choros keeps retrying — wrong observable semantics. (2) retriesLeft=0: job is FAILED; Flowable's own lock timeout handles re-release; calling failTask at this late point races with Flowable's engine-side retry/incident logic. (3) The outbox idempotency_key on the worker_lock_expired row ensures the no-op is dispatched exactly once (migration 029 outbox_idempotency_key_uq). No split-brain window identified.",
+    "ff_g3_by_spirit": "assertVariableValue is called SUBSTANTIVELY on real engine data (task.variables from Flowable) before enqueue (externalTaskBridge.ts:169). This is fail-closed guard on actual attack surface. resolveFor void-reference is explicitly sanctioned by ADR §4.5 and spec NF-3, identical to flowable-client.ts:449 precedent. T-0068 downstream will complete auth wiring at the seam. This is not cosmetic: the assertVariableValue call IS the substantive guard; resolveFor is a forward seam for T-0068.",
+    "rls_correctness": "lookupExternalTaskId uses BEGIN/SET LOCAL/query/COMMIT — SET LOCAL is correct (GUC scoped to transaction, no cross-connection leak). Primary key lookup (WHERE id=$1 AND tenant_id=current_setting(...)::uuid) is O(1) as per ADR. RLS policy on choros.job adds defense-in-depth even if GUC is set correctly.",
+    "bridge_runners_prod_surface": "bridge-runner.ts and bridge-smoke-runner.ts are compiled to dist/ by tsc (tsconfig.json includes src/**). However: no bin entries in package.json, no exports, no server.ts wire. These are standalone CI entrypoints (invoked explicitly by bridge-e2e-smoke.sh). NF-2 (additive, no externalWorker.ts changes) is satisfied. ADR §4.6 explicitly defers server.ts wiring to T-0068.",
+    "package_json_additivity": "Only one new script entry added: fitness:flowable:bridge. No new runtime dependencies (NF-1 zero new npm deps confirmed). No new bin entries."
+  }
+}

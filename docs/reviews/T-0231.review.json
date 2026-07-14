@@ -1,0 +1,70 @@
+{
+  "task_id": "T-0231",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "tsc": "0 errors",
+    "vitest_unit": "2091 passed | 6 skipped (db tier excluded)",
+    "vitest_impl_loop": "51 passed",
+    "fitness": {
+      "impl-loop-b2-phase-bundle.sh": "PASS (main + --self-test)",
+      "impl-loop-b4-interview-readonly.sh": "PASS (main + --self-test)",
+      "impl-loop-b5-sim-no-dup-linter.sh": "PASS (main + --self-test)"
+    },
+    "frozen_clear": "git diff dev...HEAD touches NO grant-lattice.ts / object-handle.ts / grant-resolver.ts / audit-writer.ts"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/core/implementation-loop.ts:578-582",
+      "issue": "isGrantScopeResolvable for `interval` scope returns `nodes.length > 0` — any non-empty org passes. An interval scope (numeric axis filter, e.g. amount>=5M) does not address an org node, so this is conservative-by-design, but it means an interval-only grant can never be flagged unresolvable regardless of axis correctness.",
+      "suggestion": "Acceptable per FR-B3-1 (interval is a numeric filter, not an org addressee) and documented inline. No change required; noting as a conservative boundary the caller should be aware of."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/core/implementation-loop.ts:840 (runSimulationMode1) vs ADR T-0129 §8.1",
+      "issue": "G-4 deviation: mode-1 takes gateway routing rules via a GatewayRoute[] DI port rather than extracting gateway/DMN conditions from the BPMN XML. ADR §8.1 says 'детерминированное протаскивание атрибутов через шлюзы/DMN' without mandating XML-conditional extraction.",
+      "suggestion": "Valid realization choice (G-4 is КАК-not-ЧТО). lintBpmn remains the sole BPMN linter (called first, fail-closed); the route-calc is deterministic. Acceptable. A future increment that wires real BPMN-extracted conditions should reuse this seam."
+    }
+  ],
+  "adversarial_focus": {
+    "b3_grant_logic_sound": true,
+    "b3_notes": "isNarrowerOrEqual(child=grantScope, parent=parentRoleScope, oracle) — direction correct (grant must be ⊑ parent role scope). Imported as pure reader from grant-lattice.ts; no write path. Three checks (unresolvable_assignee / scope_too_wide / drain_desync) are independently exercised. False-pass probe: AC-9 resolvable=pass + unresolvable(node-DOES-NOT-EXIST)=fail with stepId; AC-10 wider-than-parent flagged scope_too_wide via a non-trivial ancestry oracle (node-parent NOT ⊑ node-child); AC-11 drain v2-on-v1 desync flagged, v1-on-v1 passes. No false-pass found.",
+    "b4_no_phantom_org": true,
+    "b4_notes": "OrgTree interface exposes ONLY read methods (getNodes/getNode/getRoleIds). processInterviewClaim raises ask_interview_question on missing_role + ambiguous_assignee and returns discrepancy; never invents an org node. AC-13 asserts org node count unchanged (empty org stays empty); fitness Check-3 greps banned org-write tokens (insertNode/createNode/updateNode/addNode/writeNode/setNode) with a self-test that catches an org.insertNode fixture. No write path exists in the file.",
+    "b5_deterministic_no_engine": true,
+    "b5_notes": "runSimulationMode1 is a synchronous pure function — no clock/random/IO in route-calc (audit/IO only in B-2 assemble + B-4 claim, behind injected sink; B-5 takes no sink). lintBpmn (T-0027) called first as sole linter; invalid BPMN → fail-closed per-case error (AC-19). AC-17 asserts repeat-run identical paths. AC-18 ≥5M routes to role-legal (Юротдел), <5M to standard. Gateway evaluation iterates insertion-ordered routes, first-match/default-last — deterministic. fitness b5 self-test catches a DOMParser/xmldom duplicate-parser fixture.",
+    "b2_phase_machine": true,
+    "b2_notes": "Phase transitions validated against a static LEGAL_TRANSITIONS edge list; transitionPhase fail-closed on any edge not present (AC-1 param-tested over full legal+illegal matrix). promote_pending→production is the ONLY human-initiated edge (AC-2: no agent-initiated edge crosses draft→published; self-promote not a legal edge). coherenceHash = SHA-256 of canonical (key-sorted) JSON of components — deterministic; verifyBundleCoherence catches any component desync (AC-4/AC-6 partial-promote unreachable). Audit emitted via single injected AuditSink (impl.phase.transitioned / impl.bundle.assembled / impl.interview.*) — no second audit-log (NF-1).",
+    "frozen_clear": true,
+    "projections_not_authority": true,
+    "projections_notes": "Implementation/Bundle/GrantSpec are in-memory TypeScript types — no migration 060, no new DB table, no known_tenant_tables.txt change. All authority reads go through imported isNarrowerOrEqual (grant-lattice) + injected OrgTree (read-only) + injected AuditSink (real appendAuditEvent). PDP/grant-lattice remains the sole authority; B-3 validates a bundle AGAINST it, never substitutes for it."
+  },
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "by": "param test over legal+illegal phase matrix"},
+    {"ac": "AC-2", "covered": true, "by": "human-gate / no self-promote tests"},
+    {"ac": "AC-3", "covered": true, "by": "bundle field serialization tests"},
+    {"ac": "AC-4", "covered": true, "by": "coherenceHash determinism + desync tests"},
+    {"ac": "AC-5", "covered": true, "by": "audit emit tests (single sink)"},
+    {"ac": "AC-6", "covered": true, "by": "partial-promote / coherence-mismatch tests"},
+    {"ac": "AC-7", "covered": true, "by": "impl-loop-b2-phase-bundle.sh + --self-test"},
+    {"ac": "AC-8", "covered": true, "by": "b2 Check-6 frozen-guard + git diff dev...HEAD"},
+    {"ac": "AC-9", "covered": true, "by": "unresolvable vs resolvable scope tests"},
+    {"ac": "AC-10", "covered": true, "by": "narrowing via isNarrowerOrEqual reader tests"},
+    {"ac": "AC-11", "covered": true, "by": "drain-desync version tests"},
+    {"ac": "AC-12", "covered": true, "by": "impl-loop-b4 Check-5 frozen-guard + import-only assertion"},
+    {"ac": "AC-13", "covered": true, "by": "missing_role discrepancy + org-count-unchanged test"},
+    {"ac": "AC-14", "covered": true, "by": "ambiguous_assignee discrepancy + question-mentions-both-nodes test"},
+    {"ac": "AC-15", "covered": true, "by": "claim_resolved audit + node-count-stable test"},
+    {"ac": "AC-16", "covered": true, "by": "impl-loop-b4-interview-readonly.sh + --self-test"},
+    {"ac": "AC-17", "covered": true, "by": "repeat-run determinism test"},
+    {"ac": "AC-18", "covered": true, "by": "≥5M→Юротдел / <5M→standard / pure-function tests"},
+    {"ac": "AC-19", "covered": true, "by": "invalid-BPMN fail-closed + valid-BPMN proceed tests"},
+    {"ac": "AC-20", "covered": true, "by": "impl-loop-b5-sim-no-dup-linter.sh + --self-test"}
+  ],
+  "role_gap_evidence": []
+}

@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0163",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1107,
+    "passed": 1107,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "src/__tests__/flowable-client.test.ts (19 tests) + src/__tests__/flowable-client.adversarial.test.ts (4 tests, 1 skipped) — explicit config, all pass",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "flowable-client.adversarial.test.ts + grep src/core/flowable-client.ts: no process.env code lines",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "ci/checks/no-env-in-core.sh: full src/core/ sweep exits 0",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "no-env-in-core.sh self-test 1: planted process.env['PLANTED'] in src/core/ detected → exit 1; self-test 2: comment-only not matched",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "keyed-digest-e2e.test.ts (4), hash-oracle.test.ts (14), data-classification.test.ts (34), grant-resolver.test.ts (48), main-wired-entry.test.ts (1) — all pass",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "bridge-runner.ts + bridge-smoke-runner.ts read FLOWABLE_BASE_URL/FLOWABLE_REST_APP_ADMIN_USER_ID/FLOWABLE_REST_APP_ADMIN_PASSWORD locally; tsc --noEmit exits 0",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "ci/checks/no-env-in-core.sh SCOPE NOTE and header reference T-0163",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "tsc --noEmit",
+      "result": "pass",
+      "note": "0 errors"
+    },
+    {
+      "check": "eslint src",
+      "result": "pass",
+      "note": "2 cosmetic no-console warnings (pre-existing, bridge-runner.ts + externalTaskBridge.ts), 0 errors"
+    },
+    {
+      "check": "npm run fitness (full suite)",
+      "result": "pass",
+      "note": "All static checks green including keyed-digest-core-purity.sh and no-env-in-core.sh"
+    },
+    {
+      "check": "CI bridge-smoke env-name alignment",
+      "result": "pass",
+      "note": "FLOWABLE_BASE_URL / FLOWABLE_REST_APP_ADMIN_PASSWORD match review contract; FLOWABLE_REST_APP_ADMIN_USER_ID default 'admin' consistent across both runners"
+    },
+    {
+      "check": "Review nit R-1 (duplicate fitness key)",
+      "result": "n/a",
+      "note": "Pre-existing on dev; T-0163 invariant enforced via KEY2; deferred to separate cleanup task"
+    }
+  ],
+  "failures": []
+}

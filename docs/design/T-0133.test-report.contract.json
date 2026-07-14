@@ -1,0 +1,37 @@
+{
+  "task_id": "T-0133",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 14,
+    "passed": 14,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "covered-by-review (98ef49a): ADR §2.2/§3.3 BundleRef/FF-1", "result": "pass"},
+    {"ac": "AC-2",  "test": "covered-by-review + fitness (FF-self T-0133-adr-shape.sh): ADR §2.1/§2.4/§4/FF-3", "result": "pass"},
+    {"ac": "AC-3",  "test": "covered-by-review (98ef49a): ADR §2.8/§3.2 stage", "result": "pass"},
+    {"ac": "AC-4",  "test": "covered-by-review (98ef49a): ADR §2.3/§3.4 TemplateParameter/FF-2", "result": "pass"},
+    {"ac": "AC-5",  "test": "covered-by-review + fitness (FF-self: T-0129 presence): ADR §2.4", "result": "pass"},
+    {"ac": "AC-6",  "test": "covered-by-review (98ef49a): ADR §2.4/§4 контракты", "result": "pass"},
+    {"ac": "AC-7",  "test": "covered-by-review (98ef49a): ADR §2.5/§3.2/§3.5/FF-1/FF-4", "result": "pass"},
+    {"ac": "AC-8",  "test": "covered-by-review (98ef49a): ADR §2.5/§3.6/FF-5", "result": "pass"},
+    {"ac": "AC-9",  "test": "covered-by-review + fitness (FF-self: T-0031/fail-closed): ADR §2.6/§4/FF-1/FF-2", "result": "pass"},
+    {"ac": "AC-10", "test": "covered-by-review + fitness (FF-self: two-floor): ADR §2.7/§3.2", "result": "pass"},
+    {"ac": "AC-11", "test": "covered-by-review (98ef49a): ADR §2.8/§3.2 stage/§2.5/FF-5", "result": "pass"},
+    {"ac": "AC-12", "test": "covered-by-review + fitness (FF-self absence checks): ADR §2.1/§2.2/§2.6/rejected_alternatives/FF-3", "result": "pass"},
+    {"ac": "AC-13", "test": "covered-by-review + fitness (FF-self): ADR §6 трассировка", "result": "pass"},
+    {"ac": "AC-14", "test": "covered-by-review + fitness (FF-self): ADR §7 декомпозиция build-задач", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "UI surface", "result": "n/a", "note": "design-only artifact; no UI surface"}
+  ],
+  "failures": [],
+  "ci_evidence": {
+    "tsc": "PASS (0 errors)",
+    "eslint": "PASS (0 errors)",
+    "fitness": "PASS — all checks green including T-0133-adr-shape.sh (FF-self) + --self-test",
+    "vitest": "PASS — 1548 passed / 6 skipped (flowable integration offline), 70 files, 0 failed"
+  },
+  "diff_gate": "PASS — docs/design/T-0133-process-templates.adr.md (R-2/R-3/R-4), docs/design/T-0133.adr.contract.json (R-4), ci/checks/T-0133-adr-shape.sh (R-1, new), package.json (additive fitness registration)",
+  "review_gate": "approved iter-1 (98ef49a): 14/14 AC covered, 0 blocking, 4 nits all resolved"
+}

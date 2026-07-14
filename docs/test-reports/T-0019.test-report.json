@@ -1,0 +1,99 @@
+{
+  "task_id": "T-0019",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 668,
+    "passed": 668,
+    "failed": 0
+  },
+  "gate": {
+    "ci": "npm run ci GREEN — tsc --noEmit clean; eslint src clean; npm run fitness all static checks PASS (incl. actor_event_append_only.sh FF-4, actor_event_no_global_seq.sh FF-6, actor_event_vocab_pinned.sh FF-16); vitest 505/505 (21 files, incl. src/__tests__/actor-event.test.ts 15)",
+    "db_job_isolated": "OWN compose project t0019-test on POSTGRES_PORT=55443, own volume t0019-test_choros_pgdata — torn down (down -v) after run; shared 55432/55433 NOT touched",
+    "migrate_pass1": "applied 17 file(s) (001-016 + 018; 017 correctly reserved/absent; 018 sorts after 016 so employee FK target exists)",
+    "migrate_pass2": "idempotent — 'nothing to apply (17 already recorded, 17 files)'",
+    "fitness_db": "163/163 on isolated 55443 (8 files: actor-event.test.ts 30, cross_tenant.test.ts 37 seeding actor_event+actor_event_seq, schema 16, org-structure 8, two_tenant 4, behavior 7, pgTimerStore 25, pgJobStore 36)"
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "db/actor-event.test.ts AC-1 (relrowsecurity+relforcerowsecurity true; choros_app no-GUC count=0) + independently re-verified", "result": "pass"},
+    {"ac": "AC-2", "test": "db/cross_tenant.test.ts (actor_event in known_tenant_tables.txt; iterated, tenant-A ctx sees 0 tenant-B rows) 37/37", "result": "pass"},
+    {"ac": "AC-3", "test": "db/actor-event.test.ts AC-3 (PK exactly (tenant_id,seq); actor_event_object_read index leads tenant_id)", "result": "pass"},
+    {"ac": "AC-4", "test": "db/actor-event.test.ts AC-4 (choros_app UPDATE -> 42501; row unchanged) + re-verified", "result": "pass"},
+    {"ac": "AC-5", "test": "db/actor-event.test.ts AC-5 (choros_app DELETE -> 42501; row survives) + re-verified", "result": "pass"},
+    {"ac": "AC-6", "test": "db/actor-event.test.ts AC-6 (owner choros_migrator UPDATE+DELETE -> trigger restrict_violation 23001) — two-layer append-only holds for owner", "result": "pass"},
+    {"ac": "AC-7", "test": "ci/checks/actor_event_append_only.sh (no UPDATE/DELETE grant to choros_app + BEFORE UPDATE/DELETE triggers present)", "result": "pass"},
+    {"ac": "AC-8", "test": "db/actor-event.test.ts AC-8 (dup (tenant_id,seq) -> 23505; same seq independently usable cross-tenant)", "result": "pass"},
+    {"ac": "AC-9", "test": "ci/checks/actor_event_no_global_seq.sh (per-tenant counter, no global SEQUENCE/nextval/constant advisory lock) + live: 8 concurrent appends -> 8 distinct seq; adversarial re-run N=20 -> 20 distinct, dense, no dup", "result": "pass"},
+    {"ac": "AC-10", "test": "db/actor-event.test.ts AC-10 (actor non-existent -> 23503 FK; actor NULL -> 23502; valid accepted)", "result": "pass"},
+    {"ac": "AC-11", "test": "db/actor-event.test.ts AC-11 (on_behalf_of NULL valid; distinct employee preserved; non-existent -> 23503)", "result": "pass"},
+    {"ac": "AC-12", "test": "src/__tests__/actor-event.test.ts (actorEventPrincipal = COALESCE(onBehalfOf,actor): delegated->principal, self-act->actor)", "result": "pass"},
+    {"ac": "AC-13", "test": "actor_event_vocab_pinned.sh (no kind column) + src unit (human and agent ids validate via identical code path, no kind branch)", "result": "pass"},
+    {"ac": "AC-14", "test": "db/actor-event.test.ts AC-14 (role_at_event NULL -> 23502; non-existent role uuid ACCEPTED no-FK; pg_constraint only employee FKs)", "result": "pass"},
+    {"ac": "AC-15", "test": "db/actor-event.test.ts AC-15 (object_kind='robot' -> 23514 CHECK; record_id absent from record ACCEPTED, opaque pointer)", "result": "pass"},
+    {"ac": "AC-16", "test": "db/actor-event.test.ts AC-16 (request->prepare->submit->approve@L1->approve@L2->release reads back in seq order; EXPLAIN -> Index Scan; other object isolated)", "result": "pass"},
+    {"ac": "AC-17", "test": "actor_event_vocab_pinned.sh (no data/snapshot/view/payload column, only detail jsonb) + src unit fixture no forbidden keys", "result": "pass"},
+    {"ac": "AC-18", "test": "db/actor-event.test.ts AC-18 (event='escalate' -> 23514; five verbs accepted) + closed-set src unit", "result": "pass"},
+    {"ac": "AC-19", "test": "db/actor-event.test.ts AC-19 (approve+NULL -> 23514; submit+level=2 -> 23514; level=0 -> 23514; approve@L1/L2 accepted+orderable) + adversarial level=0 re-verified 23514", "result": "pass"},
+    {"ac": "AC-20", "test": "actor_event_vocab_pinned.sh golden = {request,prepare,submit,approve,release} + vocab_version NOT NULL; golden mutation-test (adding 'escalate' w/o bump fails exit 1)", "result": "pass"},
+    {"ac": "AC-21", "test": "actor_event_vocab_pinned.sh (no prev_hash/row_hash, no actor_event_head, no FK to audit_event; actor_event_seq is a bare counter, not a chain head)", "result": "pass"},
+    {"ac": "AC-22", "test": "src/__tests__/actor-event.test.ts (one guarded submit -> one actor_event input; audit_event MAY carry actor_event.id with NO enforced FK)", "result": "pass"}
+  ],
+  "adversarial_probes": [
+    {
+      "id": "PROBE-A",
+      "axis": "nit R-1 — reader deny-stub untested",
+      "method": "Compiled src/core/actor-event.ts and awaited each notImplementedActorEventReader method (trail, didPrincipalPerform, rolesThatActed) + writer sanity",
+      "result": "PASS — every reader method rejects with ActorEventNotImplementedError (honest not-implemented), NOT a silent null/undefined. Symmetric with the writer stub. Closes review nit R-1.",
+      "is_product_defect": false
+    },
+    {
+      "id": "PROBE-B",
+      "axis": "RLS WITH CHECK forgery — INSERT row.tenant_id=A under GUC=B from choros_app",
+      "method": "choros_app SET LOCAL choros.tenant_id=B, INSERT actor_event with tenant_id=A (and the mirror GUC=A/row=B). Control: GUC=A/row=A.",
+      "result": "PASS — both cross-tenant directions rejected with 42501 'new row violates row-level security policy for table actor_event' (that IS the WITH CHECK rejection; PG reports RLS WITH CHECK violations as SQLSTATE 42501). Control (GUC=A/row=A) succeeds. A tenant cannot forge a row tagged for another tenant.",
+      "is_product_defect": false
+    },
+    {
+      "id": "PROBE-C",
+      "axis": "concurrent seq race (N=20, larger than review's 8)",
+      "method": "20 parallel workers, each own connection: SELECT next_seq FOR UPDATE on actor_event_seq, advance, INSERT actor_event. Assert distinct seq + density + committed-row count.",
+      "result": "PASS — 20/20 distinct seq, strictly increasing AND dense over [base..base+19], 20 rows committed. The counter-row FOR UPDATE serializes correctly under higher concurrency; no duplicate, no lost update.",
+      "is_product_defect": false
+    },
+    {
+      "id": "PROBE-D",
+      "axis": "approve_level=0 boundary (>=1 CHECK)",
+      "method": "INSERT event='approve', approve_level=0 from migrator.",
+      "result": "PASS — rejected by actor_event_approve_level_ge1 CHECK (23514). The IFF CHECK and the >=1 CHECK are independent and both fire.",
+      "is_product_defect": false
+    },
+    {
+      "id": "PROBE-E",
+      "axis": "seq-rollback attack — choros_app UPDATEs actor_event_seq.next_seq BACKWARD",
+      "method": "As choros_app (which holds GRANT UPDATE on actor_event_seq, needed to advance the counter): roll next_seq back into an unused lower slot, then INSERT an 'approve' actor_event at a seq LOWER than an already-committed 'submit' on the same object.",
+      "result": "FINDING (not a T-0019 defect) — the backward UPDATE SUCCEEDS and a forged 'approve' lands at seq=970000 ahead of submit@seq=970001; reading the trail ORDER BY seq shows approve BEFORE submit (SoD order inverted) even though wall-clock ts proves the opposite. UNIQUE(tenant_id,seq) still blocks reusing an OCCUPIED slot (23505) — it only stops collisions, not backfilling an unused lower slot. The actor_event ROWS remain immutable (trigger + privilege hold). Classification: this is the WRITER's threat surface (T-0021/E4.2), explicitly out of T-0019 scope (FR-7 'only sanctioned writer is the gateway path'; Out-of-Scope §6.2). T-0019's structural guarantee (append-only rows) is intact; the spec's order-integrity claim (NF-2) is about REWRITING a committed row, which is barred. The unsanctioned raw-SQL path that decrements next_seq is outside the frozen contract by construction.",
+      "is_product_defect": false
+    }
+  ],
+  "failures": [],
+  "friction": [
+    {
+      "id": "F-T0019-1",
+      "severity": "medium",
+      "root_class": "product-defect",
+      "for_task": "T-0021/E4.2 (writer) — NOT T-0019",
+      "location": "migrations/018_actor_event.sql:52 (GRANT ... UPDATE ON actor_event_seq TO choros_app) + the unbuilt appendActorEvent writer",
+      "issue": "PROBE-E: choros_app can roll actor_event_seq.next_seq backward and backfill an unused lower seq, forging SoD order (approve appears before submit when read ORDER BY seq). UNIQUE(tenant_id,seq) only blocks occupied-slot reuse, not lower-gap backfill. The append-only ROW guarantee holds; the COUNTER is unprotected against decrement.",
+      "suggestion": "T-0021's sanctioned writer (and/or an actor_event_seq guard) MUST make seq monotonicity tamper-resistant: either a BEFORE UPDATE trigger on actor_event_seq rejecting next_seq decrease (NEW.next_seq < OLD.next_seq), or the writer asserts the assigned seq > MAX(seq) for the (tenant_id,object) at append-time. Flag for T-0021 threat model; T-0019 ledger shape is correct as specified."
+    },
+    {
+      "id": "F-T0019-2",
+      "severity": "nit",
+      "root_class": "tooling-gap",
+      "for_task": "T-0019 follow-up (cosmetic, non-blocking)",
+      "location": "review nits R-2 (ci/checks/db/actor-event.test.ts appendRow hardcodes ts/vocab_version literals 0,1) and R-3 (cross_tenant seedActorEventSeq best-effort ON CONFLICT DO NOTHING)",
+      "issue": "Both confirmed cosmetic during this run: hardcoded ts/vocab literals are fixed test constants (no behavior impact); the best-effort seq seed is irrelevant to the RLS-only cross_tenant probe. R-1 is now CLOSED by PROBE-A.",
+      "suggestion": "Optional cleanup; not gating."
+    }
+  ],
+  "anti_false_fail_note": "verdict=pass justified: ALL deterministic gates green (tsc/eslint/fitness/vitest 505 + isolated-DB migrate x2 + fitness:db 163). The only adversarial finding (PROBE-E seq-rollback) is the WRITER's threat surface (T-0021/E4.2), explicitly deferred by FR-7 / Out-of-Scope §6.2 — it is NOT a defect in T-0019's frozen ledger shape, which delivers exactly the strictly-increasing, UNIQUE, append-only, FK-scoped, closed-vocab substrate the 22 ACs require. Recorded as forward friction for T-0021, not a T-0019 product-defect."
+}

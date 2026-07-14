@@ -1,0 +1,161 @@
+{
+  "task_id": "T-0043",
+  "status": "ready",
+  "summary": "Introduce `mcp_tool(tenant_id, id, name, description, declares jsonb, pure_compute bool, resource_ops jsonb, created_at, updated_at)` as a tenant-isolated table; deliver `src/core/mcp-tool-registry.ts` with `resolveAgentToolset` (toolset = query over grants, no per-agent list) and `McpToolSource` injected port; `declares` is a typed `EffectDeclaration[]` claim verified by the gateway at invoke-time via T-0034 `verifyEffectGrants`; `pure_compute` = `classifyTool(declares).pure` stored at write-time; migration 040; downstream contracts for T-0040/T-0042/Stage-2 frozen.",
+  "functional": [
+    "FR-1 mcp_tool table: 9 columns (tenant_id, id, name, description, declares jsonb NOT NULL DEFAULT '[]', pure_compute boolean NOT NULL, resource_ops jsonb NOT NULL DEFAULT '[]', created_at, updated_at), PK(tenant_id, id), UNIQUE(tenant_id, name)",
+    "FR-2 T-0013 isolation invariants: tenant_id leading, FORCE RLS, default-DENY, choros_app SELECT/INSERT/UPDATE/DELETE only",
+    "FR-3 ci/checks/known_tenant_tables.txt updated with 'mcp_tool' (alphabetical)",
+    "FR-4 dev seed in migration 040 (ON CONFLICT DO NOTHING): at least 3 rows — one integration_endpoint tool, one messaging_channel tool, one pure-compute tool",
+    "FR-5 pure_compute consistency: TS write path calls classifyTool(declares) before every INSERT/UPDATE; DB CHECK enforces pure_compute=true when declares='[]'",
+    "FR-6 resolveAgentToolset(tenantId, employeeId, nowMs, GrantSource, McpToolSource): toolset = tools whose all resource_ops pairs are covered by effective grants held by the agent's roles; no stored per-agent list",
+    "FR-7 tool absence is structural: a tool not in the resolved toolset is physically absent from API responses; no 'disabled' state",
+    "FR-8 declares write-path guard: malformed or unparseable declares is rejected before INSERT/UPDATE with a typed error",
+    "FR-9 gateway-seam at op='invoke': resolveFor verifies (1) all resource_ops grants held; (2) all EffectDeclaration grants held via verifyEffectGrants from effect-resource.ts",
+    "FR-10 new module src/core/mcp-tool-registry.ts: additive only; does NOT edit grant-lattice.ts, object-handle.ts, effect-resource.ts; any edit to grant-resolver.ts is additive optional field only",
+    "FR-11 resource_ops vs declares separation: resource_ops = Choros object model reads/writes matched against grant rows; declares = external side-effect claims matched against effect_resource grants"
+  ],
+  "non_functional": [
+    "NF-1 pure module: src/core/mcp-tool-registry.ts has no pg/fs/net/http imports; all storage via injected ports",
+    "NF-2 additive to all existing public surfaces: no rename/remove/re-sign of existing exports; single-resolver.sh green",
+    "NF-3 migration seam: migrations 032-039 occupied/reserved; T-0043 uses 040 (and 041 if needed)",
+    "NF-4 resolveAgentToolset is deterministic: same inputs → same output; no caching or side effects",
+    "NF-5 pure_compute is denormalized query-optimization signal; does NOT bypass gateway verification",
+    "NF-6 no per-agent tool storage: no table or column stores which tools an agent has as a list",
+    "NF-7 known_tenant_tables.txt updated, cross-tenant test needs no source change"
+  ],
+  "out_of_scope": [
+    "agent runtime tool invocation and MCP server dispatch (Stage-2)",
+    "BYO-LLM secret-handle custody (T-0025)",
+    "invoke-grant agent-to-agent invocation (T-0024)",
+    "agent provisioning API POST /agents (T-0042)",
+    "role_criticality computation from mcp_tool.declares (T-0040)",
+    "budget reservation at invoke-time (E5.9 Stage-2)",
+    "BYO-LLM data-egress policy enforcement at invoke-time (E5.10 Stage-2)",
+    "HTTP endpoints serving the toolset query",
+    "UI for browsing the tool registry",
+    "agent_card schema beyond employee.id identity reference (T-0020)",
+    "effect_resource rows themselves (T-0034 owns that table)",
+    "toolset enumeration at BPMN deploy-time (T-0027)",
+    "A2A call-graph breakers (E5.8 Stage-2)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Migration file migrations/040_mcp_tool.sql exists; has CREATE TABLE choros.mcp_tool with PK (tenant_id, id), UNIQUE (tenant_id, name), and all 9 columns from FR-1 with correct types.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "mcp_tool has FORCE ROW LEVEL SECURITY and a USING (tenant_id = current_setting('choros.tenant_id', true)::uuid) policy.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "A cross-tenant read on mcp_tool (tenant B context, tenant A data) returns 0 rows.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "A cross-tenant write on mcp_tool (tenant B context, tenant A tenant_id) is rejected (0 rows inserted / RLS violation).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "ci/checks/known_tenant_tables.txt contains the line 'mcp_tool'; the cross-tenant CI tests pass for mcp_tool without modification to the test source.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "Dev seed in migration 040: at least 3 representative mcp_tool rows seeded with ON CONFLICT DO NOTHING, covering one integration_endpoint tool, one messaging_channel tool, and one pure-compute tool (empty declares).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "pure_compute consistency for empty declares: a mcp_tool row with declares='[]'::jsonb has pure_compute=true; the DB CHECK constraint rejects declares='[]'::jsonb with pure_compute=false.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "pure_compute consistency for non-empty declares: the TS write path sets pure_compute=false for any row with at least one valid EffectDeclaration in declares; the stored value matches classifyTool(declares).pure.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "Malformed declares (invalid JSON, wrong element shape, unknown kind value) causes the TS write path to return a typed error before INSERT/UPDATE; the row is not persisted.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "resolveAgentToolset returns only tools whose full resource_ops set is covered by at least one effective grant held by the agent's roles.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "Adding a grant to a role adds the associated tool to resolveAgentToolset output for an agent holding that role; revoking the grant removes the tool.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "An agent with zero roles has an empty resolved toolset (0 tools returned by resolveAgentToolset), even if mcp_tool rows exist.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "resolveAgentToolset is deterministic: calling it twice with identical inputs (same grants snapshot, same tools, same nowMs) returns deep-equal results.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "resolveAgentToolset uses only injected GrantSource and McpToolSource ports (no direct DB access, no pg/fs/net imports in src/core/mcp-tool-registry.ts).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "No existing export in grant-lattice.ts, object-handle.ts, effect-resource.ts, or types.ts is modified (byte-frozen check on those files after T-0043 commit).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "ci/checks/single-resolver.sh (T-0015/T-0021) exits 0 after T-0043's commit.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "src/core/mcp-tool-registry.ts imports EffectDeclaration, EffectKind, classifyTool, verifyEffectGrants from ./effect-resource.js WITHOUT re-declaring those types locally.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "tsc --noEmit, eslint, and npm run fitness (existing checks) are all green after T-0043's commit.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-19",
+      "text": "choros_app role has SELECT, INSERT, UPDATE, DELETE on mcp_tool and no DDL.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-20",
+      "text": "Migration 040 is idempotent: running the migration runner twice produces no error.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-21",
+      "text": "A mcp_tool row with non-empty resource_ops is included in resolveAgentToolset output only when ALL {resourceType, operation} pairs are covered; a missing grant for even one pair excludes the tool.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-22",
+      "text": "A tool with empty resource_ops and empty declares (pure_compute=true) is reachable for any agent that holds at least one grant.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-23",
+      "text": "No table or column in the schema stores a per-agent tool list: grep -r 'agent_tool\\|agent_tools\\|tool_list' migrations/ returns 0 matches.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0043-mcp-tool-registry.spec.md"
+}

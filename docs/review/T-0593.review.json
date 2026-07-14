@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0593",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/db/bundle-coherence.test.ts:100-112 (HANGING_RECORD_GRANTS_SQL)",
+      "issue": "Не блокирует — подтверждение корректности, не дефект. Фикс дословно реализует residual finding, зафиксированный в docs/test/T-0570.test-report.json (anti_false_pass_checks_performed[2] / residual_findings_nonblocking[0]): NULL-propagation в SQL three-valued logic позволял read+NULL-facet грантам с НЕПОЛНЫМ scope (например, '{\"kind\":\"node\"}' без hierarchy/nodeLevel/nodeId) ускользать от амендированного FF-13 carve-out predicate, потому что внутренний AND-chain редуцируется в SQL NULL (не false), а NOT(NULL)=NULL исключает строку из WHERE. Diff оборачивает исходный carve-out `NOT (...)` в `NOT COALESCE((...), false)` — семантически превращает 'NULL-как-false' до применения NOT, восстанавливая полную ловлю hanging-грантов для malformed/incomplete scope shapes.",
+      "suggestion": "Нет — фикс минимален и соответствует ранее рекомендованному follow-up."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "FF-13 (T-0082 invariant, amended T-0570 ADR §10)", "covered": true},
+    {"ac": "FF-RP-14 case (a) NON-sentinel scope caught", "covered": true},
+    {"ac": "FF-RP-14 case (b) non-read op caught", "covered": true},
+    {"ac": "FF-RP-14 case (c) exact sentinel read shape exempt", "covered": true},
+    {"ac": "FF-RP-14 case (d) planted INCOMPLETE-scope NULL-propagation caught via COALESCE (new in this task)", "covered": true},
+    {"ac": "FF-RP-15 sentinel-literal coherence (unaffected by this diff)", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Diff minimality (git diff dev...HEAD --stat): 2 files changed, 70 insertions(+), 5 deletions(-) — ci/checks/db/bundle-coherence.test.ts (28 lines, the actual fix + planted test) and docs/handoff/T-0593.pr-handoff.json (47 lines, a new schema-validated handoff artifact, not code). No production src/ or migrations/ files touched. Commits: 1576d97 (fix + test), 94d359b (handoff doc).",
+    "SQL predicate change, byte-by-byte (git diff -- ci/checks/db/bundle-coherence.test.ts): line 105 'AND NOT (' -> 'AND NOT COALESCE(', line 110 added trailing comma after the sentinel-nodeId literal, line 111 added 'false' as COALESCE's second (fallback) argument, closing paren unchanged. The sentinel literal '00000000-0000-0000-0000-0000000000r0' is untouched (identical string before and after, confirmed via grep in diff output) — FF-RP-15 (read-pdp-sentinel-coherence.sh) is not implicated by this change and was independently re-run (PASS, see test-report).",
+    "SS10 sanctioned-comment integrity: read the full comment block above HANGING_RECORD_GRANTS_SQL (lines 83-99) after the diff — the bidirectional citation '// SANCTIONED CARVE-OUT -- T-0570 ADR SS10 x T-0082 FR-3/AC-13: NULL-facet legal ONLY for the platform default-open READ grant...' is present, byte-identical to the pre-T-0593 version; the diff does not touch these lines at all (confirmed: diff hunks start at line 102, the comment block ends at line 99). No drift, no silent edit of the sanction text.",
+    "Semantic verification of COALESCE vs case (c) exempt (manual read + live DB confirmation, see test-report for the executed proof): case (c) plants scope={kind:node,hierarchy:resource,nodeLevel:application,nodeId:'...r0'} with operation=read -- every AND-branch inside COALESCE evaluates true, giving inner-expression=true (not NULL), so COALESCE(true,false)=true, NOT true=false -- row does NOT match WHERE, stays exempt exactly as before the fix. No regression: the carve-out's positive path is unaffected by wrapping it in COALESCE, because COALESCE is a no-op when its argument is already non-NULL (true or false).",
+    "Semantic verification of COALESCE vs new case (d) (manual read + live DB confirmation): case (d) plants scope={\"kind\":\"node\"} only -- scope->>'hierarchy' extracts SQL NULL, so 'NULL = ''resource''' is NULL, and the whole AND-chain collapses to NULL under three-valued logic. Pre-fix: NOT(NULL)=NULL, WHERE excludes the row (false-negative -- the hanging grant escapes FF-13/FF-RP-14 undetected). Post-fix: COALESCE(NULL,false)=false, NOT false=true, WHERE includes the row (correctly caught as hanging). This is the exact NULL-propagation defect this task closes.",
+    "Origin of the fix is traceable and pre-authorized: docs/test/T-0570.test-report.json explicitly recorded this as a non-blocking residual ('a follow-up could tighten the carve-out to AND NOT COALESCE((...), false) to restore full tripwire coverage over malformed rows') -- T-0593 implements exactly this, so the change is not a spontaneous re-litigation of the ADR §10 carve-out design, it is the pre-scoped follow-up landing.",
+    "ADR §10 (docs/adr/ADR-T0570-read-pdp.md) still documents the ORIGINAL non-COALESCE predicate verbatim in its §10.2 contract SQL block -- this is a pre-existing, expected staleness (the ADR is history-of-decision per §10.3 p.2: 'the live contract of the invariant = the amended test + this SS10', not the reverse); T-0593 does not edit the ADR, consistent with the T-0033 sanctioned-amendment pattern already established for T-0570 itself. Flagging for awareness, not as a blocker.",
+    "Anti-false-pass regression check performed independently in the TEST phase of this review (see docs/test/T-0593.test-report.json planted_case_regression_check): temporarily reverted only the SQL predicate to the pre-fix 'NOT (...)' form (planted case (d) test code left untouched), re-ran FF-RP-14 -- case (d) assertion failed red as expected, proving the new test is a real regression guard and not a false-positive placebo. Fix restored via git checkout --, working tree confirmed clean before and after.",
+    "No foreign-scope edits found: the only files touched are the one test file and the one new handoff doc; no other ci/checks/*.sh, no migrations/*, no src/* files appear in the diff."
+  ]
+}

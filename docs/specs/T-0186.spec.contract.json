@@ -1,0 +1,71 @@
+{
+  "task_id": "T-0186",
+  "status": "ready",
+  "summary": "Add explicit store-mode pin (additive 'storeMode' parameter) to createServer, createJobStore, createTimerStore, createOutboxStore, and handleRequest so that tests can declare in-memory store usage without relying on ambient DATABASE_URL absence. Fix externalWorker.e2e.test.ts (7 failing tests in default-store suite) and health.test.ts (2 failing tests AC-1/AC-4) to pass both with and without ambient DATABASE_URL.",
+  "functional": [
+    "FR-1: createJobStore/createTimerStore/createOutboxStore accept additive optional mode?: 'auto' | 'memory'; 'memory' forces in-memory regardless of DATABASE_URL",
+    "FR-2: createServer accepts additive optional third parameter storeMode?: 'auto' | 'memory', forwarded to all three store factories",
+    "FR-3: handleRequest accepts additive optional third parameter storeMode?: 'auto' | 'memory'; module-level lazy router cache is keyed by mode to prevent cross-contamination",
+    "FR-4: externalWorker.e2e.test.ts 'default store' beforeAll calls createServer(undefined, undefined, 'memory')",
+    "FR-5: health.test.ts all four handleRequest(req, res) calls pass 'memory' as third argument",
+    "FR-6: StoreMode type exported from server.ts"
+  ],
+  "non_functional": [
+    "NF-1: additive only — no existing call sites modified; all zero/one-arg signatures preserved backward-compatible",
+    "NF-2: explicit storeMode parameter is immune to vitest forked-worker env mutation issues",
+    "NF-3: mode parameter does not change http.Server interface or Router dispatch protocol",
+    "NF-4: health handler is synchronous in memory mode (no PostgresJobStore branch, no timerStore, no outboxStore) — satisfies synchronous assertion pattern in health.test.ts",
+    "NF-5: no new files; changes in src/server.ts and two test files only"
+  ],
+  "out_of_scope": [
+    "Changing production env-selection logic ('auto' mode behaviour frozen)",
+    "Adding a 'postgres' explicit mode",
+    "Changing InMemoryJobStore or PostgresJobStore implementations",
+    "Any changes to ci/checks/*.sh files",
+    "Fixing the async/synchronous health.test.ts pattern beyond store-mode pin"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "npm test (no DATABASE_URL): externalWorker.e2e.test.ts — all 22 tests pass; 'default store' beforeAll uses createServer(undefined, undefined, 'memory')",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "DATABASE_URL=postgres://... npm test: externalWorker.e2e.test.ts — all 22 tests pass (store pinned to memory; ambient URL irrelevant)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "npm test (no DATABASE_URL): health.test.ts — all 4 tests pass; handleRequest(req, res, 'memory') used in all four test bodies",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "DATABASE_URL=postgres://... npm test: health.test.ts — all 4 tests pass (memory pin prevents async race)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Production wiring unchanged: createServer() with no arguments uses storeMode='auto' default — env-based store selection preserved. Confirmed by static read of src/server.ts default parameter.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "npx tsc --noEmit exits 0. No new TypeScript type errors introduced.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "npm test (no env) exits 0 with no regressions across the full vitest suite.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "npm run fitness exits 0. No fitness checks broken by the additive change.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0186-store-mode-pin.spec.md"
+}

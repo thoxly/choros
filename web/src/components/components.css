@@ -1,0 +1,778 @@
+/* ============================================================================
+   CHOROS — components.css
+   Стилизация примитивов. Только токены --chs-*, никаких хардкод-значений.
+   ============================================================================ */
+
+/* ---------------- ExecutorBadge ---------------- */
+.chs-exec {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chs-space-3);
+  height: 22px;
+  padding: 0 var(--chs-space-4) 0 var(--chs-space-3);
+  border-radius: var(--chs-radius-2);
+  font-size: var(--chs-text-sm);
+  font-weight: var(--chs-weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.chs-exec__glyph { width: 9px; height: 9px; flex: none; display: block; }
+.chs-exec--human   { color: var(--chs-exec-human);   background: var(--chs-exec-human-soft);   border-color: var(--chs-exec-human-border); }
+.chs-exec--agent   { color: var(--chs-exec-agent);   background: var(--chs-exec-agent-soft);   border-color: var(--chs-exec-agent-border); }
+.chs-exec--service { color: var(--chs-exec-service); background: var(--chs-exec-service-soft); border-color: var(--chs-exec-service-border); }
+.chs-exec--bare { background: transparent; border-color: transparent; padding-left: 0; }
+.chs-exec--dot { gap: var(--chs-space-3); }
+/* T-0648 FIX-3: deactivated actor — muted + struck-through name. The
+   «(деактивирован)» marker in the accessible name (ExecutorBadge chs-sr-only)
+   carries the meaning for AT; this is the visual echo (never colour-only). */
+.chs-exec--deactivated { opacity: 0.55; }
+.chs-exec--deactivated > span:not(.chs-sr-only) { text-decoration: line-through; }
+
+/* ---------------- MonoId ---------------- */
+.chs-monoid {
+  font-family: var(--chs-font-mono);
+  font-size: var(--chs-text-sm);
+  letter-spacing: var(--chs-tracking-mono);
+  color: var(--chs-color-text-muted);
+  font-feature-settings: "tnum" 1, "zero" 1;
+  white-space: nowrap;
+}
+.chs-monoid--chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--chs-space-3);
+  border-radius: var(--chs-radius-1);
+  background: var(--chs-color-neutral-soft);
+  color: var(--chs-color-text);
+}
+.chs-monoid__pre { color: var(--chs-color-text-faint); }
+
+/* ---------------- ActorChip (T-0648) ---------------- */
+.chs-actorchip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chs-space-2);
+}
+
+/* ---------------- RecordRef (T-0648) ---------------- */
+.chs-recordref {
+  font-size: var(--chs-text-sm);
+}
+.chs-recordref--loading {
+  color: var(--chs-color-text-faint);
+  font-style: italic;
+}
+/* T-0735 / T-0756: the honest «Запись недоступна» sentinel — a source record the
+   viewing actor cannot read (fetch 404, or a projection with no title). Muted,
+   never a link, and NEVER the raw record UUID as text (the id lives only in the
+   title tooltip). ONE class for both the projection branch and the fetch path so
+   they style «недоступна» identically. */
+.chs-recordref--unresolved {
+  color: var(--chs-color-text-muted);
+  font-style: italic;
+}
+.chs-recordref--link {
+  color: var(--chs-color-accent);
+  text-decoration: none;
+}
+.chs-recordref--link:hover {
+  text-decoration: underline;
+}
+
+/* ---------------- NodeRef (T-0733) ---------------- */
+.chs-noderef {
+  font-size: var(--chs-text-sm);
+}
+.chs-noderef--unresolved {
+  color: var(--chs-color-text-faint);
+  font-style: italic;
+}
+
+/* ---------------- ProcessRef (T-0683) ---------------- */
+.chs-processref {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+.chs-processref__name {
+  font-size: var(--chs-text-sm);
+  color: var(--chs-color-text);
+  font-weight: var(--chs-weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.chs-processref__record {
+  font-size: var(--chs-text-xs);
+  color: var(--chs-color-text-muted);
+}
+
+/* ---------------- StepRef (T-0687) — humanized process step ---------------- */
+.chs-stepref {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chs-space-3);
+  min-width: 0;
+}
+.chs-stepref__name {
+  font-size: var(--chs-text-sm);
+  color: var(--chs-color-text);
+  font-weight: var(--chs-weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* ---------------- Mono value (числа/таймстамп/бюджет) ---------------- */
+.chs-mono {
+  font-family: var(--chs-font-mono);
+  font-size: var(--chs-text-sm);
+  letter-spacing: var(--chs-tracking-mono);
+  font-feature-settings: "tnum" 1, "zero" 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- StatusChip ---------------- */
+.chs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chs-space-3);
+  height: 20px;
+  padding: 0 var(--chs-space-4);
+  border-radius: var(--chs-radius-1);
+  font-size: var(--chs-text-xs);
+  font-weight: var(--chs-weight-medium);
+  letter-spacing: var(--chs-tracking-wide);
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+}
+.chs-chip__dot { width: 6px; height: 6px; border-radius: var(--chs-radius-full); flex: none; }
+.chs-chip--running { color: var(--chs-color-info);    background: var(--chs-color-info-soft); }
+.chs-chip--running .chs-chip__dot { background: var(--chs-color-info); box-shadow: 0 0 0 3px var(--chs-color-info-soft); }
+.chs-chip--done    { color: var(--chs-color-success); background: var(--chs-color-success-soft); }
+.chs-chip--done    .chs-chip__dot { background: var(--chs-color-success); }
+.chs-chip--failed  { color: var(--chs-color-danger);  background: var(--chs-color-danger-soft); }
+.chs-chip--failed  .chs-chip__dot { background: var(--chs-color-danger); }
+.chs-chip--waiting { color: var(--chs-color-warning); background: var(--chs-color-warning-soft); }
+.chs-chip--waiting .chs-chip__dot { background: var(--chs-color-warning); }
+.chs-chip--paused  { color: var(--chs-color-text-muted); background: var(--chs-color-neutral-soft); }
+.chs-chip--paused  .chs-chip__dot { background: var(--chs-color-text-muted); }
+
+@keyframes chs-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.chs-chip--running .chs-chip__dot { animation: chs-pulse 1.8s ease-in-out infinite; }
+
+/* ---------------- Button ---------------- */
+.chs-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--chs-space-3);
+  height: var(--chs-control-h);
+  padding: 0 var(--chs-space-6);
+  border-radius: var(--chs-radius-2);
+  font-family: var(--chs-font-sans);
+  font-size: var(--chs-text-base);
+  font-weight: var(--chs-weight-medium);
+  line-height: 1;
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 90ms ease, border-color 90ms ease, color 90ms ease;
+  user-select: none;
+}
+.chs-btn:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
+.chs-btn--sm { height: var(--chs-control-h-sm); padding: 0 var(--chs-space-5); font-size: var(--chs-text-sm); }
+.chs-btn--primary   { background: var(--chs-color-accent); color: var(--chs-color-accent-fg); }
+.chs-btn--primary:hover { background: var(--chs-color-accent-hover); }
+.chs-btn--secondary { background: var(--chs-color-surface-raised); color: var(--chs-color-text); border-color: var(--chs-color-border-strong); }
+.chs-btn--secondary:hover { background: var(--chs-color-overlay); border-color: var(--chs-color-border-strong); }
+.chs-btn--ghost     { background: transparent; color: var(--chs-color-text-muted); }
+.chs-btn--ghost:hover { background: var(--chs-color-hover); color: var(--chs-color-text); }
+.chs-btn--danger    { background: transparent; color: var(--chs-color-danger); border-color: var(--chs-color-danger-soft); }
+.chs-btn--danger:hover { background: var(--chs-color-danger-soft); }
+.chs-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.chs-btn__glyph { width: 12px; height: 12px; flex: none; }
+
+/* ---------------- Input ---------------- */
+.chs-field { display: flex; flex-direction: column; gap: var(--chs-space-3); }
+.chs-label { font-size: var(--chs-text-xs); color: var(--chs-color-text-muted); font-weight: var(--chs-weight-medium); letter-spacing: var(--chs-tracking-wide); text-transform: uppercase; }
+.chs-input {
+  height: var(--chs-control-h);
+  padding: 0 var(--chs-space-5);
+  background: var(--chs-color-bg);
+  border: 1px solid var(--chs-color-border-strong);
+  border-radius: var(--chs-radius-2);
+  color: var(--chs-color-text);
+  font-family: var(--chs-font-sans);
+  font-size: var(--chs-text-base);
+  width: 100%;
+  transition: border-color 90ms ease, box-shadow 90ms ease;
+}
+.chs-input::placeholder { color: var(--chs-color-text-faint); }
+.chs-input:focus { outline: none; border-color: var(--chs-color-accent); box-shadow: 0 0 0 3px var(--chs-color-accent-soft); }
+.chs-input--mono { font-family: var(--chs-font-mono); letter-spacing: var(--chs-tracking-mono); }
+.chs-input--invalid { border-color: var(--chs-color-danger); }
+.chs-input--invalid:focus { box-shadow: 0 0 0 3px var(--chs-color-danger-soft); }
+/* T-0487 (T-0404 follow-up): read-only and disabled affordance.
+   Previously a read-only scalar input looked identical to an editable one —
+   no visual cue that the field is locked. Use design-system tokens so the
+   treatment works in both light and dark themes. */
+.chs-input:read-only,
+.chs-input:disabled {
+  background: var(--chs-color-neutral-soft);
+  color: var(--chs-color-text-muted);
+  border-color: var(--chs-color-border);
+  cursor: not-allowed;
+  opacity: 1; /* override browser default; explicit muted color is more legible */
+}
+.chs-input:read-only:focus,
+.chs-input:disabled:focus {
+  outline: none;
+  border-color: var(--chs-color-border);
+  box-shadow: none;
+}
+
+/* ---------------- Select (нативный, токен-стилизованный) ---------------- */
+/* Гасим нативную стрелку (appearance:none) и рисуем свою KitIcon-шеврон, чтобы
+   контрол выглядел одинаково в обеих темах. Фон/текст/граница — те же токены,
+   что у .chs-input, поэтому select читаем и в светлой, и в тёмной. */
+.chs-select-wrap { position: relative; display: flex; }
+.chs-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  /* место под собственную стрелку справа */
+  padding-right: var(--chs-space-9);
+  cursor: pointer;
+}
+.chs-select::-ms-expand { display: none; }
+.chs-select__arrow {
+  position: absolute;
+  top: 50%;
+  right: var(--chs-space-5);
+  transform: translateY(-50%);
+  width: 14px; height: 14px;
+  color: var(--chs-color-text-muted);
+  pointer-events: none;
+}
+.chs-select:disabled { opacity: 0.45; cursor: not-allowed; }
+.chs-select:disabled + .chs-select__arrow { opacity: 0.45; }
+
+/* ---------------- BudgetMeter ---------------- */
+.chs-budget { display: flex; flex-direction: column; gap: var(--chs-space-2); min-width: 120px; }
+.chs-budget__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--chs-space-4); }
+.chs-budget__val { font-family: var(--chs-font-mono); font-size: var(--chs-text-sm); letter-spacing: var(--chs-tracking-mono); font-variant-numeric: tabular-nums; color: var(--chs-color-text); white-space: nowrap; }
+.chs-budget__total { color: var(--chs-color-text-faint); }
+.chs-budget__track { height: 4px; border-radius: var(--chs-radius-1); background: var(--chs-color-track); overflow: hidden; }
+.chs-budget__fill { height: 100%; border-radius: var(--chs-radius-1); background: var(--chs-color-accent); transition: width 240ms ease; }
+.chs-budget__fill--warn { background: var(--chs-color-warning); }
+.chs-budget__fill--over { background: var(--chs-color-danger); }
+
+/* ---------------- TaskRow ---------------- */
+.chs-taskrow {
+  display: grid;
+  grid-template-columns: 16px 1fr 132px 96px 150px 84px;
+  align-items: center;
+  gap: var(--chs-space-6);
+  height: var(--chs-row-h);
+  padding: 0 var(--chs-space-6);
+  border-bottom: 1px solid var(--chs-color-border-faint);
+  cursor: default;
+}
+.chs-taskrow:hover { background: var(--chs-color-hover); }
+.chs-taskrow__marker { width: 6px; height: 6px; border-radius: var(--chs-radius-full); }
+.chs-taskrow__name { font-size: var(--chs-text-base); color: var(--chs-color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chs-taskrow__name small { display:block; font-size: var(--chs-text-xs); color: var(--chs-color-text-faint); }
+
+/* ---------------- AuditEvent ---------------- */
+.chs-audit {
+  display: grid;
+  grid-template-columns: 168px 22px 1fr;
+  align-items: start;
+  gap: var(--chs-space-6);
+  padding: var(--chs-space-4) var(--chs-space-6);
+  border-left: 2px solid var(--chs-color-border);
+  font-size: var(--chs-text-sm);
+}
+.chs-audit:hover { background: var(--chs-color-hover); border-left-color: var(--chs-color-accent); }
+.chs-audit__time { font-family: var(--chs-font-mono); font-size: var(--chs-text-xs); color: var(--chs-color-text-faint); letter-spacing: var(--chs-tracking-mono); padding-top: 1px; }
+.chs-audit__rail { display: flex; justify-content: center; padding-top: 3px; }
+.chs-audit__rail .chs-exec__glyph { width: 8px; height: 8px; }
+.chs-audit__body { color: var(--chs-color-text-muted); }
+.chs-audit__body b { color: var(--chs-color-text); font-weight: var(--chs-weight-medium); }
+
+/* ---------------- DenseTable (canonical) ----------------
+   ЕДИНСТВЕННЫЙ источник истины для плотных таблиц. `.chs-itable` (исторически
+   в app-shell/app.css, потребляется 6+ экранами) — алиас этого же блока: оба
+   класса делят селекторный список, чтобы не было расходящегося дубля.
+   Шапка sticky (top:0, z-index над строками); ряды — высота --chs-row-h. */
+.chs-table, .chs-itable { width: 100%; border-collapse: collapse; font-size: var(--chs-text-base); }
+.chs-table thead th, .chs-itable thead th {
+  text-align: left;
+  font-size: var(--chs-text-2xs);
+  font-weight: var(--chs-weight-semibold);
+  letter-spacing: var(--chs-tracking-wide);
+  text-transform: uppercase;
+  color: var(--chs-color-text-faint);
+  padding: 0 var(--chs-space-6);
+  height: 30px;
+  border-bottom: 1px solid var(--chs-color-border);
+  background: var(--chs-color-surface-2);
+  position: sticky; top: 0; z-index: 2;
+  white-space: nowrap;
+}
+.chs-table tbody td, .chs-itable tbody td {
+  padding: 0 var(--chs-space-6);
+  height: var(--chs-row-h);
+  border-bottom: 1px solid var(--chs-color-border-faint);
+  color: var(--chs-color-text);
+  vertical-align: middle;
+}
+.chs-table tbody tr:hover td, .chs-itable tbody tr:hover td { background: var(--chs-color-hover); }
+.chs-table tbody tr[data-taken="true"] td, .chs-itable tbody tr[data-taken="true"] td { opacity: 0.55; }
+.chs-table td.chs-num, .chs-table th.chs-num,
+.chs-itable td.chs-num, .chs-itable th.chs-num { text-align: right; font-family: var(--chs-font-mono); letter-spacing: var(--chs-tracking-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Выравнивающие модификаторы ячеек (исторически на .chs-itable, теперь общие). */
+.chs-table td.chs-r, .chs-itable td.chs-r { text-align: right; }
+.chs-table td.chs-c, .chs-itable td.chs-c { text-align: center; }
+
+/* ---------------- Surface / panel (для витрины) ---------------- */
+.chs-panel {
+  background: var(--chs-color-surface);
+  border: 1px solid var(--chs-color-border);
+  border-radius: var(--chs-radius-3);
+  overflow: hidden;
+}
+
+/* ============================================================================
+   ОБЯЗАТЕЛЬНЫЙ KIT (OBLIK) — поверхности и состояния.
+   Только токены --chs-*. Ноль хардкод-цветов/отступов/теней/радиусов.
+   ============================================================================ */
+
+/* ---------------- Kit-иконки / Spinner ---------------- */
+.chs-kiticon { display: inline-block; vertical-align: middle; flex: none; }
+.chs-spinner { display: inline-block; vertical-align: middle; flex: none; animation: chs-spin 0.7s linear infinite; }
+@keyframes chs-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .chs-spinner { animation-duration: 1.6s; }
+}
+
+/* ---------------- Button: loading-вариант ---------------- */
+.chs-btn--loading { cursor: progress; }
+.chs-btn__spinner { width: 14px; height: 14px; }
+.chs-btn--sm .chs-btn__spinner { width: 12px; height: 12px; }
+
+/* ---------------- Field: hint ---------------- */
+.chs-hint { font-size: var(--chs-text-xs); color: var(--chs-color-text-faint); }
+.chs-hint--invalid { color: var(--chs-color-danger); }
+
+/* ---------------- SlugField (T-0650 — авто-слаги) ---------------- */
+/* Живая подпись-превью «будет создан как … · изменить» перед ручным
+   редактированием слага. Ноль хардкод-цвета — только --chs-* токены. */
+.chs-slugfield-preview__row {
+  display: flex;
+  align-items: center;
+  gap: var(--chs-space-4);
+  min-height: var(--chs-control-h);
+}
+.chs-slugfield-preview__text {
+  font-size: var(--chs-text-sm);
+  color: var(--chs-color-text-muted);
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.chs-slugfield-preview__mono {
+  font-family: var(--chs-font-mono);
+  letter-spacing: var(--chs-tracking-mono);
+  color: var(--chs-color-text);
+}
+
+/* ---------------- Overlay (общий для Modal/Drawer) ---------------- */
+.chs-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--chs-z-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--chs-space-8);
+  /* затемнение = выделенный per-theme scrim-токен (затемняет в ОБЕИХ темах) */
+  background: var(--chs-color-scrim);
+  animation: chs-overlay-in 120ms ease;
+}
+.chs-overlay--drawer { padding: 0; }
+.chs-overlay--right { justify-content: flex-end; }
+.chs-overlay--left  { justify-content: flex-start; }
+@keyframes chs-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .chs-overlay { animation: none; } }
+
+.chs-overlay__close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; flex: none;
+  border: none; background: transparent; cursor: pointer;
+  color: var(--chs-color-text-muted);
+  border-radius: var(--chs-radius-2);
+  transition: background 90ms ease, color 90ms ease;
+}
+.chs-overlay__close:hover { background: var(--chs-color-hover); color: var(--chs-color-text); }
+.chs-overlay__close:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
+
+/* ---------------- Modal / Dialog ---------------- */
+.chs-modal {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - var(--chs-space-10));
+  background: var(--chs-color-surface);
+  border: 1px solid var(--chs-color-border);
+  border-radius: var(--chs-radius-4);
+  box-shadow: var(--chs-shadow-3);
+  width: 100%;
+  animation: chs-modal-in 140ms ease;
+}
+.chs-modal--sm { max-width: 380px; }
+.chs-modal--md { max-width: 540px; }
+.chs-modal--lg { max-width: 760px; }
+@keyframes chs-modal-in { from { opacity: 0; transform: translateY(6px) scale(0.99); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .chs-modal { animation: none; } }
+
+.chs-modal__head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--chs-space-5);
+  height: var(--chs-panel-header-h);
+  padding: 0 var(--chs-space-5) 0 var(--chs-space-7);
+  border-bottom: 1px solid var(--chs-color-border);
+  flex: none;
+}
+.chs-modal__title { margin: 0; font-size: var(--chs-text-lg); font-weight: var(--chs-weight-semibold); letter-spacing: var(--chs-tracking-tight); color: var(--chs-color-text); }
+.chs-modal__body { padding: var(--chs-space-7); overflow: auto; color: var(--chs-color-text); }
+.chs-modal__foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: var(--chs-space-5);
+  padding: var(--chs-space-5) var(--chs-space-7);
+  border-top: 1px solid var(--chs-color-border);
+  background: var(--chs-color-surface-2);
+  flex: none;
+}
+
+/* ---------------- Drawer ---------------- */
+.chs-drawer {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 440px;
+  height: 100%;
+  background: var(--chs-color-surface);
+  box-shadow: var(--chs-shadow-3);
+  animation: chs-drawer-in-right 160ms ease;
+}
+.chs-drawer--right { border-left: 1px solid var(--chs-color-border); animation-name: chs-drawer-in-right; }
+.chs-drawer--left  { border-right: 1px solid var(--chs-color-border); animation-name: chs-drawer-in-left; }
+@keyframes chs-drawer-in-right { from { transform: translateX(100%); } to { transform: none; } }
+@keyframes chs-drawer-in-left  { from { transform: translateX(-100%); } to { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .chs-drawer { animation: none; } }
+
+.chs-drawer__head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--chs-space-5);
+  height: var(--chs-bar-h);
+  padding: 0 var(--chs-space-5) 0 var(--chs-space-7);
+  border-bottom: 1px solid var(--chs-color-border);
+  flex: none;
+}
+.chs-drawer__title { margin: 0; font-size: var(--chs-text-lg); font-weight: var(--chs-weight-semibold); letter-spacing: var(--chs-tracking-tight); color: var(--chs-color-text); }
+.chs-drawer__body { padding: var(--chs-space-7); overflow: auto; flex: 1; color: var(--chs-color-text); }
+.chs-drawer__foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: var(--chs-space-5);
+  padding: var(--chs-space-5) var(--chs-space-7);
+  border-top: 1px solid var(--chs-color-border);
+  background: var(--chs-color-surface-2);
+  flex: none;
+}
+
+/* ---------------- Состояния: Empty / Loading / Error ---------------- */
+.chs-state {
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  gap: var(--chs-space-5);
+  padding: var(--chs-space-10) var(--chs-space-8);
+  color: var(--chs-color-text-muted);
+}
+.chs-state--compact { padding: var(--chs-space-8) var(--chs-space-6); }
+.chs-state__icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px;
+  color: var(--chs-color-text-faint);
+  background: var(--chs-color-neutral-soft);
+  border-radius: var(--chs-radius-full);
+}
+.chs-state__icon--error { color: var(--chs-color-danger); background: var(--chs-color-danger-soft); }
+.chs-state__title { font-size: var(--chs-text-md); font-weight: var(--chs-weight-semibold); color: var(--chs-color-text); }
+.chs-state__desc { font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); max-width: 42ch; line-height: var(--chs-leading-normal); }
+.chs-state__action { margin-top: var(--chs-space-3); }
+.chs-state__spinner { width: 22px; height: 22px; color: var(--chs-color-accent); }
+
+/* ---------------- Skeleton ---------------- */
+.chs-skeleton {
+  display: block;
+  background: var(--chs-color-neutral-soft);
+  border-radius: var(--chs-radius-2);
+  position: relative;
+  overflow: hidden;
+}
+.chs-skeleton--line   { height: var(--chs-text-base); width: 100%; }
+.chs-skeleton--block  { height: 64px; width: 100%; }
+.chs-skeleton--circle { width: 36px; height: 36px; border-radius: var(--chs-radius-full); }
+.chs-skeleton::after {
+  content: "";
+  position: absolute; inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--chs-color-hover), transparent);
+  animation: chs-shimmer 1.4s ease-in-out infinite;
+}
+.chs-skeleton-group { display: flex; flex-direction: column; gap: var(--chs-space-4); }
+@keyframes chs-shimmer { 100% { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) {
+  .chs-skeleton::after { animation: none; display: none; }
+}
+
+/* ---------------- Popover ---------------- */
+.chs-popover-root { position: relative; display: inline-flex; }
+.chs-popover {
+  position: absolute;
+  z-index: var(--chs-z-popover);
+  min-width: 180px;
+  background: var(--chs-color-surface);
+  border: 1px solid var(--chs-color-border);
+  border-radius: var(--chs-radius-3);
+  box-shadow: var(--chs-shadow-2);
+  padding: var(--chs-space-3);
+  animation: chs-pop-in 100ms ease;
+}
+@keyframes chs-pop-in { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .chs-popover { animation: none; } }
+.chs-popover--bottom { top: calc(100% + var(--chs-space-3)); }
+.chs-popover--top    { bottom: calc(100% + var(--chs-space-3)); }
+.chs-popover--right  { left: calc(100% + var(--chs-space-3)); top: 0; }
+.chs-popover--left   { right: calc(100% + var(--chs-space-3)); top: 0; }
+.chs-popover--align-start  { left: 0; }
+.chs-popover--align-end    { right: 0; }
+.chs-popover--align-center { left: 50%; transform: translateX(-50%); }
+.chs-popover--top.chs-popover--align-center,
+.chs-popover--bottom.chs-popover--align-center { left: 50%; }
+.chs-popover--right.chs-popover--align-start,
+.chs-popover--left.chs-popover--align-start { left: auto; }
+
+/* ---------------- Tooltip ---------------- */
+.chs-tooltip { position: relative; display: inline-flex; }
+.chs-tooltip__trigger { display: inline-flex; border-radius: var(--chs-radius-1); }
+.chs-tooltip__trigger:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 2px; }
+.chs-tooltip__bubble {
+  position: absolute;
+  z-index: var(--chs-z-tooltip);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 90ms ease, transform 90ms ease;
+  white-space: nowrap;
+  font-size: var(--chs-text-xs);
+  line-height: 1.3;
+  color: var(--chs-color-text-inverse);
+  background: var(--chs-color-text);
+  padding: var(--chs-space-2) var(--chs-space-4);
+  border-radius: var(--chs-radius-2);
+  box-shadow: var(--chs-shadow-2);
+  left: 50%;
+  margin-left: -50%;
+  width: max-content;
+  max-width: 240px;
+  text-align: center;
+}
+.chs-tooltip__bubble--top    { bottom: calc(100% + var(--chs-space-3)); left: 50%; transform: translateX(-50%) translateY(2px); }
+.chs-tooltip__bubble--bottom { top: calc(100% + var(--chs-space-3)); left: 50%; transform: translateX(-50%) translateY(-2px); }
+.chs-tooltip__bubble--left   { right: calc(100% + var(--chs-space-3)); top: 50%; left: auto; margin-left: 0; transform: translateY(-50%) translateX(2px); }
+.chs-tooltip__bubble--right  { left: calc(100% + var(--chs-space-3)); top: 50%; margin-left: 0; transform: translateY(-50%) translateX(-2px); }
+.chs-tooltip:hover .chs-tooltip__bubble,
+.chs-tooltip__trigger:focus-visible + .chs-tooltip__bubble,
+.chs-tooltip:focus-within .chs-tooltip__bubble {
+  opacity: 1;
+}
+.chs-tooltip:hover .chs-tooltip__bubble--top,
+.chs-tooltip:focus-within .chs-tooltip__bubble--top { transform: translateX(-50%) translateY(0); }
+.chs-tooltip:hover .chs-tooltip__bubble--bottom,
+.chs-tooltip:focus-within .chs-tooltip__bubble--bottom { transform: translateX(-50%) translateY(0); }
+.chs-tooltip:hover .chs-tooltip__bubble--left,
+.chs-tooltip:focus-within .chs-tooltip__bubble--left { transform: translateY(-50%) translateX(0); }
+.chs-tooltip:hover .chs-tooltip__bubble--right,
+.chs-tooltip:focus-within .chs-tooltip__bubble--right { transform: translateY(-50%) translateX(0); }
+@media (prefers-reduced-motion: reduce) {
+  .chs-tooltip__bubble { transition: opacity 90ms ease; }
+}
+
+/* ---------------- Toast ---------------- */
+.chs-toast-viewport {
+  position: fixed;
+  z-index: var(--chs-z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: var(--chs-space-4);
+  padding: var(--chs-space-7);
+  pointer-events: none;
+  max-width: min(420px, 100vw);
+}
+.chs-toast-viewport--bottom-right { right: 0; bottom: 0; align-items: flex-end; }
+.chs-toast-viewport--bottom-left  { left: 0; bottom: 0; align-items: flex-start; }
+.chs-toast-viewport--top-right    { right: 0; top: 0; align-items: flex-end; }
+.chs-toast-viewport--top-left     { left: 0; top: 0; align-items: flex-start; }
+
+.chs-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--chs-space-4);
+  width: 100%;
+  min-width: 240px;
+  padding: var(--chs-space-5) var(--chs-space-5) var(--chs-space-5) var(--chs-space-6);
+  background: var(--chs-color-surface);
+  border: 1px solid var(--chs-color-border);
+  border-left: 3px solid var(--chs-color-border-strong);
+  border-radius: var(--chs-radius-3);
+  box-shadow: var(--chs-shadow-2);
+  animation: chs-toast-in 160ms ease;
+}
+@keyframes chs-toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .chs-toast { animation: none; } }
+.chs-toast--success { border-left-color: var(--chs-color-success); }
+.chs-toast--success .chs-toast__icon { color: var(--chs-color-success); }
+.chs-toast--error   { border-left-color: var(--chs-color-danger); }
+.chs-toast--error   .chs-toast__icon { color: var(--chs-color-danger); }
+.chs-toast--warning { border-left-color: var(--chs-color-warning); }
+.chs-toast--warning .chs-toast__icon { color: var(--chs-color-warning); }
+.chs-toast--info    { border-left-color: var(--chs-color-info); }
+.chs-toast--info    .chs-toast__icon { color: var(--chs-color-info); }
+.chs-toast__icon { flex: none; display: inline-flex; padding-top: 1px; }
+.chs-toast__body { flex: 1; min-width: 0; }
+.chs-toast__title { font-size: var(--chs-text-base); font-weight: var(--chs-weight-medium); color: var(--chs-color-text); }
+.chs-toast__msg { font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); line-height: var(--chs-leading-snug); }
+.chs-toast__action { flex: none; }
+.chs-toast__close {
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  border: none; background: transparent; cursor: pointer;
+  color: var(--chs-color-text-faint);
+  border-radius: var(--chs-radius-1);
+  transition: background 90ms ease, color 90ms ease;
+}
+.chs-toast__close:hover { background: var(--chs-color-hover); color: var(--chs-color-text); }
+.chs-toast__close:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
+
+/* ---------------- T-0599: Notice (персистентная плашка) ---------------- */
+/* В отличие от Toast — живёт в потоке экрана, нет auto-dismiss/close. Мягкий
+   -soft фон тона (не surface+border-left, как Toast) — читается как часть
+   контента экрана, не floating-уведомление. */
+.chs-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--chs-space-4);
+  width: 100%;
+  padding: var(--chs-space-5) var(--chs-space-6);
+  border-radius: var(--chs-radius-3);
+  border: 1px solid transparent;
+}
+.chs-notice--warning { background: var(--chs-color-warning-soft); border-color: var(--chs-color-warning); }
+.chs-notice--warning .chs-notice__icon { color: var(--chs-color-warning); }
+.chs-notice--error   { background: var(--chs-color-danger-soft);  border-color: var(--chs-color-danger); }
+.chs-notice--error   .chs-notice__icon { color: var(--chs-color-danger); }
+.chs-notice--success { background: var(--chs-color-success-soft); border-color: var(--chs-color-success); }
+.chs-notice--success .chs-notice__icon { color: var(--chs-color-success); }
+.chs-notice--info    { background: var(--chs-color-info-soft);    border-color: var(--chs-color-info); }
+.chs-notice--info    .chs-notice__icon { color: var(--chs-color-info); }
+.chs-notice__icon { flex: none; display: inline-flex; padding-top: 1px; }
+.chs-notice__body { flex: 1; min-width: 0; }
+.chs-notice__title { font-size: var(--chs-text-base); font-weight: var(--chs-weight-medium); color: var(--chs-color-text); }
+.chs-notice__msg { font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); line-height: var(--chs-leading-snug); }
+.chs-notice__action { flex: none; }
+
+/* ---------------- T-0547: Badge ---------------- */
+/* Inline-метка. Тон дублирует текстовое содержимое (§1.4.1). */
+.chs-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--chs-space-4);
+  border-radius: var(--chs-radius-1);
+  font-size: var(--chs-text-xs);
+  font-weight: var(--chs-weight-medium);
+  letter-spacing: var(--chs-tracking-wide);
+  white-space: nowrap;
+  line-height: 1;
+  border: 1px solid transparent;
+}
+.chs-badge--neutral { color: var(--chs-color-text-muted);  background: var(--chs-color-neutral-soft);  border-color: var(--chs-color-border-strong); }
+.chs-badge--info    { color: var(--chs-color-info);        background: var(--chs-color-info-soft); }
+.chs-badge--success { color: var(--chs-color-success);     background: var(--chs-color-success-soft); }
+.chs-badge--warning { color: var(--chs-color-warning);     background: var(--chs-color-warning-soft); }
+.chs-badge--danger  { color: var(--chs-color-danger);      background: var(--chs-color-danger-soft); }
+
+/* ---------------- T-0547: Card ---------------- */
+/* Поверхность с шапкой, телом и подвалом. role=region + aria-labelledby на
+   внешнем контейнере (OBLIK §4). Токены — only --chs-*. */
+.chs-card {
+  background: var(--chs-color-surface);
+  border: 1px solid var(--chs-color-border);
+  border-radius: var(--chs-radius-3);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.chs-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--chs-space-5);
+  padding: var(--chs-space-5) var(--chs-space-6);
+  border-bottom: 1px solid var(--chs-color-border);
+  flex: none;
+}
+.chs-card__title {
+  margin: 0;
+  font-size: var(--chs-text-base);
+  font-weight: var(--chs-weight-semibold);
+  color: var(--chs-color-text);
+}
+.chs-card__actions { display: flex; align-items: center; gap: var(--chs-space-4); flex: none; }
+.chs-card__body { padding: var(--chs-space-6); flex: 1; }
+.chs-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: var(--chs-space-4) var(--chs-space-6);
+  border-top: 1px solid var(--chs-color-border);
+  background: var(--chs-color-surface-2);
+  flex: none;
+}
+
+/* ---------------- T-0547: DataTable wrap + row states ---------------- */
+/* Контейнер scroll и доп. модификаторы строк (подсветка/блеклость).
+   Базовые стили таблицы (.chs-table) — в блоке «DenseTable (canonical)» выше. */
+.chs-table-wrap { overflow-x: auto; }
+.chs-table__row--hl td { background: var(--chs-color-success-soft) !important; }
+.chs-table__row--faded td { opacity: 0.55; }
+
+/* ---- T-0529: visually-hidden utility (screen-reader only) ---- */
+/* Visible to AT, hidden from sighted users. Standard clip-path approach avoids
+   display:none (removes from AT tree) and visibility:hidden (same). */
+.chs-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

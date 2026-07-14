@@ -1,0 +1,54 @@
+{
+  "task_id": "T-0015",
+  "status": "pr_open",
+  "branch": "task/T-0015-object-handles",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/object-handle.ts",
+    "src/__tests__/object-handle.test.ts",
+    "src/__tests__/object-handle.type-check.ts",
+    "ci/checks/object-handle-isolation.sh",
+    "ci/checks/no-record-in-variable.sh",
+    "ci/checks/single-resolver.sh",
+    "ci/checks/handle-uuid-binding.sh",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [],
+  "hardening": {
+    "review_finding": "R-1",
+    "change": "parseHandle now validates and reconstructs ref from identity-only fields via validateAndReconstructRef(). MalformedHandleError thrown for any ref with payload keys (data/fields/payload/view/snapshot), unknown keys, or unknown kind. Honest round-trip (AC-7) unaffected.",
+    "new_export": "MalformedHandleError",
+    "test_count_before": 345,
+    "test_count_after": 359,
+    "new_tests": 14,
+    "new_test_block": "FF-9 (R-1 hardening): fail-closed parseHandle ref validation"
+  },
+  "hardening_r2_r3": {
+    "review_findings": ["R-2", "R-3"],
+    "change": "parseHandle generalised to route through makeHandle after independent ref+facet validation. R-2 (facet payload bypass) closed via validateAndReconstructFacet() — any extra key, non-array fields, or non-string element in facet.fields throws MalformedHandleError. R-3 (cross-tenant on parse path) closed by passing validatedRef+tenantId into makeHandle which enforces the same cross-tenant binding as construction; parseHandle can no longer produce a handle that makeHandle would refuse. Wire handleId tamper detection: derived handleId compared against wire value after makeHandle; mismatch throws MalformedHandleError.",
+    "test_count_before": 359,
+    "test_count_after": 375,
+    "new_tests": 16,
+    "new_test_blocks": [
+      "FF-9-R2: parseHandle rejects facet payload (R-2 hardening)",
+      "FF-9-R3: parseHandle rejects cross-tenant ref (R-3 hardening)",
+      "FF-9-TAMPER: parseHandle rejects tampered handleId",
+      "FF-9-AC7: honest round-trip (AC-7) — all 3 ref kinds × ±facet"
+    ]
+  },
+  "hardening_r4": {
+    "review_finding": "R-4",
+    "change": "Brand symbol _RUNTIME_BRAND is now attached via Object.defineProperty with enumerable:false, writable:false, configurable:false. Object.assign in makeHandle no longer includes the brand in enumerable own properties, so object-spread ({...h}) and Object.assign({}, h) cannot copy the brand. isObjectHandle on any spread/assign clone returns false. serializeHandle is unaffected (reads named props explicitly, not by enumeration). Object.freeze is preserved.",
+    "test_count_before": 375,
+    "test_count_after": 384,
+    "new_tests": 9,
+    "new_test_block": "FF-A2: R-4 — brand non-enumerable (spread/assign cannot forge)"
+  }
+}

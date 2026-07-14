@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0669",
+  "role": "design-steward",
+  "verdict": "approved",
+  "commit": "4d76f359",
+  "history": [
+    {
+      "commit": "aea51d4b",
+      "verdict": "changes_requested",
+      "blocking": "UX-1 (P1): пустое состояние пикера «процесс не привязан» стилизовано как ошибка (chs-color-danger + role=alert) — нарушало AC-2/§3.1 «пустое состояние не выглядит ошибкой»."
+    },
+    {
+      "commit": "4d76f359",
+      "verdict": "approved",
+      "note": "fix-forward строителя закрыл UX-1 и заодно UX-NB1."
+    }
+  ],
+  "summary": "После fix-forward 4d76f359: пикер-версия подсказки — role=\"status\" + chs-color-text-muted (конвенция файла для информационных/пустых состояний, как «Выберите блок…»/«Нет полей.»); save-версия (defense-in-depth, реально блокирует действие) оставлена role=\"alert\" + chs-color-danger — ровно как предписано. Текст извлечён в константу PROCESS_NOT_BOUND_HINT (литерал 1 раз, использование 2 раза) — UX-NB1 тоже закрыт. Тесты закрепляют оба стиля раздельно (пикер: status+muted и НЕ alert/danger; save: alert+danger) — регресс в любую сторону поймается.",
+  "checks": {
+    "human_russian": {
+      "status": "pass",
+      "detail": "«Этот процесс не привязан ни к одному приложению — привяжите его на экране «Процессы».» — понятный русский, императивный CTA, указывает точный экран назначения. Текст не менялся фиксом."
+    },
+    "no_jargon_g5": {
+      "status": "pass",
+      "detail": "Ни process_app_binding, ни 409, ни WRONG_FLOOR, ни application_id в видимом тексте. ux-g5-jargon-denylist не флагует FormDesigner.jsx."
+    },
+    "typography_nested_quotes": {
+      "status": "pass",
+      "detail": "Em-dash « — » с пробелами. «Процессы» — единственная пара гильеме; вложения кавычек нет, точка после » корректно снаружи."
+    },
+    "tokens": {
+      "status": "pass",
+      "detail": "Цвета через токены (chs-color-text-muted / chs-color-danger, chs-text-xs, chs-space-2) — token-pure."
+    },
+    "empty_state_not_error": {
+      "status": "pass",
+      "detail": "ИСПРАВЛЕНО в 4d76f359: пикер-версия (FormDesigner.jsx:~1184) теперь <p role=\"status\" color:var(--chs-color-text-muted)> — читается как нормальный следующий шаг авторинга, не сбой. role=status озвучивается скринридером вежливо (polite), не ассертивно. Save-версия сознательно оставлена danger/alert — там подсказка сопровождает заблокированную кнопку сохранения (реальное препятствие действию), что уместно. Дифференциация «то же знание, разная срочность» — корректный паттерн."
+    },
+    "constant_extraction": {
+      "status": "pass",
+      "detail": "UX-NB1 закрыт: PROCESS_NOT_BOUND_HINT определён один раз (литерал ×1 в исходнике), используется ×2 ({PROCESS_NOT_BOUND_HINT}). Тест закрепляет literalCount===1 и usageCount===2 — дрейф формулировки исключён."
+    }
+  },
+  "blocking_findings": [],
+  "non_blocking": []
+}

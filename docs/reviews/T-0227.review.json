@@ -1,0 +1,37 @@
+{
+  "task_id": "T-0227",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "ci/checks/object-handle-isolation.sh:44-71",
+      "issue": "object-handle-isolation.sh Check-2 claims (in its header comment, lines 45-50) to compare the frozen files back to the merge-base with dev, but the implementation only runs `git diff --quiet HEAD -- f` (line 67) — i.e. it detects UNCOMMITTED working-tree changes only. Because T-0227's edit to grant-lattice.ts is committed, this gate passes trivially and does NOT actually enforce the byte-freeze. This is a PRE-EXISTING weakness, not introduced by T-0227, and the real merge-base byte-freeze enforcement (correctly thawed+sanctioned for this task) lives in mutation-gateway-isolation.sh G6-additive. Out of T-0227's scope; flagged for hygiene only.",
+      "suggestion": "Separate follow-up task: make object-handle-isolation.sh Check-2 compare against the merge-base with dev (as its comment already promises), matching the audit-grade pattern in mutation-gateway-isolation.sh G6-additive, so the comment and the code agree."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/core/grant-resolver.ts:575-589",
+      "issue": "The PDP covering predicate filters grants by operation (line 577) and scope-containment (line 585) but does NOT filter by grant.resourceType vs the target's resourceType. Escalation prevention therefore rests ENTIRELY on the disjoint hierarchy node (refToScope's process_instance branch + AncestryOracle returning false for instance-under-record). This is consistent with the pre-existing lattice model (resourceType drives classification/facets, not covering) and is backstopped by the oracle-independent fail-closed kind-guard in fireCardAction, so it is sound — but the single-layer reliance on the AncestryOracle for the scope path is worth a one-line invariant comment so a future oracle change cannot silently re-open the escalation on the PDP layer.",
+      "suggestion": "Add a comment at grant-resolver.ts:583-589 noting that the covering predicate intentionally does not key on resourceType and that process_instance disjointness is an AncestryOracle invariant (an instance id is never a descendant of any record/registry/application node); the fireCardAction kind-guard is the oracle-independent primary defense."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-escalation-closed: a (op=transition, scope=record) holder cannot reach a terminate/message effect", "covered": true },
+    { "ac": "AC-guard-requires-both: fireCardAction denies unless decl.target.kind==='process_instance' AND handle.ref.kind==='process_instance' (card-action.ts:358-375, fail-closed BEFORE PDP/engine, runs regardless of bridge readiness)", "covered": true },
+    { "ac": "AC-scope-disjoint: refToScope maps process_instance to its own nodeLevel/hierarchy branch; a record/registry grant scope can never contain the instance node (grant-resolver.ts:202-218; isNarrowerOrEqual delegates to oracle)", "covered": true },
+    { "ac": "AC-test-honest: old test asserting escalation SUCCEEDS replaced by a test asserting DENIED for the right reason (target_kind_mismatch, exact via string, one denied audit, zero actor_event); plus a broad-scope (registry-scoped record grant) -> no_grant test", "covered": true },
+    { "ac": "AC-positive-path: a legitimate process_instance-targeted terminate with a process_instance-scoped grant is accepted under a ready bridge (card-action.test.ts:380, deferred+ok)", "covered": true },
+    { "ac": "AC-fitness-amendment-legit (CRITICAL): mutation-gateway-isolation.sh THAW is the sanctioned FF-FCI12 additive-thaw (matching frozen-sanctions.jsonl row for T-0227/owner T-0028/founder_decide@2026-06-15), branch-scoped to task/T-0227, prints SANCTION lines, and ONLY skips the G6-additive byte-frozen-unchanged check for the two sanctioned files — the gate's real teeth (G1/G6 mutateRecord accessor ban, G2 assertVariableValue) remain unconditional and were proven to still fire on a planted mutateRecord violation", "covered": true },
+    { "ac": "AC-frozen-integrity: frozen-checks-immutable.sh green; the FF-FCI12 sanction genuinely covers exactly this additive diff (ci/checks/mutation-gateway-isolation.sh owned by T-0028, sanctioned for T-0227)", "covered": true },
+    { "ac": "AC-C2-audit: terminate/message no-op under a ready bridge emits card_action.deferred (TYPE_DEFERRED), never a false card_action.executed (card-action.ts:456-476; asserted in positive-path test)", "covered": true },
+    { "ac": "AC-CI-honest: tsc --noEmit exit 0; vitest card-action.test.ts 19/19 pass; card-action-broad-scope.sh PASS + --self-test fires on planted regression; card-action-isolation.sh FF-CA-1..4 PASS; object-handle-isolation.sh PASS; mutation-gateway-isolation.sh PASS", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "object-handle-isolation.sh Check-2 promises a merge-base byte-freeze comparison in its header comment but implements only an uncommitted-working-tree check (git diff HEAD). This freeze-gate-comment-vs-implementation drift is a recurring class (the real merge-base enforcement only exists in mutation-gateway-isolation.sh G6-additive) — candidate for a freeze-gate audit pass that asserts every 'frozen file unmodified' gate actually diffs against the merge-base, not just the working tree."
+  ]
+}

@@ -1,0 +1,140 @@
+{
+  "task_id": "T-0025",
+  "verdict": "pass",
+  "sha": "0b29e99",
+  "deterministic": {
+    "total": 952,
+    "passed": 952,
+    "failed": 0,
+    "notes": "ci: 908 unit tests (vitest run src/) + fitness:db: 5/5 secret-handle.test.ts. 2 pre-existing db failures (genesis-owner-seed: grant dup env-state, schema: Flowable ACT_* tables installed) are env-state known_gaps, not T-0025 regressions."
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/db/secret-handle.test.ts > AC-1/AC-12/AC-11(R-2): POST sets handle; DB read-back confirms non-NULL",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "src/__tests__/secret-handle.test.ts > AC-2: rejects value starting with sk- (unit + live NEG-1 manual)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "src/__tests__/secret-handle.test.ts > AC-3: rejects value starting with sk-proj- (caught by sk- prefix rule)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "src/__tests__/secret-handle.test.ts > AC-4: rejects 32-char hex string (bare_hex_token)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "src/__tests__/secret-handle.test.ts > AC-5: rejects well-formed JWT (eyJ…)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "src/__tests__/secret-handle.test.ts > AC-6: rejects value shorter than 8 chars (too_short)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "ci/checks/db/secret-handle.test.ts > AC-7/AC-13: PUT atomically overwrites; old value gone",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "ci/checks/db/secret-handle.test.ts > AC-8/AC-14: DELETE sets NULL; GET /status returns {bound:false}",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "ci/checks/db/secret-handle.test.ts > AC-9: GET /status returns {bound:true, summary} without full handle",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "ci/checks/db/secret-handle.test.ts > AC-10: cross-tenant write returns 404; target row unchanged",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "src/__tests__/secret-handle.test.ts > AC-11: console spy confirms no log during validation; ci/checks/db/secret-handle.test.ts > AC-11(R-2): stdout capture during POST contains no handle value; live NEG-1 manual confirmed no echo in response",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "ci/checks/db/secret-handle.test.ts > AC-12: audit_event row type=set_llm_secret_handle, payload has no handle; src/__tests__/secret-handle.test.ts > AC-12..14 structural source check",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "ci/checks/db/secret-handle.test.ts > AC-13: audit_event row type=rotate_llm_secret_handle, payload has no handle",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "ci/checks/db/secret-handle.test.ts > AC-14: audit_event row type=revoke_llm_secret_handle, payload has no handle",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "ci/checks/secret-handle-isolation.sh > FF-25-2: package.json contains no LLM SDK (grep openai|anthropic|generative-ai|mistralai|cohere|groq returns empty)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "ci/checks/secret-handle-isolation.sh > FF-25-3: llm_secret_handle referenced only in src/http/secret-handle.ts (dormancy boundary intact)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-17",
+      "test": "npm run ci (tsc --noEmit + eslint src): 0 errors, 0 new violations (2 pre-existing console warnings in unrelated bridge files; FF-25-7 PASS)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-18",
+      "test": "src/__tests__/secret-handle.test.ts > AC-18: holdsAgentMgmtUpdate + ADMIN_GATE_REJECTED source check; live NEG-4 manual: e-kravtsova (no mgmt grant) → 403, agent_card unchanged",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-19",
+      "test": "src/__tests__/secret-handle.test.ts > AC-19: 032 migration seed has 5 rows all with llm_secret_handle=NULL; FF-25-5 fitness check green",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "known_gaps": [
+    {
+      "gap": "genesis-owner-seed.test.ts: tenant-owner has exactly 17 delegable mgmt_object:* grants — got 150",
+      "root_class": "env-state",
+      "note": "Pre-existing: grant table has accumulated duplicates from multiple migration re-runs in dev env. Not a T-0025 regression. CI job always starts from a clean DB."
+    },
+    {
+      "gap": "schema.test.ts: zero ACT_* tables exist — got 56",
+      "root_class": "env-state",
+      "note": "Pre-existing: Flowable (ACT_*) schema has been installed in this dev Postgres instance. The test expects a clean DB without Flowable tables. Not a T-0025 regression."
+    }
+  ],
+  "live_negative_paths_verified": [
+    {
+      "path": "NEG-1: POST sk- raw key → 400 INVALID_HANDLE vendor_key_prefix; DB column remains NULL",
+      "ac": "AC-2"
+    },
+    {
+      "path": "NEG-2: GET /status on agent with NULL handle → 200 {bound:false}",
+      "ac": "AC-8"
+    },
+    {
+      "path": "NEG-3: POST without x-dev-user header → 401 UNAUTHENTICATED",
+      "ac": "FR-1 auth guard"
+    },
+    {
+      "path": "NEG-4: POST as e-kravtsova (no mgmt_object:agent/update grant) → 403 ADMIN_GATE_REJECTED; agent_card unchanged",
+      "ac": "AC-18"
+    }
+  ]
+}

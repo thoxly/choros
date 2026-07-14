@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0653",
+  "role": "tester (adversarial, live-PG)",
+  "verdict": "approved",
+  "environment": {
+    "pg": "localhost:55432 UP; DATABASE_URL=postgres://choros_migrator:...@localhost:55432/choros",
+    "migration_130": "applied + recorded in schema_migrations; scoped indexes present, old constraint dropped (verified via psql)"
+  },
+  "gates_rerun": {
+    "tsc_noEmit": "PASS (exit 0)",
+    "npm_build": "PASS (exit 0)",
+    "web_vitest_full": "PASS — 2550 passed, 95 files (matches claimed 2550), exit 0",
+    "http_core_targeted_vitest": "PASS — 115 passed across src/http/__tests__ + list-views.test + inbox-search-filter-group.test + records-view-application.test + view-config.test",
+    "fitness_db_full_live_pg": "PASS — 1323 passed / 138 files (0 failed) against live PG; includes ci/checks/db/list-view-registry.db.test.ts (10 tests: defect#9 cross-user name uniqueness, AC-10 default uniqueness, AC-2 cross-tenant 404, owner-scope)",
+    "view-registry-rls.sh": "PASS (exit 0)",
+    "view-registry-no-pdp-bypass.sh": "PASS (exit 0)",
+    "view-query-injection-safe.sh": "PASS (exit 0)",
+    "view-registry-anti-case.sh": "PASS (exit 0)",
+    "view-registry-backcompat-test-present.sh": "PASS (exit 0)",
+    "view-registry-type-open.sh": "PASS (exit 0)",
+    "anti-case-lock.sh": "PASS (exit 0)",
+    "ux/anti-uuid-actor-render.sh": "PASS (exit 0)",
+    "http-route-auth-coverage.sh": "PASS (exit 0)"
+  },
+  "adversarial_probes": {
+    "migration_130_idempotency_raw_reapply": "FAIL on raw re-apply (name[]=text[] cast error in fallback ELSE) — but INERT: runner skips recorded versions and the primary IF-EXISTS path always matches on the real graph. Non-blocking. Follow-up chip task_71236546 spawned.",
+    "security_8_owner_scope_live": "PASS — records-view-application.test asserts owner clause + actor-bound param + foreign→404; live-PG AC-2 cross-tenant 404 passes.",
+    "data_9_cross_user_name_live": "PASS — two owners same name both succeed, same-owner dup 23505 (live PG).",
+    "inbox_q_injection": "PASS — inbox q=/process= filtering is pure in-memory String.includes over materialized InboxItem[] (no SQL path); status validated against whitelist set; deadline coerced to finite number. No injection surface.",
+    "grouped_counts_sum_to_bodies": "PASS — groupSum == items.length asserted unfiltered and with q= (server returns whole capped set)."
+  },
+  "known_flakes_excluded": "doc-regen.db.test.ts timeout (T-0701) — not observed / not attributed.",
+  "blocking_findings": [],
+  "non_blocking": [
+    {"id": "T-NB-1", "ref": "review NB-1", "finding": "migration 130 fallback name[]=text[] cast bug — latent, inert, follow-up chip spawned"},
+    {"id": "T-NB-2", "ref": "review NB-2", "finding": "defer-path canApprove lacks a dedicated server unit test (covered by symmetry + client D-064 pin)"}
+  ]
+}

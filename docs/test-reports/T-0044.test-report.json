@@ -1,0 +1,119 @@
+{
+  "task_id": "T-0044",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1153,
+    "passed": 1153,
+    "failed": 0
+  },
+  "run_environment": {
+    "worktree": "/Users/shoxy/Code/choros-wt/T-0044",
+    "branch": "task/T-0044-dual-control",
+    "head": "df225e1",
+    "ci_no_database_url": {
+      "command": "npm run ci (pipefail, DATABASE_URL unset)",
+      "exit": 0,
+      "vitest": "825 passed | 5 skipped (830)",
+      "fitness": "all checks green incl FF-DC1..FF-DC8, FF-DC11"
+    },
+    "db_job_isolated_postgres": {
+      "image": "postgres:16-alpine",
+      "port": 55492,
+      "user": "choros_migrator",
+      "volume": "choros-t0044-vol (dedicated, torn down after run)",
+      "migrations_pass1": "applied 31 file(s) incl 031_grant_confirmed2_by — exit 0",
+      "migrations_pass2": "nothing to apply (idempotent) — exit 0",
+      "confirmed2_by_columns": "grant.confirmed2_by + role_assignment.confirmed2_by = text NULL (both present)",
+      "fitness_db_pass1": "323 passed (323) — exit 0",
+      "fitness_db_pass2": "323 passed (323) — exit 0 (repeatable on dirty DB)"
+    },
+    "teardown": "container choros-t0044-test + volume choros-t0044-vol removed; tester scratch probe file removed; working tree clean"
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1",  "test": "src/__tests__/dual-control.test.ts::AC-1 escalates ⇒ required 2", "result": "pass" },
+    { "ac": "AC-2",  "test": "src/__tests__/dual-control.test.ts::AC-2 non-escalating (≡/narrowing/no-op) ⇒ required 1", "result": "pass" },
+    { "ac": "AC-3",  "test": "src/__tests__/dual-control.test.ts::AC-3 two distinct ≠ proposer ⇒ satisfied; e2e PROBE-A confirm#2", "result": "pass" },
+    { "ac": "AC-4",  "test": "src/__tests__/dual-control.test.ts::AC-4 one approver ⇒ not satisfied; e2e semi-confirmed not active", "result": "pass" },
+    { "ac": "AC-5",  "test": "src/__tests__/dual-control.test.ts::AC-5 duplicate ids collapse ⇒ not satisfied", "result": "pass" },
+    { "ac": "AC-6",  "test": "src/__tests__/dual-control.test.ts::AC-6 proposer-exclusion; e2e self_confirm 409 over DB-row proposed_by", "result": "pass" },
+    { "ac": "AC-7",  "test": "src/__tests__/dual-control.test.ts::AC-7 single-approver ['a']✓ ['p']✗", "result": "pass" },
+    { "ac": "AC-8",  "test": "src/__tests__/dual-control.test.ts::AC-8 re-stating held grant ⇒ from≡to ⇒ required 1 (compiled, not row-diff)", "result": "pass" },
+    { "ac": "AC-9",  "test": "src/__tests__/dual-control.test.ts::AC-9 each axis a/b/c false→true ⇒ required 2 (3 cases)", "result": "pass" },
+    { "ac": "AC-10", "test": "ci/checks/db/dual-control.gate.e2e.test.ts::AC-10 approve grant lands semi-confirmed; single actor cannot reach confirmed; tester PROBE-A/C/D", "result": "pass" },
+    { "ac": "AC-11", "test": "ci/checks/db/dual-control.gate.e2e.test.ts::AC-11 routine read 1 request, confirmed_by=actor, confirmed2_by NULL, WORM event; tester PROBE-E", "result": "pass" },
+    { "ac": "AC-12", "test": "src/__tests__/dual-control.test.ts::AC-12 ConfirmationFlag carries serialized CriticalityDiff + change_ref + approvers + status; e2e payload assertions", "result": "pass" },
+    { "ac": "AC-13", "test": "ci/checks/dual-control-isolation.sh::FF-DC3 imports criticalityDiff/combineCriticality from role-criticality; axes not re-derived", "result": "pass" },
+    { "ac": "AC-14", "test": "src/__tests__/dual-control.test.ts::AC-14 malformed from/to/approvers ⇒ denies (malformed_input, required 2, fail-closed)", "result": "pass" },
+    { "ac": "AC-15", "test": "npm run ci: tsc --noEmit + eslint src clean; FF-DC8 frozen-foundation byte-diff", "result": "pass" },
+    { "ac": "AC-16", "test": "ci/checks/dual-control-isolation.sh::FF-DC7 + role-migration-set/grant-trail-no-new-table: only additive migration 031 (ADD COLUMN), no CREATE TABLE in 031+, known_tenant_tables.txt byte-unchanged", "result": "pass" },
+    { "ac": "AC-17", "test": "src/__tests__/dual-control.test.ts::AC-17 determinism — deep-equal on repeated identical input", "result": "pass" },
+    { "ac": "AC-18", "test": "ci/checks/dual-control-isolation.sh::FF-DC5 no sod_constraint/sodEvaluate coupling (dual-control ⊥ SoD)", "result": "pass" },
+    { "ac": "AC-NEW(rev-2 R-AUTH)", "test": "ci/checks/dual-control-isolation.sh::FF-DC11 authenticated-only approver provenance (no body-asserted approvers) + e2e AC-NEW(a) body fields ignored / (b) same-actor 409 / (c) distinct actor 200; tester PROBE-C", "result": "pass" }
+  ],
+  "adversarial_probes": [
+    {
+      "id": "PROBE-A",
+      "name": "full D-A=A3 lifecycle: propose+confirm#1 (semi) → confirm#2 distinct → active; confirm#3 → 409",
+      "result": "pass",
+      "finding": "Live two-request flow authentic: req#1 (e-owner, operation=approve raising axis a) lands semi-confirmed (proposed_by=confirmed_by=e-owner, confirmed2_by NULL, second_approver_required=true). A DISTINCT authenticated actor (e-approver-2) completes confirm#2 → confirmed, confirmed2_by=e-approver-2. A third distinct actor's confirm#3 is rejected 409 already_confirmed; confirmed2_by unchanged (no triple-stamp). The critical expansion is NOT active on one confirm."
+    },
+    {
+      "id": "PROBE-B",
+      "name": "TOCTOU: criticality of the pending row mutated between confirm#1 and confirm#2",
+      "result": "pass",
+      "finding": "FACTUAL (matches spec/ADR §9.6 + reviewer R-3): confirm#2 is ROW-keyed, not criticality-re-derived. It reads only proposed_by/confirmed_by/confirmed2_by from the DB row and does NOT re-fold criticalityDiff. After downgrading the semi-confirmed grant's operation approve→read between #1 and #2, confirm#2 still sets confirmed2_by → confirmed. This is NOT a hole: confirm#2 can only COMPLETE an already-escalated change with a genuinely distinct second actor; it can never DOWNGRADE the required-approver count nor activate anything beyond what req#1 already proposed. The required-2 requirement is fixed at req#1 (the pending row IS the carrier). Recorded as a cosmetic contract-looseness friction (reviewer R-3), not a defect."
+    },
+    {
+      "id": "PROBE-C",
+      "name": "proposer masquerade under the dev-auth floor (x-dev-user header swap self-completes #2)",
+      "result": "pass",
+      "finding": "HONEST INHERITED-FLOOR record. extractActor reads x-dev-user directly; the dev-auth floor cannot bind a header string to a real session, so the SAME operator flipping the header (e-owner → e-owner-alias) is accepted as a 'distinct' approver and completes confirm#2. This is the pre-existing X-Dev-User inherited floor that real-auth T-0060 closes — NOT introduced by T-0044. Crucially, the gate's own distinctness layer DOES bind over the authenticated id: a header EQUAL to the proposer/confirmer (e-owner) is rejected 409 self_confirm. So dual-control is authentic at its layer (rev-2 closed the body-asserted-approvers hole); only identity-binding is inherited-floor. Recorded as inherited-floor friction (parallels reviewer's dev-auth note)."
+    },
+    {
+      "id": "PROBE-D",
+      "name": "concurrent confirm#2 from two distinct valid actors → exactly one wins, WORM satisfied once",
+      "result": "pass",
+      "finding": "Two distinct actors (e-race-x, e-race-y) fire confirm#2 in parallel on the same semi-confirmed row. Exactly ONE returns 200 (winner), exactly one returns 409 (loser) — the UPDATE ... WHERE confirmed2_by IS NULL guard serializes correctly (rowCount=0 ⇒ loser 409 already_confirmed). confirmed2_by is set to exactly one of the two, and exactly ONE dual-control.second-confirm WORM event is appended (no double-append on the loser). No 500, no duplicate stamp."
+    },
+    {
+      "id": "PROBE-E",
+      "name": "routine (read, non-critical) expansion → one confirm, active immediately, no second approver",
+      "result": "pass",
+      "finding": "A routine read grant (escalates=false) completes in ONE request: state=confirmed, confirmed_by=e-owner, confirmed2_by NULL (legitimately, forever), second_approver_required absent. A single satisfied dualcontrol.gate WORM event is emitted (no pending). The single-approver path is NOT a bypass — it still records the effective-diff + WORM audit (FR-6)."
+    }
+  ],
+  "secondary_ux": [
+    { "check": "web UX (none in T-0044 — pure core + write-path gate, approval UI is downstream per spec §5)", "result": "n/a", "note": "вторично; T-0044 ships no frontend surface, so no browser/LLM UX check applies" }
+  ],
+  "integration_honesty_d056": {
+    "verdict": "honest",
+    "evidence": "The gate is NOT dead code: it is the single enforcement point on the REAL POST /api/grants write-path, exercised end-to-end against a live Postgres (e2e suite + 5 tester probes). A criticality-escalating change cannot reach confirmed without a genuinely-distinct authenticated second request (semi-confirmed → confirmed); a routine change completes in one. dualControlDecision is called with proposedBy=extractActor(req) and approvers=[] at req#1 (no body-asserted approvers — FF-DC11 enforces). Day-1 boundary is explicit and recorded (FE-2026-W24-0044-B): the read-side activation filter for semi-confirmed critical grants is owed to T-0053 (no runtime resolver exists on this base) — the write-gard + contract are real now, the read-filter is honestly deferred, not faked."
+  },
+  "failures": [],
+  "friction": [
+    {
+      "id": "FE-2026-W24-0044-C-floor",
+      "root_class": "tooling-gap",
+      "is_product_defect": false,
+      "note": "Inherited dev-auth floor (PROBE-C): x-dev-user header is the authenticated context, but cannot bind a header string to a real human session, so the same operator can present two distinct header values and self-satisfy a two-approver gate. Closed by real-auth T-0060, NOT by T-0044 (which authentically closed the body-asserted-approvers hole via rev-2 R-AUTH). Same class as the reviewer's dev-auth inherited-floor and the (now-reconciled) audit-append 500-floor."
+    },
+    {
+      "id": "FE-2026-W24-0044-B",
+      "root_class": "tooling-gap",
+      "is_product_defect": false,
+      "note": "Read-side activation obligation on T-0053 (recorded in ADR §8): day-1 'activation = needs second approver' is enforced by write-gard + contract because no runtime role→grants EFFECTIVE resolver exists on base 8a483c8. When T-0053 builds the resolver it MUST filter semi-confirmed (confirmed2_by IS NULL) escalating grants as not-active. Honest deferral, not a hole — verified there is no read-path that activates a half-confirmed critical grant today."
+    },
+    {
+      "id": "R-3-confirm2-looseness",
+      "root_class": "product-defect",
+      "is_product_defect": false,
+      "note": "Cosmetic (reviewer R-3, confirmed by PROBE-B): handleSecondConfirm does not re-assert the target row was escalating before stamping confirmed2_by, and its second-confirm WORM event hardcodes effective_diff.expanded={a:false,b:false,c:false} (reviewer R-2) — the true per-axis bits live on req#1's pending event, escalates=true is correct, gate decision unaffected. No security/activation impact (a routine row is already active; stamping confirmed2_by over-grants nothing). Flagged for an optional follow-up, NOT blocking."
+    },
+    {
+      "id": "FE-2026-W24-0044-A",
+      "root_class": "product-defect",
+      "is_product_defect": false,
+      "note": "Recorded boundary (ADR §2.1/§8): criticalityDiff.escalates fires only on routine→critical, so adding a SECOND critical axis to an already-critical role does not re-trigger dual-control via escalates. This is the FROZEN T-0040 contract honoured intentionally; per-axis expanded bits remain in effective_diff for any downstream finer policy. A change here would be a T-0040 contract task, not a T-0044 edit."
+    }
+  ]
+}

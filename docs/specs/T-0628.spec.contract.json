@@ -1,0 +1,65 @@
+{
+  "task_id": "T-0628",
+  "status": "ready",
+  "summary": "POST /api/users передавал в Keycloak email=login хардкодом — не-email login валился в KC 400 и всплывал у нас как 503. T-0625 (уже смержен в предках этой ветки) закрыл 503-баг ДРУГИМ путём: сделал login обязательно email-формата. T-0628 меняет контракт по своей спеке: login — свободное поле (email-подобный тоже разрешён, но не обязателен), email — ОТДЕЛЬНОЕ обязательное поле формы+API, валидируется на нашей стороне человеческим 400 ДО похода в KC. Список учёток уже показывает настоящий login (T-0625, migration 126) — не трогаем. Добавляем клиентский gate на /users: как в screen-org.jsx (canWrite по статусу гейтованного GET), не редирект — такого паттерна в кодовой базе нет.",
+  "functional": [
+    "POST /api/users принимает login (свободная строка, непустая, НЕ обязана быть email) и email (обязательное поле, email-формат) как два отдельных значения.",
+    "Валидация email происходит на нашей стороне (сервер + клиент-зеркало) ДО вызова kc.createHumanUser — некорректный email -> 400 VALIDATION с человеческим текстом, KC не вызывается.",
+    "kc.createHumanUser вызывается с username=login (как ввёл пользователь, без изменений) и email=email (отдельное значение) — KeycloakUserPort.createHumanUser сигнатуру не меняем, меняется только вызывающий код.",
+    "employee получает новую колонку email (миграция), значение сохраняется при создании.",
+    "Форма создания учётки (screen-users.jsx) получает отдельное поле Email (обязательное, type=email); поле Логин перестаёт требовать email-формат.",
+    "GET /api/users/accounts продолжает показывать login (T-0625 поведение не меняется).",
+    "Экран /users деградирует для не-владельца: контрол Создать учётку и деактивация скрываются/заменяются пояснительным баннером, как в screen-org.jsx OrgTree — переиспользуем уже вызываемый экраном гейтованный GET /api/org/tenant-state (200->canWrite=true, 403->canWrite=false)."
+  ],
+  "non_functional": [
+    "N1 (наследуется от T-0583): пароль никогда не логируется/не аудируется/не возвращается в ответе.",
+    "N4 (наследуется): KC-first — KC-юзер создаётся до записи в БД; DB-failure после KC-create -> best-effort компенсация (deleteUser).",
+    "N5 (наследуется): user-mgmt.ts не заводит свой HTTP-путь к KC — переиспользует KeycloakUserPort (ci/checks/user-mgmt-reuses-kc-port.sh).",
+    "Анти-кейс (D-064): никакого кейс-контента (слаги ролей/персон/бизнес-порогов) в src/.",
+    "Обратная совместимость: существующие тесты с email-подобным login не должны падать — login теперь свободное поле, email-подобное значение по-прежнему допустимо как login."
+  ],
+  "out_of_scope": [
+    "Изменение поведения GET /api/users/accounts относительно T-0625 (список login) — уже закрыто, не трогаем.",
+    "KC email-верификация / отправка писем — вне охвата.",
+    "Общий route-guard/redirect компонент для ВСЕХ admin-разделов — делаем только для /users по существующему паттерну (screen-org.jsx canWrite), не изобретаем новую архитектуру гардов."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "POST /api/users с login='ivan.petrov' (не email) + email='ivan.petrov@company.ru' + password + display_name -> 201, employee.login='ivan.petrov', employee.email='ivan.petrov@company.ru', kc.createHumanUser вызван с {username:'ivan.petrov', email:'ivan.petrov@company.ru'}.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "POST /api/users с email='not-an-email' -> 400 VALIDATION с человеческим текстом до вызова kc.createHumanUser (createCallCount остаётся 0); аналогично при отсутствующем/пустом email.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "POST /api/users с пустым login -> 400 VALIDATION (login по-прежнему обязателен, просто не обязан быть email-форматом).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "GET /api/users/accounts показывает login (не KC UUID) для учёток, созданных этим API — поведение не регрессировало относительно T-0625 (существующий тест FF-583-1/2 остаётся зелёным).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Не-владелец (без mgmt_object:employee гранта) открывает /users по прямому URL: экран рендерится, но контрол Создать учётку скрыт/задизейблен и показан пояснительный баннер (по паттерну screen-org.jsx); POST /api/users всё ещё честно 403 на сервере (контур прав не ослаблен — деградация чисто клиентская).",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-6",
+      "text": "Тенант-изоляция и 403-контур (FF-583-5, FF-583-6) не ослаблены — существующие адверс-тесты остаются зелёными без изменений логики авторизации.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "EMAIL_TAKEN от KC по-прежнему маппится в 409, EMAIL_INVALID (defense-in-depth в admin-port.ts) — в 400, AUTH_UNAVAILABLE — в 503; ни один из путей не течёт пароль в тело ответа (AC-11/AC-12 остаются зелёными).",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0628-user-account-email-fix.spec.md"
+}

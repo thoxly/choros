@@ -1,0 +1,94 @@
+{
+  "task_id": "T-0588",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 6513,
+    "passed": 6513,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/db/inbox_claim_substitution.db.test.ts — 'T-0588 AC-1 — Tier-2 substitute can claim a pool task (was 403, now 200)'",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "ci/checks/db/inbox_claim_substitution.db.test.ts — 'T-0588 AC-2 — unconfirmed or expired Tier-2 rule does NOT grant claim' (2 cases: unconfirmed, expired)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "ci/checks/db/grants-dao-deactivated.db.test.ts — 'T-0588 AC-3 — getHoldersForRole excludes deactivated employees' (sole/mixed-pool cases + positive control)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "ci/checks/db/grants-dao-deactivated.db.test.ts — 'T-0588 AC-4 — findTenantOwnerSlug excludes a deactivated tenant-owner' + 'AC-4+ positive control'",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "NOT directly tested — FR-2 filter (getHoldersForRole excludes deactivated_at) is consumed unmodified by resolveExecutorFallbackBatch (src/http/inbox.ts:466), so the suppress-absent+Tier-1-substitute batch-routing behavior inherits the fix by construction; no dedicated GET /api/inbox integration test exercises a deactivated-holder+Tier-1-substitute scenario end-to-end in this diff. Same gap the review (T-0588.review.json role_gap_evidence) flagged and pr-handoff.json did not add a test for.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "NOT directly tested — same reasoning as AC-5 (routed_to_fallback:'role_unfilled' path in resolveExecutorFallbackBatch is unmodified code, gated by the same getHoldersForRole filter); no GET /api/inbox projection test with a deactivated-holder-no-rule scenario exists in this diff.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "src/core/__tests__/executor-resolver.test.ts:382 — 'T-0588 AC-7: deactivated sole holder (no substitution) + deactivated/absent owner → kind=unresolvable'",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "LIVE_PROOF (browser, stand) — deferred post-merge per D-064 discipline; requires a live stand + real BPMN process to assign substitution via /rights/intents UI and prove substitute inbox visibility+claimability. Not an LLM-dependent scenario (pure userTask/BPMN process, no LLM key needed) — no blocker beyond stand access.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "LIVE_PROOF (browser, stand) — deferred post-merge, same as AC-8: deactivate a role-holder via /users without a substitution rule, prove the new task surfaces at the fallback (owner) inbox with an explicit 'role not filled' marker, not silently held by the deactivated account.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "bash ci/checks/anti-case-lock.sh (+ --self-test) — Phase 1 delegates clean, Phase 2 full D-064 denylist aggregate 19 vs baseline 24 (erodes-or-steady)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "Regression: src/core/__tests__/executor-resolver.test.ts (all pre-existing cases green, no expectation changed) + ci/checks/db/inbox_claim.test.ts (7/7, pre-existing suite unmodified) + inbox_claim_substitution.db.test.ts 'T-0588 AC-11' + BLOCK-4/RE-VERIFY regression companions (plain holder claim→approve→done, no on_behalf_of key)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "npx tsc --noEmit (exit 0) + npm run fitness (exit 0, 240+ checks) + npm run fitness:db (122 files/1195 tests, exit 0)",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "dev-overlap / merge-risk (T-0628, T-0586, T-0587 all landed on dev since this branch's merge-base c57e1d6)",
+      "result": "pass",
+      "note": "git diff --stat against merge-base shows ZERO file-path overlap between T-0588's changed files (grants-dao.ts, substitution-dao.ts, org.ts, inbox.ts, process-projection.ts, claim-projection.ts) and dev's post-merge-base changes (T-0586: agent-dispatch/**, T-0587: assistant-analyst/registry-digest-dao, T-0628: user-mgmt/employee-email, migration 127). git merge-tree simulation confirms the ONLY conflict is in pr-handoff.json (expected — per-task metadata file, not code); package.json's 'fitness' script diverged only because dev appended one new check (agent-live-flip-flag.sh) to the end of the chain string, while T-0588's copy is byte-identical to the merge-base (git diff shows T-0588 never touched package.json) — a plain merge/rebase resolves this non-conflict trivially by taking dev's fitness string. No rebase required before merge; a standard merge will be clean on all code files."
+    },
+    {
+      "check": "R-1 (review blocking finding: org-scope containment no-op via BOTTOM short-circuit)",
+      "result": "pass",
+      "note": "Verified in current code (src/http/inbox.ts:980-1040, resolveTier2SubstitutionClaim): BOTTOM is no longer used as the containment 'child' argument. Real fix: isNarrowerOrEqual(candidate.orgScope, absentScope, oracle) checked against the ABSENT holder's actual role_assignment.org_scope (new reader getRoleAssignmentOrgScopesForEmployee), using the REAL loadTenantOrgAncestry oracle (not a fake identity stub). Fails closed (no active assignment to check against → no match). Locked by BLOCK-1 test cases: cross-department rule → 403 (was wrongly 200), same-department rule → 200. T-0588.review.json's verdict field ('changes_requested') reflects the FIRST review round before fix-forward — it is a stale artifact of that round, not the current state; pr-handoff.json's block_resolutions/deviations_from_adr sections document the fix transparently and consistently with what the code now does."
+    },
+    {
+      "check": "RE-VERIFY finding (approve route missing deactivated-actor gate, fixed in b06b363)",
+      "result": "pass",
+      "note": "Verified in current code (src/http/inbox.ts:1623-1641): findEmployeeById(pool, tenantId, actor).deactivatedAt check placed BEFORE the myRoles/Tier-2-PDP gate in the approve route, using the route's injected writeDeps.pool (not global getOrgPool()), fail-closed on DB error — exact mirror of the claim-route BLOCK-3 gate. Locked by the new 'T-0588 RE-VERIFY' describe block in inbox_claim_substitution.db.test.ts (deactivated holder approve → 403, was 200; regression companion: active holder claim→approve→done unaffected)."
+    },
+    {
+      "check": "ADR/code drift on FR-1 containment design",
+      "result": "n/a",
+      "note": "docs/design/T-0588.adr.md §2 FR-1 still describes the ORIGINAL (pre-fix) 'task org-scope = BOTTOM when unknown' design, which was the R-1 defect. This is expected drift, not an omission: pr-handoff.json's deviations_from_adr section explicitly documents the fix-forward correction and its rationale (two research sub-agents confirmed no task-shape org-scope field and no TOP/tenant-wide sentinel exist, grounding the final absent-holder-scope-based design). Code is the source of truth here; flagging only so a future ADR-consistency pass updates the doc text to match, not a merge blocker."
+    }
+  ],
+  "failures": []
+}

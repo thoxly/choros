@@ -1,0 +1,28 @@
+{
+  "task_id": "T-0601",
+  "verdict": "approved",
+  "gate_seen": {
+    "green": true,
+    "_note": "Живой факт приёмки (жалоба владельца 'не прокручивается' на реальном стенде, диагноз height=591px vs scrollHeight=1498px на /llm-connections) устранён у корня: .chs-screen — теперь единственный достижимый скролл-owner контент-пейна. Низ /llm-connections и /processes достигается колесом/тачпадом (было физически недостижимо — единственным скроллером страницы был левый нав .chs-nav__scroll). UX honest-gate: ux-g2-theme-pairing PASS, ux-g5-jargon-denylist informational (baseline не тронут), ux-g6-no-new-hardcode PASS (0 новых hardcode — изменение затрагивает только overflow-свойство, без новых цветов/отступов), новый ux-g8-scroll-reachable PASS + --self-test PASS. G8 — новое правило вне номенклатуры G1-G7 (поэтому в red_rules не кодируется; при зелёном списке пуст)."
+  },
+  "themes_checked": [],
+  "_themes_note": "Реальный клик в обеих темах здесь не применим и не требуется: изменение — чисто структурное overflow-свойство на .chs-screen, не затрагивает ни один токен цвета/темы (ux-g2-theme-pairing PASS подтверждает отсутствие непарных тем-токенов). Web vitest-тир работает в environment:'node' (без DOM/CSSOM), поэтому рендер-клик недоступен; статический CSS-гейт ux-g8 детерминированно закрывает регрессию — тот же приём, что ux-g2-theme-pairing уже применяет к app.css.",
+  "findings": [
+    {
+      "id": "UX-1",
+      "severity": "nit",
+      "root": "A",
+      "location": "web/src/screens/screen-spend.jsx:187 (и аналогичные bare-div экраны группы B: reports, agents, llm-connections, llm-config, process-analytics, ops-overview, operational-analytics, assistant-prompt)",
+      "issue": "Bare-div экраны центрируют контент через margin:0 auto + maxWidth. При появлении вертикальной полосы прокрутки (теперь она реальная) центрированный контент сдвигается на ~пол-ширины scrollbar. Это универсально-принятое поведение любой прокручиваемой страницы, а не прыжок вёрстки; overflow-x:hidden на .chs-screen дополнительно исключает появление горизонтальной полосы. Не блокирует, не дефект — отмечено как статически проверенный UX-эффект появления скроллбара.",
+      "suggestion": "Ничего не требуется. Если в будущем захочется убрать и этот микросдвиг — scrollbar-gutter:stable на .chs-screen; но это отдельная косметика вне рамок T-0601."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true}
+  ]
+}

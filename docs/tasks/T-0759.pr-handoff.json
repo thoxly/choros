@@ -1,0 +1,65 @@
+{
+  "task_id": "T-0759",
+  "status": "pr_open",
+  "branch": "task/T-0759",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "fitness_caveat": "npm run fitness exits 1 due to ONE PRE-EXISTING dev-baseline failure UNRELATED to T-0759: agent-instruction-runtime-dormant.sh FF-COMP-6 flags src/http/agents.ts (same caveat T-0756's pr-handoff already documented on this exact gate+file). PROOF it is not mine: `git diff fd0ad0f7..HEAD -- src/http/agents.ts` is EMPTY (byte-identical to the dev merge-base), so the gate fails identically on a clean dev checkout. Every other check in the chain PASSes — including frozen-checks-immutable (via the T-0759 auto_additive sanction, SANCTION/AUDIT lines printed), auto-sanction-additive standalone, and every gate affected by or relevant to T-0759 (actor-authority-deactivation-gate + --self-test, 4x process detail/list gates, actor-active-route-coverage). The 6 FF-COV 'FAIL' lines in the log are substitution-coverage-invariant --self-test PLANTED probes, each immediately followed by its 'PASS self-test: detects' confirmation — not real failures.",
+  "files_changed": [
+    "docs/tasks/T-0759.spec.md",
+    "docs/tasks/T-0759.pr-handoff.json",
+    "src/http/process-projection.ts",
+    "src/db/actor-authority-gate.ts",
+    "ci/checks/actor-authority-deactivation-gate.sh",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "src/__tests__/processes-read-visibility.test.ts",
+    "ci/checks/db/processes-read-visibility.db.test.ts",
+    "ci/checks/db/T-0756-source-record-projection.db.test.ts"
+  ],
+  "summary": "P3 из ревью T-0756 (finding N1, re-surfaced as N2 in T-0723's nits): isInstanceParticipant/isInstanceParticipantBatch (src/http/process-projection.ts) clause (1) — the audit-actor match — was never ACTOR_ACTIVE-gated, unlike clause (2) (role-holder, gated since T-0738) and clause (3) (owner, deactivation-safe since T-0658). A deactivated actor who genuinely acted on an instance in the past still received, during the residual ~300s access-JWT window, 200 + the participant skeleton + the source record's human title (sourceRecord.title is populated regardless of canOpen). Fix: clause (1) now requires the matched identity (actorSlug, or the distinct fallbackSlug) to be a CURRENTLY active choros.employee row, reusing ACTOR_ACTIVE_SQL (src/db/actor-authority-gate.ts) — the SAME named predicate clause (2) already carries, not a bespoke deactivation literal. Applied to BOTH isInstanceParticipant (single-instance DETAIL path, one point lookup on the matched identity) and isInstanceParticipantBatch (batched LIST path, T-0723's separate sibling — actor-level active status resolved ONCE per page, same as clauses (2)/(3), not per instance). Both functions are new AUTHORITY_RESOLVERS entries in ci/checks/actor-authority-deactivation-gate.sh (they now perform a direct employee slug lookup in process-projection.ts, previously zero) and in the mirrored doc registry in actor-authority-gate.ts (entries H/I).",
+  "test_evidence": {
+    "red_green_live_pg": "ci/checks/db/T-0756-source-record-projection.db.test.ts SRP-8 (DETAIL, record-bound) and ci/checks/db/processes-read-visibility.db.test.ts's two new T-0759 tests (DETAIL + LIST, record-less) all follow: seed a fresh employee, have them act on an instance, assert participant BEFORE deactivation (200/present), set deactivated_at, assert denied AFTER (404/absent, and the raw HTTP body no longer contains the source record's title). Reverting the process-projection.ts diff flips all three RED.",
+    "regression_live_pg": "ci/checks/db/T-0756-source-record-projection.db.test.ts 9/9 GREEN (was 8, +1 SRP-8). ci/checks/db/processes-read-visibility.db.test.ts 18/18 GREEN (was 16, +2). ci/checks/db/process-projection.test.ts 7/7 GREEN, unmodified.",
+    "unit": "src/__tests__/processes-read-visibility.test.ts 28/28 GREEN (was 25, +3: DETAIL + LIST HTTP-level deactivated-actor tests, + one direct filterProjectionsByReadVisibility unit test). Two pre-existing db-test fixtures (the T-0723 'actor who STARTED the record-less instance' DETAIL/LIST tests) needed a fixture fix, not a behavior change: their synthetic starter slugs were previously unseeded strings (clause (1) never checked employee existence before this task) — now seeded via seedEmployee, since a genuine participant IS a real employee.",
+    "full_unit_suite": "vitest run src/__tests__ (no DATABASE_URL): 254 files passed + 2 skipped, 4761 tests passed + 17 skipped — 0 failures, no collateral regressions across the whole unit suite.",
+    "types": "tsc --noEmit: 0 errors."
+  },
+  "fitness_gates_run": [
+    "actor-authority-deactivation-gate.sh PASS (FF-0662-1: isInstanceParticipant carries the predicate on its 1 lookup, isInstanceParticipantBatch on its 2; FF-0662-2 accounting scan clean — both new lookups registered, none un-accounted)",
+    "actor-authority-deactivation-gate.sh --self-test PASS",
+    "process-detail-read-gate.sh PASS (FF-INST-VIS-1a/b/c/d unchanged)",
+    "process-detail-single-resolver.sh PASS (FF-INST-VIS-2a/b/c/d — single authority path held; the new active-check reuses ACTOR_ACTIVE_SQL, no second grant/lattice math)",
+    "process-list-display-plane-isolation.sh PASS (FF-INST-VIS-3 — processes.ts stays pg/src-db-free)",
+    "process-list-tenant-scope-additive.sh PASS (FF-INST-VIS-4 — the new active-check queries are tenant-scoped via withTenant + explicit tenant_id, additive on top of the already tenant-scoped projection)",
+    "actor-active-route-coverage.sh PASS (78 GET routes audited, 0 findings)",
+    "frozen-checks-immutable.sh PASS via FF-FCI13 auto_additive sanction (T-0751 precedent on the SAME file): the 2-entry AUTHORITY_RESOLVERS addition to T-0662's gate is provably additive (git diff = exactly 2 + lines, 0 removed/modified); auto-sanction-additive.sh --verify PASS A-1..A-4 + Враг-аттестация ACTOR-ACTIVE valid (corpus_ref fd0ad0f7 ancestor-of-HEAD, corpus blob identical); auto-sanction-additive.sh standalone + --self-test PASS",
+    "npm run fitness (full suite incl. build): every check PASS except ONE pre-existing dev-baseline failure on an untouched file — see fitness_caveat"
+  ],
+  "security_notes": [
+    "Clause (1) (audit-actor match) now denies unless the matched identity's choros.employee row currently has deactivated_at IS NULL — reusing ACTOR_ACTIVE_SQL verbatim, the SAME literal clause (2) already carries via getRoleSlugsForActor (T-0738). No new deactivation predicate text was introduced.",
+    "Fail-closed: a DB error in the new active-check denies clause (1) (never grants), matching the fail-closed posture of every other resolver in this module (clauses (2)/(3), and isInstanceParticipant's overall try/catch discipline).",
+    "isInstanceParticipantBatch's active-check is resolved ONCE per LIST page (actor-level, like clauses (2)/(3)), not once per instance — no N+1 introduced; only queried at all when the batch's audit rows carry any actor data (mirrors the existing anyRoles guard on clause (2)).",
+    "isInstanceParticipant's tested single-instance body and isInstanceParticipantBatch's separate batched body were BOTH touched (this is the one thing T-0723's own 'don't touch isInstanceParticipant to build the batch sibling' discipline did not anticipate — this task's fix is the one change that must land in both, by definition, since the SAME gap existed in both), but only the clause-(1) block in each; clauses (2)/(3) are byte-unchanged in both functions.",
+    "Registered as new AUTHORITY_RESOLVERS entries (ci/checks/actor-authority-deactivation-gate.sh) since both functions now perform a direct employee actor slug-lookup in src/http/process-projection.ts — closing the FF-0662-2 accounting-scan gap this change would otherwise have opened."
+  ],
+  "deviations_from_adr": [],
+  "follow_ups": [],
+  "judge_attack_surface": [
+    "Try to make a deactivated actorSlug ride a still-active, DISTINCT fallbackSlug that is NOT itself the identity recorded in this instance's audit track — clause (1) requires the SPECIFIC matched identity to be active, not any identity of the caller.",
+    "Confirm isInstanceParticipantBatch's new active-check queries run at most twice TOTAL per LIST page (not per record-less instance) — grep the diff for the query call sites (both sit before the per-instanceId loop) and re-run the existing 'no record-bound projections… participant query still runs' instrumented-pool unit test, which still asserts a single confirmed_by audit query.",
+    "Confirm clauses (2)/(3) (getRoleSlugsForActor / isGenesisOwnerForTenant calls and their surrounding try/catch) are byte-unchanged in both functions — only the clause-(1) block was touched.",
+    "SRP-8 and the two new db-test anti-cases assert the DEACTIVATED actor's response no longer contains the source record's title at all (404 body / absent from LIST), not merely canOpen:false — the whole participant skeleton is gone, matching SRP-2's existing fail-closed posture for non-participants.",
+    "Verify the FF-0662-2 accounting scan still catches a hypothetical THIRD un-gated employee slug-lookup added to either function in the future (the registry entry alone is not the anti-recurrence teeth — the accounting scan counting lookups-vs-predicates inside the registered function body is)."
+  ],
+  "friction_events": [
+    "The fake pool shared by src/__tests__/processes-read-visibility.test.ts routes ANY bare `FROM choros.employee ... slug = $2` query (no role_assignment JOIN) to a single branch — this is the SAME shape getRoleSlugsForActor's own employeeId-resolve query already used (pre-existing, previously routed to an unconditional {rows:[]}, which was harmless only because clause (2)'s SECOND query, the role_assignment JOIN, ALSO always returned [] in this fixture, making the whole role clause a no-op regardless). Adding the new clause-(1) active-check to the SAME shape required updating that shared branch (and two custom inline 'tracking pool' definitions) to answer 'active' by default and 'deactivated' only for slugs listed in a new opts.deactivatedSlugs — otherwise every pre-existing participant-via-audit-actor test in the file would have flipped to 404, since none of their actors were ever an employee row in the fake pool's world before this task.",
+    "Two db-test fixtures (processes-read-visibility.db.test.ts's T-0723 'actor who STARTED the record-less instance' DETAIL and LIST tests) used arbitrary unseeded starter slugs as the acting employee — never an actual choros.employee row. Clause (1) never checked employee existence before this task, so it worked; the new active-check requires a real row, so both fixtures now seed the starter via seedEmployee before asserting participant status.",
+    "First full npm run fitness FAILed at frozen-checks-immutable (FF-FCI1): actor-authority-deactivation-gate.sh belongs to T-0662; the required 2-entry AUTHORITY_RESOLVERS registration therefore needed the FF-FCI13 auto_additive frozen-sanction channel (memory: 'frozen-check промоут через auto_additive-санкцию', T-0751 precedent on the exact same file). Gotcha: the frozen-sanctions.jsonl matcher greps COMPACT key:value tokens — a sanction line written with default json.dumps separators ('\": \"') is silently NOT matched (both frozen-checks-immutable and the auto-sanction-additive standalone report 'no sanction'); rewrote with separators=(',',':').",
+    "Session interrupted mid-verification (machine slept) after the main commit 1094ce1e landed — recovered from git state (memory: 'агент обрывается до commit→верифай из git-состояния'; here the commit WAS complete, only the full-fitness verification and the sanction line were outstanding)."
+  ]
+}

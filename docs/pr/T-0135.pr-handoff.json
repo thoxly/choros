@@ -1,0 +1,106 @@
+{
+  "task_id": "T-0135",
+  "status": "pr_open",
+  "branch": "task/T-0135-grant-presets",
+  "merge_target": "dev",
+  "base_commit": "8ec502a",
+  "head_commit": "1435fc5",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0135: 10 day-1 пресетов грантов в DICT_PRESETS (src/http/grants.ts) + PRESETS (ra-data.jsx). Пресеты сервируются через GET /api/rights/dictionaries (presets ключ). Новые типы GrantPresetAtom / GrantPreset. Fitness guard grant-presets-isolation.sh: AC-09a/b/c + AC-10 PASS (id + count sync). 128 тестов grant-presets.test.ts (AC-01..AC-08 + bonus). Нит R-N1 закрыт: спека AC-06 3→4 атома, toHaveLength(4) добавлен в тест. CI: tsc 0 errors, eslint 0 errors (2 pre-existing warnings), fitness PASS (frozen-file grants.ts expected-red on branch by design), vitest 1517/1523.",
+  "commits": [
+    {
+      "sha": "8ec502a",
+      "phase": "SPEC",
+      "message": "spec(T-0135): PRESETS грантов — 10 day-1 пресетов ролей"
+    },
+    {
+      "sha": "23739c6",
+      "phase": "BUILD",
+      "message": "impl(T-0135): наполнить DICT_PRESETS 10 day-1 пресетами грантов"
+    },
+    {
+      "sha": "d3e79fe",
+      "phase": "REVIEW",
+      "message": "T-0135 REVIEW: approved — 10 day-1 пресетов грантов (DICT_PRESETS + PRESETS)"
+    },
+    {
+      "sha": "1435fc5",
+      "phase": "NIT",
+      "message": "nit(T-0135): R-N1 — спека AC-06 «3 атома» → «4 атома», toHaveLength(4) в тесте"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "d3e79fe",
+      "findings_resolved": [
+        "R-N1 (nit): спека AC-06 «3 атома» → «4 атома» + toHaveLength(4) в тесте — CLOSED в коммите 1435fc5"
+      ],
+      "findings_nit_open": [
+        "R-N2 (nit): axesFromGrants в ra-data.jsx проверяет «exec» вместо «invoke» — UI-ось external не поднимается для p-treasury-exec/p-pay-init-limited. Pre-existing pattern; runtime gate T-0044 независим. Зафиксирован как T-0195 (Stage 2, nit-sweep)."
+      ],
+      "artifact": "docs/design/T-0135.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1523,
+      "passed": 1517,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "10/10",
+      "fitness_static": "PASS — все чеки зелёные; frozen-file grants.ts ожидаемо красный на in-flight ветке (зеленеет post-merge в dev)",
+      "fitness_db_grant_presets": "128/128 PASS — все тесты grant-presets.test.ts с live DB",
+      "fitness_db_total": "1517/1517 PASS, 0 failed, 0 skipped",
+      "tested_commit": "1435fc5",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+        "fitness_static_checks": "PASS — все чеки зелёные (frozen grants.ts — expected in-flight red)",
+        "vitest_unit": "1517/1523 passed, 6 skipped (flowable integration offline)",
+        "grant_presets_unit_tests": "src/__tests__/grant-presets.test.ts — AC-01..AC-08 + bonus p-refund-operator, с toHaveLength(4) в AC-06",
+        "fitness_db_total": "1517/1517 passed, 0 failed"
+      },
+      "artifact": "docs/test-reports/T-0135.test-report.md",
+      "contract_artifact": "docs/design/T-0135.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/grant-presets-isolation.sh",
+    "docs/design/T-0135.review.contract.json",
+    "docs/reviews/T-0135.review.md",
+    "docs/specs/T-0135-grant-presets.spec.md",
+    "docs/specs/T-0135.spec.contract.json",
+    "package.json",
+    "src/__tests__/grant-presets.test.ts",
+    "src/http/grants.ts",
+    "web/src/screens/rights/ra-data.jsx",
+    "docs/test-reports/T-0135.test-report.md",
+    "docs/design/T-0135.test-report.contract.json",
+    "docs/pr/T-0135.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "design_notes": {
+    "constraint_amount_le_declaration": "constraint: { amount_le: N } — декларация в opaque jsonb. Runtime enforcement (проверка суммы платежа) — ответственность invoke-path (T-0034/E4.4 verifyEffectGrants), вне скопа T-0135. Пресеты корректно декларируют constraint согласно спеке.",
+    "critical_flag_ui_only": "critical?: boolean в GrantPreset — визуальная подсказка для ra-role-editor.jsx, не вычисленный RoleCriticalityLevel из T-0040 combineCriticality. Реальная критичность роли вычисляется по effective grants независимо.",
+    "no_preset_table": "AC-18 T-0030: пресеты — клиентская удобность без server-side таблицы. Клиент разворачивает пресет в структурные атомы перед POST /api/grants.",
+    "r_n2_exec_vs_invoke": "axesFromGrants в ra-data.jsx:208-211 проверяет «exec» вместо «invoke». Pre-existing legacy op. T-0195 (Stage 2) для nit-sweep."
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_needed": "T-0135 не добавляет DDL-миграций. Пресеты — seed в TS (src/http/grants.ts + ra-data.jsx).",
+    "downstream_effect": "GET /api/rights/dictionaries теперь возвращает ключ presets с 10 пресетами. ra-role-editor.jsx получает пресеты через этот endpoint и показывает их в preset-selector."
+  },
+  "friction_events": [
+    "frozen-file check grants.ts: ожидаемо красный на in-flight branch (зеленеет post-merge в dev). Идентично состоянию approved-review коммита d3e79fe."
+  ]
+}

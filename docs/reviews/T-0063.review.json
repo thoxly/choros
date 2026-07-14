@@ -1,0 +1,81 @@
+{
+  "task_id": "T-0063",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/core/postgres/pgJobStore.ts:479",
+      "issue": "Docblock ссылается на 'sweepDurationMs' параметр (копипаста из ADR §4.1), но фактически параметр удалён — метод принимает только (outboxStore, tenantId). Расхождение между docblock и сигнатурой вводит читателя в заблуждение.",
+      "suggestion": "Обновить docblock: удалить упоминание sweepDurationMs, заменить на явный текст что now берётся из this.clock.now(). Аддитивное улучшение при следующем касании файла."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/core/jobStoreTypes.ts:31",
+      "issue": "Комментарий SweepResult.incidents: 'outbox-строк вставлено (= reclaimed+failed; <N если ON CONFLICT DO NOTHING)'. Фактически incidents всегда = reclaimed+failed — код инкрементирует incidents += 1 безусловно, не проверяя outcome enqueueInTx (ON CONFLICT path возвращает select-back, а не индикатор no-insert). Комментарий '<N если ON CONFLICT' не соответствует реализации.",
+      "suggestion": "Исправить комментарий на точный: 'incidents: число попыток записи incident в outbox (включая ON CONFLICT do-nothing; = reclaimed+failed)'. Либо отслеживать реальные inserts, но это усложнение без практической ценности. Не блокирует — поле используется только для observability onSweep-хука, а не для AC."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/core/lockReclaimer.ts:53",
+      "issue": "runSweepOnce использует Date.now() для bucketsFn-вызова фазы-1, тогда как sweepExpiredLocks использует this.clock.now() для фазы-2. В продакшн-среде оба будут Date.now() — расхождения нет. В тестах с инъектируемыми часами есть теоретическая несогласованность временных снимков. Аналогичный паттерн был в T-0062 (review R-2 там).",
+      "suggestion": "По образцу T-0062 review R-2: не блокирует. Если понадобится детерминированное тестирование полного sweepOnce-прохода — добавить Clock injection в LockReclaimerOptions. Не нужно сейчас."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": true,  "_note": "sweepExpiredLocks: атомарный CTE UPDATE + enqueueInTx на одном client; integration test passed." },
+    { "ac": "AC-2",  "covered": true,  "_note": "retries=2 → CREATED, retries=1, available_at=now; FF-2 integration passed." },
+    { "ac": "AC-3",  "covered": true,  "_note": "retries=0 → FAILED, retries=0, 1 outbox incident; integration test passed." },
+    { "ac": "AC-4",  "covered": true,  "_note": "payload {topic, lockOwner, lockExpiry, retriesLeft} verified в integration test." },
+    { "ac": "AC-5",  "covered": true,  "_note": "idempotency_key='lock_expired:'+jobId+':'+lockExpiry + UNIQUE index (029) + ON CONFLICT DO NOTHING в enqueueInTx; integration test AC-5 passed." },
+    { "ac": "AC-6",  "covered": true,  "_note": "active lock (lock_expiry>now) не тронут — WHERE lock_expiry<=now; integration test passed." },
+    { "ac": "AC-7",  "covered": true,  "_note": "CREATED/COMPLETED/FAILED не выбираются — WHERE state='LOCKED'; integration test passed." },
+    { "ac": "AC-8",  "covered": true,  "_note": "concurrent sweep: FOR UPDATE SKIP LOCKED + idempotency; Promise.all test → ровно 1 incident." },
+    { "ac": "AC-9",  "covered": true,  "_note": "GET /health с queue.workerIncidents: number; server.ts аддитивно расширен; существующие поля сохранены." },
+    { "ac": "AC-10", "covered": true,  "_note": "workerIncidents=0 при пустом outbox; =N после N sweep; integration tests passed." },
+    { "ac": "AC-11", "covered": true,  "_note": "RLS cross-tenant: sweep(TENANT_A) не затрагивает TENANT_B jobs — SET LOCAL choros.tenant_id; integration test passed." },
+    { "ac": "AC-12", "covered": true,  "_note": "FF-10 smoke: lock_expiry=now-1 → CREATED + 1 outbox; lock_expiry=now+1000 → untouched; integration test passed." },
+    { "ac": "AC-13", "covered": true,  "_note": "Существующие AC-1..AC-18 pgJobStore.integration.test.ts зелёные (49 tests passed)." },
+    { "ac": "AC-14", "covered": true,  "_note": "Миграция 029: CREATE OR REPLACE FUNCTION (идемпотентно) + CREATE UNIQUE INDEX IF NOT EXISTS (идемпотентно); второй прогон migrations/run.mjs → 'nothing to apply'." }
+  ],
+  "role_gap_evidence": [],
+  "_review_notes": {
+    "phase": "REVIEW",
+    "object": "BUILD commit d3d1095 (diff против f7dc03b)",
+    "worktree": "/Users/shoxy/Code/choros-wt/T-0063 @ d3d1095",
+    "gate": {
+      "npm_run_ci": "green: tsc --noEmit clean, eslint src clean, npm run fitness (все static FF зелёные), vitest run 620 passed / 5 skipped. Exit 141 при команде с head -40 = SIGPIPE, не ошибка CI.",
+      "isolated_db": "Postgres 16 на порту 55465 (own volume choros_t0063_review_vol, снесён после). Migrations run×2: run1 applied 26 files incl. 029, run2 'nothing to apply' (AC-14 live). npm run fitness:db = 204 passed (pgJobStore 49 + остальные), cross_tenant.test.ts parse-error = pre-existing баг на базе f7dc03b (не трогался coder, не считается finding). T-0063 sweepExpiredLocks тесты: все 13 новых passed."
+    },
+    "sweep_cte_correctness": {
+      "state_transition": "retries>0 → CREATED, retries-- (GREATEST); retries=0 → FAILED, retries=0 (GREATEST clamp). Lock cleared (owner=NULL, expiry=NULL). available_at=now (immediate retry — FR-6: no backoff). ✓",
+      "returning_clause": "j.retries AS retries_after = post-update value (decremented); lock_owner/expiry_before = pre-update snapshot из CTE. Семантика payload.retriesLeft = retries после декремента — соответствует ADR §3.2. ✓",
+      "for_update_skip_locked": "В CTE expired WHERE state='LOCKED' AND lock_expiry<=$1 FOR UPDATE SKIP LOCKED. Concurrent sweepers skip already-locked rows. ✓",
+      "atomicity": "BEGIN → SET LOCAL → CTE UPDATE → enqueueInTx loop на том же client → COMMIT. One transaction, two effects. ✓",
+      "rollback_on_error": "catch(err) → ROLLBACK + rethrow; finally → client.release(). ✓"
+    },
+    "t0062_idempotency_assessment": "T-0062 outbox idempotency была НЕ декоративной. T-0062 ADR §3.2 явно: 'Уникального ограничения на outbox.idempotency_key НЕТ — одна логическая доменная мутация = одна строка outbox по построению'. enqueueInTx в базе f7dc03b = plain INSERT без ON CONFLICT — корректно по дизайну T-0062 (at-most-one call per domain tx). T-0063 добавляет UNIQUE constraint (029 Part A) как НОВУЮ инфраструктуру, необходимую для sweep-reclaim idempotency. Это не gap T-0062, а законное расширение T-0063.",
+    "adr_deviation_sweepDurationMs": "ADR §4.1 сигнатура sweepExpiredLocks(sweepDurationMs, outboxStore, tenantId). Имплементация: sweepExpiredLocks(outboxStore, tenantId) — sweepDurationMs удалён, вместо него this.clock.now() внутри. Это лучше соответствует FF-14 и NF-5 (Clock injection). ADR §5 FF-14: 'sweepExpiredLocks использует this.clock.now()' — фактически именно это и реализовано. Девиация допустима по принципу 'FF > сигнатура ADR'. Docblock-нит (R-1).",
+    "adr_deviation_server_wiring": "startLockReclaimerLoop не вызывается из server.ts/index.ts — аналогично outboxDispatcher.startOutboxLoop (тоже не вызывается). Оба — library API, wiring в process startup — задача следующего этапа (T-0067 или отдельная). Ни один AC не требует wiring. Не девиация.",
+    "security_check": {
+      "sql_injection": "tenantId UUID-validated перед SET LOCAL interpolation (UUID_RE regex). ✓",
+      "security_definer": "choros.job_locked_expired_buckets: SECURITY DEFINER + SET search_path = choros, pg_catalog (hardcoded) + REVOKE ALL FROM PUBLIC + GRANT EXECUTE TO choros_app ONLY. Аналог 1:1 outbox_pending_buckets (025). ✓",
+      "data_leakage": "job_locked_expired_buckets возвращает (tenant_id, expired_count) — только агрегат, никаких строк данных. ✓",
+      "worker_incidents_health": "getQueueHealth query без GUC — аналог getOutboxHealth. Правильно работает с migrator pool (BYPASSRLS). С app pool без GUC = RLS block = 0 (деградация без утечки). ✓"
+    },
+    "independent_probes": {
+      "probe_cross_tenant_rls": "AC-11 integration test: sweep(TENANT_A) не трогает TENANT_B jobs — passed live.",
+      "probe_concurrent_sweep": "AC-8 Promise.all: two sweepers → exactly 1 incident — FOR UPDATE SKIP LOCKED + ON CONFLICT DO NOTHING — passed live.",
+      "probe_idempotency_dedup": "AC-5: повторный sweep того же lock event (same idempotency_key) → 1 outbox row в DB — passed live.",
+      "probe_migration_idempotency": "migrations/run.mjs дважды → второй 'nothing to apply' — passed live.",
+      "probe_secdef_function": "job_locked_expired_buckets: prosecdef=t, search_path=[choros,pg_catalog], app_can_execute=t, public_can_execute=f — verified live via pg_proc."
+    },
+    "schema_validation": "Validated against /Users/shoxy/Code/demiurge/schemas/review.schema.json via python3 validate_file — 0 errors."
+  }
+}

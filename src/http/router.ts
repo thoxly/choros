@@ -53,6 +53,55 @@ export function mapDomainError(code: string): HttpError {
 }
 
 // ---------------------------------------------------------------------------
+// readRawBody — mirrors readJsonBody but returns the raw Buffer (no JSON.parse)
+// ---------------------------------------------------------------------------
+
+/** Default max for file uploads: 25 MiB. */
+export const DEFAULT_RAW_MAX_BYTES = 26_214_400; // 25 MiB
+
+/**
+ * Read raw (non-JSON) request body bytes into a Buffer.
+ * Rejects with 413 if the body exceeds maxBytes (default 25 MiB).
+ * Callers receive the raw Buffer — content-type interpretation is their concern.
+ */
+export function readRawBody(
+  req: IncomingMessage,
+  maxBytes: number = DEFAULT_RAW_MAX_BYTES,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let done = false;
+
+    const finish = (err: HttpError): void => {
+      if (done) return;
+      done = true;
+      req.resume();
+      reject(err);
+    };
+
+    req.on("data", (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) {
+        finish(new HttpError(413, "PAYLOAD_TOO_LARGE", "request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("error", () => {
+      finish(new HttpError(400, "READ_ERROR", "request read error"));
+    });
+
+    req.on("end", () => {
+      if (done) return;
+      done = true;
+      resolve(Buffer.concat(chunks));
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // readJsonBody
 // ---------------------------------------------------------------------------
 
@@ -114,6 +163,10 @@ interface RouteEntry {
   segments: string[];
   paramIndex: number | null;
   paramName: string | null;
+  // T-0072 additive: multi-param support (paramIndices/paramNames supersede
+  // paramIndex/paramName when present; existing single-param routes are unaffected).
+  paramIndices?: number[];
+  paramNames?: string[];
   handler: RouteHandler;
 }
 
@@ -133,12 +186,48 @@ function sendErrorEnvelope(
   res.end(body);
 }
 
+// T-0573: additive re-export so call-sites outside the router (e.g.
+// assistant.ts's LLM-unavailable 503) can emit the SAME canonical
+// {error:{code,message}} envelope instead of hand-rolling their own shape
+// (ADR-T0573 §2.2 B3). Zero lines of the original declaration touched
+// (FF-HIRE-4: router.ts is additive-only).
+export { sendErrorEnvelope };
+
+// ---------------------------------------------------------------------------
+// T-0763: server-side logging for unexpected (non-HttpError) exceptions
+// ---------------------------------------------------------------------------
+
+/**
+ * T-0763 (follow-up to T-0249 CE-1 live-wire finding): before this task, every
+ * non-HttpError thrown by a handler fell straight into the generic
+ * `sendErrorEnvelope(res, 500, "INTERNAL", ...)` branches below with ZERO
+ * server-side trace — a live 22P02 (slug written into a UUID column) would
+ * have surfaced as a mute 500, discoverable only by a standalone repro script
+ * (see docs/tasks/T-0249.spec.md "Живая находка провода"). This function logs
+ * the diagnostic detail SERVER-SIDE, immediately before the generic envelope
+ * is sent to the client — the client-facing response is UNCHANGED (still
+ * generic INTERNAL, no message/stack ever reaches the HTTP response body).
+ *
+ * SAFE surface: only the HTTP method, the pathname (query string and request
+ * body are NEVER read here — this function receives no body/query/headers),
+ * and the error's own name/message/stack are written to the log. Handlers
+ * that need to keep secrets (e.g. LLM keys, passwords) out of `Error` messages
+ * remain responsible for that themselves (unchanged from today) — this
+ * function does not invent a new secret-bearing surface, it only stops
+ * discarding what a thrown Error already carries.
+ */
+function logUnexpectedError(method: string, pathname: string, err: unknown): void {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  console.error(`[router] unhandled non-HttpError on ${method} ${pathname}: ${detail}`);
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
 export class Router {
   private readonly routes: RouteEntry[] = [];
+  private fallback: RouteHandler | null = null;
 
   register(method: string, pattern: string, handler: RouteHandler): void {
     const upperMethod = method.toUpperCase();
@@ -146,16 +235,36 @@ export class Router {
     let paramIndex: number | null = null;
     let paramName: string | null = null;
 
+    // T-0072 additive: collect ALL :param positions (multi-param support).
+    const paramIndices: number[] = [];
+    const paramNames: string[] = [];
+
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       if (seg !== undefined && seg.startsWith(":")) {
-        paramIndex = i;
-        paramName = seg.slice(1);
-        break; // only one :param segment supported
+        paramIndices.push(i);
+        paramNames.push(seg.slice(1));
+        // Preserve legacy single-param behaviour: first param sets paramIndex/paramName.
+        if (paramIndex === null) {
+          paramIndex = i;
+          paramName = seg.slice(1);
+        }
       }
     }
 
-    this.routes.push({ method: upperMethod, segments, paramIndex, paramName, handler });
+    this.routes.push({
+      method: upperMethod,
+      segments,
+      paramIndex,
+      paramName,
+      // Multi-param: only stored when there is more than one param segment.
+      ...(paramIndices.length > 1 ? { paramIndices, paramNames } : {}),
+      handler,
+    });
+  }
+
+  setFallback(handler: RouteHandler): void {
+    this.fallback = handler;
   }
 
   dispatch(req: IncomingMessage, res: ServerResponse): void {
@@ -173,17 +282,36 @@ export class Router {
       let matched = true;
       const params: Record<string, string> = {};
 
+      // T-0072 additive: use paramIndices/paramNames (multi-param) when present;
+      // fall back to legacy paramIndex/paramName for single-param routes.
+      const paramIdxSet: Set<number> = route.paramIndices
+        ? new Set(route.paramIndices)
+        : route.paramIndex !== null
+          ? new Set([route.paramIndex])
+          : new Set();
+      const paramNameMap: Map<number, string> = new Map();
+      if (route.paramIndices && route.paramNames) {
+        for (let pi = 0; pi < route.paramIndices.length; pi++) {
+          paramNameMap.set(route.paramIndices[pi] as number, route.paramNames[pi] as string);
+        }
+      } else if (route.paramIndex !== null && route.paramName !== null) {
+        paramNameMap.set(route.paramIndex, route.paramName);
+      }
+
       for (let i = 0; i < route.segments.length; i++) {
         const routeSeg = route.segments[i] as string;
         const urlSeg = urlSegments[i] as string;
 
-        if (i === route.paramIndex) {
+        if (paramIdxSet.has(i)) {
           // Named param segment — match any non-empty string
           if (urlSeg.length === 0) {
             matched = false;
             break;
           }
-          params[route.paramName as string] = urlSeg;
+          const pName = paramNameMap.get(i);
+          if (pName !== undefined) {
+            params[pName] = urlSeg;
+          }
         } else {
           if (routeSeg !== urlSeg) {
             matched = false;
@@ -206,6 +334,9 @@ export class Router {
             if (err instanceof HttpError) {
               sendErrorEnvelope(res, err.statusCode, err.code, err.message);
             } else {
+              // T-0763: log the diagnostic server-side BEFORE the generic
+              // envelope goes out — the response body itself stays unchanged.
+              logUnexpectedError(method, pathname, err);
               sendErrorEnvelope(res, 500, "INTERNAL", "internal server error");
             }
           });
@@ -214,7 +345,38 @@ export class Router {
       }
     }
 
-    // No route matched → 404
+    // No route matched — try fallback if set
+    if (this.fallback) {
+      let result: void | Promise<void>;
+      try {
+        result = this.fallback(req, res, {});
+      } catch (err) {
+        // Handle sync errors immediately
+        if (err instanceof HttpError) {
+          sendErrorEnvelope(res, err.statusCode, err.code, err.message);
+        } else {
+          // T-0763: same server-side logging for the fallback's sync path.
+          logUnexpectedError(method, pathname, err);
+          sendErrorEnvelope(res, 500, "INTERNAL", "internal server error");
+        }
+        return;
+      }
+
+      if (result instanceof Promise) {
+        result.catch((err: unknown) => {
+          if (err instanceof HttpError) {
+            sendErrorEnvelope(res, err.statusCode, err.code, err.message);
+          } else {
+            // T-0763: same server-side logging for the fallback's async path.
+            logUnexpectedError(method, pathname, err);
+            sendErrorEnvelope(res, 500, "INTERNAL", "internal server error");
+          }
+        });
+      }
+      return;
+    }
+
+    // No route matched and no fallback → 404
     sendErrorEnvelope(res, 404, "NOT_FOUND", "route not found");
   }
 }

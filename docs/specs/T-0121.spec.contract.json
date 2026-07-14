@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0121",
+  "status": "ready",
+  "summary": "Дизайн-требования к отчётам как кастомным UI-страницам (two-floor) и реестру зависимостей страниц от полей объектной схемы: Floor-1 (декларативный агрегат, zero-LLM) и Floor-2 (React-компонент поверх named-binding, авторит config-агент в DRAFT, промоутирует человек); tenant-таблица report_page_dep фиксирует зависимости page→field_key; мягкое изменение схемы → предупреждение; деструктивное (drop/rename field_key при наличии dep) → API 409 + CI-гард bundle-coherence (расширение T-0082); escape-hatch с force+human-confirm; единый механизм согласованности через checkReportPageDepFields (расширение паттерна T-0072 checkBindingCompat), не третий отдельный механизм.",
+  "functional": [
+    "FR-1: модель report_page — tenant-таблица с T-0013-контрактом; поля: app_id, slug, title, floor ('1'|'2'), tier ('draft'|'published'), bundle_ref (nullable); UNIQUE(tenant_id, app_id, slug); Floor-1 = декларативный агрегат JSON Schema; Floor-2 = React-компонент поверх авторизованного RLS-gated API; граница Floor-1↔Floor-2 машинно-проверяема.",
+    "FR-2: реестр зависимостей report_page_dep — tenant-таблица с T-0013-контрактом; поля: page_id, registry_def_id, field_key, dep_kind ('read'|'aggregate'), stale (boolean); UNIQUE(tenant_id, page_id, registry_def_id, field_key); ADR определяет способ наполнения (ручная декларация / статический анализ / гибрид); валидация при регистрации: field_key обязан существовать в record_schema.",
+    "FR-3: предупреждение при мягком изменении схемы — PUT/PATCH record_schema с полями, от которых есть активные deps, возвращает warnings:[{page_slug, field_key}]; операция применяется; список машинно-читаем; связь с T-0084 changelog зафиксирована.",
+    "FR-4: red-line на деструктивное изменение — ADR определяет классификацию (drop field_key при наличии dep, rename field_key = destructive); API 409 destructive_schema_change без force; bundle-coherence.sh расширяется check-report-page-deps (stale dep → CI exit 1); human-gate при promote с stale dep.",
+    "FR-5: escape-hatch с force:true + grant mgmt_object:schema_destructive/apply → изменение применяется, deps помечаются stale=true, страницы депромоутируются в tier='draft', audit_event с меткой 'destructive'.",
+    "FR-6: права — просмотр/авторинг DRAFT/promote/управление deps через grant-алгебру T-0018 + PDP T-0021; нет второго permission-механизма; promote = human-only (не агент self-promote); MCP-tool author_report_page = DRAFT-only операция агента.",
+    "FR-7: tenant-изоляция — report_page и report_page_dep под FORCE RLS; Floor-2 код читает данные только через авторизованный RLS-gated серверный API; cross-tenant доступ структурно невозможен.",
+    "FR-8: аудит T-0016 — события на create/update/delete report_page, tier_change, register/update/delete report_page_dep, destructive schema-change с force; единственный canonical appendAuditEvent.",
+    "FR-9: миграционные слоты ≥ 046 для report_page и report_page_dep; DDL не выполняется в DESIGN-фазе; T-0121-impl обязан добавить report_page_dep в bundle_members.txt."
+  ],
+  "non_functional": [
+    "NF-1: один механизм согласованности — checkReportPageDepFields расширяет паттерн T-0072 (checkBindingCompat), не вводит третий отдельный механизм; функция pure (no I/O), экспортируется из src/core/report-page-compat.ts.",
+    "NF-2: tenant-изоляция структурна (FORCE RLS, T-0013-контракт), не на дисциплине кода; один cross-tenant leak = смерть GTM.",
+    "NF-3: default-DENY на деструктивное изменение схемы — блокируется по умолчанию (API 409 + CI fail); обход требует явного human-confirm с отдельным grant.",
+    "NF-4: Floor-1 страницы не зависят от LLM-авторства — декларативный агрегат рендерится детерминированно server-side; переживает агента-офлайн.",
+    "NF-5: bundle-coherence.sh проходит после T-0121-impl — report_page_dep в bundle_members.txt + check-report-page-deps добавлены как DoD T-0121-impl.",
+    "NF-6: zero new npm production dependencies для core-модуля report-page-compat.ts.",
+    "NF-7: аудит-след переживает удаление страницы (T-0016 append-only).",
+    "NF-8: предупреждение машинно-читаемо — warnings:[{page_slug, registry_def_id, field_key}] в API-ответе, потребляется T-0084 changelog."
+  ],
+  "out_of_scope": [
+    "Реализация (DDL/код/React-компоненты) — последующие фазы; миграции ≥ 046 бронируются, не создаются.",
+    "Полный Floor-2 git-под-капотом бандл — bundle_ref nullable, git-машинерия инкрементально.",
+    "UI редактора страниц (Floor-1 кнопочный) — задачи зоны 7.",
+    "Статический анализ Floor-2 React-кода для автоизвлечения field-deps — Stage-2 (если ADR выбирает ручную декларацию или гибрид).",
+    "Конкретные шаблоны отчётов (дашборд руководителя, SLA-dashboard) — механизм, не ассортимент.",
+    "Второй permission-механизм — видимость страниц = grant-алгебра T-0018 без исключений.",
+    "LLM-генерация тела отчётов / query-time агентный ответ — Stage-2.",
+    "Публичный доступ к отчётным страницам без аутентификации — T-0122 внешняя поверхность.",
+    "Pooled-режим — дефолт silo; T-0013-контракт без достройки pooled."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "ADR определяет tenant-таблицу choros.report_page с полным T-0013-контрактом (tenant_id-leading PK, FORCE RLS, default-DENY, choros_app, known_tenant_tables.txt); поля: id, app_id, slug, title, floor ('1'|'2'), tier ('draft'|'published'), bundle_ref (nullable), created_at, updated_at; UNIQUE(tenant_id, app_id, slug).", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "ADR определяет tenant-таблицу choros.report_page_dep с полным T-0013-контрактом; поля: id, page_id (FK→report_page), registry_def_id (FK→registry_def), field_key, dep_kind ('read'|'aggregate'), stale (boolean default false), created_at; UNIQUE(tenant_id, page_id, registry_def_id, field_key).", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "ADR определяет машинно-проверяемую границу Floor-1↔Floor-2: явное правило, какая страница обязательно Floor-1 (декларативный агрегат), когда допустим Floor-2 (React-компонент); граница не на вкус агента.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "ADR экспортирует из src/core/report-page-compat.ts чистую функцию checkReportPageDepFields(deps, recordSchema): DepCompatResult — аналог checkBindingCompat (T-0072); возвращает {ok:true} или {ok:false; violations:DepViolation[]}; ADR явно ссылается на T-0072 как прецедент, не изобретает второй механизм.", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "ADR определяет валидацию при регистрации dep: field_key обязан существовать в актуальном registry_def.record_schema; несуществующий field_key = ошибка 422 (не тихий accept).", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "ADR определяет предупреждение при мягком изменении схемы: API PUT/PATCH record_schema с полями, от которых есть активные deps, возвращает warnings:[{page_slug, field_key}]; операция применяется; список машинно-читаем.", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "ADR определяет классификацию деструктивных изменений (минимум: drop field_key, rename field_key при наличии dep) и механизм блокировки: API 409 destructive_schema_change при попытке без force; bundle-coherence.sh fail при stale dep в CI.", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "ADR определяет escape-hatch: деструктивное изменение с force:true + grant mgmt_object:schema_destructive/apply → изменение применяется, затронутые deps помечаются stale=true, страницы депромоутируются в tier='draft', пишется audit_event с action='schema_destructive_force' и полем affected_pages.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "ADR определяет human-gate на promote: report_page с dep.stale=true не промоутируется в 'published' без исправления или удаления stale-зависимостей.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "ADR фиксирует расширение bundle-coherence.sh (T-0082): новая проверка check-report-page-deps — для каждого report_page_dep field_key существует в registry_def.record_schema; несуществующий dep → CI exit 1; ADR фиксирует обязательство T-0121-impl обновить bundle_members.txt.", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "ADR определяет Floor-2 код страницы: читает record-данные только через авторизованный RLS-gated серверный API; прямой DB-доступ из Floor-2 React-кода структурно невозможен.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "ADR определяет права через grant-алгебру T-0018 + PDP T-0021; нет второго permission-механизма (FF-R6); MCP-tool author_report_page зафиксирован как DRAFT-only операция агента; promote = human-only.", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "ADR определяет аудит-события T-0016 для: create/update/delete report_page; tier_change; register/update/delete report_page_dep; destructive schema-change с force. Единственный canonical appendAuditEvent.", "verifiable_as": "fitness"},
+    {"id": "AC-14", "text": "ADR фиксирует миграционные слоты ≥ 046 для report_page и report_page_dep; DDL не выполняется в DESIGN-фазе.", "verifiable_as": "fitness"},
+    {"id": "AC-15", "text": "Post-impl: пользователь без grant read на application не видит связанных report_page; GET /api/report-pages fail-closed по tenant-контексту; tenant B не видит report_page tenant A.", "verifiable_as": "test"},
+    {"id": "AC-16", "text": "Post-impl: попытка деструктивного изменения record_schema (drop поля, от которого есть dep) без force → API 409; изменение не применяется; record_schema неизменна.", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "Post-impl: попытка promote report_page с dep.stale=true → API 409; страница остаётся в tier='draft'.", "verifiable_as": "test"},
+    {"id": "AC-18", "text": "Post-impl: checkReportPageDepFields(deps, schema) — field_key отсутствует в schema.properties → {ok:false, violations:[{type:'missing_in_schema', field_key}]}; все поля присутствуют → {ok:true}.", "verifiable_as": "test"},
+    {"id": "AC-19", "text": "Post-impl: деструктивное изменение с force → deps помечены stale=true, затронутые страницы в tier='draft', audit_event содержит action='schema_destructive_force' с полем affected_pages.", "verifiable_as": "test"},
+    {"id": "AC-20", "text": "ADR трассируется к gap-map §3а: каждое FR-1..FR-9 покрыто ≥1 решением ADR; ни одно решение не вводит второго permission-механизма, второго coherence-механизма, не противоречит T-0072/T-0082/extensibility-инвариантам; ревью-гейт архитектора.", "verifiable_as": "manual"},
+    {"id": "AC-21", "text": "ADR явно фиксирует связь с T-0084: предупреждение о зависимых страницах входит в changelog-payload семантического changelog; ADR T-0121 документирует это как контрактное требование к T-0084.", "verifiable_as": "fitness"},
+    {"id": "AC-22", "text": "ADR фиксирует: checkReportPageDepFields — pure function (no I/O, no DB, no network); аналог T-0072 NF-2; проверяется jest-тестом на отсутствие I/O-импортов.", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0121-reports-pages-design.spec.md"
+}

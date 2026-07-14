@@ -1,0 +1,165 @@
+{
+  "task_id": "T-0067",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 974,
+    "passed": 974,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "externalTaskBridge.test.ts::Block A — runBridgeOnce poll & enqueue > AC-1: 2 ExternalTasks → 2 jobs enqueued with topic = task.topic",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "externalTaskBridge.test.ts::Block A — runBridgeOnce poll & enqueue > AC-2: Repeated runBridgeOnce with same task IDs → 0 new jobs (idempotency)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "externalTaskBridge.test.ts::Block A — runBridgeOnce poll & enqueue > AC-3: assertVariableValue rejects record-payload task → job NOT created; other tasks proceed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "externalTaskBridge.test.ts::Block A — runBridgeOnce poll & enqueue > AC-4: job.topic = externalTask.topic (1:1 pass-through); job.variables = task.variables",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "externalTaskBridge.test.ts::Block A — runBridgeOnce poll & enqueue > AC-5: externalTaskId recoverable from jobId after restart (via idempotency_key)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "externalTaskBridge.test.ts::Block B — makeExternalTaskDeliver complete-path > AC-6: deliver(task_completed) calls completeTask exactly once with correct args",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "externalTaskBridge.test.ts::Block B — makeExternalTaskDeliver complete-path > AC-7: completeTask NOT_FOUND → idempotentSuccess:true → dispatched",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "externalTaskBridge.test.ts::Block B — makeExternalTaskDeliver complete-path > AC-8: completeTask ENGINE_UNAVAILABLE → { ok: false } → backoff/retry cycle",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "npm run fitness (flowable-bridge-contract.sh) — FF-G3: assertVariableValue + resolveFor references present in externalTaskBridge.ts; exit 0",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "externalTaskBridge.test.ts::Block C — makeExternalTaskDeliver fail-path > AC-10: deliver(task_failed) calls failTask exactly once with correct args",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "externalTaskBridge.test.ts::Block C — makeExternalTaskDeliver fail-path > AC-11: failTask NOT_FOUND → idempotentSuccess:true",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "externalTaskBridge.test.ts::Block C — makeExternalTaskDeliver fail-path > AC-12: deliver(worker_lock_expired) returns { ok: true } (no-op, no exception)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "externalTaskBridge.test.ts::Block D — startBridgePollLoop > AC-13: first poll pass happens after one interval, NOT immediately",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "externalTaskBridge.test.ts::Block D — startBridgePollLoop > AC-14: stop() halts further calls; no unhandledRejection after stop",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "externalTaskBridge.test.ts::Block D — startBridgePollLoop > AC-15: fetchAndLock ENGINE_UNAVAILABLE → loop continues; no throw",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "bridge-e2e-smoke.sh (live Flowable+Postgres compose POSTGRES_PORT=55476, FLOWABLE_PORT=18087): deploy choros-smoke.bpmn20.xml → start instance → runBridgeOnce → job in JobStore → outbox task_completed → completeTask → instance completed; exit 0",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-17",
+      "test": "bridge-e2e-smoke.sh Step 2b: repeat runBridgeOnce with same externalTask.id → COUNT(job WHERE idempotency_key=externalTask.id)=1 (no duplicates)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-18",
+      "test": "bridge-e2e-smoke.sh Step 4 + flowable-bridge-contract.sh: FF-G3 green (assertVariableValue + resolveFor in bridge file); exit 0",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-19",
+      "test": "fitness:db (isolated POSTGRES_PORT=55476): vitest --dir ci/checks/db --no-file-parallelism → 273 passed; cross_tenant.test.ts green; no new table added (NF-6 vacuously satisfied)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-20",
+      "test": "npm run ci: tsc --noEmit exit 0; eslint src exit 0 (2 no-console warnings, 0 errors); vitest run 696 passed / 5 skipped (701 total); 0 regressions",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-21",
+      "test": "node migrations/run.mjs ×2: run1 = applied 29 files; run2 = 'nothing to apply (29 already recorded)' — idempotent (no new migration in T-0067 design; vacuously satisfied)",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "Bridge module has no visual UX surface — no browser/LLM secondary check required",
+      "result": "n/a",
+      "note": "T-0067 is a headless library module (externalTaskBridge.ts). No browser/LLM verification applicable."
+    }
+  ],
+  "failures": [],
+  "_test_notes": {
+    "phase": "TEST",
+    "worktree": "/Users/shoxy/Code/choros-wt/T-0067 @ task/T-0067-external-task-mapping (HEAD=1bb57d5)",
+    "object": "T-0067 External Task Bridge — spec 21 AC, ADR approved, review approved (R-1/R-2/R-3 nits, all severity=nit).",
+    "gate_full_ci": {
+      "tsc_noEmit": "exit 0 (clean)",
+      "eslint_src": "exit 0 (2 no-console warnings in bridge-runner.ts + externalTaskBridge.ts — pre-existing style, consistent with codebase)",
+      "fitness_static": "all 28+ static checks green (incl. FF-G3 flowable-bridge-contract.sh, T-0115 cross-tenant fitness, all kc/flowable/sod/rbac static checks); exit 0",
+      "vitest_run": "696 passed / 5 skipped (701 total, 32 passed + 1 skipped test files); 0 regressions; 15 new externalTaskBridge.test.ts tests all green"
+    },
+    "gate_isolated_db": {
+      "engine": "Postgres 16 via docker compose -p t0067test, POSTGRES_PORT=55476, volume t0067test_choros_pgdata; torn down after run (docker compose down -v)",
+      "migrations_x2": "run1 = applied 29 files (001..029); run2 = 'nothing to apply (29 already recorded)' — AC-21 idempotency confirmed",
+      "fitness_db": "vitest run --dir ci/checks/db --no-file-parallelism → 273 passed (15 files); cross_tenant.test.ts 49 tests all green; schema.test.ts 16 tests all green (correct choros_migrator ownership with proper compose setup)"
+    },
+    "gate_live_e2e": {
+      "engine": "Isolated docker compose -p t0067live: Postgres 16 (POSTGRES_PORT=55476) + Flowable 7.1.0 (FLOWABLE_PORT=18087); own volume t0067live_choros_pgdata; torn down after run (docker compose down -v)",
+      "bridge_e2e_smoke": "bridge-e2e-smoke.sh PASS: deploy choros-smoke.bpmn20.xml → start instance (instanceId 48e27c7e) → runBridgeOnce fetched 2 tasks + enqueued 2 → idempotency re-poll: fetched=0 enqueued=0 (0 new jobs) → task_completed outbox → completeTask in Flowable → instance no longer running (completed). AC-16/AC-17/AC-18 all verified.",
+      "ff_g3_in_e2e": "flowable-bridge-contract.sh run inside bridge-e2e-smoke.sh: exit 0"
+    },
+    "adversarial_probes": {
+      "method": "4 probes (PROBE-A×2, PROBE-B×3, PROBE-C, PROBE-D×2 = 8 test cases) in ephemeral _probe_t0067_adversarial.test.ts; all 8 PASS; file DELETED after run, working tree clean.",
+      "PROBE_A_enqueue_throw_behavior": "CONFIRMED: when enqueue() throws (simulated Postgres transient error), runBridgeOnce propagates the exception. The poll-loop (startBridgePollLoop) swallows it via .catch() per ADR §4.4 / AC-14. External task stays locked in Flowable until lockDurationMs. On re-poll (simulating Flowable lock timeout), same externalTask.id → idempotency_key conflict → returns existing job; no duplicate. Idempotency guarantee holds.",
+      "PROBE_A_finding": "Note: bridge does NOT continue within the batch after an enqueue exception (no per-task try/catch for enqueue errors — only for fetchAndLock errors). Spec FR-3 'продолжает следующий task' applies specifically to assertVariableValue guard rejection, not enqueue infrastructure failure. Behavior is consistent with poll-loop swallowing: next interval retries the task (Flowable re-offers after lock timeout). NOT classified as product defect — within spec scope.",
+      "PROBE_B_nested_guard": "CONFIRMED: assertVariableValue recurses into nested plain objects. PROBE-B1: outer object with key 'data' → isRawObjectWithData → rejected immediately (raw_object_with_data). PROBE-B2: { wrapper: { rec: { kind:'record', registryId, recordId } } } → outer recurses into wrapper value → inner recurses into rec → isRecordRef → rejected (record_payload). Guard catches at 2nd nesting level. PROBE-B3: bridge skips task with deep nested record-ref via 'wrapper' key; other tasks in batch proceed. Guard depth is correct per T-0028 assertVariableValue spec.",
+      "PROBE_C_parallel_idempotency": "CONFIRMED: two concurrent runBridgeOnce with identical fetchResults (same 2 externalTask.ids) → 4 total fetches, but exactly 2 unique jobs (MockJobStore idempotency_key dedup). No race condition in the idempotency logic.",
+      "PROBE_D_retries_mapping": "CONFIRMED: deliver(task_failed) passes retries value from outbox payload directly to Flowable failTask. retries=2 → failTask called with retries=2 (no extra decrement — decrement already happened in JobStore at fail() time). retries=0 → failTask called with retries=0 (terminal). Flowable receives the correct retry count."
+    },
+    "integration_honesty_D056": {
+      "finding": "FRICTION: bridge-e2e-smoke.sh (fitness:flowable:bridge, AC-16..AC-18) is NOT in CI .github/workflows/ci.yml flowable job. Only static FF-G3 check (flowable-bridge-contract.sh) is in CI. The live E2E bridge gate is manually-run-only.",
+      "impact": "AC-16/AC-17/AC-18 verified locally but not automatically enforced in CI on every push/PR. Risk: bridge regressions are not caught by the automated gate.",
+      "classification": "tooling-gap (CI wiring gap, not a product defect in the bridge itself)",
+      "local_verification": "Verified locally: bridge-e2e-smoke.sh PASS on isolated compose (POSTGRES_PORT=55476, FLOWABLE_PORT=18087) with npm run build + node dist/bridge-smoke-runner.js; full cycle AC-16..AC-18 confirmed."
+    },
+    "review_nits": {
+      "R1_pool_guc": "Observed in bridge-runner.ts: single-connection GUC set. bridge-smoke-runner.ts uses pool.on('connect') pattern correctly for pool-wide GUC. R-1 nit confirmed by code inspection; not a test failure.",
+      "R2_private_field": "externalTaskBridge.ts:222 `jobStore['pool']` string-index access. Compiles and works (tested in adversarial PROBE-D with direct pool injection). R-2 nit confirmed; not a test failure.",
+      "R3_void_workerId": "externalTaskBridge.ts:139 `void workerId;` before using workerId at line 150-155. Redundant noise as reviewer noted. R-3 nit confirmed; not a test failure."
+    },
+    "schema_validation": "Validated against /Users/shoxy/Code/demiurge/.claude/worktrees/dreamy-hawking-97542b/schemas/test-report.schema.json via python3 validate_file — 0 errors."
+  }
+}

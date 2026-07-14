@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0636",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/externalTaskBridge.ts:487 (SET LOCAL choros.tenant_id via string interpolation)",
+      "issue": "tenantId is interpolated directly into a SET LOCAL statement (quote-escaped) rather than passed as a bind parameter, because Postgres SET does not support parameterized values. Safe here ONLY because tenantId is validated against UUID_RE before this point (line ~467) — an unvalidated string would be an injection vector.",
+      "suggestion": "No action needed now — this mirrors the exact pre-existing pattern in agent-dispatch-loop.ts:314/424 and lifecycle-bridge.ts:185, and the UUID guard is confirmed present before use. Flagging only so a future refactor of the UUID guard doesn't accidentally weaken this shared pattern across all three call sites at once."
+    },
+    {
+      "id": "R2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/core/externalTaskBridge.ts:509 (logThrottle(\"ENQUEUE_TENANT_FAILED\", `tenant=${tenantId}: ${String(err)}`))",
+      "issue": "String(err) on a per-tenant enqueue failure could in theory include verbose driver/db error detail (not secrets — no code path constructs an Error containing the Flowable password or Authorization header — but e.g. a raw SQL fragment on a constraint violation). Not a blocking secret leak (verified: flowable-client.ts never throws an Error containing `auth`/password; the only literal throw is the missing-password guard in makeFlowableClient, which is unreachable here since both composition roots noop-degrade before calling it).",
+      "suggestion": "Optional hardening for a follow-up: truncate/allowlist the err message before logging, or log err.message only. Not required for this task's acceptance criteria (NF-6 explicitly scopes 'password/Authorization', which is satisfied)."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": false },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true },
+    { "ac": "AC-16", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "AC-13 (LIVE_PROOF, D-064) is explicitly out of BUILD/coder-phase scope per the ADR's liveproof_plan — deferred to tester on the live Tailscale stand. Marked covered:false here only to reflect it is NOT yet proven, not as a defect of this PR.",
+    "Verified independently (not just trusting pr-handoff): re-ran bash ci/checks/agent-bridge-contract.sh solo (exit 0, all 4 sub-checks PASS); re-ran bash ci/checks/anti-case-lock.sh solo (aggregate 19 vs baseline 24, matches handoff claim exactly); re-ran npx tsc --noEmit and npm run build (both clean); ran src/__tests__/externalTaskBridge.test.ts (35/35 pass, including the 13 new Block G/H tenant-scoping + throttle tests) and flowable-client.test.ts + lifecycle-bridge.test.ts + timer-firing-loop.test.ts + binding-trigger.unit.test.ts + main-wired-entry.test.ts + process-start.test.ts together (88/88 pass) as their own vitest invocation, not reusing coder's run. Ran ci/checks/db/bridge-cross-tenant.db.test.ts solo against a live Postgres :55432 (3/3 pass) — confirmed by direct row read that tenant A's and tenant B's jobs land with their OWN, non-swapped tenant_id, and that a task with no choros_tenantId stamp is skipped (not enqueued/guessed).",
+    "Diff-vs-dev@f0151cf zone check: git diff shows zero overlap with dev's post-f0151cf advance (T-0634 touches web/modeler files only); confirmed no rebase needed. Confirmed diff --stat contains none of src/runtime/agent-dispatch/**, src/core/assistant-analyst.ts, src/db/registry-digest-dao.ts, src/http/inbox.ts.",
+    "Credential fix (P0-5) traced end-to-end in both lifecycle-bridge.ts and timer-firing-loop.ts: both now read FLOWABLE_REST_APP_ADMIN_USER_ID/PASSWORD (matching server.ts:474-486's working names), both noop-degrade (no throw, no 'test' literal) when the password is absent, confirmed by reading the actual guard code (not just the diff hunks) — in lifecycle-bridge.ts the noop-degrade sits after the pre-existing deps.pool/jobStore/outboxStore guard, so deps.pool is provably non-undefined by the time it's threaded into startBridgePollLoop.",
+    "Tenant-GUC fix (P0-6/F3/F4) traced in full: pgJobStore.enqueue's new 7th `executor?: Queryable` param is used via `(executor ?? this.pool)` on ALL THREE query call-sites (both INSERT branches + SELECT-back) — confirmed byte-for-byte in the diff; runBridgeOnce's per-tenant branch opens client, BEGIN, SET LOCAL (UUID-validated before interpolation), enqueues with executor=client, COMMIT, with ROLLBACK+non-fatal continue on a single tenant's failure (mirrors buildAgentWithTenantTx / PostgresAgentJobFetcher Phase-2, an established codebase pattern, not a novel risk). Legacy (no-pool) call-shape is preserved byte-identical to pre-T-0636 behaviour, gated by `pool === undefined`.",
+    "F5 tenant-stamp traced: CHOROS_TENANT_VAR='choros_tenantId' exported once from externalTaskBridge.ts; process-start.ts:387 and records.ts:986 both spread the stamp LAST (platform value wins over any coincidental caller-supplied key of the same name); tenantId confirmed in lexical scope at both call sites (withTenantTx argument / destructured createRecord arg). Regression tests in binding-trigger.unit.test.ts/process-start.test.ts were TIGHTENED to assert the new stamped shape, not weakened.",
+    "P0-7 duration fix: msToIso8601Duration manually re-executed for all spec-given examples (30000→PT30S, 5000→PT5S, 0→PT0S, 500→PT0.5S, plus -100→PT0S and NaN→PT0S) — all match. fetchAndLock/failTask signatures unchanged (NF-2); flowable-client.test.ts:236 updated from raw 5000 to 'PT5S' as the spec required (not left red, not deleted).",
+    "F8/F9/F10 observability: startBridgePollLoop's and startTimerFiringLoop's top-level catches are no longer empty — both call a shared makeErrorLogThrottle (timer-firing-loop.ts imports it from externalTaskBridge.ts rather than duplicating, a reasonable ADR deviation noted transparently in pr-handoff.json). Throttle behavior (first-occurrence-immediate, class-keyed suppression with injectable clock) read in full and matches spec.",
+    "No secret leakage found by independent review of every new console.error/logThrottle call site: none interpolate adminPassword/Authorization/basicAuth; the only literal password-related throw (missing-password guard inside makeFlowableClient) is unreachable from the bridge's composition roots because both now noop-degrade before ever calling makeFlowableClient without a password.",
+    "Two minor non-blocking nits recorded (R1: pre-existing SQL-interpolation pattern, already safe via upstream UUID validation, no change needed; R2: err-object stringification in one throttled log line carries a theoretical over-verbosity risk but no secret-leakage risk, given the codebase's actual throw sites) — neither blocks approval."
+  ]
+}

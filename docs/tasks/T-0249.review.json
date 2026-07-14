@@ -1,0 +1,75 @@
+{
+  "task_id": "T-0249",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "reviewer_runs": {
+    "tsc_noemit": "0 errors (exit 0; full-project npx tsc --noEmit)",
+    "live_pg_chain_solo": "5/5 PASS (DATABASE_URL solo, --dir ci/checks/db --no-file-parallelism, real PG :55432): happy-path write-back (circuit_id/activation_key_issued_at/status=active re-read from PG + key_issued audit + real Ed25519 license), dormant no-op, PDP-deny no-op, CE-3 concurrent single-issuance, CE-3 sequential re-click",
+    "route_red_lock_solo": "3/3 PASS (real HTTP POST /api/inbox/:id/action + production buildCompletionEffectRegistry, live PG, engine honest-degrade not_configured): (1) live env -> 200 done + circuit_id/status=active written back through the PRODUCTION PDP (makeDbGrantSource resolving the actor's real role_assignment+grant) and the slug->UUID actor_event adapter; (2) NEGATIVE CONTROL registry-omitted (HEAD~ dead wire) -> 200 done but record UNCHANGED; (3) dormant env -> 422 STEP_EFFECT_FAILED, record unchanged, approve ROLLED BACK (task.approved count=0)",
+    "unit_no_env": "69/69 PASS with DATABASE_URL unset (completion-effect 6 + inbox-action 10 + inbox-engine-drive 53)",
+    "anti_case_gate": "PASS + --self-test PASS (generic plane 0 case-literals across records/inbox/list-views/grant-resolver/completion-effect; independent grep confirms 0)",
+    "wired_gate": "completion-effect-wired.sh PASS + --self-test PASS (a: root exports builder; b: server.ts imports it; c: server.ts passes completionEffectRegistry: buildCompletionEffectRegistry(...); d: inbox seam declares + consumes it)",
+    "eslint": "0 errors (4 pre-existing no-console warnings in inbox.ts engine-drive log lines 1545/1568/1596/2688 — NOT the T-0249 seam at 2593-2629)",
+    "red_proof_of_wire": "REPRODUCED. rm src/composition/completion-effects-root.ts + git checkout HEAD~ -- src/server.ts -> completion-effect-wired.sh exit 1 (FAIL a/b/c, 3 violations) AND the route red-lock suite fails to LOAD ('Failed to load url ../../../src/composition/completion-effects-root.js'). git checkout HEAD restore -> wired.sh exit 0 + route 3/3. The D-064 dead-wire regression is genuinely locked by BOTH the static check (catches server.ts dropping the wire while tests stay green) and the route suite (catches the assembly being broken).",
+    "mutation_ce3_for_update": "removed FOR UPDATE from the issue-key-effect lock query -> CE-3 concurrent test RED (oks 2 vs expected 1; issueCalls 2 vs expected 1 — double issuance). Guard is real, not theatre. Restored (2x 'FOR UPDATE' back, tree clean).",
+    "mutation_a_writeback_removed_r1": "db chain went RED (circuit_id undefined) when write-back stripped — carried from r1; write-back genuinely guarded.",
+    "merge_tree_vs_dev_dff4e2f9": "CLEAN: git merge-tree --write-tree HEAD dev exit 0, zero conflicted paths. Change sets are DISJOINT (comm -12 of dev-vs-base and HEAD-vs-base name lists = empty). dev's only overlap-adjacent file src/http/process-projection.ts (T-0723/T-0760) changes ONLY read-visibility predicates (isInstanceDetailVisible / filterProjectionsByReadVisibility / isInstanceParticipant[Batch]); appendProcessStarted (write-side, used by the route test) and the projection fields the seam reads (procKey/taskDefKey/step) are untouched."
+  },
+  "axis_legend": {
+    "1": "correctness / reachability / completeness",
+    "2": "security / PDP / privilege",
+    "3": "anti-case / D-064 discipline",
+    "4": "idempotency / robustness",
+    "5": "migration / data",
+    "6": "integration / merge"
+  },
+  "resolved_blocking": [
+    {
+      "id": "CE-1",
+      "was": "blocking",
+      "resolution": "buildCompletionEffectRegistry (src/composition/completion-effects-root.ts) is now the production assembly; server.ts imports it and passes completionEffectRegistry: buildCompletionEffectRegistry(grantsPool) into registerInboxRoutes UNCONDITIONALLY (env-gate moved to the entitlement PORT, not the wire). Reachability proven LIVE through real POST /api/inbox/:id/action (route red-lock 3/3). RED-lock added at two layers (static wired.sh + route suite) and REPRODUCED by the reviewer. Live-wire finding disclosed and fixed: runIssueKey emitted actor_event with slug actor/role but the prod actor_event substrate is UUID-typed (22P02) -> fail-closed slug->UUID adapter in the composition root."
+    },
+    {
+      "id": "CE-2",
+      "was": "nit (silent ok:false promotion)",
+      "resolution": "a non-ok issue-key outcome now throws HttpError(422, STEP_EFFECT_FAILED) out of the effect -> runCompletionEffect propagates -> the approve tx ROLLBACKs (task.approved undone, record untouched, step stays open). Route test (3) pins it: dormant -> 422 + record unchanged + task.approved count=0. Never a silent done+200 without a key."
+    },
+    {
+      "id": "CE-3",
+      "was": "nit (concurrent double-issue window)",
+      "resolution": "SELECT ... FOR UPDATE + a pre-issuance transition guard BEFORE any EntitlementPort call serialize concurrent completions on the same record; the loser blocks, re-reads committed status=active, and is rejected active->active WITHOUT reaching the port. Concurrent + sequential chain tests prove exactly-once issuance; reviewer mutation (strip FOR UPDATE) turns the concurrent test RED."
+    }
+  ],
+  "findings": [
+    {
+      "id": "CE-R1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/composition/completion-effects-root.ts:107 (makeSlugResolvingActorEventWriter) + src/runtime/customer-onboarding/issue-key.ts:239 (Step 5b appendActorEvent)",
+      "issue": "The guarded-transition actor_event is appended on its OWN tenant tx (PgSodSource writer / the slug->UUID adapter connect), NOT the approve tx — disclosed in the module doc-comment. This does not undermine CE-2: Step 5b (the only actor_event append) runs ONLY after a successful issuance, so on every failure/deny/dormant path NO actor_event is written and the 422 rollback leaves nothing orphaned. A residual orphan-event window would require the approve tx to roll back AFTER a successful runIssueKey; in practice the only post-effect work is the JSONB write-back (same tx) and the engine-drive runs AFTER commit — so the window is not reachable through the current path. Low severity, accepted as documented.",
+      "suggestion": "If a future path can roll back the approve tx after a successful issuance, thread the actor_event append onto the caller's tx (or move it after the write-back) so the guarded-transition record shares the effect's atomicity."
+    },
+    {
+      "id": "CE-R2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "ci/checks/db/T-0249-action-route-effect.db.test.ts (test 1 seeds an approver WITH an update grant)",
+      "issue": "The live /action route proves the PDP-gated write-back on the POSITIVE path (completer holds a real update grant -> write-back happens through makeDbGrantSource). The DENY path (no-grant / deactivated completer -> pdp_denied -> NO write-back) is proven at the chain/unit tier (onboarding-chain test 3 'PDP denies (no grant) -> no issuance, no write-back'), not re-driven through the live route. The gating mechanism is identical (runIssueKey resolveFor subject=completer op=update; with CE-2 a denial now surfaces as a 422 rollback), so the security property holds — this is a coverage-completeness nit, not a hole.",
+      "suggestion": "Optionally add a 4th route case: production registry (live env) + a completer WITHOUT the update grant -> 422 STEP_EFFECT_FAILED, record unchanged — to pin the deny path at the route tier too."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Anti-case: generic plane 0 case-literals (records/inbox/list-views/grant-resolver/completion-effect)", "covered": true },
+    { "ac": "completion-effect.ts primitive case-free (opaque keys, no pg/http/env)", "covered": true },
+    { "ac": "Live-PG write-back circuit_id/activation_key_issued_at/status=active re-read from PG + customer.key_issued on real hash-chain", "covered": true },
+    { "ac": "Anti-theatre: dormant entitlement + PDP-deny write NOTHING (mutation-verified RED on removal)", "covered": true },
+    { "ac": "Dispatcher: no-op unregistered / duplicate throws / handler-throw propagates (unit 6/6)", "covered": true },
+    { "ac": "Migration 134 additive+idempotent (ON CONFLICT DO NOTHING, zero DDL, trigger_registry_id pinned)", "covered": true },
+    { "ac": "Additive seam no-op: existing inbox behaviour byte-identical (inbox-engine-drive 53/53, inbox-action 10/10)", "covered": true },
+    { "ac": "LIVE WIRE (CE-1): production buildCompletionEffectRegistry reachable in prod (server.ts) + RED-lock (static wired.sh + route suite), reviewer-reproduced", "covered": true },
+    { "ac": "Fail-visible (CE-2): dormant/denied -> 422 STEP_EFFECT_FAILED + approve rolled back, never silent done", "covered": true },
+    { "ac": "Exactly-once (CE-3): concurrent + sequential completion issue the key at most once (FOR UPDATE + pre-issuance guard), mutation-verified", "covered": true },
+    { "ac": "KEYSTONE: issue-key effect fires through the real POST /api/inbox/:id/action (create=start -> issue-key -> effect) — effect wire proven live at the route; the remaining live-Flowable HTTP userTask drive stays deferred under CUSTOMER_ONBOARDING_LIVE (stand offline)", "covered": true }
+  ],
+  "summary": "R2 re-verify: all three r1-flagged items closed and reviewer-reproduced. CE-1 (blocking) RESOLVED — the completion-effect primitive is live in the production composition root (buildCompletionEffectRegistry built unconditionally in server.ts, env-gate moved to the entitlement port) and reachable through the real POST /api/inbox/:id/action (route red-lock 3/3 on live PG, full production PDP via makeDbGrantSource). RED-lock reproduced: unwiring drives completion-effect-wired.sh to exit 1 (3 violations) AND the route suite to a load failure; restore returns green — the D-064 dead-wire regression is doubly locked. Live-wire finding (runIssueKey slugs vs UUID actor_event substrate, 22P02) fixed fail-closed by a slug->UUID adapter. CE-2 RESOLVED — a non-ok outcome throws 422 STEP_EFFECT_FAILED and rolls the approve tx back (task.approved count=0, record untouched), never a silent done. CE-3 RESOLVED — FOR UPDATE + pre-issuance transition guard give exactly-once issuance; reviewer mutation (strip FOR UPDATE) turns the concurrent test RED (issueCalls 2 vs 1). Rights of the effect: the write-back is gated on the COMPLETER's PDP resolveFor(update) (not a pure system bypass) — a denied/deactivated completer yields pdp_denied -> 422 rollback; only the two system-only fields (circuit_id/activation_key_issued_at) are written as the system actor AFTER the actor passes PDP, audited (record.update + completed_by). Anti-case (D-064): generic plane 0 case-literals (independent grep), primitive case-free (Phase 3), case content in seed(mig134)/quarantine(runtime|composition); customer-crm-anti-case.sh's composition/adapters quarantine is PRE-EXISTING (src/composition/issue-key-live.ts present at base d5557afd), not self-legalized for this task, and the gate's only r2 change is a strengthening bugfix to the single-file comment-strip anchor. Numbers: tsc 0; chain 5/5 solo; route 3/3 solo; unit 69/69 no-env; anti-case + wired + self-tests PASS; eslint 0 errors. Merge vs dev dff4e2f9 (T-0743, T-0760 included): CLEAN (merge-tree exit 0, disjoint file sets; dev's process-projection.ts change is read-visibility only, appendProcessStarted + seam projection fields untouched). Two residual nits (CE-R1 out-of-band actor_event tx — disclosed, not reachable to orphan; CE-R2 route-tier deny-path coverage — mechanism proven at unit tier). Neither blocks. MERGE-READY."
+}

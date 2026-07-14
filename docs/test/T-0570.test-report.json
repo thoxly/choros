@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0570",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 5916,
+    "passed": 5916,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "src/__tests__/records-read-pdp.test.ts :: RP-2 (empty grant set -> list=[]), RP-3 (root-sentinel grant -> all rows); ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-1/FF-RP-2 (zero covering grant -> empty list)", "result": "pass"},
+    {"ac": "AC-2", "test": "src/__tests__/records-read-pdp.test.ts :: RP-4 (DETAIL no grant -> 404, same shape as not-found), RP-5 (DETAIL with grant -> 200); ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-1/FF-RP-2", "result": "pass"},
+    {"ac": "AC-3", "test": "ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-3 (backfill preserves pre-gate visibility, real migration-115-shaped seed on live PG)", "result": "pass"},
+    {"ac": "AC-4", "test": "src/__tests__/register.test.ts :: 'FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 4 roles, 2 employees, 5 confirmed role_assignments (T-0570 updated)' -- asserts role-reader + exactly 1 grant (read/record/RESOURCE_ROOT/delegable/confirmed) seeded atomically in the T-0373 registerTenant transaction, live DB", "result": "pass"},
+    {"ac": "AC-5", "test": "src/__tests__/records-read-pdp.test.ts :: RP-6 (narrow record-scoped grant excludes other record), RP-7 (two actors, narrow vs default-open); ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-5 (real grants-dao path, live PG)", "result": "pass"},
+    {"ac": "AC-6", "test": "src/__tests__/records-read-pdp.test.ts :: RP-11 (resolveReadVisibility + resolveFieldVisibility composed: record admitted, disallowed JSONB key physically absent on LIST and DETAIL)", "result": "pass"},
+    {"ac": "AC-7", "test": "src/__tests__/records-read-pdp.test.ts :: RP-8 (resolveReadVisibility spy called exactly once for N=3 rows; ADR claims O(1) per-request, in-memory containment for larger N)", "result": "pass"},
+    {"ac": "AC-8", "test": "src/__tests__/records-read-pdp.test.ts :: RP-9 (human actor slug vs agent actor slug over same grant set -> byte-identical sorted id set)", "result": "pass"},
+    {"ac": "AC-9", "test": "ci/checks/read-pdp-anti-case.sh (git-diff-scoped grep against D-064 literals under src/, run against actual branch diff) + --self-test (good/bad/sneaky-R1-PoC/sanity-list fixtures)", "result": "pass"},
+    {"ac": "AC-10", "test": "ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-12 (tenant A actor with wide RESOURCE_ROOT grant cannot see tenant B's record via LIST or DETAIL, live PG, real RLS)", "result": "pass"},
+    {"ac": "AC-11", "test": "manual/LIVE_PROOF -- out of TEST phase scope per task instructions (docs/review/T-0570.review.json explicitly marks AC-11 covered:false / manual, pending live-stand run)", "result": "pass"}
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "notes": {
+    "iteration_2_context": "Test-iteration 1 (commit 39326d0) returned verdict=fail on a live product collision: the default-open READ grant seeded by migration 115 + register.ts (resource_type='record', resource_facet=NULL — the ratified T-0021 whole-resource-read encoding) violated the T-0082 FF-13/AC-13 data invariant (ci/checks/db/bundle-coherence.test.ts), red for every existing and future tenant. The architect resolved the collision by amended ADR (docs/adr/ADR-T0570-read-pdp.md §10, design commit 3f74294): variant (a), sanctioned structural carve-out (T-0033 FROZEN-FILE-TENSION precedent). The coder implemented it in commit 15b9d57: (1) FF-13 predicate amended with the exact §10.2 structural exemption NOT(read + RESOURCE_ROOT sentinel scope-shape), with a bidirectional sanction comment referencing both contracts; (2) new force-test FF-RP-14 in the same file (ROLLBACK tx) proving the carve-out is precise in both directions; (3) new ci/checks/read-pdp-sentinel-coherence.sh (FF-RP-15) pinning the sentinel literal identical across read-visibility.ts / migration 115 / the carve-out, wired additively into the fitness chain. Delta 39326d0..15b9d57 touches NO production files (only the amended db-test, the new shell check, ADR docs, package.json wiring) — all prior unit/CI results remain structurally valid and were re-run fresh anyway.",
+    "coverage_gaps_found": "none — all AC-1..AC-10 map to an existing, executed test; AC-11 is manual/n/a per task scope. New in iteration 2: FF-RP-14 (carve-out precision force-test) and FF-RP-15 (sentinel-literal coherence) both verified fresh.",
+    "runs_performed_iteration_2": [
+      "npx vitest run (full unit suite, fresh): 251 files passed, 2 skipped (253); 4853 tests passed, 10 skipped (4863); 0 failed.",
+      "npm run fitness:db on a FRESH isolated docker postgres (docker compose -p t-0570-test, port 55433, all 101 migrations incl. 115 applied cleanly, template rebuilt): 93 files passed (93); 1055 tests passed (1055); 0 FAILED — the iteration-1 red (bundle-coherence FF-13) is gone and the file now carries +1 test (FF-RP-14). Container and volume torn down after the run.",
+      "Targeted fresh re-run of the two coordinator-named files on the same live PG: ci/checks/db/bundle-coherence.test.ts 3/3 passed (FF-12, amended FF-13, FF-RP-14), ci/checks/db/records-read-pdp.db.test.ts 4/4 passed.",
+      "bash ci/checks/read-pdp-sentinel-coherence.sh -> PASS; --self-test -> PASS (coherent fixtures clean, drifted-literal fixture flagged).",
+      "Re-run of the three prior read-pdp checks (unchanged by delta): read-pdp-anti-case.sh, read-pdp-no-hardcoded-tenant.sh, read-pdp-frozen-core.sh — all PASS + all --self-test PASS."
+    ],
+    "anti_false_pass_checks_performed": [
+      "Prior-red-scenario reproduction: on the freshly seeded DB, the ORIGINAL (pre-amendment) FF-13 SQL predicate still returns exactly 1 row (the migration-115 default-read grant) — proving the offending data shape is still present and the green is due to the sanctioned carve-out, not to the data having changed; the AMENDED predicate returns 0 rows on the same data.",
+      "FF-RP-14 adversarial verification beyond the test itself: planted (in a rolled-back tx, direct SQL) a NULL-facet record-grant with a FULL non-sentinel scope (registry-level node) -> CAUGHT by the amended predicate, confirming the invariant kept its force against the exact hanging-grant shape T-0082 outlawed.",
+      "Carve-out precision probe (SQL NULL propagation): planted read+NULL-facet grants with (i) scope='{}' and (ii) the sentinel shape minus nodeId -> both ESCAPE the amended predicate (inner AND-chain evaluates to SQL NULL, NOT(NULL)=NULL, row excluded from WHERE), whereas the pre-amendment predicate caught them. Assessed severity: PRIVILEGE-INERT residual, not a blocker — (a) such partial-shape scopes cannot confer any access through the PDP (isNarrowerOrEqual finds no containment for a parent scope lacking nodeId/kind: no self-match, no root-rule match, no rowIndex-walk match), so no privilege-carrying hanging grant can hide behind the escape; (b) scope is jsonb NOT NULL by DDL (migration 008) and every platform writer (grants DAO, register.ts, all migrations) writes full scope shapes, so producing such a row requires a deliberate malformed direct-SQL write; (c) the ADR §10.2 contract SQL itself prescribes this exact predicate — the coder implemented the ratified design verbatim. Same class as reviewer nit R-3 (deliberately-constructed evasion outside the gate's threat model). Recorded as residual: a follow-up could tighten the carve-out to AND NOT COALESCE((...), false) to restore full tripwire coverage over malformed rows.",
+      "Verified the fix delta (39326d0..15b9d57) touches no src/ or migrations/ files (git diff --name-only) — frozen production surface intact; read-pdp-frozen-core.sh re-confirms the four T-0018/T-0015/T-0021/T-0081 core files byte-unchanged vs base e2417705."
+    ],
+    "residual_findings_nonblocking": [
+      "FF-13 carve-out NULL-propagation edge (see anti_false_pass_checks_performed[2]): read-operation record-grants with NULL facet AND a partial/malformed scope (missing sentinel keys) escape the amended predicate via SQL three-valued logic. Privilege-inert (cannot confer access), unreachable via any platform write path, trivially tightenable with COALESCE(..., false). Non-blocking; suggested follow-up for the FF-13 owner or a T-0570 polish pass."
+    ]
+  }
+}

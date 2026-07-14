@@ -1,0 +1,92 @@
+{
+  "task_id": "T-0198",
+  "status": "pr_open",
+  "branch": "task/T-0198",
+  "merge_target": "dev",
+  "base_commit": "3fb8377",
+  "head_commit": "47a5e4b",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0127 genesis installer + activation key, built as a wrapper over existing primitives plus a thin vendor-only key-verification layer (never in core). src/vendor/activation.ts is a pure zero-dep Ed25519 verifier (node:crypto) returning active|autonomous|invalid; expired/missing/forged => autonomous|invalid, NEVER a core halt. src/vendor/entitlement.ts is the env/fs boundary; src/http/vendor-activation.ts reports status (always 200) and refuses vendor-service calls with 402/403. ops/install.sh is an idempotent, fail-closed, online/linux-amd64 genesis installer + online self-upgrader (preflight -> .env.prod gen-if-absent -> optional key -> compose up --wait -> verify /health -> [pull+up] -> structured summary), wrapping docker-compose.yml + prod overlay + migrations/run.mjs + migration 026 with no second owner path and no fork. Ten FFs covered: 5 new self-tested ci/checks (FF-T127-1 red-line no-killswitch-in-core, FF-T127-2/5/8/10 genesis-installer static, FF-T127-3 verifier-offline, FF-T127-4 entitlement-gates-vendor-only exclusion, R-3 config-pubkey-only), FF-T127-9 = vitest, FF-T127-6/7 = CI integration jobs against a live stack. The three review nits are addressed (R-1 not_after narrowed via import-invariant + benign-comment self-test; R-2 vendor-only exclusion check; R-3 config/activation public-key-only check). Full gate `npm run ci` is green: tsc 0, eslint 0 errors (2 pre-existing no-console warnings), fitness all PASS incl. 5 new checks + their --self-tests, vitest 1766 passed / 6 skipped.",
+  "commits": [
+    {
+      "sha": "bd2e8cb",
+      "phase": "BUILD",
+      "message": "feat(T-0198): vendor activation layer — Ed25519 offline verifier + vendor HTTP edges (T-0127 §1.B/§1.C)"
+    },
+    {
+      "sha": "47a5e4b",
+      "phase": "BUILD",
+      "message": "feat(T-0198): genesis installer + 5 activation fitness checks + runbook (T-0127 §1.A/§5)"
+    }
+  ],
+  "gates": {
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1772,
+      "passed": 1766,
+      "skipped": 6,
+      "failed": 0,
+      "fitness_static": "PASS — all checks green incl. 5 new T-0127 checks + their --self-tests",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing no-console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+        "fitness": "PASS — full chain green; new: no-killswitch-in-core (FF-T127-1), genesis-installer (FF-T127-2/5/8/10), activation-verifier-offline (FF-T127-3), entitlement-gates-vendor-only (FF-T127-4), activation-config-pubkey-only (R-3); each also run with --self-test",
+        "vitest": "1766 passed, 6 skipped (flowable/kc integration offline — pre-existing), 78 files; activation.test.ts 22 tests"
+      },
+      "tested_commit": "47a5e4b"
+    }
+  },
+  "fitness_checks_added": [
+    "ci/checks/no-killswitch-in-core.sh (FF-T127-1, RED-LINE)",
+    "ci/checks/genesis-installer.sh (FF-T127-2/5/8/10 static)",
+    "ci/checks/activation-verifier-offline.sh (FF-T127-3)",
+    "ci/checks/entitlement-gates-vendor-only.sh (FF-T127-4, R-2 exclusion)",
+    "ci/checks/activation-config-pubkey-only.sh (R-3 config public-key-only)"
+  ],
+  "files_changed": [
+    "src/vendor/activation.ts",
+    "src/vendor/entitlement.ts",
+    "src/http/vendor-activation.ts",
+    "src/server.ts",
+    "config/activation/vendor-pub.ed25519",
+    "src/__tests__/activation.test.ts",
+    "src/__tests__/fixtures/activation/dev-active.key",
+    "ops/install.sh",
+    "ci/checks/no-killswitch-in-core.sh",
+    "ci/checks/genesis-installer.sh",
+    "ci/checks/activation-verifier-offline.sh",
+    "ci/checks/entitlement-gates-vendor-only.sh",
+    "ci/checks/activation-config-pubkey-only.sh",
+    "docs/runbooks/install.md",
+    ".env.prod.example",
+    ".gitignore",
+    "package.json",
+    "docs/pr/T-0198.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "FF-T127-6 (offline end-to-end) and FF-T127-7 (genesis-owner exactly once) are CI integration jobs that require a live Docker stack; they are documented in docs/runbooks/install.md and the genesis-installer.sh header as the dynamic half, but are NOT part of the offline `npm run fitness` chain (which must run without Docker). Static halves of FF-T127-5/8 are covered by genesis-installer.sh.",
+    "Added ci/checks/activation-config-pubkey-only.sh to materialize review nit R-3 (config/activation public-key-only) as a discrete check rather than folding it into genesis-installer.sh, for individual addressability."
+  ],
+  "redline_ff_selftest": "pass — ci/checks/no-killswitch-in-core.sh (FF-T127-1): self-test 1 detects a planted core->vendor import, self-test 2 detects a planted entitlement read, self-test 3 (R-1) proves a benign comment-only not_after/activation mention does NOT trip; real check green (src/core has no activation read, no src/vendor import)",
+  "vendor_pub_committed": true,
+  "vendor_priv_gitignored": true,
+  "install_sh_idempotent": true,
+  "residual_risks": [
+    "Activation status in the install summary is computed via the compiled dist/vendor/entitlement.js when present, else a best-effort active/autonomous guess from the activation.key presence; the authoritative live verdict is always GET /vendor/activation inside the running app.",
+    "FF-T127-6/7 dynamic verification deferred to the CI integration job (needs a live stack) — not exercisable in the offline gate."
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges the feature branch into dev after all gates pass",
+    "no_migration": "T-0198 adds NO migration and NO tenant table — fully additive (migration 026 reused verbatim; FF-RC6 honored). Nothing to run post-merge.",
+    "ops_note": "ops/install.sh is the documented one-command genesis install/upgrade for the founder home-server (linux/amd64, Docker + compose v2). See docs/runbooks/install.md."
+  },
+  "deviations_note": "No edits to src/core/*, agents/, constitution/, control-plane, or migration 026 — write-zones honored.",
+  "friction_events": []
+}

@@ -1,0 +1,71 @@
+{
+  "task_id": "T-0735",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "NB-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/screen-processes.jsx (loadMore / offset pagination)",
+      "issue": "newest-first offset-пагинация под конкурентной вставкой: инстанс, стартовавший между загрузкой стр.1 и стр.2, сдвигает порядок на 1 → строка на границе страницы может дублироваться или пропасться. Врождённое свойство offset-пагинации; поверхность низкочастотная.",
+      "suggestion": "Приемлемо для MVP. Прожить границу страницы живьём на стенде; при заметности перейти на keyset/курсор по (startedAtMs,id)."
+    },
+    {
+      "id": "NB-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/screens/screen-processes.jsx:957 + screen-process-instance.jsx (ActorChip type default)",
+      "issue": "type={inst.starterType || 'human'}: если starterId присутствует, а starterType отсутствует, стартер неизвестного типа отрисовался бы глифом «Человек». По контракту DB-режим всегда кладёт starterType рядом со starterId (projectionToInstance), ветка недостижима в проде.",
+      "suggestion": "Защитный фолбэк безобиден; для строгости дефолтить в нейтральный тип или выводить из резолвера."
+    },
+    {
+      "id": "NB-3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/*.test.jsx (client mocks) ↔ GET /api/processes (live)",
+      "issue": "Все client-тесты на моках — семантический рассинхрон грид↔живой роут моками не ловится. Контракт src/http/processes.ts байт-идентичен на dev (риск низкий), но шов доказуем только живьём.",
+      "suggestion": "LIVE_PROOF при возврате стенда: реальные инстансы в гриде; «Показать ещё» аппендит реальную стр.2 без дублей; round-trip ?mine/?status/?definition/?q; deep-link деталка→инбокс ?instance= фильтрует до задач этого инстанса."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "B: грид на part-A контракте (?q/?definition/?status/?started_from/?started_to/?mine/?limit/?offset + {total,limit,offset})", "covered": true },
+    { "ac": "B: тулбар→buildProcessesQuery, пагинация «Показать ещё» с loadSeq против гонок", "covered": true },
+    { "ac": "B: плотность строк через user_pref", "covered": true },
+    { "ac": "B: анти-UUID — колонка Инстанс убрана, стартер→ActorChip (честный «—»), запись→RecordRef", "covered": true },
+    { "ac": "D1: деталка стартер «Кем запущен» именем через ActorChip", "covered": true },
+    { "ac": "D2: «Связанные задачи»→/inbox?instance= (T-0710 scope), инбокс сидит из URL + чистимый чип", "covered": true },
+    { "ac": "D3: заголовок «Имя · Запись-источник» RecordRef ссылкой", "covered": true },
+    { "ac": "B6: удаление каталога — ОТЛОЖЕНО в T-0654-c (обоснованно, ADR §55-63; иначе осиротило бы триггеры/branch-rules)", "covered": false }
+  ],
+  "integration_seam": {
+    "merge_tree_clean": true,
+    "merge_tree_evidence": "git merge-tree --write-tree origin/dev task/T-0735 → exit 0, single tree-SHA b9e42765, no conflict lines",
+    "disjoint_files": true,
+    "disjoint_evidence": "git log 8a7434b0..dev -- <T-0735 files> пусто (0 из 57 коммитов)",
+    "contract_unchanged": true,
+    "contract_evidence": "git diff 8a7434b0..dev -- src/http/processes.ts ПУСТО — роут байт-идентичен; T-0732 definitionName / T-0721-0722 PDP уже в part-A base (8a7434b0)",
+    "grid_contract_sync": true
+  },
+  "gates_run": {
+    "tsc_noemit": "0 errors",
+    "vitest_targeted": "121/121 pass (4 files: screen-processes.test.jsx, screen-processes.logic.test.js, screen-process-instance.test.jsx, screen-inbox.test.jsx)",
+    "vite_build": "ok (547 modules, 2.82s)",
+    "anti_uuid_actor_render": "PASS + self-test",
+    "ux_g2_theme_pairing": "PASS + self-test",
+    "ux_g5_jargon": "PASS (informational, exit 0) + self-test",
+    "ux_g7_no_fake_buttons": "PASS (0 new) + self-test",
+    "ux_g8_scroll_reachable": "PASS + self-test",
+    "anti_case_lock": "PASS + self-test",
+    "process_list_display_plane_isolation": "PASS",
+    "process_list_tenant_scope_additive": "PASS",
+    "process_detail_read_gate": "PASS + self-test",
+    "process_detail_single_resolver": "PASS + self-test",
+    "diff_scope": "web-only (0 server .ts; web/src/screens + docs + handoff json)"
+  },
+  "role_gap_evidence": [
+    "REVIEW: контракт GET /api/processes сверен с потребителем — грид читает {instances,total,limit,offset}; projectionToInstance маппит definitionName→name / procKey→procId; buildProcessesQuery↔parseProcessListQuery согласованы.",
+    "REVIEW: пагинация loadMore проверена на дубли/потери и гонки (loadSeq ref, размонтирование при fresh-load, guard двойного клика, детерминированный серверный sort).",
+    "UX_REVIEW: G2/G5/G7/G8 прогнаны + self-test; анти-UUID гейт 0 находок; два честных Empty-состояния (фильтр vs пустой тенант); мёртвых кнопок нет; токены --chs-* сплошь."
+  ]
+}

@@ -1,0 +1,135 @@
+{
+  "task_id": "T-0067",
+  "status": "pr_open",
+  "branch": "task/T-0067-external-task-mapping",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    ".github/workflows/ci.yml",
+    "ci/checks/flowable/bridge-e2e-smoke.sh",
+    "docs/design/T-0067-external-task-mapping.adr.md",
+    "docs/design/T-0067.adr.contract.json",
+    "docs/reviews/T-0067.review.json",
+    "docs/specs/T-0067-external-task-mapping.spec.md",
+    "docs/specs/T-0067.spec.contract.json",
+    "docs/test-reports/T-0067.test-report.json",
+    "package.json",
+    "src/__tests__/externalTaskBridge.test.ts",
+    "src/bridge-runner.ts",
+    "src/bridge-smoke-runner.ts",
+    "src/core/externalTaskBridge.ts"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [
+    "FE-T0067-0001: bridge-e2e-smoke.sh (FF-T0067-14..16) was not wired into .github/workflows/ci.yml flowable-job at REVIEW/TEST time — live E2E was manually-run-only. Fixed in CI-wire commit 760b303: flowable-job now has setup-node@v4 + npm ci + bridge-e2e-smoke step with DATABASE_URL=compose:55432 + FLOWABLE_REST_APP_ADMIN_PASSWORD. ci-workflow-lint.sh green, npm run ci green (701 tests)."
+  ],
+  "verdict_payload": {
+    "review_verdict": "approved",
+    "review_commit": "1bb57d5",
+    "review_findings": [
+      {
+        "id": "R-1",
+        "severity": "nit",
+        "status": "open-minor",
+        "location": "src/bridge-runner.ts:48-70",
+        "issue": "GUC set on a single pool connection via client.query('SET ...') then released; subsequent pool.query() calls can dispatch to a different connection without the GUC set. Reliable in CI (pool-of-1) but fragile if pool size increases.",
+        "suggestion": "Use pool.on('connect', ...) pattern (as in bridge-smoke-runner.ts) so GUC is set on every new connection."
+      },
+      {
+        "id": "R-2",
+        "severity": "nit",
+        "status": "open-minor",
+        "location": "src/core/externalTaskBridge.ts:222",
+        "issue": "`const pool = jobStore['pool'] as pg.Pool` — private field access via string index; rename of private field breaks silently at runtime.",
+        "suggestion": "Accept pool explicitly in makeExternalTaskDeliver(flowableClient, pool, onDispatched?) per ADR §4.3 injected-pool pattern."
+      },
+      {
+        "id": "R-3",
+        "severity": "nit",
+        "status": "open-minor",
+        "location": "src/core/externalTaskBridge.ts:139",
+        "issue": "`void workerId;` is redundant noise — workerId is used directly on lines 150-155.",
+        "suggestion": "Remove the void workerId line."
+      }
+    ],
+    "test_verdict": "pass",
+    "test_commit": "5205bc1",
+    "ac_coverage": 21,
+    "ac_passed": 21,
+    "deterministic_tests": {
+      "total": 974,
+      "passed": 974,
+      "failed": 0
+    },
+    "adversarial_probes": [
+      {
+        "probe": "PROBE-A — enqueue() throw → idempotency holds on re-poll",
+        "result": "pass — exception propagates from runBridgeOnce; poll-loop swallows via .catch(); on re-poll idempotency_key conflict returns existing job, no duplicate"
+      },
+      {
+        "probe": "PROBE-B — nested guard (assertVariableValue recurses 2 levels into plain objects and record-refs)",
+        "result": "pass — raw_object_with_data and record_payload both rejected at correct nesting depth; other tasks in batch proceed"
+      },
+      {
+        "probe": "PROBE-C — parallel-dedup (two concurrent runBridgeOnce with identical fetch results)",
+        "result": "pass — exactly 2 unique jobs, no race condition in idempotency_key dedup"
+      },
+      {
+        "probe": "PROBE-D — retries-mapping (deliver(task_failed) passes retries value directly to failTask)",
+        "result": "pass — retries=2 → failTask(retries=2); retries=0 → failTask(retries=0); no extra decrement"
+      }
+    ],
+    "live_gate": {
+      "compose_project": "t0067live",
+      "postgres_port": 55476,
+      "flowable_port": 18087,
+      "volume": "t0067live_choros_pgdata",
+      "torn_down_after": true,
+      "smoke_script": "pass",
+      "ac_16_17_18_verified": true
+    },
+    "integration_honesty_d056": "HONEST after CI-wire commit 760b303 — flowable-job now invokes bash ci/checks/flowable/bridge-e2e-smoke.sh (FF-T0067-14..16) in GitHub Actions. Previously: manually-run-only (FE-T0067-0001, tooling-gap). Now: live E2E bridge cycle is an enforced CI gate."
+  },
+  "merge_target": "dev",
+  "merge_base": "b3745ae",
+  "merge_policy": "auto-merge D-053 (orchestrator rebases task/T-0067-external-task-mapping onto current dev HEAD before merge; no PR on GitHub per dispatch constraint)",
+  "migrations": "none — T-0067 adds no new migrations; 29 migrations already applied (AC-21 idempotency confirmed ×2)",
+  "promote_guide_GT3": {
+    "what_is_new": "External Task ↔ JobStore bridge (E6.2): poll-loop (startBridgePollLoop) fetches Flowable external tasks per topic, enqueues them in pgJobStore with idempotency_key=externalTask.id, and delivers outbox completions back to Flowable via completeTask/failTask. Pull model is fully closed: Flowable → JobStore → worker HTTP API → Flowable.",
+    "how_to_run_e2e": [
+      "1. Start compose stack: docker compose up -d postgres flowable && bash ci/checks/flowable/wait-ready.sh",
+      "2. Build TypeScript: npm run build",
+      "3. Run bridge E2E smoke: DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros FLOWABLE_REST_APP_ADMIN_PASSWORD=choros_flowable_dev_pw bash ci/checks/flowable/bridge-e2e-smoke.sh",
+      "4. Expect exit 0: '[FF-T0067-14] PASS: bridge E2E smoke green (AC-16..AC-18)'",
+      "5. Full CI gate: npm run ci — 701 tests pass"
+    ],
+    "key_env_vars": {
+      "DATABASE_URL": "postgres://choros_migrator:choros_dev_pw@localhost:55432/choros (compose default) — required for genesis tenant lookup in bridge-e2e-smoke.sh",
+      "FLOWABLE_REST_APP_ADMIN_PASSWORD": "choros_flowable_dev_pw (dev default; required for bridge smoke)",
+      "BRIDGE_TOPICS": "comma-separated topic strings for startBridgePollLoop (e.g. 'smoke-topic')",
+      "BRIDGE_WORKER_ID": "worker ID passed to Flowable fetchAndLock",
+      "BRIDGE_TENANT_ID": "UUID of tenant; auto-resolved from Postgres genesis tenant if not set"
+    },
+    "not_in_scope": [
+      "server.ts wiring of startBridgePollLoop — T-0068 (E6.3, onDispatched seam) owns this",
+      "resolveFor authorization wiring at outbox deliver — T-0068 owns lifecycle+audit path",
+      "Production Flowable credentials / fleet ops — E0.7 (founder-gated, RL-1)",
+      "BPMN modeller deploy UI — E8.2"
+    ],
+    "downstream_T_0068": {
+      "seam": "onDispatched callback in makeExternalTaskDeliver(flowableClient, pool, onDispatched?)",
+      "note": "T-0068 wires the onDispatched hook to resolveFor authorization lifecycle + audit trail. ADR §4.6 frozen at T-0067: externalTaskBridge.ts exports makeExternalTaskDeliver + startBridgePollLoop; onDispatched is an optional callback injected from outside (no breaking change).",
+      "frozen_contract": {
+        "makeExternalTaskDeliver_signature": "makeExternalTaskDeliver(flowableClient: FlowableClient, jobStore: JobStore, onDispatched?: (jobId: string, outcome: DeliverOutcome) => Promise<void>): Deliver",
+        "startBridgePollLoop_signature": "startBridgePollLoop(opts: BridgePollOpts): { stop: () => void }",
+        "BridgePollOpts_fields": "flowableClient, jobStore, topics: string[], workerId: string, tenantId: string, intervalMs?: number, lockDurationMs?: number, maxTasksPerPoll?: number, onDispatched?"
+      }
+    }
+  }
+}

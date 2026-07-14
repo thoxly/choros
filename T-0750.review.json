@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0750",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "T-0750-F1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/inbox.ts:1831 (item.mine branch) + inTab(\"mine\") src/http/inbox.ts:1184",
+      "issue": "The item.mine (claimant) visibility branch is NOT deactivation-gated. Adversarial live-PG probe (my own, beyond the coder's 8 AC): a DEACTIVATED actor who CLAIMED a task while active can still read that task's detail (GET /api/inbox/:id) with a residual-window JWT -> HTTP 200 (deactivation does not release the claim; claim-state -> item.mine=true is identity-match only). This is a real, but NARROW and NON-BLOCKING, defense-in-depth residual: (a) self-scoped -- only a task the actor personally claimed and already had full access to; (b) time-bounded to the ~300s residual JWT window (T-0702); (c) byte-symmetric with LIST's inTab(\"mine\") (line 1184) and its 'mine' badge -- a deactivated claimant already sees the same task in LIST, so this is a SYSTEMIC property (deactivation != claim release; claim-state visibility is ACTOR_ACTIVE-gated NOWHERE), not introduced by T-0750; (d) the ADR (§3) honestly scopes the deactivation cutoff to branches (2) role and (3) owner ONLY -- it does NOT overclaim item.mine cuts off deactivated actors. The finding under fix (role-addressee / arbitrary-tenant-member read) IS closed (live AC-3 + my P4 both 404). Narrowing DETAIL alone would break the LIST/DETAIL 'mine' symmetry the task correctly preserves.",
+      "suggestion": "Out of scope for T-0750 (route->resolver reachability finale). Spin a separate systemic task: either release active claims on deactivation (claim-projection + migration) OR ACTOR_ACTIVE-gate claim-state visibility across BOTH LIST inTab(\"mine\")/badges AND DETAIL item.mine, so the two stay symmetric. Do not fix in this PR."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1 role-addressee (active) -> 200", "covered": true },
+    { "ac": "AC-2 outsider (unrelated role, not claimant, not owner) -> honest 404", "covered": true },
+    { "ac": "AC-3 DEACTIVATED addressee (role_assignment intact, live JWT) -> 404 [core fix]", "covered": true },
+    { "ac": "AC-4 tenant-owner bypass -> 200", "covered": true },
+    { "ac": "AC-5a claimant (mine) -> 200; AC-5b same-role colleague (not claimant) -> 200", "covered": true },
+    { "ac": "AC-6a/6b LIST tab=pool regression (addressee sees / deactivated empty)", "covered": true },
+    { "ac": "P2 (judge probe) deactivated OWNER -> 404 (owner bypass deactivation-safe)", "covered": true },
+    { "ac": "P3 (judge probe) cross-tenant actor (same role slug, other tenant) -> 404 (tenant isolation)", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "actor-active-route-coverage.sh live: SUMMARY 77 GET routes -- 22 marker-covered, 55 whitelisted, 0 findings (was 1). Self-test PASS.",
+    "Parent commit 99b590c8 DETAIL block (GET /api/inbox/:id) marker scan = [] (the 1 finding). Post-fix block references resolveRolesForActor (inbox.ts:1822) + isGenesisOwnerForTenant (inbox.ts:1826, Group-1 T-0662 resolver).",
+    "Not masking: /api/inbox and /api/inbox/:id are NOT on ROUTE_WHITELIST; 0 ci/checks/*.sh edited; frozen-checks-immutable.sh PASS; markers pre-existed in ACTIVE_MARKERS (isGenesisOwnerForTenant Group-1; resolveRolesForActor registered by T-0740).",
+    "getRoleSlugsForActor (grants-dao.ts:468-493) carries ${ACTOR_ACTIVE_SQL} ('deactivated_at IS NULL') on BOTH the primary and T-0366 fallback employee lookup -> myRoles=[] for a deactivated role-holder. Live AC-3 + probe P4 confirm 404.",
+    "Live-PG: coder suite 8/8 PASS (incl. AC-3). Judge adversarial probe 5/5 deterministic met: P1(mine edge)=200 documented, P2 deact-owner=404, P3 cross-tenant=404, P4 deact-claimant/unrelated=404.",
+    "Gates: tsc clean; vitest src/__tests__ 4735/4735 (full run 5956 pass/17 skip); http-route-auth-coverage PASS+self-test; actor-authority-deactivation-gate PASS+self-test; anti-case-lock PASS+self-test; read-pdp-anti-case PASS+self-test; process-detail-read-gate PASS+self-test.",
+    "Diff scoped to 5 files (src/http/inbox.ts +57/-1, 2 tests, 1 adr, 1 handoff); zero ci/checks/*.sh; owner-bypass call signature matches org.ts:747 def and the file's existing T-0744 reuse at inbox.ts:1449."
+  ]
+}

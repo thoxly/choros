@@ -1,0 +1,54 @@
+{
+  "task_id": "T-0744",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/T-0744-orphaned-role-owner-claim.db.test.ts",
+      "issue": "Новый live-PG DB-тест не покрывает прямой кейс 'деактивированный genesis-owner -> 403' для новой authority-ветки owner-orphan-claim.",
+      "suggestion": "Belt-and-suspenders: добавить регресс, где owner деактивирован (employee.deactivated_at set) на осиротевшей задаче -> owner-claim 403. Безопасность уже структурно airtight (isGenesisOwnerForTenant несёт ACTOR_ACTIVE_SQL='deactivated_at IS NULL', account-deactivation гейт inbox.ts:1919-1924/:2338-2343 бросает 403 ДО owner-ветки, actor-authority-deactivation-gate PASS) — потому non-blocking."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/inbox.ts:2378",
+      "issue": "approve owner-ветка загейчена только `!myRoles.includes(task.role)` без guard `task.role !== undefined/truthy`, тогда как claim-путь имеет `taskRole !== undefined` (inbox.ts:1964). При гипотетической безадресной (role='') waiting-задаче пустой пул сделал бы owner-approve допустимым.",
+      "suggestion": "Симметрии ради добавить truthiness-guard на task.role в approve owner-ветку. Не эксплуатируемо (owner-гейт + empty-pool-гейт; pre-existing Tier-2-ветка тоже без этого guard-а), потому non-blocking."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/inbox.ts:678-694",
+      "issue": "Путь B роутинга всё ещё резолвит ownerSlug через findTenantOwnerSlug и делает `void ownerSlug` с комментом 'used structurally by the fallback path'. После T-0744 owner-eligibility считается независимо в claim-гейте (isGenesisOwnerForTenant), поэтому этот резолвинг дважды-мёртв, а коммент неточен.",
+      "suggestion": "Кандидат на уборку (убрать мёртвый findTenantOwnerSlug-вызов в пути B или поправить коммент). Pre-existing, вне скоупа T-0744 — non-blocking."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 5,
+      "location": "T-0744.pr-handoff.json (ci_local_notes)",
+      "issue": "Хэндофф заявляет 'T-0710 4' регресс; сьют T-0710-inbox-escalation-order = 2 теста (T-0710 размазан по 3 db-файлам).",
+      "suggestion": "Косметика счёта, не дефект. Уточнить число при желании."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "в1: substituteProvidesCoverage(rule,holders)=ttlGrantId!==null ∨ holders.has(substitute) — единый чистый предикат", "covered": true },
+    { "ac": "в1: computeEffectivePool в пути B (inbox.ts) — Tier-1-не-держатель больше не маскирует пул -> routed_to_fallback:role_unfilled", "covered": true },
+    { "ac": "в1: тот же предикат в пути A (executor-resolver.ts, dormant) — add гейтится, опустевший пул -> fallback", "covered": true },
+    { "ac": "в2: isOwnerOrphanClaimEligible = isGenesisOwnerForTenant ∧ пустой effective pool — genesis-owner-специфично, не любой admin", "covered": true },
+    { "ac": "в2: только при пустом пуле (live-PG c1/c2/c3: owner-claim 403 при co-holder/live-holder/Tier-2)", "covered": true },
+    { "ac": "в2: fail-closed на деактивированном владельце (ACTOR_ACTIVE_SQL + account-deactivation гейт до owner-ветки)", "covered": true },
+    { "ac": "в2: владелец действует как себя, без on_behalf_of (payload assert 'on_behalf_of' in payload === false)", "covered": true },
+    { "ac": "в2: owner-ветка в claim И approve, ПОСЛЕ Tier-2 ДО 403 — Tier-2 приоритетнее (c3)", "covered": true },
+    { "ac": "Tier-2 on_behalf_of цел — T-0588 AC-1 (c3 + inbox_claim_substitution 12/12)", "covered": true },
+    { "ac": "§2.6 закрыт: владелец реально claim-ит осиротевшую (было 403 -> 200) + approve -> done", "covered": true },
+    { "ac": "ложный коммент claim-гейта убран (inbox.ts:1372)", "covered": true },
+    { "ac": "tech-debt: предикат вынесен + FF-COV1..5 (+self-test, не тавтология)", "covered": true },
+    { "ac": "диф скоуплен (10 файлов, все T-0744-owned; чужие ci/checks не тронуты)", "covered": true }
+  ]
+}

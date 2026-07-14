@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0615",
+  "status": "pr_open",
+  "branch": "task/T-0615-bpmn-auto-layout",
+  "pr_url": "local:task/T-0615-bpmn-auto-layout",
+  "live_proof": "pending orchestrator",
+  "summary": "Живой факт со стенда (2026-07-03, подтверждён консолью): модельер процессов (/processes/:id/edit) падал с bpmn-js 'importXML error: no diagram to display' для ЛЮБОГО определения без diagram-interchange (DI, блок <bpmndi:BPMNDiagram> с координатами узлов) — пустой канвас с палитрой, процесс не посмотреть/не править. Определения, залитые голым BPMN через seed/API/emit ИИ, приходят без DI; созданные в модельере — с DI. bpmn-js — рендерер DI: без BPMNDiagram нет BPMNPlane→BPMNShape/BPMNEdge→нечего рисовать. ФИКС (вариант A — клиент): новый чистый модуль web/src/canvas/bpmn-ensure-layout.js: hasDiagramInterchange(xml) (структурный prefix-agnostic детектор элемента BPMNDiagram, регэксп якорён на '<' — не ловит подстроку в атрибуте/тексте) + ensureLayout(xml)→{xml,layoutApplied} (DI есть → исходный XML байт-в-байт layoutApplied=false; DI нет → await layoutProcess(xml) из bpmn-auto-layout@1.3.0 → XML с DI layoutApplied=true; провал раскладки → throw 'auto-layout failed'). web/src/canvas/bpmn-modeler-wrapper.jsx вклинивает ensureLayout(xmlToLoad) ПЕРЕД modeler.importXML в ту же .then/.catch цепочку; .catch различает провал авто-раскладки ('Не удалось построить схему автоматически…') от реджекта importXML ('Не удалось открыть диаграмму…'), оба через onError (честная деградация T-0484 сохранена, немой пустой канвас невозможен). Вариант A выбран над B (серверная генерация DI при сохранении), т.к. чинит ВСЕ уже сохранённые определения при открытии без миграции данных (включая боевой процесс закупок волны 1); B требует bpmn-moddle в бэкенде (сейчас чистые строковые трансформы) + бэкфилл — вынесен follow-up O1. D-064: детект DI структурный, ноль кейс-литералов, anti-case-lock на baseline (aggregate 24=24). Новая зависимость bpmn-auto-layout@1.3.0 — КЛИЕНТСКАЯ (web/package.json), в бэкенд src не течёт (bpmn-linter-isolation сканирует src — не затронут). layoutProcess — чистый bpmn-moddle-трансформ без DOM (проверено живьём в node: DI-less вход → выход с BPMNDiagram/BPMNShape/Bounds), поэтому unit-тесты гоняют реальную раскладку в vitest env=node без инстанса BpmnModeler (ему нужен DOM). Теперь рисуются ВСЕ определения: без DI (авто-раскладка) и с DI (без изменений, раскладка автора сохранена).",
+  "mechanism": {
+    "choice": "Вариант A (клиент) первичный — чинит все существующие определения без DI при открытии, без миграции данных; локализован в единственной точке рендера; зависимость клиентская. Вариант B (серверная генерация DI при сохранении/публикации) отвергнут как первичный (не чинит сохранённые без бэкфилла; требует bpmn-moddle в бэкенде) — оставлен follow-up O1.",
+    "where_injected": "web/src/canvas/bpmn-modeler-wrapper.jsx: useEffect (mount-once) заменил modeler.importXML(xmlToLoad).then(...) на ensureLayout(xmlToLoad).then(prepared=>modeler.importXML(prepared.xml)).then(...прежний post-import: zoom fit-viewport, exec-markers, keyboard bind, onReady...).catch(...). Импорт ensureLayout добавлен рядом с другими ./*.js импортами. Строки правки: ~52-56 (импорт), ~196-206 (ensureLayout→importXML), ~240-256 (.catch с различением ошибки).",
+    "new_module": "web/src/canvas/bpmn-ensure-layout.js — hasDiagramInterchange(xml)→boolean (регэксп /<(?:[A-Za-z_][\\w.-]*:)?BPMNDiagram(?=[\\s/>])/) + ensureLayout(xml)→Promise<{xml,layoutApplied}> (генерит DI когда нет, иначе байт-в-байт; бросок 'auto-layout failed'/'produced no diagram interchange'/'must be a non-empty string').",
+    "dependency": "bpmn-auto-layout@1.3.0 добавлен в web/package.json (dependencies: ^1.3.0). Вендор bpmn-io (тот же, что bpmn-js). Транзитивные bpmn-moddle@^10, min-dash@^5 совпадают с зависимостями bpmn-js@17.11.1 — конфликта версий нет. Клиентская зависимость (не root/бэкенд).",
+    "honest_degrade": "Провал самого layoutProcess (malformed BPMN, который раскладчик не парсит) или отсутствие DI на выходе → ensureLayout бросает именованную ошибку; wrapper .catch по /auto-layout/i показывает 'Не удалось построить схему автоматически: <причина>' через onError. Реджект importXML (валидный DI, но битый BPMN) → 'Не удалось открыть диаграмму: <причина>'. Оба поверхностны пользователю, пустой канвас без объяснения невозможен.",
+    "di_preserved": "Определения С DI не трогаются: ensureLayout возвращает исходный XML байт-в-байт (layoutApplied=false), layoutProcess НЕ вызывается — раскладка автора важнее и не перетирается.",
+    "now_renders": "Определения без DI (seed/API/emit ИИ, включая боевой процесс закупок волны 1) теперь рисуются (авто-раскладка даёт координаты). Определения с DI рисуются как раньше (поведение не изменилось)."
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npm run build (root, tsc ×2) — 0 ошибок (правка JS-only в web, бэкенд TS не затронут). cd web && npm run build — чисто (vite, 523 modules, +bpmn-auto-layout забандлен; pre-existing chunk-size warning на bpmn-js не связан с задачей).",
+    "lint": true,
+    "lint_result": "npx eslint на новые/изменённые файлы (bpmn-ensure-layout.js, bpmn-ensure-layout.test.js) — 0 ошибок. Единственное сообщение eslint на bpmn-modeler-wrapper.jsx:265 ('rule react-hooks/exhaustive-deps not found') — ПРЕ-СУЩЕСТВУЮЩЕЕ на неизменённой строке disable-комментария (эффект depsArray не тронут); появляется только при прямом вызове eslint без react-hooks плагина, в проектном конфиге правило есть.",
+    "types": true,
+    "types_result": "tsc (root build) — 0 ошибок. Правка в web/src (JS), бэкенд TS не затронут.",
+    "tests": true,
+    "tests_result": "cd web && npx vitest run — 62 файла passed, 1694 passed (было 1682; +12 новых в bpmn-ensure-layout.test.js: hasDiagramInterchange FALSE-без-DI / TRUE-с-DI / prefix-agnostic / no-false-positive / empty-non-string; ensureLayout AC-1 DI-less→DI+BPMNShape+Bounds / AC-2 DI→байт-в-байт x=4242 / AC-2-isolation layoutApplied=false / honest-degrade malformed→auto-layout throw / empty-reject; layout-call-discipline большой DI-вход байт-в-байт / harness sanity). Полная web-сьюта зелёная — существующие тесты модельера не сломаны.",
+    "fitness": true,
+    "fitness_result": "Релевантные гейты (правка в web/src/canvas): anti-case-lock.sh PASS (Phase1 delegates clean; Phase2 aggregate 24=24, ни один литерал не вырос — D-064 соблюдён; --self-test PASS). bpmn-linter-isolation.sh PASS (frozen files unmodified; no xml/bpmn runtime deps в бэкенд package.json — bpmn-auto-layout только в web/package.json; WARN про 2 runtime deps ajv/pg пре-существующий). forms-sandbox-iframe.sh PASS + --self-test PASS (сканирует web/src/canvas — правка не создаёт iframe). Полный npm run fitness не прогонялся целиком (включает DB/движок-гейты и флейкающие doc-*, не относящиеся к клиентской правке); прогнаны все гейты, чью зону затрагивает изменение (перечислены). Живое доказательство layoutProcess в node: DI-less BPMN (Start→Task→End) → layoutProcess → выход с BPMNDiagram+BPMNShape+Bounds (typeof out=string, has BPMNDiagram=true) — подтверждает, что механизм даёт рисуемый XML."
+  },
+  "files_changed": [
+    "docs/specs/T-0615-bpmn-auto-layout.spec.md",
+    "docs/specs/T-0615.spec.contract.json",
+    "docs/adr/ADR-T0615-bpmn-auto-layout.md",
+    "docs/adr/T-0615.adr.contract.json",
+    "web/src/canvas/bpmn-ensure-layout.js",
+    "web/src/canvas/bpmn-ensure-layout.test.js",
+    "web/src/canvas/bpmn-modeler-wrapper.jsx",
+    "web/package.json",
+    "web/package-lock.json",
+    "docs/handoff/T-0615.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [
+    "Разведочный агент ошибочно сообщил о существовании ci/checks/process-editor-di-guard.sh (гейт .catch/onError) — файла НЕТ в репозитории (172 .sh, авторитетный листинг подтвердил). Контракт .catch→onError всё равно сохранён (поведение T-0484), но как таковой гейт не гоняется, потому что не существует. FF-5 переформулирован как grep-проверка структуры wrapper.",
+    "Схемы контрактов называются spec.schema.json/adr.schema.json/pr-handoff.schema.json (НЕ contract-prefixed) и валидатор вызывается программно validate_file(dict, schema_path), не как CLI. Оба контракта прошли validate_file → OK.",
+    "vitest web env = 'node' (не jsdom, осознанно) — BpmnModeler требует DOM и НЕ инстанцируется в тестах; но layoutProcess из bpmn-auto-layout — чистый bpmn-moddle-трансформ без DOM, поэтому unit-тесты гоняют РЕАЛЬНУЮ авто-раскладку в node (не мок), что даёт сильное доказательство AC-1/AC-2."
+  ]
+}

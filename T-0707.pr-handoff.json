@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0707",
+  "status": "pr_open",
+  "branch": "task/T-0707",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "migrations/130_list_view_source_owner.sql",
+    "ci/checks/db/migration-130-fallback-name-cast.test.ts (NEW)",
+    "T-0707.pr-handoff.json (NEW)"
+  ],
+  "summary": "Вскрыто судьёй T-0653 NB-1: migrations/130_list_view_source_owner.sql несёт ЗАПАСНОЙ путь (второй DO $$ блок, «Запасной путь: найти UNIQUE-constraint... под любым именем и снять его»), который ищет старый table-level constraint 123 (tenant_id, registry_def_id, name) по СОСТАВУ столбцов, если его имя расходится с автогенерированным Postgres list_view_tenant_id_registry_def_id_name_key. Поиск сравнивал array_agg(a.attname ORDER BY a.attname) — тип name[] (pg_attribute.attname — системный тип `name`) — с нетипизированным литералом ARRAY['name','registry_def_id','tenant_id'], который резолвится в text[]. Postgres не даёт оператора name[] = text[] → ERROR: operator does not exist: name[] = text[] (проверено вживую psql). Дефект LATENT/INERT: на реальном линейном графе (001..130) миграция 123 ВСЕГДА именует constraint канонично, поэтому первичная ветка IF EXISTS в 130 всегда матчит первой — ELSE недостижим на любой среде, где 130 применялась через обычный раннер. Риск был чисто в СЫРОМ повторном применении файла на схеме, где constraint переименован вручную. ФИКС: `a.attname::text` внутри array_agg — минимальная правка, семантика поиска не меняется.",
+  "mini_adr_raw_edit_legitimacy": {
+    "question": "Легитимна ли правка СЫРОГО файла уже смерженной/применённой миграции 130, или нужен новый фикс-форвард файл?",
+    "gate_audit": "Проверено по факту репо (не предположение): (1) migrations/run.mjs трекает 'applied' ИСКЛЮЧИТЕЛЬНО по filename/version в schema_migrations — content-checksum НЕТ; правка байт файла не триггерит переприменение и не детектируется раннером ни на одной среде. (2) ci/checks/frozen-checks-immutable.sh (T-0146) — единственный иммутабельность-гейт в репо — замораживает ТОЛЬКО ci/checks/*.sh (второй строкой файла проверяется T-ID владелец); migrations/ им не покрыт вообще (подтверждено чтением скрипта). (3) scripts/db-setup-template.ts / ci/checks/db/migrations-hash.ts хешируют содержимое migrations/*.sql, но ИСКЛЮЧИТЕЛЬНО как cache-key для test-template БД (T-0192) — не как gate корректности/неизменности.",
+    "precedent_check": "git log --oneline -- migrations/ | grep fix нашёл прямой прецедент: commit 9efede7e (миграция 116) чинит дефект в ТРЁХ УЖЕ ПРИМЕНЁННЫХ миграциях (094/107/113, составной FK ON DELETE SET NULL ронял tenant_id) — НЕ правкой их сырых файлов, а НОВОЙ фикс-форвард миграцией 116 с идемпотентными DROP/RECREATE guard'ами. Это конвенция репо по умолчанию: 'append-only catalog' (ADR T-0053, §comparison table) + fix-forward, а не raw-edit.",
+    "why_this_case_differs": "Прецедент 116 чинил дефект, РЕАЛЬНО достижимый через прикладное поведение (DELETE llm_connection/section из настоящих HTTP-маршрутов) — нужно было исправить УЖЕ УСТАНОВЛЕННОЕ состояние схемы (определение FK-констрейнта на живых таблицах), поэтому фикс обязан был быть НОВОЙ DDL-миграцией, применяемой поверх текущего состояния. Дефект T-0707 — противоположный случай: текущее состояние схемы УЖЕ КОРРЕКТНО везде, где 130 когда-либо реально выполнялась (проверено: constraint list_view_tenant_id_registry_def_id_name_key отсутствует, list_view_name_scoped_uniq на месте — т.е. сработал ИМЕННО первичный IF-путь, не ELSE). Новой миграции ПРОСТО НЕЧЕГО чинить в состоянии БД — единственное, что неверно, это байты мёртвой ветки внутри уже пройденного файла, которая ни разу не выполнилась ни на одной применённой среде и не может исполниться повторно через обычный раннер (schema_migrations её уже пропускает). Правка этой ветки не меняет ни одного уже выполненного оператора ни на одной среде — только чинит код на случай гипотетического сырого повторного применения вне обычного пайплайна (ровно тот periметр, для которого ELSE и был написан).",
+    "conclusion": "Raw-edit ЛЕГИТИМНА и УЖЕЕ прецедента 116 по объёму: она единственный способ исправить мёртвую ветку без бесполезной no-op миграции. Задокументировано инлайн в самом файле (комментарий 'T-0707 (fix-forward, судья T-0653 NB-1)' над DO-блоком) — та же конвенция, что уже несёт файл для 'fix-forward defect #9' (T-0653) выше по тексту."
+  },
+  "reuse_notes": [
+    "Только ::text каст внутри существующего array_agg — ни один соседний DO-блок, constraint-имя, индекс или семантика поиска не тронуты.",
+    "Комментарий-обоснование вставлен инлайн (та же конвенция файла, что уже несёт 'fix-forward defect #9' выше по тексту, T-0653)."
+  ],
+  "deviations_from_adr": [],
+  "tests_added": [
+    {
+      "file": "ci/checks/db/migration-130-fallback-name-cast.test.ts",
+      "covers": "Читает РЕАЛЬНЫЕ байты ELSE-блока с диска (не переизобретает SQL), ретаргетит ТОЛЬКО имя объекта (choros.list_view → throwaway choros.t0707_130_fallback_fixture) и выполняет живьём против фикстуры с 3-колоночным UNIQUE constraint под НЕ-каноничным именем — ровно тот случай, для которого ELSE-ветка существует. FF-1 статически подтверждает, что извлечённый фрагмент несёт ::text каст (регресс, если кто-то откатит правку). FF-2 доказывает, что ретаргетнутый блок находит и дропает fallback-именованный constraint без ошибки типов. Мутационно проверено вживую: временный откат ::text каста (sed, затем npm run fitness:db:setup-template на пересобранный template) дал RED — тест упал РОВНО с `operator does not exist: name[] = text[]` (2 из 3 тестов, идентичная ошибка репродукции); откат отменён (cp сохранённой копии), template пересобран, все 3 теста снова GREEN."
+    }
+  ],
+  "manual_sql_proof": {
+    "why": "Задача допускала ручное psql-доказательство как альтернативу тесту; сделаны ОБА (тест — основной артефакт, ручной прогон — независимая живая проверка того же дефекта до правки файла).",
+    "before_fix_raw_sql": "DO $$ ... SELECT array_agg(a.attname ORDER BY a.attname) FROM unnest(c.conkey) ... = ARRAY['name','registry_def_id','tenant_id'] ... $$; -- на фикстуре choros.t0707_repro.list_view с constraint weirdly_named_uniq(tenant_id, registry_def_id, name)",
+    "before_fix_result": "ERROR: operator does not exist: name[] = text[]\nLINE 10: ) = ARRAY['name','registry_def_id','tenant_id']\nHINT: No operator matches the given name and argument types. You might need to add explicit type casts.",
+    "after_fix_raw_sql": "тот же блок с array_agg(a.attname::text ORDER BY a.attname)",
+    "after_fix_result": "NOTICE: matched constraint: weirdly_named_uniq -- DO выполнился без ошибки, констрейнт найден и корректно дропнут (второй прогон подтвердил DROP CONSTRAINT реально сработал)"
+  },
+  "gates": {
+    "tsc": "green — npx tsc --noEmit -p tsconfig.json, exit 0",
+    "build": "green — npm run build (tsc + seed/tsconfig), exit 0",
+    "lint": "green — npm run lint (eslint src), exit 0, 0 errors (44 pre-existing no-console warnings в НЕтронутых файлах, не наши)",
+    "unit_tests": "green — npm test (vitest run, ci/checks/db исключён конфигом по умолчанию): 309 файлов, 5834 passed, 10 skipped, 0 failed",
+    "targeted_fitness_db": "green — DATABASE_URL=...:55432 npx vitest run --dir ci/checks/db -t \"T-0707\" --no-file-parallelism: 3/3 passed (после npm run fitness:db:setup-template на свежий template с применённым фиксом, полный линейный прогон 001..130 применился чисто)",
+    "anti_case_lock": "PASS — aggregate 4 ≤ baseline 7 (Phase 1), aggregate 15 ≤ baseline 16 (Phase 2 D-064 §5 denylist), ни один литерал не вырос",
+    "fleet_migration_matrix": "PASS — FF-FLEET1..5, 1 cell appliable против 116 миграций (head=130_list_view_source_owner)",
+    "migrations_no_hardcoded_tenant_uuid": "PASS",
+    "view_registry_rls": "PASS — FF-VR-2a..e, T-0013 tenant-table контракт list_view не задет",
+    "frozen_checks_immutable": "PASS + --self-test PASS — T-0146, ни один ci/checks/*.sh не тронут (добавлен только ci/checks/db/*.test.ts — вне зоны T-0146 glob'а)",
+    "full_fitness_db": "НЕ гонялся — по прямой инструкции задачи (substrate, точечных гейтов достаточно)"
+  },
+  "live_proof": "НЕ требуется по прямой инструкции задачи: substrate/latent-bug фикс в миграции, changes_product=0 (никакой прикладной HTTP-путь/UI не меняется — дефект был исключительно во ВНУТРЕННЕЙ dead-code ветке SQL-скрипта миграции, недостижимой ни с одного прикладного экрана). Устойчивость доказана вживую на реальном PostgreSQL 16 (локальный стенд :55432) — тестом + ручным psql до/после (см. manual_sql_proof) + полным чистым линейным прогоном 001..130 через npm run fitness:db:setup-template.",
+  "friction_events": [
+    "Worktree был без node_modules — npm install --maxsockets=3 потребовался до любых гейтов (типовое трение, уже фиксировалось в прошлых прогонах).",
+    "fitness:db требует заранее собранного test-template (npm run fitness:db:setup-template) — без него vitest --dir ci/checks/db падает с 'template database not found'; template пересобирался дважды (для мутационной RED-проверки и после восстановления фикса)."
+  ]
+}

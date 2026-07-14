@@ -1,0 +1,86 @@
+{
+  "task_id": "T-0540",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "web_build_green": true,
+    "typecheck_green": true,
+    "nav_sections_tests_passed": 14,
+    "app_shell_suite_passed": 102,
+    "app_shell_suite_failed": 0,
+    "ci_guards": {
+      "nav-sections-no-hardcode.sh": "PASS [FF-SECTIONS-FROM-DATA]"
+    },
+    "notes": "Web vite build зелёный (✓ built in 1.78s). Server tsc --noEmit: 0 ошибок (exit 0, нет вывода). Все 14 новых nav-sections.test.js зелёные (FF-SECTIONS-EMPTY-HIDDEN × 3, FF-SECTIONS-FALLBACK × 4, FF-SECTIONS-FROM-DATA × 4, инвариант сохранности × 3). Весь app-shell suite 102/102. CI FF-SECTIONS-FROM-DATA guard: PASS. Миграция 108 аддитивна (ADD COLUMN IF NOT EXISTS, номер свободен — предыдущая 107)."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/app-shell/shell.jsx:772 + 794 (два useEffect → оба fetch /api/applications)",
+      "issue": "При навигации на /app-schema/:appId или /app-records/:appId оба useEffect могут зафайриться почти одновременно: crumb-эффект (строка 772, deps=[currentUser, crumbAppId, ...]) и navApps-эффект (строка 794, deps=[currentUser, null]). Результат: два параллельных GET /api/applications → два вызова setNavApps с идентичными данными. Второй setNavApps идемпотентен (React batching), RLS-защита сервера одинакова на обоих вызовах, cancelled-guards корректны. Функциональных дефектов нет. Дизайн-doc явно допускает «отдельный лёгкий фетч». Лишний RTT на app-detail маршрутах.",
+      "suggestion": "Опционально: сделать один канонический useFetchApps(currentUser) хук, возвращающий [apps, refresh]; оба эффекта потребляют один кэш. Безопасно отложить — не блокирует T-0540."
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/app-shell/shell.jsx:802 (dependency array с тернаром)",
+      "issue": "deps второго useEffect содержит `location.pathname === '/apps' ? location.pathname : null`. Это не запрещено (lint-exempt через eslint-disable-next-line), но паттерн хрупкий: при навигации /apps → /apps/xxx/records/yyy тернар вернёт null в обоих случаях, т.е. invalidation не сработает для глубоких app-routes. Для MVP достаточно (apps-экран — главный триггер изменений разделов); эффект при смене currentUser всё равно перегрузит данные.",
+      "suggestion": "Можно расширить условие до `location.pathname.startsWith('/apps') ? location.pathname : null` чтобы invalidation срабатывал и для глубоких маршрутов. Не критично для текущей пользовательской модели — нав не меняется без перехода на экран управления разделами."
+    },
+    {
+      "id": "F3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/screen-apps.jsx: SetSectionModal + CreateAppModal",
+      "issue": "CreateAppModal сбрасывает section через reset() в onCreated-коллбэке корректно. SetSectionModal синхронизирует sectionValue через useEffect([app.section, open]). Нет race при быстром open/close (submitting-guard). Минорный момент: при onUpdated колбэк вызывает setSectionModalOpen(false) дважды (в AppActions onUpdated и внутри SetSectionModal handleClose), что безвредно (setState с тем же значением — no-op). Не дефект, просто избыточность.",
+      "suggestion": null
+    },
+    {
+      "id": "F4",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/applications.ts: patchApplication (строки 224-233, ветка setClauses.length === 0)",
+      "issue": "Когда PATCH передан без ни одного известного поля (пустой patch), сервер делает SELECT-only транзакцию и возвращает 200 с текущей строкой. Поведение корректное и явно задокументировано в коде. Альтернатива — 422 на пустой patch — была бы строже, но текущий подход тоже допустим (идемпотентный PATCH).",
+      "suggestion": null
+    },
+    {
+      "id": "F5",
+      "severity": "nit",
+      "axis": 4,
+      "location": "migrations/108_app_section.sql",
+      "issue": "ADD COLUMN IF NOT EXISTS section text NULL — строго аддитивна: нет NOT NULL, нет DEFAULT кроме NULL, нет DDL на существующие строки, нет FK, нет индекса. Номер 108 свободен (107_spend_ledger_llm_tracking.sql — предыдущий). Fallback NULL → 'Другое' реализован в клиентском groupAppsBySection (не на уровне БД), что соответствует дизайну ADR §3.",
+      "suggestion": null
+    },
+    {
+      "id": "F6",
+      "severity": "nit",
+      "axis": 6,
+      "location": "web/src/app-shell/shell.jsx: renderZoneItems (зона work, строки 939–969)",
+      "issue": "capability-фильтр T-0539 не сломан: zone-gate (`visibleZones(navCaps).includes(zone.id)`) применяется ДО вызова renderZoneItems. Зона work рендерится только если 'work' ∈ visibleZones (что всегда true при fail-closed). items внутри work фильтруются visibleItems(zone.id, navCaps). Динамические секции navApps — данные уже отфильтрованы RLS на сервере (tenant-scoped GET /api/applications). Никакого capability-bypass нет.",
+      "suggestion": null
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Web vite build зелёный (exit 0)", "covered": true },
+    { "ac": "Server tsc --noEmit: 0 ошибок", "covered": true },
+    { "ac": "nav-sections.test.js (14 тестов) зелёные — FF-SECTIONS-FALLBACK, FF-SECTIONS-EMPTY-HIDDEN, FF-SECTIONS-FROM-DATA, инвариант сохранности", "covered": true },
+    { "ac": "app-shell suite 102/102 зелёных — нет регрессии T-0538/T-0539", "covered": true },
+    { "ac": "CI FF-SECTIONS-FROM-DATA guard (nav-sections-no-hardcode.sh): PASS", "covered": true },
+    { "ac": "Миграция 108 аддитивна: ADD COLUMN IF NOT EXISTS section text NULL, номер 108 свободен", "covered": true },
+    { "ac": "PATCH /api/applications/:id: динамический SET, tenant-scoped (WHERE tenant_id = $1 AND id = $2), 404 вне тенанта", "covered": true },
+    { "ac": "PATCH не открывает дыр: extractActor через withAuth, tenantId от resolveActorTenant (не из body)", "covered": true },
+    { "ac": "groupAppsBySection: fallback section=null → «Другое» (не теряется)", "covered": true },
+    { "ac": "groupAppsBySection: пустой массив → [] (нет секций-пустышек)", "covered": true },
+    { "ac": "groupAppsBySection: инвариант sum(result[].apps.length) === apps.length", "covered": true },
+    { "ac": "Сайдбар: разделы рендерятся из данных navApps (groupAppsBySection), не хардкода", "covered": true },
+    { "ac": "Сайдбар: зона work видима только если 'work' ∈ visibleZones(navCaps) (fail-closed guard T-0539 цел)", "covered": true },
+    { "ac": "capability-фильтр T-0539 не сломан: zone-gate + item-gate применяются перед renderZoneItems", "covered": true },
+    { "ac": "Nav-config.js: нет хардкодированных бизнес-секций, только комментарии", "covered": true },
+    { "ac": "T-0538/T-0539 зоны/пункты/маршруты/палитра не сломаны (102 тест зелёных)", "covered": true }
+  ],
+  "role_gap_evidence": [],
+  "reviewer_notes": "Реализация T-0540 корректная и соответствует дизайну. Ключевые проверки: (1) Миграция 108 строго аддитивна (ADD COLUMN IF NOT EXISTS, NULL, нет NOT NULL/DEFAULT/FK/индекса, номер свободен). (2) groupAppsBySection — чистая функция, fallback section=null → «Другое» корректен, инвариант сохранности доказан 14 тестами. (3) PATCH /api/applications/:id tenant-scoped (tenantId от resolveActorTenant, WHERE tenant_id AND id), 404 вне тенанта, динамический SET только по присутствующим полям — дыр нет. (4) Сайдбар строит секции из данных: groupAppsBySection(navApps), не хардкод. CI FF-SECTIONS-FROM-DATA guard PASS. (5) capability-фильтр T-0539 цел: zone-gate (`visibleZones(navCaps).includes(zone.id)`) применяется ДО renderZoneItems; динамические app-кнопки внутри work не имеют своего capability-слоя, но это корректно — данные уже отфильтрованы RLS сервера (tenant-scoped GET /api/applications). Все находки — nit, ни одной blocking. Сборка зелёная, tsc чистый, все 102 теста зелёных. Verdict: approved."
+}

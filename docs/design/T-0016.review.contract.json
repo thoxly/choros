@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0016",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0016-audit-floor.adr.md:§4.2",
+      "issue": "The genesis concurrent-append case is described as resolving to 'one genesis + one seq=2', implying the second concurrent transaction re-computes seq against the committed head. However the appendAuditEvent pseudocode (§4.3) shows no retry loop: both transactions compute seq=1 and prevHash=GENESIS_PREV_HASH before any lock can be acquired (head does not exist yet), then race on the UNIQUE(tenant_id,seq) INSERT into audit_event. The second transaction aborts at the audit_event INSERT — it cannot naturally produce seq=2 without a retry. The prose claim 'one genesis + one seq=2' is technically correct only if the caller retries the entire appendAuditEvent call, but no retry contract is specified. A coder may misread this as automatic.",
+      "suggestion": "Add a one-line note in §4.2 (and/or §4.3 pseudocode) that the genesis concurrent case aborts one transaction via UNIQUE violation on audit_event, requiring the caller to retry from step 1; or clarify that 'one genesis + one seq=2' describes the two-retry-round outcome. The invariant (no two genesis rows) is sound; only the explanation is ambiguous for the coder."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0016-audit-floor.adr.md:§3.2 + §4.6 (B2)",
+      "issue": "The head-advance trigger SQL shown in §4.6(B2) enforces only `NEW.seq = OLD.seq + 1`. The prose in §3.2 states the trigger also enforces that NEW.row_hash matches the just-inserted audit_event row. The SQL contract as written omits this check. A coder implementing only the SQL shown would leave audit_head.row_hash writable to any arbitrary value at UPDATE time; the DB trigger would not catch a head whose row_hash is forged. The chain verifier would catch it as a fork/tamper defect, but the trigger-level prose guarantee is not reflected in the SQL.",
+      "suggestion": "Either (a) add to the B2 trigger a check that NEW.row_hash = the audit_event.row_hash at (tenant_id, NEW.seq) within the same transaction (SELECT in trigger body), or (b) explicitly note that the row_hash cross-check is the verifier's responsibility (FR-5, defect classes tamper/fork) and the trigger enforces only seq monotonicity. Option (b) is simpler, still structurally safe, and removes the prose/SQL inconsistency. Make §3.2 prose and §4.6 SQL agree on which guarantees the trigger provides."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 2,
+      "location": "docs/design/T-0016-audit-floor.adr.md:§4.6",
+      "issue": "The audit_head no-DELETE protection is stated as 'MAY' ('a no-delete trigger MAY mirror (B1) for defense in depth — T-0053 detail'). If a role with DELETE privilege on audit_head (e.g. choros_migrator) deletes the head row, the next append creates a new genesis, silently forking/truncating the chain without any CI-visible schema or privilege diff. This is a structurally weaker guarantee than the dual-mechanism FR-1 requirement for audit_event. The spec FR-4 says 'head never names a non-durable row' but does not bar deletion of the head row itself, and the MAY leaves the door open for a single-migration bypass of the forward-only invariant.",
+      "suggestion": "Upgrade to MUST: add a BEFORE DELETE trigger on audit_head (symmetric with audit_event's B1 no-mutate trigger), and extend the audit_append_only.sh lint or a new fitness function to assert a BEFORE DELETE trigger on audit_head exists. The structural argument is identical to FR-1b for audit_event: deletion of the head must require a CI-visible diff."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docs/design/T-0016-audit-floor.adr.md:§1 (foundation reference) / docs/design/T-0013-tenant-isolation.adr.md:§3.3",
+      "issue": "T-0013 §3.3 defines an `audit_log` entity (the original per-tenant audit table stub). T-0016 introduces `audit_event` + `audit_head` as the full audit floor. T-0016 does not explicitly state that T-0013's `audit_log` is superseded and must NOT be created by T-0053. A coder implementing T-0053 would find two audit entities in the design documents with no resolution note, risking creation of both tables or uncertainty about which to use. The known_tenant_tables fixture note (AC-17) only adds the new tables; it does not retire audit_log.",
+      "suggestion": "Add a one-line note in §1 or §2 (or as a rejected-alternative entry) explicitly stating that T-0016's audit_event + audit_head supersede and replace the T-0013 §3.3 audit_log placeholder; audit_log MUST NOT be created by T-0053. This eliminates coder ambiguity about whether both tables coexist."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true},
+    {"ac": "AC-19", "covered": true},
+    {"ac": "AC-20", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

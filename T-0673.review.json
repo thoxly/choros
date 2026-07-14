@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0673",
+  "role": "reviewer",
+  "verdict": "approved",
+  "summary": "person-поле теперь резолвится в человеко-имя через ActorChip в списке и деталке. formatCellValue('person') возвращает sentinel PERSON_CELL_ASYNC зеркально RELATION_CELL_ASYNC/FILE_CELL_ASYNC. Все пути потребления formatCellValue проверены — sentinel не утекает в строковый рендер. Батч ОДИН GET /api/org на страницу через fetchEmployees() (auth-хелпер fetchWithAuthRetry, не голый fetch), N+1 нет, деталка реюзит уже загруженный authorNames без второго fetch. Gates: tsc=0, vitest 2532/2532, anti-uuid PASS, anti-case PASS.",
+  "findings": [
+    {
+      "severity": "P2",
+      "what": "PersonCell прокидывает deactivated={Boolean(hit && hit.deactivated)}, но источник — fetchEmployees()→listOrgTree (src/db/org.ts:162-166) — НЕ кладёт поле deactivated на people[] (SELECT без deactivated_at). Значит в проде deactivated ВСЕГДА false; маркер деактивации (сигнал столпа-4, который ActorChip специально поддерживает) для person-ячеек в списке никогда не покажется. Юнит-тест 'threads deactivated through' зелёный только потому, что руками строит map с deactivated:true — тест проходит, прод инертен.",
+      "where": "web/src/screens/screen-app-records.jsx:498-506 (PersonCell) + src/db/org.ts:150-166 (listOrgTree source shape)",
+      "why": "Не ломает основную цель (резолв имени работает, деградирует в false безопасно), но плюмбинг обещает несуществующий сигнал и создаёт ложное покрытие. Не блокирует — косметика/аудит-сигнал, не корректность данных. Deactivated-статус остаётся виден в деталке created_by и в PersonPicker путях, где он приходит отдельно; здесь просто не протянут через /api/org. Кандидат в follow-up: либо добавить deactivated_at в listOrgTree people[], либо убрать вводящий в заблуждение prop+тест."
+    },
+    {
+      "severity": "P3",
+      "what": "kanban-board.js::resolveCardLabel (line 188): если person-поле сконфигурировано ПЕРВЫМ card-field канбана, PERSON_CELL_ASYNC (не строка) даёт фоллбэк 'Запись <id.slice(0,8)>' вместо имени сотрудника. То же самое уже происходит для relation/file — поведение пред-существующее и консистентное.",
+      "where": "web/src/screens/kanban-board.js:186-188",
+      "why": "Явно вне скоупа задачи ('kanban вне скоупа — уже деградирует'). Консистентно с relation/file. Карточка kanban.jsx (line 89) корректно даёт '—' для любого sentinel. Не регрессия. Не блокирует."
+    },
+    {
+      "severity": "info",
+      "what": "Детальный экран вызывает formatCellValue(val, f.type) до 3 раз на поле (isAsyncRelation/isAsyncFile/isAsyncPerson проверки), пере-вычисляя. Пред-существующий паттерн (relation/file уже так делали); T-0673 добавил один вызов в тот же стиль.",
+      "where": "web/src/screens/screen-record-detail.jsx:925-935",
+      "why": "Микро-неэффективность, formatCellValue чистая и дешёвая. Не блокирует, не в скоупе."
+    }
+  ],
+  "adversarial_checks_passed": {
+    "sentinel_leak_all_paths": "OK — единственные потребители formatCellValue: список (screen-app-records.jsx:1550, ветка PERSON_CELL_ASYNC перед default td), деталка (screen-record-detail.jsx:934/964, ветка isAsyncPerson), computed-readout (type='computed', person-ветка недостижима), kanban.jsx (line 89 typeof===string?...:'—'), kanban.js resolveCardLabel (line 188 фоллбэк). CSV-экспорта в экране НЕТ. Сортировка/фильтр/поиск серверные (view_id/cursor) — не стрингуют cell-value. Symbol не утекает в React-child нигде.",
+    "hasPersonColumn_gate": "OK — hasPersonColumn выведен из columns (view-фильтрованный видимый набор), тот же набор что рендерит ячейки. Скрытая колонка не рендерит PersonCell → карта ей не нужна. Person в collection-подполях не всплывает в списке (collection→'N позиций') и в деталке (тот же summary) — консистентно с relation/file. Детальный fetch authorNames безусловный (пред-существующий для created_by), содержит ПОЛНЫЙ список сотрудников — любой person-slug резолвится, не только автор.",
+    "no_n_plus_1": "OK — список: один fetchEmployees() на страницу в useEffect([hasPersonColumn]), карта Map передаётся вниз в PersonCell (без per-cell fetch). Деталка: НЕТ нового fetch — реюз authorNames (единственный useState, единственный fetchEmployees() — подтверждено тестом stateMatches===1, fetchMatches===1).",
+    "auth_helper": "OK — fetchEmployees (field-renderer.jsx:111) использует fetchWithAuthRetry('/api/org', {headers: devHeaders()}), не голый fetch. Дыры 'bare fetch → 401 тихо' нет.",
+    "relation_file_cells_intact": "OK — relation/file ветки formatCellValue не тронуты; порядок веток в списке relation→file→person→default; RelationCell/FileCell рендер не изменён.",
+    "anti_case": "OK — исполняемые фикстуры generic (emp-slug-1/2, 'К. Орлов' — выдуманное имя). 'e-larina' только в doc-комментах/спеке как пример бага. anti-case-lock: e-larina 2/2, e-orlov 2/2 — steady, ничего не выросло. Старый тест удалил literal 'e-orlov' из executable-кода."
+  }
+}

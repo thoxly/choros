@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0192",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1391,
+    "passed": 1385,
+    "failed": 0,
+    "skipped": 6
+  },
+  "fitness_db": {
+    "run1": {
+      "hash": "4e98434b",
+      "template": "choros_test_template_4e98434b",
+      "clone": "choros_test_1781222687960_c473",
+      "files": 43,
+      "tests": 599,
+      "failed": 0
+    },
+    "run2": {
+      "hash": "4e98434b",
+      "clone": "choros_test_1781222736804_a523",
+      "files": 43,
+      "tests": 599,
+      "failed": 0
+    }
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-hash-determinism", "test": "hash=4e98434b stable in 2 runs; ASCII sort locale-independent", "result": "pass" },
+    { "ac": "AC-cross-branch-isolation", "test": "different migration sets → different template names; selfTest PASS", "result": "pass" },
+    { "ac": "AC-orphan-no-accidental-drop", "test": "TEMPLATE_RE excludes per-hash templates from orphan drop; FF-T147-1..9 all green", "result": "pass" },
+    { "ac": "AC-stale-explicit-cleanup", "test": "--stale-templates flag; dropDb with datistemplate=false guard; R-N1 doc warning added", "result": "pass" },
+    { "ac": "AC-legacy-backward-compat", "test": "legacy choros_test_template sent to orphans list (not template list)", "result": "pass" },
+    { "ac": "AC-FF-T147-all-green", "test": "all 9 FF-T147-* green after R-N2 refactor; FF-T147-3 explicitly confirmed", "result": "pass" },
+    { "ac": "AC-CI-green", "test": "tsc/eslint/fitness/vitest all exit 0", "result": "pass" }
+  ],
+  "secondary_ux": [
+    { "check": "R-N1 closed — ADR + script warning for --stale-templates", "result": "pass" },
+    { "check": "R-N2 closed — computeMigrationsHash extracted to ci/checks/db/migrations-hash.ts", "result": "pass" },
+    { "check": "FF-T147-3 passes after R-N2 refactor", "result": "pass" },
+    { "check": "npm run fitness: 478 PASS, 0 FAIL", "result": "pass" }
+  ],
+  "failures": [],
+  "tested_commit": "ce5877f",
+  "review_commit": "6ebe4e1"
+}

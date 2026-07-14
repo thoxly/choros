@@ -1,0 +1,75 @@
+{
+  "task_id": "T-0220",
+  "status": "ready",
+  "decision": "An agent step is a PROPOSAL, not a decision (hybrid 'agent proposes, human confirms'). Every governed step resolves into exactly one of three outcomes: proceed (confidence >= threshold AND action within grants -> agent fills/routes, human sees result + reasoning-trace), defer-to-human (confidence < threshold OR ambiguity OR borderline attribute -> agent does NOT decide; materializes an ORDINARY inbox task (E7) 'needs review' with the precise doubt reason; reasoning-trace explains the doubt), fail-closed (action outside grants / tool error / egress block -> step stops, audit event written, role escalation; NEVER silently skip). LOAD-BEARING INVARIANT (default-to-human): proceed is reachable ONLY when every affirming condition holds; any denial, any ambiguity, any tool error, and any unrecognised/missing signal resolve to NOT-proceed (defer for soft uncertainty, fail-closed for structural denial). Trust = predictable stop, not infallibility. Confidence (founder decision B.5, 2026-06-14) = BOTH signals at once, disjunction on the defer side: deterministic threshold from DMN/agent_card.autonomy_threshold (auditable framework) AND model self-confidence (sensitivity signal); defer fires if EITHER the threshold is breached OR the model reports low confidence. Implementation is 'nothing new beyond the envelope': defer -> ordinary inbox task (reuse claim/SLA/notifications), fail-closed -> existing PDP-deny (T-0021) + audit-floor (T-0016); the two events agent.deferred / agent.blocked are open-vocab `type` strings on the existing audit_event (audit_event.type is text NOT NULL with NO CHECK, migrations/006), NO new table/column. Design-only: no migration, no ci/checks edit, no production code; freezes the model, invariants, event contracts and fitness functions the B-2 impl (T-0221) must satisfy.",
+  "rejected_alternatives": [
+    {"option": "New actor_event verbs defer/block", "why_not": "actor_event verb-set is CLOSED and vocab-pinned (T-0019 {request,prepare,submit,approve,release}); these are governance-audit (what went wrong), not SoD facts. Open-vocab audit_event.type is the correct home; adding them to actor_event reddens actor_event_vocab_pinned with no SoD benefit."},
+    {"option": "New agent_step_outcome table", "why_not": "Violates 'nothing new beyond the envelope' (B.3); audit_event (open-vocab) + inbox (E7) cover all day-1. A new table triggers a founder-gate and drift, with no benefit."},
+    {"option": "proceed as the default branch of the classifier", "why_not": "Directly breaks INV-DEFAULT; signal incompleteness would yield 'agent guessed'. proceed must be the remainder when ALL gates are green, never the fallback branch."},
+    {"option": "Only the deterministic threshold OR only model self-confidence", "why_not": "Contradicts founder decision B.5 ('BOTH at once'): a threshold alone misses ambiguity, a model alone is not auditable. Both, disjoined on the defer side, are required."},
+    {"option": "Silently continue with a default value on tool error", "why_not": "Explicitly forbidden by B.2 ('NEVER silently skip'); kills the trust-red-line of the first customer."},
+    {"option": "A separate agent.proceeded audit type", "why_not": "Duplicates existing actor_event/lifecycle-audit producers; day-1 only deviations (deferred/blocked) are materialized in audit."},
+    {"option": "Enforce agent_card.autonomy_threshold day-1", "why_not": "The column is dormant per T-0020 ('E5.7 enforces, Stage-2'); enforcement is Stage-2/T-0123. T-0220 is the model, not the autonomy runtime."}
+  ],
+  "object_model": [
+    {"entity": "StepOutcome (enum)", "fields": [
+      {"name": "proceed", "type": "agent fills/routes; human sees result + reasoning-trace; emits NO new audit type (reuses actor_event/lifecycle-audit)"},
+      {"name": "defer-to-human", "type": "materializes an ordinary inbox task (E7) with doubt_reason; emits agent.deferred"},
+      {"name": "fail-closed", "type": "step stops; role escalation; emits agent.blocked; NEVER silent"}
+    ]},
+    {"entity": "ConfidenceSignals (B.5)", "fields": [
+      {"name": "deterministicThreshold", "type": "auditable framework: DMN rule (sum/category) + agent_card.autonomy_threshold numeric(5,4) [0,1] (migrations/032_agent_card.sql, dormant day-1)"},
+      {"name": "modelConfidence", "type": "model self-assessment signal; competence layer T-0123 (instruction 'when in doubt, ask' + per-agent field, NOT BUILT)"},
+      {"name": "combination", "type": "defer if (thresholdBreached OR modelConfidence < threshold OR ambiguous); proceed requires BOTH green"}
+    ]},
+    {"entity": "agent.deferred (open-vocab audit_event)", "fields": [
+      {"name": "type", "type": "string literal 'agent.deferred' (audit_event.type text NOT NULL, NO CHECK, open-vocab)"},
+      {"name": "payload", "type": "jsonb hash-covered (preimage field #11): { doubtReason, signal: 'threshold'|'model'|'ambiguity', inboxTaskId, reasoningTraceRef }"},
+      {"name": "actor/subject/via", "type": "actor=agent employee.id (kind='agent'); subject=case object; via=step channel"}
+    ]},
+    {"entity": "agent.blocked (open-vocab audit_event)", "fields": [
+      {"name": "type", "type": "string literal 'agent.blocked' (same open-vocab path)"},
+      {"name": "payload", "type": "jsonb: { cause: 'pdp_deny'|'tool_error'|'egress_block', denyReason?, toolRef?, escalatedToRole, reasoningTraceRef }; denyReason for pdp_deny == resolveFor reason"}
+    ]}
+  ],
+  "contracts": [
+    "classifyOutcome(signals) -> 'proceed'|'defer-to-human'|'fail-closed': TOTAL pure function. Priority: fail-closed (structuralDenial OR toolError OR egressBlocked) > defer (thresholdFailed OR modelConfidence<threshold OR ambiguous OR any-unrecognised-signal) > proceed (remainder, ONLY when none above). proceed is NEVER the default branch (INV-DEFAULT).",
+    "fail-closed for pdp_deny is an audit PROJECTION of an already-taken PDP-deny (resolveFor -> { denied:true, reason }), NOT a second authorization path; authority stays single (T-0021).",
+    "defer producer materializes an ORDINARY inbox task (same HTTP/state contract as src/http/inbox.ts: role-addressed, sla, claimable from pool), filling doubt_reason; no new task type/table.",
+    "agent.deferred / agent.blocked are emitted via the existing appendAuditEvent (src/db/audit-writer.ts) as open-vocab `type` strings; encoder modeled on lifecycle-audit.ts / audit-grant-encoder.ts. Reasoning-trace ref lives in payload (T-0139 channel).",
+    "Threshold is READ from agent_card.autonomy_threshold (migrations/032) OR the process DMN rule via a seam; never hardcoded in the outcome model. T-0123 supplies the instruction/per-agent threshold (dependency, paused, not a day-1 precondition)."
+  ],
+  "fitness_functions": [
+    {"id": "AC-1", "rule": "classifyOutcome is total, returns exactly one of three outcomes", "ci_check": "Static-now: unit-golden over a signal table; every input maps to exactly one outcome, no undefined."},
+    {"id": "AC-2", "rule": "An uncertain step NEVER auto-proceeds (INV-DEFAULT)", "ci_check": "Static-now: property/golden — for any input where threshold/model/ambiguity are not both green (incl. missing signal), outcome != proceed."},
+    {"id": "AC-3", "rule": "proceed reachable ONLY with PDP-allow AND both confidence gates", "ci_check": "Static-now golden: PDP-deny OR threshold-fail OR low-model-conf => outcome != proceed."},
+    {"id": "AC-4", "rule": "fail-closed ALWAYS emits agent.blocked (never silent)", "ci_check": "Static-now: each fail-closed input => exactly one audit_event type='agent.blocked' with cause in {pdp_deny,tool_error,egress_block}."},
+    {"id": "AC-5", "rule": "defer materializes an inbox task with the doubt reason", "ci_check": "Static-now (encoder) + live-DB (inbox write): defer input => inbox task with non-empty doubt_reason AND agent.deferred whose inboxTaskId == that task id."},
+    {"id": "AC-6", "rule": "defer introduces no new task type (ordinary pool task)", "ci_check": "Static-now lint: producer emits same shape as src/http/inbox.ts (role/sla/claim); no new task table."},
+    {"id": "AC-7", "rule": "agent.blocked.denyReason for pdp_deny in {cross_tenant,no_grant,no_effect_grant,sod_violation}", "ci_check": "Static-now golden: value taken from resolveFor reason, not a free string."},
+    {"id": "AC-8", "rule": "agent.deferred/agent.blocked add NO CHECK/column/table", "ci_check": "Static-now grep: migrations/ has no new type-CHECK; events flow through the `type` string (audit-writer.ts)."},
+    {"id": "AC-9", "rule": "proceed emits no new audit type", "ci_check": "Static-now lint: no type='agent.proceeded' in the encoder."},
+    {"id": "AC-10", "rule": "Events do NOT enter actor_event (closed verb-set untouched)", "ci_check": "Static-now lint: agent.deferred/agent.blocked not among ACTOR_EVENT_VERBS; actor_event_vocab_pinned green."},
+    {"id": "AC-11", "rule": "reasoning-trace accompanies both defer and block", "ci_check": "Static-now golden: payload of both events carries reasoningTraceRef (T-0139 channel)."},
+    {"id": "AC-12", "rule": "threshold read from agent_card.autonomy_threshold/DMN, not hardcoded", "ci_check": "Static-now lint: no literal threshold in the outcome-model code; source is the seam."},
+    {"id": "AC-13", "rule": "fail-closed has priority over defer (structural denial > doubt)", "ci_check": "Static-now golden: input with PDP-deny AND low-confidence => fail-closed, not defer."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR §4 INV-DEFAULT + §3 classifier"},
+    {"ac": "AC-2", "covered_by": "ADR §4 default-to-human property"},
+    {"ac": "AC-3", "covered_by": "ADR §3 priority + §5.1 dual gate (B.5)"},
+    {"ac": "AC-4", "covered_by": "ADR §3.1 + §5.3 agent.blocked"},
+    {"ac": "AC-5", "covered_by": "ADR §3.2 + §6.2 defer->inbox task"},
+    {"ac": "AC-6", "covered_by": "ADR §6.2 ordinary pool task"},
+    {"ac": "AC-7", "covered_by": "ADR §5.3 denyReason from resolveFor"},
+    {"ac": "AC-8", "covered_by": "ADR §5.2/§5.4 open-vocab type, no new column (T-0016)"},
+    {"ac": "AC-9", "covered_by": "ADR §3.3/§5.4 proceed without new type"},
+    {"ac": "AC-10", "covered_by": "ADR §5.4 not actor_event (T-0019 closed verb-set)"},
+    {"ac": "AC-11", "covered_by": "ADR §5.2/§5.3 reasoningTraceRef (T-0139)"},
+    {"ac": "AC-12", "covered_by": "ADR §6.3 agent_card/DMN seam (T-0020/T-0123)"},
+    {"ac": "AC-13", "covered_by": "ADR §3 fail-closed priority over defer"}
+  ],
+  "runtime_target": "Existing choros dev stack (single-Postgres substrate + node:http) on the founder home server (/srv/choros, deploy founder-gated). NO new migration, table, external resource, or CI shell check (mirrors T-0139). No founder gate (no new infra/server/DB provisioning). Not built here (seams for T-0221): the producer emitting agent.deferred/agent.blocked via appendAuditEvent (encoder modeled on lifecycle-audit.ts/audit-grant-encoder.ts); the producer placing the defer task into the inbox; reading the threshold from agent_card.autonomy_threshold/DMN. Dependency: T-0123 (competence layer — instruction/per-agent threshold) is paused, not a day-1 precondition.",
+  "adr_artifact_path": "docs/design/T-0220-agent-step-outcomes.adr.md",
+  "escalation": ""
+}

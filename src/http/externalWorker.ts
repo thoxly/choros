@@ -7,6 +7,7 @@
  */
 import { HttpError, mapDomainError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
+import { withAuth, assertKeycloakConfig } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Validation helpers
@@ -34,18 +35,22 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 // ---------------------------------------------------------------------------
 
 export function registerExternalWorkerRoutes(router: Router, store: JobStore): void {
+  // fail-fast config check for keycloak mode (ADR §1.7, AC-20)
+  assertKeycloakConfig();
+
   // POST /jobs — enqueue a new job
-  router.register("POST", "/jobs", async (req, res) => {
+  router.register("POST", "/jobs", withAuth(async (req, res) => {
     const body = await readJsonBody(req);
 
     if (!isPlainObject(body)) {
       throw new HttpError(400, "VALIDATION", "request body must be a JSON object");
     }
 
-    const { topic, variables, retries } = body as {
+    const { topic, variables, retries, idempotencyKey } = body as {
       topic: unknown;
       variables: unknown;
       retries: unknown;
+      idempotencyKey: unknown;
     };
 
     if (!isNonEmptyString(topic)) {
@@ -75,19 +80,39 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
       }
     }
 
+    // T-0062: optional idempotencyKey (string ≤255). Additive — existing clients
+    // that omit it keep the current always-new-job behavior.
+    if (idempotencyKey !== undefined && idempotencyKey !== null) {
+      if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) {
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          "idempotencyKey must be a non-empty string if provided"
+        );
+      }
+      if (idempotencyKey.length > 255) {
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          "idempotencyKey must be at most 255 characters"
+        );
+      }
+    }
+
     const job = store.enqueue(
       topic,
       (variables as Record<string, unknown>) ?? {},
-      (retries as number) ?? 0
+      (retries as number) ?? 0,
+      (idempotencyKey as string | undefined) ?? undefined
     );
 
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(job));
-  });
+  }));
 
   // POST /external-task/fetch-and-lock — acquire up to maxJobs locked jobs
-  router.register("POST", "/external-task/fetch-and-lock", async (req, res) => {
+  router.register("POST", "/external-task/fetch-and-lock", withAuth(async (req, res) => {
     const body = await readJsonBody(req);
 
     if (!isPlainObject(body)) {
@@ -137,10 +162,10 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ jobs }));
-  });
+  }));
 
   // POST /external-task/:id/complete — mark a job as completed
-  router.register("POST", "/external-task/:id/complete", async (req, res, params) => {
+  router.register("POST", "/external-task/:id/complete", withAuth(async (req, res, params) => {
     const body = await readJsonBody(req);
 
     if (!isPlainObject(body)) {
@@ -163,10 +188,10 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true }));
-  });
+  }));
 
   // POST /external-task/:id/fail — report a job failure and optionally schedule retry
-  router.register("POST", "/external-task/:id/fail", async (req, res, params) => {
+  router.register("POST", "/external-task/:id/fail", withAuth(async (req, res, params) => {
     const body = await readJsonBody(req);
 
     if (!isPlainObject(body)) {
@@ -210,5 +235,5 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true }));
-  });
+  }));
 }

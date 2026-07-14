@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0690",
+  "status": "pr_open",
+  "branch": "task/T-0690",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "migrations/133_application_created_by.sql (NEW)",
+    "src/http/applications.ts",
+    "ci/checks/db/applications_delete_cascade.db.test.ts (EXTENDED)",
+    "docs/tasks/T-0690.spec.md (NEW)",
+    "docs/tasks/T-0690.pr-handoff.json (NEW)"
+  ],
+  "summary": "P2 из LIVE_PROOF T-0689 (эпик E-UX-HUMAN): DELETE /api/applications/:id (assertMayDeleteConfig, T-0566) требовал owner/admin ИЛИ authoring_draft-грант — рядовой автор СВОЕГО draft-приложения получал 403 на собственную песочницу, вопреки модели 'draft = личная песочница автора' (столп 5), и мешал уборке (live-proof T-0684/0687/0689 оставляли test-app residue, чистили ручным SQL). Нулевой шаг: `git log dev --grep T-0690` пуст, живое чтение assertMayDeleteConfig подтвердило дыру — не починено. КЛЮЧЕВАЯ НАХОДКА: choros.application НЕ имел created_by вовсе (в отличие от record/list_view) — негде было даже спросить 'кто автор'; application.created никогда не аудировался, поэтому честного бэкфилла историчных строк нет (created_by=NULL для legacy — они остаются owner/admin/authoring_draft-only, безопасный дефолт по умолчанию).",
+  "fix": "1) migrations/133_application_created_by.sql — ADD COLUMN IF NOT EXISTS created_by text NULL (аддитивно, известные_tenant_tables.txt не тронут, паттерн из migration 049). 2) src/http/applications.ts: ApplicationRow/APP_READ_SELECT/serializeApplication += created_by (зеркалит record/list_view — тот же незаконтрейненный actor-slug); createApplication(actor) теперь пишет created_by при INSERT (единственный HTTP create-путь, POST /api/applications). DeleteAppOutcome += {kind:'forbidden'}; deleteApplicationCascade(actorIsConfigPrivileged) — существование+tier+created_by читаются ОДНИМ SELECT...FOR UPDATE внутри той же tx, что и сам delete (ноль TOCTOU, зеркалит T-0623 deleteRecord дословно): непривилегированный актор проходит ТОЛЬКО если created_by=actor И tier='draft'; иначе forbidden. assertMayDeleteConfig удалена — DELETE-роут резолвит resolveActorPrivilege напрямую (тот же путь, что и раньше) и передаёт actorIsConfigPrivileged в каскад; 403 message байт-идентичен прежнему ('not permitted to delete this application'). 3) ПОПУТНО (в той же функции, тот же тезис 'не оставляй сирот'): report_page/list_view/doc_page FK-ят application БЕЗ ON DELETE и НИКОГДА не каскадировались (живая проверка information_schema подтвердила дыру, существовавшую с T-0566 — не привнесена этой задачей, но самообслуживаемый delete теперь бьёт по этому пути чаще) — закрыто явными DELETE в FK-safe порядке; их собственные зависимости (report_page_dep/doc_log/doc_ref) уже каскадируют от родителя. Audit-payload += report_pages_removed/list_views_removed/doc_pages_removed.",
+  "deviations_from_adr": [
+    "Cascade-completeness (report_page/list_view/doc_page) — не в буквальном тексте задачи, но прямо мандатно по формулировке 'ОБЯЗАТЕЛЬНО проверь каскад ... не оставляй сирот'; закрыто в том же PR как минимальное аддитивное расширение существующей функции (не отдельный рефакторинг), задокументировано отдельным пунктом в T-0690.spec.md таблицей FK.",
+    "assertMayDeleteConfig удалена целиком (не оставлена как мёртвый код) — её единственный вызов заменён инлайновым resolveActorPrivilege в роуте (тот же паттерн, что DELETE /api/records/:id уже использует в records.ts) — меньше, не больше, кода; 403-текст и HTTP-контракт байт-совместимы."
+  ],
+  "live_proof_plan": "Стенд не поднимался в этой сессии (задача выполнялась изолированно в /Users/shoxy/Code/choros-wt/T-0690 против локального PG:55432, без деплоя). План живого прохода при промоуте: (1) войти рядовым автором (не owner/admin, без authoring_draft) на /process-catalog или аналог конструктора; (2) создать новое draft-приложение через POST /api/applications (создатель = этот актор); (3) DELETE это приложение своим же актором → ожидать 204, приложение исчезает из списка; (4) опубликовать другое своё draft-приложение (tier=published), попытаться удалить тем же непривилегированным актором → 403 (кнопка/эндпоинт должны это уважать, если/когда появится UI); (5) как owner/admin убедиться, что чужой draft всё ещё удаляем без изменений в поведении.",
+  "tests_added": [
+    {
+      "file": "ci/checks/db/applications_delete_cascade.db.test.ts",
+      "covers": "4 НОВЫХ живых PG-теста (реальная choros_app/NOBYPASSRLS роль, реальная RLS) в новом describe 'author-of-own-draft delete floor (T-0690)': (1) непривилегированный автор удаляет СВОЁ draft-приложение → 204, полный каскад включая НОВОЕ покрытие report_page/list_view/doc_page (0 сирот, все 3 таблицы явно проверены отсутствием строк) + audit payload со всеми 6 счётчиками; (2) то же приложение но tier=published → 403 (self-service floor только для draft); (3) непривилегированный актор НЕ может удалить draft ДРУГОГО автора в том же тенанте → 403; (4) совпадение slug автора между тенантами НИКОГДА не пересекает границу → 404 (RLS выигрывает раньше, чем created_by вообще сравнивается — draft-приложение в TENANT_B с created_by='del-actor-c', тот же slug что и TENANT_A-актор, недостижимо). seedAppWithData расширен опциями (appTier/appCreatedBy/withBindings) БЕЗ изменения поведения 3 существующих тестов (дефолты = прежняя NULL/draft форма) — они остаются проходить байт-в-байт, что и доказывает регрессию: owner/admin по-прежнему удаляет ЧУЖОЕ (created_by=NULL) приложение, actorIsConfigPrivileged корректно шорткружит новый floor."
+    }
+  ],
+  "gates": {
+    "tsc_noemit": "green — npx tsc --noEmit, exit 0, 0 ошибок",
+    "eslint_targeted": "green — npx eslint src/http/applications.ts ci/checks/db/applications_delete_cascade.db.test.ts, 0 errors/0 warnings",
+    "eslint_full_src": "green — npx eslint src (весь npm run lint scope), exit 0: 0 errors, 46 pre-existing warnings (no-console в НЕТРОНУТЫХ этой задачей файлах — assistant.ts/inbox.ts/records.ts и т.д., не в applications.ts)",
+    "vitest_db_targeted": "green — DATABASE_URL=...55432/choros APP_DATABASE_URL=...choros_app npx vitest run --dir ci/checks/db --no-file-parallelism applications_delete_cascade.db.test.ts: 7/7 passed (3 pre-existing без диффа + 4 NEW T-0690). RED->GREEN верифицирован ЖИВЬЁМ: git stash применён к applications.ts (временный откат фикса) -> 2 из 4 новых тестов красные с EXACT ожидаемым 403 ('own draft delete' expected 204 got 403; 'cross-tenant slug match' expected 404 got 403 — подтверждает и старую 403-before-404 проблему упорядочивания) -> stash-восстановление -> все 7 снова зелёные",
+    "vitest_db_regression": "green — то же окружение, applications_crud.test.ts + sections_crud.test.ts: 21/21 passed (0 диффа в этих файлах — доказывает APP_READ_SELECT/ApplicationRow/serializeApplication аддитивное расширение created_by не ломает существующий CRUD-контракт)",
+    "vitest_unit_targeted": "green — npx vitest run src/__tests__/spaAuth.test.ts (20/20, включая POST/GET /api/applications auth-контур) + src/__tests__/rights-resources-routing.test.ts (2/2, listApplications/ApplicationRow потребитель)",
+    "anti_case_lock_sh": "PASS — bash ci/checks/anti-case-lock.sh, Phase 1+2 (aggregate 15 ≤ baseline 16, ноль новых case-литералов в src/ или web/src/)",
+    "migration_apply": "green — DATABASE_URL=...npm run migrate: applied 133_application_created_by чисто на живой PG:55432; npm run fitness:db:setup-template перегенерировал template включая 133 (119 файлов применено)",
+    "full_fitness_suite": "НЕ гонялся целиком (P2, таргетный фикс одного write-эндпоинта; изменённый код — только src/http/applications.ts — покрыт таргетными гейтами выше). Риск: ~300 остальных ci/checks/*.sh гейтов на файлы, которые эта задача не трогала."
+  },
+  "blocked_reason": "",
+  "friction_events": [
+    "CRITICAL (инфраструктурный, не относится к коду задачи): во время RED/GREEN-верификации git stash push/pop столкнулся с ОДНОВРЕМЕННОЙ coder-сессией в соседнем воркдире ТОГО ЖЕ репозитория (task/T-0756) — refs/stash общий на весь .git, НЕ per-worktree. Мой временный откат applications.ts (стеш) и T-0756-ный стеш (её незакоммиченные process-projection.ts/processes.ts/components.jsx/screen-process-instance.jsx) поменялись местами: мой pop забрал T-0756-ные файлы, T-0756-ный pop (или аналог) забрал мой фикс applications.ts. Диагностировано через git diff-сравнение (T-0756-ная утёкшая копия моего фикса оказалась байт-в-байт идентична пересозданной версии — подтверждено, содержимое не потеряно). Разрешено: чужие файлы в МОЁМ воркдире восстановлены к HEAD (после сохранения patch-бэкапа в scratchpad), свой фикс пересобран заново вручную. Воркдир T-0756 НЕ трогал (вне моего мандата на запись) — её сессия увидит расхождение сама при следующем git status и должна пересобрать свои 4 файла (её собственный applications.ts, вероятно, всё ещё несёт МОЙ диф — ей нужно сначала git checkout -- src/http/applications.ts у себя, ЗАТЕМ пересобрать process-projection.ts и др. из своей памяти, как я сделал). СИСТЕМНЫЙ РИСК ДЛЯ ФАБРИКИ: любая параллельная coder-сессия, использующая `git stash` в воркдире, разделяющем .git с другими активными сессиями, может ПОТЕРЯТЬ или ПОДМЕНИТЬ чужую незакоммиченную работу без явной ошибки. Рекомендация: запретить `git stash` в конвенциях coder-роли для этой среды (несколько воркдиров = один .git) и использовать вместо него `git diff > patch.file` + `git apply -R`/`git apply` с явным путём, ЛИБО просто хранить/восстанавливать изменения из памяти сессии (как сделано здесь), как безопасную альтернативу."
+  ]
+}

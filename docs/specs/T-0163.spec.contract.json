@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0163",
+  "status": "ready",
+  "summary": "Remove process.env reads from src/core/flowable-client.ts (lines ~264/269/274) by lifting them to the composition root (bridge-runner.ts, bridge-smoke-runner.ts); extend ci/checks/keyed-digest-core-purity.sh to cover the full src/core/ tree with positive/negative self-tests so the no-env-in-core invariant is fully enforced.",
+  "functional": [
+    "FR-1: makeFlowableClient no longer reads process.env for baseUrl, adminUser, or adminPassword. All three values must be supplied by the caller via config, or makeFlowableClient throws on missing adminPassword.",
+    "FR-2: bridge-runner.ts and bridge-smoke-runner.ts read the three env vars locally (in their src/ scope) and pass a full config object to makeFlowableClient, preserving runtime behavior.",
+    "FR-3: ci/checks/keyed-digest-core-purity.sh is extended to scan all of src/core/ (not just the three masking modules), using the same comment-strip + grep method already in place."
+  ],
+  "non_functional": [
+    "NF-1: makeFlowableClient with a fully supplied config behaves identically before and after — all existing unit tests pass without modification.",
+    "NF-2: npx tsc --noEmit passes after the change (no type regressions).",
+    "NF-3: The positive self-test (planted violation detected → exit 1) and negative self-test (comment-only mention → no match) remain in the updated check.",
+    "NF-4: No || true suppression around the real assertion grep in the updated check."
+  ],
+  "out_of_scope": [
+    "Changing FlowableClientConfig interface shape.",
+    "Refactoring src/server/lifecycle-bridge.ts (already passes explicit config).",
+    "Modifying flowable-client test files (all pass explicit TEST_CONFIG; no env fallback relied upon).",
+    "Python bindings or non-TypeScript implementations.",
+    "Key rotation or secrets management."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "makeFlowableClient({ baseUrl, adminUser, adminPassword, ... }) with a full explicit config behaves identically to before. All tests in src/__tests__/flowable-client.test.ts and src/__tests__/flowable-client.adversarial.test.ts pass without modification.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "makeFlowableClient() with zero args (no config) throws Error('FLOWABLE_REST_APP_ADMIN_PASSWORD is required'). No process.env read for baseUrl, adminUser, or adminPassword occurs inside src/core/flowable-client.ts.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "After the change, grep -rn 'process\\.env' src/core/ returns no code-line matches (comment-only mentions are not counted). The updated ci/checks/keyed-digest-core-purity.sh scans the full src/core/ tree and exits 0.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "Positive self-test of the updated check: a planted process.env['PLANTED'] on a code line inside src/core/ is detected and the check exits 1. If the planted violation is not detected the check exits 2 (self-test broken).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "npm test is green after the change. Specifically: src/__tests__/keyed-digest-e2e.test.ts, src/__tests__/hash-oracle.test.ts, src/__tests__/data-classification.test.ts, src/__tests__/grant-resolver.test.ts, and src/__tests__/main-wired-entry.test.ts all pass without modification.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "bridge-runner.ts and bridge-smoke-runner.ts read FLOWABLE_BASE_URL, FLOWABLE_REST_APP_ADMIN_USER_ID (or equivalent), and FLOWABLE_REST_APP_ADMIN_PASSWORD from process.env locally and pass them as an explicit config object to makeFlowableClient. npx tsc --noEmit passes.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "The updated ci/checks/keyed-digest-core-purity.sh has its SCOPE NOTE updated to reflect that the full src/core/ sweep is now achievable (T-0163 removed the flowable-client.ts blocker). The header references T-0163.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0163-no-env-in-core.spec.md"
+}

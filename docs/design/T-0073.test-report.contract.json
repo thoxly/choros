@@ -1,0 +1,64 @@
+{
+  "task_id": "T-0073",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1708,
+    "passed": 1702,
+    "failed": 0,
+    "skipped": 6,
+    "note": "env -u DATABASE_URL npm test; 6 skipped = Flowable integration offline (pre-existing, unrelated); target suite floor1-editor.test.ts 61/61"
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "floor1-editor.test.ts AC-1 relabel_field updates BindingField.label + FieldUiMeta.label", "result": "pass"},
+    {"ac": "AC-2", "test": "floor1-editor.test.ts AC-2 toggle_required flips BindingField.required", "result": "pass"},
+    {"ac": "AC-3", "test": "floor1-editor.test.ts AC-3 hide_field sets hidden=true", "result": "pass"},
+    {"ac": "AC-4", "test": "floor1-editor.test.ts AC-4 show_field sets hidden=false", "result": "pass"},
+    {"ac": "AC-5", "test": "floor1-editor.test.ts AC-5 reorder_fields sets display_order", "result": "pass"},
+    {"ac": "AC-6", "test": "floor1-editor.test.ts AC-6 set_help_text sets help_text", "result": "pass"},
+    {"ac": "AC-7", "test": "floor1-editor.test.ts AC-7 relabel_field with placeholder", "result": "pass"},
+    {"ac": "AC-8", "test": "floor1-editor.test.ts AC-8 immutability of input arrays", "result": "pass"},
+    {"ac": "AC-9", "test": "floor1-editor.test.ts AC-9 unknown fieldKey → UNKNOWN_FIELD", "result": "pass"},
+    {"ac": "AC-10", "test": "floor1-editor.test.ts AC-10 empty label → EMPTY_LABEL", "result": "pass"},
+    {"ac": "AC-11", "test": "floor1-editor.test.ts AC-11 empty helpText → EMPTY_HELP_TEXT", "result": "pass"},
+    {"ac": "AC-12", "test": "floor1-editor.test.ts AC-12 empty orders → EMPTY_ORDERS", "result": "pass"},
+    {"ac": "AC-13", "test": "floor1-editor.test.ts AC-13 duplicate fieldKey in orders → DUPLICATE_FIELD_KEY", "result": "pass"},
+    {"ac": "AC-14", "test": "floor1-editor.test.ts AC-14 Floor-2 kind → WRONG_FLOOR (core, all 8 kinds)", "result": "pass"},
+    {"ac": "AC-15", "test": "floor1-editor.test.ts AC-15 purity (sync, no throw, no I/O)", "result": "pass"},
+    {"ac": "AC-16", "test": "floor1-editor.test.ts AC-16 uiSchema entry created on first op", "result": "pass"},
+    {"ac": "AC-17", "test": "floor1-editor.test.ts AC-17 sequential edits accumulate", "result": "pass"},
+    {"ac": "AC-18", "test": "floor1-editor.test.ts AC-18 relabel preserves key+type", "result": "pass"},
+    {"ac": "AC-19", "test": "floor1-editor.test.ts AC-19 toggle_required does not touch uiSchema", "result": "pass"},
+    {"ac": "AC-20", "test": "floor1-editor.test.ts AC-20 hide+show round-trip", "result": "pass"},
+    {"ac": "AC-21", "test": "floor1-editor.test.ts HTTP AC-21 valid relabel_field → 200 + live smoke (b) curl 200 with transformed fields/uiSchema", "result": "pass"},
+    {"ac": "AC-22", "test": "floor1-editor.test.ts HTTP AC-22 Floor-2 kind → 400 VALIDATION (409 WRONG_FLOOR at core in AC-14) + live smoke (c) drop_field → 400", "result": "pass"},
+    {"ac": "AC-23", "test": "floor1-editor.test.ts HTTP AC-23 missing x-dev-user → 401 + live smoke (a) curl 401 UNAUTHENTICATED", "result": "pass"},
+    {"ac": "AC-24", "test": "floor1-editor.test.ts HTTP AC-24 malformed edit.kind → 400", "result": "pass"},
+    {"ac": "AC-25", "test": "floor1-editor.test.ts HTTP AC-25 unknown fieldKey in body.edit → 422", "result": "pass"},
+    {"ac": "AC-26", "test": "floor1-editor.test.ts HTTP AC-26 malformed fields body → 400 + live smoke (d) truncated JSON → 400 INVALID_JSON", "result": "pass"},
+    {"ac": "AC-27", "test": "floor1-editor.test.ts AC-27 keycloak mode: no role → 403 FORBIDDEN; pool=null → 503 fail-closed (R-1 fix, iter2)", "result": "pass"},
+    {"ac": "AC-28", "test": "floor1-editor.test.ts AC-28 allow-path: keycloak+role → 200; dev mode → 200 (R-1 fix, iter2)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "browser/LLM UX verification", "result": "n/a", "note": "вторично, LLM/браузер — серверный API без веб-фронта (D-025), не требуется"}
+  ],
+  "failures": [],
+  "fitness_checks": {
+    "floor1_editor_isolation": "PASS FE1-1..FE1-11 + --self-test PASS",
+    "authoring_floor_isolation_T0074": "PASS AFC-1..AFC-7",
+    "named_binding_isolation_T0072": "PASS NB-1..NB-6",
+    "full_local_fitness_chain": "skipped on branch by policy (origin-lag false-reds of sibling frozen-file checks)"
+  },
+  "live_smoke": {
+    "server": "env -u DATABASE_URL PORT=18173 CHOROS_AUTH_MODE=dev node dist/index.js (no DB, killed after run)",
+    "endpoint": "POST /tenants/{tenantId}/processes/{processKey}/forms/{formKey}/edits",
+    "cases": [
+      {"case": "no x-dev-user", "expected": "401", "actual": "401 UNAUTHENTICATED", "result": "pass"},
+      {"case": "valid Floor-1 relabel_field supplier → 'Поставщик'", "expected": "200 + transformation", "actual": "200; fields[0].label and uiSchema.supplier.label both updated", "result": "pass"},
+      {"case": "Floor-2 kind drop_field in body.edit", "expected": "400 per HTTP contract (409 only at core level, review AC-22/R-N2)", "actual": "400 VALIDATION listing 6 Floor-1 kinds", "result": "pass"},
+      {"case": "malformed body (truncated JSON)", "expected": "400", "actual": "400 INVALID_JSON", "result": "pass"}
+    ]
+  },
+  "tested_commit": "9b3607c28fb8b06291a4bd901cfcc2db0e790e73",
+  "branch": "task/T-0073-floor1-editor",
+  "notes": "Spec file docs/specs/T-0073*.spec.md absent in repo; AC source = review trace (docs/reviews/T-0073.review.md §11 + iter2) and test file. Recorded as known-gap in pr-handoff."
+}

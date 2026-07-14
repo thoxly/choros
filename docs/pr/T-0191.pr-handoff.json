@@ -1,0 +1,101 @@
+{
+  "task_id": "T-0191",
+  "status": "pr_open",
+  "branch": "task/T-0191-registry-defs-pdp",
+  "merge_target": "dev",
+  "base_commit": "fc39382",
+  "head_commit": "0db1000",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0191: PDP-гейт mgmt_object:schema_destructive/apply на PUT/PATCH /api/registry-defs/:id force-path. RegistryDefAuthzDeps injectable interface (паттерн PrefAuthzDeps из T-0171); defaultCheckDestructiveGrant через loadAdminContext: isGenesisOwner short-circuit + adminGrants.some(resource_type===mgmt_object:schema_destructive && operation==='apply'). Frozen Operation union не расширяется — widening-cast (g.operation as string) (ADR T-0121 §6.2, FF-RDP5). registry-defs-pdp.test.ts (AC-3/AC-4/AC-5), schema_change_api.test.ts AC-10 (genesis-owner → 200) + AC-10b (sc-tester → 403). R-N1 (review nit): AC-7 non-owner seeded-grant live-test закрыт через новый ci/checks/db/schema_change_api_ac7b.test.ts (FF-T147-2 forbids modifying existing files; 1/1 PASS). CI: tsc 0 errors, eslint 0 errors (2 pre-existing no-console warnings), fitness all PASS (FF-RDP1..7), vitest 1253/1259, fitness:db 547/547.",
+  "commits": [
+    {
+      "sha": "41d1348",
+      "phase": "SPEC",
+      "message": "T-0191 SPEC: PDP-гейт на PUT/PATCH /api/registry-defs/:id force-path"
+    },
+    {
+      "sha": "710f164",
+      "phase": "BUILD",
+      "message": "T-0191 BUILD: PDP-гейт mgmt_object:schema_destructive/apply на force-path"
+    },
+    {
+      "sha": "0db1000",
+      "phase": "REVIEW",
+      "message": "T-0191 REVIEW: approved — PDP-гейт mgmt_object:schema_destructive/apply"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "0db1000",
+      "findings_resolved": [],
+      "findings_nit_open": [
+        "R-N1 (nit, axis 2): AC-7 spec contract требовал live-теста на non-owner пути с сидированным apply-грантом. CLOSED: ci/checks/db/schema_change_api_ac7b.test.ts — 1/1 PASS. Placed in new file (не модификация существующего — FF-T147-2). Seed: employee+role+role_assignment+grant(delegable=true, operation=apply) через migrator-соединение, T-0144-дисциплина (BEGIN/SET LOCAL/COMMIT), cleanup в afterAll."
+      ],
+      "artifact": "docs/design/T-0191.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1800,
+      "passed": 1800,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "10/10",
+      "fitness_static": "PASS — all checks green including FF-RDP1..FF-RDP7",
+      "fitness_db_schema_change_api": "6/6 PASS — ci/checks/db/schema_change_api.test.ts (AC-10 genesis-owner + AC-10b 403)",
+      "fitness_db_schema_change_api_ac7b": "1/1 PASS — ci/checks/db/schema_change_api_ac7b.test.ts (R-N1: seeded non-owner apply-grant → 200)",
+      "fitness_db_total": "547/547 PASS, 0 failed, 0 skipped",
+      "tested_commit": "0db1000",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+        "fitness_static_checks": "PASS — all checks green (FF-RDP1..FF-RDP7 all PASS)",
+        "vitest_unit": "1253/1259 passed, 6 skipped (flowable integration offline)",
+        "registry_defs_pdp_unit_tests": "src/__tests__/registry-defs-pdp.test.ts — AC-3/AC-4/AC-5 covered",
+        "fitness_db_total": "547/547 passed, 0 failed",
+        "fitness_db_schema_change_api": "6/6 — schema_change_api.test.ts",
+        "fitness_db_schema_change_api_ac7b": "1/1 — schema_change_api_ac7b.test.ts (R-N1 closed)"
+      },
+      "artifact": "docs/test-reports/T-0191.test-report.md",
+      "contract_artifact": "docs/design/T-0191.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/http/registry-defs.ts",
+    "src/__tests__/registry-defs-pdp.test.ts",
+    "ci/checks/db/schema_change_api.test.ts",
+    "ci/checks/registry-defs-pdp-isolation.sh",
+    "package.json",
+    "ci/checks/db/schema_change_api_ac7b.test.ts",
+    "docs/design/T-0191.review.contract.json",
+    "docs/reviews/T-0191.review.md",
+    "docs/test-reports/T-0191.test-report.md",
+    "docs/design/T-0191.test-report.contract.json",
+    "docs/pr/T-0191.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "design_notes": {
+    "destructive_owner_only_day1": "ADR T-0121 §6 явно определяет деструктив-force как 'admin-only'. По умолчанию (fresh DB + seed 026) только genesis-owner проходит через isGenesisOwner short-circuit. Делегирование apply-гранта другим акторам технически возможно (подтверждено live-тестом AC-7b), но не сидировано в production. Когда genesis-owner захочет делегировать — через validateAdminDelegation при выдаче гранта через grant API.",
+    "apply_not_in_frozen_union": "operation='apply' не входит в frozen Operation union (grant-lattice.ts) — сравнение через widening-cast (g.operation as string)==='apply'. FF-RDP5 + FF-RDP5b PASS.",
+    "injectable_deps_pattern": "RegistryDefAuthzDeps идентичен PrefAuthzDeps из T-0171 (notification-prefs.ts). Консистентность паттерна соблюдена.",
+    "ff_t147_2_discipline": "FF-T147-2 запрещает модификацию ci/checks/db/*.test.ts относительно HEAD после REVIEW-коммита. R-N1 тест помещён в новый файл schema_change_api_ac7b.test.ts."
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_needed": "T-0191 не добавляет новых миграций. grant-таблица и все связанные таблицы уже в dev.",
+    "downstream_effect": "PUT /api/registry-defs/:id с force=true теперь требует mgmt_object:schema_destructive/apply гранта (genesis-owner short-circuit or delegated). Незасидированные тенанты могут вызвать только genesis-owner. Это breaking change только для force-path — не-force путь без изменений."
+  },
+  "friction_events": [
+    "FF-T147-2: нельзя модифицировать существующий schema_change_api.test.ts после REVIEW-коммита; R-N1 тест помещён в новый файл."
+  ]
+}

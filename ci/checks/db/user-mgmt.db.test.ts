@@ -1,0 +1,1916 @@
+/**
+ * ci/checks/db/user-mgmt.db.test.ts — T-0583 (ADR-T0583-user-mgmt).
+ *
+ * LIVE Postgres probe (skipped without DATABASE_URL). Runs `registerUserMgmtRoutes`
+ * against a REAL server (dev-mode x-dev-user auth) + REAL Postgres (RLS-enforcing
+ * choros_app pool for the routes, choros_migrator for setup/teardown), with
+ * InMemoryKeycloakUserPort standing in for Keycloak (no live KC needed in CI —
+ * mirrors hire-read-grant.db.test.ts / register-tenant-isolation.adversarial.test.ts).
+ *
+ * Each test registers ONE OR TWO fresh, fully-seeded tenants via the production
+ * registerTenant() service (own owner + role-reader + role-configurator etc.), so
+ * cross-tenant assertions run against REAL RLS rather than a synthetic fixture.
+ *
+ * PROVES (ADR §6 fitness table):
+ *   FF-583-1  POST /api/users (owner) → createHumanUser called 1×; employee(kind=
+ *             'human', slug=<KC userId>) created; 201 {employee_id, login}.
+ *   FF-583-2  The created account gets role-reader + covering READ (same result as
+ *             hire-flow T-0619) — getGrantsForSubject resolves a read/record/
+ *             RESOURCE_ROOT grant for it.
+ *   FF-583-3  KC-first + compensation: EMAIL_TAKEN → 409, no employee row; a DB
+ *             failure after KC-create → deleteUser called 1× with that userId, no 201.
+ *   FF-583-4  PATCH {active:false} → setUserEnabled(userId,false) 1× + deactivated_at
+ *             set; list shows active:false; {active:true} reverses both.
+ *   FF-583-5  tenant isolation: actor A creating with tenant_id=B → 403; PATCH on
+ *             B's employee → 404; GET /accounts for A never contains B's accounts.
+ *   FF-583-6  a non-privileged tenant member (no mgmt_object:employee grant, not
+ *             owner) → 403 ADMIN_GATE_REJECTED on POST and PATCH.
+ *   FF-583-10 (regression guard) — see hire-read-grant.db.test.ts (unchanged file,
+ *             not duplicated here); this file does not touch that test.
+ *
+ * T-0727 (R-4/R-5, review of T-0702) additions — see docs/design/
+ * ADR-T0727-deactivation-hygiene.md:
+ *   FF-727-WARN-LOG   a failed revokeUserSessions is console.warn'd (operator-visible
+ *                      in real time), not only recorded as payload.kc_sessions_revoked.
+ *   FF-727-IDEMPOTENT a repeated PATCH {active} that already matches the current state
+ *                      is a no-op: no second deactivate/reactivate audit event, no
+ *                      redundant KC call, the ORIGINAL deactivated_at is preserved.
+ *   FF-727-RECOVERY   if the DB write never landed (the pre-existing T-0583 "KC-disabled
+ *                      + choros-active" gap this ADR documents), a repeat PATCH reads as
+ *                      a REAL transition (not a no-op) and completes it — KC calls are
+ *                      safely re-invoked (idempotent by construction, unchanged).
+ */
+
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import * as http from 'node:http';
+import pg from 'pg';
+import { migratorUrl, appUrl, withClient } from './_helpers.js';
+import { Router } from '../../../src/http/router.js';
+import { registerUserMgmtRoutes } from '../../../src/http/user-mgmt.js';
+import { registerTenant } from '../../../src/core/register.js';
+import { InMemoryKeycloakUserPort } from '../../../src/keycloak/fake-user-port.js';
+import type { KeycloakUserPort, KcHumanUserSpec } from '../../../src/keycloak/admin-port.js';
+import { getGrantsForSubject } from '../../../src/db/grants-dao.js';
+import { resolveActorTenant } from '../../../src/db/org.js';
+import { RESOURCE_ROOT_NODE_ID } from '../../../src/core/read-visibility.js';
+
+const LIVE = !!process.env['DATABASE_URL'];
+const NOW = () => Date.now();
+
+/**
+ * T-0664 — a KeycloakUserPort wrapper that inserts a rendezvous barrier at the
+ * `setUserEnabled` call. In the PATCH deactivation flow, `setUserEnabled` runs
+ * AFTER the (separate, unlocked) EARLY last-owner guard but BEFORE the write
+ * transaction. By making two concurrent requests rendezvous here, we
+ * DETERMINISTICALLY force the exact interleaving that reproduces the race the
+ * fix closes: both requests finish their early guard (each sees the OTHER owner
+ * still active) BEFORE EITHER performs its deactivating write. Without the
+ * atomic FOR UPDATE guard, both writes then land → the tenant is left with ZERO
+ * active owners (self-lockout). With the fix, the write-tx FOR UPDATE serializes
+ * them → exactly one succeeds, the other is refused 409 LAST_OWNER.
+ *
+ * Only the FIRST `parties` arrivals rendezvous; any later `setUserEnabled` call
+ * (e.g. the fix's compensating re-enable on the refused branch) passes straight
+ * through. A safety timeout guarantees the suite can never wedge if — for any
+ * reason — fewer than `parties` requests reach the barrier.
+ */
+class BarrierKcPort implements KeycloakUserPort {
+  private arrived = 0;
+  private releasers: Array<() => void> = [];
+  constructor(
+    private readonly inner: InMemoryKeycloakUserPort,
+    private readonly parties: number,
+  ) {}
+  createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }> {
+    return this.inner.createHumanUser(spec);
+  }
+  deleteUser(userId: string): Promise<void> {
+    return this.inner.deleteUser(userId);
+  }
+  revokeUserSessions(userId: string): Promise<{ revoked: boolean }> {
+    return this.inner.revokeUserSessions(userId);
+  }
+  async setUserEnabled(userId: string, enabled: boolean): Promise<void> {
+    if (this.arrived < this.parties) {
+      this.arrived++;
+      if (this.arrived >= this.parties) {
+        for (const r of this.releasers) r();
+        this.releasers = [];
+      } else {
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, 5000); // safety valve — never wedge the suite
+          this.releasers.push(() => {
+            clearTimeout(t);
+            resolve();
+          });
+        });
+      }
+    }
+    return this.inner.setUserEnabled(userId, enabled);
+  }
+}
+
+interface Registered {
+  tenantId: string;
+  ownerSlug: string; // = KC sub = employee.slug
+}
+
+describe.skipIf(!LIVE)('T-0583 — user-mgmt (live Postgres)', () => {
+  let migPool: pg.Pool;
+  let appPool: pg.Pool;
+  let kc: InMemoryKeycloakUserPort;
+  let server: http.Server;
+  let base = '';
+
+  const tenantsToClean: string[] = [];
+
+  beforeAll(async () => {
+    if (!LIVE) return;
+    migPool = new pg.Pool({ connectionString: migratorUrl() });
+    appPool = new pg.Pool({ connectionString: appUrl() });
+    kc = new InMemoryKeycloakUserPort();
+
+    const router = new Router();
+    // Production wiring (server.ts): registerUserMgmtRoutes runs on the SAME
+    // grantsPool that resolveActorTenant/authorizeOrgWrite/loadAdminContext use
+    // (the DATABASE_URL / choros_migrator-class pool — BYPASSRLS for identity
+    // resolution; RLS isolation for tenant-scoped writes/reads is enforced by
+    // withTenantTx's SET LOCAL choros.tenant_id + explicit tenant_id filters,
+    // not by a non-bypass Postgres role). Using appPool (choros_app, NOBYPASSRLS)
+    // here would make resolveActorTenant's cross-tenant lookup fail closed
+    // (ACTOR_TENANT_UNRESOLVED) BEFORE the GUC is even set — that is not how
+    // server.ts wires this route, so the test uses migPool, matching prod.
+    registerUserMgmtRoutes(router, migPool, kc, (actorSlug: string) =>
+      resolveActorTenant(migPool, actorSlug),
+    );
+    server = http.createServer((req, res) => router.dispatch(req, res));
+    base = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const a = server.address();
+        resolve(a && typeof a !== 'string' ? `http://127.0.0.1:${a.port}` : '');
+      });
+    });
+  });
+
+  afterAll(async () => {
+    if (!LIVE) return;
+    await new Promise<void>((resolve) => server?.close(() => resolve()));
+    for (const tenantId of tenantsToClean) {
+      await deepDeleteTenant(tenantId);
+    }
+    await appPool?.end();
+    await migPool?.end();
+  });
+
+  async function deepDeleteTenant(tenantId: string): Promise<void> {
+    const c = await migPool.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+      await c.query(`DELETE FROM choros."grant" WHERE tenant_id = $1`, [tenantId]);
+      await c.query(`DELETE FROM choros.role_assignment WHERE tenant_id = $1`, [tenantId]);
+      await c.query(`DELETE FROM choros.agent_card WHERE tenant_id = $1`, [tenantId]);
+      await c.query(`DELETE FROM choros.employee WHERE tenant_id = $1`, [tenantId]);
+      await c.query(`DELETE FROM choros.role WHERE tenant_id = $1`, [tenantId]);
+      await c.query(`DELETE FROM choros.tenant WHERE tenant_id = $1`, [tenantId]);
+      await c.query('COMMIT');
+    } catch {
+      await c.query('ROLLBACK');
+    } finally {
+      c.release();
+    }
+  }
+
+  async function registerOne(label: string): Promise<Registered> {
+    const regKc = new InMemoryKeycloakUserPort();
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const req = {
+      orgName: `T0583 ${label} ${stamp}`,
+      email: `t0583-${label}-${stamp}@example.com`,
+      password: 't0583-owner-password-1',
+    };
+    const res = await registerTenant({ pool: migPool, kc: regKc, nowMs: NOW }, req);
+    tenantsToClean.push(res.tenantId);
+    return { tenantId: res.tenantId, ownerSlug: res.userId };
+  }
+
+  function postUsers(body: unknown, actor: string): Promise<{ status: number; json: any }> {
+    return fetch(`${base}/api/users`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-dev-user': actor },
+      body: JSON.stringify(body),
+    }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) }));
+  }
+
+  function getAccounts(actor: string): Promise<{ status: number; json: any }> {
+    return fetch(`${base}/api/users/accounts`, {
+      headers: { 'x-dev-user': actor },
+    }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) }));
+  }
+
+  function patchUser(employeeId: string, body: unknown, actor: string): Promise<{ status: number; json: any }> {
+    return fetch(`${base}/api/users/${employeeId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'x-dev-user': actor },
+      body: JSON.stringify(body),
+    }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) }));
+  }
+
+  // ---------------------------------------------------------------------
+  // FF-583-1 / FF-583-2: create → KC user + employee(slug=userId) + role-reader.
+  // ---------------------------------------------------------------------
+  it('FF-583-1/2: owner creates a user account → KC user + employee(slug=KC userId) + covering READ', async () => {
+    const t = await registerOne('create');
+    kc.reset();
+    // T-0628: login is free-form (NOT an email) — email is the separate
+    // required field. This is AC-1's exact shape.
+    const login = `t0583-create-${Date.now()}`;
+    const email = `t0583-create-${Date.now()}@example.com`;
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'T-0583 Test Account' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    expect(res.json.employee_id).toBeTruthy();
+    expect(res.json.login).toBe(login);
+    // Password must never appear in the response.
+    expect(JSON.stringify(res.json)).not.toContain('password12345');
+
+    // FF-583-1: createHumanUser called exactly once; slug == returned userId.
+    expect(kc.createCallCount).toBe(1);
+    // T-0628 (AC-1): username=login (free-form, unchanged) and email=email
+    // (the distinct required field) are passed as TWO separate values — not
+    // the same string duplicated into both KC fields.
+    expect(kc.created[0].spec.username).toBe(login);
+    expect(kc.created[0].spec.email).toBe(email);
+    // T-0741 (AC-6, follow-up on T-0734 §5): the real HTTP route forwards the
+    // request's `display_name` as `displayName` on the createHumanUser call —
+    // admin-port.ts's live adapter derives KC firstName/lastName from it (see
+    // src/__tests__/admin-port.test.ts AP-8 for the payload-shape unit test).
+    // Without this, a UI-created account cannot obtain a login token at all
+    // (proven live: docs/live-proof/T-0741-firstname-lastname.live-proof.md).
+    expect(kc.created[0].spec.displayName).toBe('T-0583 Test Account');
+    expect(kc.created).toHaveLength(1);
+    const kcUserId = kc.created[0].userId;
+
+    const employeeId = res.json.employee_id as string;
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT slug, login, email, kind, deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].kind).toBe('human');
+      expect(rows[0].slug).toBe(kcUserId);
+      // T-0628 (AC-1): login and email are stored as DISTINCT column values.
+      expect(rows[0].login).toBe(login);
+      expect(rows[0].email).toBe(email);
+      expect(rows[0].deactivated_at).toBeNull();
+      await c.query('COMMIT');
+    });
+
+    // FF-583-2: covering READ resolves for the new account (role-reader, RESOURCE_ROOT).
+    const grants = await getGrantsForSubject(appPool, t.tenantId, kcUserId, Date.now());
+    const covering = grants.filter(
+      (g) => g.operation === 'read' && g.resourceType === 'record'
+        && (g.scope as { nodeId?: string })?.nodeId === RESOURCE_ROOT_NODE_ID,
+    );
+    expect(covering.length, 'created account must resolve the RESOURCE_ROOT covering READ grant').toBeGreaterThanOrEqual(1);
+
+    // T-0625 fix: GET /api/users/accounts must show the HUMAN-READABLE login
+    // the owner typed (not employee.slug, which is the KC user UUID). Before
+    // the fix, `login: row.slug` made this list show a raw KC UUID instead of
+    // the login — this is the secondary bug from the T-0625 LIVE_PROOF diagnosis.
+    const list = await getAccounts(t.ownerSlug);
+    expect(list.status, JSON.stringify(list.json)).toBe(200);
+    const listedRow = list.json.accounts.find((a: any) => a.employee_id === employeeId);
+    expect(listedRow, 'created account must appear in the list').toBeTruthy();
+    expect(listedRow.login).toBe(login);
+    expect(listedRow.login).not.toBe(kcUserId);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0628 (AC-1, AC-2, AC-3): login is free-form (no longer email-shaped
+  // per T-0625's narrower fix) — a real ordinary login like `ivan.petrov`
+  // must now SUCCEED (not 400). email is the separate required field that
+  // must be a valid email address, validated BEFORE any KC call, with an
+  // honest 400 (never the 503 AUTH_UNAVAILABLE masquerade from the original
+  // T-0583 LIVE_PROOF bug).
+  // ---------------------------------------------------------------------
+  it('T-0628 (AC-1): POST /api/users with a non-email login (ivan.petrov-shaped) + valid email → 201, KC called with distinct username/email', async () => {
+    const t = await registerOne('nonemail');
+    kc.reset();
+    const login = `ivan.petrov.${Date.now()}`; // deliberately NOT email-shaped
+    const email = `liveproof-${Date.now()}@example.com`;
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Ordinary Login' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    expect(res.json.login).toBe(login);
+    expect(kc.createCallCount).toBe(1);
+    expect(kc.created[0].spec.username).toBe(login);
+    expect(kc.created[0].spec.email).toBe(email);
+  });
+
+  it('T-0628 (AC-2): POST /api/users with an invalid email → honest 400 VALIDATION, not 503; no employee row, KC never called', async () => {
+    const t = await registerOne('bademail');
+    kc.reset();
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: `liveproof-${Date.now()}`, email: 'not-an-email', password: 'password12345', display_name: 'Bad Email' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('VALIDATION');
+    // Server-side validation runs BEFORE any KC call — a bad email never
+    // reaches kc.createHumanUser at all.
+    expect(kc.createCallCount).toBe(0);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT count(*)::int AS n FROM choros.employee WHERE tenant_id=$1 AND display_name='Bad Email'`,
+        [t.tenantId],
+      );
+      expect(rows[0].n).toBe(0);
+      await c.query('COMMIT');
+    });
+  });
+
+  it('T-0628 (AC-2): POST /api/users with a missing email → honest 400 VALIDATION, KC never called', async () => {
+    const t = await registerOne('noemail');
+    kc.reset();
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: `liveproof-${Date.now()}`, password: 'password12345', display_name: 'No Email' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('VALIDATION');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it('T-0628 (AC-3): POST /api/users with an empty login → honest 400 VALIDATION (login still required, just not email-shaped)', async () => {
+    const t = await registerOne('nologin');
+    kc.reset();
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: '', email: `t0628-${Date.now()}@example.com`, password: 'password12345', display_name: 'No Login' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('VALIDATION');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------
+  // FF-583-3: EMAIL_TAKEN -> 409, no partial employee row.
+  // ---------------------------------------------------------------------
+  it('FF-583-3a: EMAIL_TAKEN from KC -> 409, employee NOT created', async () => {
+    const t = await registerOne('taken');
+    kc.reset();
+    kc.failOnCreate = true;
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: 'taken-login', email: 'taken@example.com', password: 'password12345', display_name: 'Taken' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT count(*)::int AS n FROM choros.employee WHERE tenant_id=$1 AND display_name='Taken'`,
+        [t.tenantId],
+      );
+      expect(rows[0].n).toBe(0);
+      await c.query('COMMIT');
+    });
+  });
+
+  it('FF-583-3b: KC unreachable (AUTH_UNAVAILABLE) -> 503, no employee row', async () => {
+    const t = await registerOne('unavail');
+    kc.reset();
+    kc.failOnAuth = true;
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: 'unavail-login', email: 'unavail@example.com', password: 'password12345', display_name: 'Unavail' },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(503);
+  });
+
+  it('FF-583-3c: a DB failure AFTER KC-create (bad role_id, FK violation) triggers deleteUser 1x, no 201', async () => {
+    const t = await registerOne('compensate');
+    kc.reset();
+    const bogusRoleId = '99999999-9999-9999-9999-999999999999'; // well-formed UUID, no such role row
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `compensate-login-${Date.now()}`,
+        email: `compensate-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Compensate Me',
+        role_id: bogusRoleId, // FK violation on role_assignment insert -> tx rollback AFTER KC create
+      },
+      t.ownerSlug,
+    );
+    expect(res.status, JSON.stringify(res.json)).not.toBe(201);
+    // KC user was created (createHumanUser succeeded) then compensated exactly once.
+    expect(kc.createCallCount).toBe(1);
+    expect(kc.deleteCallCount).toBe(1);
+    expect(kc.deleteCalls[0]).toBe(kc.created[0].userId);
+
+    // No employee row survives the rolled-back transaction.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT count(*)::int AS n FROM choros.employee WHERE tenant_id=$1 AND display_name='Compensate Me'`,
+        [t.tenantId],
+      );
+      expect(rows[0].n).toBe(0);
+      await c.query('COMMIT');
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // FF-583-4: deactivate / reactivate.
+  // ---------------------------------------------------------------------
+  it('FF-583-4: PATCH {active:false} disables KC + sets deactivated_at; {active:true} reverses both', async () => {
+    const t = await registerOne('deactivate');
+    kc.reset();
+    const login = `t0583-deact-${Date.now()}`;
+    const email = `t0583-deact-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Deactivate Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+    const kcUserId = kc.created[kc.created.length - 1].userId;
+
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(off.status, JSON.stringify(off.json)).toBe(200);
+    expect(off.json.active).toBe(false);
+    expect(kc.setEnabledCallCount).toBe(1);
+    expect(kc.setEnabledCalls[0]).toEqual({ userId: kcUserId, enabled: false });
+    expect(kc.isEnabled(kcUserId)).toBe(false);
+
+    const listAfterOff = await getAccounts(t.ownerSlug);
+    const row = listAfterOff.json.accounts.find((a: any) => a.employee_id === employeeId);
+    expect(row.active).toBe(false);
+
+    const on = await patchUser(employeeId, { active: true }, t.ownerSlug);
+    expect(on.status, JSON.stringify(on.json)).toBe(200);
+    expect(on.json.active).toBe(true);
+    expect(kc.setEnabledCallCount).toBe(2);
+    expect(kc.setEnabledCalls[1]).toEqual({ userId: kcUserId, enabled: true });
+
+    const listAfterOn = await getAccounts(t.ownerSlug);
+    const row2 = listAfterOn.json.accounts.find((a: any) => a.employee_id === employeeId);
+    expect(row2.active).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0702 (ADR-T0702) — KC session revocation on deactivation. setUserEnabled
+  // (false) alone only blocks a NEW token; revokeUserSessions kills already-
+  // issued sessions (best-effort, never throws — outcome lands in the audit
+  // event payload as kc_sessions_revoked).
+  // ---------------------------------------------------------------------
+
+  async function auditPayloadFor(
+    tenantId: string,
+    employeeId: string,
+    type: 'user_account.deactivate' | 'user_account.reactivate',
+  ): Promise<any> {
+    return withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      const { rows } = await c.query<{ payload: unknown }>(
+        `SELECT payload FROM choros.audit_event
+          WHERE tenant_id = $1 AND subject = $2 AND type = $3
+          ORDER BY seq DESC LIMIT 1`,
+        [tenantId, employeeId, type],
+      );
+      await c.query('COMMIT');
+      return rows[0]?.payload;
+    });
+  }
+
+  it('FF-702-CALLED-ONCE/AUDIT-SUCCESS: deactivation calls revokeUserSessions once and audits kc_sessions_revoked:true on success', async () => {
+    const t = await registerOne('t0702-revoke-ok');
+    kc.reset();
+    const login = `t0702-revoke-ok-${Date.now()}`;
+    const email = `t0702-revoke-ok-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Revoke Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+    const kcUserId = kc.created[kc.created.length - 1].userId;
+
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(off.status, JSON.stringify(off.json)).toBe(200);
+
+    // FF-702-CALLED-ONCE
+    expect(kc.revokeSessionsCallCount).toBe(1);
+    expect(kc.revokeSessionsCalls[0]).toBe(kcUserId);
+
+    // FF-702-AUDIT-SUCCESS
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.deactivate');
+    expect(payload).toEqual({ kc_sessions_revoked: true });
+  });
+
+  it('FF-702-DEGRADE: revokeUserSessions failing does not fail the deactivation — audits kc_sessions_revoked:false', async () => {
+    const t = await registerOne('t0702-revoke-fail');
+    kc.reset();
+    const login = `t0702-revoke-fail-${Date.now()}`;
+    const email = `t0702-revoke-fail-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Revoke Fail Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+    const kcUserId = kc.created[kc.created.length - 1].userId;
+
+    // KC reachable enough for setUserEnabled to succeed, but the revoke call
+    // specifically degrades (models a KC hiccup isolated to the logout call).
+    kc.failOnRevokeSessions = true;
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+
+    // Deactivation still completes — best-effort must not block the primary action.
+    expect(off.status, JSON.stringify(off.json)).toBe(200);
+    expect(off.json.active).toBe(false);
+    expect(kc.isEnabled(kcUserId)).toBe(false);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      expect(rows[0].deactivated_at).not.toBeNull();
+      await c.query('COMMIT');
+    });
+
+    expect(kc.revokeSessionsCallCount).toBe(1);
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.deactivate');
+    expect(payload).toEqual({ kc_sessions_revoked: false });
+  });
+
+  it('FF-702-REACTIVATE-NOOP: reactivation never calls revokeUserSessions', async () => {
+    const t = await registerOne('t0702-reactivate-noop');
+    kc.reset();
+    const login = `t0702-reactivate-noop-${Date.now()}`;
+    const email = `t0702-reactivate-noop-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Reactivate Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(off.status).toBe(200);
+    expect(kc.revokeSessionsCallCount).toBe(1); // from the deactivate step
+
+    const on = await patchUser(employeeId, { active: true }, t.ownerSlug);
+    expect(on.status, JSON.stringify(on.json)).toBe(200);
+    expect(on.json.active).toBe(true);
+
+    // Reactivation must NOT call revokeUserSessions — count unchanged.
+    expect(kc.revokeSessionsCallCount).toBe(1);
+
+    // Reactivate audit payload carries no kc_sessions_revoked field at all.
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.reactivate');
+    expect(payload).toEqual({});
+  });
+
+  it('FF-702-SETENABLED-REGRESSION: setUserEnabled failing (KC down before revoke) still 503s and never calls revokeUserSessions (T-0583 behavior preserved)', async () => {
+    const t = await registerOne('t0702-setenabled-fail');
+    kc.reset();
+    const login = `t0702-setenabled-fail-${Date.now()}`;
+    const email = `t0702-setenabled-fail-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'SetEnabled Fail Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    kc.failOnSetEnabled = true;
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(off.status, JSON.stringify(off.json)).toBe(503);
+
+    // setUserEnabled failed BEFORE revokeUserSessions is ever reached.
+    expect(kc.revokeSessionsCallCount).toBe(0);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      expect(rows[0].deactivated_at).toBeNull(); // untouched
+      await c.query('COMMIT');
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0727 (R-4/R-5, review of T-0702) — operational hygiene of deactivation:
+  // a failed revoke must be operator-visible in logs (not only the audit
+  // payload), and a repeated PATCH must be idempotent (no duplicate audit
+  // event, no timestamp churn) while the KC-disabled+choros-active recovery
+  // path (pre-existing T-0583 gap) still completes on retry. See
+  // docs/design/ADR-T0727-deactivation-hygiene.md.
+  // ---------------------------------------------------------------------
+
+  it('T-0727 R-4: revokeUserSessions failing logs a warning (operator-visible, not only the audit payload)', async () => {
+    const t = await registerOne('t0727-revoke-fail-log');
+    kc.reset();
+    const login = `t0727-revoke-fail-log-${Date.now()}`;
+    const email = `t0727-revoke-fail-log-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Revoke Fail Log Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    kc.failOnRevokeSessions = true;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Capture the call list BEFORE mockRestore() — mockRestore() also clears
+    // mock.calls (same as mockReset()), so reading it after restore always
+    // reads back empty regardless of what was actually captured.
+    let capturedWarnCalls: unknown[][] = [];
+    let off: { status: number; json: any };
+    try {
+      off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+      capturedWarnCalls = warnSpy.mock.calls.map((args) => [...args]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(off.status, JSON.stringify(off.json)).toBe(200);
+
+    // R-4: the degraded revoke must be LOGGED — an operator tailing logs (not
+    // diffing the audit trail) must see it happened, tagged to this task and
+    // this employee.
+    const warnedAboutThisEmployee = capturedWarnCalls.some(
+      (args) => typeof args[0] === 'string' && args[0].includes('T-0727') && args[0].includes(employeeId),
+    );
+    expect(warnedAboutThisEmployee, JSON.stringify(capturedWarnCalls)).toBe(true);
+
+    // Still recorded on the audit event too (T-0702 behavior unchanged —
+    // R-4 ADDS log visibility, it does not replace the audit field).
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.deactivate');
+    expect(payload).toEqual({ kc_sessions_revoked: false });
+  });
+
+  it('T-0727 R-5: a repeated PATCH {active:false} on an already-inactive account is a no-op — audit not duplicated, KC not re-called, deactivated_at unchanged', async () => {
+    const t = await registerOne('t0727-idempotent-deactivate');
+    kc.reset();
+    const login = `t0727-idempotent-deactivate-${Date.now()}`;
+    const email = `t0727-idempotent-deactivate-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Idempotent Deactivate Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    const first = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(first.status, JSON.stringify(first.json)).toBe(200);
+    expect(kc.setEnabledCallCount).toBe(1);
+    expect(kc.revokeSessionsCallCount).toBe(1);
+
+    const deactivatedAtAfterFirst = await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      await c.query('COMMIT');
+      return rows[0].deactivated_at as string;
+    });
+    expect(deactivatedAtAfterFirst).not.toBeNull();
+
+    // Repeat — the account is ALREADY inactive; this must be a safe no-op
+    // ("already-inactive вход не падает" — the second call must not error).
+    const second = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(second.status, JSON.stringify(second.json)).toBe(200);
+    expect(second.json.active).toBe(false);
+
+    // No redundant KC round-trip for a no-op — counts unchanged.
+    expect(kc.setEnabledCallCount).toBe(1);
+    expect(kc.revokeSessionsCallCount).toBe(1);
+
+    // The ORIGINAL deactivated_at is preserved, not silently overwritten by
+    // the retry's own timestamp.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      expect(rows[0].deactivated_at).toBe(deactivatedAtAfterFirst);
+      await c.query('COMMIT');
+    });
+
+    // Exactly ONE deactivate audit row exists — the repeat did not duplicate it.
+    const auditRows = await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT payload FROM choros.audit_event
+          WHERE tenant_id = $1 AND subject = $2 AND type = 'user_account.deactivate'`,
+        [t.tenantId, employeeId],
+      );
+      await c.query('COMMIT');
+      return rows;
+    });
+    expect(auditRows.length, JSON.stringify(auditRows)).toBe(1);
+    expect(auditRows[0].payload).toEqual({ kc_sessions_revoked: true });
+  });
+
+  it('T-0727 R-5: a repeated PATCH {active:true} on an already-active account is a no-op — no reactivate audit, no KC call', async () => {
+    const t = await registerOne('t0727-idempotent-reactivate');
+    kc.reset();
+    const login = `t0727-idempotent-reactivate-${Date.now()}`;
+    const email = `t0727-idempotent-reactivate-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Idempotent Reactivate Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    // Freshly created — already active. PATCH {active:true} is a no-op from
+    // the very first call (symmetric with the deactivate no-op above).
+    const res = await patchUser(employeeId, { active: true }, t.ownerSlug);
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(res.json.active).toBe(true);
+    expect(kc.setEnabledCallCount).toBe(0);
+    expect(kc.revokeSessionsCallCount).toBe(0);
+
+    const payload = await auditPayloadFor(t.tenantId, employeeId, 'user_account.reactivate');
+    expect(payload).toBeUndefined();
+  });
+
+  it('T-0727 R-5 recovery path: if the DB write never landed (deactivated_at reset out of band, modeling the T-0583 KC-disabled+choros-active gap), a repeat PATCH completes it — KC calls are safely re-invoked', async () => {
+    const t = await registerOne('t0727-recovery');
+    kc.reset();
+    const login = `t0727-recovery-${Date.now()}`;
+    const email = `t0727-recovery-${Date.now()}@example.com`;
+    const create = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Recovery Me' },
+      t.ownerSlug,
+    );
+    expect(create.status).toBe(201);
+    const employeeId = create.json.employee_id as string;
+
+    const first = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(first.status, JSON.stringify(first.json)).toBe(200);
+    expect(kc.setEnabledCallCount).toBe(1);
+    expect(kc.revokeSessionsCallCount).toBe(1);
+
+    // Model the pre-existing T-0583 gap this ADR documents: KC ended up
+    // disabled, but the DB transaction that should have recorded it never
+    // committed (crash / dropped connection between the KC calls and the
+    // tx). Force employee.deactivated_at back to NULL out-of-band.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      await c.query(
+        `UPDATE choros.employee SET deactivated_at = NULL WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      await c.query('COMMIT');
+    });
+
+    // The operator's recovery move: repeat the SAME PATCH. Because the DB
+    // still (honestly) reads "active", this is NOT short-circuited as a
+    // no-op — it re-runs the full flow, including a SECOND round of KC
+    // calls, which must complete without error (idempotent by construction).
+    const second = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(second.status, JSON.stringify(second.json)).toBe(200);
+    expect(second.json.active).toBe(false);
+    expect(kc.setEnabledCallCount).toBe(2);
+    expect(kc.revokeSessionsCallCount).toBe(2);
+
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, employeeId],
+      );
+      expect(rows[0].deactivated_at).not.toBeNull();
+      await c.query('COMMIT');
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0658 (round 3) FIX-2 — LAST-OWNER GUARD: the T-0658 deactivation gate
+  // (org.ts isGenesisOwnerForTenant / loadAdminContext) makes a deactivated
+  // owner isGenesisOwner=false. That closes the security hole but would brick a
+  // tenant if the LAST owner were deactivated (reactivation authz is
+  // loadAdminContext — no one left to reactivate). PATCH {active:false} must
+  // REFUSE to deactivate the last active tenant-owner (409 LAST_OWNER).
+  // ---------------------------------------------------------------------
+
+  // Resolve the owner's employee UUID from their slug (registerOne returns slug).
+  async function ownerEmployeeId(tenantId: string, ownerSlug: string): Promise<string> {
+    return withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+      const { rows } = await c.query<{ id: string }>(
+        `SELECT id FROM choros.employee WHERE tenant_id=$1 AND slug=$2 LIMIT 1`,
+        [tenantId, ownerSlug],
+      );
+      await c.query('COMMIT');
+      return rows[0]!.id;
+    });
+  }
+
+  it('T-0658 FIX-2: deactivating the SOLE tenant-owner is refused (409 LAST_OWNER)', async () => {
+    const t = await registerOne('lastowner');
+    kc.reset();
+    const ownerId = await ownerEmployeeId(t.tenantId, t.ownerSlug);
+
+    // registerOne creates a tenant with exactly ONE owner (the genesis owner).
+    // Deactivating them must be refused — there is no other owner to reactivate.
+    const res = await patchUser(ownerId, { active: false }, t.ownerSlug);
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json.error?.code ?? res.json.code).toBe('LAST_OWNER');
+    // Fail-closed BEFORE any KC/DB mutation: KC never touched, owner still active.
+    expect(kc.setEnabledCallCount).toBe(0);
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT deactivated_at FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, ownerId],
+      );
+      await c.query('COMMIT');
+      expect(rows[0].deactivated_at).toBeNull(); // still active — not bricked
+    });
+  });
+
+  it('T-0658 FIX-2: with a SECOND owner present, deactivating one owner is allowed; the remaining last owner is then protected', async () => {
+    const t = await registerOne('twoowners');
+    kc.reset();
+    const ownerId = await ownerEmployeeId(t.tenantId, t.ownerSlug);
+
+    // Create a second human account, capture its slug (= KC userId, the actor
+    // identity dev-mode auth uses).
+    const login2 = `t0658-owner2-${Date.now()}`;
+    const email2 = `t0658-owner2-${Date.now()}@example.com`;
+    const create2 = await postUsers(
+      { tenant_id: t.tenantId, login: login2, email: email2, password: 'password12345', display_name: 'Owner Two' },
+      t.ownerSlug,
+    );
+    expect(create2.status, JSON.stringify(create2.json)).toBe(201);
+    const owner2Id = create2.json.employee_id as string;
+    const owner2Slug = kc.created[kc.created.length - 1].userId; // slug == KC userId
+
+    // Grant owner2 the tenant-owner role directly (confirmed, in-window) — two
+    // active owners now. Reuse the genesis owner's own org_scope so the scope is
+    // schema-valid without inventing one.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+      const { rows: roleRows } = await c.query<{ id: string }>(
+        `SELECT id FROM choros.role WHERE tenant_id=$1 AND slug='tenant-owner' LIMIT 1`,
+        [t.tenantId],
+      );
+      const ownerRoleId = roleRows[0]!.id;
+      const { rows: scopeRows } = await c.query<{ org_scope: unknown }>(
+        `SELECT org_scope FROM choros.role_assignment
+          WHERE tenant_id=$1 AND role_id=$2 AND employee_id=$3 LIMIT 1`,
+        [t.tenantId, ownerRoleId, ownerId],
+      );
+      const ownerScope = scopeRows[0]!.org_scope;
+      await c.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, $3, $4::jsonb,
+                 NULL, NULL, 'seed', 'seed', NULL, 'seed', NULL, 0, 0)`,
+        [t.tenantId, owner2Id, ownerRoleId, JSON.stringify(ownerScope)],
+      );
+      await c.query('COMMIT');
+    });
+
+    // Deactivating the FIRST owner is now allowed (a second active owner exists).
+    const res = await patchUser(ownerId, { active: false }, t.ownerSlug);
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(res.json.active).toBe(false);
+
+    // owner1 is now deactivated → they can no longer authz (loadAdminContext gate).
+    // Deactivating the SECOND (now LAST) owner, called AS owner2 (still active),
+    // is refused with 409 LAST_OWNER — the guard holds for whoever is last.
+    const res2 = await patchUser(owner2Id, { active: false }, owner2Slug);
+    expect(res2.status, JSON.stringify(res2.json)).toBe(409);
+    expect(res2.json.error?.code ?? res2.json.code).toBe('LAST_OWNER');
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0664 — RACE in the last-owner guard. The EARLY guard (before the KC
+  // flip) and the deactivating write ran in SEPARATE READ COMMITTED
+  // transactions with no row lock. Two concurrent PATCH{active:false} on TWO
+  // DIFFERENT owners each passed the early guard (each saw the other still
+  // active), then both wrote → the tenant ended with ZERO active owners
+  // (self-lockout — found in T-0658 round-3 final verification). The fix
+  // re-asserts the invariant inside the write tx under `SELECT ... FOR UPDATE`
+  // on the active-owner rows, so concurrent owner-deactivations SERIALIZE.
+  //
+  // DETERMINISTIC mutation-proof: a BarrierKcPort rendezvous at setUserEnabled
+  // (which sits AFTER the early guard, BEFORE the write) forces both requests
+  // to clear the early guard before EITHER writes — the worst-case
+  // interleaving, every run. Without the FOR UPDATE fix this test is RED (both
+  // 200 → 0 owners); with it, GREEN (one 200, one 409, ≥1 owner always).
+  // ---------------------------------------------------------------------
+
+  /** Grant an EXISTING employee the tenant-owner role (confirmed, in-window). */
+  async function grantTenantOwner(tenantId: string, granteeId: string, seedOwnerId: string): Promise<void> {
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+      const { rows: roleRows } = await c.query<{ id: string }>(
+        `SELECT id FROM choros.role WHERE tenant_id=$1 AND slug='tenant-owner' LIMIT 1`,
+        [tenantId],
+      );
+      const ownerRoleId = roleRows[0]!.id;
+      const { rows: scopeRows } = await c.query<{ org_scope: unknown }>(
+        `SELECT org_scope FROM choros.role_assignment
+          WHERE tenant_id=$1 AND role_id=$2 AND employee_id=$3 LIMIT 1`,
+        [tenantId, ownerRoleId, seedOwnerId],
+      );
+      const ownerScope = scopeRows[0]!.org_scope;
+      await c.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, $3, $4::jsonb,
+                 NULL, NULL, 'seed', 'seed', NULL, 'seed', NULL, 0, 0)`,
+        [tenantId, granteeId, ownerRoleId, JSON.stringify(ownerScope)],
+      );
+      await c.query('COMMIT');
+    });
+  }
+
+  /** Count active (deactivated_at IS NULL) confirmed in-window tenant-owners. */
+  async function countActiveOwners(tenantId: string): Promise<number> {
+    return withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+      const now = Date.now();
+      const { rows } = await c.query<{ n: string }>(
+        `SELECT COUNT(DISTINCT e.id) AS n
+           FROM choros.employee e
+           JOIN choros.role_assignment ra ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+           JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+          WHERE e.tenant_id = $1
+            AND r.slug = 'tenant-owner'
+            AND ra.confirmed_by IS NOT NULL
+            AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
+            AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+            AND e.deactivated_at IS NULL`,
+        [tenantId, now],
+      );
+      await c.query('COMMIT');
+      return Number(rows[0]!.n);
+    });
+  }
+
+  it('T-0664: two concurrent deactivations of two different owners never leave 0 active owners (exactly one succeeds)', async () => {
+    const t = await registerOne('t0664race');
+    kc.reset();
+    const owner1Id = await ownerEmployeeId(t.tenantId, t.ownerSlug);
+    const owner1Slug = t.ownerSlug;
+
+    // Create a SECOND human account and promote it to tenant-owner → two active
+    // owners. postUsers goes through the SHARED server (shared `kc`); its slug
+    // (= KC userId) is the actor identity dev-mode auth uses.
+    const create2 = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `t0664-owner2-${Date.now()}`,
+        email: `t0664-owner2-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Owner Two',
+      },
+      owner1Slug,
+    );
+    expect(create2.status, JSON.stringify(create2.json)).toBe(201);
+    const owner2Id = create2.json.employee_id as string;
+    const owner2Slug = kc.created[kc.created.length - 1].userId;
+    await grantTenantOwner(t.tenantId, owner2Id, owner1Id);
+    expect(await countActiveOwners(t.tenantId)).toBe(2);
+
+    // Stand up a SECOND server whose KC port rendezvous-barriers setUserEnabled,
+    // forcing both concurrent deactivations to clear their early guard before
+    // either writes. Wired exactly like production (server.ts): same migPool,
+    // resolveActorTenant over the same pool. Its own kc-capture is irrelevant to
+    // the DB invariant — the barrier's job is only the deterministic interleave.
+    const barrierInner = new InMemoryKeycloakUserPort();
+    const barrierKc = new BarrierKcPort(barrierInner, 2);
+    const raceRouter = new Router();
+    registerUserMgmtRoutes(raceRouter, migPool, barrierKc, (slug: string) =>
+      resolveActorTenant(migPool, slug),
+    );
+    const raceServer = http.createServer((req, res) => raceRouter.dispatch(req, res));
+    const raceBase = await new Promise<string>((resolve) => {
+      raceServer.listen(0, '127.0.0.1', () => {
+        const a = raceServer.address();
+        resolve(a && typeof a !== 'string' ? `http://127.0.0.1:${a.port}` : '');
+      });
+    });
+
+    const racePatch = (employeeId: string, actor: string) =>
+      fetch(`${raceBase}/api/users/${employeeId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'x-dev-user': actor },
+        body: JSON.stringify({ active: false }),
+      }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) }));
+
+    try {
+      // Fire BOTH deactivations concurrently — each owner deactivates THEMSELF,
+      // the realistic self-lockout scenario. The barrier guarantees both reach
+      // the write only after both cleared the early guard.
+      const [r1, r2] = await Promise.all([
+        racePatch(owner1Id, owner1Slug),
+        racePatch(owner2Id, owner2Slug),
+      ]);
+
+      // INVARIANT: exactly one deactivation succeeded, the other was refused
+      // with 409 LAST_OWNER — never both 200 (which would be 0 owners).
+      const statuses = [r1.status, r2.status].sort((a, b) => a - b);
+      expect(statuses, `expected one 200 + one 409, got ${JSON.stringify([r1, r2])}`).toEqual([200, 409]);
+      const refused = r1.status === 409 ? r1 : r2;
+      expect(refused.json.error?.code ?? refused.json.code).toBe('LAST_OWNER');
+
+      // The load-bearing invariant: the tenant STILL has ≥1 active owner (here
+      // exactly 1 — the loser stays active). Without the fix this is 0.
+      expect(await countActiveOwners(t.tenantId)).toBe(1);
+
+      // COMPENSATION proof: the refused branch re-enabled the last owner's KC
+      // login (setUserEnabled(...,true)) so the refused deactivation leaves no
+      // KC-disabled last owner. All setUserEnabled calls are captured by the
+      // barrier's inner port regardless of whether the user was "created" there.
+      expect(
+        barrierInner.setEnabledCalls.some((c) => c.enabled === true),
+        `expected a compensating KC re-enable; saw ${JSON.stringify(barrierInner.setEnabledCalls)}`,
+      ).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => raceServer.close(() => resolve()));
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // FF-583-5: tenant isolation.
+  // ---------------------------------------------------------------------
+  it('FF-583-5: cross-tenant create/patch/list are all blocked', async () => {
+    const a = await registerOne('isoA');
+    const b = await registerOne('isoB');
+    kc.reset();
+
+    // A's owner tries to create INTO tenant B -> 403.
+    const crossCreate = await postUsers(
+      { tenant_id: b.tenantId, login: 'cross-login', email: 'cross@example.com', password: 'password12345', display_name: 'Cross' },
+      a.ownerSlug,
+    );
+    expect(crossCreate.status).toBe(403);
+
+    // B creates their own account.
+    const bCreate = await postUsers(
+      { tenant_id: b.tenantId, login: `bacct-login-${Date.now()}`, email: `bacct-${Date.now()}@example.com`, password: 'password12345', display_name: 'B Account' },
+      b.ownerSlug,
+    );
+    expect(bCreate.status).toBe(201);
+    const bEmployeeId = bCreate.json.employee_id as string;
+
+    // A's owner tries to PATCH B's employee -> 404 (resolved under A's own tenant RLS).
+    const crossPatch = await patchUser(bEmployeeId, { active: false }, a.ownerSlug);
+    expect(crossPatch.status).toBe(404);
+
+    // A's account list never contains B's account.
+    const aList = await getAccounts(a.ownerSlug);
+    expect(aList.status).toBe(200);
+    expect(aList.json.accounts.some((acct: any) => acct.employee_id === bEmployeeId)).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------
+  // FF-583-6: non-privileged member -> 403 ADMIN_GATE_REJECTED (not 500/silent success).
+  // ---------------------------------------------------------------------
+  it('FF-583-6: a plain (non-owner, non-granted) tenant member gets 403 on create and patch', async () => {
+    const t = await registerOne('nonpriv');
+    kc.reset();
+
+    // Seed a plain human employee with NO mgmt_object:employee grant/role.
+    const plainSlug = `plain-${Date.now()}`;
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      await c.query(
+        `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), NULL, 'human', $2, 'Plain Member', $3, $3)`,
+        [t.tenantId, plainSlug, Date.now()],
+      );
+      await c.query('COMMIT');
+    });
+
+    const createRes = await postUsers(
+      { tenant_id: t.tenantId, login: 'blocked-login', email: 'blocked@example.com', password: 'password12345', display_name: 'Blocked' },
+      plainSlug,
+    );
+    expect(createRes.status).toBe(403);
+    expect(createRes.json?.error?.code ?? createRes.json?.code).toBe('NOT_OWNER');
+
+    // Owner creates a target account, then the plain member tries to patch it.
+    const ownerCreate = await postUsers(
+      { tenant_id: t.tenantId, login: `target-login-${Date.now()}`, email: `target-${Date.now()}@example.com`, password: 'password12345', display_name: 'Target' },
+      t.ownerSlug,
+    );
+    expect(ownerCreate.status).toBe(201);
+    const patchRes = await patchUser(ownerCreate.json.employee_id, { active: false }, plainSlug);
+    expect(patchRes.status).toBe(403);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0630 [SECURITY]: GET /api/users/accounts previously carried NO
+  // authority gate (only auth) — any authenticated tenant member, owner or
+  // not, got 200 with the full account list (login/name/position/department/
+  // active for every human in the tenant). Adversarial finding on T-0628.
+  // MUTATION-PROVEN RED: before the fix, `plainRes.status` below was 200 —
+  // this test fails on pre-fix code and passes after (owner or a covering,
+  // delegable mgmt_object:employee grant now required, same gate PATCH uses).
+  // ---------------------------------------------------------------------
+  it('T-0630 [SECURITY]: a plain (non-owner, non-granted) tenant member gets 403 NOT_OWNER on GET /api/users/accounts — no list leak', async () => {
+    const t = await registerOne('read-gate-plain');
+    kc.reset();
+
+    // Owner creates at least one account so there IS something to leak if the
+    // gate were absent.
+    const ownerCreate = await postUsers(
+      { tenant_id: t.tenantId, login: `readgate-target-${Date.now()}`, email: `readgate-target-${Date.now()}@example.com`, password: 'password12345', display_name: 'Read Gate Target' },
+      t.ownerSlug,
+    );
+    expect(ownerCreate.status, JSON.stringify(ownerCreate.json)).toBe(201);
+
+    // Seed a plain human employee with NO mgmt_object:employee grant/role,
+    // no role_assignment at all — the exact adversarial shape from T-0628.
+    const plainSlug = `plain-read-${Date.now()}`;
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      await c.query(
+        `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), NULL, 'human', $2, 'Plain Reader Attempt', $3, $3)`,
+        [t.tenantId, plainSlug, Date.now()],
+      );
+      await c.query('COMMIT');
+    });
+
+    const plainRes = await getAccounts(plainSlug);
+    expect(plainRes.status, JSON.stringify(plainRes.json)).toBe(403);
+    expect(plainRes.json?.error?.code ?? plainRes.json?.code).toBe('NOT_OWNER');
+    // The list body must never leak alongside a 403 — no `accounts` key present.
+    expect(plainRes.json?.accounts).toBeUndefined();
+
+    // Sanity: the SAME tenant's owner still sees the list (no over-correction).
+    const ownerRes = await getAccounts(t.ownerSlug);
+    expect(ownerRes.status, JSON.stringify(ownerRes.json)).toBe(200);
+    expect(Array.isArray(ownerRes.json.accounts)).toBe(true);
+    expect(ownerRes.json.accounts.length).toBeGreaterThanOrEqual(2); // owner + the created target
+  });
+
+  it('T-0630 [SECURITY]: a non-owner holder of a delegable mgmt_object:employee grant gets 200 on GET /api/users/accounts (read-parity with write)', async () => {
+    const t = await registerOne('read-gate-granted');
+    kc.reset();
+
+    const ownerCreate = await postUsers(
+      { tenant_id: t.tenantId, login: `readgate-grantee-target-${Date.now()}`, email: `readgate-grantee-target-${Date.now()}@example.com`, password: 'password12345', display_name: 'Grantee Target' },
+      t.ownerSlug,
+    );
+    expect(ownerCreate.status, JSON.stringify(ownerCreate.json)).toBe(201);
+
+    // Seed a human employee, then grant them a role carrying a confirmed,
+    // in-window, delegable mgmt_object:employee grant — the SAME shape
+    // assertOrgObjectAuthority's covering-grant branch requires (mirrors the
+    // role-constructor-admin seeding pattern documented in seed-write.ts).
+    const granteeSlug = `grantee-${Date.now()}`;
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      await c.query('SET LOCAL search_path TO choros');
+
+      const { rows: employeeRows } = await c.query<{ id: string }>(
+        `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), NULL, 'human', $2, 'Employee Grantee', $3, $3)
+         RETURNING id`,
+        [t.tenantId, granteeSlug, Date.now()],
+      );
+      const granteeId = employeeRows[0]!.id;
+
+      const { rows: ownerRoleRows } = await c.query<{ org_scope: unknown }>(
+        `SELECT ra.org_scope
+           FROM choros.role_assignment ra
+           JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+          WHERE ra.tenant_id = $1 AND r.slug = 'tenant-owner' LIMIT 1`,
+        [t.tenantId],
+      );
+      const scope = ownerRoleRows[0]!.org_scope;
+
+      const { rows: roleRows } = await c.query<{ id: string }>(
+        `INSERT INTO choros.role (tenant_id, id, slug, display_name, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, 'Employee Reader Role', $3, $3)
+         RETURNING id`,
+        [t.tenantId, `employee-reader-${Date.now()}`, Date.now()],
+      );
+      const roleId = roleRows[0]!.id;
+
+      // T-0768: 'read' with no clearance marker is non-critical (criticalGrantPredicate)
+      // but loadAdminContext step 3 now requires confirmed_by IS NOT NULL (T-0397
+      // grant-row activation, matching getGrantsForSubject) — set it explicitly.
+      await c.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, operation, scope, delegable,
+            granted_by, created_at, confirmed_by)
+         VALUES ($1, gen_random_uuid(), $2, 'mgmt_object:employee', 'read', $3::jsonb, true, $4, $5, $4)`,
+        [t.tenantId, roleId, JSON.stringify(scope), t.ownerSlug, Date.now()],
+      );
+
+      await c.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, $3, $4::jsonb,
+                 NULL, NULL, 'seed', 'seed', NULL, 'seed', NULL, 0, 0)`,
+        [t.tenantId, granteeId, roleId, JSON.stringify(scope)],
+      );
+      await c.query('COMMIT');
+    });
+
+    const res = await getAccounts(granteeSlug);
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(Array.isArray(res.json.accounts)).toBe(true);
+    expect(res.json.accounts.some((a: any) => a.employee_id === ownerCreate.json.employee_id)).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------
+  // AC-11/AC-12 (tester-added, T-0583 TEST phase): the plaintext password
+  // must never surface in ANY HTTP response body — success AND error paths
+  // (create-409, create-503, create-201, list, patch) — and never in the
+  // audit_event payload row written for create/deactivate/reactivate. The
+  // static half of this (FF-583-7, ci/checks/user-mgmt-no-secret-leak.sh)
+  // only inspects source code; this is the DYNAMIC probe its own header
+  // comment claims exists but that, before this addition, only asserted the
+  // password absence on the single 201-create response (see FF-583-1 above)
+  // — never on 409/503/patch/list bodies nor the actual audit_event row.
+  // ---------------------------------------------------------------------
+  it('AC-11/AC-12: plaintext password never appears in any response body or in the audit_event payload', async () => {
+    const t = await registerOne('pwleak');
+    kc.reset();
+    const SECRET = `t0583-super-secret-pw-${Date.now()}`;
+    const login = `t0583-pwleak-${Date.now()}`;
+    const email = `t0583-pwleak-${Date.now()}@example.com`;
+
+    // 1) 409 EMAIL_TAKEN path — body must not echo the password.
+    kc.failOnCreate = true;
+    const conflictRes = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: SECRET, display_name: 'PwLeak Conflict' },
+      t.ownerSlug,
+    );
+    expect(conflictRes.status).toBe(409);
+    expect(JSON.stringify(conflictRes.json)).not.toContain(SECRET);
+
+    // 2) 503 AUTH_UNAVAILABLE path — body must not echo the password.
+    kc.failOnCreate = false;
+    kc.failOnAuth = true;
+    const unavailRes = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: SECRET, display_name: 'PwLeak Unavail' },
+      t.ownerSlug,
+    );
+    expect(unavailRes.status).toBe(503);
+    expect(JSON.stringify(unavailRes.json)).not.toContain(SECRET);
+
+    // 3) 201 create path — body must not echo the password (redundant with
+    // FF-583-1 but re-asserted here alongside the other paths for one
+    // single-purpose AC-11/AC-12 test).
+    kc.failOnAuth = false;
+    const createRes = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: SECRET, display_name: 'PwLeak Create' },
+      t.ownerSlug,
+    );
+    expect(createRes.status, JSON.stringify(createRes.json)).toBe(201);
+    expect(JSON.stringify(createRes.json)).not.toContain(SECRET);
+    const employeeId = createRes.json.employee_id as string;
+
+    // 4) GET /accounts — list body must not echo the password.
+    const listRes = await getAccounts(t.ownerSlug);
+    expect(listRes.status).toBe(200);
+    expect(JSON.stringify(listRes.json)).not.toContain(SECRET);
+
+    // 5) PATCH deactivate/reactivate — body must not echo the password
+    // (the PATCH body itself never carries a password, but assert the
+    // RESPONSE never does either, matching the AC-11 "every response" scope).
+    const off = await patchUser(employeeId, { active: false }, t.ownerSlug);
+    expect(off.status).toBe(200);
+    expect(JSON.stringify(off.json)).not.toContain(SECRET);
+    const on = await patchUser(employeeId, { active: true }, t.ownerSlug);
+    expect(on.status).toBe(200);
+    expect(JSON.stringify(on.json)).not.toContain(SECRET);
+
+    // 6) AC-12: audit_event payload rows for this tenant's user_account.*
+    // events never carry the plaintext password (dynamic DB-level probe —
+    // the static script can only see the source, not what was ACTUALLY
+    // written at runtime).
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query<{ payload: unknown }>(
+        `SELECT payload FROM choros.audit_event
+          WHERE tenant_id = $1
+            AND type IN ('user_account.create', 'user_account.deactivate', 'user_account.reactivate')`,
+        [t.tenantId],
+      );
+      expect(rows.length, 'expected at least the create+deactivate+reactivate audit rows').toBeGreaterThanOrEqual(3);
+      for (const row of rows) {
+        expect(JSON.stringify(row.payload)).not.toContain(SECRET);
+      }
+      await c.query('COMMIT');
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0633 [SECURITY]: anti-collision on mint — a login that collides with an
+  // existing HUMAN employee slug (in ANY tenant) is rejected 409 LOGIN_RESERVED
+  // BEFORE any Keycloak call. This is the load-bearing block for the vertical
+  // privilege-escalation vector: without it, a holder of
+  // mgmt_object:employee:create (NOT the owner) could mint a KC user named
+  // 'e-owner' (genesis forest-owner, 16 delegable mgmt-grants + tenant-owner,
+  // migrations/026 — a kind='human' employee with NO KC user at install, so KC
+  // does not 409), log in, miss sub-first identity resolution, and be resolved
+  // to the forest-owner via the cross-tenant preferred_username → employee.slug
+  // fallback (src/db/org.ts resolveActorSlugFromAuth). The seed personas below
+  // ('e-owner', 'e-configurator') live in the always-migrated genesis tenant
+  // a0000000-…-001; 'e-orlov' is a seeded persona too. The check is cross-tenant
+  // (matches the fallback it protects), so it fires even though the actor mints
+  // into their OWN tenant.
+  // ---------------------------------------------------------------------
+  it('FF-633-1 [SECURITY]: POST /api/users with login=e-owner (genesis forest-owner slug) → 409 LOGIN_RESERVED, KC never called, no employee row', async () => {
+    const t = await registerOne('escalate-owner');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'e-owner', // collides with the genesis forest-owner slug
+        email: `escalate-owner-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Escalation Attempt',
+      },
+      t.ownerSlug,
+    );
+
+    // Rejected BEFORE any side-effect — the escalation vector is closed.
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    // KC user was NEVER created (guard runs before createHumanUser) — no orphan.
+    expect(kc.createCallCount, 'KC must not be called when the login collides').toBe(0);
+
+    // No employee row named 'e-owner' was created in the actor's own tenant.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query(
+        `SELECT 1 FROM choros.employee WHERE tenant_id=$1 AND (slug='e-owner' OR login='e-owner')`,
+        [t.tenantId],
+      );
+      expect(rows).toHaveLength(0);
+      await c.query('COMMIT');
+    });
+  });
+
+  it('FF-633-2 [SECURITY]: POST /api/users with login=e-configurator (role-configurator authoring persona) → 409 LOGIN_RESERVED, KC never called', async () => {
+    const t = await registerOne('escalate-config');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'e-configurator', // seeded human persona slug (migrations/088)
+        email: `escalate-config-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Escalation Attempt 2',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it('FF-633-3 [SECURITY]: POST /api/users with login=e-orlov (any existing human employee slug) → 409 LOGIN_RESERVED, KC never called', async () => {
+    const t = await registerOne('escalate-orlov');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'e-orlov', // an existing seeded human employee slug
+        email: `escalate-orlov-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Escalation Attempt 3',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it('FF-633-4 [SECURITY]: a freshly-created account\'s login is itself reserved — a SECOND POST with the same login → 409 LOGIN_RESERVED', async () => {
+    const t = await registerOne('escalate-dup');
+    kc.reset();
+    const login = `dup-login-${Date.now()}`;
+    const email1 = `dup1-${Date.now()}@example.com`;
+
+    // First create succeeds (non-colliding login).
+    const first = await postUsers(
+      { tenant_id: t.tenantId, login, email: email1, password: 'password12345', display_name: 'First' },
+      t.ownerSlug,
+    );
+    expect(first.status, JSON.stringify(first.json)).toBe(201);
+    expect(kc.createCallCount).toBe(1);
+
+    // Note: the created employee's slug is the KC userId (a UUID), but its
+    // `login` column holds the human-readable login. Anti-collision keys on the
+    // employee *slug*, so a same-login retry is NOT blocked by THIS guard — the
+    // KC layer's own username uniqueness (EMAIL_TAKEN/username-exists) is the
+    // relevant guard for a duplicate real login. To prove the SLUG collision is
+    // what's reserved, we retry with the just-minted account's SLUG as a login.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query<{ slug: string }>(
+        `SELECT slug FROM choros.employee WHERE tenant_id=$1 AND login=$2`,
+        [t.tenantId, login],
+      );
+      expect(rows).toHaveLength(1);
+      const mintedSlug = rows[0].slug; // = KC userId (a UUID)
+      await c.query('COMMIT');
+
+      kc.reset();
+      const second = await postUsers(
+        {
+          tenant_id: t.tenantId,
+          login: mintedSlug, // colliding with an existing employee slug
+          email: `dup2-${Date.now()}@example.com`,
+          password: 'password12345',
+          display_name: 'Second',
+        },
+        t.ownerSlug,
+      );
+      expect(second.status, JSON.stringify(second.json)).toBe(409);
+      expect(second.json?.error?.code ?? second.json?.code).toBe('LOGIN_RESERVED');
+      expect(kc.createCallCount).toBe(0);
+    });
+  });
+
+  it('FF-633-5 (regression): a NON-colliding, seed-slug-adjacent login (e.g. "e-owner-external") still mints → 201; the guard is exact-match, not a prefix ban', async () => {
+    const t = await registerOne('nearmiss');
+    kc.reset();
+    // Deliberately NEAR a seed slug but not equal — must NOT be false-positived.
+    const login = `e-owner-external-${Date.now()}`;
+    const email = `nearmiss-${Date.now()}@example.com`;
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login, email, password: 'password12345', display_name: 'Ordinary External' },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    expect(res.json.login).toBe(login);
+    expect(kc.createCallCount).toBe(1);
+    expect(kc.created[0].spec.username).toBe(login);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0633 ROUND-3 [SECURITY] — case-collision bypass of the anti-collision
+  // guard. RE-VERIFY finding (live against KC 25.0.6): Keycloak LOWERCASES the
+  // username at creation, but the pre-round-3 guard compared byte-exact, so a
+  // MIXED-CASE login ('E-Configurator') MISSED the guard's SQL (no
+  // employee.slug == 'E-Configurator') → guard PASSED → KC stored
+  // 'e-configurator' → token preferred_username='e-configurator' → resolved to
+  // the SEED persona 'e-configurator' (role-configurator authoring) via the
+  // cross-tenant fallback. A vertical privilege escalation for ANY seed
+  // kind='human' slug lacking a KC user at install. The round-3 fix lowercases
+  // `login` BEFORE the guard and before the KC username so both sides see the
+  // one form KC stores. These tests are the load-bearing RE-VERIFY: each MUST
+  // fail on pre-round-3 code (mixed-case would 201) and pass after.
+  // ---------------------------------------------------------------------
+  it("FF-633-6 [SECURITY]: POST /api/users with login='E-Owner' (mixed-case of a seed slug) → 409 LOGIN_RESERVED, KC never called — case-collision bypass closed", async () => {
+    const t = await registerOne('escalate-owner-case');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'E-Owner', // KC would fold to 'e-owner' → the genesis forest-owner slug
+        email: `escalate-owner-case-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Case Escalation Attempt',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount, 'KC must not be called when the folded login collides').toBe(0);
+  });
+
+  it("FF-633-7 [SECURITY]: POST /api/users with login='E-Configurator' (mixed-case seed persona) → 409 LOGIN_RESERVED, KC never called", async () => {
+    const t = await registerOne('escalate-config-case');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'E-Configurator', // KC folds to 'e-configurator' (migrations/088 authoring persona)
+        email: `escalate-config-case-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Case Escalation Attempt 2',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it("FF-633-8 [SECURITY]: POST /api/users with login='eL-orLoV' (arbitrary casing of a seed slug) → 409 LOGIN_RESERVED", async () => {
+    const t = await registerOne('escalate-orlov-case');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'eL-orLoV', // folds to 'el-orlov'? no — case-only variant of 'e-orlov'
+        email: `escalate-orlov-case-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Case Escalation Attempt 3',
+      },
+      t.ownerSlug,
+    );
+
+    // 'eL-orLoV'.toLowerCase() === 'el-orlov' which is NOT a seed slug — this is
+    // a genuine near-miss, so it must MINT (201). Kept as a discriminating
+    // control: the fix folds case, it does NOT collapse distinct strings.
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    // The stored login/username is the FOLDED form (matches what KC stores).
+    expect(res.json.login).toBe('el-orlov');
+    expect(kc.createCallCount).toBe(1);
+    expect(kc.created[0].spec.username).toBe('el-orlov');
+  });
+
+  it("FF-633-9 [SECURITY]: exact mixed-case of a seed slug 'E-Orlov' → 409 LOGIN_RESERVED", async () => {
+    const t = await registerOne('escalate-orlov-exactcase');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: 'E-Orlov', // folds to 'e-orlov' — a seeded human employee slug
+        email: `escalate-orlov-exactcase-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Case Escalation Attempt 4',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_RESERVED');
+    expect(kc.createCallCount).toBe(0);
+  });
+
+  it('FF-633-10 (policy): a legit NON-colliding MIXED-CASE login normalizes to lowercase on both the KC username and the stored/returned login (KC-honest, no divergence)', async () => {
+    const t = await registerOne('mixedcase-legit');
+    kc.reset();
+    const suffix = `${Date.now()}`;
+    const mixed = `Ivan.Petrov-${suffix}`;
+    const expectedFolded = mixed.toLowerCase();
+    const email = `ivan-${suffix}@example.com`;
+
+    const res = await postUsers(
+      { tenant_id: t.tenantId, login: mixed, email, password: 'password12345', display_name: 'Иван Петров' },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    // Policy DECISION (T-0633 round-3): a mixed-case login is NOT rejected — it
+    // is FOLDED to lowercase (the one form KC stores), so guard/token/storage
+    // never diverge. Response, stored column, and KC username are all the
+    // folded form.
+    expect(res.json.login).toBe(expectedFolded);
+    expect(kc.createCallCount).toBe(1);
+    expect(kc.created[0].spec.username).toBe(expectedFolded);
+    expect(kc.created[0].spec.email).toBe(email);
+
+    // The employee.login column persists the folded form (so a later login,
+    // which KC also folds, resolves to the same row).
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${t.tenantId}'`);
+      const { rows } = await c.query<{ login: string }>(
+        `SELECT login FROM choros.employee WHERE tenant_id=$1 AND id=$2`,
+        [t.tenantId, res.json.employee_id as string],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].login).toBe(expectedFolded);
+      await c.query('COMMIT');
+    });
+  });
+
+  it('FF-633-11 (minor): a KC USERNAME conflict → 409 LOGIN_TAKEN with a "login is taken" message (not the misleading "email already exists")', async () => {
+    const t = await registerOne('login-taken');
+    kc.reset();
+    kc.failOnLoginTaken = true; // next createHumanUser throws LOGIN_TAKEN (KC username clash)
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `login-clash-${Date.now()}`, // non-colliding with any SEED slug → passes anti-collision guard
+        email: `login-taken-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Login Clash',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('LOGIN_TAKEN');
+    // The message must point at the LOGIN, not the email.
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '').toLowerCase();
+    expect(msg).toContain('login');
+    expect(msg).not.toContain('email');
+    // KC was reached (guard passed for a non-seed login) then reported the clash.
+    expect(kc.createCallCount).toBe(1);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0630 (minor): EMAIL_TAKEN's 409 text softened. admin-port.ts's own
+  // comment admits EMAIL_TAKEN is the DEFAULT mapping "when the body is
+  // absent/unparseable/ambiguous" — a login clash can surface under this
+  // same code, so the message must not claim specifically "email already
+  // exists" (misdirects the owner into fixing the wrong field).
+  // ---------------------------------------------------------------------
+  it('T-0630 (minor): EMAIL_TAKEN → 409 with a softened "login or email" text, not a misleading "email already exists" claim', async () => {
+    const t = await registerOne('email-taken-text');
+    kc.reset();
+    kc.failOnCreate = true; // next createHumanUser throws EMAIL_TAKEN
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `email-taken-text-${Date.now()}`,
+        email: `email-taken-text-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Email Taken Text',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(409);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('EMAIL_TAKEN');
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+    // Must mention BOTH possible fields (honest about the ambiguity), not
+    // assert specifically that email is the one that collided.
+    expect(msg).toContain('логин');
+    expect(msg).toContain('email');
+    expect(msg).not.toBe('an account with that email already exists');
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0748 (NF-1 from T-0741's own review): T-0741 started sending KC
+  // firstName/lastName derived from display_name. A display_name with
+  // characters Keycloak's person-name validator forbids (e.g. "Bot #1",
+  // "A&B") triggers a KC 400 that — before this fix — was folded into the
+  // SAME code as a genuinely bad email (EMAIL_INVALID), so the owner was
+  // told "email must be a valid email address" while the email was fine and
+  // the display name was the real problem. RED→GREEN: honest attribution.
+  // ---------------------------------------------------------------------
+  it('T-0748: KC person-name-invalid-character (display_name="Bot #1") → 400 NAME_INVALID_CHARACTERS with an honest Russian message, NOT the misleading email message', async () => {
+    const t = await registerOne('name-invalid-chars');
+    kc.reset();
+    kc.failOnNameInvalid = true; // next createHumanUser throws NAME_INVALID_CHARACTERS (KC person-name validator)
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-invalid-${Date.now()}`,
+        email: `name-invalid-${Date.now()}@example.com`, // a perfectly valid email — NOT the problem
+        password: 'password12345',
+        display_name: 'Bot #1', // the actual anti-case from T-0748
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('NAME_INVALID_CHARACTERS');
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+    // Honest Russian attribution — points at the name, not the email.
+    expect(msg).toContain('имя');
+    expect(msg).toContain('символ');
+    expect(msg).not.toContain('email must be a valid email address');
+    // KC was reached (email/display_name both passed our own pre-KC checks) then reported the name problem.
+    expect(kc.createCallCount).toBe(1);
+    // No orphan employee row — KC create never truly succeeded.
+    const accounts = await getAccounts(t.ownerSlug);
+    expect(accounts.json?.accounts?.some((a: { display_name: string }) => a.display_name === 'Bot #1')).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0748 regression guard: a display_name with an ordinary space (a real
+  // two-word name, "И. Петров"-shaped per T-0741) must still create
+  // successfully — this fix does not touch the happy path.
+  // ---------------------------------------------------------------------
+  it('T-0748 regression: an ordinary display_name (no special characters) still creates 201, unaffected by the new NAME_INVALID_CHARACTERS branch', async () => {
+    const t = await registerOne('name-ordinary');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-ordinary-${Date.now()}`,
+        email: `name-ordinary-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Иван Петров',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    expect(kc.created[kc.created.length - 1]?.spec.displayName).toBe('Иван Петров');
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0748 regression guard: the EMAIL_INVALID mapping (T-0625 defense-in-
+  // depth — KC itself rejects the email) must remain completely unaffected
+  // by the new NAME_INVALID_CHARACTERS branch added just above it.
+  // ---------------------------------------------------------------------
+  it('T-0748 regression: KC-side EMAIL_INVALID (defense-in-depth) still maps to 400 VALIDATION with the email message, unchanged', async () => {
+    const t = await registerOne('email-invalid-kc-side');
+    kc.reset();
+    // Force the PORT layer to report EMAIL_INVALID directly (models a KC
+    // 400 that IS a genuine email problem — the client-side EMAIL_RE check
+    // in user-mgmt.ts's own validateCreateBody cannot be bypassed via the
+    // public request shape, so this exercises the port-level catch branch
+    // the same way a KC-side validation drift would).
+    const spy = kc.createHumanUser.bind(kc);
+    kc.createHumanUser = async (spec) => {
+      void spec;
+      const err = new Error('EMAIL_INVALID');
+      (err as NodeJS.ErrnoException).code = 'EMAIL_INVALID';
+      throw err;
+    };
+    try {
+      const res = await postUsers(
+        {
+          tenant_id: t.tenantId,
+          login: `email-invalid-kc-${Date.now()}`,
+          email: `email-invalid-kc-${Date.now()}@example.com`,
+          password: 'password12345',
+          display_name: 'Regular Name',
+        },
+        t.ownerSlug,
+      );
+      expect(res.status, JSON.stringify(res.json)).toBe(400);
+      expect(res.json?.error?.code ?? res.json?.code).toBe('VALIDATION');
+      const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+      expect(msg).toContain('email must be a valid email address');
+    } finally {
+      kc.createHumanUser = spy;
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0762 (R-2 follow-up from T-0748's own review): T-0748 fixed the
+  // CHARACTER-validator misattribution but explicitly scoped out the
+  // sibling LENGTH-validator class (spec.md §7). A display_name near the
+  // client's DISPLAY_NAME_MAX with no space (single token) still trips
+  // Keycloak's independent 255-char-per-field cap — before this fix, that
+  // 400 fell to the SAME misleading EMAIL_INVALID default T-0748 already
+  // fixed for the character class. RED→GREEN: honest attribution for the
+  // length class too.
+  // ---------------------------------------------------------------------
+  it('T-0762: KC person-name length-too-long (single-token display_name near the 255-char cap) → 400 NAME_TOO_LONG with an honest Russian message, NOT the misleading email message', async () => {
+    const t = await registerOne('name-too-long');
+    kc.reset();
+    kc.failOnNameTooLong = true; // next createHumanUser throws NAME_TOO_LONG (KC length validator)
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-too-long-${Date.now()}`,
+        email: `name-too-long-${Date.now()}@example.com`, // a perfectly valid email — NOT the problem
+        password: 'password12345',
+        display_name: 'A'.repeat(256), // single token, near DISPLAY_NAME_MAX — the actual anti-case from T-0762
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('NAME_TOO_LONG');
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+    // Honest Russian attribution — points at the name/length, not the email.
+    expect(msg).toContain('имя');
+    expect(msg).toContain('длин');
+    expect(msg).not.toContain('email must be a valid email address');
+    // KC was reached (email/display_name both passed our own pre-KC checks) then reported the length problem.
+    expect(kc.createCallCount).toBe(1);
+    // No orphan employee row — KC create never truly succeeded.
+    const accounts = await getAccounts(t.ownerSlug);
+    expect(accounts.json?.accounts?.some((a: { display_name: string }) => a.display_name === 'A'.repeat(256))).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0762 regression guard: T-0748's own NAME_INVALID_CHARACTERS class
+  // (character validator) must remain completely unaffected by the new
+  // NAME_TOO_LONG branch added alongside it — the two checks must not
+  // cross-fire.
+  // ---------------------------------------------------------------------
+  it('T-0762 regression: T-0748\'s NAME_INVALID_CHARACTERS (character validator) is unaffected by the new NAME_TOO_LONG branch', async () => {
+    const t = await registerOne('name-invalid-not-long');
+    kc.reset();
+    kc.failOnNameInvalid = true; // next createHumanUser throws NAME_INVALID_CHARACTERS (unchanged T-0748 path)
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-invalid-not-long-${Date.now()}`,
+        email: `name-invalid-not-long-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Bot #1',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    expect(res.json?.error?.code ?? res.json?.code).toBe('NAME_INVALID_CHARACTERS');
+    const msg = String(res.json?.error?.message ?? res.json?.message ?? '');
+    expect(msg).toContain('символ');
+    expect(msg).not.toContain('длин');
+  });
+
+  // ---------------------------------------------------------------------
+  // T-0762 regression guard: an ordinary display_name (well under the
+  // length cap) still creates 201, unaffected by the new NAME_TOO_LONG
+  // branch.
+  // ---------------------------------------------------------------------
+  it('T-0762 regression: an ordinary display_name (well under the length cap) still creates 201, unaffected by the new NAME_TOO_LONG branch', async () => {
+    const t = await registerOne('name-ordinary-length');
+    kc.reset();
+
+    const res = await postUsers(
+      {
+        tenant_id: t.tenantId,
+        login: `name-ordinary-length-${Date.now()}`,
+        email: `name-ordinary-length-${Date.now()}@example.com`,
+        password: 'password12345',
+        display_name: 'Иван Петров',
+      },
+      t.ownerSlug,
+    );
+
+    expect(res.status, JSON.stringify(res.json)).toBe(201);
+    expect(kc.created[kc.created.length - 1]?.spec.displayName).toBe('Иван Петров');
+  });
+});

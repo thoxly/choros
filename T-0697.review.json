@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0697",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "phase": "REVIEW+UX_REVIEW (combined, small UI text task)",
+  "gates_run": {
+    "tsc_noEmit_root": 0,
+    "vitest_ra_intents": "21/21 pass",
+    "rights_ui_no_new_write": "PASS",
+    "rights_ui_anti_case": "PASS",
+    "rights_ui_frozen_write": "PASS",
+    "frozen_checks_thaw_precheck": "clean (no ci/checks/ touched)",
+    "web_ajv_2_files_fail": "pre-existing, unrelated (ajv absent in web/node_modules; apps-schema.test.js + records-form.test.js import ajv; neither touched by diff)"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/screens/rights/ra-intents.jsx:422",
+      "issue": "«подмножеством ваших прав» и «отклоняется сервером» — слегка технично («подмножество» — матем. термин, «сервером» подтекает деталь реализации). Приемлемо: читаемо, сохранено 1:1 из старого текста и консистентно с SubstituteForm.",
+      "suggestion": "Опциональная P3-полировка в беклог: «не больше ваших прав; расширение система отклонит». Если полировать — сразу в ОБЕИХ формах (SubstituteForm стр.329), иначе разъедется консистентность, которую эта задача как раз чинит."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/rights/ra-intents.jsx:423 (vs src/http/rights-intents.ts:1285-1293)",
+      "issue": "Глосса «(есть другие активные держатели)» упрощает: серверный pool-запрос исключает и отсутствующего, и самого замещающего (employee_id <> absent AND <> substitute). Т.е. «пул» = третий держатель помимо вас и замещающего.",
+      "suggestion": "Честное упрощение для подсказки, совпадает со старым текстом и SubstituteForm — не блокирует. Оставить."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/rights/ra-intents.jsx:436",
+      "issue": "ResultBanner в SelfAbsenceForm не потребляет серверный tier для пост-сабмит фидбека (в отличие от SubstituteForm стр.342). Пост-сабмит сообщение при этом честно отражает факт выдачи гранта через ttl_grant_id (стр.380) — жаргона нет.",
+      "suggestion": "Пре-существующий пробел, вне охвата этой задачи, уже задокументирован in-code (dev-комментарий стр.409-420) как отдельный follow-up. Кандидат в беклог, НЕ блокирует."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1: Tier-N жаргон убран из видимой подсказки SelfAbsenceForm", "covered": true },
+    { "ac": "AC-2: терминология 1:1 с SubstituteForm (пул / грант не выпускается / расширение отклоняется сервером)", "covered": true },
+    { "ac": "AC-3: Tier остаётся только в dev-комментариях (видимый текст чист, verified strip+regex)", "covered": true },
+    { "ac": "AC-4: +3 теста, честно ловят регресс жаргона (мутация Tier-1 в видимый текст → тест падает)", "covered": true },
+    { "ac": "AC-5: смысловая верность серверной логике tier (registerSelfAbsence): tier1=пул→нет гранта, tier2=единственный→subset-грант, widening отклоняется", "covered": true },
+    { "ac": "AC-6: гейты зелёные — tsc 0, vitest ra-intents 21/21, rights-ui гейты PASS", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0599",
+  "status": "ready",
+  "summary": "Проактивный баннер «LLM-ключ не подключён» на экране ассистента, ДО отправки сообщения (сейчас статус узнаётся только после честного 503 T-0573/T-0595). Разведка нашла баг честности в существующем GET /api/agents (src/http/agents-list.ts): поле llm_bound вычисляется из УСТАРЕВШЕГО agent_card.llm_secret_handle, а не из реально резолвимого состояния через llm_connection_id (T-0498, актуальный путь привязки ключа через /llm-connections). Реальный рантайм-резолвер (src/db/agent-provision.ts::readConfiguredAgentLlmConfig) считает конфиг полным через COALESCE(lc.secret_handle, ac.llm_secret_handle) IS NOT NULL. Решение: чинить agents-list.ts (LEFT JOIN llm_connection, тот же COALESCE-предикат) — НЕ строить новый эндпойнт. Клиент (screen-assistant.jsx) вызывает существующий GET /api/agents (no admin-gate) при монтировании, находит assistant-agent по slug, показывает баннер если llm_bound:false (после loading, без мигания). Admin-статус для deep-link кнопки берётся из уже резолвленного клиентского кэша getNavCapabilities() (active-tenant.js, заполняется shell.jsx auth-bootstrap до рендера экранов) — без нового запроса, тот же предикат, что гейтит видимость admin nav-зоны.",
+  "functional": [
+    "F1. GET /api/agents (agents-list.ts) чинится: listAgentsTx LEFT JOIN choros.llm_connection на ac.llm_connection_id; llm_bound = COALESCE(lc.secret_handle, ac.llm_secret_handle) IS NOT NULL — тот же предикат, что agent-provision.ts::readConfiguredAgentLlmConfig. Поле не переименовывается, не дублируется — становится честным.",
+    "F2. screen-assistant.jsx при монтировании вызывает GET /api/agents, находит запись slug==='assistant-agent', держит состояние {loading, llmBound}.",
+    "F3. Пока запрос не завершился — баннер не рендерится (loading-честность, нет мигания).",
+    "F4. llm_bound===false для assistant-agent → баннер виден (warning-тон, текст без жаргона).",
+    "F5. llm_bound===true, либо ошибка сети, либо запись не найдена → баннер не рендерится (fail-quiet, не педалируем предупреждение на непроверенном факте).",
+    "F6. Кнопка «Открыть LLM-соединения» рендерится только при isAdmin===true (getNavCapabilities().isGenesisOwner || zones.includes('admin')); для не-админа — текст «обратитесь к администратору», без кнопки и без голого пути.",
+    "F7. Баннер живой: перечитывает статус on-mount и on-focus — после возврата с /llm-connections статус обновляется без ручного refresh. Realtime/polling не требуется.",
+    "F8. 503-путь (T-0573/T-0595) не меняется — баннер это превенция, honest-503 остаётся страховкой."
+  ],
+  "non_functional": [
+    "N1. Ноль новых HTTP-маршрутов — баннер строится из существующих GET /api/agents + getNavCapabilities().",
+    "N2. llm_bound после фикса — единый источник правды (тот же предикат, что реальный LLM-вызов), без отдельного оптимистичного клиентского вычисления.",
+    "N3. Loading-честность — баннер не мигает/не показывается до разрешения запроса.",
+    "N4. Текст баннера консистентен ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN/_NON_ADMIN по стилю (web/ не импортирует src/ — раздельные пакеты), без dev-жаргона, без голого пути для не-админа.",
+    "N5. UX-гейты (ux-g2 theme-pairing, ux-g5 jargon-denylist, ux-g6 no-new-hardcode) зелёные / без новых находок.",
+    "N6. Честный 503-путь (assistant-error-text.js, envelope-шейп, assistant-llm-message-jargon.sh) не трогается.",
+    "N7. Фикс llm_bound — коррекция бага, не breaking change контракта; единственный существующий consumer (screen-agents.jsx) становится точнее, существующие тесты не проверяют конкретное значение поля."
+  ],
+  "out_of_scope": [
+    "O1. Realtime-обновление статуса (WebSocket/SSE/polling-интервал) — только on-mount/on-focus.",
+    "O2. Изменение classifyLlmUnavailability, честного 503-пути, assistant-messages.ts.",
+    "O3. Правка UI-текста/логики screen-agents.jsx сверх автоматического выигрыша от фикса agents-list.ts.",
+    "O4. Новый HTTP-эндпойнт статуса LLM специально для баннера — запрещено рамкой задачи.",
+    "O5. Полный machine-readable capability-объект для баннера — достаточно boolean isAdmin из navCaps."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "GET /api/agents для тенанта, где assistant-agent привязан к llm_connection с непустым secret_handle (agent_card.llm_secret_handle NULL), возвращает llm_bound:true.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "GET /api/agents для тенанта без привязки (ни connection-secret, ни inline-handle) возвращает llm_bound:false.", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "serializeAgent/listAgentsTx unit: llm_bound покрыт тестами на все 4 комбинации (ac.llm_secret_handle × lc.secret_handle, null/non-null).", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "Экран ассистента до разрешения GET /api/agents не рендерит баннер.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Экран ассистента после разрешения с llm_bound:false для assistant-agent рендерит баннер warning-тона без жаргона.", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "Баннер для isAdmin:true показывает кнопку «Открыть LLM-соединения» → navigate('/llm-connections').", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "Баннер для isAdmin:false не показывает кнопку, текст направляет к администратору без голого пути.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "Баннер не рендерится когда llm_bound:true для assistant-agent.", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "503-путь (T-0573/T-0595) не регрессирует — существующие тесты screen-assistant.error-envelope.test.js (12/12) проходят без изменений.", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "npm run ci (root), npx vitest run (web), tsc --noEmit, eslint src — зелёные.", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "ux-g2-theme-pairing.sh, ux-g5-jargon-denylist.sh, ux-g6-no-new-hardcode.sh — зелёные / без новых находок.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "Новый kit-компонент (Notice) в components.jsx использует только --chs-* токены, экспортирован и переиспользован (не one-off inline styling).", "verifiable_as": "test"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0599-assistant-banner.spec.md"
+}

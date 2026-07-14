@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0644",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "pr-handoff.json:5",
+      "issue": "status='pr_open' но pr_url='' — процедурная мелочь, не блокирует ревью кода, но handoff неполон для трассировки PR.",
+      "suggestion": "Заполнить pr_url при открытии PR, либо оставить пояснение в handoff почему пусто (напр. PR ещё не создан на момент фиксации спеки)."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": false},
+    {"ac": "AC-8", "covered": true}
+  ],
+  "role_gap_evidence": [],
+  "review_notes": {
+    "summary": "Независимая перепроверка (не полагаясь на pr-handoff.json заявления): (1) frozen zone T-0586/T-0587/T-0588 (src/runtime/agent-dispatch/**, включая dispatch-outcome.ts) — git diff dev...HEAD пуст байт-в-байт, подтверждено лично; FF-15 (ci/checks/agent-bridge-contract.sh) прогнан вживую → PASS. (2) Единый источник workerId подтверждён чтением кода: lifecycle-bridge.ts:297 вычисляет bridgeWorkerId РОВНО один раз и прокидывает в startBridgePollLoop (строка 304, opts.workerId) И makeExternalTaskDeliver (строка 343, 4-й позиционный аргумент) — grep по repo не находит второго независимого чтения FLOWABLE_WORKER_ID и не находит оставшихся мест, где row.payload['workerId'] всё ещё читается для Flowable-вызова (completeTask/failTask в externalTaskBridge.ts используют исключительно bridgeWorkerId). bridge-smoke-runner.ts получил симметричный фикс — тот же локальный workerId идёт и в fetchAndLock (строки 108/161/207), и в makeExternalTaskDeliver (строка 249). (3) Тесты нетавтологичны: старые AC-6/AC-10-style ассерты в externalTaskBridge.test.ts переписаны с явным expect(calledWorkerId).not.toBe(payload-value); 2 новых keystone-теста используют РАЗНЫЕ значения для payload.workerId и bridgeWorkerId, что и было бы недостаточно в старой версии. Кросс-компонентный тест agent-dispatch-bridge-workerid.test.ts вызывает РЕАЛЬНЫЙ applyAgentOutcome (read-only импорт из dispatch-outcome.ts) и РЕАЛЬНЫЙ makeExternalTaskDeliver — не мокает ни одну из сторон моста, доказывает сквозной путь. Все 46 юнит-тестов (externalTaskBridge + lifecycle-bridge + agent-dispatch-bridge-workerid) лично прогнаны — green. (4) reviveDeadOutboxRows: прочитан SQL (pgOutboxStore.ts:369-383) — WHERE строго state='dead' AND event_type IN (task_completed,task_failed) AND payload->>'workerId' IS DISTINCT FROM bridgeWorkerId; DML не DDL, обоснование в deviations_from_adr принято. Лично прогнаны 35 live-DB тестов ci/checks/db/pgOutboxStore.integration.test.ts на реальном Postgres :55432 (T-0147 clone-template изоляция) — все green, включая 7 новых T-0644 тестов, которые содержательно покрывают: revive mismatch (completed+failed), NOT revive когда payload.workerId уже = bridge (fail-closed), NOT revive для worker_lock_expired (eventType scope), NOT revive pending/dispatched (state scope), идемпотентность (второй прогон = 0), кросс-тенантность (TENANT_A+TENANT_B одним вызовом). CLI-раннер (outbox-revive-runner.ts) не авто-вызывается ни из какого поллинг-цикла — подтверждено (единственный вызов reviveDeadOutboxRows — в этом CLI-файле и в тестах). (5) Регресс: T-0636 (мультитенантность/ISO-8601/throttle) не задет — эти пути (CHOROS_TENANT_VAR-скоупинг, msToIso8601Duration, makeErrorLogThrottle) не изменены дифом, тесты остаются как были плюс аддитивные новые. anti-case-lock.sh прогнан вживую → PASS (aggregate 19 ≤ baseline 24, ни один individual литерал не вырос). (6) Швы: git diff по src/core/assistant-analyst.ts, src/db/registry-digest-dao.ts, src/http/inbox.ts — 0 строк, не тронуты. (7) tsc --noEmit -p . лично прогнан — exit 0. Рабочее дерево чистое (git status --porcelain пуст) — probe-мусора от параллельного скептика не обнаружено, отмечать нечего. AC-7 помечен covered:false намеренно — это ручной LIVE_PROOF на стенде после деплоя, не верифицируется в рамках кодового ревью (verifiable_as='manual' в спеке), не blocking для approve кода.",
+    "frozen_zone_intact": true,
+    "single_source_verified": true,
+    "commands_run": [
+      "git diff dev...HEAD --stat",
+      "git diff dev...HEAD -- src/runtime/agent-dispatch/ (empty)",
+      "npx vitest run src/__tests__/externalTaskBridge.test.ts src/__tests__/lifecycle-bridge.test.ts src/__tests__/agent-dispatch-bridge-workerid.test.ts --no-file-parallelism (46 passed)",
+      "DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npx vitest run --dir ci/checks/db --no-file-parallelism ci/checks/db/pgOutboxStore.integration.test.ts (35 passed)",
+      "bash ci/checks/agent-bridge-contract.sh (PASS, FF-15 confirmed)",
+      "bash ci/checks/anti-case-lock.sh (PASS)",
+      "npx tsc --noEmit -p . (exit 0)",
+      "git diff dev...HEAD -- src/core/assistant-analyst.ts src/db/registry-digest-dao.ts src/http/inbox.ts (empty)",
+      "git status --porcelain (clean)"
+    ]
+  }
+}

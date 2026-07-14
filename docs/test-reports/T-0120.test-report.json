@@ -1,0 +1,122 @@
+{
+  "task_id": "T-0120",
+  "verdict": "pass",
+  "phase": "TEST",
+  "date": "2026-06-11",
+  "branch": "task/T-0120",
+  "head": "4ecc81dc435fef959d2cd8ab99a2cd9d031c39db",
+  "base": "92a53e1",
+
+  "gates": {
+    "schema_validation": {
+      "verdict": "pass",
+      "artifacts_checked": [
+        {
+          "path": "docs/specs/T-0120.spec.contract.json",
+          "verdict": "valid",
+          "note": "task_id=T-0120, status=ready, 10 FR, 7 NF, 10 out_of_scope, 20 AC (AC-1..AC-20); JSON parses without error"
+        },
+        {
+          "path": "docs/design/T-0120.adr.contract.json",
+          "verdict": "valid",
+          "note": "task_id=T-0120, status=ready; decision, rejected_alternatives, object_model, contracts, fitness_functions (23 FF), traceability (20 AC), runtime_target, adr_artifact_path present; JSON parses without error"
+        },
+        {
+          "path": "docs/reviews/T-0120.review.json",
+          "verdict": "valid",
+          "note": "task_id=T-0120, verdict=approved; ci_seen.green=true; 3 findings (R-1/R-2/R-3, all nit); acceptance_coverage 20 entries all covered:true; contract_vs_spec_contract verdict=MATCH; security_red_lines smtp_raw_secret=PROTECTED; JSON parses without error"
+        },
+        {
+          "path": "docs/design/T-0120-notifications.adr.md",
+          "verdict": "valid",
+          "note": "ADR Markdown, 10 sections (§1..§10); all 3 reviewer nits applied in commit 4ecc81d"
+        }
+      ]
+    },
+
+    "traceability_20_of_20": {
+      "verdict": "pass",
+      "coverage": "20/20",
+      "method": "grep on adr.contract.json traceability array + review.json acceptance_coverage; cross-check with ADR §7 table",
+      "detail": [
+        {"ac": "AC-1",  "covered": true, "anchor": "ADR §2.1, §4.4 NotificationEvent/publishNotificationEvent, FF-EVENT-CONTRACT"},
+        {"ac": "AC-2",  "covered": true, "anchor": "ADR §2.2, §4.1 choros.notification schema, FF-T13"},
+        {"ac": "AC-3",  "covered": true, "anchor": "ADR §2.2 REST endpoints, FF-OWN-ONLY-READ/FF-NO-CROSS-USER/FF-UNREAD-INDEXED"},
+        {"ac": "AC-4",  "covered": true, "anchor": "ADR §2.3, §4.2 email_channel_config, smtp_handle RL-3, FF-HANDLE-SHAPE"},
+        {"ac": "AC-5",  "covered": true, "anchor": "ADR §2.3 no-raw-secret, §2.8, FF-NO-RAW-SMTP"},
+        {"ac": "AC-6",  "covered": true, "anchor": "ADR §2.5 ChannelDriver Map-registry, FF-NO-SWITCH-CHANNEL"},
+        {"ac": "AC-7",  "covered": true, "anchor": "ADR §2.4, §4.3 notification_preference, defaults, FF-PREF-AUTHZ/FF-SELF-PREF-SCOPED/FF-DEFAULTS-SEED"},
+        {"ac": "AC-8",  "covered": true, "anchor": "ADR §2.6 outbox T-0062 one-dispatcher, FF-ONE-OUTBOX/FF-NB-OUTBOX"},
+        {"ac": "AC-9",  "covered": true, "anchor": "ADR §2.3, §4.4, §8 SmtpSecretResolverPort day-1=stub/Stage-2=real, FF-RESOLVER-PORT"},
+        {"ac": "AC-10", "covered": true, "anchor": "ADR §2.9/§2.10 body ≤ internal, egress T-0041, FF-EGRESS-CLASS/FF-TEMPLATE-CLASS"},
+        {"ac": "AC-11", "covered": true, "anchor": "ADR §2.8 audit only on config, not per-delivery/is_read, FF-AUDIT-CONFIG-ONLY/FF-NO-DELIVERY-AUDIT/FF-NO-ISREAD-AUDIT"},
+        {"ac": "AC-12", "covered": true, "anchor": "ADR §2.9 code-bundled templates, renderTemplate, FF-TEMPLATE-NO-LLM/FF-HTML-ESCAPE/FF-TEMPLATE-CLASS"},
+        {"ac": "AC-13", "covered": true, "anchor": "ADR §2.7 partial badge index, expires_at+sweeper retention, FF-UNREAD-INDEXED"},
+        {"ac": "AC-14", "covered": true, "anchor": "ADR §2.10 worker fail-closed by tenant-context, FF-FANOUT-FAILCLOSED"},
+        {"ac": "AC-15", "covered": true, "anchor": "ADR §2.2/§2.10 own-only RLS, FF-OWN-ONLY-READ live-impl; deferred to impl (test AC, legal for design)"},
+        {"ac": "AC-16", "covered": true, "anchor": "ADR §2.4 email-if-configured, §2.6 in_app independent; deferred to impl (test AC, legal for design)"},
+        {"ac": "AC-17", "covered": true, "anchor": "ADR §2.2 no-cross-user mutation, FF-NO-CROSS-USER; deferred to impl (test AC, legal for design)"},
+        {"ac": "AC-18", "covered": true, "anchor": "ADR §2.6 SMTP-failure→retry/dead, no in-app dup, handle not in logs; deferred to impl (test AC, legal for design)"},
+        {"ac": "AC-19", "covered": true, "anchor": "ADR §3 rejected-alternatives + §6 FF-ONE-OUTBOX/FF-PREF-AUTHZ/FF-NO-RAW-SMTP + review-gate (manual)"},
+        {"ac": "AC-20", "covered": true, "anchor": "ADR §2.1 same NotificationEvent shape for SLA/escalations, §4.4, FF-EVENT-CONTRACT"}
+      ],
+      "deferred_to_impl": ["AC-15", "AC-16", "AC-17", "AC-18"],
+      "deferred_reason": "verifiable_as:test — live-impl probes (Postgres+SMTP); legal for design-phase; covered by fitness functions with gating=live-impl"
+    },
+
+    "red_line_check": {
+      "verdict": "pass",
+      "description": "No instructions to store/log raw SMTP secret anywhere in ADR",
+      "checks": [
+        {
+          "pattern": "store raw|raw.*password|naked password|smtp_password=|plain.*secret",
+          "target": "docs/design/T-0120-notifications.adr.md",
+          "result": "0 matches — PASS"
+        },
+        {
+          "pattern": "sk-.*example|xai-.*example|SMTP_PASSWORD=",
+          "target": "docs/design/T-0120-notifications.adr.md",
+          "result": "0 matches — PASS"
+        }
+      ],
+      "affirmative_evidence": "ADR §2.3: smtp_handle is RL-3 непрозрачный handle; validateSecretHandleShape structural barrier; FF-NO-RAW-SMTP covers grep on log/audit/API/exception paths; §2.8 explicitly states smtp_handle never in audit_event.payload. Review verdict=PROTECTED on smtp_raw_secret."
+    },
+
+    "docs_only_diff": {
+      "verdict": "pass",
+      "base_commit": "92a53e1",
+      "files_changed": [
+        "docs/specs/T-0120-notifications-design.spec.md",
+        "docs/specs/T-0120.spec.contract.json",
+        "docs/design/T-0120-notifications.adr.md",
+        "docs/design/T-0120.adr.contract.json",
+        "docs/reviews/T-0120.review.json",
+        "docs/test-reports/T-0120.test-report.json"
+      ],
+      "files_outside_docs": 0,
+      "note": "git diff --name-only 92a53e1..HEAD: all 6 files in docs/**; 0 files in src/**; product code untouched"
+    },
+
+    "product_ci": {
+      "verdict": "pass",
+      "tsc_noEmit": "PASS (0 errors)",
+      "eslint_src": "PASS",
+      "fitness_static": "PASS (all static shell checks green)",
+      "vitest": "1032 passed / 0 failed / 6 skipped (53 test files, 2 skipped)",
+      "note": "Product code unchanged relative to dev baseline — result equivalent to dev CI. Integration-honest gate (D-056): docs-only branch, product CI green."
+    }
+  },
+
+  "review_summary": {
+    "verdict": "approved",
+    "nit_fixes_applied": [
+      "R-1 (migration slots): уточнена формулировка — 043+ заняты к моменту дизайна, в т.ч. 044 может быть занят T-0077 post-base; coder берёт следующий фактически свободный",
+      "R-2 (immediate-dead): зафиксирован механизм явно — markRetry с maxAttempts=0 (T-0062 механизм, без нового markDead)",
+      "R-3 (FF-BADGE-INDEX→FF-UNREAD-INDEXED): единое имя в §5 и §6; обновлён adr.contract.json"
+    ],
+    "commit": "4ecc81dc435fef959d2cd8ab99a2cd9d031c39db"
+  },
+
+  "failures": [],
+  "friction": []
+}

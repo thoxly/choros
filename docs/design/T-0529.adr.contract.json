@@ -1,0 +1,128 @@
+{
+  "task_id": "T-0529",
+  "status": "ready",
+  "decision": "Ремонт доступности (WCAG AA) на пяти ключевых поверхностях Choros через паттерн-спеку: (1) BPMN-канвас — keyboard.bindTo=containerRef + role=application + aria-label/describedby; (2) FormDesigner drag-canvas — CanvasNode превращается в button+actions (onMoveUp/Down как keyboard-fallback, контракт для T-0544), Inspector → kit Field; (3) Tabs/деревья/rows — role=tablist/tab/tabpanel + roving-tabindex + arrow-keys, извлечение kit <Tabs>; (4) Ошибки полей — aria-describedby+aria-errormessage на контроле, role=alert на span, touched-validation до publish; (5) Оверлеи — Modal overlay-close mousedown→onClick, Popover: aria-haspopup+aria-expanded+focus-on-open+Esc, Tooltip: clone-not-wrap+Esc. Disabled-причина: aria-disabled+focusable+aria-describedby вместо title/Tooltip-на-disabled. Текст-эквиваленты для смысла-через-цвет: aria-label на ExecBadge/CritAxis/glyph, progressbar на SLA-метре, transient success-tint. Живёт в docs/design/T-0529-a11y-remediation.design.md.",
+  "rejected_alternatives": [
+    {
+      "option": "keyboard: { bindTo: document } для BPMN-канваса",
+      "why_not": "Глобальный bind перехватывает клавиши за пределами канваса (Delete, Escape) и мешает другим интерактивным поверхностям на странице. bindTo=containerRef изолирует область."
+    },
+    {
+      "option": "Использовать native title для disabled-причины",
+      "why_not": "title не воспроизводится AT на disabled-элементе, не доступен с touch, не гарантирован в браузерах. WCAG 1.3.1 требует программно определяемого имени/описания."
+    },
+    {
+      "option": "Tooltip-wrapper на disabled button (текущий паттерн shell.jsx)",
+      "why_not": "AT достигает tooltip только если trigger focusable. disabled button — нет. Решение: aria-disabled='true' (не HTML disabled) чтобы элемент оставался focusable."
+    },
+    {
+      "option": "Оставить role=listbox в assistant thread list",
+      "why_not": "listbox с embedded interactive controls (pin/rename/delete) — невалидный ARIA: option не может содержать интерактивные children. Моделировать как plain navigable list."
+    },
+    {
+      "option": "Добавить aria-live к каждому error-span по отдельности",
+      "why_not": "aria-live=polite на каждом span создаёт конкурирующие регионы и дублирует объявления при множественных ошибках. role=alert достаточен и появляется только при mount/change."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "A11yTabsPattern",
+      "fields": [
+        { "name": "role", "type": "string — 'tablist' на контейнере, 'tab' на кнопках, 'tabpanel' на контентах" },
+        { "name": "roving_tabindex", "type": "boolean — активная вкладка tabIndex=0, остальные -1" },
+        { "name": "arrow_keys", "type": "string — ArrowLeft/Right/Home/End между вкладками" },
+        { "name": "aria_controls", "type": "string — tab.id → panel.id" },
+        { "name": "aria_labelledby", "type": "string — panel.id ← tab.id" }
+      ]
+    },
+    {
+      "entity": "A11yFieldError",
+      "fields": [
+        { "name": "error_span_id", "type": "string — стабильный id на span ошибки" },
+        { "name": "aria_invalid", "type": "boolean — на input/select" },
+        { "name": "aria_describedby", "type": "string — ссылка на error_span_id" },
+        { "name": "aria_errormessage", "type": "string — ссылка на error_span_id (доп. к describedby)" },
+        { "name": "role_alert", "type": "string — role=alert на span ошибки" },
+        { "name": "touched_validation", "type": "boolean — показывать ошибку при blur после первой попытки сохранения" }
+      ]
+    },
+    {
+      "entity": "A11yDisabledControl",
+      "fields": [
+        { "name": "strategy", "type": "enum: aria-disabled+focusable | disabled+visible-helper-text" },
+        { "name": "reason_id", "type": "string — id span с причиной" },
+        { "name": "aria_describedby", "type": "string — ссылка на reason_id" },
+        { "name": "click_blocked", "type": "boolean — e.preventDefault() при aria-disabled стратегии" }
+      ]
+    },
+    {
+      "entity": "A11yOverlayPattern",
+      "fields": [
+        { "name": "modal_close_trigger", "type": "string — onClick (не onMouseDown) на backdrop" },
+        { "name": "popover_aria_haspopup", "type": "string — 'listbox'|'dialog' на trigger" },
+        { "name": "popover_aria_expanded", "type": "boolean" },
+        { "name": "popover_focus_on_open", "type": "boolean — focus первый focusable в panel" },
+        { "name": "tooltip_clone_strategy", "type": "string — cloneElement children, не wrap в span" },
+        { "name": "tooltip_esc_dismiss", "type": "boolean" }
+      ]
+    },
+    {
+      "entity": "A11yColorMeaning",
+      "fields": [
+        { "name": "aria_label_on_glyph", "type": "string — для ExecGlyph/CritAxis/status-icons" },
+        { "name": "aria_hidden_decorative", "type": "boolean — aria-hidden=true на декоративных dot/shape" },
+        { "name": "progressbar_attrs", "type": "string — role/aria-valuenow/aria-valuemin/aria-valuemax/aria-valuetext для SLA" },
+        { "name": "sr_only_text", "type": "string — visually-hidden текст для opacity-only used-state" }
+      ]
+    }
+  ],
+  "contracts": [
+    "Каждый error-span получает стабильный id; control ссылается через aria-describedby + aria-errormessage",
+    "Tabs: role=tablist/tab/tabpanel + roving-tabindex + arrow ArrowLeft/Right/Home/End — извлечь kit <Tabs>",
+    "CanvasNode FormDesigner: button-based selection + onMoveUp/onMoveDown controls (контракт T-0544)",
+    "BPMN-канвас: keyboard.bindTo=containerRef.current + role=application + aria-label + sr-only hint",
+    "Disabled-с-причиной: aria-disabled='true' (focusable) + aria-describedby=reasonId — НЕ HTML disabled + title",
+    "Popover при role=dialog: focus-on-open + Esc-close + aria-haspopup/expanded/controls на trigger",
+    "Tooltip: cloneElement children (не span-wrapper) + aria-describedby на child + Esc-dismiss",
+    "Modal backdrop: onClick (не onMouseDown) для предотвращения закрытия при text-selection drag",
+    "Смысл через цвет/форму/opacity: всегда иметь aria-label / role=progressbar+aria-valuetext / sr-only text",
+    "ToastViewport: pause-on-hover (clearTimeout onMouseEnter) — гарантирует прочтение error-toast"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-UX-G1-contrast",
+      "rule": "Каждая интерактивная поверхность проходит WCAG AA контраст-чек (4.5:1 text, 3:1 UI components). Автоматически: axe-core colorContrast rule — 0 violations.",
+      "ci_check": "ci/checks/ux/axe-contrast.sh"
+    },
+    {
+      "id": "FF-UX-G3-no-dead-controls",
+      "rule": "Ни один enabled (не disabled, не aria-disabled) интерактивный элемент не является silent no-op: каждый button/a имеет onClick или href ведущий к действию. Проверка: поиск `<button` без onClick И без disabled в компонентах поверхностей из scope.",
+      "ci_check": "ci/checks/ux/no-dead-controls.sh"
+    },
+    {
+      "id": "FF-UX-G4-keyboard-reachable",
+      "rule": "Каждый интерактивный элемент достижим и активируемо с клавиатуры (Tab / arrow keys / Enter / Space). axe-core: 0 violations по правилам keyboard, interactive-supports-focus, aria-required-children, tabindex. Journey-тест: keyboard-only e2e сценарий для BPMN-канваса, FormDesigner, Tabs, CanvasNode reorder.",
+      "ci_check": "e2e/journeys/a11y-keyboard.ux.journey.ts"
+    },
+    {
+      "id": "FF-A11Y-ERR-aria-describedby",
+      "rule": "Каждый field с error-state имеет: (1) aria-invalid=true, (2) aria-describedby ссылающийся на существующий id error-span, (3) error-span с role=alert или aria-live. axe-core: 0 violations по aria-valid-attr-value, label, aria-describedby-missing.",
+      "ci_check": "ci/checks/ux/axe-form-errors.sh"
+    }
+  ],
+  "traceability": [
+    { "ac": "UX-аудит §5 — keyboard-inaccessible surfaces", "covered_by": "FF-UX-G4-keyboard-reachable + design section А" },
+    { "ac": "UX-аудит §8 — field errors not tied to controls", "covered_by": "FF-A11Y-ERR-aria-describedby + design section Б" },
+    { "ac": "UX-аудит §9 — dead controls + disabled reason in title", "covered_by": "FF-UX-G3-no-dead-controls + design section В" },
+    { "ac": "UX-аудит §13 — color/icon meaning without text", "covered_by": "FF-UX-G1-contrast + design section Г" },
+    { "ac": "UX-аудит §15 — overlay focus management", "covered_by": "FF-UX-G4-keyboard-reachable + design section Д" },
+    { "ac": "T-0314 гейт G1 — WCAG AA контраст", "covered_by": "FF-UX-G1-contrast" },
+    { "ac": "T-0314 гейт G3 — нет мёртвых контролов", "covered_by": "FF-UX-G3-no-dead-controls" },
+    { "ac": "T-0314 гейт G4 — интерактив с клавиатуры", "covered_by": "FF-UX-G4-keyboard-reachable" },
+    { "ac": "T-0526 — disabled-причина видима (не title)", "covered_by": "design section В2 + FF-UX-G3" },
+    { "ac": "T-0528 — toast-озвучка через live-region", "covered_by": "design section Д4 + компонент Toast в kit" },
+    { "ac": "T-0544 — keyboard-фоллбэк drag-drop", "covered_by": "design section А2 (контракт onMoveUp/Down)" }
+  ],
+  "runtime_target": "локально",
+  "adr_artifact_path": "docs/design/T-0529-a11y-remediation.design.md"
+}

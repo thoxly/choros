@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0725",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "N1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/core/assistant-configurator.ts (CONFIGURATOR_TOOLS) / ADR-T0656 §4.4",
+      "issue": "LLM-тул-обёртка (ToolDeclaration) для document-ops не существует и отложена (иная auth-модель DRAFT-only vs прямой патч published). item(1) 'схема тула экспонирует applicationId' трактован как контракт РОУТА (JSDoc) — честно: тула нет, инвентить его смешало бы две auth-модели. Паритет достигнут на уровне шва (единственный потребитель document-ops — прямой HTTP-агент, для него схема=контракт роута).",
+      "suggestion": "Follow-up (не блокер): когда document-ops станет ToolDeclaration в assistant-configurator, схема тула должна экспонировать applicationId (как T-0700 для author_binding) и поднимать 422 AMBIGUOUS_APPLICATION как ASK-петлю ассистента."
+    },
+    {
+      "id": "N2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/forms-document-ops.ts:157-169 (пре-флайт) + classifyLayoutSave resolve",
+      "issue": "Пре-флайт-COUNT и последующий resolveLiveRecordSchema — разные statements одной READ COMMITTED tx (снимок на statement). Привязка, закоммиченная в узком окне между ними, всё ещё уйдёт в тихий фолбэк вместо 422.",
+      "suggestion": "Доброкачественно (одновременное добавление привязки посреди сохранения формы нереалистично) — приемлемо, фиксировать не обязательно."
+    },
+    {
+      "id": "N3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "T-0725.pr-handoff.json live_proof_plan",
+      "issue": "live_proof отложен (стенд offline). Ассистент-петля UX (422→ASK→ретрай) через тул сегодня недоказуема — тула document-ops нет.",
+      "suggestion": "DB+HTTP-доказательство (20/20 live-PG, судьёй перепрогнано) адекватно шву без UI/тул-потребителя. Живой proof — когда стенд online и/или появится тул."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-a: контракт роута (JSDoc) явно перечисляет applicationId как опциональное поле", "covered": true},
+    {"ac": "AC-b: агент с пином на мульти-привязке → резолв выбранного приложения (pin=B→200; pin=A на B-поле→409), реюз classifyLayoutSave", "covered": true},
+    {"ac": "AC-c: агент без пина на 2+ привязках → 422 AMBIGUOUS_APPLICATION со всеми кандидатами; form_binding НЕ изменён (live SELECT после отказа)", "covered": true},
+    {"ac": "AC-d: агент без пина на 1 привязке → 200 (T-0711 фолбэк не сломан); 0 привязок → 409 не 422", "covered": true},
+    {"ac": "AC-e: human-путь (binding.ts/floor1-editor/FormBuilder) НУЛЕВЫЕ изменения; regression suites зелёные", "covered": true},
+    {"ac": "AC-f (анти-кейс D-064): нет кейс-литералов в src/; фикстуры t0725-* нейтральны; anti-case-lock зелёный без роста", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Детектор точен: миграция 075 UNIQUE(tenant_id,process_key,application_id) → 1 строка на (процесс,app) → count>1 ⟺ строго 2+ разных приложения, ложных срабатываний на single нет.",
+    "RLS: process_app_binding FORCE RLS + политика tenant_id=current_setting; пре-флайт стоит ПОСЛЕ checkRole и внутри withTenantTx + явный WHERE tenant_id=$1 + JOIN application tenant-scoped → кросс-тенант утечки нет.",
+    "Судьёй перепрогнано живьём: tsc green; live-PG 20/20 (5 новых T-0725 + 7 T-0711 + 8 form_binding_layout); targeted vitest 301/301 (14 файлов); anti-case-lock/forms-schema-binding/named-binding-isolation PASS.",
+    "Дифф скоуплен: 3 исходника (live-form-schema.ts +78 чисто аддитивно, forms-document-ops.ts +57, новый unit +260); resolveLiveRecordSchema/classifyLayoutSave/floor1-editor/FormBuilder/binding.ts НЕ тронуты."
+  ]
+}

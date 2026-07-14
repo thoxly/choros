@@ -1,0 +1,150 @@
+{
+  "task_id": "T-0042",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 900,
+    "passed": 895,
+    "failed": 0,
+    "skipped": 5
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "POST /api/agents/hire HTTP route — AC-1: returns 401 when x-dev-user header is missing; R-1 (AC-1) — authenticated caller without mgmt_object:agent grant → 403",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "POST /api/agents/hire HTTP route — AC-2/4/5: hire succeeds — KC client created with correct spec, kc_client_id returned",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "R-2 (AC-3) — admin grant covers dept D2, position in disjoint dept D1 → 403",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "InMemoryKeycloakAdminPort capture log — AC-4: records correct KcClientSpec on create; AC-2/4/5 HTTP route test",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "AC-2/4/5 HTTP route test — kc_client_id returned in response matches capture log",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "InMemoryKeycloakAdminPort — AC-6: failOnCreate throws without persisting client; HTTP AC-6: KC failure — no DB rows committed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "InMemoryKeycloakAdminPort — AC-7: deleteClient is recorded in deleteCalls; HTTP AC-7: DB failure after KC success — deleteClient is called (orphan cleanup)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "AC-8 — resolveAgentToolset zero-toolset by construction: returns [] when agent has no role assignments",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "AC-9 — identity decoupled from rights: resolveAgentToolset signature takes subjectId (employeeId), not kc_client_id; fitness FF-HIRE-2 grep PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "InMemoryKeycloakAdminPort — AC-10: getRealmRoleMappings always returns []; HTTP AC-2/4/5 test checks getRealmRoleMappings",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "encodeAgentHireAuditEvent — AC-11: produces AuditEventInput with type=agent.hire and correct fields; InMemoryAuditWriter + encodeAgentHireAuditEvent — audit chain appends agent.hire event",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "AgentConflictError — AC-12: is thrown by insertAgentRows when a PG 23505 error occurs; HTTP AC-12: duplicate kc_client_id returns 409 client_id_conflict",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "fitness FF-HIRE-3: no second-authority subsystem; validateAdminDelegation is the gate — PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "fitness FF-HIRE-4: frozen files unmodified; additive-only files have zero deleted lines — PASS; git diff dcd5a78..HEAD grant-lattice.ts grant-resolver.ts mcp-tool-registry.ts = 0 lines",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "POST /api/agents/hire HTTP route — AC-15: dev-auth — hire succeeds with x-dev-user header (CHOROS_AUTH_MODE=dev)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "fitness FF-HIRE-6: KC port is injectable (files exist, core is pure, port in route params) — PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-17",
+      "test": "fitness FF-HIRE-7: no migrations/042_*.sql — AC-17 satisfied vacuously (no migration needed) — PASS",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "npm run build (tsc)",
+      "result": "pass",
+      "note": "Zero TypeScript errors. Clean compile."
+    },
+    {
+      "check": "npx vitest run — total suite",
+      "result": "pass",
+      "note": "895 passed, 5 skipped (all skipped are flowable-client.integration — live Keycloak/Flowable, expected), 0 failed."
+    },
+    {
+      "check": "npm run fitness — all static checks",
+      "result": "pass",
+      "note": "All 46 fitness checks green including agent-hire-specific: FF-HIRE-1 gate order, FF-HIRE-2 identity isolation, FF-HIRE-3 no-second-authority, FF-HIRE-4 frozen-additive, FF-HIRE-6 port-injectable, FF-HIRE-7 migration-seam."
+    },
+    {
+      "check": "Live Keycloak integration (AC-4 createServiceAccountClient live)",
+      "result": "n/a",
+      "note": "not-run-live: per task brief, live Keycloak adapter is outside scope of local gate. Covered by InMemoryKeycloakAdminPort fake. Live path deferred to T-0060 environment."
+    },
+    {
+      "check": "E-1 edge: hire with non-existent position_id",
+      "result": "pass",
+      "note": "Returns 400 VALIDATION, zero KC calls. Handler correctly surfaces 400 when lookupPositionOrgScope finds no row."
+    },
+    {
+      "check": "E-2 edge: malformed UUID for position_id",
+      "result": "pass",
+      "note": "Both 'not-a-uuid' and truncated UUID return 400 VALIDATION before any IO. assertUuidShape guard fires correctly."
+    },
+    {
+      "check": "E-3 edge: duplicate concurrent hire (same kc_client_id) — UNIQUE-guard",
+      "result": "pass",
+      "note": "PG 23505 on agent_card INSERT → AgentConflictError → HTTP 409 client_id_conflict. Not a 500 crash. deleteClient called for orphan KC client."
+    },
+    {
+      "check": "E-4 edge: deleteClient itself throws after DB-fail (double failure)",
+      "result": "pass",
+      "note": "Original DB error surfaces as 500 db_failed. deleteClient error is swallowed (void/async, catch inside). Response arrives in < 3s, no hang. deleteClient WAS attempted (best-effort proven)."
+    },
+    {
+      "check": "AC-9 manual grep: agent_card mention in mcp-tool-registry.ts",
+      "result": "pass",
+      "note": "One hit on line 75 is a code comment ('no agent_card dep'), not functional code. Fitness FF-HIRE-2 passed independently."
+    },
+    {
+      "check": "grant-trail Check-1 (dcd5a78) — pre-merge class check",
+      "result": "n/a",
+      "note": "grant-trail-encoder-isolation fitness Check-2 passed green (grant-lattice.ts unchanged vs merge-base dcd5a78). No grant-trail red on this branch."
+    }
+  ],
+  "failures": []
+}

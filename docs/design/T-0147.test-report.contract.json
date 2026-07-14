@@ -1,0 +1,91 @@
+{
+  "task_id": "T-0147",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1107,
+    "passed": 1107,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1: parallel fitness:db progs do not conflict",
+      "test": "parallel pair (runs 2+3): choros_test_..._ae39 + choros_test_..._7968, both 377 passed, genesis=17 in each",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2: repeat run does not change template",
+      "test": "runs 1→4 sequential: template not re-created; 377 passed / 75 skipped in each",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3: genesis stable = 17",
+      "test": "genesis-owner-seed.test.ts AC-12: count=17 in all 4 runs",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4: existing db/*.test.ts files unmodified",
+      "test": "FF-T147-2 (db-isolation-no-test-change.sh) PASS — git diff HEAD -- ci/checks/db/*.test.ts = 0 bytes",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5: orphan cleanup script exists and registered",
+      "test": "FF-T147-5 (db-isolation-cleanup-registered.sh) PASS — scripts/db-cleanup-orphans.ts present, package.json fitness:db:cleanup-orphans registered",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6: clear error if template absent",
+      "test": "globalSetup.ts throws 'run npm run fitness:db:setup-template first' when choros_test_template absent; FF-T147-7 fallback-path PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7: setup-template idempotent",
+      "test": "FF-T147-4 (db-isolation-template-url.sh) PASS — uses run.mjs idempotent migration runner; self-test --self-test PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8: role rights correct on cloned DB",
+      "test": "31/32 suites (all non-skipped) pass using appUrl() + migratorUrl() on per-run clone",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9: clone cost ≤ 5s",
+      "test": "direct CREATE DATABASE choros_test_perf_check TEMPLATE choros_test_template = 102ms",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "FF-T147-1 db-isolation-setup-registered.sh",
+      "result": "pass",
+      "note": "globalSetup registered in vitest.config.js"
+    },
+    {
+      "check": "FF-T147-3 db-isolation-globalsetup-pure.sh",
+      "result": "pass",
+      "note": "globalSetup.ts imports only pg + Node builtins; no src/ production modules"
+    },
+    {
+      "check": "FF-T147-6 db-isolation-run-id-pattern.sh",
+      "result": "pass",
+      "note": "run_id matches /^choros_test_\\d{10,13}_[0-9a-f]{4}$/"
+    },
+    {
+      "check": "FF-T147-8 db-isolation-teardown-terminate.sh",
+      "result": "pass",
+      "note": "teardown calls pg_terminate_backend before DROP DATABASE"
+    },
+    {
+      "check": "FF-T147-9 db-isolation-self-test.sh",
+      "result": "pass",
+      "note": "globalSetup --self-test PASS: run_id pattern and URL rewriting OK"
+    }
+  ],
+  "failures": [
+    {
+      "test": "cross_tenant.test.ts — 75 tests skipped (seedRowForTable: unknown table invoke_proposal)",
+      "is_product_defect": false,
+      "root_class": "tooling-gap",
+      "note": "Pre-existing: invoke_proposal was added to known_tenant_tables.txt by earlier task but seedRowForTable case never written. Present on dev branch. T-0147 does not touch cross_tenant.test.ts (AC-4 PASS). Candidate: add seedRowForTable case for invoke_proposal."
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+# ci/checks/role-criticality-migration-excludes.txt
+# Data file for role-criticality-isolation.sh (T-0040 / FF-RC5/FF-RC6).
+#
+# Each non-blank, non-comment line names a migration file (relative to
+# migrations/, without the .sql suffix) that is owned by another task and
+# therefore excluded from the T-0040 frozen-diff check.
+#
+# Format (one entry per line):
+#   <migration_stem>  # T-XXXX — <reason>
+#
+# Rules:
+#   - Only name migrations NOT owned by T-0040.
+#   - Any T-0040 migration would still be caught (it must not appear here).
+#   - Absence of this file is treated as an empty list (fail-closed).
+#   - Lines starting with '#' and blank lines are ignored.
+#
+030_grant_proposed_confirmed  # T-0030 — grant editor; sibling task, predates T-0040
+031_grant_confirmed2_by       # T-0044 — dual-control gate ADD COLUMN confirmed2_by
+043_invoke_proposal           # T-0024 — invoke-grant migration; owned by invoke-grant-isolation.sh
+046_notification              # T-0168 — notifications E-N.1 migrations (choros.notification)
+047_email_channel_config      # T-0168 — notifications E-N.1 migrations (choros.email_channel_config)
+048_notification_preference   # T-0168 — notifications E-N.1 migrations (choros.notification_preference)
+049_tier                      # T-0087 — tier column + published-locked trigger (E12.6)
+050_tier_delete_fix           # T-0185 — tier DELETE suppression bugfix
+051_report_page               # T-0175 — reports DDL (choros.report_page)
+052_report_page_dep           # T-0175 — reports DDL (choros.report_page_dep)
+053_author_report_page_seed   # T-0180 — mcp_tool seed author_report_page (T-0121f)
+055_fix_mcp_tool_demo_tenant  # T-0161 — delete misplaced 040 demo mcp_tool rows (wrong tenant 00000000-…-001)
+057_agent_instruction         # T-0230 — competence layer DDL (choros.agent_instruction); owned by agent-instruction-*.sh (T-0123 impl)
+059_implementation_agent_seed # T-0207 — implementation-agent seed (role/employee/agent_card/mcp_tool/grant); owned by implementation-agent-seed.sh (B-1)
+066_dmn_rule_table            # T-0075 — dmn_rule_table DDL; owned by dmn-middle-isolation.sh
+067_modules_nav               # T-0079 — modules nav + catalog_field_spec DDL; owned by modules-extend-not-replace.sh
+068_cross_app_ref             # T-0080 — cross_app_ref DDL; owned by cross-app-refs-isolation.sh
+069_bundle_commit             # T-0083 — bundle_commit + bundle_ref DDL; owned by bundle-commit-isolation.sh
+070_record_schema_versioning  # T-0085 — per-record schema versioning (registry_schema_history DDL + triggers); owned by record-schema-compat.sh
+071_inflight_migration        # T-0086 — in-flight migration drain + rollback guard (bundle_version_instance + inflight_mapping_request DDL); owned by inflight-migration-isolation.sh
+072_isolated_env_escalation   # T-0088 — E12.7 on-demand physical isolation config-flip (ADD COLUMN physical_isolation_requested on choros.tenant); owned by isolated-env-isolation.sh
+073_vendor_crm_seed           # T-0244 — vendor-crm application + customer-subscription registry seed (is_system app + registry_def INSERT only); owned by vendor-crm-seed-idempotent.sh
+074_process_definition        # T-0252 — E8 BPMN publish path: process_definition tenant table DDL; owned by process-defs route module
+075_process_app_binding       # T-0270 — E13 process↔application binding: process_app_binding tenant table DDL; owned by process-catalog route module
+076_soglasovanie_registry_seed # T-0335 — Согласование registry_def seed (pure INSERT seed, no CREATE TABLE); owned by step-applier.ts
+077_tel_roles_seed            # T-0336 — TEL role seed (INSERT role/grant rows, no CREATE TABLE); owned by claim-projection.ts
+078_user_task_claim           # T-0338 — E15-S2-claim: user_task_claim TOCTOU-safe DB lock primitive (FORCE RLS); owned by claim-projection.ts
+079_transition_journal_index  # T-0339 — E15-S3: GIN+btree indexes on audit_event + process_transition_journal mat-view (no new tenant table); owned by transition-journal.ts analytics
+080_tel_dmn_seed              # T-0340 — E15-S5: DMN 5M-threshold seed for dev tenant (pure INSERT, no CREATE TABLE); owned by dmn-rule-table adapter
+081_revoke_transition_journal # T-0346 — E15-S3-followup SECURITY: REVOKE+DROP cross-tenant mat-view process_transition_journal (zero readers, audit_event RLS path preserved); owned by this task
+082_process_app_binding_trigger # T-0351 — E16 trigger config: ALTER TABLE process_app_binding ADD COLUMN (trigger_type/start_form_key/field_mapping); owned by binding-trigger-dao.ts + records.ts on_create seam
+083_core_system_registries_seed # T-0354 — E16 §7 core system registries seed (pure INSERT seed, zero DDL, rides existing tables 003/004); owned by core-system-registries.ts
+084_tel_approver_assignment_seed # T-0362 — E15 approve→entity gap fix: seed role-initiator+role-approver (new non-colliding UUIDs) + confirmed role_assignment for e-orlov/e-larina; pure INSERT, zero DDL
+109_dual_control_pdp_backfill # T-0397 — PDP dual-control read-hole fix: pure BACKFILL of confirmed2_by for pre-existing active critical grants/assignments (no DDL, no new tenant table); enforcement lives in grants-dao.ts query change
+115_assistant_agent_card_backfill # T-0574 — BYO-LLM binding gap: backfill agent_card row for existing assistant-agent employees (INSERT backfill, no new tenant table); owned by register.ts assistant seam
+116_composite_fk_set_null_columns # T-0574 — schema defect fix: composite ON DELETE SET NULL was nulling NOT-NULL tenant_id on agent_card/spend_ledger/application FKs (094/107/113) → column-scoped SET NULL
+117_default_read_grant_backfill # T-0570 — READ-PDP default-open grant backfill: pure INSERT…SELECT FROM choros.tenant seed (role-reader + role_assignment + read/record grant, no DDL, no new tenant table); owned by src/core/read-visibility.ts + src/http/records.ts
+118_assistant_tenant_zero_backfill # T-0573 — assistant-unlock: full tenant-zero backfill for pre-T-0373 tenants (role-configurator + assistant-agent employee + agent_card + role_assignment + grant, pure INSERT…SELECT, no DDL, no new tenant table); owned by src/core/register.ts assistant seam
+119_process_app_binding_target_registry_slug # T-0575 — деТЭЛизация BUG-017: ALTER TABLE process_app_binding ADD COLUMN target_registry_slug (nullable, additive) + ТЭЛ-binding data-completion UPDATE; owned by src/db/step-applier.ts + src/db/process-instance-resolver.ts
+120_ownerless_tenant_zero_unarm # T-0594 — R-2 finding of the T-0573 review: pure DELETE unarm of dangling role-configurator armament (role_assignment + grant, backfill-marked) for tenants lacking a confirmed tenant-owner (no DDL, no new tenant table); owned by migrations/118_assistant_tenant_zero_backfill.sql's own A5/A6/A7 semantics
+121_process_app_binding_submit_task_key # T-0604 — P0 целостность согласований: ALTER TABLE process_app_binding ADD COLUMN submit_task_key (nullable, additive) + telLinear-binding data-completion UPDATE; owned by src/db/binding-trigger-dao.ts + src/http/records.ts on_create seam
+122_approval_registry_guard # T-0606 — approval-registry-guard: ALTER TABLE process_app_binding ADD COLUMN trigger_registry_id (nullable, additive) + ALTER TABLE registry_def ADD COLUMN engine_managed (boolean, additive) + ТЭЛ «Согласование» data-completion UPDATE; owned by src/db/binding-trigger-dao.ts (trigger scope) + src/http/records.ts (write-protection guard)
+123_list_view_registry # T-0581 — view registry: CREATE TABLE choros.list_view (new tenant table, FORCE RLS); owned by src/core/view-query.ts + src/core/view-config.ts + src/http/list-views.ts + src/http/records.ts (view application)
+124_read_grant_all_staff_backfill # T-0619 — covering READ-грант всему персоналу: pure INSERT…SELECT FROM choros.tenant/employee (ensure role-reader + read/record grant + role_assignment for every kind='human'; no DDL, no new tenant table, role_criticality untouched — derived not stored); owned by src/http/rights-intents.ts hire seam + src/core/read-visibility.ts constants; renumbered 123→124 (collision with T-0581 list_view on dev)
+125_employee_deactivated_at # T-0583 — user-account management: ALTER TABLE choros.employee ADD COLUMN deactivated_at (nullable bigint, additive, generic recency-marker not enum-status per D-064); no new tenant table, role_criticality untouched — derived not stored; owned by src/http/user-mgmt.ts + src/keycloak/admin-port.ts setUserEnabled
+126_employee_login # T-0625 — P0 account-creation fix: ALTER TABLE choros.employee ADD COLUMN login (nullable text, additive, human-readable KC username separate from the identity-bearing slug=KC-UUID); no new tenant table, role_criticality untouched — derived not stored; owned by src/http/user-mgmt.ts GET /api/users/accounts
+127_employee_email # T-0628 — free-form login + separate required email fix: ALTER TABLE choros.employee ADD COLUMN email (nullable text, additive, distinct from login/slug); no new tenant table, role_criticality untouched — derived not stored; owned by src/http/user-mgmt.ts POST /api/users
+128_process_designer_role_backfill # T-0666 — forms-save-access fix: pure INSERT…SELECT FROM choros.tenant seed (process_designer role, seeded not auto-assigned) for every tenant lacking it; no DDL, no new tenant table, role_criticality untouched — derived not stored; owned by src/http/binding.ts checkRole + src/core/register.ts tenant-zero seeding

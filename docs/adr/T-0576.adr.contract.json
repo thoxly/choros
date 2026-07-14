@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0576",
+  "status": "ready",
+  "decision": "Один новый зонтичный ci/checks/anti-case-lock.sh с двумя фазами: (1) делегирует к трём существующим точечным анти-кейс гейтам как есть (read-pdp-anti-case.sh T-0570 git-diff-scoped src/, rights-ui-anti-case.sh T-0572 git-diff-scoped web/src/, detel-literal-baseline.sh T-0575 repo-wide code-only 3 литерала) без модификации их файлов/владения; (2) добавляет собственный repo-wide code-only скан ПОЛНОГО денилиста карты примитивов §5 (все 8 позиций: role-approver, soglasovanie, tel-approval, telLinear, e-larina, e-orlov, TEL_GATEWAY_VAR/approvalRequired-значение, TEL_GATEWAY_ID/gw-approval-threshold-значение) поверх src/**/*.ts и web/src/**/*.{jsx,tsx}, сравниваемый с data-baseline-файлом ci/checks/data/anti-case-baseline.json по семантике <= (erodes-or-steady, никогда не растёт) — per-литерал и агрегатно. Baseline зафиксирован на разведке HEAD задачи (§4 ADR): role-approver:2,soglasovanie:2,tel-approval:1,telLinear:8,e-larina:2,e-orlov:2,approvalRequired:1,gw-approval-threshold:1,агрегат:19. Прошито аддитивно в хвост npm run fitness. Отдельно: правка ci/checks/http-route-auth-coverage.sh §5 FF-0328-3 (чужой чек, владелец T-0328) — FROZEN_FILES сужен до РОВНО src/http/secret-handle.ts, снимая структурную неточность относительно ADR T-0328 §4.2 (process-start.ts — contract-frozen, enforced start-route-isolation.sh, НЕ byte-frozen). Санкционировано существующей записью T-0575 в frozen-sanctions.jsonl (explicit follow-up на T-0576) + новой founder-класс записью этой задачи.",
+  "rejected_alternatives": [
+    {"option": "Б1. Единый монолитный чек, дублирующий git-diff-scoped логику трёх существующих гейтов заново", "why_not": "дублирует уже написанный, протестированный код (санитайзер комментариев T-0570, R-1-исправленная защита от bypass через trailing-comment) — риск рассинхронизации логики между копиями; нарушает требование задачи 'не ломая их — они принадлежат своим задачам'."},
+    {"option": "Б2. Заменить detel-literal-baseline.sh (T-0575, 3 литерала) новым файлом с полным денилистом, удалив старый", "why_not": "frozen-checks-immutable.sh запрещает T-0576 удалять чужой чек (владелец T-0575) без санкции; T-0575's AC-10/FF-7 'strictly less' — контракт этой задачи (baseline входа для T-0576), удаление сломало бы её собственную acceptance-историю."},
+    {"option": "В1. Расширить detel-literal-baseline.sh литералами денилиста напрямую (правка чужого файла)", "why_not": "тот же запрет владения; семантика T-0575 ('строго меньше', one-time reduction proof) отличается от нужной T-0576 семантики ('не больше', steady-state guard навсегда) — смешивание двух контрактов в одном файле путает читателя."},
+    {"option": "Г1. Baseline как встроенная bash-константа внутри anti-case-lock.sh вместо отдельного data-файла", "why_not": "spec NF-5 требует data-файл (не код) — расширение порога должно быть видимым отдельной строкой в git diff data-файла, не спрятанным внутри логики скрипта; тот же принцип, что frozen-sanctions.jsonl."},
+    {"option": "Д1. НЕ трогать FF-0328-3 в этой задаче, оставить known-red документированным навсегда", "why_not": "запись T-0575 в frozen-sanctions.jsonl explicit называет T-0576 её follow-up исполнителем; оставить нерешённым означает накопление второй санкции при каждой будущей правке process-start.ts — тот же паттерн повторных санкций, который D-064 сама называет дрейфом."},
+    {"option": "Д2. Полностью снять байт-фриз с process-start.ts (удалить весь арм FF-0328-3 для этого файла)", "why_not": "ADR T-0328 §4.2 сам называет process-start.ts 'contract-frozen' (не 'unfrozen') — контракт остаётся enforced отдельным структурным гейтом start-route-isolation.sh; T-0576 чинит НЕТОЧНОЕ ПРЕДСТАВЛЕНИЕ фриза (byte-diff вместо contract-check), не отменяет сам фриз."}
+  ],
+  "contracts": [
+    "ci/checks/anti-case-lock.sh (новый, T-0576) — Phase 1: bash-вызов read-pdp-anti-case.sh, rights-ui-anti-case.sh, detel-literal-baseline.sh как сабпроцессов (их код/владение не модифицируется). Phase 2: count_literal(root,literal,exts) — grep code-only (исключая __tests__/, .test.*, комментарии) поверх src/ и web/src/; read_baseline(key) — grep-based flat JSON reader без парсера. FAIL если любой per-литерал count > baseline ИЛИ агрегат > baseline-агрегата. --self-test планирует представительные литерал-семьи (src-scope, web-scope, TEL_GATEWAY-family) и подтверждает comment/test-file exclusion.",
+    "ci/checks/data/anti-case-baseline.json (новый, T-0576) — плоский JSON-объект {литерал:count, ..., aggregate:count} + _comment поле, объясняющее контракт 'erodes, does not grow'. НЕ ci/checks/*.sh — не захватывается frozen-checks-immutable.sh glob'ом, не само-охраняется, тот же класс, что frozen-sanctions.jsonl.",
+    "package.json 'fitness' script — аддитивная правка хвоста: '&& bash ci/checks/anti-case-lock.sh && bash ci/checks/anti-case-lock.sh --self-test' добавлено ПОСЛЕ существующего detel-literal-baseline.sh звена; ни одно существующее звено не переставлено/не удалено.",
+    "ci/checks/http-route-auth-coverage.sh (чужой, владелец T-0328, ПРАВКА санкционирована) — FF-0328-3 FROZEN_FILES массив сужен с {secret-handle.ts, process-start.ts} до {secret-handle.ts}. Обновлён комментарий header (строки FF-0328-3 описание) + комментарий над FROZEN_FILES объясняющий сужение и ссылку на ADR §4.2 + санкц-запись. FF-0328-1/2 арм и вся остальная логика файла (включая owner-header строка 2 '# T-0328 ·') НЕ ТРОНУТЫ.",
+    "ci/checks/data/frozen-sanctions.jsonl — append-only, новая строка {task:'T-0576', file:'ci/checks/http-route-auth-coverage.sh', owner:'T-0328', sanctioned_by:'founder', decision:'ADR-T0576-anticase-ci.md-§4-ff-0328-3-narrowing', note: полное обоснование (ADR §4.2 grounds + verified self-test/production green)}."
+  ],
+  "fitness_functions": [
+    {"id": "FF-T0576-1", "rule": "anti-case-lock.sh фаза 1 делегирует ко всем трём существующим точечным гейтам без модификации их файлов; их собственные --self-test остаются зелёными.", "ci_check": "bash ci/checks/read-pdp-anti-case.sh --self-test && bash ci/checks/rights-ui-anti-case.sh --self-test && bash ci/checks/detel-literal-baseline.sh --self-test (AC-4)"},
+    {"id": "FF-T0576-2", "rule": "anti-case-lock.sh фаза 2 ловит планту каждого класса денилиста — self-test на представительный поднабор литерал-семей (src-scope, web-scope, TEL_GATEWAY-семейство) + доказательство отсутствия ложных срабатываний на comment/test-file occurrences.", "ci_check": "bash ci/checks/anti-case-lock.sh --self-test (AC-1)"},
+    {"id": "FF-T0576-3", "rule": "Production-прогон на текущем dev даёт каждый литерал <= записанного baseline и агрегат <= записанного агрегата.", "ci_check": "bash ci/checks/anti-case-lock.sh, exit 0 (AC-2)"},
+    {"id": "FF-T0576-4", "rule": "Повторный прогон на неизменном дереве идемпотентен (два последовательных вызова дают идентичный stdout+exit code).", "ci_check": "ручная верификация двух последовательных прогонов anti-case-lock.sh, diff вывода = пусто (AC-3)"},
+    {"id": "FF-T0576-5", "rule": "http-route-auth-coverage.sh FF-0328-3 после правки: FROZEN_FILES содержит РОВНО src/http/secret-handle.ts; полный прогон (FF-0328-1/2/3) и --self-test зелёные.", "ci_check": "bash ci/checks/http-route-auth-coverage.sh && bash ci/checks/http-route-auth-coverage.sh --self-test (AC-5/AC-6)"},
+    {"id": "FF-T0576-6", "rule": "Новая санкц-запись в frozen-sanctions.jsonl валидный JSON, признаётся мета-гейтом как founder-класс санкция.", "ci_check": "bash ci/checks/frozen-checks-immutable.sh (проверяет SANCTION/AUDIT строки на этой ветке) (AC-7/AC-8)"},
+    {"id": "FF-T0576-7", "rule": "anti-case-lock.sh (+ --self-test) прошиты аддитивно в хвост npm run fitness; порядок существующих звеньев не нарушен.", "ci_check": "bash ci/checks/package-json-no-dup-keys.sh + визуальный diff package.json (AC-9)"},
+    {"id": "FF-T0576-8", "rule": "Полный npm run fitness прогон зелёный на итоговом дереве задачи (включая новое звено).", "ci_check": "npm run fitness (AC-10)"},
+    {"id": "FF-T0576-9", "rule": "Baseline-файл — единственный источник порогов; расширение видно построчно в git diff (no-weakening мета).", "ci_check": "ручная проверка при ревью — anti-case-baseline.json содержит _comment, объясняющий контракт"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§1 фаза 2 механизм; FF-T0576-2"},
+    {"ac": "AC-2", "covered_by": "§4 baseline-таблица; FF-T0576-3"},
+    {"ac": "AC-3", "covered_by": "§5 идемпотентность-проверка; FF-T0576-4"},
+    {"ac": "AC-4", "covered_by": "§1 фаза 1 делегирование; FF-T0576-1"},
+    {"ac": "AC-5", "covered_by": "§1 правка FF-0328-3; FF-T0576-5"},
+    {"ac": "AC-6", "covered_by": "§1 правка FF-0328-3 (self-test); FF-T0576-5"},
+    {"ac": "AC-7", "covered_by": "§7 санкц-запись; FF-T0576-6"},
+    {"ac": "AC-8", "covered_by": "§7 санкц-запись; FF-T0576-6"},
+    {"ac": "AC-9", "covered_by": "§3 wiring; FF-T0576-7"},
+    {"ac": "AC-10", "covered_by": "§5 полный прогон; FF-T0576-8"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0576-anticase-ci.md",
+  "escalation": ""
+}

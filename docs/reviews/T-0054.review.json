@@ -1,0 +1,71 @@
+{
+  "task_id": "T-0054",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "tsc": "clean",
+    "eslint": "clean",
+    "vitest": "473/473",
+    "fitness_static": "16/16 FF green (FF-6..FF-14 + existing static checks)",
+    "live_kc": "FF-1..FF-5 all pass"
+  },
+  "live_kc": "pass",
+  "live_kc_detail": {
+    "FF-1_wait_ready": "PASS — Keycloak 25.0.6 health/ready HTTP 200 after 15s (port 9000)",
+    "FF-2_realm_ready": "PASS — issuer=http://localhost:8180/realms/choros",
+    "FF-3_human_token": "PASS — ROPC e-kravtsova, access_token 1205 chars",
+    "FF-4_agent_token": "PASS — client_credentials agent-orchestrator, access_token 1065 chars",
+    "FF-5_jwt_claims": "PASS — iss/aud/sub/preferred_username/actor_type/RS256 all verified for both human and agent tokens"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docker-compose.yml:63,70",
+      "issue": "Port 9000 (Keycloak management/health interface) is hardcoded in two places — the ports mapping and the healthcheck curl — without an env var (e.g. KEYCLOAK_MGMT_PORT). It is also absent from docs/environments.md. In KC 25 start-dev, the management interface runs on 9000, not on KEYCLOAK_PORT (8180); this split was correctly handled in 08d43da but the port was not made configurable.",
+      "suggestion": "Introduce KEYCLOAK_MGMT_PORT env var (default 9000), parameterize the ports entry and the healthcheck curl, and document it in docs/environments.md §6."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0054-keycloak-compose.adr.md:240",
+      "issue": "ADR §3.6 still specifies the healthcheck as 'curl http://localhost:${KEYCLOAK_PORT:-8180}/health/ready' but the actual docker-compose.yml correctly uses port 9000 (the management port). The ADR was not updated when 08d43da fixed the live-kc failures. This will mislead future readers about where to reach the health endpoint.",
+      "suggestion": "Update ADR §3.6 healthcheck snippet to use port 9000 (or KEYCLOAK_MGMT_PORT) and add a note explaining the KC 25 http/management port split."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docker-compose.yml:40",
+      "issue": "The comment on line 40 says '(KC_DB_URL ?currentSchema=keycloak)' but the actual KC_DB_URL no longer uses a JDBC ?currentSchema parameter — the second BUILD commit replaced that with KC_DB_SCHEMA=keycloak. The comment is stale and misleads about the JDBC connection string.",
+      "suggestion": "Update the comment to reflect the actual mechanism: 'KC_DB_SCHEMA=keycloak (separate env var, not a JDBC query param)'."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0054-keycloak-compose.adr.md:271, docs/specs/T-0054-keycloak-compose.spec.md:116",
+      "issue": "The JWT contract table states 'preferred_username = client_id for agent service accounts (e.g. agent-orchestrator)'. However Keycloak 25 actually emits 'service-account-agent-orchestrator' as the preferred_username for client_credentials tokens — the service account user's username, not the client_id. AC-5 only requires non-empty (passes), but the frozen contract documentation will mislead T-0060's implementation if it expects 'agent-orchestrator'.",
+      "suggestion": "Correct the JWT contract table in both the ADR and the spec to reflect the actual Keycloak behavior: 'preferred_username = service-account-<clientId> for agent service accounts'. If the intent is to emit the actual client_id (e.g. agent-orchestrator), a custom oidc-hardcoded-claim or oidc-usermodel-attribute mapper for preferred_username needs to be added to the realm."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

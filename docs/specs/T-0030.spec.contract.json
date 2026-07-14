@@ -1,0 +1,59 @@
+{
+  "task_id": "T-0030",
+  "status": "ready",
+  "summary": "Structural grant editor (E3.4): a write-API for grants and role-assignments (POST /api/grants, POST /api/grants/:id/revoke, POST /api/role-assignments, POST /api/role-assignments/:id/revoke) where every write is gated by the T-0029 validateAdminDelegation checker (isGenesisOwner resolved from DB, never assumed), scope is composed from closed lattice dictionaries (registry/op/scope — no free text), every create/revoke emits a GrantAuditEvent into the audit floor, and the existing ra-role-editor.jsx progressive-disclosure UI (simple presets + advanced grant atoms + LLM-proposes panel) is wired to the write-API. Day-1 = API + UI wire-up; DB read-path (GET /api/rights) may remain seed-backed until T-0053.",
+  "functional": [
+    "FR-1 POST /api/grants accepts a structural body (role_id, resource_type, operation, ScopeElement scope, optional resource_facet/constraint/delegable/valid_from/valid_until/proposed_by/confirmed_by) and inserts a grant row; free-text scope is rejected (INVALID_SCOPE 400); freeform scope accepted only if isGenesisOwner.",
+    "FR-2 Every grant write gated by validateAdminDelegation: admin context (isGenesisOwner, adminGrants, adminOrgScope) is resolved from the DB before INSERT; rejection → 403 ADMIN_GATE_REJECTED with typed reason.",
+    "FR-3 POST /api/grants/:id/revoke soft-revokes (sets valid_until=now_ms, does not delete); gated by validateAdminDelegation; emits GrantAuditEvent kind=grant.revoke.",
+    "FR-4 POST /api/role-assignments creates a role_assignment row (employee_id, role_id, org-hierarchy ScopeElement org_scope, validity window, source, granted_by, optional proposed_by/confirmed_by); gated by validateAdminDelegation kind=assignment (org-axis).",
+    "FR-5 POST /api/role-assignments/:id/revoke soft-revokes (valid_until=now_ms); gated by validateAdminDelegation.",
+    "FR-6 Every successful create and revoke emits GrantAuditEvent (kind grant.create or grant.revoke) into audit_event table; proposed_by/confirmed_by threaded from request body.",
+    "FR-7 ra-role-editor.jsx RoleEditorScreen wired: submit button calls POST /api/grants per grant; LLM-proposes panel sets proposed_by=llm, confirmed_by=null on proposals; confirmation call sets confirmed_by; simple (preset) mode expands presets into structural atoms before POST.",
+    "FR-8 GET /api/rights/dictionaries returns resources (uri+name), operations (array of operation literals), orgTree (id/label/depth/children), scopeTags (id/label) — closed dictionaries the UI picker is built from."
+  ],
+  "non_functional": [
+    "NF-1 Scope must parse as a structural ScopeElement (node/tags/interval/set); no free-text rights descriptions; parseScope reuses normalize from grant-lattice.ts.",
+    "NF-2 All INSERTs and UPDATEs carry tenant_id from the authenticated request context; RLS policies on grant and role_assignment are not bypassed.",
+    "NF-3 isGenesisOwner is DB-resolved (role_assignment JOIN role WHERE slug=tenant-owner AND confirmed_by IS NOT NULL AND validity window); never hardcoded or assumed from JWT claims.",
+    "NF-4 No new scope algebra: scope validation reuses grant-lattice.ts isNarrowerOrEqual/normalize; no new ScopeElement kind introduced.",
+    "NF-5 No new DDL tables day-1 (writes land in existing grant and role_assignment tables); if a new table is added it must be numbered 030+, have tenant_id leading, RLS, FORCE ROW LEVEL SECURITY, GRANT to choros_app, and appear in known_tenant_tables.txt.",
+    "NF-6 GrantAuditEvent shape imported verbatim from grant-lattice.ts; not redefined.",
+    "NF-7 validateAdminDelegation imported from src/core/scoped-admin.ts verbatim; not reimplemented in the write-API module.",
+    "NF-8 HTTP error codes machine-readable: validateAdminDelegation rejection → 403 {code:ADMIN_GATE_REJECTED, reason:<typed>}; malformed scope → 400 INVALID_SCOPE; unknown role_id/employee_id → 404; tenant mismatch → 403 CROSS_TENANT."
+  ],
+  "out_of_scope": [
+    "LLM-proposes-grants BYO-LLM call = T-0039 (E3.5); T-0030 only wires proposed_by/confirmed_by fields and UI panel.",
+    "DB-backed grant read resolution = T-0053; GET /api/rights may remain seed-backed.",
+    "role_criticality computation = T-0040 (E4.5); UI criticality hint is display-only.",
+    "Dual-control two-approver gate = T-0044 (E4.6); proposed_by/confirmed_by schema is laid down here, enforcement is T-0044.",
+    "SoD enforcement on grant writes = T-0032; grant writes emit GrantAuditEvent (not actor_event).",
+    "TTL-delegation and substitution mechanics = T-0035.",
+    "Batch import / CSV-upload of grant sets.",
+    "Keycloak JWT auth = T-0054; dev: X-Dev-User header."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-01", "text": "POST /api/grants with a valid structural body (role_id, resource_type, operation, valid ScopeElement scope, granted_by) → 201 and a grant row inserted in grant table with correct tenant_id and supplied fields.", "verifiable_as": "test"},
+    {"id": "AC-02", "text": "POST /api/grants where validateAdminDelegation returns {ok:false, reason:scope_widens} → 403 with code ADMIN_GATE_REJECTED and reason scope_widens; no row inserted.", "verifiable_as": "test"},
+    {"id": "AC-03", "text": "POST /api/grants where validateAdminDelegation returns {ok:false, reason:org_scope_widens} → 403 with reason org_scope_widens; no row inserted.", "verifiable_as": "test"},
+    {"id": "AC-04", "text": "POST /api/grants where validateAdminDelegation returns {ok:false, reason:no_admin_authority} → 403; no row inserted.", "verifiable_as": "test"},
+    {"id": "AC-05", "text": "POST /api/grants with a free-text scope payload (not a parseable ScopeElement) → 400 INVALID_SCOPE; no row inserted.", "verifiable_as": "test"},
+    {"id": "AC-06", "text": "POST /api/grants by the genesis owner (isGenesisOwner=true resolved from DB) with any valid structural scope → 201; no parent-subset check applied (validateAdminDelegation step-3 owner short-circuit).", "verifiable_as": "test"},
+    {"id": "AC-07", "text": "POST /api/grants/:id/revoke by an authorized admin → 200; valid_until on the target grant row is set to the request time (epoch-ms); the row is NOT deleted.", "verifiable_as": "test"},
+    {"id": "AC-08", "text": "POST /api/grants/:id/revoke by a principal without covering mgmt_object:grant authority → 403 ADMIN_GATE_REJECTED.", "verifiable_as": "test"},
+    {"id": "AC-09", "text": "POST /api/role-assignments with valid body (employee_id, role_id, org-hierarchy ScopeElement org_scope, granted_by) → 201 and a row inserted in role_assignment with correct tenant_id.", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "POST /api/role-assignments where the target org_scope escapes the admin's adminOrgScope (org_scope_widens) → 403 ADMIN_GATE_REJECTED; no row inserted.", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "POST /api/role-assignments/:id/revoke by authorized admin → 200; valid_until set; row not deleted.", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "Every successful POST /api/grants emits a GrantAuditEvent (kind: grant.create) into the audit_event table with correct actor, subjectRoleId, capability (resourceType, operation), scope, and (when present) proposedBy/confirmedBy. Static lint asserts the emit call-site imports GrantAuditEvent from grant-lattice.ts.", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "Every successful POST /api/grants/:id/revoke emits a GrantAuditEvent (kind: grant.revoke) into audit_event.", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "POST /api/grants with proposed_by set and confirmed_by absent → row inserted with confirmed_by IS NULL (PROPOSAL, not effective). Subsequent confirmation updates confirmed_by to the confirming actor id.", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "isGenesisOwner is resolved from the DB (role_assignment JOIN role WHERE slug=tenant-owner AND confirmed_by IS NOT NULL AND validity window passes at request time); never assumed or hardcoded. Static lint asserts no hardcoded isGenesisOwner=true outside the DB-query helper.", "verifiable_as": "fitness"},
+    {"id": "AC-16", "text": "GET /api/rights/dictionaries returns a JSON body containing resources (array with uri and name), operations (array of operation literals), orgTree (array of org nodes with id/label/depth/children), and scopeTags (array with id/label).", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "Progressive-disclosure UI: the submit button in RoleEditorScreen triggers POST /api/grants for each grant in the current set; a 403 response surfaces the typed rejection reason inline; a 201 response adds the grant to the confirmed-grants view.", "verifiable_as": "manual"},
+    {"id": "AC-18", "text": "Simple (preset) mode: selecting a preset and submitting expands it into structural grant atoms (same shape as advanced mode) before or at POST; no separate preset table is created.", "verifiable_as": "manual"},
+    {"id": "AC-19", "text": "No new tenant table is created by T-0030 (grant and role_assignment are the write targets; both already in known_tenant_tables.txt). If DESIGN adds a new table it must appear in known_tenant_tables.txt and have a seedRowForTable case in cross_tenant.test.ts.", "verifiable_as": "fitness"},
+    {"id": "AC-20", "text": "Every DB write (INSERT INTO grant, UPDATE grant, INSERT INTO role_assignment, UPDATE role_assignment) includes tenant_id as the leading parameter; RLS policy not bypassed (no superuser path).", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0030-grant-editor.spec.md"
+}

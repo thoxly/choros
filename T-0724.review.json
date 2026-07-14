@@ -1,0 +1,51 @@
+{
+  "task_id": "T-0724",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "src/core/assistant-configurator.ts:58-72",
+      "issue": "The new RegistryListCandidate interface (+ its JSDoc block) is declared in the MIDDLE of the top-of-file import statements — between the `relation-cascade.js` import (line 56) and the `slug-generator.js` import (line 73), splitting what reads as one continuous import section. Valid TypeScript, tsc is clean, ESLint import-order is not configured to catch it — purely a readability nit.",
+      "suggestion": "Move the RegistryListCandidate interface below the import block (or into a small types section) so imports stay contiguous. No behavior change."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "T-0724.pr-handoff.json / live_proof_plan",
+      "issue": "The pr-handoff honestly discloses 'NOT YET EXECUTED — стенд offline на момент сессии' for the end-to-end LLM live-proof (real model calling list_registries before author_binding against a live BYO-LLM tenant). The multi-round list->bind flow is only proven against a scripted/stub LLM port (AC-T724-5, SequentialToolCallLlmPort) plus live-PG proof of the DATA layer (fetchRegistryListCandidates tenant/cross-tenant scoping). This is a UX/prompt-adherence gap, not a rights-contour gap: even in the worst case where a real model ignores the prompt and still guesses a slug, T-0700's existing server-side validation honestly rejects an unknown targetRegistrySlug — no security or bot>human exposure follows from an unexecuted live-proof here.",
+      "suggestion": "Track as follow-up: run the live_proof_plan in T-0724.pr-handoff.json once the dev stand is back online, to confirm the model actually adopts list->bind instead of guessing in practice."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/entitlement-gates-vendor-only.sh output vs src/http/user-mgmt.ts:755",
+      "issue": "Confirmed pre-existing, NOT a T-0724 regression. Ran the gate myself on HEAD (b3707349) and on the base commit (d468e4c9, separate worktree) — byte-identical FAIL output both times, same file. `git diff d468e4c9 HEAD -- src/http/user-mgmt.ts` is empty (file untouched by this diff, 810 lines both sides). The FAIL is a regex false-positive: VOCAB_RE='activation|entitlement|...' matches the substring 'activation' inside the comment word 'deactivation' at user-mgmt.ts:755 (post comment-stripping line renumbering makes the script report line 450, not 755 — a script quirk, not a location shift).",
+      "suggestion": "No action for this task; builder already flagged a background follow-up to add a word-boundary to VOCAB_RE. Not blocking T-0724's merge."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "bot ≤ human: list_registries reuses listRegistryDefs — the SAME DAO GET /api/registry-defs (BindProcessModal picker, screen-processes.jsx:324) calls; verified no per-registry ACL exists on either path (only withTenantTx RLS)", "covered": true },
+    { "ac": "tenant-scope RLS: fetchRegistryListCandidates(pool, tenantId) never returns another tenant's registries — live-PG AC-2, ran myself against :55432, 2/2 pass", "covered": true },
+    { "ac": "application-scope: an applicationId arg can only NARROW the already tenant-scoped candidate array in memory — cannot widen scope even with a crafted/foreign applicationId (source array structurally cannot contain another tenant's rows)", "covered": true },
+    { "ac": "read-only: list_registries case in processToolCall returns no approved/blocked/pendingPromote — only changelogLine + toolResultContent; verified in code and via AC-T724-2 unit test (0 approvedOps, 0 blockedOps)", "covered": true },
+    { "ac": "processToolCall stays pure core (no IO): function signature is a plain (non-async) function — structurally cannot await a DB/HTTP call; list_registries only filters the pre-injected registryListCandidates array", "covered": true },
+    { "ac": "agent∩user rights gate: hasAuthoringDraftGrant (owner short-circuit OR intersectionGrants canOperateSystemAgent) runs BEFORE runConfiguratorLoop for both handleConfigurator and runConfigurator entrypoints — list_registries inherits this gate for free, cannot be called by a caller lacking authoring_draft on either side of agent∩user", "covered": true },
+    { "ac": "diff scoped: only src/http/assistant.ts + src/core/assistant-configurator.ts + tests/docs changed; src/http/registry-defs.ts (the DAO) untouched — confirmed via git show --stat and git diff", "covered": true },
+    { "ac": "prompt update instructs list_registries BEFORE author_binding for non-default targetRegistrySlug, never guess — does not remove/alter prior configurator prompt behavior (additive only)", "covered": true },
+    { "ac": "tsc --noEmit — ran myself, exit 0, zero errors", "covered": true },
+    { "ac": "unit assistant-configurator.test.ts — ran myself, 49/49 (7 new AC-T724-1..5)", "covered": true },
+    { "ac": "unit assistant-suite (8 named files: configurator/owner/prompt/prompt-authz/bundle-review/thread-ux/llm-message/intent-routing) — ran myself, 125/125 exact match", "covered": true },
+    { "ac": "live-PG T-0724-list-registries-candidates.db.test.ts — ran myself against :55432 isolated clone DB, 2/2 (AC-1 scope+empty-app, AC-2 cross-tenant isolation)", "covered": true },
+    { "ac": "T-0700 regression author-binding-target-registry.test.ts — ran myself against live PG, 1/1 still green", "covered": true },
+    { "ac": "forms-schema-binding.sh + --self-test — ran myself, PASS", "covered": true },
+    { "ac": "http-route-auth-coverage.sh + --self-test — ran myself, PASS (FF-0328-1/2/3, no new route registered, secret-handle.ts byte-unchanged)", "covered": true },
+    { "ac": "anti-case-lock.sh + --self-test — ran myself, PASS (aggregate 15, baseline 16, no growth; fixtures neutral orders/invoices/t0724-*)", "covered": true },
+    { "ac": "entitlement-gates-vendor-only.sh false-positive is pre-existing, not a T-0724 regression — verified myself on base commit d468e4c9 in a separate worktree, identical failure", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

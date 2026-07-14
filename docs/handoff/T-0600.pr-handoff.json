@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0600",
+  "status": "pr_open",
+  "branch": "task/T-0600-llm-fallback-honesty",
+  "pr_url": "local:task/T-0600-llm-fallback-honesty",
+  "live_proof": "pending orchestrator",
+  "summary": "Два дефекта честности LLM-контура, оба воспроизведены на живом факте приёмки («Ошибка LLM-порта: OpenAI API error 401: {raw json}»). Дефект A (env-fallback дыра BYO): src/server.ts::makeLlmPortFactory (единственный production composition root для ассистента, server.ts:1048) падал на глобальный DEEPSEEK_API_KEY для ЛЮБОГО tenantId, у которого per-tenant loadTenantLlmConfig вернул null — тенант без своего назначенного профиля молча пользовался чужим/общим серверным ключом. Разведка подтвердила единственный производственный call-site и единственного потребителя DEEPSEEK_API_KEY/DEEPSEEK_HANDLE/deepseekSecretResolver — эти три конструкции удалены целиком (недостижимый код после фикса поведения не оставлен как 'мёртвый с комментарием' — см. ADR §1.1 за обоснованием). DEEPSEEK_BASE_URL/DEEPSEEK_MODEL остались УЗКО — только default endpoint/model строки для НЕ связанного T-0496 'Проверить подключение' (тенантский секрет, не сервер-ключ; не BYO-риск). Дефект B (утечка сырого провайдер-ответа): src/core/assistant-configurator.ts::runConfiguratorLoop (:1194-1205) и src/core/process-gen-loop.ts::runProcessGenLoop (:230-250) ловили LlmUnavailableError ЛОКАЛЬНО (минуя classifyLlmUnavailability/respondLlmUnavailable T-0573 честный 503-путь целиком) и печатали err.message — который для провайдерского 4xx (src/adapters/openai-llm-port.ts::_post :282-285) несёт ПОЛНОЕ сырое тело ответа — прямо в handlerResult.text/outcome.message, доходящий до пользователя как обычный 200-ответ. Добавлены isProviderAuthFailure/canonicalizeLlmError (src/core/llm-port.ts) — классификация по префиксу СВОЕГО адаптера (не парсинг чужого JSON), канонический русский текст без жаргона для provider-auth-fail/dormant/generic случаев; оба catch-места переписаны на canonicalizeLlmError + console.error (полная ошибка — только в серверный лог).",
+  "mechanism": {
+    "byo_fix": "makeLlmPortFactory (src/server.ts, экспортирован для тестируемости T-0600 AC-1) теперь имеет ДВА шага вместо трёх: (1) per-tenant agent_card/llm_connection конфиг (loadTenantLlmConfig, без изменений — тот же COALESCE-резолвер T-0574/T-0599); (2) при null/невалидном хендле — dormantLlmPort напрямую (был: fallback на глобальный DEEPSEEK_API_KEY между 1 и 3). dormantLlmPort → classifyLlmUnavailability/respondLlmUnavailable (T-0573/T-0595, НЕ изменены) → канонический честный 503 'LLM-ключ не подключён'. Граница легитимных env-путей (задокументирована в спеке/ADR): grantsPool===null (dev без DATABASE_URL) не регистрирует ассистентский роут вовсе — не затронут; тесты инжектят собственный llmPortFactory-стаб (другой composition root) — не затронуты; T-0496 'Проверить подключение' использует ТОЛЬКО tenantSecretResolver с тенантским секретом, DEEPSEEK_BASE_URL/MODEL там — лишь default НЕ-секретных строк endpoint/model, оставлены намеренно узко.",
+    "leak_fix": "isProviderAuthFailure(err) — true когда err instanceof LlmUnavailableError И err.message матчит /OpenAI API error (401|403):/ (префикс, который пишет НАШ адаптер, не парсинг чужого provider JSON). canonicalizeLlmError(err) — чистая функция, всегда возвращает фиксированный русский текст без жаргона и БЕЗ echo err.message: provider-auth-fail → 'Ключ LLM отклонён провайдером. Проверьте или замените ключ в LLM-соединениях.'; dormant → 'LLM-ключ не подключён. Настройте профиль ассистента в LLM-соединениях.'; generic (timeout/network/malformed/иные коды) → 'Не удалось обработать запрос из-за проблемы с подключением к LLM. Попробуйте ещё раз позже.'. Оба catch-места (runConfiguratorLoop, runProcessGenLoop) теперь: console.error(String(err)) для полного диагностического лога + canonicalizeLlmError(err) для user-facing текста. ProcessGenOutcome's status/cause union НЕ меняется — существующий тест 'error port → cause=error' проходит без изменений сигнатуры."
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npm run build (tsc + seed/tsconfig) — 0 ошибок",
+    "lint": true,
+    "lint_result": "npx eslint src — exit 0 (38 pre-existing no-console WARNINGS across the codebase incl. my 2 new console.error calls, same pattern as externalTaskBridge.ts/outcome-branch-resolver.ts — 0 errors)",
+    "types": true,
+    "types_result": "покрыто npx tsc --noEmit (тот же прогон, что build) — 0 ошибок",
+    "tests": true,
+    "tests_result": "npm test (root vitest run): 255 файлов passed | 2 skipped (257), 4908 тестов passed | 10 skipped (4918), exit 0 — включая новые src/__tests__/server-llm-factory.test.ts (3/3, AC-1), расширенные src/__tests__/assistant-llm-message.unit.test.ts (+9 тестов, isProviderAuthFailure/canonicalizeLlmError, AC-5/AC-6), src/__tests__/assistant-configurator.test.ts (+2 теста, AC-7), src/core/__tests__/process-gen-loop.test.ts (+3 теста, AC-8/AC-9). Живой Postgres (localhost:55432, DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros): npm run fitness:db — новый ci/checks/db/assistant-llm-env-fallback.test.ts (1/1, AC-2, реальный registerTenant + РЕАЛЬНЫЙ makeLlmPortFactory с DEEPSEEK_API_KEY установленным в env процесса теста → honest 503, не сетевой вызов) зелёный; ci/checks/db/assistant-llm-binding.test.ts (6/6, T-0574 C4 не регрессирует) и ci/checks/db/assistant-llm-unavailable.test.ts (4/4, T-0573/T-0595 не регрессирует) зелёные в ОБОИХ полных прогонах fitness:db. Полный прогон fitness:db показал 5-7 FAIL в doc-regen.db.test.ts/doc-summary.db.test.ts/seed-pack.test.ts (РАЗНЫЕ тесты падают в разных прогонах, все 'Test timed out in 5000ms' под нагрузкой параллельных DB-воркеров) — файлы НЕ тронуты этой задачей; при изолированном прогоне (--dir ci/checks/db без остальных 100+ файлов) все 24 теста doc-regen+doc-summary проходят зелёными — подтверждённый пре-существующий флейк среды (машинная нагрузка, не детерминированная регрессия), не связан с T-0600.",
+    "fitness": true,
+    "fitness_result": "npm run fitness (полная цепочка ~250+ non-DB чеков, включает npm run build внутри) — exit 0. npm run ci (tsc+eslint+fitness+vitest) — exit 0. Точечно: bash ci/checks/ux/assistant-llm-message-jargon.sh → PASS (не тронут, T-0573/T-0595 508-путь константы не менялись); bash ci/checks/ux/assistant-llm-message-jargon.sh --self-test → PASS; bash ci/checks/anti-case-lock.sh → PASS (Phase 1+2 в пределах baseline, 0 новых D-064 анти-кейс литералов)."
+  },
+  "files_changed": [
+    "docs/specs/T-0600-llm-fallback-honesty.spec.md",
+    "docs/specs/T-0600.spec.contract.json",
+    "docs/adr/ADR-T0600-llm-fallback-honesty.md",
+    "docs/adr/T-0600.adr.contract.json",
+    "src/server.ts",
+    "src/db/agent-card-llm.ts",
+    "src/core/llm-port.ts",
+    "src/core/assistant-configurator.ts",
+    "src/core/process-gen-loop.ts",
+    "src/__tests__/assistant-llm-message.unit.test.ts",
+    "src/__tests__/assistant-configurator.test.ts",
+    "src/__tests__/server-llm-factory.test.ts",
+    "src/core/__tests__/process-gen-loop.test.ts",
+    "ci/checks/db/assistant-llm-env-fallback.test.ts",
+    "docs/handoff/T-0600.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "ADR §4 п.7 допускал 'расширение ci/checks/db/assistant-llm-unavailable.test.ts ЛИБО новый файл рядом' для AC-2 — выбран НОВЫЙ файл (ci/checks/db/assistant-llm-env-fallback.test.ts), т.к. AC-2 нуждается в РЕАЛЬНОМ makeLlmPortFactory composition (assistant-llm-unavailable.test.ts's существующий router намеренно инжектит СВОЙ llmPortFactory-стаб для тестирования downstream honest-503 механизма — смешивать два разных router-wiring в одном файле увеличило бы связность теста; отдельный файл держит намерение явным, тот же helper-паттерн (_helpers.ts, registerTenant, cleanup) переиспользован без дублирования логики).",
+    "ADR не специфицировал точную границу для DEEPSEEK_BASE_URL/DEEPSEEK_MODEL (§O4 'решается в DESIGN') — решено: удалить DEEPSEEK_API_KEY/DEEPSEEK_HANDLE/deepseekSecretResolver целиком (единственный consumer — шаг 2 makeLlmPortFactory), но СОХРАНИТЬ DEEPSEEK_BASE_URL/DEEPSEEK_MODEL как узкие default-строки для T-0496 'Проверить подключение' — этот call-site (registerLlmConnectionTestRoute, server.ts) использует ТОЛЬКО тенантский secretHandle через tenantSecretResolver, DEEPSEEK_BASE_URL/MODEL там — non-secret default endpoint/model, не BYO-риск и не относится к дефекту A. Разведка подтвердила это единственный оставшийся consumer этих двух урезанных констант."
+  ],
+  "friction_events": [
+    "Worktree был provisioned без node_modules — npm ci --maxsockets=3 перед первым tsc/vitest прогоном.",
+    "Первый npm run fitness:db через run_in_background молча не записал вывод в ожидаемый output-файл (harness-специфичная особенность передачи stdout через `tail` в фоне) — пришлось дождаться завершения процесса через PID-поллинг и прочитать итог напрямую; повторный прогон в foreground (redirect в /tmp) дал чистый лог. Не связано с кодом задачи.",
+    "npm run fitness:db дважды показал 5-7 FAIL в doc-regen.db.test.ts/doc-summary.db.test.ts/seed-pack.test.ts — РАЗНЫЕ тесты в каждом прогоне, все с 'Test timed out in 5000ms' — подтверждено адверс-проверкой (изолированный прогон тех же файлов без остальных 100+ db-тестов) как пре-существующий флейк среды под параллельной DB-нагрузкой, НЕ регрессия T-0600 (эти файлы не в diff). Assistant-llm-* тесты (включая новый AC-2 живой тест) зелёные во всех прогонах."
+  ]
+}

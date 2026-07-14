@@ -1,0 +1,52 @@
+{
+  "task_id": "T-0078",
+  "verdict": "changes_requested",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "docs/specs/T-0078-authoring-redlines.spec.md:22-33",
+      "issue": "ADR §4 RED-LINES explicitly lists 'lossy live-migration' as a categorical human-gate operation (alongside drop/rename/lossy type-change). The spec operation table and AuthoringOpKind vocabulary omit this operation entirely, and Out of Scope (spec §5) does not account for it. This leaves a gap between the ADR red-lines coverage claim and the actual implementation scope.",
+      "suggestion": "Either (a) add 'live_migration' to AuthoringOpKind with classification destructive/core_pinned and AC-19 test, or (b) add to spec §5 Out of Scope: 'Lossy live-migration (Camunda-grade instance rerouting) — covered by separate task (TODO: assign task number)'."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "docs/specs/T-0078-authoring-redlines.spec.md:61-62",
+      "issue": "Spec §1 Confirm-contract explicitly promises three validation checks, including '2. Подтверждение не является одним из запрещённых шаблонов (автозаполнение).' isValidConfirm in src/core/authoring-redlines.ts:265-273 implements only rule 1 (length >= 10) and rule 3 (force === true). Rule 2 (forbidden template check) is absent from implementation and has no corresponding AC or test. Spec-impl mismatch on stated validation contract.",
+      "suggestion": "Option A (minimal): remove rule 2 from spec §1 and add a comment in isValidConfirm acknowledging that semantic validation is delegated to the UI layer (T-0073). Option B (full): implement FORBIDDEN_STATEMENTS list, enforce in isValidConfirm, add AC-19 test."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/specs/T-0078-authoring-redlines.spec.md:32",
+      "issue": "Spec summary table labels core/system-directory-field operations as 'destructive (всегда, без core-check)' but the actual AuthoringChangeClass value is 'core_pinned' (a distinct third classification). FR-2 and ACs AC-8/AC-9 correctly use 'core_pinned'. Summary table is misleading.",
+      "suggestion": "Change table cell to 'core_pinned (безусловный deny, escape-hatch запрещён §5)'."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1",  "covered": true},
+    {"ac": "AC-2",  "covered": true},
+    {"ac": "AC-3",  "covered": true},
+    {"ac": "AC-4",  "covered": true},
+    {"ac": "AC-5",  "covered": true},
+    {"ac": "AC-6",  "covered": true},
+    {"ac": "AC-7",  "covered": true},
+    {"ac": "AC-8",  "covered": true},
+    {"ac": "AC-9",  "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

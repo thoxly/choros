@@ -1,0 +1,249 @@
+{
+  "meta": {
+    "name": "showcase",
+    "version": "1.0.0",
+    "description": "Choros showcase tenant: demo org structure, roles, and process instances for dev/demo stand."
+  },
+  "tenant": {
+    "slug": "showcase",
+    "display_name": "Showcase Corp"
+  },
+  "departments": [
+    { "slug": "fin",  "display_name": "Финансы",          "parent_slug": null },
+    { "slug": "cs",   "display_name": "Клиентский сервис", "parent_slug": null },
+    { "slug": "plat", "display_name": "Платформа",         "parent_slug": null }
+  ],
+  "positions": [
+    { "slug": "fin-ctrl", "title": "Контролёр расчётов",   "department_slug": "fin"  },
+    { "slug": "fin-appr", "title": "Согласующий счетов",   "department_slug": "fin"  },
+    { "slug": "fin-cfo",  "title": "Финансовый директор",  "department_slug": "fin"  },
+    { "slug": "cs-l1",    "title": "Линия поддержки L1",   "department_slug": "cs"   },
+    { "slug": "cs-l2",    "title": "Эскалации L2",         "department_slug": "cs"   },
+    { "slug": "plat-int", "title": "Интеграции",           "department_slug": "plat" },
+    { "slug": "plat-svc", "title": "Сервисные коннекторы", "department_slug": "plat" }
+  ],
+  "employees": [
+    { "slug": "e-kravtsova", "display_name": "А. Кравцова",  "kind": "human", "position_slug": "fin-ctrl"  },
+    { "slug": "a-recon",     "display_name": "Сверка-агент", "kind": "agent", "position_slug": "fin-ctrl"  },
+    { "slug": "a-invoice",   "display_name": "Счёт-агент",   "kind": "agent", "position_slug": "fin-appr"  },
+    { "slug": "e-mironov",   "display_name": "Д. Миронов",   "kind": "human", "position_slug": "fin-appr"  },
+    { "slug": "e-larina",    "display_name": "Е. Ларина",    "kind": "human", "position_slug": "fin-cfo"   },
+    { "slug": "a-triage",    "display_name": "Триаж-агент",  "kind": "agent", "position_slug": "cs-l1"     },
+    { "slug": "e-orlov",     "display_name": "К. Орлов",     "kind": "human", "position_slug": "cs-l1"     },
+    { "slug": "e-savina",    "display_name": "Н. Савина",    "kind": "human", "position_slug": "cs-l1"     },
+    { "slug": "e-petrov",    "display_name": "И. Петров",    "kind": "human", "position_slug": "cs-l2"     },
+    { "slug": "e-belov",     "display_name": "С. Белов",     "kind": "human", "position_slug": "plat-int"  },
+    { "slug": "s-ledger",    "display_name": "ledger-sync",  "kind": "agent", "position_slug": "plat-svc"  },
+    { "slug": "s-ocr",       "display_name": "ocr-gateway",  "kind": "agent", "position_slug": "plat-svc"  }
+  ],
+  "roles": [
+    { "slug": "tenant-owner",    "display_name": "Владелец тенанта",   "description": "Genesis root admin role",            "system": true  },
+    { "slug": "budget-approver", "display_name": "Согласующий бюджет", "description": "Cross-cutting budget approval role", "system": true  },
+    { "slug": "role-fin-control",      "display_name": "Контролёр расчётов",          "description": null, "system": false },
+    { "slug": "role-fin-approve-250",  "display_name": "Согласование ≤ ₽250 000",     "description": null, "system": false },
+    { "slug": "role-fin-approve-50",   "display_name": "Согласующий счетов ≤ ₽50 000", "description": null, "system": false },
+    { "slug": "role-fin-recon",        "display_name": "Сверка платежей",             "description": null, "system": false },
+    { "slug": "role-fin-escrcv",       "display_name": "Приёмник эскалаций агентов",  "description": null, "system": false },
+    { "slug": "role-cs-l1",            "display_name": "Линия поддержки L1",          "description": null, "system": false },
+    { "slug": "role-cs-l2",            "display_name": "Эскалации L2",                "description": null, "system": false },
+    { "slug": "role-plat-ledger",      "display_name": "Коннектор реестра",           "description": null, "system": false }
+  ],
+  "role_assignments": [],
+  "grants": [],
+  "rights_cards": [
+    {
+      "role_slug": "role-fin-control",
+      "name": "Контролёр расчётов",
+      "dept": "Финансы",
+      "scope": "Финансы",
+      "holders": [{ "type": "human", "name": "А. Кравцова" }],
+      "grants": [
+        { "res": "Реестр счетов",    "uri": "mcp://ledger.invoices",    "ops": ["read", "write"], "scope": "Финансы"      },
+        { "res": "Сверка платежей",  "uri": "mcp://ledger.recon",       "ops": ["read", "write"], "scope": "Финансы"      },
+        { "res": "Контрагенты (KYC)","uri": "mcp://counterparty.kyc",   "ops": ["read", "write"], "scope": "Финансы"      },
+        { "res": "Платёжный шлюз",   "uri": "mcp://payments.initiate",  "ops": ["exec"],          "scope": "≤ ₽250 000"  }
+      ],
+      "fields": [
+        { "name": "Сумма счёта",   "a": "read"  },
+        { "name": "Контрагент",    "a": "write" },
+        { "name": "Реквизиты",     "a": "write" },
+        { "name": "Лимит платежа", "a": "read"  }
+      ]
+    },
+    {
+      "role_slug": "role-fin-approve-250",
+      "name": "Согласование ≤ ₽250 000",
+      "dept": "Финансы",
+      "scope": "Финансы · Согласование счёта",
+      "holders": [
+        { "type": "human", "name": "А. Кравцова" },
+        { "type": "human", "name": "Е. Ларина"   }
+      ],
+      "grants": [
+        { "res": "Реестр счетов", "uri": "mcp://ledger.invoices",   "ops": ["read"],  "scope": "Финансы · Согласование счёта" },
+        { "res": "Платёжный шлюз","uri": "mcp://payments.initiate", "ops": ["exec"],  "scope": "≤ ₽250 000"                   }
+      ],
+      "fields": [
+        { "name": "Сумма счёта",    "a": "read"   },
+        { "name": "Решение",        "a": "write"  },
+        { "name": "Возврат средств","a": "hidden" }
+      ]
+    },
+    {
+      "role_slug": "role-fin-approve-50",
+      "name": "Согласующий счетов ≤ ₽50 000",
+      "dept": "Финансы",
+      "scope": "Финансы · Согласование счёта",
+      "holders": [{ "type": "agent", "name": "Счёт-агент" }],
+      "grants": [
+        { "res": "Реестр счетов",        "uri": "mcp://ledger.invoices",   "ops": ["read", "write"], "scope": "Финансы · Согласование счёта" },
+        { "res": "Справочник договоров", "uri": "mcp://contracts.lookup",  "ops": ["read"],          "scope": "Финансы"                      },
+        { "res": "OCR-распознавание",    "uri": "mcp://ocr.extract",       "ops": ["exec"],          "scope": "Финансы · Согласование счёта" },
+        { "res": "Платёжный шлюз",       "uri": "mcp://payments.initiate", "ops": ["exec"],          "scope": "≤ ₽50 000"                    }
+      ],
+      "fields": [
+        { "name": "Сумма счёта",    "a": "read"   },
+        { "name": "Контрагент",     "a": "read"   },
+        { "name": "Договор",        "a": "read"   },
+        { "name": "Реквизиты",      "a": "write"  },
+        { "name": "Возврат средств","a": "hidden" }
+      ]
+    },
+    {
+      "role_slug": "role-fin-recon",
+      "name": "Сверка платежей",
+      "dept": "Финансы",
+      "scope": "Финансы · Закрытие месяца",
+      "holders": [
+        { "type": "agent", "name": "Счёт-агент"   },
+        { "type": "human", "name": "А. Кравцова"  }
+      ],
+      "grants": [
+        { "res": "Реестр счетов",  "uri": "mcp://ledger.invoices", "ops": ["read"],          "scope": "Финансы"                    },
+        { "res": "Сверка платежей","uri": "mcp://ledger.recon",    "ops": ["read", "write"], "scope": "Финансы · Закрытие месяца"  },
+        { "res": "Шина событий",   "uri": "mcp://bus.publish",     "ops": ["exec"],          "scope": "Финансы"                    }
+      ],
+      "fields": [
+        { "name": "Период",      "a": "read"  },
+        { "name": "Расхождение", "a": "write" },
+        { "name": "Комментарий", "a": "write" }
+      ]
+    },
+    {
+      "role_slug": "role-fin-escrcv",
+      "name": "Приёмник эскалаций агентов",
+      "dept": "Финансы",
+      "scope": "Финансы",
+      "holders": [{ "type": "human", "name": "А. Кравцова" }],
+      "grants": [
+        { "res": "Очередь эскалаций","uri": "mcp://escalations.queue", "ops": ["read", "write"], "scope": "Финансы" },
+        { "res": "Журнал агентов",   "uri": "mcp://agents.audit",      "ops": ["read"],          "scope": "Финансы" }
+      ],
+      "fields": [
+        { "name": "Инцидент",  "a": "read"  },
+        { "name": "Резолюция", "a": "write" }
+      ]
+    },
+    {
+      "role_slug": "role-cs-l1",
+      "name": "Линия поддержки L1",
+      "dept": "Клиентский сервис",
+      "scope": "Клиентский сервис · Поддержка",
+      "holders": [
+        { "type": "agent", "name": "Триаж-агент" },
+        { "type": "human", "name": "К. Орлов"    },
+        { "type": "human", "name": "Н. Савина"   }
+      ],
+      "grants": [
+        { "res": "Очередь обращений","uri": "mcp://support.queue",  "ops": ["read", "write"], "scope": "Поддержка" },
+        { "res": "База знаний",      "uri": "mcp://kb.search",       "ops": ["read"],          "scope": "—"         },
+        { "res": "CRM клиента",      "uri": "mcp://crm.customer",    "ops": ["read"],          "scope": "Поддержка" }
+      ],
+      "fields": [
+        { "name": "Тема",           "a": "read"   },
+        { "name": "Категория",      "a": "write"  },
+        { "name": "Ответ",          "a": "write"  },
+        { "name": "Возврат средств","a": "hidden" }
+      ]
+    },
+    {
+      "role_slug": "role-cs-l2",
+      "name": "Эскалации L2",
+      "dept": "Клиентский сервис",
+      "scope": "Клиентский сервис · Поддержка",
+      "holders": [{ "type": "human", "name": "И. Петров" }],
+      "grants": [
+        { "res": "Очередь обращений","uri": "mcp://support.queue",   "ops": ["read", "write"], "scope": "Поддержка" },
+        { "res": "CRM клиента",      "uri": "mcp://crm.customer",    "ops": ["read", "write"], "scope": "Поддержка" },
+        { "res": "Возвраты средств", "uri": "mcp://payments.refund", "ops": ["exec"],          "scope": "≤ ₽30 000" }
+      ],
+      "fields": [
+        { "name": "Спор",           "a": "read"  },
+        { "name": "Возврат средств","a": "write" },
+        { "name": "Решение",        "a": "write" }
+      ]
+    },
+    {
+      "role_slug": "role-plat-ledger",
+      "name": "Коннектор реестра",
+      "dept": "Платформа",
+      "scope": "Платформа",
+      "holders": [{ "type": "service", "name": "ledger-sync" }],
+      "grants": [
+        { "res": "Реестр счетов","uri": "mcp://ledger.invoices", "ops": ["read", "write"], "scope": "Платформа" },
+        { "res": "Шина событий", "uri": "mcp://bus.publish",     "ops": ["exec"],          "scope": "Платформа" }
+      ],
+      "fields": []
+    }
+  ],
+  "process_instances": [
+    {
+      "id": "INS-7731", "name": "Согласование заявки на закупку (линейный ТЭЛ · DEMO-1)",
+      "procId": "PRC-TEL-LINEAR", "status": "running",
+      "node": "S3 · Юр-предпроверка", "started": "07.06.2026 14:28:11", "elapsed": "00:06:42",
+      "progress": { "done": 3, "total": 5 }, "execs": ["human", "agent", "service"]
+    },
+    {
+      "id": "INS-7702", "name": "Возврат средств клиенту",
+      "procId": "PRC-REFUND", "status": "waiting",
+      "node": "n3 · Утверждение", "started": "07.06.2026 10:15:44", "elapsed": "04:13:28",
+      "progress": { "done": 2, "total": 5 }, "execs": ["human"]
+    },
+    {
+      "id": "INS-7698", "name": "Закрытие месяца",
+      "procId": "PRC-MONTH-CLOSE", "status": "running",
+      "node": "n5 · Сверка", "started": "06.06.2026 23:30:00", "elapsed": "14:58:12",
+      "progress": { "done": 5, "total": 8 }, "execs": ["human", "service"]
+    },
+    {
+      "id": "INS-7740", "name": "Классификация обращения",
+      "procId": "PRC-SUPPORT-TRIAGE", "status": "running",
+      "node": "n2 · Триаж", "started": "07.06.2026 14:30:22", "elapsed": "00:00:58",
+      "progress": { "done": 1, "total": 4 }, "execs": ["agent"]
+    },
+    {
+      "id": "INS-7755", "name": "Проверка контрагента (KYC)",
+      "procId": "PRC-KYC", "status": "waiting",
+      "node": "n4 · Комплаенс", "started": "07.06.2026 08:00:00", "elapsed": "06:30:45",
+      "progress": { "done": 1, "total": 3 }, "execs": ["human", "service"]
+    },
+    {
+      "id": "INS-7733", "name": "Поддержка и эскалация",
+      "procId": "PRC-SUPPORT-ESC", "status": "failed",
+      "node": "n6 · L2", "started": "06.06.2026 18:45:30", "elapsed": "19:45:02",
+      "progress": { "done": 3, "total": 4 }, "execs": ["human", "agent"]
+    },
+    {
+      "id": "INS-7729", "name": "Инициирование платежа",
+      "procId": "PRC-PAYMENT-INIT", "status": "done",
+      "node": "n7 · Завершение", "started": "07.06.2026 15:05:11", "elapsed": "00:03:20",
+      "progress": { "done": 5, "total": 5 }, "execs": ["agent"]
+    },
+    {
+      "id": "INS-7690", "name": "Синхронизация проводок",
+      "procId": "PRC-LEDGER-SYNC", "status": "done",
+      "node": "n8 · Завершение", "started": "07.06.2026 14:32:15", "elapsed": "00:02:08",
+      "progress": { "done": 3, "total": 3 }, "execs": ["service"]
+    }
+  ]
+}

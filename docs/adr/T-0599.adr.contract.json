@@ -1,0 +1,102 @@
+{
+  "task_id": "T-0599",
+  "status": "ready",
+  "decision": "Источник статуса: существующий GET /api/agents (src/http/agents-list.ts), но чинится баг честности — listAgentsTx добавляет LEFT JOIN choros.llm_connection на ac.llm_connection_id и вычисляет COALESCE(lc.endpoint, ac.llm_endpoint)/COALESCE(lc.model, ac.llm_model)/COALESCE(lc.secret_handle, ac.llm_secret_handle) — ТОТ ЖЕ предикат, что использует реальный рантайм-резолвер src/db/agent-provision.ts::readConfiguredAgentLlmConfig (вызывается из src/server.ts::makeLlmPortFactory при настоящем LLM-вызове). serializeAgent не меняется структурно — llm_bound = row.llm_secret_handle !== null остаётся тем же кодом, но входные данные честны (раньше читали только устаревшее agent_card.llm_secret_handle, migration 094 deprecation, игнорируя llm_connection.secret_handle — актуальный T-0498 путь привязки через /llm-connections). Клиент: screen-assistant.jsx новый хук useAssistantLlmStatus() вызывает GET /api/agents при монтировании (без admin-гейта, безопасно для любого пользователя), находит запись slug==='assistant-agent', держит {loading, llmBound: boolean|null}. Баннер AssistantLlmBanner рендерится только когда loading===false И llmBound===false (unknown-состояния — сетевая ошибка/запись не найдена — трактуются как 'не показывать', честная неизвестность не равна доказанному факту отсутствия ключа). Admin-статус для deep-link кнопки читается СИНХРОННО из существующего клиентского кэша getNavCapabilities() (web/src/app-shell/active-tenant.js), заполняемого shell.jsx auth-bootstrap ДО монтирования любого защищённого экрана — без нового HTTP-запроса, тот же предикат isGenesisOwner||zones.includes('admin'), что решает видимость admin nav-зоны (nav-config.js::projectZones). Кнопка — чистая клиентская навигация (navigate('/llm-connections')), не обходит серверный гейт T-0595. Новый kit-компонент Notice (components.jsx, соседствует с Toast) — персистентная warning-плашка, только --chs-* токены (--chs-color-warning/--chs-color-warning-soft, уже парные в обеих темах). Живой (F7): перечитывает статус on-mount и on-focus (window focus event) — после возврата с /llm-connections статус обновляется без ручного refresh; polling/realtime явно не нужны.",
+  "rejected_alternatives": [
+    {
+      "option": "Новый эндпойнт GET /api/assistant/llm-status",
+      "why_not": "Прямо запрещено рамкой задачи (reuse существующих источников). GET /api/agents уже содержит всё нужное после фикса — второй эндпойнт дублировал бы источник правды."
+    },
+    {
+      "option": "Вызывать GET /api/llm-connections для проверки статуса из экрана ассистента",
+      "why_not": "Эндпойнт admin-only (canConfigureLlmConnection, 403 для builder-не-админа) — вызов от ЛЮБОГО пользователя означал бы систематический 403 для не-админов на каждую загрузку экрана ассистента. GET /api/agents не имеет такого гейта и уже агрегирует нужный boolean."
+    },
+    {
+      "option": "Оставить llm_bound как есть, вычислять «настоящий» статус вторым полем на клиенте эвристикой",
+      "why_not": "Плодит два источника правды с шансом разойтись; клиент физически не имеет доступа к llm_connection.secret_handle (и не должен) — эвристика на клиенте невозможна без утечки. Единственно честный путь — чинить сервер."
+    },
+    {
+      "option": "Клиент запрашивает admin-статус отдельным fetch('/api/me/nav-capabilities') при монтировании экрана ассистента",
+      "why_not": "Дублирует уже сделанный shell-запрос (лишний round-trip на каждую загрузку экрана); getNavCapabilities() синхронно возвращает уже резолвленное значение — гонки нет, т.к. authReady гейтит рендер маршрутов до завершения resolveNavCapabilities()."
+    },
+    {
+      "option": "Polling каждые N секунд для «живого» статуса",
+      "why_not": "Спека явно ограничивает F7 до on-mount/on-focus ('реалтайм не нужен') — polling добавил бы нагрузку без требуемой пользы; возврат с /llm-connections — единственный практический сценарий смены статуса, и focus-событие его покрывает."
+    },
+    {
+      "option": "Рендерить disabled-кнопку для не-админа вместо полного её отсутствия",
+      "why_not": "Тот же анти-паттерн, что отклонён в T-0595 ('честно назвали, нечестно предложили') — зеркалим решение T-0595, не изобретаем заново."
+    },
+    {
+      "option": "Встроить баннер прямо в JSX AssistantScreen без выделения Notice-компонента (ad-hoc div как floor2Flag)",
+      "why_not": "Задача явно просит kit-компонент (Alert/notice-паттерн) — разовый inline-div создал бы вторую нестандартную реализацию 'предупреждения' рядом с Toast, увеличивая расхождение kit-поверхности."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "AgentPublic (существующий, src/http/agents-list.ts:137-167)",
+      "fields": [
+        {"name": "llm_bound", "type": "boolean — теперь резолвится честно через COALESCE с llm_connection.secret_handle, имя/тип не меняются"},
+        {"name": "llm_connection_id", "type": "string | null — без изменений"},
+        {"name": "slug", "type": "string — используется клиентом для поиска assistant-agent"}
+      ]
+    },
+    {
+      "entity": "AssistantLlmStatusState (client-only, не персистится)",
+      "fields": [
+        {"name": "loading", "type": "boolean"},
+        {"name": "llmBound", "type": "boolean | null — null = честная неизвестность (loading отдельно, это ПОСЛЕ загрузки: ошибка сети или запись не найдена)"}
+      ]
+    },
+    {
+      "entity": "Notice (новый kit-компонент, components.jsx)",
+      "fields": [
+        {"name": "tone", "type": "'info' | 'warning' | 'error'"},
+        {"name": "title", "type": "string (optional)"},
+        {"name": "message", "type": "string (optional)"},
+        {"name": "action", "type": "ReactNode (optional)"},
+        {"name": "className", "type": "string (optional)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "src/http/agents-list.ts::listAgentsTx — LEFT JOIN choros.llm_connection + COALESCE на endpoint/model/secret_handle (ADR §1.1)",
+    "src/__tests__/agents-list.test.ts — 4 комбинации null/non-null для ac.llm_secret_handle × lc.secret_handle (AC-3)",
+    "живой DB-тест (ci/checks/db/*) — AC-1/AC-2 через реальный Postgres, assistant-agent привязан к llm_connection с secret_handle",
+    "web/src/screens/screen-assistant.jsx — useAssistantLlmStatus() хук + AssistantLlmBanner компонент (ADR §1.2/1.3)",
+    "web/src/components/components.jsx — новый экспорт Notice (ADR §1.4)",
+    "web/src/design/app.css (или соседний файл .chs-toast) — .chs-notice* CSS на --chs-* токенах",
+    "web/src/screens/__tests__/screen-assistant.llm-banner.test.js — source-presence конвенция (см. screen-assistant.error-envelope.test.js)",
+    "docs/handoff/T-0599.pr-handoff.json — BUILD-фаза"
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1: GET /api/agents возвращает llm_bound:true для assistant-agent, привязанного через llm_connection.secret_handle (inline agent_card.llm_secret_handle NULL).", "ci_check": "живой DB-тест (ci/checks/db/* или root vitest с реальным Postgres)"},
+    {"id": "FF-2", "rule": "AC-2: GET /api/agents возвращает llm_bound:false, когда ни connection, ни inline-handle не заданы.", "ci_check": "тот же DB-тест"},
+    {"id": "FF-3", "rule": "AC-3: serializeAgent/SQL-резолюция покрыта юнит-тестами на 4 комбинации.", "ci_check": "vitest run src/__tests__/agents-list.test.ts"},
+    {"id": "FF-4", "rule": "AC-4: баннер не рендерится до разрешения запроса.", "ci_check": "vitest run web/src/screens/__tests__/screen-assistant.llm-banner.test.js"},
+    {"id": "FF-5", "rule": "AC-5: баннер рендерится при llm_bound:false, warning-тон, без жаргона.", "ci_check": "тот же тестовый файл"},
+    {"id": "FF-6", "rule": "AC-6: admin видит кнопку с navigate('/llm-connections').", "ci_check": "тот же тестовый файл"},
+    {"id": "FF-7", "rule": "AC-7: не-admin не видит кнопку, текст без голого пути.", "ci_check": "тот же тестовый файл"},
+    {"id": "FF-8", "rule": "AC-8: баннер не рендерится при llm_bound:true.", "ci_check": "тот же тестовый файл"},
+    {"id": "FF-9", "rule": "AC-9: 503-путь не регрессирует — существующие 12 тестов screen-assistant.error-envelope.test.js проходят без изменений.", "ci_check": "vitest run web/src/screens/__tests__/screen-assistant.error-envelope.test.js"},
+    {"id": "FF-10", "rule": "AC-10: полный локальный CI (root+web) зелёный.", "ci_check": "npm run ci && (cd web && npx vitest run)"},
+    {"id": "FF-11", "rule": "AC-11: UX-гейты g2/g5/g6 зелёные / без новых находок.", "ci_check": "bash ci/checks/ux/ux-g2-theme-pairing.sh && bash ci/checks/ux/ux-g5-jargon-denylist.sh && bash ci/checks/ux/ux-g6-no-new-hardcode.sh"},
+    {"id": "FF-12", "rule": "AC-12: Notice использует только --chs-* токены, экспортирован и переиспользован.", "ci_check": "bash ci/checks/ux/ux-g6-no-new-hardcode.sh + source-presence тест"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-2"},
+    {"ac": "AC-3", "covered_by": "FF-3"},
+    {"ac": "AC-4", "covered_by": "FF-4"},
+    {"ac": "AC-5", "covered_by": "FF-5"},
+    {"ac": "AC-6", "covered_by": "FF-6"},
+    {"ac": "AC-7", "covered_by": "FF-7"},
+    {"ac": "AC-8", "covered_by": "FF-8"},
+    {"ac": "AC-9", "covered_by": "FF-9"},
+    {"ac": "AC-10", "covered_by": "FF-10"},
+    {"ac": "AC-11", "covered_by": "FF-11"},
+    {"ac": "AC-12", "covered_by": "FF-12"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0599-assistant-banner.md",
+  "escalation": "Нет. Весь механизм переиспользует существующие поверхности (GET /api/agents, getNavCapabilities(), nav-config admin-предикат, T-0595 текстовый паттерн) — фикс agents-list.ts является коррекцией бага честности в уже существующем контракте, не новой архитектурой. Единственное новое — Notice kit-компонент (запрошен явно в задаче) и клиентский хук чтения статуса."
+}

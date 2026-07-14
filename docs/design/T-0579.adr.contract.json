@@ -1,0 +1,84 @@
+{
+  "task_id": "T-0579",
+  "status": "ready",
+  "decision": "Тип «Файл» вводится как x-file-аннотированный СТРУКТУРНЫЙ примитив, разведённый через УЖЕ СУЩЕСТВУЮЩИЙ каталог привязок (PD-18) к выделенной компоненте FileField, которая говорит ТОЛЬКО с уже построенными маршрутами файлов (POST/GET/download в src/http/files.ts, T-0518). Значение поля в record.data — строковый fileVersionId (как person=id, relation=uuid); эмит в record_schema = {type:'string','x-file':{}} (generic x-strip валидатора уже покрывает). Единственная backend-правка — аддитивный inline-режим download-маршрута (?disposition=inline) для превью image/*/pdf при сохранённом PDP/tenant/nosniff. Бэкенд/модель choros.file+file_version/права-производность через PDP T-0021/хранилище FsObjectStore — построены (T-0119/T-0518), НЕ переделываются; ни новой permission-строки, ни второго рендерера, ни новой tenant-таблицы, ни клиентского file-ACL, ни прямого S3-доступа с фронта.",
+  "rejected_alternatives": [
+    { "option": "Новый параллельный inputKind-словарь файлов вне каталога привязок", "why_not": "Размножение рендереров — антипаттерн, устранённый PD-18/OBLIK (4 клиентских словаря → 1 каталог). file-контракт УЖЕ объявлен заглушкой в каталоге (обе стороны); правильно оживить его через resolveFieldContract, не заводить второй путь." },
+    { "option": "Встроенный объект {fileId,name,mime,size} в record.data", "why_not": "Дублирует метаданные из choros.file_version (единый источник истины), рассинхронизируется при замене, ломает x-file→type:'string' (потребовал бы type:'object'+под-схему, чего flat-форма избегает). Строка-идентификатор + резолв из листинга = один источник." },
+    { "option": "Хранить fileId (логический файл) вместо fileVersionId", "why_not": "download и превью адресуются ВЕРСИЕЙ; хранение fileId заставило бы клиент резолвить current_version перед каждым скачиванием и создало бы гонку «какая версия показана». versionId = конкретная показанная версия; замена явно двигает указатель через onChange." },
+    { "option": "Клиент пресайнит и грузит напрямую в S3/bucket", "why_not": "Разрывает PDP-инвариант (байты/ключ мимо authorizeFileOp), клиент узнаёт bucket/креды, tenant-префикс уходит под дисциплину клиента → дыра изоляции. Загрузка ТОЛЬКО через POST …/files (гейт update на запись, серверный buildObjectKey)." },
+    { "option": "Клиентский file-ACL / поле видимости файла на фронте", "why_not": "Второй источник истины «кто видит файл» ≠ «кто видит запись» → leak/тихий отказ. Запрещено T-0018 §2 / T-0021 FF-R6. Видимость = производная записи через уже-подключённый PDP; фронт лишь честно показывает 403/пусто." },
+    { "option": "Всегда inline-отдача (убрать attachment)", "why_not": "image/svg+xml / text/html inline с origin приложения = stored-XSS. Inline — allowlist image/*(кроме svg)/pdf; прочее — attachment + nosniff. Дефолт остаётся attachment (не ломает текущее поведение/тесты)." },
+    { "option": "Отдельный маршрут GET /api/files/:id/preview", "why_not": "Дублировал бы весь PDP+tenant+stream-код download-маршрута (второй авторизационный кодпуть файла — то, чего FF-NOACL избегает). ?disposition=inline на существующем маршруте = один авторизационный путь, ветвление только в заголовке Content-Disposition." },
+    { "option": "Поднять MinIO как docker-compose сервис под эту задачу", "why_not": "Не нужно: бэкенд использует FsObjectStore (ФС, FILE_STORE_ROOT), достаточного для upload/download/preview на dev-стенде. MinIO/prod-S3 — deploy-time за ObjectStore-портом (T-0119 §8, GT-4). Добавление сервиса = лишний провижн/сбой-режим вне объёма." },
+    { "option": "Разрешить файл как sub-field коллекции «Список строк»", "why_not": "stripXExtensions не рекурсирует в items.properties (nested x-file сломал бы AJV-strict — как nested x-date); depth-cap=1 как relation/computed. Файл-в-коллекции — отдельная задача при необходимости." }
+  ],
+  "object_model": [
+    { "entity": "record_schema property (файловое поле, эмит-контракт PINNED — новых БД-сущностей нет)", "fields": [
+      { "name": "type", "type": "\"string\" (JSON-Schema слот)" },
+      { "name": "x-file", "type": "object (day-1 пустой {}; расширяемо {mime_allow?:string[], max_bytes?:number} additive)" },
+      { "name": "title", "type": "string (label поля)" },
+      { "name": "(value in record.data)", "type": "string = fileVersionId | \"\" (пусто)" }
+    ]},
+    { "entity": "in-memory дескриптор поля (records-form/apps-schema)", "fields": [
+      { "name": "type", "type": "\"file\" (в FIELD_TYPES/FIELD_TYPE_VALUES)" },
+      { "name": "key", "type": "string (FIELD_KEY_RE)" },
+      { "name": "label", "type": "string (пользовательский, не кейс-строка)" },
+      { "name": "required", "type": "boolean (файл-поле может быть обязательным)" }
+    ]},
+    { "entity": "choros.file / choros.file_version (СУЩЕСТВУЮТ — migrations/058, T-0119; здесь НЕ создаются, справочно)", "fields": [
+      { "name": "file.id / file.record_id / file.current_version / file.retention_state", "type": "uuid/uuid/uuid/text (tenant-таблица, FORCE RLS)" },
+      { "name": "file_version.id / object_key / mime_type / content_hash / data_class", "type": "uuid/text/text/text/text (immutable, tenant-таблица)" }
+    ]}
+  ],
+  "contracts": [
+    "apps-schema.js: FIELD_TYPES += {value:'file', label:'Файл'}",
+    "apps-schema.js buildRecordSchema: f.type==='file' → { type:'string', 'x-file':{}, title }",
+    "apps-schema.js schemaToFormFields/parseRecordSchema: def['x-file'] present → { key, type:'file', label, required } (детект ДО generic-string-fallthrough)",
+    "field-contract.js: contractKindForFieldType('file')==='file'",
+    "field-contract.js: resolveFieldContract({type:'file'}) === { contractKind:'file', presentation:'file', editable:true } (structuralKind += file)",
+    "field-renderer.jsx FieldControl: presentation==='file' → <FileField {field,value,onChange,error,idPrefix,isRequired,readOnly} /> (file НЕ в isScalarish)",
+    "FileField использует ТОЛЬКО существующие маршруты: POST /api/records/:recordId/files (body=bytes, Content-Type=mime, X-File-Name=name) → 201 {fileId,versionId,versionNo}; GET /api/records/:recordId/files → [{fileId,originalName,currentVersionId,mime,sizeBytes,createdAt}]; GET /api/files/:versionId/download[?disposition=inline]",
+    "records-form.js validateRecordValues: f.type==='file' && required && value==='' → error[key]; blankRecordValues/recordDataToValues file → строка (пусто '')",
+    "records-form.js formatCellValue(value,'file') → resolved originalName | '—' (никогда сырой uuid); schemaToColumns пробрасывает file-колонку",
+    "src/http/files.ts (единственная backend-правка): GET /api/files/:fileVersionId/download?disposition=inline → Content-Disposition:inline ТОЛЬКО для mime ∈ {image/* кроме svg, application/pdf}; иначе attachment; PDP getFileContentUrl + tenant/actor из identity + nosniff БЕЗ изменений; дефолт (без параметра) attachment",
+    "record-schema-validator.ts: БЕЗ изменений — stripXExtensions уже generic-стрипает x-file до AJV-strict"
+  ],
+  "fitness_functions": [
+    { "id": "FF-FIELDTYPE", "rule": "file — первоклассный тип: FIELD_TYPES содержит {value:'file'}, FIELD_TYPE_VALUES.includes('file'), validateField принимает file (AC-1).", "ci_check": "vitest run web/src/screens/apps-schema.test.js -t 'file': assert FIELD_TYPES entry + validateField no error" },
+    { "id": "FF-XFILE-ROUNDTRIP", "rule": "Round-trip x-file: buildRecordSchema file→{type:'string','x-file':…}; schemaToFormFields/schemaToColumns x-file→type:'file'; без x-file не детектится как file (AC-2,AC-3).", "ci_check": "vitest run apps-schema/records-form tests: build→parse идентичность типа + negative без x-file" },
+    { "id": "FF-CATALOG", "rule": "Единый каталог, не размножение: contractKindForFieldType('file')==='file', resolveFieldContract({type:'file'}).presentation==='file'; нет нового inputKind-словаря файлов (AC-4, NF-1).", "ci_check": "vitest run field-contract test + grep guard: file-dispatch идёт через resolveFieldContract, нет второго file-switch вне каталога" },
+    { "id": "FF-SCHEMA-VALID", "rule": "Файловое поле проходит серверный AJV-strict (generic x-strip): validateRecordSchemaDefinition({...properties:{f:{type:'string','x-file':{}}}}).valid===true (AC-5).", "ci_check": "vitest run record-schema-validator test с x-file property" },
+    { "id": "FF-RENDER-FILE", "rule": "FieldControl при presentation:'file' рендерит FileField (не readout, не text-input) (AC-6).", "ci_check": "компонентный тест: render FieldControl с file-полем → присутствует file-контрол, отсутствует 'пока заполняется в другом месте'" },
+    { "id": "FF-UPLOAD-ROUTE-ONLY", "rule": "Загрузка ТОЛЬКО через POST /api/records/:recordId/files: клиент не содержит прямых S3/bucket/presign-вызовов, не строит object_key (FR-7, NF-2).", "ci_check": "grep guard web/src: нет s3://|bucket|presign|PutObject|aws-sdk в клиенте; upload на /api/records/.*/files" },
+    { "id": "FF-VALUE-STRING", "rule": "Значение файл-поля — строка-идентификатор: validateRecordValues required-file+пусто → ошибка; непусто = строка; blankRecordValues file → '' (AC-8).", "ci_check": "vitest run records-form test file branches" },
+    { "id": "FF-CELL-NO-UUID", "rule": "Список/карточка не показывают сырой uuid: formatCellValue(v,'file') → имя или '—'; карточка резолвит имя из листинга (AC-9,AC-10).", "ci_check": "vitest run formatCellValue test + компонентный тест карточки" },
+    { "id": "FF-INLINE-SAFE", "rule": "Inline только для safe-mime: ?disposition=inline → Content-Disposition:inline для image/*(не svg)/pdf; svg/html/прочее → attachment; всегда nosniff; PDP-read и tenant/actor-из-identity сохранены; без параметра — attachment (существующие тесты зелёные) (AC-11).", "ci_check": "маршрут-тест: inline для png/pdf, attachment для svg/html/txt; deny без гранта; дефолт attachment" },
+    { "id": "FF-DERIVED-AUTHZ", "rule": "Права файла = производная записи (регресс): субъект без read на запись → 403 download/inline, 0 байт; с read — контент; тот же PDP T-0021 (AC-12).", "ci_check": "существующая file-attachment проба + inline-вариант (live-api)" },
+    { "id": "FF-CROSS-TENANT", "rule": "Cross-tenant недостижим (регресс): файл записи tenant B из контекста tenant A → cross_tenant/404, 0 байт; фронт не конструирует cross-tenant путь (AC-13).", "ci_check": "существующая cross-tenant file проба, покрывает inline-маршрут (live-api)" },
+    { "id": "FF-ANTICASE", "rule": "D-064: ни одной кейс-строки денилиста в добавленном/изменённом src/+web/src/; label файл-типа = 'Файл' (AC-14).", "ci_check": "bash ci/checks/anti-case-lock.sh зелёный" },
+    { "id": "FF-UX-FILE", "rule": "UX honest-gate G1–G7: файл-контрол Empty/Loading/Error, контраст ≥ WCAG AA (обе темы), нет мёртвых enabled-аффордансов, data-theme-совпадение, нет дев-жаргона, слой/kit без хардкода цветов (AC-15).", "ci_check": "ci/checks/ux/* + e2e/journeys/*.ux.journey.ts для файл-поля" },
+    { "id": "FF-BACKCOMPAT", "rule": "Наборы полей без файловых полей и схемы до T-0579 не меняют поведения (файл детектится только по x-file) (NF-3).", "ci_check": "существующий apps-schema/records-form test-корпус зелёный без правок ожиданий не-file кейсов" }
+  ],
+  "traceability": [
+    { "ac": "AC-1", "covered_by": "§2.1 (FIELD_TYPES += file); FF-FIELDTYPE" },
+    { "ac": "AC-2", "covered_by": "§2.1 (buildRecordSchema x-file); §4.1; FF-XFILE-ROUNDTRIP" },
+    { "ac": "AC-3", "covered_by": "§2.1 (schemaToFormFields x-file детект, backward-compat); FF-XFILE-ROUNDTRIP, FF-BACKCOMPAT" },
+    { "ac": "AC-4", "covered_by": "§2.2 (contractKindForFieldType/resolveFieldContract, каталог оживает); §3 (rejected: параллельный inputKind); FF-CATALOG" },
+    { "ac": "AC-5", "covered_by": "§2.1 (generic x-strip, валидатор не трогается); §4; FF-SCHEMA-VALID" },
+    { "ac": "AC-6", "covered_by": "§2.3 (FieldControl presentation:file → FileField); §4.3; FF-RENDER-FILE" },
+    { "ac": "AC-7", "covered_by": "§2.4 (загрузка через POST …/files, versionId в значении); §4.3/§4.4; FF-UPLOAD-ROUTE-ONLY" },
+    { "ac": "AC-8", "covered_by": "§2.5 (validateRecordValues file-ветка); §4.2; FF-VALUE-STRING" },
+    { "ac": "AC-9", "covered_by": "§2.6 (карточка: имя-ссылка + inline-превью safe-mime); FF-CELL-NO-UUID, FF-INLINE-SAFE" },
+    { "ac": "AC-10", "covered_by": "§2.5/§2.6 (schemaToColumns + formatCellValue + async-cell); FF-CELL-NO-UUID" },
+    { "ac": "AC-11", "covered_by": "§2.7 (inline-режим маршрута, allowlist, PDP/tenant/nosniff сохранены); §3 (rejected: всегда inline / отдельный /preview); FF-INLINE-SAFE" },
+    { "ac": "AC-12", "covered_by": "§2.4/§4.4 (PDP-производность, download-гейт); §3 (rejected: client file-ACL); FF-DERIVED-AUTHZ" },
+    { "ac": "AC-13", "covered_by": "§2.7/§4.4 (tenant/actor из identity, cross_tenant до S3); FF-CROSS-TENANT" },
+    { "ac": "AC-14", "covered_by": "§2.1 (generic label «Файл»); FF-ANTICASE" },
+    { "ac": "AC-15", "covered_by": "§2.3 (FileField honest-states); FF-UX-FILE" },
+    { "ac": "AC-16", "covered_by": "§3 (rejected обоснованы); §6 (FF-CATALOG/FF-UPLOAD-ROUTE-ONLY/FF-DERIVED-AUTHZ гарантируют отсутствие второго механизма/рендерера); ревью-гейт архитектора" }
+  ],
+  "runtime_target": "контейнер (dev-стек): метаданные — Postgres-в-compose (уже провижн); контент файлов — FsObjectStore (ФС контейнера, FILE_STORE_ROOT, уже подключён в src/server.ts) — достаточно для upload/download/preview на dev-стенде; фронт — Vite/React в том же образе. MinIO-сервис НЕ требуется. Prod-S3-провайдер (AWS/Yandex/MinIO self-hosted) + 152-ФЗ + оплата = deploy-time за ObjectStore-портом, гейт фаундера GT-4 (T-0119 §8) — не блокирует impl.",
+  "adr_artifact_path": "docs/design/T-0579-file-field.adr.md",
+  "escalation": ""
+}

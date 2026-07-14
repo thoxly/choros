@@ -1,0 +1,86 @@
+{
+  "task_id": "T-0121",
+  "verdict": "pass",
+  "phase": "TEST (design-task, docs-only diff)",
+  "date": "2026-06-11",
+  "branch": "task/T-0121",
+  "head_sha": "ce5c350",
+  "base_sha": "873c69c",
+  "gates": {
+    "diff_gate": {
+      "verdict": "pass",
+      "docs_only": true,
+      "files_changed": [
+        "docs/design/T-0121-reports-pages.adr.md",
+        "docs/design/T-0121.adr.contract.json",
+        "docs/reviews/T-0121.review.json",
+        "docs/specs/T-0121-reports-pages-design.spec.md",
+        "docs/specs/T-0121.spec.contract.json"
+      ],
+      "files_outside_docs": [],
+      "note": "git diff --name-only 873c69c..HEAD — все 5 файлов строго в docs/**; нет src/ изменений."
+    },
+    "artifact_validity": {
+      "verdict": "pass",
+      "checked": [
+        {"file": "docs/specs/T-0121.spec.contract.json", "valid_json": true, "task_id": "T-0121", "status": "ready"},
+        {"file": "docs/design/T-0121.adr.contract.json", "valid_json": true, "task_id": "T-0121", "status": "ready"},
+        {"file": "docs/reviews/T-0121.review.json", "valid_json": true, "task_id": "T-0121", "verdict": "approved"}
+      ]
+    },
+    "traceability_22_ac": {
+      "verdict": "pass",
+      "total_ac": 22,
+      "covered": 22,
+      "method": "grep по §11 трассировочной таблице ADR — каждый AC-1..AC-22 присутствует ровно 1 раз",
+      "detail": [
+        {"ac": "AC-1",  "anchor": "§2.1 (report_page T-0013-контракт, все поля, UNIQUE) + FF-T13-PAGE/FF-SCHEMA-046"},
+        {"ac": "AC-2",  "anchor": "§2.2 (report_page_dep T-0013-контракт, поля, UNIQUE, stale) + FF-T13-PAGE/FF-SCHEMA-046"},
+        {"ac": "AC-3",  "anchor": "§4 (classifyReportPageFloor, vocab Floor-1, синтаксическая граница) + FF-FLOOR"},
+        {"ac": "AC-4",  "anchor": "§3 (checkReportPageDepFields, ссылка на T-0072 checkBindingCompat) + FF-COMPAT-PURE/BEHAVIOR"},
+        {"ac": "AC-5",  "anchor": "§5.1/§6.1 (валидация при регистрации dep, 422) + FF-DEP-VALIDATE"},
+        {"ac": "AC-6",  "anchor": "§5.1 (мягкое изменение, warnings машинно-читаемы, операция применяется) + FF-SOFT-WARN/NF-8"},
+        {"ac": "AC-7",  "anchor": "§5.2 (критерий деструктива drop/rename/narrowing + 409 + CI fail) + FF-DESTRUCTIVE-DENY/FF-BUNDLE-DEPS"},
+        {"ac": "AC-8",  "anchor": "§5.3 (escape-hatch force + grant + stale + депромоут + audit) + FF-FORCE-DEMOTE"},
+        {"ac": "AC-9",  "anchor": "§5.2 п3 (promote human-gate на stale dep) + FF-PROMOTE-GATE"},
+        {"ac": "AC-10", "anchor": "§5.4 (check-report-page-deps, bundle_members.txt) + FF-BUNDLE-DEPS"},
+        {"ac": "AC-11", "anchor": "§7 (Floor-2 RLS-gated, нет DB-credentials) + FF-FLOOR2-RLS"},
+        {"ac": "AC-12", "anchor": "§6/§6.1 (PDP T-0021, ноль второго механизма, author_report_page DRAFT-only) + FF-NO-2ND-AUTHZ"},
+        {"ac": "AC-13", "anchor": "§7 (аудит-события T-0016, единый appendAuditEvent) + FF-AUDIT-EVENTS"},
+        {"ac": "AC-14", "anchor": "§0 header + §2 (слоты ≥046, DDL не в DESIGN)"},
+        {"ac": "AC-15", "anchor": "§7 (fail-closed tenant, cross-tenant невозможен) + FF-T13-PAGE → live-impl"},
+        {"ac": "AC-16", "anchor": "§5.2 (деструктив без force → 409, schema неизменна) + FF-DESTRUCTIVE-DENY → live-impl"},
+        {"ac": "AC-17", "anchor": "§5.2 п3 (promote stale → 409) + FF-PROMOTE-GATE → live-impl"},
+        {"ac": "AC-18", "anchor": "§3 (контракт checkReportPageDepFields) + FF-COMPAT-BEHAVIOR → test"},
+        {"ac": "AC-19", "anchor": "§5.3 (force → stale + draft + audit с affected_pages) + FF-FORCE-DEMOTE → live-impl"},
+        {"ac": "AC-20", "anchor": "§1/§3/§6/§10 (ноль второго permission/coherence-механизма) — ревью-гейт архитектора §12"},
+        {"ac": "AC-21", "anchor": "§5.1 (changelog-payload контракт к T-0084) + FF-CHANGELOG-T84"},
+        {"ac": "AC-22", "anchor": "§3 (pure function, no I/O) + FF-COMPAT-PURE"}
+      ]
+    },
+    "diff_docs_only_check": {
+      "verdict": "pass",
+      "files_outside_docs": 0,
+      "note": "Все 5 изменённых файлов строго в docs/** — нет src/, ci/, migrations или корневых файлов."
+    },
+    "no_slot_conflict_044_045": {
+      "verdict": "pass",
+      "note": "ADR упоминает 044 (T-0077) и 045 (T-0072) только как ссылки на занятые сестринские слоты; T-0121 НЕ претендует на 044/045. Заявленные слоты: 046 (report_page) и 047 (report_page_dep) с явным fallback ≥046/≥047."
+    },
+    "review_gate": {
+      "verdict": "approved",
+      "source": "docs/reviews/T-0121.review.json",
+      "ac_coverage": "22/22 covered=true",
+      "findings": [
+        {"id": "T-0121-F-001", "severity": "nit", "disposition": "fixed — §2.1/§2.2 заголовки обновлены fallback-ссылкой на §0"},
+        {"id": "T-0121-F-002", "severity": "nit", "disposition": "fixed — §6.1 добавлен explicit WARNING о dev-тенанте a0000000-…-000000000001 (T-0077 §2.3 урок)"}
+      ]
+    },
+    "product_ci": {
+      "verdict": "pass",
+      "note": "Design-only branch (docs-only diff); product CI unaffected — baseline identical to dev (D-056 integration-honest gate). No src/ changes → tsc/eslint/fitness/vitest baseline = dev green."
+    }
+  },
+  "failures": [],
+  "summary": "Все gates PASS: diff-gate docs-only (5/5 файлов в docs/**), 3 артефакта — валидный JSON, трассируемость 22/22 AC → якоря ADR §11, нет занятия слотов 044/045, review approved с 2 nit (оба fixed в коммите ce5c350)."
+}

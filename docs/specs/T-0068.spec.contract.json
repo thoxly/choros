@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0068",
+  "status": "ready",
+  "summary": "Записывать lifecycle процесс-инстанса (instance.started, task.completed, task.failed) как события в единый аудит-флор (audit_event/audit_head, T-0016) через канонический writer appendAuditEvent — с различимым актором человек/агент/сервис (ось employee.kind, T-0017) и instance_id-указателем (не дублём состояния движка); связка через замороженный T-0067 onDispatched-шов + server-wiring startBridgePollLoop/startInstance.",
+  "functional": [
+    "FR-1: Реализовать канонический writer appendAuditEvent (T-0016 §4.4) — внутри withTenant-транзакции: per-tenant SELECT...FOR UPDATE head, seq=head.seq+1 (или GENESIS_SEQ=1), prev_hash=head.row_hash (или GENESIS_PREV_HASH 32 нулевых байта), canonical preimage (T-0016 §4.3, vocab=1), row_hash=SHA-256(preimage), атомарный INSERT audit_event + forward-only advance audit_head в одной транзакции.",
+    "FR-2: Различимость актора человек/агент/сервис — ось employee.kind (T-0017: human|agent, сервис=agent по FR-4); проекция в audit_event.payload.actorType ∈ {human,agent,service} (hash-covered) + actor (slug/uuid/worker-id) + via (канал); без изменения схемы employee.",
+    "FR-3: Успешный startInstance(processKey,vars) → ровно одна audit_event строка type='instance.started', subject=processInstanceId, payload.instanceId.",
+    "FR-4: onDispatched(row) (T-0067 шов, exactly-once после durable markDispatched) для eventType∈{task_completed,task_failed} → ровно одна audit_event строка type='task.completed'|'task.failed' с instance/jobId-указателем и actor/actorType.",
+    "FR-5: onDispatched для eventType='worker_lock_expired' (и неизвестных) → аудит НЕ пишется (T-0067 ADR §2.B no-op/anti-split-brain, не governance-событие).",
+    "FR-6: instance_id хранится в аудит-строке как опаковый указатель (subject/payload.instanceId + jobId через T-0067 reverse-map); T-0068 НЕ заводит таблицу-зеркало состояния инстанса и не реплицирует машину состояний движка.",
+    "FR-7: Построить GuardContext (actor,onBehalfOf,roleAtEvent,verb,approveLevel) на approve/transition-шве и провести resolveFor так, что T-0053-DAO deps.sod инжектится аддитивно без переписывания (опциональный параметр); без deps.sod поведение идентично pre-T-0032. Живой Postgres SoD-DAO — НЕ скоуп T-0068.",
+    "FR-8: Server-wiring в src/server.ts: makeFlowableClient → startBridgePollLoop({...,onDispatched=auditOnDispatched}) + lifecycle-аудит на startInstance, за env-флагом; без Flowable-конфига сервер стартует деградированно (no-throw, T-0067 AC-13/14).",
+    "FR-9: Любая новая таблица (если будет) — T-0013 tenant-table (tenant_id leading PK, FORCE RLS, default-DENY), добавлена в known_tenant_tables.txt + cross_tenant.test.ts case. Цель — НЕ заводить таблицу (audit_event/audit_head уже существуют и уже в known_tenant_tables)."
+  ],
+  "non_functional": [
+    "NF-1: Zero new npm dependencies (SHA-256 из node:crypto).",
+    "NF-2: Per-tenant сериализация аудит-append — audit_head...FOR UPDATE per tenant; НИКАКОГО глобального SEQUENCE/advisory-lock (T-0016 NF-2).",
+    "NF-3: Атомарность audit_event INSERT + audit_head advance в одной транзакции; ROLLBACK откатывает обе (T-0016 FR-4/AC-15).",
+    "NF-4: Exactly-once аудит на lifecycle-событие — опора на durable markDispatched + if(advanced) (T-0067), не in-app дедуп.",
+    "NF-5: Деградация без Flowable — отсутствие движка/конфига НЕ роняет сервер (loop стартует, ошибки poll глотаются — T-0067 AC-13/14).",
+    "NF-6: Аудит-append append-only структурно — writer только INSERT на audit_event; триггеры 006/007 не тронуты (T-0016 FR-1/NF-6).",
+    "NF-7: Канонический preimage детерминирован и vocab-pinned (T-0016 FR-6/NF-5); изменение поля/порядка/кодировки/H = bump vocab_version + golden-digest CI-гейт.",
+    "NF-8: Идемпотентность миграций — новые миграции (если будут) нумеруются С 031 (030 занята T-0030 в полёте), применяются дважды без ошибки."
+  ],
+  "out_of_scope": [
+    "instance.cancel / instance.completed-аудит — REST T-0064 не отдаёт cancel/history; требует расширения FlowableClient (forward-obligation).",
+    "Таблица-зеркало состояния инстанса — Choros не дублирует машину состояний движка (CONCEPT §6).",
+    "Verifier verifyAuditChain реализация + CI-probe — контракт T-0016 §4.5/FR-5; T-0068 строит writer, не верификатор (T-0053).",
+    "Постоянный Postgres SoD-DAO (deps.sod) — T-0053.",
+    "head-snapshot-to-object-storage job — T-0016 §6.5 (T-0053/infra).",
+    "UI инбокса/аудита и замена seed-fixture в src/http/audit.ts на live-выборку из audit_event — E7.3/последующая задача.",
+    "Агентский рантайм / реальные агенты — Stage 2 (CONCEPT §9, E10.1 заглушка).",
+    "152-ФЗ юридическая валидация — юрист, не код."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "appendAuditEvent для пустого тенанта пишет строку seq=1, prev_hash=GENESIS_PREV_HASH (32 нулевых байта), row_hash=SHA256(preimage); audit_head.(seq,row_hash)=(1,row_hash).", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "3 последовательных appendAuditEvent в одном тенанте → seq=1,2,3 (плотно +1); для n>1 prev_hash=row_hash строки seq=n-1; audit_head=(3,row_hash_3).", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "canonicalPreimage(fixture) детерминирован, length-unambiguous (NULL≠empty, переставленные ключи jsonb → идентичный preimage через JCS), SHA256(preimage)==pinned golden digest; изменение поля/порядка/кодировки флипает golden → CI красный.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "Append per-tenant сериализован через audit_head...FOR UPDATE, НЕ глобальный SEQUENCE/advisory (ci/checks lint); N конкурентных append в тенанте-A → N плотных различных seq, append в A и B не блокируют друг друга.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Внутри транзакции appendAuditEvent затем ROLLBACK → ни audit_event-строки, ни head-advance не видно; после COMMIT обе видны и согласованы (head.seq указывает на существующую строку).", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "ci/checks/audit_append_only.sh (T-0016 AC-4) остаётся зелёным — writer не добавляет GRANT UPDATE/DELETE и не делает UPDATE/DELETE на audit_event; триггеры 006/007 не тронуты.", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "Успешный startInstance('invoice',vars) → ровно одна audit_event строка type='instance.started', subject=processInstanceId, payload.instanceId=processInstanceId.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "auditOnDispatched(row{eventType:'task_completed',...}) вызывает appendAuditEvent ровно один раз с type='task.completed' и instance/job-указателем (aggregateId); 'task_failed' → type='task.failed'.", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "auditOnDispatched(row{eventType:'worker_lock_expired'}) НЕ вызывает appendAuditEvent (0 строк); то же для неизвестного eventType.", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "Прогон outboxDispatcher дважды по одной строке — onDispatched вызывается только когда markDispatched.advanced===true (T-0067) → appendAuditEvent вызван ровно один раз; второй проход аудит не пишет (exactly-once, без дубля).", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "Различимость: employee.kind='human' → payload.actorType='human'; kind='agent' (агент-рантайм) → 'agent'; bridge/external-worker-актор (s-ledger/control-plane) → 'service'. Три значения различимы и hash-covered.", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "Изменение payload.actorType в фикстуре меняет recomputed row_hash (T-0016 AC-19 паттерн) — подмена типа актора детектируется как tamper.", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "Проекция kind→actorType даёт значения из множества, совпадающего с AuditEvent.type в src/http/audit.ts ('human'|'agent'|'service'), без изменения схемы employee (kind остаётся {human,agent}).", "verifiable_as": "fitness"},
+    {"id": "AC-14", "text": "Композиционный корень регистрирует startBridgePollLoop с onDispatched=auditOnDispatched и lifecycle-аудит на startInstance; без FLOWABLE-env сервер стартует (loop стартует, poll-ошибки глотаются — T-0067 AC-13/14), не бросает на старте.", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "resolveFor на approve/transition с построенным guardCtx, но БЕЗ deps.sod → решение идентично pre-T-0032 (нет sod_violation, только grant-решение); шов принимает deps.sod опционально без изменения сигнатуры.", "verifiable_as": "test"},
+    {"id": "AC-16", "text": "Если T-0068 добавляет миграцию — номер ≥ 031 (030 занята T-0030); migrations run x2 идемпотентны. Нет новых миграций → AC вакуумно выполнен (writer использует существующие 006/007).", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "Если T-0068 заводит таблицу — она в ci/checks/known_tenant_tables.txt и имеет case в cross_tenant.test.ts (FORCE RLS, tenant_id leading, TENANT_A row невидим (0) для TENANT_B). Нет новой таблицы → AC вакуумно зелёный.", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0068-instance-lifecycle.spec.md"
+}

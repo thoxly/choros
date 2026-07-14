@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0736",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/rights-sod.ts:421-425 + T-0736.pr-handoff.json / docs/tasks/T-0736.adr.md",
+      "issue": "The override 403 is documented as an 'empty body / пустое тело (no leak)'. Empirically the body is NOT empty — it is the standard error envelope {\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"viewing another subject's SoD conflicts requires admin/owner authority\"}} (router.ts sendErrorEnvelope). The security property that actually holds and matters (no subjectId/conflicts/heldRoles, no exists-oracle, static message) is fully satisfied — only the wording 'empty body' is imprecise.",
+      "suggestion": "Reword the ADR/handoff to 'static generic 403 envelope carrying no subject data / no exists-oracle' instead of 'empty body'. Pure documentation nit; no code change."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/rights-change-requests.ts:598 (listChangeRequests LIST gate)",
+      "issue": "The LIST gate (assertApproverIsHuman) admits ANY active human, so every active human can enumerate the ENTIRE tenant's pending dual-control queue (proposed_by, role display_name, resource_type, operation, scope of every semi-confirmed grant/assignment). This is deliberate and CORRECT — it is exactly the write-path eligibility (approve/reject on this same file use the identical assertApproverIsHuman) and is grounded in T-0044 ADR §9 (any distinct active human may be the second approver). Read bar == write bar, so no privilege escalation. Flagging only because the exposure is broad and worth an explicit acknowledgement.",
+      "suggestion": "None required for this task. If tenants later want a narrower approver pool, that is a policy change to the dual-control model (T-0044), not a defect here."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/actor-active-route-coverage.sh output (informational gate)",
+      "issue": "9 residual FF-726-1 findings remain on T-0736's base (audit×3 [covered by already-merged T-0737 in dev], inbox×2, operational-analytics×2, record-links×1, report-page-render×1). These are pre-existing, out of T-0736 scope, and the gate is informational (exit 0). After T-0736+T-0737 land in dev, 6 remain (inbox/op-analytics/record-links/report-page) — deactivated-actor residual-JWT read window still open on those. Track as follow-ups per ADR-T0726 §5.",
+      "suggestion": "Spawn follow-up tasks for the remaining 6 ungated GET routes (inbox, operational-analytics, record-links, report-page-render)."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "grant-trail: owner -> 200", "covered": true },
+    { "ac": "grant-trail: ordinary active member -> 403", "covered": true },
+    { "ac": "grant-trail: DEACTIVATED owner -> 403 (fail-closed)", "covered": true },
+    { "ac": "change-requests: ordinary active human -> 200 (not narrowed to admin)", "covered": true },
+    { "ac": "change-requests: DEACTIVATED human -> 403", "covered": true },
+    { "ac": "change-requests: agent -> 403 AGENT_NOT_ALLOWED", "covered": true },
+    { "ac": "sod-check: self-view (implicit+explicit) -> 200", "covered": true },
+    { "ac": "sod-check: owner override -> 200 with real target data", "covered": true },
+    { "ac": "sod-check: unprivileged override -> 403, no leak", "covered": true },
+    { "ac": "sod-check: DEACTIVATED owner override -> 403", "covered": true },
+    { "ac": "sod-check: existent vs nonexistent override -> byte-identical 403 (no exists-oracle) [judge-probed]", "covered": true },
+    { "ac": "collateral: r.name -> r.display_name fixes live-PG 500", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

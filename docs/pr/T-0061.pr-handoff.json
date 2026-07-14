@@ -1,0 +1,191 @@
+{
+  "task_id": "T-0061",
+  "status": "pr_open",
+  "branch": "task/T-0061-dev-prod-stacks",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "merge_target": "dev",
+  "base_commit": "f0c4b26",
+  "head_commit": "b4a76fd",
+  "migrations": [],
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E0.6: dev+prod compose stacks. Новый сервис choros в docker-compose.yml (build:., depends_on postgres/keycloak/flowable healthy, port APP_PORT:-3000); multi-stage Dockerfile (web-builder→app-builder→runtime, 3 стадии — копирует dist/, web/dist/, migrations/, ops/, нет src/ нет .env*); docker-compose.prod.yml (prod override: KC command=start, required-форма ${VAR:?msg} для всех чувствительных переменных, prod-тома choros_pgdata_prod); .env.prod.example с REPLACE_* placeholders; ops/docker-entrypoint.sh (migrations перед node dist/index.js, fail-fast при невалидном DATABASE_URL); CI fitness: compose-prod-config.sh (FF-T61-1..12 включая live docker compose up --wait), flowable/static-checks.sh (FF-FL-11 baseline updated). 13/13 AC; 3 adversarial-пробы (a: prod up без .env.prod → exit 1; b: volume isolation dev vs prod; c: runtime image clean); vitest 768/768; live stack: все 4 сервиса healthy, 29 миграций applied, /health HTTP 200. Ноль choros_* DDL-миграций, ноль src/ изменений.",
+  "commits": [
+    {
+      "sha": "12c88a7",
+      "phase": "SPEC",
+      "message": "T-0061 SPEC: dev+prod compose — один артефакт, choros-app сервис, prod override с required-кредами"
+    },
+    {
+      "sha": "bee0138",
+      "phase": "DESIGN",
+      "message": "T-0061 DESIGN: dev+prod compose stacks — choros-app сервис, Dockerfile multi-stage, prod override required-form, 12 fitness functions"
+    },
+    {
+      "sha": "79c1524",
+      "phase": "BUILD",
+      "message": "T-0061 BUILD: dev+prod compose stacks — choros сервис, Dockerfile, prod overlay, CI fitness"
+    },
+    {
+      "sha": "4f39859",
+      "phase": "REVIEW",
+      "message": "T-0061 REVIEW: approved — RL-3 clean, all 13 AC covered, CI green, 2 nits"
+    },
+    {
+      "sha": "fccb75c",
+      "phase": "TEST",
+      "message": "T-0061 TEST: fail — choros healthcheck wget missing + ${VAR} required-form not enforced"
+    },
+    {
+      "sha": "4a32709",
+      "phase": "BUILD-fix",
+      "message": "T-0061 BUILD: test fixes — :?-form, node healthcheck, entrypoint migrations, KC/Flowable healthchecks"
+    },
+    {
+      "sha": "e7ac90a",
+      "phase": "BUILD-fix",
+      "message": "T-0061 BUILD: update FF-FL-11 baseline SHA to 4a32709 (KC/Flowable healthcheck fixes)"
+    },
+    {
+      "sha": "f693923",
+      "phase": "BUILD-fix",
+      "message": "T-0061 BUILD: fix KC healthcheck — use container-internal port 9000 (not host-mapped var)"
+    },
+    {
+      "sha": "3698042",
+      "phase": "BUILD-fix",
+      "message": "T-0061 BUILD: advance FF-FL-11 baseline to f693923 (hardcoded KC port 9000 fix)"
+    },
+    {
+      "sha": "b4a76fd",
+      "phase": "TEST",
+      "message": "T-0061 TEST: pass — re-test после фиксов"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "reviewer role (T-0061 REVIEW)",
+      "reviewed_commit": "4f39859",
+      "rl3_check": "clean",
+      "findings": [
+        {
+          "id": "R-1",
+          "severity": "nit",
+          "location": "docker-compose.prod.yml (volumes section) + ADR §3.3",
+          "issue": "ADR comment implies KC/Flowable volumes use _prod suffix analogously — misleading since they have no named volumes (state is in Postgres). Documentation ambiguity only, no data isolation gap.",
+          "resolution": "Comment clarified in docker-compose.prod.yml"
+        },
+        {
+          "id": "R-2",
+          "severity": "nit",
+          "location": "ci/checks/compose-prod-config.sh:95-99 (FF-T61-4)",
+          "issue": "grep pattern for bare choros_pgdata: is slightly coarse — sufficient for current content, not blocking.",
+          "resolution": "Accepted as-is; sufficient for file content"
+        }
+      ],
+      "artifact": "docs/reviews/T-0061.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_ac": 13,
+      "passed_ac": 13,
+      "failed_ac": 0,
+      "adversarial_probes": "3/3",
+      "tested_commit": "b4a76fd",
+      "run_details": {
+        "tsc": "pass (0 errors)",
+        "eslint": "pass (2 pre-existing no-console warnings, 0 errors)",
+        "vitest": "768 passed / 5 skipped (pre-existing Flowable live-integration), 0 failures",
+        "fitness_static": "FF-T61-1..12 all green (compose-prod-config.sh); FF-FL-4..11 all green (flowable/static-checks.sh, baseline f693923)",
+        "live_stack": "docker compose up -d --wait (project t0061retest): all 4 services healthy; 29 migrations applied; /health HTTP 200 {status:ok}; KC start-mode active; prod volume isolation confirmed",
+        "image_cleanliness": "docker run --rm: dist/, web/dist/, migrations/, ops/ present; no .env*, no src/ (multi-stage confirmed)"
+      },
+      "artifact": "docs/test-reports/T-0061.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 warnings in src)",
+      "vitest_run": "pass (768/768; 5 skipped pre-existing Flowable)",
+      "fitness_static": "pass (FF-T61-1..12 + FF-FL-4..11)",
+      "integration_honesty_d056": "CI 'stack' job present in .github/workflows/ci.yml: npm ci + web build + docker compose up -d --wait. Uses real docker daemon, real healthchecks, real --wait flag. AC-13 integration-honestly gated. Verified live in t0061retest project (all 4 services healthy exit 0)."
+    }
+  },
+  "files_changed": [
+    ".dockerignore",
+    ".env.prod.example",
+    ".github/workflows/ci.yml",
+    ".gitignore",
+    "Dockerfile",
+    "ci/checks/compose-prod-config.sh",
+    "ci/checks/flowable/static-checks.sh",
+    "docker-compose.prod.yml",
+    "docker-compose.yml",
+    "docs/design/T-0061-dev-prod-stacks.adr.md",
+    "docs/design/T-0061.adr.contract.json",
+    "docs/environments.md",
+    "docs/reviews/T-0061.review.json",
+    "docs/specs/T-0061-dev-prod-stacks.spec.md",
+    "docs/specs/T-0061.spec.contract.json",
+    "docs/test-reports/T-0061.test-report.json",
+    "ops/docker-entrypoint.sh",
+    "package.json"
+  ],
+  "deviations_from_adr": [
+    "R-1 (nit, closed): ADR §3.3 comment about KC/Flowable _prod volumes — misleading but harmless; KC/Flowable state lives in Postgres (covered by choros_pgdata_prod). Comment clarified in prod overlay.",
+    "R-2 (nit, accepted): FF-T61-4 grep pattern for bare choros_pgdata: slightly coarse — sufficient for current file content, not blocking.",
+    "KC healthcheck: uses bash /dev/tcp probe against container-internal port 9000 (not host-mapped KEYCLOAK_MGMT_PORT). Original design used ${KEYCLOAK_MGMT_PORT} but BusyBox/KC container lacks port-var at probe time; hardcoded 9000 is correct (KC management always binds 9000 internally). Authorized in FF-FL-11 baseline update to f693923.",
+    "Flowable healthcheck: URL-embedded basic-auth wget (BusyBox compat) instead of -u flag — documented in ADR as BusyBox constraint fix."
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "what_this_gives": "Закрывает E0.6: choros-app добавлен в единый compose-стек; prod overlay готов для E0.7. Теперь `docker compose up` поднимает весь Choros (postgres + keycloak + flowable + choros-app) одной командой. Prod-стек: `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait` — гейтится .env.prod с реальными кредами. Ноль изменений src/, ноль новых migrations, ноль новых tenant-таблиц.",
+    "how_to_run_dev_stack": [
+      "1. Убедиться, что Docker daemon запущен.",
+      "2. npm run build (или npm ci && npm run build:web && npm run build) — собирает dist/ и web/dist/ для Dockerfile.",
+      "3. docker compose up (или docker compose up -d --wait для detached).",
+      "4. Все 4 сервиса (postgres, keycloak, flowable, choros) поднимутся с healthcheck.",
+      "5. choros-app: http://localhost:3000 (или $APP_PORT), /health → {status:ok}."
+    ],
+    "how_to_run_prod_stack": [
+      "1. Скопировать .env.prod.example в .env.prod: cp .env.prod.example .env.prod",
+      "2. Заполнить все REPLACE_* значения реальными кредами в .env.prod (никогда не коммитить .env.prod).",
+      "3. Запустить prod-стек: docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d --wait",
+      "4. Все 4 сервиса поднимутся в prod-режиме: KC в 'start' (не start-dev), prod-тома choros_pgdata_prod, NODE_ENV=production.",
+      "5. /health → HTTP 200 {status:ok}; миграции применяются автоматически при старте.",
+      "KNOWN GAP (до E0.7): KC TLS/hostname не настроен (KC_HOSTNAME, KC_HTTP_ENABLED=false); KC запускается в start-режиме без внешнего TLS. Prod hostname и TLS — E0.7 (founder-gated provisioning). До E0.7 prod-стек пригоден для home-server за Tailscale, но не для открытого интернета."
+    ],
+    "how_to_verify": [
+      "npm run ci: tsc --noEmit / eslint src / vitest run — 768/768, 0 failures.",
+      "bash ci/checks/compose-prod-config.sh — FF-T61-1..12 все PASS.",
+      "bash ci/checks/flowable/static-checks.sh — FF-FL-1..11 все PASS.",
+      "docker compose up -d --wait && docker compose ps — все 4 сервиса healthy.",
+      "curl http://localhost:3000/health → {\"status\":\"ok\"}.",
+      "Проверить ноль новых миграций choros_*: git diff f0c4b26..HEAD -- 'migrations/*.sql' пусто.",
+      "Проверить ноль src/ изменений: git diff f0c4b26..HEAD -- 'src/*' пусто.",
+      "docker build -t choros-test . && docker run --rm choros-test ls /app — только dist/, web/dist/, migrations/, ops/, node_modules, package*.json (нет src/, нет .env*)."
+    ],
+    "infra_changes": "Добавлены: Dockerfile (multi-stage), docker-compose.prod.yml (prod overlay), .env.prod.example, .dockerignore, ops/docker-entrypoint.sh. Изменены: docker-compose.yml (добавлен сервис choros), .gitignore (добавлен .env.prod), .github/workflows/ci.yml (добавлен job 'stack'), docs/environments.md (таблица choros-app vars), package.json (+fitness scripts). Ноль новых npm-зависимостей в runtime (только infra-файлы).",
+    "dev_stack_unchanged": "Существующие блоки postgres/keycloak/flowable в docker-compose.yml не тронуты деструктивно. Dev-дефолты кредов и порты сохранены. Все существующие CI-проверки продолжают проходить.",
+    "downstream_seams": {
+      "E0.7": {
+        "description": "Провижн home-server фаундера (founder-gated). Берёт docker-compose.yml + docker-compose.prod.yml + .env.prod.example как-есть. Создаёт .env.prod с реальными кредами на /srv/choros. KC TLS/hostname конфигурируется в E0.7.",
+        "command": "docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d --wait"
+      },
+      "T-0060": {
+        "description": "CHOROS_AUTH_MODE=keycloak — переменная уже присутствует в choros-сервисе compose с дефолтом dev. Prod overlay переопределит при необходимости через .env.prod."
+      },
+      "T-0114": {
+        "description": "DATABASE_URL уже в compose env choros-сервиса → JobStore-Postgres подключается через тот же URL без дополнительных изменений."
+      }
+    }
+  },
+  "friction_events": [
+    "fccb75c: TEST-FAIL — 5 дефектов: (1) ${VAR:-default} форма вместо ${VAR:?msg} для sensitive vars в prod overlay; (2) wget отсутствует в node:20-alpine образе для healthcheck choros-app; (3) entrypoint-миграции не запускались (ops/ не копировался в Dockerfile); (4) KC healthcheck использовал host-mapped порт ${KEYCLOAK_MGMT_PORT} вместо container-internal 9000; (5) Flowable healthcheck несовместим с BusyBox wget (-u флаг не поддерживается). Все 5 фиксов в BUILD-fix коммитах 4a32709..f693923 + re-TEST PASS b4a76fd."
+  ]
+}

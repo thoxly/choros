@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0019",
+  "status": "ready",
+  "summary": "Typed actor-event ledger per object (E4.1) — the SoD source of truth. One append-only `actor_event` tenant table records, per object, the closed verb trail {request, prepare, submit, approve(@Ln), release} with actor (=performed_by, FK→employee), on_behalf_of (principal, nullable, distinct from performer), role_at_event (point-in-time role_id, FK deferred to T-0022), object_ref (denormalized opaque ResourceRef à la object_handle, no FK), per-tenant strictly-increasing seq, and ts. SoD (T-0032/E4.2) is a query over this ledger (read contract frozen); the guarded-transition gateway path (T-0021/E4.2) is the sole writer (write contract frozen) — neither implemented here. The ledger is NOT the audit floor (T-0016): no hash chain, no head; §2 fixes the boundary (a guarded transition writes both an actor_event row and an audit_event row, distinct tables, optional reference, no FK). Migration 018 (017 reserved for parallel T-0033); known_tenant_tables.txt additive. 22 CI-checkable acceptance criteria.",
+  "functional": [
+    "FR-1 actor_event is an append-only per-tenant T-0013 tenant table: tenant_id NOT NULL leading PK, FORCE RLS default-DENY, choros_app SELECT+INSERT only, no-mutate trigger bars UPDATE/DELETE for all roles; NO hash chain / head (distinct from T-0016)",
+    "FR-2 actor identity: actor (=performed_by) NOT NULL FK→employee; on_behalf_of nullable FK→employee, distinct from performer (NULL ⇒ own behalf); SoD attributes to principal = COALESCE(on_behalf_of, actor); role_at_event point-in-time role_id NOT NULL, FK deferred to T-0022; kind∈{human,agent} deliberately NOT a discriminator (equal actors)",
+    "FR-3 object_ref = denormalized opaque ResourceRef (object_kind CHECK∈{application,registry,record} + nullable application_id/registry_id/record_id, no FK — T-0015 object_handle pattern); per-object lookup is the primary indexed read path",
+    "FR-4 typed, ordered verb trail per object: closed verb set + approve level, ordered by seq, append-only and order-stable",
+    "FR-5 ordering: ts (epoch ms) + per-tenant strictly-increasing seq UNIQUE(tenant_id,seq); SoD order reasoning uses seq not ts; per-tenant serialization, never a global sequence/lock",
+    "FR-6 ledger stores references and identities, never object payloads (no data/snapshot/view column; only object_ref + identities; detail jsonb is event metadata, no object field values) — gateway stays the sole value-resolver",
+    "FR-7 write contract (frozen, not implemented): sole writer is the guarded-transition/gateway path (T-0021/E4.2), appends at action-time (TOCTOU), append-only INSERT; only guarded transitions write actor-events, not ordinary CRUD",
+    "FR-8 read contract (frozen, not implemented): per-object ordered trail; actor-on-object (dynamic SoD substrate, principal = COALESCE); role-pair-on-object (static SoD substrate, reads role_at_event); the SoD constraints themselves are T-0032/E4.2"
+  ],
+  "non_functional": [
+    "NF-1 tenant isolation by repo invariants: FORCE RLS, leading tenant_id, tenant-scoped employee FKs, choros_app NOBYPASSRLS, additive known_tenant_tables.txt entry; no new isolation code-path",
+    "NF-2 append-only + per-tenant ordering are structural (privilege revoke + no-mutate trigger + no global sequence/lock), mirroring T-0016 NF-1/NF-2; defeating requires a CI-visible diff; tenants never block each other",
+    "NF-3 human/agent equality: no branch on actor.kind; kind resolvable via employee join, never a column of or discriminator in actor_event",
+    "NF-4 references not values: no object payload in the ledger; gateway (T-0021) remains the only object-value resolver",
+    "NF-5 migration ordering (run seam, frozen): migration 018 (017 reserved for parallel T-0033); lexicographic NNN sort applies 018 after 016 employee so the FK target exists; known_tenant_tables.txt appended additively"
+  ],
+  "out_of_scope": [
+    "SoD constraint evaluation: sod_constraint, static/dynamic decision, action-time SoD block (T-0032/E4.2) — T-0019 builds only the substrate",
+    "the guarded-transition writer / guarded-transition class taxonomy (T-0021 gateway + E4.2) — write contract frozen, no writer implemented",
+    "role / assignment tables: role_at_event FK deferred to T-0022/E3.2 (mirrors grant.role_id)",
+    "substitution / absence mechanics (E4.7) — T-0019 only makes on_behalf_of ≠ performed_by expressible",
+    "hash-chaining / head-snapshot / tamper-evidence — that is the audit floor T-0016; actor_event is intentionally un-chained (a guarded transition writes both rows, coupling is the writer's job)",
+    "any HTTP/API surface for actor-events (contracts are internal)",
+    "object_ref → gateway value resolution (ledger stores the reference; resolving to values is T-0021)",
+    "verb-set extension beyond the GT-1 closed set (any future verb is a vocab_version migration)"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "actor_event in known_tenant_tables.txt (flows into every T-0013 RLS probe); live-DB: pg_class relrowsecurity=true AND relforcerowsecurity=true; choros_app with no tenant GUC → SELECT count=0", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "cross-tenant isolation: tenant-A and tenant-B rows seeded via migrator; in tenant-A context SELECT … WHERE tenant_id=<B> → 0 rows; shared cross_tenant probe iterating KNOWN_TENANT_TABLES passes for actor_event", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "tenant_id leading: PK is (tenant_id, seq); object-read index and both employee FKs lead with tenant_id (reuses tenant_id_leading.sql); static lint over 018_actor_event.sql asserts the same", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "app role cannot UPDATE: as choros_app with tenant context, INSERT one row then UPDATE actor_event SET event='approve' WHERE seq=<n> MUST fail (privilege error OR trigger abort); row unchanged on re-read", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "app role cannot DELETE: as choros_app, DELETE FROM actor_event WHERE seq=<n> MUST fail; row still present", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "UPDATE/DELETE barred even for choros_migrator (table owner) by the no-mutate trigger (defence in depth — append-only survives an app-role privilege misconfiguration)", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "append-only structural: ci/checks/actor_event_append_only.sh asserts (a) no migration grants UPDATE/DELETE on actor_event to choros_app and (b) a no-mutate trigger on actor_event exists; CI fails if the grant appears or the trigger is absent", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "seq per-tenant strictly increasing and unique: append K rows tenant-A, M tenant-B; tenant-A seq strictly increasing no dup; UNIQUE(tenant_id,seq) rejects a manual duplicate-seq insert; A and B order independently", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "no global sequence/lock: ci/checks/actor_event_no_global_seq.sh asserts a per-tenant ordinal primitive (per-tenant advisory lock or counter row), not a global SEQUENCE/advisory lock; concurrency: N concurrent appends in tenant-A yield N distinct seq; A and B appends do not block on a shared lock", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "actor NOT NULL and FK-scoped: INSERT with actor=non-existent employee.id (same tenant) rejected by FK; actor=NULL rejected by NOT NULL; valid employee.id accepted", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "on_behalf_of nullable, FK-scoped, distinct from actor: on_behalf_of=NULL valid (own behalf); on_behalf_of=other valid employee.id valid with on_behalf_of≠actor preserved on read; on_behalf_of=non-existent employee rejected by FK", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "principal SoD attribution uses COALESCE(on_behalf_of, actor): read-contract helper for 'did principal P do event E on X' matches on COALESCE(on_behalf_of,actor)=P; delegated approval (actor=X,on_behalf_of=P) attributes to P; self-act (on_behalf_of=NULL) attributes to actor; both asserted via fixtures", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "human/agent equality: lint asserts actor_event has no kind column and does not branch on employee.kind; fixture shows an agent employee.id and a human employee.id stored/read via the same code path (no kind-conditional)", "verifiable_as": "fitness"},
+    {"id": "AC-14", "text": "role_at_event NOT NULL, point-in-time, no role FK: role_at_event=NULL rejected by NOT NULL; a role_at_event UUID absent from any future role table is accepted (no FK, mirrors grant.role_id); lint asserts 018 declares no FK from role_at_event to role", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "object_ref denormalized non-FK ResourceRef with CHECKed kind: object_kind='robot' (∉{application,registry,record}) rejected by CHECK; a record-kind row populating record_id accepted; component id columns have no FK (record_id not in record is accepted — opaque-pointer posture)", "verifiable_as": "test"},
+    {"id": "AC-16", "text": "per-object trail index-served, ordered, complete: append request→prepare→submit→approve@L1→approve@L2→release for one object_ref; reading all rows for that object_ref ordered by seq returns exactly those 6 events in order; read uses the object index (EXPLAIN index scan not seq scan); events for a different object absent", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "no object payload: lint over 018_actor_event.sql asserts no data/snapshot/view/payload column; the only jsonb is detail (event metadata); fixture asserts detail carries no record field values", "verifiable_as": "fitness"},
+    {"id": "AC-18", "text": "closed verb set CHECK-enforced: INSERT event='escalate' (∉{request,prepare,submit,approve,release}) rejected by CHECK; each of the five valid verbs accepted", "verifiable_as": "test"},
+    {"id": "AC-19", "text": "approve_Ln level-typed: approve_level non-null iff event='approve' — event='approve' with approve_level=NULL rejected; event='submit' with approve_level=2 rejected; event='approve' with approve_level 1 and 2 both accepted and distinguishable/orderable on read", "verifiable_as": "test"},
+    {"id": "AC-20", "text": "verb vocabulary pinned to vocab_version: every row carries vocab_version NOT NULL; ci/checks/actor_event_vocab_pinned.sh (or unit golden) asserts the day-1 verb set is {request,prepare,submit,approve,release} and that changing it requires editing the CHECK + bumping vocab_version (golden fails CI if the set changes without a vocab bump)", "verifiable_as": "fitness"},
+    {"id": "AC-21", "text": "actor_event is a separate ledger from audit_event: lint asserts no prev_hash/row_hash/chain columns and no head table on actor_event, and NO FK between actor_event and audit_event (each independently append-only); the two co-exist, neither subsumes the other", "verifiable_as": "fitness"},
+    {"id": "AC-22", "text": "a guarded transition can produce both an actor_event row and an audit_event row: write-contract fixture shows one guarded submit mapping to one actor_event row (SoD fact) referable by an audit_event row via actor_event.id UUID WITHOUT an enforced FK — confirming §2 'both rows, distinct tables, optional reference' (actual coupling is the writer's, T-0021/E4.2)", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0019-actor-event-ledger.spec.md"
+}

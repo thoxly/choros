@@ -1,0 +1,1412 @@
+/**
+ * web/src/screens/records-form.js
+ *
+ * Pure, framework-free helpers for the RECORD entry screen (T-0267 — the moment
+ * the constructor stores real data). Kept JSX-free so the schema→form-fields
+ * mapping, value typing/serialization and 400-error mapping are unit-testable in
+ * isolation (mirrors apps-schema.js / apps-validate.js).
+ *
+ * THE record_schema CONTRACT (FROZEN — same object the field-constructor T-0266
+ * emits and the backend AJV validator compiles, see apps-schema.js header and
+ * src/core/record-schema-validator.ts):
+ *
+ *     {
+ *       "type": "object",
+ *       "additionalProperties": false,
+ *       "properties": {
+ *         "<fieldKey>": { "type": "string"|"number"|"integer"|"boolean", "title"?: <label>, "enum"?: [...] },
+ *         ...
+ *       },
+ *       "required": ["<fieldKey>", ...]
+ *     }
+ *
+ * The backend validates record.data with a DEFAULT Ajv instance (NOT strict),
+ * `additionalProperties:false`. Two consequences this module is built around:
+ *   1. EXTRA keys are rejected → we only emit keys that exist in `properties`.
+ *   2. OPTIONAL keys may simply be ABSENT → for a blank optional field we OMIT
+ *      the key rather than send "" / NaN, which would fail the type check for a
+ *      number/integer (and is cleaner for string too). A blank REQUIRED field is
+ *      caught client-side (the server would 400 on a missing required key anyway).
+ *
+ * VALUE TYPING (the load-bearing part — the server validates types):
+ *   - string            → the raw string. Required ⇒ must be non-empty.
+ *   - number / integer  → Number(raw). Required ⇒ must parse to a finite number
+ *                         (and, for integer, an integer). Optional + blank ⇒ omit.
+ *                         Numbers are serialized as JS numbers (NOT strings) so the
+ *                         AJV `type:"number"/"integer"` check passes.
+ *   - boolean           → a real boolean from the checkbox (always present; a
+ *                         checkbox has a definite true/false state). `false` is a
+ *                         valid boolean, so required booleans never block on false.
+ *   - select (T-0294)   → emitted as `type:"string"` + `enum:[...]` in the JSON
+ *                         schema. The form renders a <select> dropdown; the chosen
+ *                         value is a string matching one of the enum entries.
+ *                         Required ⇒ must be non-empty. Optional + blank ⇒ omit.
+ *   - date (T-0294)     → emitted as `type:"string"` + `x-date:true` (T-0553; no
+ *                         format — AJV strict rejects format:date, so x-date is the
+ *                         discriminator). The form renders <input type="date"> which
+ *                         produces ISO 8601 dates (YYYY-MM-DD). Required ⇒ must be
+ *                         non-empty. Optional + blank ⇒ omit. Legacy date fields without
+ *                         x-date load as text (backward-compatible).
+ *   - unknown type      → treated as string (defensive; the constructor never
+ *                         emits an unsupported type, see apps-schema FIELD_TYPES).
+ */
+
+// T-0580: import the SAME core formula parser/evaluator the server uses — ONE
+// grammar/evaluator, not a duplicated copy (ADR §2.6/§4 D2). The explicit
+// `.ts` extension resolves correctly under this repo's vite/vitest toolchain
+// (proven in apps-schema.js / apps-schema.test.js's identical pattern).
+import { parseFormula } from '../../../src/core/formula-parser.ts';
+import { evalFormula } from '../../../src/core/formula-eval.ts';
+// T-0649: shared дд.мм.гггг formatters — formatCellValue's date/datetime/money
+// branches use these so the list/detail cell and the DateInput/MoneyInput
+// controls (field-renderer.jsx) render identically (single source of truth).
+import { formatShortDate, formatShortDateTime } from '../lib/format.js';
+
+// The input control a given JSON-Schema primitive type maps to in the form.
+//   text       → <input type="text">      (string)
+//   number     → <input type="number">    (number / integer)
+//   checkbox   → <input type="checkbox">  (boolean)
+//   select     → <select> dropdown        (select — T-0294)
+//   date       → <input type="date">      (date — T-0294)
+//   relation   → searchable picker of target registry records (T-0446)
+//   collection → repeatable-rows table (line-items — T-0448/T-0449)
+//   computed   → read-only rollup readout (NEVER a writable control — T-0453)
+export const INPUT_KIND = {
+  string: "text",
+  number: "number",
+  integer: "number",
+  boolean: "checkbox",
+  select: "select",
+  "multi-select": "multi-select",
+  date: "date",
+  // T-0649: datetime — <input type="datetime-local">, separate control from "date".
+  datetime: "datetime",
+  url: "url",
+  email: "email",
+  money: "money",
+  relation: "relation",
+  person: "person",
+  collection: "collection",
+  computed: "computed",
+  // T-0579: file — upload/download control; value is the fileVersionId string.
+  file: "file",
+};
+
+// T-0580: ISO calendar-date pattern (YYYY-MM-DD, no time component) — the
+// x-date storage convention (apps-schema.js:40) AND a formula field's
+// result_type:"date" shape (src/core/formula-eval.ts's ISO_DATE_RE mirror).
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * T-0552: Humanize a raw field key into a readable label fallback. Used wherever
+ * a field label is derived from a missing human title (`title?.trim() || humanizeKey(key)`)
+ * so the record list headers and the create/edit form never surface a raw snake_case
+ * key (e.g. `vendor_inn` → "Vendor inn"). PURE — replaces `_`/`-` with spaces, trims,
+ * collapses whitespace and capitalizes the first letter. Empty / non-string → "".
+ *
+ * @param {unknown} key a field key
+ * @returns {string}
+ */
+export function humanizeKey(key) {
+  if (typeof key !== "string") return "";
+  const words = key.replace(/[_-]+/g, " ").trim().replace(/\s+/g, " ");
+  if (words.length === 0) return "";
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * T-0453: Compute the rollup value for a computed/«Итог» field from a data object.
+ *
+ * PURE function — no side effects, no throws. Returns a JS number or null.
+ *
+ * @param {{ rollupSource: string, rollupOp: string, rollupValueField?: string,
+ *           rollupFactorField?: string }} field  form-field descriptor for a computed field
+ * @param {Record<string, unknown>} data  record.data or live form values
+ * @returns {number | null}
+ *
+ * Semantics:
+ *   source: data[field.rollupSource] must be an array of row objects (a collection).
+ *     If absent or not an array → null (source missing; no error).
+ *
+ *   For each row, read value_field (and factor_field for op:"sum" when set) as numbers.
+ *   Non-numeric or missing cells:
+ *     - sum/avg/min/max : skip the cell entirely (treat as if the row doesn't exist
+ *       for that aggregation). This is the honest choice: a blank optional price cell
+ *       should not make the total zero, nor should it error.
+ *     - count : all rows counted regardless of cell contents.
+ *
+ *   Empty source array (0 rows) or all cells non-numeric → returns null (not 0),
+ *   because "no data" should display as «—», not as 0, which would be misleading.
+ *   Exception: count on an empty array → null (zero rows → no meaningful count to show).
+ *
+ *   Operations:
+ *     sum   : Σ value × factor (factor defaults to 1 when factor_field absent/non-numeric)
+ *     count : total row count (ignores value_field)
+ *     avg   : mean of numeric value cells
+ *     min   : minimum numeric value cell
+ *     max   : maximum numeric value cell
+ */
+export function computeRollup(field, data) {
+  if (!field || typeof field !== "object") return null;
+  const source = typeof field.rollupSource === "string" ? field.rollupSource : "";
+  const op = typeof field.rollupOp === "string" ? field.rollupOp : "";
+  const valueField = typeof field.rollupValueField === "string" ? field.rollupValueField : "";
+  const factorField = typeof field.rollupFactorField === "string" ? field.rollupFactorField : "";
+
+  if (source.length === 0 || op.length === 0) return null;
+
+  const dataObj = data && typeof data === "object" ? data : {};
+  const rows = dataObj[source];
+  if (!Array.isArray(rows)) return null;
+
+  // count: just the row count, value_field irrelevant
+  if (op === "count") {
+    return rows.length === 0 ? null : rows.length;
+  }
+
+  // For all other ops, collect numeric values (and optional factors for sum)
+  const values = [];
+  for (const row of rows) {
+    const rowObj = row && typeof row === "object" ? row : {};
+    const raw = rowObj[valueField];
+    const rawStr = typeof raw === "number" ? raw : (typeof raw === "string" ? raw.trim() : null);
+    if (rawStr === null || rawStr === "") continue;
+    const v = Number(rawStr);
+    if (!Number.isFinite(v)) continue;
+
+    if (op === "sum" && factorField.length > 0) {
+      const rawF = rowObj[factorField];
+      const rawFStr = typeof rawF === "number" ? rawF : (typeof rawF === "string" ? rawF.trim() : null);
+      let factor = 1;
+      if (rawFStr !== null && rawFStr !== "") {
+        const f = Number(rawFStr);
+        if (Number.isFinite(f)) factor = f;
+      }
+      values.push(v * factor);
+    } else {
+      values.push(v);
+    }
+  }
+
+  if (values.length === 0) return null;
+
+  if (op === "sum") {
+    return values.reduce((acc, x) => acc + x, 0);
+  }
+  if (op === "avg") {
+    return values.reduce((acc, x) => acc + x, 0) / values.length;
+  }
+  if (op === "min") {
+    return Math.min(...values);
+  }
+  if (op === "max") {
+    return Math.max(...values);
+  }
+
+  return null; // unknown op: degrade silently
+}
+
+/**
+ * T-0580: compute a "computed" field's live preview value for EITHER mode —
+ * dispatches to computeRollup (rollup mode, T-0452) or the SHARED CORE
+ * evalFormula (formula mode) based on `field.computedMode`. This is the ONE
+ * call site the list/card UI should use for a computed field's readout going
+ * forward (computeRollup remains directly exported/used for backward
+ * compatibility and its own dedicated tests).
+ *
+ * NF-4 (client preview is OPTIONAL, server is the source of truth): this
+ * function mirrors the SAME grammar/evaluator the server uses
+ * (src/core/formula-eval.ts, imported directly — one evaluator, ADR §2.6/§4
+ * D2) — parsing the stored `formulaExpr` fresh on every call (no caching; a
+ * formula is a short string, re-parsing is cheap and avoids any staleness
+ * class of bug). A parse failure (should not happen for a schema the server
+ * already accepted) degrades to null, never throws.
+ *
+ * @param {{computedMode?: string, rollupSource?, rollupOp?, rollupValueField?,
+ *          rollupFactorField?, formulaExpr?: string}} field
+ * @param {Record<string, unknown>} data  record.data or live form values
+ * @returns {number | string | null}
+ */
+export function computeComputedFieldValue(field, data) {
+  if (!field || typeof field !== "object") return null;
+  if (field.computedMode === "formula") {
+    const expr = typeof field.formulaExpr === "string" ? field.formulaExpr : "";
+    if (expr.trim().length === 0) return null;
+    const parsed = parseFormula(expr);
+    if (!parsed.ok) return null;
+    const scope = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    return evalFormula(parsed.ast, scope);
+  }
+  // Default: rollup mode (also the backward-compatible path for any
+  // persisted field with no computedMode key at all — T-0452 fields saved
+  // before T-0580 have no computedMode, and default to "rollup" on load via
+  // apps-schema.js::parseRecordSchema anyway, but this dispatcher is
+  // defensive independent of that).
+  return computeRollup(field, data);
+}
+
+/**
+ * Derive an ordered list of form-field descriptors from a record_schema.
+ * Order = `properties` insertion order (the field-constructor preserves field
+ * order via JS object key order — see apps-schema.buildRecordSchema).
+ *
+ * T-0294: properties with an `enum` array are typed as "select"; the options
+ * list is extracted and included in the descriptor. Plain string fields remain
+ * "string" (date fields, stored as type:"string" without format, are
+ * indistinguishable at this layer and render as text inputs).
+ *
+ * @param {unknown} recordSchema a registry_def.record_schema
+ * @returns {Array<{ key, type, title, label, required, inputKind, options? }>}
+ */
+export function schemaToFormFields(recordSchema) {
+  if (
+    recordSchema === null ||
+    typeof recordSchema !== "object" ||
+    Array.isArray(recordSchema)
+  ) {
+    return [];
+  }
+  const props = recordSchema.properties;
+  if (props === null || typeof props !== "object" || Array.isArray(props)) {
+    return [];
+  }
+  const requiredList = Array.isArray(recordSchema.required) ? recordSchema.required : [];
+  const requiredSet = new Set(requiredList.filter((k) => typeof k === "string"));
+
+  // T-0510: resolve field key order using x-field-order (same logic as parseRecordSchema).
+  // x-field-order is a root-level array that survives jsonb roundtrip; object key order
+  // doesn't. Legacy schemas without x-field-order fall back to properties insertion order.
+  const xFieldOrder = Array.isArray(recordSchema["x-field-order"]) ? recordSchema["x-field-order"] : null;
+  let orderedKeys;
+  if (xFieldOrder && xFieldOrder.length > 0) {
+    const propKeySet = new Set(Object.keys(props));
+    const ordered = xFieldOrder.filter((k) => typeof k === "string" && propKeySet.has(k));
+    const orderedSet = new Set(ordered);
+    for (const k of Object.keys(props)) {
+      if (!orderedSet.has(k)) ordered.push(k);
+    }
+    orderedKeys = ordered;
+  } else {
+    orderedKeys = Object.keys(props);
+  }
+
+  return orderedKeys.map((key) => {
+    const def = props[key];
+    const rawType = def && typeof def === "object" ? def.type : undefined;
+    const title =
+      def && typeof def === "object" && typeof def.title === "string" && def.title.trim().length > 0
+        ? def.title
+        : "";
+
+    // T-0512: detect multi-select fields by type:"array" + x-multi-select annotation.
+    // Must come BEFORE collection detection (both match type:"array").
+    const xMultiSelect = def && typeof def === "object" ? def["x-multi-select"] : undefined;
+    if (xMultiSelect && rawType === "array") {
+      const options = (def.items && Array.isArray(def.items.enum))
+        ? def.items.enum.filter((o) => typeof o === "string")
+        : [];
+      return {
+        key,
+        type: "multi-select",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "multi-select",
+        options,
+      };
+    }
+
+    // T-0449: detect collection fields (T-0448 wire shape):
+    //   { type: "array", title?, items: { type: "object", additionalProperties: false,
+    //     properties: { <sub-fields> }, required?: [...] } }
+    // Sub-fields are scalars (select by enum, date/number/integer/boolean by type).
+    if (
+      def && typeof def === "object" && !Array.isArray(def) &&
+      rawType === "array" &&
+      def.items && typeof def.items === "object" && !Array.isArray(def.items) &&
+      def.items.type === "object"
+    ) {
+      const itemProps =
+        def.items.properties && typeof def.items.properties === "object" && !Array.isArray(def.items.properties)
+          ? def.items.properties
+          : {};
+      const itemRequired = Array.isArray(def.items.required)
+        ? new Set(def.items.required.filter((k) => typeof k === "string"))
+        : new Set();
+
+      // T-0649: restore date-column typing lost on the JSON-Schema round-trip.
+      // A collection sub-field cannot carry its own x-date (AJV strict rejects an
+      // x-* keyword nested inside items.properties[subKey]/items — the server's
+      // stripXExtensions only strips ROOT-level and top-level properties[key]
+      // x-*). buildRecordSchema (apps-schema.js) records date sub-field keys as a
+      // ROOT-level x-collection-date-fields map instead (same mechanism as
+      // x-field-order); read it back here so the record-entry form renders a
+      // DateInput for the cell instead of a permanent plain-text fallback (the
+      // "x-date never recurses into collection rows" gap, UX study §2).
+      const xCollectionDateFields = recordSchema["x-collection-date-fields"];
+      const dateKeysForThisField = (
+        xCollectionDateFields && typeof xCollectionDateFields === "object" && !Array.isArray(xCollectionDateFields)
+          && Array.isArray(xCollectionDateFields[key])
+      ) ? new Set(xCollectionDateFields[key].filter((k) => typeof k === "string")) : null;
+
+      const subFields = Object.keys(itemProps).map((sfKey) => {
+        const sfDef = itemProps[sfKey];
+        const sfTitle =
+          sfDef && typeof sfDef === "object" && typeof sfDef.title === "string" && sfDef.title.trim().length > 0
+            ? sfDef.title
+            : "";
+        const sfHasEnum =
+          sfDef && typeof sfDef === "object" && Array.isArray(sfDef.enum) && sfDef.enum.length > 0;
+        if (sfHasEnum) {
+          const sfOptions = sfDef.enum.filter((o) => typeof o === "string");
+          return {
+            key: sfKey,
+            type: "select",
+            label: sfTitle || humanizeKey(sfKey),
+            required: itemRequired.has(sfKey),
+            inputKind: "select",
+            options: sfOptions,
+          };
+        }
+        // T-0649: x-collection-date-fields says this column is a date.
+        if (dateKeysForThisField && dateKeysForThisField.has(sfKey)) {
+          return {
+            key: sfKey,
+            type: "date",
+            label: sfTitle || humanizeKey(sfKey),
+            required: itemRequired.has(sfKey),
+            inputKind: "date",
+          };
+        }
+        const sfRawType = sfDef && typeof sfDef === "object" ? sfDef.type : undefined;
+        const sfType =
+          sfRawType === "string" || sfRawType === "number" || sfRawType === "integer" || sfRawType === "boolean"
+            ? sfRawType
+            : "string";
+        return {
+          key: sfKey,
+          type: sfType,
+          label: sfTitle || humanizeKey(sfKey),
+          required: itemRequired.has(sfKey),
+          inputKind: INPUT_KIND[sfType] || "text",
+        };
+      });
+
+      return {
+        key,
+        type: "collection",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "collection",
+        subFields,
+      };
+    }
+
+    // T-0580: detect FORMULA-mode computed fields by the presence of
+    // x-formula extension (checked BEFORE x-rollup — mutually exclusive
+    // flavors, mirrors apps-schema.js::parseRecordSchema's discriminator
+    // order). Shape: { type:"number"|"string", "x-formula":{expr,result_type},
+    // "x-date"?:true }.
+    const xFormula = def && typeof def === "object" ? def["x-formula"] : undefined;
+    if (xFormula && typeof xFormula === "object" && !Array.isArray(xFormula) && typeof xFormula.expr === "string") {
+      return {
+        key,
+        type: "computed",
+        title,
+        label: title || humanizeKey(key),
+        required: false, // computed fields are NEVER required
+        inputKind: "computed",
+        computedMode: "formula",
+        formulaExpr: xFormula.expr,
+        formulaResultType: xFormula.result_type === "date" ? "date" : "number",
+      };
+    }
+
+    // T-0453: detect computed (rollup) fields by the presence of x-rollup extension.
+    // Shape: { type: "number", "x-rollup": { source, op, value_field, factor_field? } }.
+    // These fields are NEVER required and NEVER appear in the submitted data
+    // (serializeRecordData omits them; the value is computed at display time).
+    const xRollup = def && typeof def === "object" ? def["x-rollup"] : undefined;
+    if (xRollup && typeof xRollup === "object" && !Array.isArray(xRollup) && typeof xRollup.source === "string") {
+      return {
+        key,
+        type: "computed",
+        title,
+        label: title || humanizeKey(key),
+        required: false, // computed fields are NEVER required
+        inputKind: "computed",
+        computedMode: "rollup",
+        rollupSource: typeof xRollup.source === "string" ? xRollup.source : "",
+        rollupOp: typeof xRollup.op === "string" ? xRollup.op : "",
+        rollupValueField: typeof xRollup.value_field === "string" ? xRollup.value_field : "",
+        rollupFactorField: typeof xRollup.factor_field === "string" ? xRollup.factor_field : "",
+      };
+    }
+
+    // T-0446: detect relation fields by the presence of the x-relation extension
+    // (emitted by apps-schema.buildRecordSchema for "relation" type fields — T-0444).
+    // Shape: { type: "string", "x-relation": { target_registry_id: "<uuid>" } }.
+    const xRelation = def && typeof def === "object" ? def["x-relation"] : undefined;
+    if (xRelation && typeof xRelation === "object" && typeof xRelation.target_registry_id === "string") {
+      return {
+        key,
+        type: "relation",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "relation",
+        targetRegistryId: xRelation.target_registry_id,
+      };
+    }
+
+    // T-0509: detect money fields by the presence of the x-money extension.
+    // Shape: { type: "number", "x-money": { currency: "RUB" } }.
+    // Must be detected before the generic number fallthrough so editing a money
+    // field restores type "money", not "number".
+    const xMoney = def && typeof def === "object" ? def["x-money"] : undefined;
+    if (xMoney && typeof xMoney === "object" && !Array.isArray(xMoney)) {
+      return {
+        key,
+        type: "money",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "money",
+      };
+    }
+
+    // T-0512: detect person fields by the presence of x-person annotation.
+    // Shape: { type: "string", "x-person": true }.
+    // Must be detected before the generic string fallthrough.
+    const xPerson = def && typeof def === "object" ? def["x-person"] : undefined;
+    if (xPerson) {
+      return {
+        key,
+        type: "person",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "person",
+      };
+    }
+
+    // T-0516: detect url fields by the presence of x-url annotation.
+    // Shape: { type: "string", "x-url": true }.
+    // Must be detected before the generic string fallthrough.
+    const xUrl = def && typeof def === "object" ? def["x-url"] : undefined;
+    if (xUrl) {
+      return {
+        key,
+        type: "url",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "url",
+      };
+    }
+
+    // T-0516: detect email fields by the presence of x-email annotation.
+    // Shape: { type: "string", "x-email": true }.
+    // Must be detected before the generic string fallthrough.
+    const xEmail = def && typeof def === "object" ? def["x-email"] : undefined;
+    if (xEmail) {
+      return {
+        key,
+        type: "email",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "email",
+      };
+    }
+
+    // T-0553: detect date fields by the presence of x-date annotation.
+    // Shape: { type: "string", "x-date": true }. Must be detected before the generic
+    // string fallthrough so a date field renders <input type="date">, not a text input.
+    // Legacy date fields (plain { type: "string" }, no x-date) fall through to text —
+    // no regression, backward-compatible.
+    const xDate = def && typeof def === "object" ? def["x-date"] : undefined;
+    if (xDate) {
+      return {
+        key,
+        type: "date",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "date",
+      };
+    }
+
+    // T-0649: detect datetime fields by the presence of x-datetime annotation.
+    // Shape: { type: "string", "x-datetime": true }. Mirrors x-date exactly —
+    // must be detected before the generic string fallthrough.
+    const xDatetime = def && typeof def === "object" ? def["x-datetime"] : undefined;
+    if (xDatetime) {
+      return {
+        key,
+        type: "datetime",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "datetime",
+      };
+    }
+
+    // T-0579: detect file fields by the presence of x-file annotation.
+    // Shape: { type: "string", "x-file": {…} }. Must be detected before the generic
+    // string fallthrough. A property WITHOUT x-file never detects as "file" —
+    // backward-compatible (NF-3).
+    const xFile = def && typeof def === "object" ? def["x-file"] : undefined;
+    if (xFile && typeof xFile === "object" && !Array.isArray(xFile)) {
+      return {
+        key,
+        type: "file",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "file",
+      };
+    }
+
+    // T-0294: detect select fields by the presence of a non-empty enum array.
+    const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
+    if (hasEnum) {
+      const options = def.enum.filter((o) => typeof o === "string");
+      return {
+        key,
+        type: "select",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "select",
+        options,
+      };
+    }
+
+    const type =
+      rawType === "string" || rawType === "number" || rawType === "integer" || rawType === "boolean"
+        ? rawType
+        : "string";
+    return {
+      key,
+      type,
+      title,
+      label: title || humanizeKey(key), // human label falls back to the raw key
+      required: requiredSet.has(key),
+      inputKind: INPUT_KIND[type] || "text",
+    };
+  });
+}
+
+/**
+ * The blank/initial form-VALUE state for a set of form fields. Strings/numbers
+ * start as "" (controlled inputs), booleans as false (a checkbox is always set).
+ * T-0294: select and date start as "" (the <select> or <input type="date"> value).
+ *
+ * @param {Array<{ key, type }>} formFields output of schemaToFormFields
+ * @returns {Record<string, string|boolean>}
+ */
+export function blankRecordValues(formFields) {
+  const values = {};
+  for (const f of Array.isArray(formFields) ? formFields : []) {
+    if (f.type === "computed") {
+      // T-0453: computed fields have no user-editable state — they are derived
+      // at display time via computeRollup. Do NOT add a key to the values map
+      // so serializeRecordData never sees it and can never accidentally emit it.
+      continue;
+    }
+    if (f.type === "boolean") {
+      values[f.key] = false;
+    } else if (f.type === "collection") {
+      // T-0449: a collection starts as an empty row array; T-0450 renders the row table.
+      values[f.key] = [];
+    } else if (f.type === "multi-select") {
+      // T-0512: multi-select starts as an empty array (no options selected).
+      values[f.key] = [];
+    } else {
+      values[f.key] = "";
+    }
+  }
+  return values;
+}
+
+/**
+ * T-0568: Seed the form-VALUE state from an EXISTING record's `data` object (the
+ * inverse of serializeRecordData — used to prefill the edit form). Starts from
+ * blankRecordValues(formFields) and overlays the stored value per field, coerced
+ * back to the control's representation:
+ *   - boolean            → Boolean(stored)                (checkbox state)
+ *   - number/integer/money → stored as a String           (numeric inputs are controlled strings)
+ *   - collection         → the stored array of rows, else []
+ *   - multi-select       → the stored string[], else []
+ *   - computed           → skipped (never has editable state)
+ *   - everything else    → String(stored) when present, else "" (blank)
+ * Absent keys keep their blank default. PURE — no side effects.
+ *
+ * @param {Array} formFields output of schemaToFormFields
+ * @param {Record<string, unknown>} data a record's `data` object
+ * @returns {Record<string, string|boolean|Array>}
+ */
+export function recordDataToValues(formFields, data) {
+  const values = blankRecordValues(formFields);
+  const src = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  for (const f of Array.isArray(formFields) ? formFields : []) {
+    if (f.type === "computed") continue; // no editable state
+    if (!(f.key in src)) continue;       // absent → keep blank default
+    const stored = src[f.key];
+    if (stored === null || stored === undefined) continue;
+    if (f.type === "boolean") {
+      values[f.key] = Boolean(stored);
+    } else if (f.type === "collection") {
+      values[f.key] = Array.isArray(stored) ? stored : [];
+    } else if (f.type === "multi-select") {
+      values[f.key] = Array.isArray(stored) ? stored.filter((s) => typeof s === "string") : [];
+    } else {
+      // string / number / integer / money / select / date / relation / person / url / email
+      values[f.key] = typeof stored === "string" ? stored : String(stored);
+    }
+  }
+  return values;
+}
+
+/**
+ * Client-side validation of the raw form values against the form fields. A UX
+ * convenience ONLY — the server (AJV) is the source of truth and still 400s.
+ * We check exactly what we can honestly check client-side:
+ *   - required string  → must be non-empty (trimmed);
+ *   - required number/integer → must be present and parse to a finite number
+ *     (integer additionally must be a whole number);
+ *   - optional number/integer with a value → if present it must still parse
+ *     (a half-typed "12abc" is rejected so we never POST a NaN);
+ *   - boolean           → always valid (checkbox state is always a boolean).
+ *   - select (T-0294)   → required ⇒ must be non-empty; value must be in options.
+ *   - date (T-0294)     → required ⇒ must be non-empty. The browser constrains
+ *                          <input type="date"> to valid ISO dates; we just check
+ *                          non-empty for required and basic YYYY-MM-DD pattern if
+ *                          a value is present (prevents garbage on browsers that
+ *                          fall back to a plain text input).
+ *
+ * @param {Array} formFields
+ * @param {Record<string, string|boolean>} values
+ * @returns {{ valid: boolean, errors: Record<string,string> }} per-key error map
+ */
+export function validateRecordValues(formFields, values) {
+  const errors = {};
+  const vals = values && typeof values === "object" ? values : {};
+
+  for (const f of Array.isArray(formFields) ? formFields : []) {
+    const raw = vals[f.key];
+
+    if (f.type === "boolean") {
+      continue; // a checkbox is always a valid boolean
+    }
+
+    // T-0453: computed fields are never user-input — skip validation entirely.
+    // The value is derived at display time; no validation error is ever appropriate.
+    if (f.type === "computed") {
+      continue;
+    }
+
+    // T-0449: collection — validate each row cell by its sub-field rules.
+    // Error shape: { [fieldKey]: { rows: [ { [subKey]: "error message" }, … ] } }
+    // Each index in `rows` corresponds to a data row (undefined = no errors for that row).
+    // This shape is consumed by the T-0450 row-table UI component.
+    if (f.type === "collection") {
+      const rows = Array.isArray(raw) ? raw : [];
+      if (f.required && rows.length === 0) {
+        errors[f.key] = { rows: [], _collection: "Добавьте хотя бы одну строку" };
+        continue;
+      }
+      const subFields = Array.isArray(f.subFields) ? f.subFields : [];
+      const rowErrors = [];
+      let hasRowError = false;
+      for (const row of rows) {
+        const rowObj = row && typeof row === "object" ? row : {};
+        const cellErrors = {};
+        for (const sf of subFields) {
+          const cellRaw = rowObj[sf.key];
+          if (sf.type === "boolean") continue;
+          if (sf.type === "number" || sf.type === "integer") {
+            const str = typeof cellRaw === "string" ? cellRaw.trim() : cellRaw == null ? "" : String(cellRaw);
+            if (str.length === 0) {
+              if (sf.required) cellErrors[sf.key] = "Обязательное поле";
+            } else {
+              const n = Number(str);
+              if (!Number.isFinite(n)) {
+                cellErrors[sf.key] = "Введите число";
+              } else if (sf.type === "integer" && !Number.isInteger(n)) {
+                cellErrors[sf.key] = "Введите целое число";
+              }
+            }
+            continue;
+          }
+          if (sf.type === "select") {
+            const str = typeof cellRaw === "string" ? cellRaw : cellRaw == null ? "" : String(cellRaw);
+            if (str.length === 0) {
+              if (sf.required) cellErrors[sf.key] = "Обязательное поле";
+            } else {
+              const opts = Array.isArray(sf.options) ? sf.options : [];
+              if (opts.length > 0 && !opts.includes(str)) cellErrors[sf.key] = "Выберите значение из списка";
+            }
+            continue;
+          }
+          if (sf.type === "date") {
+            const str = typeof cellRaw === "string" ? cellRaw.trim() : cellRaw == null ? "" : String(cellRaw).trim();
+            if (str.length === 0) {
+              if (sf.required) cellErrors[sf.key] = "Обязательное поле";
+            } else if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+              cellErrors[sf.key] = "Введите дату в формате ГГГГ-ММ-ДД";
+            }
+            continue;
+          }
+          // string
+          const str = typeof cellRaw === "string" ? cellRaw : cellRaw == null ? "" : String(cellRaw);
+          if (sf.required && str.trim().length === 0) cellErrors[sf.key] = "Обязательное поле";
+        }
+        const hasCellError = Object.keys(cellErrors).length > 0;
+        rowErrors.push(hasCellError ? cellErrors : undefined);
+        if (hasCellError) hasRowError = true;
+      }
+      if (hasRowError) errors[f.key] = { rows: rowErrors };
+      continue;
+    }
+
+    if (f.type === "number" || f.type === "integer" || f.type === "money") {
+      // T-0509: money behaves identically to number for validation — stored as a plain number.
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw);
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      const n = Number(str);
+      if (!Number.isFinite(n)) {
+        errors[f.key] = "Введите число";
+      } else if (f.type === "integer" && !Number.isInteger(n)) {
+        errors[f.key] = "Введите целое число";
+      }
+      continue;
+    }
+
+    // T-0512: multi-select — value is a string[]; each element must be in options.
+    // Required → at least one item must be selected (non-empty array).
+    if (f.type === "multi-select") {
+      const arr = Array.isArray(raw) ? raw : [];
+      if (arr.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      const opts = Array.isArray(f.options) ? f.options : [];
+      if (opts.length > 0) {
+        for (const item of arr) {
+          if (!opts.includes(item)) {
+            errors[f.key] = "Выберите значения из списка";
+            break;
+          }
+        }
+      }
+      continue;
+    }
+
+    // T-0512: person — value is the employee id string; non-empty when required.
+    if (f.type === "person") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+      }
+      continue;
+    }
+
+    // T-0579: file — value is the fileVersionId string; non-empty when required.
+    // Optional + blank → valid (no file attached yet). AC-8.
+    if (f.type === "file") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Прикрепите файл";
+      }
+      continue;
+    }
+
+    // T-0446: relation — required → must be a non-empty UUID string.
+    if (f.type === "relation") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      // The stored value must be a valid UUID (the referenced record's id).
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str)) {
+        errors[f.key] = "Выберите запись из списка";
+      }
+      continue;
+    }
+
+    // T-0294: select — must be non-empty if required; must be one of the options.
+    if (f.type === "select") {
+      const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      // Validate that the chosen value is in the allowed options.
+      const opts = Array.isArray(f.options) ? f.options : [];
+      if (opts.length > 0 && !opts.includes(str)) {
+        errors[f.key] = "Выберите значение из списка";
+      }
+      continue;
+    }
+
+    // T-0294: date — required ⇒ non-empty; if present, must look like YYYY-MM-DD.
+    if (f.type === "date") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      // Basic ISO date pattern check (YYYY-MM-DD) to catch plain-text fallbacks.
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+        errors[f.key] = "Введите дату в формате ГГГГ-ММ-ДД";
+      }
+      continue;
+    }
+
+    // T-0649: datetime — required ⇒ non-empty; if present, must look like an
+    // ISO-8601 datetime (YYYY-MM-DDTHH:mm, the <input type="datetime-local"> value shape).
+    if (f.type === "datetime") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(str)) {
+        errors[f.key] = "Введите дату и время";
+      }
+      continue;
+    }
+
+    // T-0516: url — required ⇒ non-empty; if present, must start with http:// or https://.
+    if (f.type === "url") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      if (!/^https?:\/\/.+/.test(str)) {
+        errors[f.key] = "Введите корректный URL (начиная с http:// или https://)";
+      }
+      continue;
+    }
+
+    // T-0516: email — required ⇒ non-empty; if present, must match x@y.z pattern.
+    if (f.type === "email") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str)) {
+        errors[f.key] = "Введите корректный адрес электронной почты";
+      }
+      continue;
+    }
+
+    // string
+    const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+    if (f.required && str.trim().length === 0) {
+      errors[f.key] = "Обязательное поле";
+    }
+  }
+
+  return { valid: Object.keys(errors).length === 0, errors };
+}
+
+/**
+ * Serialize raw form values into the typed `data` object the POST /api/records
+ * body carries. THE LOAD-BEARING STEP: numbers become JS numbers, booleans
+ * become real booleans, and blank OPTIONAL fields are OMITTED (so they neither
+ * fail the type check nor trip additionalProperties:false). Assumes the values
+ * already passed validateRecordValues (so number strings parse cleanly); a
+ * never-reached NaN is still guarded by omitting unparseable optionals.
+ *
+ * T-0294:
+ *   select → emitted as a string (must be in the enum; AJV validates that).
+ *            Blank optional select ⇒ omit.
+ *   date   → emitted as a string (YYYY-MM-DD). Blank optional date ⇒ omit.
+ *
+ * @param {Array} formFields
+ * @param {Record<string, string|boolean>} values
+ * @returns {Record<string, unknown>} the `data` payload
+ */
+export function serializeRecordData(formFields, values) {
+  const data = {};
+  const vals = values && typeof values === "object" ? values : {};
+
+  for (const f of Array.isArray(formFields) ? formFields : []) {
+    const raw = vals[f.key];
+
+    // T-0453: THE KEY TRAP — computed fields MUST NEVER appear in the output `data`.
+    // The field IS declared in the schema `properties` (type:"number" with x-rollup),
+    // but it is NEVER stored (value is derived at display time). If a computed key
+    // ends up in `data`, every record POST 400s on AJV `additionalProperties:false`
+    // because the schema strips x-rollup before AJV compile, leaving the key as an
+    // extra property that the validator rejects. OMIT unconditionally.
+    if (f.type === "computed") {
+      continue; // never write computed fields to the record data payload
+    }
+
+    if (f.type === "boolean") {
+      // A checkbox always has a definite state; emit a real boolean.
+      data[f.key] = Boolean(raw);
+      continue;
+    }
+
+    // T-0449: collection — emit an ARRAY of typed row objects.
+    // Each cell is coerced by its sub-field type (mirrors the scalar per-type logic).
+    // Fully-blank trailing rows are dropped (a row is "fully blank" when EVERY
+    // non-boolean cell is an empty string or null/undefined).
+    if (f.type === "collection") {
+      const rows = Array.isArray(raw) ? raw : [];
+      const subFields = Array.isArray(f.subFields) ? f.subFields : [];
+
+      // Drop fully-blank trailing rows (from the end).
+      let lastNonBlankIdx = -1;
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i] && typeof rows[i] === "object" ? rows[i] : {};
+        const hasContent = subFields.some((sf) => {
+          if (sf.type === "boolean") return true; // checkbox always has state
+          const v = row[sf.key];
+          const str = typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim();
+          return str.length > 0;
+        });
+        if (hasContent) { lastNonBlankIdx = i; break; }
+      }
+      const trimmedRows = rows.slice(0, lastNonBlankIdx + 1);
+
+      const serialized = trimmedRows.map((row) => {
+        const rowObj = row && typeof row === "object" ? row : {};
+        const out = {};
+        for (const sf of subFields) {
+          const cellRaw = rowObj[sf.key];
+          if (sf.type === "boolean") {
+            out[sf.key] = Boolean(cellRaw);
+            continue;
+          }
+          if (sf.type === "number" || sf.type === "integer") {
+            const str = typeof cellRaw === "string" ? cellRaw.trim() : cellRaw == null ? "" : String(cellRaw);
+            if (str.length === 0) continue; // omit blank optional cell
+            const n = Number(str);
+            if (Number.isFinite(n)) out[sf.key] = n;
+            continue;
+          }
+          // string, select, date
+          const str = typeof cellRaw === "string" ? cellRaw : cellRaw == null ? "" : String(cellRaw);
+          if (str.length === 0 && !sf.required) continue; // omit blank optional cell
+          out[sf.key] = str;
+        }
+        return out;
+      });
+
+      // Optional empty collection → omit (consistent with optional-handling for scalars).
+      if (serialized.length === 0 && !f.required) continue;
+      data[f.key] = serialized;
+      continue;
+    }
+
+    if (f.type === "number" || f.type === "integer" || f.type === "money") {
+      // T-0509: money is stored as a plain JSON number (the x-money annotation is
+      // a display hint only and is stripped by AJV before validation). Treat identically
+      // to number: parse the string, emit a JS number, omit blank optionals.
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw);
+      if (str.length === 0) {
+        // Blank: omit. Required-blank is rejected by validateRecordValues before
+        // we get here; an omitted optional number is the cleanest valid payload.
+        continue;
+      }
+      const n = Number(str);
+      if (!Number.isFinite(n)) continue; // guard — should be unreachable post-validate
+      data[f.key] = n; // a JS number, NOT a string → passes AJV type:number
+      continue;
+    }
+
+    // T-0512: multi-select — emit an array of strings (each element in options).
+    // Empty array optional → omit; empty array required is caught by validateRecordValues.
+    if (f.type === "multi-select") {
+      const arr = Array.isArray(raw) ? raw.filter((s) => typeof s === "string") : [];
+      if (arr.length === 0 && !f.required) continue; // omit blank optional
+      data[f.key] = arr; // string[] — passes AJV type:"array" + items.enum
+      continue;
+    }
+
+    // T-0512: person — the selected value IS the employee's id string.
+    // Blank optional → omit; blank required is caught by validateRecordValues.
+    if (f.type === "person") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0 && !f.required) continue; // omit blank optional
+      data[f.key] = str; // employee id string — passes AJV type:"string"
+      continue;
+    }
+
+    // T-0579: file — the uploaded value IS the fileVersionId string (returned by
+    // POST /api/records/:recordId/files). Blank optional → omit; blank required
+    // is caught by validateRecordValues.
+    if (f.type === "file") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0 && !f.required) continue; // omit blank optional
+      data[f.key] = str; // fileVersionId string — passes AJV type:"string"
+      continue;
+    }
+
+    // T-0446: relation — the picked value IS the referenced record's UUID string.
+    // Emitted as a plain string (the schema stores it as type:"string"). Blank
+    // optional ⇒ omit; blank required is caught by validateRecordValues.
+    if (f.type === "relation") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0 && !f.required) {
+        continue; // omit blank optional relation
+      }
+      data[f.key] = str; // the UUID string — passes AJV type:"string"
+      continue;
+    }
+
+    // T-0294: select and date are emitted as plain strings (just like string).
+    // T-0516: url and email are also plain strings. T-0649: datetime too.
+    // Blank optional ⇒ omit; blank required is caught by validateRecordValues.
+    if (f.type === "select" || f.type === "date" || f.type === "datetime" || f.type === "url" || f.type === "email") {
+      const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+      if (str.length === 0 && !f.required) {
+        continue; // omit blank optional
+      }
+      data[f.key] = str;
+      continue;
+    }
+
+    // string
+    const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+    if (str.length === 0 && !f.required) {
+      // Omit blank optional strings (keeps the payload minimal; a non-required
+      // absent key is valid under the schema).
+      continue;
+    }
+    data[f.key] = str;
+  }
+
+  return data;
+}
+
+/**
+ * Build the list of table columns for the record list from a record_schema.
+ * Columns = the schema's field keys (label = title || humanizeKey(key)), in schema order.
+ *
+ * @param {unknown} recordSchema
+ * @returns {Array<{ key, label, type }>}
+ */
+export function schemaToColumns(recordSchema) {
+  return schemaToFormFields(recordSchema).map((f) => {
+    const col = { key: f.key, label: f.label, type: f.type };
+    // T-0507/T-0580: thread rollup/formula props through for computed fields
+    // so that computeComputedFieldValue(col, rowData) works correctly in the
+    // list cell renderer, for EITHER mode.
+    if (f.type === "computed") {
+      col.computedMode = f.computedMode;
+      col.rollupSource = f.rollupSource;
+      col.rollupOp = f.rollupOp;
+      col.rollupValueField = f.rollupValueField;
+      col.rollupFactorField = f.rollupFactorField;
+      col.formulaExpr = f.formulaExpr;
+      col.formulaResultType = f.formulaResultType;
+    }
+    // T-0512: thread options through for multi-select so formatCellValue can display values.
+    if (f.type === "multi-select") {
+      col.options = f.options;
+    }
+    return col;
+  });
+}
+
+/**
+ * Derive a human-readable display label from a target record's data object.
+ * Returns the first non-empty string or finite-number value found in data
+ * (schema-order), or a short id prefix as fallback. Never surfaces a raw UUID.
+ *
+ * This is the canonical label-derivation for relation fields — T-0447 exports
+ * it so both the list (RelationCell) and the detail card can reuse the same
+ * logic without duplication. Also used by RelationPicker (T-0446) in
+ * screen-app-records.jsx — that copy should be removed in favour of this one.
+ *
+ * @param {object|null|undefined} record  a record row from GET /api/records
+ * @returns {string}
+ */
+export function deriveRecordLabel(record) {
+  if (!record) return "—";
+  const data = record.data && typeof record.data === "object" ? record.data : {};
+  for (const key of Object.keys(data)) {
+    const v = data[key];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  // Fallback: first 8 chars of id — unambiguous short ref, not a raw placeholder.
+  return typeof record.id === "string" ? record.id.slice(0, 8) + "…" : "—";
+}
+
+/**
+ * Render a single record-data cell value for the list (display-only). Booleans
+ * become «Да»/«Нет»; null/undefined become «—»; objects are JSON-stringified
+ * (defensive — the flat schema never nests, but a hand-inserted seed might).
+ *
+ * T-0447: relation fields (type === "relation") store a UUID string as their
+ * value. Because resolving the UUID to a label is async, formatCellValue cannot
+ * do it directly. It returns the sentinel symbol RELATION_CELL_ASYNC so the
+ * caller (screen-app-records.jsx / screen-record-detail.jsx) knows to render
+ * an async <RelationCell> / resolve via fetch. The caller must check
+ *   typeof result === 'symbol' && result === RELATION_CELL_ASYNC
+ * before rendering. When the value is null/undefined the normal "—" path fires.
+ *
+ * @param {unknown} value
+ * @param {string} type the field's JSON-Schema type
+ * @returns {string|symbol}  string in all cases except relation with a value
+ */
+export const RELATION_CELL_ASYNC = Symbol("relation_cell_async");
+
+/**
+ * T-0579: sentinel for a file-type cell whose value (a fileVersionId) needs an
+ * async resolve to a display name via GET /api/records/:recordId/files (the
+ * same listing FileField itself consumes — one source of metadata, no second
+ * resolver). Mirrors RELATION_CELL_ASYNC's pattern: formatCellValue cannot
+ * fetch, so it signals the caller to render an async cell component instead of
+ * ever surfacing the raw fileVersionId (FF-CELL-NO-UUID).
+ */
+export const FILE_CELL_ASYNC = Symbol("file_cell_async");
+
+/**
+ * T-0673: sentinel for a person-type cell whose value (an employee id/slug)
+ * needs a display-name resolve. Previously formatCellValue returned the raw
+ * person value AS-IS (a caller-responsibility comment, unlike relation/file
+ * which already had an async-cell contract) — the list/detail screens had no
+ * signal to render a resolved name and always showed the bare slug (e.g.
+ * "e-larina"). Mirrors RELATION_CELL_ASYNC/FILE_CELL_ASYNC's pattern exactly:
+ * formatCellValue cannot fetch, so it signals the caller to render an async
+ * cell component (batch-resolved via the SAME fetchEmployees()/GET /api/org
+ * source PersonPicker and screen-record-detail.jsx's created_by already use —
+ * T-0648's ActorChip primitive renders the resolved name, never a second
+ * resolver) instead of ever surfacing the raw id as the primary text.
+ */
+export const PERSON_CELL_ASYNC = Symbol("person_cell_async");
+
+export function formatCellValue(value, type) {
+  if (value === null || value === undefined) return "—";
+  if (type === "boolean" || typeof value === "boolean") {
+    return value ? "Да" : "Нет";
+  }
+  // T-0447: relation value is a UUID — label resolution is async.
+  // Return the sentinel so callers can render an async cell component.
+  // Empty string means no target was picked (blank optional) → render "—".
+  if (type === "relation") {
+    if (typeof value === "string" && value.length > 0) return RELATION_CELL_ASYNC;
+    return "—"; // blank or unexpected non-string → absent
+  }
+  // T-0579: file value is a fileVersionId — name resolution is async (via the
+  // record's file listing, GET /api/records/:recordId/files). Return the sentinel
+  // so callers render an async cell/card component instead of ever surfacing the
+  // raw uuid (FF-CELL-NO-UUID, AC-9/AC-10). Empty string → no file attached → "—".
+  if (type === "file") {
+    if (typeof value === "string" && value.length > 0) return FILE_CELL_ASYNC;
+    return "—";
+  }
+  // T-0453/T-0580: computed field value is a number (rollup mode; pre-computed
+  // before call) OR a string (T-0580 formula mode with result_type:"date" — an
+  // ISO YYYY-MM-DD date string, e.g. "deadline = data_podpisaniya + srok_dney").
+  // Format as a string number (locale-neutral — consistent with number fields),
+  // or pass an ISO date string through AS-IS (the SAME convention a real "date"
+  // field uses — records-form.js has no special date-locale formatting for
+  // type:"date" either; both fall back to the raw ISO string). null/anything-
+  // else → «—». This branch is ADDITIVE — the relation and collection branches
+  // above are NOT modified. Callers pass the already-computed value (from
+  // computeRollup, or the shared core evalFormula for formula mode) as `value`.
+  if (type === "computed") {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      // Round to at most 10 decimal places to avoid float display noise (e.g. 0.1+0.2)
+      // while still supporting legitimate fractional results (avg, factor multiplication).
+      const rounded = Math.round(value * 1e10) / 1e10;
+      return String(rounded);
+    }
+    if (typeof value === "string" && ISO_DATE_RE.test(value)) {
+      return value; // formula result_type:"date" — ISO string, same as a plain date field
+    }
+    return "—";
+  }
+
+  // T-0509/T-0649: money value is a plain number; display with Russian currency
+  // formatting. Thousands separators + ₽ symbol via Intl.NumberFormat (locale
+  // 'ru-RU', style 'currency').
+  //
+  // P1 FIX (T-0649, data-integrity bug caught live 2026-07-05): the previous
+  // maximumFractionDigits:0 SILENTLY ROUNDED AWAY kopecks on display — typing
+  // 150000.5 (150 000 rubles 50 kopecks) showed as "150 001 ₽", which reads as
+  // data loss even though storage (serializeRecordData above) never rounds.
+  //
+  // Kopecks are shown IN FULL (a standard 2-digit fraction) whenever the value
+  // actually has a fractional part ("150 000,50 ₽"), and a whole-ruble sum
+  // shows NO decimals ("150 000 ₽" — not cluttered with ",00" for the common
+  // case). Intl can't express "0 or 2 digits" in one call (min/max fraction
+  // are independent bounds), so we branch on whether the value has kopecks.
+  // Never rounds/truncates the fractional part — money has at most 2 decimal
+  // places, so 2 fraction digits is lossless.
+  if (type === "money") {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const hasKopecks = !Number.isInteger(value);
+      return value.toLocaleString("ru-RU", {
+        style: "currency",
+        currency: "RUB",
+        minimumFractionDigits: hasKopecks ? 2 : 0,
+        maximumFractionDigits: 2,
+      });
+    }
+    return "—";
+  }
+
+  // T-0649: date/datetime — display дд.мм.гггг[ чч:мм] instead of the raw ISO
+  // string (UX study §2: "в списке дата рендерится сырым ISO 2026-07-05").
+  // Storage is unchanged (ISO string); this is a display-only reformat.
+  if (type === "date") {
+    if (typeof value === "string" && value.length > 0) return formatShortDate(value);
+    return "—";
+  }
+  if (type === "datetime") {
+    if (typeof value === "string" && value.length > 0) return formatShortDateTime(value);
+    return "—";
+  }
+
+  // T-0512: multi-select value is a string[]; join with ", " or "—" if empty.
+  if (type === "multi-select") {
+    if (!Array.isArray(value) || value.length === 0) return "—";
+    return value.join(", ");
+  }
+
+  // T-0512/T-0673: person value is an employee id/slug string. Resolving it to a
+  // display name needs the batch employee list (GET /api/org via fetchEmployees()
+  // — the SAME source PersonPicker and screen-record-detail.jsx's created_by
+  // resolver already use), which formatCellValue cannot fetch synchronously.
+  // Mirrors RELATION_CELL_ASYNC/FILE_CELL_ASYNC: return the sentinel so the
+  // caller renders an async/batch-resolved cell (ActorChip, T-0648) instead of
+  // the raw id. null/empty → "—".
+  if (type === "person") {
+    if (typeof value === "string" && value.length > 0) return PERSON_CELL_ASYNC;
+    return "—";
+  }
+
+  // T-0516: url — display as plain text (no async resolution needed; value is the URL string itself).
+  // null/empty → "—".
+  if (type === "url" || type === "email") {
+    if (typeof value === "string" && value.length > 0) return value;
+    return "—";
+  }
+
+  // T-0449: collection value is an array of row objects.
+  // Summarize as «N позиций» (or «—» when empty/absent).
+  // This branch is ADDITIVE — the relation branch above is NOT modified.
+  if (type === "collection") {
+    if (!Array.isArray(value) || value.length === 0) return "—";
+    const n = value.length;
+    // Russian grammatical agreement for «позиция»:
+    //   1, 21, 31…  → позиция
+    //   2-4, 22-24… → позиции
+    //   5-20, 25-29… → позиций
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    let word;
+    if (mod100 >= 11 && mod100 <= 19) {
+      word = "позиций";
+    } else if (mod10 === 1) {
+      word = "позиция";
+    } else if (mod10 >= 2 && mod10 <= 4) {
+      word = "позиции";
+    } else {
+      word = "позиций";
+    }
+    return `${n} ${word}`;
+  }
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+/**
+ * Map a non-2xx POST /api/records response (status + parsed body) to a
+ * user-facing message. Honest surfacing of the records API contract (src/http/
+ * records.ts): the body is `{ error: { code, message } }`.
+ *   400 VALIDATION            → the server's AJV detail (the real reason),
+ *   401 UNAUTHENTICATED       → re-login hint,
+ *   404 NOT_FOUND             → app / registry_def missing,
+ *   409 CONFLICT              → app has >1 registry_def → must pick one,
+ *   403 FIELD_WRITE_FORBIDDEN → a system-only field was blocked by the write-mask,
+ *   else                      → generic with server message if present.
+ *
+ * @param {number} status
+ * @param {unknown} body parsed JSON (may be null / non-object)
+ * @returns {{ kind: 'pick-registry'|'message', message: string }}
+ */
+export function mapRecordError(status, body) {
+  const obj = body && typeof body === "object" ? body : null;
+  const serverMsg = obj ? (obj.error?.message || obj.message) : undefined;
+
+  if (status === 400) {
+    return {
+      kind: "message",
+      message: serverMsg || "Данные не прошли проверку — проверьте поля",
+    };
+  }
+  if (status === 401) {
+    return { kind: "message", message: "Сессия не авторизована — войдите заново" };
+  }
+  if (status === 403) {
+    return {
+      kind: "message",
+      message: serverMsg || "Запись содержит поле, которое вам не разрешено заполнять",
+    };
+  }
+  if (status === 404) {
+    return { kind: "message", message: serverMsg || "Приложение или реестр полей не найдены" };
+  }
+  if (status === 409) {
+    // App has more than one registry_def → the caller MUST pass registry_def_id.
+    return {
+      kind: "pick-registry",
+      message: "У приложения несколько реестров полей — выберите, в какой добавить запись",
+    };
+  }
+  return { kind: "message", message: serverMsg || `Не удалось сохранить запись (HTTP ${status})` };
+}
+
+/**
+ * Best-effort: pull per-field error messages out of a 400 VALIDATION message.
+ * The records API joins AJV errors into one string of the form:
+ *   "data does not conform to registry_def schema: #/properties/<key>/type: must be number; #/required: ..."
+ * We parse `#/properties/<key>/...: <reason>` fragments back to { key: reason }
+ * so the screen can show the reason inline under the offending field. Anything
+ * we can't attribute to a field stays in the form-level message (returned as-is
+ * by mapRecordError). This is a presentation nicety — never invents a field.
+ *
+ * @param {string|undefined} message the server's 400 message
+ * @param {Set<string>|string[]} knownKeys field keys that exist in the schema
+ * @returns {Record<string,string>} key → reason (only for recognised keys)
+ */
+export function extractFieldErrors(message, knownKeys) {
+  const out = {};
+  if (typeof message !== "string") return out;
+  const keySet = knownKeys instanceof Set ? knownKeys : new Set(Array.isArray(knownKeys) ? knownKeys : []);
+
+  // Match "#/properties/<key>/<kw>: <reason>" up to the next "; " or end.
+  const re = /#\/properties\/([A-Za-z_][A-Za-z0-9_]*)\/[^:]*:\s*([^;]+)/g;
+  let m;
+  while ((m = re.exec(message)) !== null) {
+    const key = m[1];
+    const reason = m[2].trim();
+    if (keySet.has(key) && !out[key]) out[key] = reason;
+  }
+  return out;
+}
