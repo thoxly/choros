@@ -23,11 +23,18 @@
  * T-0762 (R-2 follow-up from T-0748's own review) adds the sibling
  * NAME_TOO_LONG case (KC's length validator, distinct messageKey from the
  * character validator above) to the SAME real-DOM proof.
+ *
+ * T-0775 adds a third block below: the «Деактивировать» ConfirmDialog gate
+ * (live-audit T-0693 HIGH — it used to fire the PATCH instantly, no confirm,
+ * no undo, no toast). Since the screen now calls useToastContext(), every
+ * render in this file is wrapped in the real <ToastProvider> (same pattern as
+ * screen-record-detail.mount.test.jsx) — a bare <UsersScreen/> would throw.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { render, waitFor, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { ToastProvider } from '../app-shell/toast-context.jsx';
 import UsersScreen from './screen-users.jsx';
 
 function jsonOk(body) {
@@ -42,8 +49,16 @@ function bootFetch(url) {
   return jsonOk({});
 }
 
+function renderUsersScreen() {
+  return render(
+    <ToastProvider>
+      <UsersScreen />
+    </ToastProvider>,
+  );
+}
+
 async function openCreateModal() {
-  render(<UsersScreen />);
+  renderUsersScreen();
   await waitFor(() => {
     expect(screen.queryByText('Загрузка пользователей…')).toBeNull();
   });
@@ -199,5 +214,139 @@ describe('UsersScreen — CreateUserModal honest name-character attribution (T-0
     expect(emailInput.getAttribute('aria-invalid')).toBe('true');
     const nameInput = within(dialog).getByLabelText('Отображаемое имя');
     expect(nameInput.getAttribute('aria-invalid')).not.toBe('true');
+  }, 15000);
+});
+
+/* =============================================================================
+   T-0775 — «Деактивировать» ConfirmDialog gate (live-audit T-0693 HIGH).
+   Before this fix the button fired PATCH /api/users/:id instantly — no
+   confirm, no undo, no success toast — the only unconfirmed consequential
+   action on this screen (inconsistent with «Уволить» in
+   rights/ra-intents.jsx). These tests mount the REAL screen with one active
+   account and prove: click opens ConfirmDialog BEFORE any PATCH fires;
+   Cancel closes it with zero PATCH calls; Confirm fires exactly one PATCH
+   and shows a real success toast.
+   ============================================================================= */
+const ONE_ACCOUNT = {
+  employee_id: 'emp-generic-1',
+  display_name: 'Иван Петров',
+  login: 'ivan.petrov',
+  login_missing: false,
+  active: true,
+  position: null,
+  department: null,
+};
+
+function bootFetchOneAccount(url) {
+  const u = String(url);
+  if (u.startsWith('/api/users/accounts')) return jsonOk({ accounts: [ONE_ACCOUNT] });
+  if (u.startsWith('/api/org/tenant-state')) return jsonOk({ positions: [] });
+  return jsonOk({});
+}
+
+describe('UsersScreen — «Деактивировать» is gated behind ConfirmDialog (T-0775)', () => {
+  let originalFetch;
+  let originalLocalStorage;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    originalLocalStorage = globalThis.localStorage;
+    const store = new Map();
+    globalThis.localStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+      clear: () => store.clear(),
+    };
+  });
+
+  afterEach(() => {
+    cleanup();
+    globalThis.fetch = originalFetch;
+    globalThis.localStorage = originalLocalStorage;
+  });
+
+  async function mountWithOneAccount() {
+    globalThis.fetch = async (url) => bootFetchOneAccount(url);
+    renderUsersScreen();
+    await waitFor(() => {
+      expect(screen.queryByText('Загрузка пользователей…')).toBeNull();
+    });
+    return screen.getByRole('button', { name: 'Деактивировать' });
+  }
+
+  it('clicking «Деактивировать» opens ConfirmDialog and does NOT call the PATCH API yet', async () => {
+    const deactivateBtn = await mountWithOneAccount();
+    const patchCalls = [];
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      if (opts && opts.method === 'PATCH') patchCalls.push([u, opts]);
+      return bootFetchOneAccount(u);
+    };
+
+    fireEvent.click(deactivateBtn);
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Деактивировать учётку?')).toBeTruthy();
+    // ConsequenceSummary — human name, not a raw UUID/employee_id.
+    expect(within(dialog).getByText('Иван Петров')).toBeTruthy();
+    expect(within(dialog).queryByText(ONE_ACCOUNT.employee_id)).toBeNull();
+    expect(patchCalls.length).toBe(0);
+  }, 15000);
+
+  it('Cancel closes the dialog and calls the PATCH API zero times', async () => {
+    const deactivateBtn = await mountWithOneAccount();
+    const patchCalls = [];
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      if (opts && opts.method === 'PATCH') patchCalls.push([u, opts]);
+      return bootFetchOneAccount(u);
+    };
+
+    fireEvent.click(deactivateBtn);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Отмена' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+    expect(patchCalls.length).toBe(0);
+    // Account is untouched — still shows the "Деактивировать" affordance.
+    expect(screen.getByRole('button', { name: 'Деактивировать' })).toBeTruthy();
+  }, 15000);
+
+  it('Confirm calls PATCH /api/users/:id with {active:false} exactly once and shows a success toast', async () => {
+    const deactivateBtn = await mountWithOneAccount();
+    const patchCalls = [];
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      if (opts && opts.method === 'PATCH') {
+        patchCalls.push([u, JSON.parse(opts.body)]);
+        return jsonOk({ ok: true });
+      }
+      // After the PATCH, loadAccounts() refetches — return the now-inactive account.
+      if (u.startsWith('/api/users/accounts')) {
+        return jsonOk({ accounts: [{ ...ONE_ACCOUNT, active: false }] });
+      }
+      return bootFetchOneAccount(u);
+    };
+
+    fireEvent.click(deactivateBtn);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Деактивировать' }));
+
+    await waitFor(() => {
+      expect(patchCalls.length).toBe(1);
+    });
+    expect(patchCalls[0][0]).toBe(`/api/users/${ONE_ACCOUNT.employee_id}`);
+    expect(patchCalls[0][1]).toEqual({ active: false });
+
+    // Real success toast (ToastProvider → ToastViewport → role=status), not a fake banner.
+    await waitFor(() => {
+      expect(screen.getByText(/Учётка «Иван Петров» деактивирована/)).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
   }, 15000);
 });
