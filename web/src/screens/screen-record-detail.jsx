@@ -28,7 +28,7 @@ import { devHeaders, fetchWithAuthRetry } from '../app-shell/dev-auth.js';
 // human-title / current-step derivations the process-instance card already uses —
 // no bespoke second copy of "which step is this instance on" (StepRef renders it).
 import { deriveInstanceTitle, currentNodes } from './process-instance.logic.js';
-import { formatDate, formatError, formatJsonReadable, formatPersonName } from '../lib/format.js';
+import { formatDate, formatError, formatJsonReadable } from '../lib/format.js';
 import { fetchFileBlob, downloadFile } from '../lib/authed-file.js';
 import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, FILE_CELL_ASYNC, PERSON_CELL_ASYNC, deriveRecordLabel, computeComputedFieldValue } from './records-form.js';
 // T-0608 (пункт г): resolve record.created_by (an employee SLUG — for a
@@ -1153,17 +1153,25 @@ function RecordDetailScreen() {
               {record.created_by && (
                 <div style={fieldRowStyle}>
                   <span style={labelStyle}>Автор</span>
-                  <Mono style={{ ...valueStyle, fontSize: 'var(--chs-text-xs)' }}>
-                    {/* T-0608 (пункт г): resolve the slug to a display name via
-                        the /api/org-backed map; fall back to the raw slug when
-                        the lookup has no entry (e.g. still loading, or the
-                        author has no position and /api/org's tree omits them)
-                        — degrades to the PREVIOUS behaviour, never worse.
-                        T-0698 B1: the map now holds employee ENTRIES, so read
-                        .name explicitly (?.name keeps the missing-entry path
-                        identical: undefined → formatPersonName null → slug). */}
-                    {formatPersonName(authorNames.get(record.created_by)?.name) || record.created_by}
-                  </Mono>
+                  <span style={valueStyle}>
+                    {/* T-0774 (anti-UUID, E-UX-HUMAN, live-audit T-0693): this
+                        line used to be a BESPOKE
+                        `formatPersonName(...) || record.created_by` chain that
+                        fell straight through to the raw employee UUID/slug the
+                        moment authorNames had no entry for it (deactivated/
+                        removed author, or a genesis-owner self-registration
+                        that never synced a display_name) — exactly the «АВТОР:
+                        4c653940-…» defect T-0608 first fixed and the live audit
+                        re-found because THIS cell never went through
+                        ActorChip's own unresolved-fallback at all. Every other
+                        person-typed value on this same screen already resolves
+                        via PersonFieldValue (T-0673, same authorNames map) —
+                        reuse it here too instead of a second bespoke resolver.
+                        PersonFieldValue → ActorChip's isMachineActorLabel
+                        demotion (T-0685) degrades an unresolved UUID to the
+                        honest generic "Человек" label, never a bare id. */}
+                    <PersonFieldValue personId={record.created_by} authorNames={authorNames} />
+                  </span>
                 </div>
               )}
               <div style={{ ...fieldRowStyle, borderBottom: 'none' }}>

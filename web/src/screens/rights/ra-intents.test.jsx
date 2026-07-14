@@ -589,3 +589,68 @@ describe('SelfAbsenceForm — force_tier2 + coverage warning wired into the writ
 // literals, which the case-content scanner then flags as an anti-case hit
 // in the test file itself (self-defeating duplication) — the CI gate is the
 // single source of truth for this invariant.
+
+// ---------------------------------------------------------------------------
+// T-0774 (anti-UUID, E-UX-HUMAN, live-audit T-0693): the hire/fire/substitute
+// employee pickers (useOrgDirectory) used to build their option label as
+// `x.slug || x.id` ONLY — for a Keycloak-registered human, slug === the KC
+// user UUID, so every one of these dropdowns (Уволить, Подмена «кого
+// замещают»/«кто замещает», Срочно отозвать «замещающий») showed a bare UUID
+// string instead of a name. GET /api/org/tenant-state's employees rows carry
+// display_name (T-0608, src/http/seed-write.ts) — employeeOptionLabel now
+// resolves it via the SAME formatPersonName(...) || slug chain
+// ra-overview-forms.jsx's "Назначить роль" picker already uses (single
+// authority, not a bespoke second copy).
+// ---------------------------------------------------------------------------
+
+import { employeeOptionLabel } from './ra-intents.jsx';
+
+describe('employeeOptionLabel — hire/fire/substitute picker option label (T-0774)', () => {
+  it('a resolved display_name wins over slug/id', () => {
+    expect(employeeOptionLabel({ id: 'e0000000-1111-2222-3333-444444444444', slug: 'e0000000-1111-2222-3333-444444444444', display_name: 'И. Орлова' }))
+      .toBe('И. Орлова');
+  });
+
+  it('falls back to the slug when display_name is blank/whitespace-only (never a raw UUID when a human-legible slug exists)', () => {
+    expect(employeeOptionLabel({ id: 'e0000000-1111-2222-3333-444444444444', slug: 'e-orlova', display_name: '' }))
+      .toBe('e-orlova');
+    expect(employeeOptionLabel({ id: 'e0000000-1111-2222-3333-444444444444', slug: 'e-orlova', display_name: '   ' }))
+      .toBe('e-orlova');
+  });
+
+  it('the T-0693 live-audit case: slug === the KC UUID and display_name is absent — degrades to the id, but display_name (when present) is what actually renders in production for every KC-registered human', () => {
+    const kcUuid = 'e0000000-1111-2222-3333-444444444444';
+    // Absolute worst case (no display_name AND slug happens to equal the UUID,
+    // e.g. a not-yet-backfilled legacy row): the option still resolves to
+    // SOMETHING (never throws, never blank) — this is the pre-existing honest
+    // last-resort degrade, unchanged. The FIX is that production rows always
+    // carry display_name now (T-0608 backend), so this branch is not the
+    // common case any more.
+    expect(employeeOptionLabel({ id: kcUuid, slug: kcUuid, display_name: null })).toBe(kcUuid);
+  });
+
+  it('never throws on a missing/undefined row (defensive — mirrors PersonCell/PersonFieldValue\'s own Map-miss tolerance)', () => {
+    expect(() => employeeOptionLabel(undefined)).not.toThrow();
+    expect(employeeOptionLabel(undefined)).toBe('');
+    expect(employeeOptionLabel(null)).toBe('');
+  });
+});
+
+describe('useOrgDirectory wiring — employees resolve via employeeOptionLabel, roles/departments stay slug-based (T-0774)', () => {
+  it('the OLD single `opt()` mapper applied to employees is gone (was `employees: opt(d.employees)`, slug/id only)', () => {
+    const idx = src.indexOf('function useOrgDirectory');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 900);
+    expect(block).not.toContain('employees: opt(d.employees)');
+    expect(block).not.toContain('const opt = (rows)');
+  });
+
+  it('employees resolve via employeeOptionLabel; roles/departments keep the generic slug-based option (no display_name column on those tables)', () => {
+    const idx = src.indexOf('function useOrgDirectory');
+    const block = src.slice(idx, idx + 900);
+    expect(block).toContain('employeeOpt(d.employees)');
+    expect(block).toContain('genericOpt(d.roles)');
+    expect(block).toContain('genericOpt(d.departments)');
+    expect(block).toContain('label: employeeOptionLabel(x)');
+  });
+});

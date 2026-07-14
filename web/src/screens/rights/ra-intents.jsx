@@ -18,7 +18,7 @@ import { Button, Field, Select, KitIcon, ConfirmDialog, ErrorState } from '../..
 import { SectionHead } from './ra-data.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
-import { formatError, formatDate } from '../../lib/format.js';
+import { formatError, formatDate, formatPersonName } from '../../lib/format.js';
 import { ConsequenceSummary, useDestructiveConfirm } from '../../util/confirm-helpers.jsx';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
@@ -29,10 +29,37 @@ import { ConsequenceSummary, useDestructiveConfirm } from '../../util/confirm-he
    ask the admin to TYPE a raw role/employee/org-node UUID (placeholder
    `e0000000-…`) — a dev-jargon leak (principles.md §3) and an error trap. We now
    resolve those ids from GET /api/org/tenant-state (the same endpoint screen-org
-   reads): it returns { departments, positions, employees, roles } as { id, slug }
-   rows, scoped to the dev silo. The picker lists them by human slug → value=id,
-   so the admin chooses a name and the underlying UUID is still what we submit.
+   reads): it returns { departments, positions, employees, roles } rows, scoped
+   to the dev silo. The picker lists them by human label → value=id, so the
+   admin chooses a name and the underlying UUID is still what we submit.
+
+   T-0774 (anti-UUID, E-UX-HUMAN, live-audit T-0693): the employees option label
+   used to be `x.slug || x.id` ONLY — for a Keycloak-registered human, slug ===
+   the KC user UUID, so every hire/fire/substitute picker showed a bare UUID
+   string in the dropdown instead of a name. GET /api/org/tenant-state's
+   employees rows have carried `display_name` since T-0608 (see
+   src/http/seed-write.ts's tenant-state handler) — ra-overview-forms.jsx's
+   "Назначить роль" picker already resolves that same field via
+   `formatPersonName(e.display_name) || e.slug`; employeeOptionLabel below is
+   the SAME rule (single authority, not a bespoke copy) reused for every
+   employee picker in THIS file. Roles/departments have no display_name column
+   in the schema (choros.role / choros.department carry only slug) — those keep
+   the slug-based option unchanged (genericOpt).
    ---------------------------------------------------------------------------- */
+
+/**
+ * employeeOptionLabel — the human label for one org-directory employee row.
+ * Fallback chain mirrors formatPersonName's own honest degrade: a real
+ * display_name wins; otherwise the slug (a stable human-legible handle, not a
+ * machine key, for non-KC seed employees); otherwise the raw id as the last
+ * resort so a picker option is never blank. Never returns a raw UUID when a
+ * name OR slug is available.
+ */
+export function employeeOptionLabel(e) {
+  if (!e) return '';
+  return formatPersonName(e.display_name) || e.slug || e.id || '';
+}
+
 function useOrgDirectory() {
   const [dir, setDir] = useState({ employees: [], roles: [], departments: [] });
   const [error, setError] = useState(null);
@@ -43,8 +70,9 @@ function useOrgDirectory() {
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(formatError(r.status)))))
       .then((d) => {
         if (!alive) return;
-        const opt = (rows) => (Array.isArray(rows) ? rows : []).map((x) => ({ id: x.id, label: x.slug || x.id }));
-        setDir({ employees: opt(d.employees), roles: opt(d.roles), departments: opt(d.departments) });
+        const genericOpt = (rows) => (Array.isArray(rows) ? rows : []).map((x) => ({ id: x.id, label: x.slug || x.id }));
+        const employeeOpt = (rows) => (Array.isArray(rows) ? rows : []).map((x) => ({ id: x.id, label: employeeOptionLabel(x) }));
+        setDir({ employees: employeeOpt(d.employees), roles: genericOpt(d.roles), departments: genericOpt(d.departments) });
         setLoading(false);
       })
       .catch((e) => { if (alive) { setError(e.message); setLoading(false); } });

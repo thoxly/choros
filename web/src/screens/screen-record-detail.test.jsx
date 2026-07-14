@@ -45,17 +45,50 @@ describe('screen-record-detail — author display name (T-0608 пункт г)', 
     expect(src).toContain("import { fetchEmployees, buildEmployeesById } from '../forms/field-renderer.jsx'");
     expect(src).toContain('fetchEmployees()');
   });
-  it('renders the resolved name through formatPersonName, falling back to the raw slug (never blank)', () => {
-    // T-0698 B1: authorNames now holds employee ENTRIES ({name, deactivated,
-    // …}), not name strings — the created_by line reads .name explicitly.
-    // ?.name preserves the missing-entry degrade byte-for-byte: undefined →
-    // formatPersonName(undefined) → null → `|| record.created_by` raw slug.
-    expect(src).toContain('formatPersonName(authorNames.get(record.created_by)?.name) || record.created_by');
-  });
   it('a failed /api/org lookup degrades non-fatally (record still renders)', () => {
     const idx = src.indexOf('fetchEmployees()');
     const block = src.slice(idx, idx + 400);
     expect(block).toMatch(/\.catch\(/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0774 (anti-UUID, E-UX-HUMAN, live-audit T-0693): the «АВТОР» sidebar line
+// used to be a BESPOKE `formatPersonName(authorNames.get(record.created_by)
+// ?.name) || record.created_by` chain that fell straight through to the raw
+// employee UUID/slug whenever authorNames had no entry for it — a SECOND,
+// divergent resolver from the one every other person-typed value on this
+// screen used (PersonFieldValue, T-0673). This closes that gap: the sidebar
+// line now renders through PersonFieldValue exactly like the record's own
+// person-typed FIELDS already do, so there is only ONE "how do we show an
+// employee id" rule on this screen, not two that can silently drift apart.
+// ---------------------------------------------------------------------------
+
+describe('screen-record-detail — «АВТОР» renders via PersonFieldValue, never a bare id (T-0774)', () => {
+  it('the old bespoke formatPersonName(...) || record.created_by chain is GONE', () => {
+    expect(src).not.toContain('formatPersonName(authorNames.get(record.created_by)?.name) || record.created_by');
+  });
+
+  it('the created_by sidebar row renders <PersonFieldValue personId={record.created_by} authorNames={authorNames} />', () => {
+    const idx = src.indexOf('Автор');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 1400);
+    expect(block).toContain('<PersonFieldValue personId={record.created_by} authorNames={authorNames} />');
+  });
+
+  it('PersonFieldValue itself never surfaces a bare UUID as primary text — unresolved id degrades to the honest ActorChip type label', () => {
+    // Mirrors this file's own PersonFieldValue unit tests below (T-0673): an
+    // id absent from authorNames renders through ActorChip, whose
+    // isMachineActorLabel demotion (T-0685) hides a raw UUID/slug-that-looks-
+    // like-a-UUID from the PRIMARY label — never the id text visible in flow.
+    const rawUuid = 'e0000000-1111-2222-3333-444444444444';
+    const el = PersonFieldValue({ personId: rawUuid, authorNames: new Map() });
+    // name passed to ActorChip is the unresolved id itself (honest fallback,
+    // matches the existing PersonFieldValue contract) — ActorChip is the
+    // component responsible for not rendering it bare; that contract is
+    // covered directly in actor-chip.test.jsx and is not re-derived here.
+    expect(el.props.name).toBe(rawUuid);
+    expect(el.type.name).toBe('ActorChip');
   });
 });
 
