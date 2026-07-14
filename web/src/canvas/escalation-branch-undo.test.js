@@ -192,8 +192,8 @@ const isSeqFlow = (c) => c.type === 'bpmn:SequenceFlow';
 // the known fitness:db class (concurrency amplifies). Explicit generous timeout.
 const HEAVY_TIMEOUT_MS = 30000;
 
-describe('T-0660 U-1 — one click = ONE undo entry (real bpmn-js CommandStack)', () => {
-  it('a single commandStack.undo() removes the whole built branch and restores the original topology', async () => {
+describe('T-0660/T-0776 U-1 — one click = ONE undo entry (real bpmn-js CommandStack)', () => {
+  it('a single commandStack.undo() removes the whole built D5 branch and restores the original topology', async () => {
     const modeler = await makeLiveModeler();
     const registry = modeler.get('elementRegistry');
     const commandStack = modeler.get('commandStack');
@@ -206,40 +206,69 @@ describe('T-0660 U-1 — one click = ONE undo entry (real bpmn-js CommandStack)'
     const res = applyEscalationBranch({ modeler, boundaryElement: boundary });
     expect(res.applied).toBe(true);
 
-    // Built topology exists on the LIVE canvas.
+    // Built topology exists on the LIVE canvas (D5, ADR-T0612 §8 / T-0661):
+    // subProcess encloses host + boundary + escTask + gateway + terminateEnd;
+    // host → gateway → terminateEnd (SCOPE-LOCAL); timer → escTask → gateway;
+    // subProcess (top level) → End_1.
+    const subProcess = registry.get(res.subProcessId);
     const escTask = registry.get(res.escalationTaskId);
     const gateway = registry.get(res.gatewayId);
+    const terminateEnd = registry.get(res.terminateEndId);
+    expect(subProcess).toBeTruthy();
     expect(escTask).toBeTruthy();
     expect(gateway).toBeTruthy();
+    expect(terminateEnd).toBeTruthy();
     expect(boundary.businessObject.cancelActivity).toBe(false);
-    // host → gateway → End_1; timer → escTask → gateway.
+
+    // host + boundary now live INSIDE the subProcess (reparented).
+    expect(host.parent.id).toBe(subProcess.id);
+    expect(boundary.parent.id).toBe(subProcess.id);
+    expect(escTask.parent.id).toBe(subProcess.id);
+    expect(gateway.parent.id).toBe(subProcess.id);
+    expect(terminateEnd.parent.id).toBe(subProcess.id);
+
+    // terminateEnd carries a TerminateEventDefinition (scope-local: no
+    // terminateAll set → BPMN default false).
+    const eventDefs = terminateEnd.businessObject.eventDefinitions || [];
+    expect(eventDefs.some((d) => d.$type === 'bpmn:TerminateEventDefinition')).toBe(true);
+
+    // host → gateway → terminateEnd (NOT a plain end — that is the D2 shape
+    // T-0661 proved hangs); timer → escTask → gateway.
     expect(host.outgoing.filter(isSeqFlow).map((c) => c.target.id)).toEqual([res.gatewayId]);
-    expect(gateway.outgoing.filter(isSeqFlow).map((c) => c.target.id)).toEqual(['End_1']);
+    expect(gateway.outgoing.filter(isSeqFlow).map((c) => c.target.id)).toEqual([res.terminateEndId]);
     expect(boundary.outgoing.filter(isSeqFlow).map((c) => c.target.id)).toEqual([res.escalationTaskId]);
     expect(escTask.outgoing.filter(isSeqFlow).map((c) => c.target.id)).toEqual([res.gatewayId]);
 
+    // subProcess (top level) carries the resolved race onward to End_1 — the
+    // ONLY top-level flow change (the old host → End_1 flow is gone).
+    expect(subProcess.outgoing.filter(isSeqFlow).map((c) => c.target.id)).toEqual(['End_1']);
+
     // ---- THE PIN: exactly ONE undo entry for the whole build. ----
     expect(commandStack.canUndo()).toBe(true);
-    commandStack.undo(); // ONE undo — not ~8
+    commandStack.undo(); // ONE undo — not the whole chain of nested ops
     expect(commandStack.canUndo()).toBe(false); // stack empty ⇒ it was a single entry
 
     // Original topology fully restored.
+    expect(registry.get(res.subProcessId)).toBeUndefined();
     expect(registry.get(res.escalationTaskId)).toBeUndefined();
     expect(registry.get(res.gatewayId)).toBeUndefined();
-    const hostOut = host.outgoing.filter(isSeqFlow);
+    expect(registry.get(res.terminateEndId)).toBeUndefined();
+    const restoredHost = registry.get('Task_step');
+    expect(restoredHost.parent.id).toBe('Process_1');
+    const hostOut = restoredHost.outgoing.filter(isSeqFlow);
     expect(hostOut).toHaveLength(1);
     expect(hostOut[0].target.id).toBe('End_1');
-    expect(boundary.outgoing.filter(isSeqFlow)).toHaveLength(0);
+    const restoredBoundary = registry.get('Boundary_1');
+    expect(restoredBoundary.outgoing.filter(isSeqFlow)).toHaveLength(0);
     // cancelActivity restored to its pre-build value (absent/true = interrupting).
-    expect(boundary.businessObject.cancelActivity).not.toBe(false);
+    expect(restoredBoundary.businessObject.cancelActivity).not.toBe(false);
   }, HEAVY_TIMEOUT_MS);
 
-  it('a single commandStack.redo() replays the whole build (one entry both ways)', async () => {
+  it('a single commandStack.redo() replays the whole D5 build (one entry both ways)', async () => {
     const modeler = await makeLiveModeler();
     const registry = modeler.get('elementRegistry');
     const commandStack = modeler.get('commandStack');
     const boundary = registry.get('Boundary_1');
-    const host = registry.get('Task_step');
 
     const res = applyEscalationBranch({ modeler, boundaryElement: boundary });
     expect(res.applied).toBe(true);
@@ -248,12 +277,56 @@ describe('T-0660 U-1 — one click = ONE undo entry (real bpmn-js CommandStack)'
     expect(registry.get(res.escalationTaskId)).toBeUndefined();
 
     commandStack.redo(); // ONE redo brings the ENTIRE branch back
+    expect(registry.get(res.subProcessId)).toBeTruthy();
     expect(registry.get(res.escalationTaskId)).toBeTruthy();
     expect(registry.get(res.gatewayId)).toBeTruthy();
-    expect(boundary.businessObject.cancelActivity).toBe(false);
-    expect(host.outgoing.filter(isSeqFlow).map((c) => c.target.id)).toEqual([res.gatewayId]);
+    expect(registry.get(res.terminateEndId)).toBeTruthy();
+    const rebuiltBoundary = registry.get('Boundary_1');
+    expect(rebuiltBoundary.businessObject.cancelActivity).toBe(false);
+    const rebuiltHost = registry.get('Task_step');
+    expect(rebuiltHost.outgoing.filter(isSeqFlow).map((c) => c.target.id)).toEqual([res.gatewayId]);
     // And it is again a single entry: one undo clears it completely.
     commandStack.undo();
     expect(commandStack.canUndo()).toBe(false);
+  }, HEAVY_TIMEOUT_MS);
+});
+
+/* --------------------------------------------------------------------------
+   T-0776 (adversarial review, empirically proven) — the host's INCOMING flow
+   (Start_1 → Task_step) must survive the build. bpmn-js SILENTLY DELETES any
+   connection that would cross the new subProcess boundary during
+   moveElements([host, boundary], ..., subProcess) — the D5 builder only ever
+   reconnected the host's OUTGOING flow (host → next, rewired as
+   subProcess → next); nothing reconnected the INCOMING side. Left unfixed:
+   Flow_1 (Start_1 → Task_step) is dropped mid-move, Start_1.outgoing becomes
+   [], subProcess.incoming stays [] — the subProcess (and the whole built
+   escalation branch) is NEVER ENTERED. The process is structurally broken.
+   -------------------------------------------------------------------------- */
+describe('T-0776 — the host\'s INCOMING flow survives the build (subProcess reachable)', () => {
+  it('reconnects Start_1 -> subProcess so the built branch is not orphaned', async () => {
+    const modeler = await makeLiveModeler();
+    const registry = modeler.get('elementRegistry');
+    const boundary = registry.get('Boundary_1');
+
+    const res = applyEscalationBranch({ modeler, boundaryElement: boundary });
+    expect(res.applied).toBe(true);
+
+    const start = registry.get('Start_1');
+    const subProcess = registry.get(res.subProcessId);
+
+    // THE FIX (T-0776): Start_1's flow into the host is reconnected to the
+    // subProcess now enclosing the host, instead of being silently dropped.
+    const startOut = start.outgoing.filter(isSeqFlow);
+    const subIn = subProcess.incoming.filter(isSeqFlow);
+    expect(startOut).toHaveLength(1);
+    expect(startOut[0].target.id).toBe(subProcess.id);
+    expect(subIn).toHaveLength(1);
+    expect(subIn[0].source.id).toBe('Start_1');
+
+    // The exported XML must not contain an orphaned start: a sequenceFlow
+    // sourced at Start_1 must exist, targeting the subProcess.
+    const { xml } = await modeler.saveXML();
+    expect(xml).toMatch(/sourceRef="Start_1"/);
+    expect(xml).toMatch(new RegExp(`sourceRef="Start_1"[\\s\\S]{0,40}targetRef="${subProcess.id}"`));
   }, HEAVY_TIMEOUT_MS);
 });
