@@ -58,9 +58,14 @@ export interface KcHumanUserSpec {
    * (see splitDisplayName below) — NOT stored verbatim as a KC attribute.
    * OPTIONAL and back-compat: omitted/empty means createHumanUser sends no
    * firstName/lastName at all (prior behavior, unchanged) — this is what
-   * src/core/register.ts (self-registration, no real name collected — its
-   * `display_name` is the email address itself) still does; splitting an
-   * email would be nonsense. src/http/user-mgmt.ts's POST /api/users DOES
+   * src/core/register.ts (self-registration) still does: the register form
+   * collects no real name (ADR §4 wire contract is orgName/email/password
+   * only), so there is nothing to split here; splitting the email itself
+   * would be nonsense. (T-0770 separately humanizes the registered owner's
+   * OWN choros.employee.display_name column from the email's local-part —
+   * an app-side cosmetic default so the owner isn't shown their raw email in
+   * the UI — but that is orthogonal to this KC-side displayName param and
+   * does not change this call.) src/http/user-mgmt.ts's POST /api/users DOES
    * pass it (the "Создать учётку" form already collects a real display name
    * — reusing it costs the caller nothing extra to type).
    */

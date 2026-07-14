@@ -4,9 +4,10 @@
  * PURE: no http import. All IO behind injected interfaces (FF-5 / FF-HIRE-6).
  *
  * Exports:
- *   RegisterRequest   — validated input shape
- *   RegisterResponse  — success response shape
- *   registerTenant    — pure service: validate → KC-first → DB-tx → compensation
+ *   RegisterRequest          — validated input shape
+ *   RegisterResponse         — success response shape
+ *   registerTenant           — pure service: validate → KC-first → DB-tx → compensation
+ *   humanizeEmailLocalPart   — T-0770: owner employee display_name derivation (NOT the raw email)
  *
  * Flow:
  *   1. Validate orgName/email/password (throw VALIDATION on failure)
@@ -94,6 +95,41 @@ export function slugifyOrgName(orgName: string): string {
     .replace(/-{2,}/g, "-")
     .replace(/^-+|-+$/g, "");
   return (slug || "org").slice(0, SLUG_MAX);
+}
+
+// ---------------------------------------------------------------------------
+// Owner display name — pure (T-0770, pillar 7: onboarding first impression)
+// ---------------------------------------------------------------------------
+
+/**
+ * humanizeEmailLocalPart(email) — derive a human-presentable display name
+ * from the LOCAL PART of an email when no real name was collected at
+ * registration (self-registration's RegisterRequest carries no name field —
+ * ADR §4 wire contract is orgName/email/password only, T-0741's own
+ * regression guard documents this as a deliberate, pre-existing scope
+ * boundary). Without this, the freshly-minted owner employee's display_name
+ * defaulted to the RAW EMAIL ("lp-w8-owner@example.com"), which then surfaced
+ * verbatim in the app header and every actor-chip — the very first thing a
+ * new owner sees reads as a machine artifact, not a person (T-0770).
+ *
+ * "lp-w8-owner@example.com"  → "Lp W8 Owner"
+ * "founder@acme.com"         → "Founder"
+ * "john.doe+test@corp.io"    → "John Doe Test"
+ *
+ * Deliberately NOT a "real name" guess — just a safe, non-breaking default
+ * that is never the literal email string. Pure; never throws (always returns
+ * a non-empty string — falls back to a generic RU label if the local part is
+ * made up entirely of separator characters).
+ */
+export function humanizeEmailLocalPart(email: string): string {
+  const at = email.indexOf("@");
+  const local = at > 0 ? email.slice(0, at) : email;
+  const words = local
+    .split(/[._+-]+/)
+    .filter((w) => w.length > 0)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1));
+  const joined = words.join(" ").trim();
+  return joined || "Новый пользователь";
 }
 
 // ---------------------------------------------------------------------------
@@ -342,11 +378,15 @@ export async function registerTenant(
         [tenantId, roleId, ts],
       );
 
-      // 3c. Insert employee (slug=kcSub, kind='human', position_id=NULL)
+      // 3c. Insert employee (slug=kcSub, kind='human', position_id=NULL).
+      // display_name (T-0770): humanized local-part of the email, NOT the raw
+      // email — the register form collects no name field (ADR §4), so this is
+      // the safe non-breaking default; a real name can still be set later via
+      // the existing employee-edit UI.
       await client.query(
         `INSERT INTO choros.employee (tenant_id, id, slug, kind, display_name, position_id, created_at, updated_at)
          VALUES ($1, $2, $3, 'human', $4, NULL, $5, $5)`,
-        [tenantId, employeeId, kcUserId, normalizedEmail, ts],
+        [tenantId, employeeId, kcUserId, humanizeEmailLocalPart(normalizedEmail), ts],
       );
 
       // 3d. Insert confirmed role_assignment (org_scope=set([]), confirmed_by=employeeId for self-bootstrap)

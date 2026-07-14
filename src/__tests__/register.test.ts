@@ -33,7 +33,7 @@ import pg from "pg";
 
 import { Router } from "../http/router.js";
 import { registerRegisterRoutes } from "../http/register.js";
-import { registerTenant, slugifyOrgName } from "../core/register.js";
+import { registerTenant, slugifyOrgName, humanizeEmailLocalPart } from "../core/register.js";
 import { InMemoryKeycloakUserPort } from "../keycloak/fake-user-port.js";
 import type { KeycloakUserPort, KcHumanUserSpec } from "../keycloak/admin-port.js";
 
@@ -210,12 +210,12 @@ describe("FF-3 — KC user created with actor_type=human + password credential",
     expect(created.spec.password.length).toBeGreaterThanOrEqual(8);
     expect(created.spec.email).toBe("founder@acme.com");
     // T-0741 regression guard (ADR §3, deliberate scope boundary): self-
-    // registration does NOT pass displayName to createHumanUser — its own
-    // display_name is the normalized email address (no real name is ever
-    // collected on this form), so splitting it would produce nonsense KC
-    // firstName/lastName values. Register.ts's own (pre-existing, wider)
-    // version of the T-0734 §5 gap is intentionally left unresolved by T-0741
-    // — see the spec's §6 "Out of scope" note.
+    // registration does NOT pass displayName to createHumanUser — the
+    // register form collects no real name (no name field exists, ADR §4),
+    // so there is nothing to split into KC firstName/lastName. (T-0770
+    // separately humanizes the OWN choros.employee.display_name column from
+    // the email's local-part — an app-side cosmetic default, unrelated to
+    // this KC-side param — see the "T-0770" describe block below.)
     expect(created.spec.displayName).toBeUndefined();
   });
 });
@@ -654,6 +654,83 @@ describe("SQL column guard — updated_at and granted_by in INSERT statements", 
     expect(assignmentInsert).toBeDefined();
     expect(assignmentInsert!.text).toContain("updated_at");
     expect(assignmentInsert!.text).toContain("granted_by");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0770 (pillar 7 — onboarding first impression): owner display_name is a
+// humanized name, NEVER the raw email.
+//
+// Before this fix, the owner employee's display_name was set to the raw
+// (normalized) email — a freshly self-registered owner showed up as
+// "lp-w8-owner@example.com" in the app header and every actor-chip. Fixed by
+// deriving a humanized token from the email's local-part (no name field
+// exists on the register form — ADR §4 — so this is a safe, non-breaking
+// default; T-0741's regression guard above documents that KC's own
+// createHumanUser call is deliberately unaffected by this fix).
+// ---------------------------------------------------------------------------
+
+describe("humanizeEmailLocalPart — pure", () => {
+  it("splits on dots/underscores/hyphens/plus and title-cases each word", () => {
+    expect(humanizeEmailLocalPart("lp-w8-owner@example.com")).toBe("Lp W8 Owner");
+  });
+  it("single-word local part → single capitalized word", () => {
+    expect(humanizeEmailLocalPart("founder@acme.com")).toBe("Founder");
+  });
+  it("dotted + plus-addressed local part → each segment capitalized", () => {
+    expect(humanizeEmailLocalPart("john.doe+test@corp.io")).toBe("John Doe Test");
+  });
+  it("underscore-separated local part", () => {
+    expect(humanizeEmailLocalPart("jane_smith@corp.io")).toBe("Jane Smith");
+  });
+  it("never returns the raw email string (contains no '@')", () => {
+    const result = humanizeEmailLocalPart("someone@example.com");
+    expect(result).not.toContain("@");
+    expect(result).not.toBe("someone@example.com");
+  });
+  it("local part made only of separators falls back to a non-empty generic label", () => {
+    const result = humanizeEmailLocalPart("---@example.com");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result).not.toContain("@");
+  });
+});
+
+describe("registerTenant — owner employee display_name is humanized, not the raw email", () => {
+  it("employee INSERT's display_name param is the humanized local-part, not the raw email", async () => {
+    const kcLocal = new InMemoryKeycloakUserPort();
+    const capturedQueries: Array<{ text: string; values?: unknown[] }> = [];
+
+    class CapturingClient extends FakePoolClient {
+      override async query(textOrConfig: string | { text: string; values?: unknown[] }, values?: unknown[]) {
+        const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+        const vals = typeof textOrConfig === "string" ? values : textOrConfig.values;
+        capturedQueries.push({ text, values: vals });
+        return super.query(textOrConfig, values);
+      }
+    }
+
+    const capturingPool: pg.Pool = {
+      connect: async () => new CapturingClient() as unknown as pg.PoolClient,
+    } as unknown as pg.Pool;
+
+    const email = "lp-w8-owner@example.com";
+    await registerTenant(
+      { pool: capturingPool, kc: kcLocal, nowMs: () => 1234567890000 },
+      { orgName: "T0770Org", email, password: "password123" },
+    );
+
+    // Owner employee INSERT: values = [tenantId, employeeId, kcUserId, displayName, ts]
+    const employeeInsert = capturedQueries.find(
+      (q) =>
+        q.text.includes("INSERT") &&
+        q.text.includes("choros.employee") &&
+        q.text.includes("'human'") &&
+        !q.text.includes("assistant-agent"),
+    );
+    expect(employeeInsert).toBeDefined();
+    const displayNameParam = employeeInsert!.values![3] as string;
+    expect(displayNameParam).not.toBe(email);
+    expect(displayNameParam).toBe("Lp W8 Owner");
   });
 });
 
