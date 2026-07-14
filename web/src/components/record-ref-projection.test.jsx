@@ -13,7 +13,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import React from 'react';
 import { render, screen, cleanup } from '@testing-library/react';
-import { RecordRef } from './components.jsx';
+import { RecordRef, RECORD_UNAVAILABLE_LABEL } from './components.jsx';
 
 afterEach(() => cleanup());
 
@@ -65,13 +65,33 @@ describe('T-0756 RecordRef projection prop', () => {
     expect(container.textContent.length).toBeGreaterThan(0);
   });
 
-  it('no projection → existing fetch/deny fallback is UNCHANGED (backward compat)', async () => {
-    // A 404 with no projection keeps the pre-T-0756 behavior: the honest MonoId
-    // chip (raw id, secondary) — the projection path does not alter it.
+  it('no projection + 404 → honest «Запись недоступна» sentinel, NEVER the raw UUID (T-0735 fetch-path fix)', async () => {
+    // T-0735 (live-proof anti-uuid): the no-projection FETCH path is what the
+    // grid / inbox / ProcessRef consumers use. On the 404 the acting participant
+    // hits, RecordRef used to fall into <MonoId chip>{recordId}</MonoId> — a
+    // styled but fully-visible raw record UUID (observed in 8/25 «Процессы»
+    // rows). It now degrades to the honest sentinel, id demoted to a tooltip.
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false });
+    const { container } = render(<RecordRef recordId={RECORD_ID} headers={{}} fetchImpl={fetchImpl} />);
+    // Fetch IS attempted on the no-projection path (projection path never fetches).
+    expect(fetchImpl).toHaveBeenCalledWith(`/api/records/${RECORD_ID}`, { headers: {} });
+    // After the 404 resolves the visible label is the sentinel, never the UUID.
+    await screen.findByText(RECORD_UNAVAILABLE_LABEL);
+    expect(container.textContent).not.toContain(RECORD_ID);
+    const sentinel = container.querySelector('.chs-recordref--unresolved');
+    expect(sentinel).not.toBeNull();
+    // The raw id survives ONLY as the tooltip, never as rendered text.
+    expect(sentinel.getAttribute('title')).toBe(RECORD_ID);
+  });
+
+  it('no projection + resolved record → human title link (fetch happy path UNCHANGED, no regression)', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: RECORD_ID, application_id: APP_ID, data: { title: TITLE } }),
+    });
     render(<RecordRef recordId={RECORD_ID} headers={{}} fetchImpl={fetchImpl} />);
-    // Fetch IS attempted on the no-projection path.
-    await Promise.resolve();
-    expect(fetchImpl).toHaveBeenCalled();
+    const link = await screen.findByText(TITLE);
+    expect(link.tagName).toBe('A');
+    expect(link.getAttribute('href')).toBe(`/apps/${APP_ID}/records/${RECORD_ID}`);
   });
 });

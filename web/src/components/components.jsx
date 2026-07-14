@@ -290,6 +290,46 @@ function deriveRecordRefLabel(record) {
   return typeof record.id === "string" ? record.id.slice(0, 8) + "…" : null;
 }
 
+// T-0735 [live-proof anti-uuid finding, batch on top of T-0648/T-0756]: the
+// NON-projection FETCH path's "denied" branch used to render
+// <MonoId chip>{recordId}</MonoId> — a STYLED but still fully-visible raw record
+// UUID (observed live in the «Процессы» grid: a bare
+// `308eb628-2058-4a36-b04a-e10610dfad1a` in 8/25 rows whose source record 404'd
+// under the viewing actor's PDP — GET /api/records/:id denies a record the actor
+// can't read). T-0756 already fixed the instance-DETAIL screen via a server
+// `projection` (no fetch); this closes the OTHER consumers that still fetch
+// (grid, inbox drawer, inbox row, ProcessRef). Single shared sentinel/label with
+// T-0756's projection branch — both style «недоступна» identically
+// (chs-recordref--unresolved), raw id demoted to a tooltip only.
+export const RECORD_UNAVAILABLE_LABEL = "Запись недоступна";
+
+/**
+ * deriveRecordRefDisplay — pure decision for what RecordRef renders on the
+ * NON-projection FETCH path, given its resolved fetch state (mirrors
+ * deriveRecordRefLabel / deriveProcessRefPrimary: hook-free, unit-testable
+ * without a React dispatcher — RecordRef itself uses useState/useEffect and is
+ * not directly mountable in this suite, see actor-chip.test.jsx's documented
+ * split reasoning). The T-0756 `projection` branch is authoritative and handled
+ * separately in RecordRef — this helper is NEVER consulted when a projection is
+ * present.
+ *
+ * An unresolvable record (denied, or resolved with no derivable title) NEVER
+ * surfaces its raw id as primary text — the primary is the honest generic
+ * RECORD_UNAVAILABLE_LABEL sentinel (mirroring ActorChip's own type-label
+ * degrade and T-0756's projection sentinel). The raw id, when present, stays
+ * reachable only via a title tooltip.
+ */
+export function deriveRecordRefDisplay({ state, label, recordId, targetAppId, appId } = {}) {
+  if (state === "loading") return { kind: "loading" };
+  if (state === "resolved" && label) {
+    const resolvedAppId = targetAppId || appId || null;
+    const href = resolvedAppId ? `/apps/${resolvedAppId}/records/${recordId}` : undefined;
+    return href ? { kind: "link", label, href } : { kind: "plain", label };
+  }
+  // denied (404/403/network) or resolved-but-unlabelable: honest sentinel.
+  return recordId ? { kind: "unavailable", tooltip: recordId } : { kind: "empty" };
+}
+
 // T-0756 (E16 §6, capstone T-0691 P1): `projection` — a SERVER-provided safe
 // source-record projection { id, title, typeLabel, canOpen, appId? }. When present
 // it is AUTHORITATIVE: RecordRef renders `title` directly and issues NO
@@ -352,24 +392,54 @@ function RecordRef({ recordId, appId, headers, fetchImpl, projection }) {
   if (state === "loading") {
     return <span className="chs-recordref chs-recordref--loading">…</span>;
   }
-  if (state === "denied" || !label) {
-    // Honest sentinel (D2) — never fall back to rendering the raw id bare.
-    // T-0756: a projection with no derivable title still shows a human sentinel,
-    // never the raw UUID.
-    if (hasProjection) {
-      return <span className="chs-recordref chs-recordref--unresolved">Запись недоступна</span>;
+
+  // ── T-0756 projection branch — a server sourceRecord is AUTHORITATIVE
+  //    (title without a fetch, «открыть» only when canOpen). Kept intact; the
+  //    only change is hoisting the sentinel literal to the shared
+  //    RECORD_UNAVAILABLE_LABEL constant (byte-identical text) so this branch
+  //    and the T-0735 fetch path below render «недоступна» from one source.
+  if (hasProjection) {
+    if (state === "denied" || !label) {
+      // projection with no derivable title → human sentinel, never a raw UUID.
+      return <span className="chs-recordref chs-recordref--unresolved">{RECORD_UNAVAILABLE_LABEL}</span>;
     }
-    return recordId ? <MonoId chip>{recordId}</MonoId> : <span>—</span>;
+    const href = targetAppId ? `/apps/${targetAppId}/records/${projTargetId}` : undefined;
+    if (!href) {
+      // No open affordance (canOpen=false, or no known app): show the human
+      // title as PLAIN TEXT — orientation without a dead link (E16 §6).
+      return <span className="chs-recordref">{label}</span>;
+    }
+    return (
+      <a className="chs-recordref chs-recordref--link" href={href} title={`Открыть запись · ${projTargetId}`}>
+        {label}
+      </a>
+    );
   }
-  const href = targetAppId ? `/apps/${targetAppId}/records/${projTargetId}` : undefined;
-  if (!href) {
-    // No open affordance (projection canOpen=false, or no known app): show the
-    // human title as PLAIN TEXT — orientation without a dead link (E16 §6).
-    return <span className="chs-recordref">{label}</span>;
+
+  // ── T-0735 fetch path (NO projection): honest render decision. The old denied
+  //    branch fell into <MonoId chip>{recordId}</MonoId> — a styled but fully
+  //    visible raw record UUID. deriveRecordRefDisplay routes denied /
+  //    resolved-unlabelable to the SAME «Запись недоступна» sentinel
+  //    (chs-recordref--unresolved) as the projection branch, raw id demoted to a
+  //    tooltip only; resolved-with-title reuses the shared link/plain render.
+  //    projTargetId === recordId here (no projection), threaded consistently.
+  const display = deriveRecordRefDisplay({ state, label, recordId: projTargetId, targetAppId, appId });
+  if (display.kind === "empty") {
+    return <span className="chs-recordref chs-recordref--unresolved">—</span>;
+  }
+  if (display.kind === "unavailable") {
+    return (
+      <span className="chs-recordref chs-recordref--unresolved" title={display.tooltip}>
+        {RECORD_UNAVAILABLE_LABEL}
+      </span>
+    );
+  }
+  if (display.kind === "plain") {
+    return <span className="chs-recordref">{display.label}</span>;
   }
   return (
-    <a className="chs-recordref chs-recordref--link" href={href} title={`Открыть запись · ${projTargetId}`}>
-      {label}
+    <a className="chs-recordref chs-recordref--link" href={display.href} title={`Открыть запись · ${projTargetId}`}>
+      {display.label}
     </a>
   );
 }

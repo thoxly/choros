@@ -367,7 +367,13 @@ function ProcessesScreen() {
                   <tr key={inst.id}>
                     {/* name: human definition name + запись-источник (RecordRef →
                         resolves the record TITLE, a link) — the disambiguator the
-                        operator scans by. NEVER the raw instance UUID. */}
+                        operator scans by. NEVER the raw instance UUID.
+                        T-0735 (live-proof anti-uuid finding): this grid uses the
+                        FETCH path (no server projection). When the source record
+                        404s under the viewing actor's PDP, RecordRef itself now
+                        degrades to the «Запись недоступна» sentinel (fixed once in
+                        the primitive, components.jsx deriveRecordRefDisplay) —
+                        never the raw record-source UUID. */}
                     <td>
                       <div className="chs-task">
                         <span className="chs-task__marker" style={{ background: MARKER_COLOR[inst.status] }} />
