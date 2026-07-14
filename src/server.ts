@@ -803,6 +803,25 @@ function buildRouter(
       // running instance's LIVE active step/role (the source /api/processes/:inst
       // reads) instead of the start-time snapshot. Optional — absent ⇒ honest degrade.
       flowable: flowableClient ?? undefined,
+      // T-0771 (E16 consistency, live-proof T-0742): read-visibility resolver —
+      // BYTE-IDENTICAL composition to registerProcessesRoutes'/registerRecordRoutes'
+      // resolveReadVisibility above (getGrantsForSubject + loadTenantOrgAncestry →
+      // makeResourceAncestryOracle; single-resolver, FF-INST-VIS-2, no bespoke grant
+      // query). Narrows the catalog's per-definition instance_count to the SAME
+      // visible set the /api/processes grid's ?definition=<key> deep-link shows —
+      // closes the T-0742 live-proof mismatch (card said "N инстансов", click showed
+      // 0 rows for a non-participant).
+      resolveReadVisibility: async (actorSlug: string, tenantId: string, nowMs: number) => {
+        const [grants, orgOracle] = await Promise.all([
+          getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+          loadTenantOrgAncestry(grantsPool, tenantId),
+        ]);
+        const emptyRowIndex = new Map<string, RowAncestry>();
+        return {
+          grants,
+          ancestry: makeResourceAncestryOracle(orgOracle, emptyRowIndex),
+        };
+      },
     });
   }
 
