@@ -2276,6 +2276,18 @@ export function registerInboxRoutes(
         // addressed to, or a Tier-2 substitution licenses them to act for it.
         const deferNowMs = Date.now();
         const deferMyRoles = await resolveRolesForActor(actor, tenantId, deferNowMs);
+        // T-0676 (adversarial review follow-up): mirror the claim/approve routes'
+        // owner-orphan rung (T-0744, isOwnerOrphanClaimEligible) here too. Since
+        // T-0676 defaults an unset defer_role to "" (READ-side fix), a role-less
+        // defer is routed to the tenant OWNER via resolveExecutorFallbackBatch
+        // (routed_to_fallback:"role_unfilled") — but without this rung the owner
+        // could never actually RESOLVE it: deferMyRoles.includes("") is false,
+        // Tier-2 substitution is role-scoped and also misses, so the owner hit a
+        // 403 dead-end and the engine token was stuck forever (contradicts
+        // ADR-T0638's success criterion). Same guards as claim/approve: gated on
+        // isGenesisOwnerForTenant (deactivation-safe) + effective pool empty for
+        // deferRow.role — the owner acts as themselves (no on_behalf_of).
+        let deferOwnerOrphan = false;
         if (!deferMyRoles.includes(deferRow.role)) {
           const onBehalf = await resolveTier2SubstitutionClaim(
             pool,
@@ -2285,6 +2297,9 @@ export function registerInboxRoutes(
             deferNowMs,
           );
           if (onBehalf === undefined) {
+            deferOwnerOrphan = await isOwnerOrphanClaimEligible(pool, tenantId, actor, deferRow.role, deferNowMs);
+          }
+          if (onBehalf === undefined && !deferOwnerOrphan) {
             throw new HttpError(
               403,
               "NOT_ELIGIBLE",

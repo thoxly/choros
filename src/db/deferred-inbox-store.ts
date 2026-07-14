@@ -169,10 +169,26 @@ export async function listDeferredInboxTasks(
       // write-side fix alone would not fix rows already persisted).
       const doubtReason = humanizeDoubtReason(rawDoubtReason);
 
+      // T-0676 (anti-case hardcode fix, D-064): an unset/blank defer_role must NOT
+      // default to a case-specific role literal ("fin-ctrl" — a day-1-demo role
+      // that happens to have holders in THAT tenant's fixtures, not a universal
+      // truth). The old default silently defeated the honest-addressing fallback
+      // that T-0638 (F6) already built at the read layer: findInboxItems's
+      // defer-merge block feeds row.role into resolveExecutorFallbackBatch, which
+      // routes to the tenant owner (via findTenantOwnerSlug) ONLY when the role has
+      // NO confirmed holders — but "fin-ctrl" often DOES have holders (it is a real,
+      // commonly-seeded role), so a task that never actually had a role assigned
+      // would incorrectly land on fin-ctrl's holder instead of the honest owner
+      // fallback. "" is not a role any tenant can define (role.slug is never blank),
+      // so getHoldersForRole("") is always empty — resolveExecutorFallbackBatch
+      // correctly treats it as unfilled and reuses the SAME fallback ladder
+      // (owner-via-findTenantOwnerSlug) that already exists for ordinary
+      // instance-task roles. No new fallback path invented here — reusing the one
+      // the main path already uses (ADR-T0638-defer-task-complete.md §2.5).
       const role =
         typeof payload["defer_role"] === "string" && payload["defer_role"].trim() !== ""
           ? payload["defer_role"]
-          : "fin-ctrl"; // safe default role (matches day-1 demo)
+          : "";
 
       // name: T-0638 — ALWAYS rebuilt from the (humanized) doubtReason, never
       // trusted verbatim from payload.defer_name. defer_name is a fully
