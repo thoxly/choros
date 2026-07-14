@@ -165,11 +165,18 @@ async function seedTenantOwner(c: pg.Client, tenantId: string, ownerSlug: string
   return owner;
 }
 
-/** Seed ONE agent.deferred audit event (mirrors dispatch-outcome.ts's deferredAuditEvent shape). */
+/**
+ * Seed ONE agent.deferred audit event (mirrors dispatch-outcome.ts's deferredAuditEvent shape).
+ *
+ * T-0676: `deferRole` is OPTIONAL and, when omitted, the `defer_role` key is left
+ * OUT of the payload entirely — this mirrors a legacy row written before the
+ * field existed (or any write path that genuinely never had a role to thread),
+ * which is exactly the case deferred-inbox-store.ts's read-side default handles.
+ */
 async function seedDeferEvent(
   c: pg.Client,
   tenantId: string,
-  opts: { taskId: string; agentEmployeeId: string; doubtReason: string; deferRole: string; instanceId?: string },
+  opts: { taskId: string; agentEmployeeId: string; doubtReason: string; deferRole?: string; instanceId?: string },
 ): Promise<void> {
   const input: AuditEventInput = {
     id: opts.taskId,
@@ -186,7 +193,7 @@ async function seedDeferEvent(
       inbox_task_id: opts.taskId,
       instance_id: opts.instanceId ?? null,
       proc_key: 'telLinear',
-      defer_role: opts.deferRole,
+      ...(opts.deferRole !== undefined ? { defer_role: opts.deferRole } : {}),
       defer_sla_minutes: null,
       defer_name: `Проверить: ${opts.doubtReason}`,
       agent_draft: null,
@@ -339,5 +346,69 @@ describe('T-0638 AC-d — GET /api/inbox: a defer task addressed to an unfilled 
     const item = parsed.items.find((i) => i['id'] === taskId);
     expect(item).toBeDefined();
     expect(item!['routed_to_fallback']).toBeUndefined();
+  });
+
+  // T-0676: anti-case hardcode fix. Before this task, deferred-inbox-store.ts
+  // defaulted a MISSING payload.defer_role to the literal "fin-ctrl" — so even
+  // though this defer task never had a role assigned, it would incorrectly land
+  // on whoever holds "fin-ctrl" in THIS tenant (a real, commonly-seeded role)
+  // instead of the honest role_unfilled → tenant-owner fallback. This test seeds
+  // a tenant where "fin-ctrl" DOES have a confirmed holder — the exact condition
+  // that used to mask the bug (an empty-pool "fin-ctrl" would have accidentally
+  // "worked") — and asserts the defer task still resolves honestly to the owner,
+  // never to the fin-ctrl holder.
+  it('T-0676: a defer task with NO defer_role in payload resolves to the owner, even when "fin-ctrl" has a live holder', async () => {
+    if (!hasDb) return;
+
+    const tenantId = uuid();
+    const ownerSlug = `t0676-owner-${uuid().slice(0, 6)}`;
+    const finCtrlHolderSlug = `t0676-fin-ctrl-holder-${uuid().slice(0, 6)}`;
+    const taskId = uuid();
+
+    const c = new pg.Client({ connectionString: migratorUrl() });
+    await c.connect();
+    try {
+      await c.query('SET search_path TO choros;');
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await seedTenant(c, tenantId);
+      const owner = await seedTenantOwner(c, tenantId, ownerSlug);
+      void owner;
+      // Seed the "fin-ctrl" role WITH a confirmed holder — proves the fallback
+      // is NOT keyed off that literal ever being unfilled by coincidence.
+      const finCtrlRoleId = await seedRole(c, tenantId, 'fin-ctrl');
+      const finCtrlHolder = await seedEmployee(c, tenantId, finCtrlHolderSlug, 'Т-0676 fin-ctrl держатель');
+      await seedAssignment(c, tenantId, { empId: finCtrlHolder.id, roleId: finCtrlRoleId });
+      // deferRole OMITTED entirely — mirrors a legacy/no-role-context defer event.
+      await seedDeferEvent(c, tenantId, {
+        taskId,
+        agentEmployeeId: `agent-t0676-${uuid().slice(0, 6)}`,
+        doubtReason: 'no published instruction for agent',
+      });
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK');
+      throw err;
+    } finally {
+      await c.end();
+    }
+
+    // The fin-ctrl holder must NOT see this task in their POOL tab (pool
+    // eligibility is role-addressed — myRoles.includes(item.role) — and this task
+    // was never actually addressed to fin-ctrl; a case-role hardcode would have
+    // wrongly made it claimable by this holder).
+    const finCtrlRes = await makeRequest(baseUrl, 'GET', '/api/inbox?tab=pool', { 'x-dev-user': finCtrlHolderSlug });
+    expect(finCtrlRes.statusCode, finCtrlRes.body).toBe(200);
+    const finCtrlParsed = JSON.parse(finCtrlRes.body) as { items: Array<Record<string, unknown>> };
+    expect(finCtrlParsed.items.find((i) => i['id'] === taskId)).toBeUndefined();
+
+    // The tenant owner sees it, honestly marked as a role_unfilled fallback.
+    const ownerRes = await makeRequest(baseUrl, 'GET', '/api/inbox', { 'x-dev-user': ownerSlug });
+    expect(ownerRes.statusCode, ownerRes.body).toBe(200);
+    const ownerParsed = JSON.parse(ownerRes.body) as { items: Array<Record<string, unknown>> };
+    const item = ownerParsed.items.find((i) => i['id'] === taskId);
+    expect(item).toBeDefined();
+    expect(item!['routed_to_fallback']).toBe('role_unfilled');
+    expect(item!['role']).not.toBe('fin-ctrl');
   });
 });
