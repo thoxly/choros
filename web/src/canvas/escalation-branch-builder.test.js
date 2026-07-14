@@ -55,16 +55,35 @@ function makeMockModeler() {
     updateProperties(element, properties) {
       calls.push({ op: 'updateProperties', id: element.id, properties });
     },
+    createShape(shape, position, parent) {
+      seq += 1;
+      const local = shape.type.split(':')[1];
+      const el = {
+        id: `${local}_${seq}`, type: shape.type,
+        businessObject: { $type: shape.type, eventDefinitions: shape.eventDefinitionType ? [{ $type: shape.eventDefinitionType }] : [] },
+        x: (position && position.x) || 0, y: (position && position.y) || 0,
+        width: 100, height: 80, parent, outgoing: [], incoming: [],
+      };
+      calls.push({
+        op: 'createShape', type: shape.type, newId: el.id,
+        parent: parent && parent.id, position,
+        eventDefinitionType: shape.eventDefinitionType,
+      });
+      return el;
+    },
     appendShape(source, shape, position, parent) {
       seq += 1;
       const local = shape.type.split(':')[1];
       const el = {
         id: `${local}_${seq}`, type: shape.type,
-        businessObject: { $type: shape.type },
+        businessObject: { $type: shape.type, eventDefinitions: shape.eventDefinitionType ? [{ $type: shape.eventDefinitionType }] : [] },
         x: (position && position.x) || 0, y: (position && position.y) || 0,
         width: 100, height: 80, parent, outgoing: [], incoming: [],
       };
-      calls.push({ op: 'appendShape', source: source.id, type: shape.type, newId: el.id, position });
+      calls.push({
+        op: 'appendShape', source: source.id, type: shape.type, newId: el.id, position,
+        eventDefinitionType: shape.eventDefinitionType,
+      });
       return el;
     },
     connect(source, target, attrs) {
@@ -75,6 +94,10 @@ function makeMockModeler() {
     },
     removeConnection(connection) {
       calls.push({ op: 'removeConnection', id: connection.id });
+    },
+    moveElements(shapes, delta, target) {
+      calls.push({ op: 'moveElements', ids: shapes.map((s) => s.id), target: target.id, delta });
+      shapes.forEach((s) => { s.parent = target; });
     },
   };
   // Minimal commandStack mimicking diagram-js semantics: registerHandler
@@ -207,11 +230,12 @@ describe('canBuildEscalationBranch', () => {
 });
 
 /* --------------------------------------------------------------------------
-   4. applyEscalationBranch — exact modeling ops + converging topology
+   4. applyEscalationBranch — exact modeling ops + D5 (subProcess + scope-local
+      terminate) topology, per ADR-T0612 §8 / T-0661.
    -------------------------------------------------------------------------- */
-describe('applyEscalationBranch — builds the converging shape', () => {
-  it('sets non-interrupting, appends esc-task + gateway, reroutes, converges', () => {
-    const { boundary, host, next, hostFlow } = makeGraph();
+describe('applyEscalationBranch — builds the D5 shape (subProcess + scope-local terminate)', () => {
+  it('encloses the race in a subProcess converging into a terminateEndEvent', () => {
+    const { boundary, host, next, hostFlow, parent } = makeGraph();
     const modeler = makeMockModeler();
     const res = applyEscalationBranch({ modeler, boundaryElement: boundary });
 
@@ -227,7 +251,9 @@ describe('applyEscalationBranch — builds the converging shape', () => {
     expect(executes[0].command).toBe('choros.escalationBranch.build');
     // No modeling op happened OUTSIDE the composite execute.
     const executeIdx = calls.findIndex((c) => c.op === 'commandStack.execute');
-    const modelingOps = ['updateProperties', 'appendShape', 'connect', 'removeConnection'];
+    const modelingOps = [
+      'updateProperties', 'appendShape', 'createShape', 'connect', 'removeConnection', 'moveElements',
+    ];
     expect(calls.findIndex((c) => modelingOps.includes(c.op))).toBeGreaterThan(executeIdx);
 
     // 1. timer → non-interrupting
@@ -235,7 +261,33 @@ describe('applyEscalationBranch — builds the converging shape', () => {
       op: 'updateProperties', id: 'Boundary_1', properties: { cancelActivity: false },
     });
 
-    // 2. escalation userTask appended FROM the boundary timer
+    // 2. the host's OLD top-level flow is removed (the subProcess carries the
+    //    resolved race onward instead — see assertion 8 below).
+    expect(calls).toContainEqual({ op: 'removeConnection', id: hostFlow.id });
+
+    // 3. the embedded subProcess is created at the top level (host's old parent).
+    const subCreate = calls.find((c) => c.op === 'createShape' && c.type === 'bpmn:SubProcess');
+    expect(subCreate).toBeDefined();
+    expect(subCreate.parent).toBe(parent.id);
+    const subId = subCreate.newId;
+    expect(res.subProcessId).toBe(subId);
+
+    // 4. host + its boundary timer are MOVED into the subProcess (host keeps
+    //    its id/config — only containment changes).
+    expect(calls).toContainEqual(
+      expect.objectContaining({ op: 'moveElements', ids: [host.id, boundary.id], target: subId }),
+    );
+
+    // 5. embedded sub-processes require exactly one none-start, wired to host.
+    const subStartCreate = calls.find((c) => c.op === 'createShape' && c.type === 'bpmn:StartEvent');
+    expect(subStartCreate).toBeDefined();
+    expect(subStartCreate.parent).toBe(subId);
+    const subStartId = subStartCreate.newId;
+    expect(calls).toContainEqual(
+      expect.objectContaining({ op: 'connect', source: subStartId, target: host.id }),
+    );
+
+    // 6. escalation userTask appended FROM the boundary timer, INSIDE the subProcess.
     const escAppend = calls.find((c) => c.op === 'appendShape' && c.source === 'Boundary_1');
     expect(escAppend).toBeDefined();
     expect(escAppend.type).toBe('bpmn:UserTask');
@@ -245,7 +297,7 @@ describe('applyEscalationBranch — builds the converging shape', () => {
       expect.objectContaining({ op: 'updateProperties', id: escId, properties: { name: 'Эскалация' } }),
     );
 
-    // 3. converging exclusiveGateway appended FROM the host step
+    // 7. converging exclusiveGateway appended FROM the host step, INSIDE the subProcess.
     const gwAppend = calls.find((c) => c.op === 'appendShape' && c.source === host.id);
     expect(gwAppend).toBeDefined();
     expect(gwAppend.type).toBe('bpmn:ExclusiveGateway');
@@ -255,15 +307,25 @@ describe('applyEscalationBranch — builds the converging shape', () => {
       expect.objectContaining({ op: 'updateProperties', id: gwId, properties: { name: 'Продолжить' } }),
     );
 
-    // 4. old host→next removed, new gateway→next added (gateway sits between them)
-    expect(calls).toContainEqual({ op: 'removeConnection', id: hostFlow.id });
-    expect(calls).toContainEqual(
-      expect.objectContaining({ op: 'connect', source: gwId, target: next.id }),
-    );
-
-    // 5. escalation step converges into the SAME gateway
+    // escalation step converges into the SAME gateway.
     expect(calls).toContainEqual(
       expect.objectContaining({ op: 'connect', source: escId, target: gwId }),
+    );
+
+    // 8. THE FIX (D5): the gateway flows to a SCOPE-LOCAL terminateEndEvent —
+    //    NOT a plain end. Appended from the gateway, inside the subProcess.
+    const termAppend = calls.find(
+      (c) => c.op === 'appendShape' && c.source === gwId && c.type === 'bpmn:EndEvent',
+    );
+    expect(termAppend).toBeDefined();
+    expect(termAppend.eventDefinitionType).toBe('bpmn:TerminateEventDefinition');
+    const termId = termAppend.newId;
+    expect(res.terminateEndId).toBe(termId);
+
+    // 9. the subProcess (not the bare host) now carries the race's outcome to
+    //    wherever the host used to flow — the ONLY top-level reconnection.
+    expect(calls).toContainEqual(
+      expect.objectContaining({ op: 'connect', source: subId, target: next.id }),
     );
   });
 

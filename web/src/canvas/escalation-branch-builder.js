@@ -2,6 +2,8 @@
    CHOROS — escalation-branch-builder.js
    T-0660 [столпы 1/2, модельер]: собрать «напоминание по таймеру с эскалацией»
    мышью, без правки сырого BPMN XML.
+   T-0776 [столпы 1/3, модельер]: корректирует форму D2 (T-0660) на форму D5
+   (ADR-T0612 §8, T-0661) — см. ниже «D5 addendum».
 
    Закрывает два физических пробела конструктора процессов (D-064, класс P0
    «продукт этого не даёт»):
@@ -12,19 +14,54 @@
         было получить лишь правкой XML. bpmn-js по умолчанию ставит true, поэтому
         непрерывающий таймер мышью был недостижим.
 
-     2. Сама ветка эскалации СО СХОЖДЕНИЕМ. Валидный паттерн (ADR-T0612 §D2)
-        требует: нормальное завершение шага И ветка эскалации сходятся в общий
-        exclusiveGateway перед общим концом. Без схождения непрерывающий таймер
-        даёт зомби-инстанс (T-0612). Собрать это схождение мышью вручную — почти
-        гарантированно неверно (в отдельный конец). Аффорданс собирает КОРРЕКТНОЕ
-        схождение одним кликом.
+     2. Сама ветка эскалации СО СХОЖДЕНИЕМ И РАЗРЕШЕНИЕМ КОНКУРЕНЦИИ. Валидный
+        паттерн (ADR-T0612 §8, D5) требует не только схождения нормального
+        завершения шага и ветки эскалации в общий exclusiveGateway, но и то,
+        чтобы это схождение вело в SCOPE-LOCAL terminateEndEvent внутри
+        embedded subProcess — иначе сработавший непрерывающий таймер порождает
+        ВТОРОЙ параллельный токен, который простой сходящийся gateway + обычный
+        endEvent не может погасить (T-0661: сходящийся exclusiveGateway —
+        неконтролируемое слияние, каждый токен проходит независимо → зависание
+        инстанса, если оба токена не разрешены). Собрать эту форму мышью вручную
+        — почти гарантированно неверно. Аффорданс собирает КОРРЕКТНУЮ (D5) форму
+        одним кликом.
 
    Чистые части (cancelActivity read/write, гард предусловий) отделены от
    исполнителя на bpmn-js modeling API, поэтому логика юнит-тестируема без DOM.
-   DI (координаты) генерируется bpmn-js автоматически при appendShape/connect.
+   DI (координаты) генерируется bpmn-js автоматически при appendShape/connect/
+   createShape.
 
    cancelActivity — родной атрибут BPMN 2.0; Flowable читает его напрямую, поэтому
    серверная трансляция не нужна (граница с T-0641: сервер не тронут).
+
+   ----------------------------------------------------------------------------
+   D5 addendum (T-0776, ADR-T0612 §8): why the shape changed from D2 to D5
+   ----------------------------------------------------------------------------
+   D2 (T-0660, this file's original build) produced:
+     host  → gateway → next        (host's single path, rerouted THROUGH gateway)
+     timer → escTask → gateway     (escalation branch converging into gateway)
+   T-0661 PROVED (live Flowable) this shape HANGS once the timer fires: a
+   converging exclusiveGateway is an UNCONTROLLED MERGE — it passes EACH
+   incoming token through independently, it does not "discard the later
+   token". Once the timer fires, both `host` and `escTask` are open
+   concurrently; whichever completes first sends ITS token through the
+   gateway to `next` — but the OTHER task's token stays parked forever, and
+   BPMN only completes a (sub)process when EVERY token is consumed. A new
+   linter rule (`timer_escalation_unresolved_concurrency`,
+   src/core/bpmn-linter.ts) now BLOCKS publishing this exact D2 shape.
+
+   D5 fixes this by enclosing the race in an embedded subProcess whose
+   convergence flows to a SCOPE-LOCAL terminateEndEvent (terminateAll left at
+   its BPMN default, false): the FIRST racer to arrive there ends the
+   sub-process scope, cancelling the OTHER, still-parked racer's token — the
+   sub-process then completes normally and its single outgoing flow carries
+   the resolved race onward exactly where `host` used to flow. Produced
+   topology (mirrors docs/design/T-0612-purchaseApproval-fixed.bpmn20.xml.txt):
+
+     subProcess (encloses):
+       subStart → host  ─┐
+       timer → escTask ──┼→ gateway → terminateEnd (scope-local)
+     subProcess → next   (top level; replaces the old host → next flow)
    ============================================================================ */
 
 /* --------------------------------------------------------------------------
@@ -152,8 +189,10 @@ function pointFrom(el, dx, dy) {
    diagram-js' own AppendShapeHandler: nested modeling calls fired from a
    handler's preExecute/postExecute phase). CommandStack._pushAction assigns
    every NESTED action the BASE action's id, and undo()/redo() loop
-   `while (next.id === action.id)` — so the ~8 nested operations below are
-   undone by a SINGLE commandStack.undo(). Nested execution is only legal in
+   `while (next.id === action.id)` — so the nested operations below (D5: timer
+   flip, subProcess create, host+timer reparent, sub-start wiring, escalation
+   task, gateway, scope-local terminate, top-level reconnect) are undone by a
+   SINGLE commandStack.undo(). Nested execution is only legal in
    preExecute/postExecute (the atomic guard throws inside execute/revert),
    hence all work lives in preExecute; execute/revert are intentionally absent
    (both optional per CommandStack._internalExecute/_internalUndo).
@@ -166,8 +205,10 @@ export const BUILD_ESCALATION_BRANCH_CMD = 'choros.escalationBranch.build';
  * Composite command handler. Instantiated by the diagram-js injector
  * (commandStack.registerHandler), receives the real modeling service via $inject.
  *
- * Context in:  { boundaryElement, escalationName?, gatewayName? }
- * Context out: { escalationTask, gateway }  (the created shapes)
+ * Context in:  { boundaryElement, escalationName?, gatewayName?, subProcessName?,
+ *                terminateName? }
+ * Context out: { escalationTask, gateway, subProcess, terminateEnd, subStart }
+ *              (the created shapes)
  */
 export function BuildEscalationBranchHandler(modeling) {
   this._modeling = modeling;
@@ -178,40 +219,92 @@ BuildEscalationBranchHandler.prototype.preExecute = function preExecute(context)
   const modeling = this._modeling;
   const boundaryElement = context.boundaryElement;
   const host = boundaryElement.host;
+  const parent = host.parent;
   const hostFlow = normalOutgoing(host)[0];
   const nextEl = hostFlow.target;
 
   // 1. Timer becomes a non-interrupting reminder (does not cancel the step).
   modeling.updateProperties(boundaryElement, { cancelActivity: false });
 
-  // 2. Escalation step, appended from the boundary timer (creates timer→escTask + DI).
+  // 2. The host's old top-level flow is retired here: once the race resolves,
+  //    the ENCLOSING subProcess (step 3) carries the flow onward, not the bare
+  //    host (D5 — the host moves INSIDE the subProcess in step 4).
+  modeling.removeConnection(hostFlow);
+
+  // 3. Embedded subProcess (D5, ADR-T0612 §8 / T-0661): encloses the fin-approval
+  //    RACE (host + escalation task) so a SCOPE-LOCAL terminate end event can
+  //    cancel the losing racer's token without ending anything outside this
+  //    slice. Created at the host's original top-level slot.
+  const subProcess = modeling.createShape(
+    { type: 'bpmn:SubProcess', isExpanded: true },
+    pointFrom(host, 0, 0),
+    parent,
+  );
+  modeling.updateProperties(subProcess, {
+    name: context.subProcessName || 'Шаг с напоминанием (гонка + эскалация)',
+  });
+
+  // 4. Move the host step — WITH its attached boundary timer — INTO the
+  //    subProcess. The host keeps its id/config; only its containment changes.
+  modeling.moveElements([host, boundaryElement], { x: 0, y: 0 }, subProcess);
+
+  // 5. Embedded sub-processes require exactly one none-start event; wire it
+  //    to the (now-nested) host so the race actually begins on entry.
+  const subStart = modeling.createShape(
+    { type: 'bpmn:StartEvent' },
+    pointFrom(host, -140, 0),
+    subProcess,
+  );
+  modeling.connect(subStart, host, { type: 'bpmn:SequenceFlow' });
+
+  // 6. Escalation step, appended from the boundary timer (creates timer→escTask
+  //    + DI, INSIDE the subProcess since the timer now lives there).
   const escTask = modeling.appendShape(
     boundaryElement,
     { type: 'bpmn:UserTask' },
     pointFrom(boundaryElement, 90, 120),
-    boundaryElement.parent,
+    subProcess,
   );
   modeling.updateProperties(escTask, { name: context.escalationName || 'Эскалация' });
 
-  // 3. Converging gateway, appended from the host step (creates host→gateway + DI).
+  // 7. Converging gateway, appended from the host step (creates host→gateway +
+  //    DI, INSIDE the subProcess). Both racers still converge here (T-0612 D2
+  //    is preserved) — the fix is what the gateway now flows TO (step 9).
   const gateway = modeling.appendShape(
     host,
     { type: 'bpmn:ExclusiveGateway' },
     pointFrom(host, host.width ? host.width / 2 + 90 : 140, 0),
-    host.parent,
+    subProcess,
   );
   modeling.updateProperties(gateway, { name: context.gatewayName || 'Продолжить' });
 
-  // 4. Reroute the host's normal path THROUGH the gateway:
-  //    remove the old host→next flow, add gateway→next (gateway sits between them).
-  modeling.removeConnection(hostFlow);
-  modeling.connect(gateway, nextEl, { type: 'bpmn:SequenceFlow' });
-
-  // 5. Escalation step converges into the same gateway.
+  // 8. Escalation step converges into the same gateway.
   modeling.connect(escTask, gateway, { type: 'bpmn:SequenceFlow' });
+
+  // 9. THE FIX (T-0661/D5): the gateway flows to a SCOPE-LOCAL terminate end
+  //    event (terminateAll left at its BPMN default, false) instead of a plain
+  //    end — the FIRST racer to arrive here ends the sub-process scope,
+  //    cancelling the other, still-parked racer's token. Appended from the
+  //    gateway (creates gateway→terminateEnd + DI).
+  const terminateEnd = modeling.appendShape(
+    gateway,
+    { type: 'bpmn:EndEvent', eventDefinitionType: 'bpmn:TerminateEventDefinition' },
+    pointFrom(gateway, 120, 0),
+    subProcess,
+  );
+  modeling.updateProperties(terminateEnd, {
+    name: context.terminateName || 'Решение принято',
+  });
+
+  // 10. The subProcess (not the bare host) now carries the resolved race
+  //     onward to wherever the host used to flow — the ONLY top-level change.
+  modeling.connect(subProcess, nextEl, { type: 'bpmn:SequenceFlow' });
 
   context.escalationTask = escTask;
   context.gateway = gateway;
+  context.subProcess = subProcess;
+  context.terminateEnd = terminateEnd;
+  context.subStart = subStart;
 };
 
 /** Command stacks the composite handler is already registered on. */
@@ -225,31 +318,48 @@ function ensureBuildHandlerRegistered(commandStack) {
 }
 
 /**
- * Build the converging escalation branch on the LIVE canvas via bpmn-js modeling.
- * Idempotent-guarded by canBuildEscalationBranch. DI (coordinates/waypoints) is
- * generated by bpmn-js automatically for every appendShape/connect.
+ * Build the D5 escalation branch (ADR-T0612 §8, T-0661) on the LIVE canvas via
+ * bpmn-js modeling. Idempotent-guarded by canBuildEscalationBranch. DI
+ * (coordinates/waypoints) is generated by bpmn-js automatically for every
+ * createShape/appendShape/connect.
  *
  * ATOMIC (U-1): all operations run as ONE composite command
  * (BUILD_ESCALATION_BRANCH_CMD) — a single commandStack.undo() removes the whole
- * built branch and restores the original topology.
+ * built branch (subProcess and everything moved/created inside it) and restores
+ * the original topology.
  *
- * Topology produced:
- *   host  → gateway → next        (the host's single normal path, rerouted
- *                                   THROUGH a new converging exclusiveGateway)
- *   timer → escTask → gateway     (the escalation branch, converging into the
- *                                   same gateway)
+ * Topology produced (mirrors
+ * docs/design/T-0612-purchaseApproval-fixed.bpmn20.xml.txt):
+ *   subProcess (encloses the race):
+ *     subStart → host  ─┐
+ *     timer → escTask ──┼→ gateway → terminateEnd (scope-local terminate)
+ *   subProcess → next   (top level; replaces the old host → next flow)
  * plus the boundary timer set to non-interrupting (cancelActivity=false).
  *
  * This is exactly the shape the publish linter's checkTimerEscalationConvergence
- * (T-0641/T-0612) requires for a non-interrupting boundary timer — so the
- * mouse-built process passes the publish gate (no timer_escalation_no_convergence).
+ * (T-0612/T-0641/T-0661, src/core/bpmn-linter.ts) requires for a non-interrupting
+ * boundary timer — it satisfies BOTH the convergence rule
+ * (`timer_escalation_no_convergence`: host and escTask both reach the gateway)
+ * AND the concurrency-resolution rule
+ * (`timer_escalation_unresolved_concurrency`: a terminateEndEvent is reachable
+ * from the escalation branch) — so the mouse-built process passes the publish
+ * gate AND is not the D2 shape T-0661 proved hangs once the timer fires.
  *
  * @param {{ modeler: object, boundaryElement: object,
- *           escalationName?: string, gatewayName?: string }} args
+ *           escalationName?: string, gatewayName?: string,
+ *           subProcessName?: string, terminateName?: string }} args
  * @returns {{ applied: boolean, reason?: string, escalationTaskId?: string,
- *             gatewayId?: string }}
+ *             gatewayId?: string, subProcessId?: string,
+ *             terminateEndId?: string }}
  */
-export function applyEscalationBranch({ modeler, boundaryElement, escalationName, gatewayName }) {
+export function applyEscalationBranch({
+  modeler,
+  boundaryElement,
+  escalationName,
+  gatewayName,
+  subProcessName,
+  terminateName,
+}) {
   const guard = canBuildEscalationBranch(boundaryElement);
   if (!guard.ok) return { applied: false, reason: guard.reason };
   if (!modeler || typeof modeler.get !== 'function') {
@@ -259,12 +369,20 @@ export function applyEscalationBranch({ modeler, boundaryElement, escalationName
   const commandStack = modeler.get('commandStack');
   ensureBuildHandlerRegistered(commandStack);
 
-  const context = { boundaryElement, escalationName, gatewayName };
+  const context = {
+    boundaryElement,
+    escalationName,
+    gatewayName,
+    subProcessName,
+    terminateName,
+  };
   commandStack.execute(BUILD_ESCALATION_BRANCH_CMD, context);
 
   return {
     applied: true,
     escalationTaskId: context.escalationTask && context.escalationTask.id,
     gatewayId: context.gateway && context.gateway.id,
+    subProcessId: context.subProcess && context.subProcess.id,
+    terminateEndId: context.terminateEnd && context.terminateEnd.id,
   };
 }
