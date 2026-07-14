@@ -17,10 +17,12 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, MonoId, Modal, StatusChip, EmptyState, LoadingState, ErrorState, Tooltip, Field, Select } from '../components/components.jsx';
+import { Button, MonoId, Modal, StatusChip, EmptyState, LoadingState, ErrorState, Tooltip, Field, Select, ConfirmDialog } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../app-shell/active-tenant.js';
+import { useToastContext } from '../app-shell/toast-context.jsx';
+import { ConsequenceSummary, useDestructiveConfirm } from '../util/confirm-helpers.jsx';
 import {
   validateCreateUser, buildCreateUserPayload,
   mapUserError, accountStatusMeta, positionOptions,
@@ -217,6 +219,14 @@ export default function UsersScreen() {
   // banner, same as OrgTree does. The SERVER 403 on POST/PATCH stays the real
   // gate (T-0469) — this is a cosmetic client-side degrade only.
   const [canWrite, setCanWrite] = useState(false);
+  // T-0775: «Деактивировать» was the only unconfirmed consequential action on
+  // this screen (fired instantly, no undo, no toast) — inconsistent with
+  // «Уволить» on rights/ra-intents.jsx, which gates behind ConfirmDialog +
+  // ConsequenceSummary (§confirm-helpers.jsx). Reuse the SAME two-phase
+  // open/confirm hook + component here (no bespoke dialog). Реактивация
+  // остаётся мгновенной — она не деструктивна (просто разрешает вход обратно).
+  const dc = useDestructiveConfirm();
+  const { push: pushToast } = useToastContext();
 
   const loadAccounts = useCallback(async () => {
     setError(null);
@@ -253,7 +263,9 @@ export default function UsersScreen() {
 
   useEffect(() => { loadAccounts(); loadPositions(); }, [loadAccounts, loadPositions]);
 
-  const toggleActive = async (account, nextActive) => {
+  // T-0775: the actual PATCH — unchanged contract, just renamed so the two
+  // call sites (instant reactivate vs. confirm-gated deactivate) are clear.
+  const performToggle = async (account, nextActive) => {
     setToggleErr(null);
     setBusyId(account.employee_id);
     try {
@@ -262,7 +274,13 @@ export default function UsersScreen() {
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ active: nextActive }),
       });
-      if (res.ok) { await loadAccounts(); return; }
+      if (res.ok) {
+        await loadAccounts();
+        if (!nextActive) {
+          pushToast({ tone: 'success', message: `Учётка «${account.display_name}» деактивирована.` });
+        }
+        return;
+      }
       let parsed = null;
       try { parsed = await res.json(); } catch { /* non-JSON */ }
       const mapped = mapUserError(res.status, parsed, nextActive ? 'реактивацию' : 'деактивацию');
@@ -273,6 +291,17 @@ export default function UsersScreen() {
       setBusyId(null);
     }
   };
+
+  // T-0775: click-through — «Реактивировать» stays instant (safe/reversible-
+  // by-nature, no confirm needed), «Деактивировать» opens ConfirmDialog first
+  // (matches «Уволить» gating in rights/ra-intents.jsx). The PATCH itself only
+  // fires from dc.confirm below, never from this handler directly.
+  const toggleActive = (account, nextActive) => {
+    if (nextActive) { performToggle(account, nextActive); return; }
+    dc.request(account);
+  };
+
+  const deactivateTargetName = dc.target?.display_name || 'Выбранная учётка';
 
   const hasAccounts = Array.isArray(accounts) && accounts.length > 0;
 
@@ -346,6 +375,26 @@ export default function UsersScreen() {
           onDone={() => { setCreateOpen(false); loadAccounts(); }}
         />
       )}
+
+      {/* T-0775: same ConfirmDialog+ConsequenceSummary pattern as «Уволить»
+          (rights/ra-intents.jsx) — «Деактивировать» is consequential (blocks
+          login) so it now gets the same confirm gate, no bespoke dialog. */}
+      <ConfirmDialog
+        open={dc.open}
+        tone="danger"
+        title="Деактивировать учётку?"
+        message={
+          <ConsequenceSummary
+            who={deactivateTargetName}
+            what="Вход в систему будет заблокирован. Данные и история учётки сохраняются без изменений."
+            reversibility="Обратимо — учётку можно реактивировать в любой момент кнопкой «Реактивировать»."
+          />
+        }
+        confirmLabel="Деактивировать"
+        loading={dc.loading}
+        onConfirm={() => dc.confirm((account) => performToggle(account, false))}
+        onClose={dc.cancel}
+      />
     </div>
   );
 }
