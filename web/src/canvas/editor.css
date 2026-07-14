@@ -192,6 +192,12 @@
 .chs-banner__violation-element { font-weight: var(--chs-weight-regular); opacity: 0.85; }
 .chs-banner__violation-message { white-space: pre-wrap; word-break: break-word; opacity: 0.92; }
 
+/* T-0761: Russian detail sentence + "как починить" hint (violation-i18n.js
+   humanizeViolation) rendered above the raw .message when the shape is
+   recognised — same wrap/no-clip discipline as -message, tokens only. */
+.chs-banner__violation-detail { white-space: pre-wrap; word-break: break-word; margin-top: var(--chs-space-2); }
+.chs-banner__violation-fix { white-space: pre-wrap; word-break: break-word; margin-top: var(--chs-space-2); font-weight: var(--chs-weight-medium); }
+
 /* ============================================================================
    T-0096: REAL bpmn-js container
    BpmnModelerWrapper mounts into .chs-bpmn-real-container; bpmn-js appends
