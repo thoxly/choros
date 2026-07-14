@@ -392,6 +392,19 @@ const HUMANIZERS = {
     },
   ],
 
+  // T-0661 [ADR-T0612 §8]: convergence alone is NOT sufficient — a converging
+  // exclusiveGateway is an uncontrolled merge, so once the timer FIRES it
+  // spawns a second concurrent token that a plain endEvent can never resolve.
+  timer_escalation_unresolved_concurrency: [
+    {
+      re: /^<.+?> is a NON-INTERRUPTING boundary timer \(cancelActivity="false"\) whose escalation branch RECONNECTS to the guarded task's \(attachedToRef="([^"]*)"\) downstream path \(flow convergence exists\) but no terminateEndEvent is reachable from the escalation branch/,
+      render: (m) => ({
+        detail: `Неблокирующий (cancelActivity="false") граничный таймер эскалации СХОДИТСЯ с обычным потоком завершения охраняемого шага (attachedToRef="${m[1]}"), но ни один reachable-узел ветки эскалации не является terminate-событием. Когда таймер СРАБАТЫВАЕТ, он порождает ВТОРОЙ, независимый токен (токен охраняемого шага остаётся живым) — сходящийся шлюз/конечное событие пропускает каждый токен независимо, поэтому экземпляр процесса завершится только после того, как ЗАВЕРШАТСЯ ОБЕ задачи: он зависает, пока вторая, уже неактуальная задача тоже не будет закрыта.`,
+        fix: 'Направьте схождение веток в scope-local terminateEndEvent (например, внутри вложенного sub-process), чтобы первое из завершений отменяло вторую, гоняющуюся задачу.',
+      }),
+    },
+  ],
+
   app_binding_unpublished: [
     {
       re: /^This process binds application "([^"]*)" \(slug="([^"]*)"\) which is still a SANDBOX \(draft\) application/,

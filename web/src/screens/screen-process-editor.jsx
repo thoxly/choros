@@ -192,6 +192,11 @@ const VIOLATION_TYPE_LABELS = {
   message_event_incoherent: 'Несогласованное событие-сообщение',
   agent_task_incoherent: 'Несогласованно настроен агентский шаг',
   timer_escalation_no_convergence: 'Ветка эскалации таймера не сходится с основным потоком',
+  // T-0661 [ADR-T0612 §8]: convergence alone is not enough — a converging
+  // gateway is an uncontrolled merge, so once the timer fires and spawns a
+  // second concurrent token, only a scope-local terminateEndEvent can resolve
+  // it. This distinct violation names that unresolved case.
+  timer_escalation_unresolved_concurrency: 'Эскалация таймера сходится с потоком, но не гасит конкурирующую задачу',
   app_binding_unpublished: 'Привязано неопубликованное приложение',
   step_target_unresolved: 'Не определена цель результата шага',
 };
