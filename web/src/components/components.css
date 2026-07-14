@@ -63,6 +63,15 @@
   color: var(--chs-color-text-faint);
   font-style: italic;
 }
+/* T-0735 / T-0756: the honest «Запись недоступна» sentinel — a source record the
+   viewing actor cannot read (fetch 404, or a projection with no title). Muted,
+   never a link, and NEVER the raw record UUID as text (the id lives only in the
+   title tooltip). ONE class for both the projection branch and the fetch path so
+   they style «недоступна» identically. */
+.chs-recordref--unresolved {
+  color: var(--chs-color-text-muted);
+  font-style: italic;
+}
 .chs-recordref--link {
   color: var(--chs-color-accent);
   text-decoration: none;

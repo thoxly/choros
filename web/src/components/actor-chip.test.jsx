@@ -27,6 +27,13 @@
  *   5. deriveRecordRefLabel — first non-empty string/number field wins; honest
  *      id-prefix fallback when no usable field; never returns the raw UUID
  *      un-shortened.
+ *   6. deriveRecordRefDisplay (T-0735 live-proof anti-uuid fix) — RecordRef's
+ *      pure render-decision on the NON-projection fetch path: a denied/
+ *      unresolvable record NEVER surfaces the raw record UUID as the primary
+ *      label (the honest RECORD_UNAVAILABLE_LABEL sentinel instead, id demoted
+ *      to a tooltip-only field); a resolved record WITH a derivable title still
+ *      yields the human label (link when an app id is known, plain otherwise).
+ *      The T-0756 projection path is authoritative and bypasses this helper.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -37,6 +44,8 @@ import {
   ProcessRef,
   asRenderableText,
   deriveRecordRefLabel,
+  deriveRecordRefDisplay,
+  RECORD_UNAVAILABLE_LABEL,
   deriveProcessRefPrimary,
   isMachineInst,
 } from './components.jsx';
@@ -336,6 +345,69 @@ describe('T-0648 deriveRecordRefLabel — RecordRef title derivation (mirrors de
   it('null/undefined record → null (RecordRef treats this as "denied/honest-empty", never throws)', () => {
     expect(deriveRecordRefLabel(null)).toBeNull();
     expect(deriveRecordRefLabel(undefined)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5b. deriveRecordRefDisplay — T-0735 live-proof anti-uuid fix: RecordRef's
+//     NON-projection fetch-path render decision. Regression coverage for the
+//     exact defect: "the «Процессы» grid name cell showed a bare raw
+//     record-source UUID (308eb628-2058-4a36-b04a-e10610dfad1a-shaped) when
+//     GET /api/records/:id 404'd (source record unreadable under the viewing
+//     actor's PDP)". T-0756 already closed the instance-DETAIL screen via a
+//     server projection (no fetch); this closes the consumers that still fetch
+//     (grid, inbox drawer, inbox row, ProcessRef) — see the projection-path
+//     coverage in screen-process-instance.test.jsx (detail unchanged).
+// ---------------------------------------------------------------------------
+
+describe('T-0735 deriveRecordRefDisplay — RecordRef fetch-path denied-state anti-uuid fix', () => {
+  const UUID = '308eb628-2058-4a36-b04a-e10610dfad1a';
+
+  it('denied (404/403/network) + a recordId → the honest sentinel, NOT the raw UUID', () => {
+    const display = deriveRecordRefDisplay({ state: 'denied', label: null, recordId: UUID });
+    expect(display.kind).toBe('unavailable');
+    // The raw id is reachable ONLY as tooltip metadata, never as rendered text.
+    expect(display.tooltip).toBe(UUID);
+    expect(display).not.toHaveProperty('label');
+  });
+
+  it('the sentinel label itself never contains/equals the raw record id', () => {
+    expect(RECORD_UNAVAILABLE_LABEL).not.toContain(UUID);
+    expect(RECORD_UNAVAILABLE_LABEL.trim().length).toBeGreaterThan(0);
+    // Sanity: it reads as a sentence, not a machine key.
+    expect(RECORD_UNAVAILABLE_LABEL).toMatch(/[а-яА-Я]/);
+  });
+
+  it('resolved with no derivable label (empty data record) → still the honest sentinel, never the id', () => {
+    const display = deriveRecordRefDisplay({ state: 'resolved', label: null, recordId: UUID });
+    expect(display.kind).toBe('unavailable');
+    expect(display.tooltip).toBe(UUID);
+  });
+
+  it('denied + no recordId at all → the neutral empty dash, no sentinel needed', () => {
+    const display = deriveRecordRefDisplay({ state: 'denied', label: null, recordId: undefined });
+    expect(display.kind).toBe('empty');
+  });
+
+  it('loading → a distinct loading kind (not treated as unavailable)', () => {
+    expect(deriveRecordRefDisplay({ state: 'loading', label: null, recordId: UUID }).kind).toBe('loading');
+  });
+
+  it('resolved WITH a derivable title + a known app id → a link carrying the human label', () => {
+    const display = deriveRecordRefDisplay({
+      state: 'resolved', label: 'Заявка на аренду офиса', recordId: UUID, targetAppId: 'app-1',
+    });
+    expect(display.kind).toBe('link');
+    expect(display.label).toBe('Заявка на аренду офиса');
+    expect(display.href).toBe(`/apps/app-1/records/${UUID}`);
+  });
+
+  it('resolved WITH a derivable title but NO known app id → plain human label (no link, still not the id)', () => {
+    const display = deriveRecordRefDisplay({
+      state: 'resolved', label: 'Заявка на аренду офиса', recordId: UUID, targetAppId: null, appId: null,
+    });
+    expect(display.kind).toBe('plain');
+    expect(display.label).toBe('Заявка на аренду офиса');
   });
 });
 
