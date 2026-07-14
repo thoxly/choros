@@ -181,7 +181,7 @@ describe('ViolationItem — publish lint violations render in FULL, never trunca
     "task's normal completion flow (so both paths converge before ending), or set cancelActivity=\"true\" " +
     'if the escalation is meant to CANCEL the guarded task rather than merely remind';
 
-  it('renders the message in FULL, including the trailing "Fix:" hint — no 120-char cutoff', () => {
+  it('renders the raw .message in FULL (kept verbatim for exact technical fidelity) — no 120-char cutoff', () => {
     const el = ViolationItem({
       v: {
         type: 'timer_escalation_no_convergence',
@@ -199,7 +199,7 @@ describe('ViolationItem — publish lint violations render in FULL, never trunca
     expect(text).not.toContain('…');
   });
 
-  it('translates the violation .type into a Russian rule title and shows element context', () => {
+  it('translates the violation .type into a Russian rule title and shows a HUMAN element label (T-0761)', () => {
     const el = ViolationItem({
       v: {
         type: 'timer_escalation_no_convergence',
@@ -210,7 +210,11 @@ describe('ViolationItem — publish lint violations render in FULL, never trunca
     });
     const text = collectText(el).join(' ');
     expect(text).toContain('Ветка эскалации таймера не сходится с основным потоком');
-    expect(text).toContain('boundaryEvent');
+    // T-0761: elementKind now renders as a human Russian noun phrase (ELEMENT_KIND_LABELS),
+    // not the raw BPMN camelCase — the whole item reads as Russian prose, not
+    // English vocabulary embedded mid-sentence.
+    expect(text).toContain('граничное событие');
+    expect(text).not.toContain('boundaryEvent');
     expect(text).toContain('timer_esc_1');
     expect(text).toContain('краткое сообщение');
   });
@@ -235,5 +239,160 @@ describe('ViolationItem — publish lint violations render in FULL, never trunca
     const text = collectText(el).join(' ');
     expect(text).toContain('"foo"');
     expect(text).toContain('"bar"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0761: finishes T-0659's "человеческим русским" goal — the .message BODY
+// + fix-hint were still raw English/XML-technical (T-0659.ux-review.json
+// findings -N2/-N3). violation-i18n.js (humanizeViolation) now supplies a
+// Russian detail sentence + "Как починить" hint per known LintViolationType
+// message shape (server contract untouched — see that file's header for why
+// this is a client-render-only layer, same mechanism as VIOLATION_TYPE_LABELS).
+// ---------------------------------------------------------------------------
+describe('ViolationItem — Russian detail + fix-hint for known server message shapes (T-0761)', () => {
+  const realMessages = {
+    raw_object_binding: {
+      elementKind: 'userTask',
+      elementId: 'ut_1',
+      message:
+        'raw-object binding detected in attribute "choros:objectRef" of <userTask id="ut_1">: value ' +
+        'contains record-identity or payload keys; use an ObjectHandle instead',
+    },
+    malformed_xml: {
+      elementKind: 'malformed_xml',
+      elementId: '',
+      message: 'document contains invalid UTF-8 sequences (U+FFFD replacement character detected)',
+    },
+    binding_mismatch: {
+      elementKind: 'binding_mismatch',
+      elementId: '',
+      message: 'BPMN variable "approvalRequired" is not declared in the form binding schema',
+    },
+    gateway_rule_mismatch: {
+      elementKind: 'exclusiveGateway',
+      elementId: 'gw_1',
+      message:
+        '<exclusiveGateway id="gw_1"> uses routing variable "decision" but no published rule table ' +
+        'declares a routing outcome with that name; publish a rule table that sets routing outcome ' +
+        '"decision" before publishing this process',
+    },
+    parallel_gateway_imbalance: {
+      elementKind: 'parallelGateway',
+      elementId: 'gw_2',
+      message:
+        '<parallelGateway id="gw_2"> is dangling: it has 0 incoming and 1 outgoing sequence flow(s). ' +
+        'A parallel (AND) gateway must have at least one incoming and one outgoing flow; a split needs ' +
+        '1 incoming and ≥2 outgoing, a join needs ≥2 incoming and 1 outgoing',
+    },
+    timer_malformed: {
+      elementKind: 'boundaryEvent',
+      elementId: 'timer_1',
+      message:
+        '<boundaryEvent id="timer_1"> is a boundary timer with no attachedToRef — it must be attached ' +
+        'to the task whose deadline it guards',
+    },
+    message_event_incoherent: {
+      elementKind: 'receiveTask',
+      elementId: 'rt_1',
+      message:
+        '<receiveTask id="rt_1"> is a message/signal catch with NO TIMEOUT — it would wait forever if ' +
+        'the message never arrives. Attach a boundary timer (deadline) to it (spec §3.5 R3: a ' +
+        'message-catch MUST have a timeout)',
+    },
+    agent_task_incoherent: {
+      elementKind: 'serviceTask',
+      elementId: 'agent_1',
+      message:
+        '<serviceTask id="agent_1"> is an agent step but declares no choros:agentRef — pick the agent ' +
+        "that runs this step (the dispatcher loads the agent's grants + LLM by this id); without it the " +
+        'step can never execute',
+    },
+    app_binding_unpublished: {
+      elementKind: 'application',
+      elementId: 'app_1',
+      message:
+        'This process binds application "Поставщики" (slug="postavshiki") which is still a SANDBOX ' +
+        '(draft) application — a published (live) process must not depend on a draft app. ' +
+        'Publish/promote the application first (or promote both together in one solution bundle), ' +
+        'then publish the process.',
+    },
+    step_target_unresolved: {
+      elementKind: 'application',
+      elementId: 'app_1',
+      message:
+        'This process\'s approve step writes its result into a registry named "soglasovanie" under the ' +
+        'bound application — but no such registry exists there yet. The FIRST approve would fail ' +
+        '(STEP_TARGET_UNRESOLVED) instead of the process publishing cleanly. Create a registry with ' +
+        'slug "soglasovanie" under the bound application (or set an explicit target_registry_slug on ' +
+        "this process's binding to an existing registry), then publish again.",
+    },
+  };
+
+  for (const [type, shape] of Object.entries(realMessages)) {
+    it(`renders a Russian detail + "Как починить" hint for ${type}, and still keeps the raw .message verbatim`, () => {
+      const el = ViolationItem({ v: { type, ...shape } });
+      const text = collectText(el).join(' ');
+      // Full raw server message is still present, unabridged (support/dev escalation fidelity).
+      expect(text).toContain(shape.message);
+      // A Russian detail sentence was added (Cyrillic present outside of the raw message alone —
+      // detect it by asserting the item contains at least one Cyrillic run not found verbatim in
+      // the raw English .message).
+      expect(/[А-Яа-яЁё]/.test(text)).toBe(true);
+    });
+  }
+
+  it('binding_mismatch/malformed_xml document-level violations do NOT show a redundant element line', () => {
+    const el = ViolationItem({
+      v: {
+        type: 'malformed_xml',
+        elementKind: 'malformed_xml',
+        elementId: '',
+        message: 'document contains invalid UTF-8 sequences (U+FFFD replacement character detected)',
+      },
+    });
+    const text = collectText(el).join(' ');
+    // The sentinel elementKind (mirrors .type — no real diagram element) must not leak as a
+    // bare "malformed_xml" element-context fragment distinct from the (already-Russian) title.
+    expect((text.match(/malformed_xml/g) || []).length).toBe(0);
+  });
+
+  it('has a Russian detail for the timer_escalation_no_convergence LONG_MESSAGE shape, with no raw English fix-text leaking', () => {
+    const LONG_MESSAGE =
+      '<boundaryEvent id="timer_esc_1"> is a NON-INTERRUPTING boundary timer (cancelActivity="false") ' +
+      "whose escalation branch reaches its own endEvent WITHOUT reconnecting to the guarded task's own " +
+      'downstream path. If the guarded task (attachedToRef="task_1") completes before the deadline fires, ' +
+      "the escalation branch's token is never cancelled and never reaches an end either — the process " +
+      'instance never completes (act_hi_procinst.end_time stays NULL forever), even though the main path ' +
+      'finished. Fix: either route the escalation branch into a gateway that also receives the guarded ' +
+      "task's normal completion flow (so both paths converge before ending), or set cancelActivity=\"true\" " +
+      'if the escalation is meant to CANCEL the guarded task rather than merely remind';
+    const el = ViolationItem({
+      v: {
+        type: 'timer_escalation_no_convergence',
+        elementId: 'timer_esc_1',
+        elementKind: 'boundaryEvent',
+        message: LONG_MESSAGE,
+      },
+    });
+    const text = collectText(el).join(' ');
+    // Russian "как починить" hint present, in Russian, NOT the raw English "Fix: either route..." text
+    // standing alone as the only actionable guidance — the Russian fix hint must be there too.
+    expect(text).toContain('Как починить:');
+    expect(text).toContain('Соедините ветку эскалации');
+    expect(text).not.toContain('граничное событие эскалации'); // sanity: no mistranslation artifact
+  });
+
+  it('falls back to the raw .message (untranslated) for an unrecognised message shape of a known type — never crashes, never hides text', () => {
+    const el = ViolationItem({
+      v: {
+        type: 'timer_malformed',
+        elementId: 't_9',
+        elementKind: 'boundaryEvent',
+        message: 'some brand-new server message shape this client has never seen before',
+      },
+    });
+    const text = collectText(el).join(' ');
+    expect(text).toContain('some brand-new server message shape this client has never seen before');
   });
 });

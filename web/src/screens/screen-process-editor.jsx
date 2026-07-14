@@ -25,6 +25,7 @@ import { Button, MonoId, StatusChip, KitIcon, Tooltip, LoadingState, ErrorState,
 import { ConsequenceSummary, useDestructiveConfirm } from '../util/confirm-helpers.jsx';
 import { useDirtyGuard } from '../hooks/useDirtyGuard.js';
 import { formatJsonReadable } from '../lib/format.js';
+import { formatElementLabel, humanizeViolation } from '../lib/violation-i18n.js';
 import { Icon } from '../app-shell/icon.jsx';
 import BpmnModelerWrapper from '../canvas/bpmn-modeler-wrapper.jsx';
 import BpmnPropertiesPanel from '../canvas/bpmn-properties-panel.jsx';
@@ -168,6 +169,18 @@ export function ValidationBanner({ result, onDismiss }) {
    rule title; the .message itself is always rendered IN FULL below it —
    never truncated. Additive: any LintViolationType not yet listed here still
    renders (falls back to the raw type string), it just isn't translated.
+
+   T-0761: T-0659's own follow-up review (docs/tasks/T-0659.ux-review.json,
+   findings -N2/-N3) flagged that this was only half the job — the TITLE was
+   Russian but the .message BODY + fix-hint stayed raw English/XML-technical
+   (authored server-side, out of this file's scope to rewrite — see
+   web/src/lib/violation-i18n.js's header for why), and elementKind rendered
+   as raw BPMN camelCase ("boundaryEvent") mid-sentence. violation-i18n.js
+   (same additive/fallback-safe mechanism as VIOLATION_TYPE_LABELS) now
+   supplies: ELEMENT_KIND_LABELS (elementKind -> human Russian) and
+   humanizeViolation() (per-type Russian detail + "как починить" hint,
+   falling back to the raw .message, still shown in FULL, for any shape it
+   does not recognise).
    -------------------------------------------------------------------------- */
 const VIOLATION_TYPE_LABELS = {
   raw_object_binding: 'Несвязанный объект',
@@ -185,25 +198,30 @@ const VIOLATION_TYPE_LABELS = {
 
 /**
  * Renders ONE publish/lint violation. Structured violations (anything with a
- * string .message — the LintViolation shape) get a human rule title plus the
- * element context, with the message rendered in full underneath — never
- * truncated. Plain strings (e.g. legacy warning entries) render as-is.
- * Anything else falls back to formatJsonReadable, matching prior behaviour
- * for shapes the linter has never actually emitted.
+ * string .message — the LintViolation shape) get a human rule title, the
+ * element context (elementKind translated via ELEMENT_KIND_LABELS — T-0761),
+ * a Russian detail sentence + "Как починить" hint when humanizeViolation()
+ * recognises the message shape (T-0761), and the message rendered in full
+ * underneath — never truncated, kept verbatim even when translated (so a
+ * developer/support escalation always has the exact server text to hand).
+ * Plain strings (e.g. legacy warning entries) render as-is. Anything else
+ * falls back to formatJsonReadable, matching prior behaviour for shapes the
+ * linter has never actually emitted.
  */
 export function ViolationItem({ v }) {
   if (typeof v === 'string') return <li>{v}</li>;
   if (v && typeof v === 'object' && typeof v.message === 'string') {
     const title = VIOLATION_TYPE_LABELS[v.type] || v.type || 'Нарушение проверки';
-    const elementLabel = v.elementId
-      ? `${v.elementKind ? v.elementKind + ' ' : ''}«${v.elementId}»`
-      : (v.elementKind || null);
+    const elementLabel = formatElementLabel(v);
+    const { detail, fix, matched } = humanizeViolation(v);
     return (
       <li className="chs-banner__violation">
         <div className="chs-banner__violation-title">
           {title}
           {elementLabel ? <span className="chs-banner__violation-element"> — {elementLabel}</span> : null}
         </div>
+        {matched ? <div className="chs-banner__violation-detail">{detail}</div> : null}
+        {fix ? <div className="chs-banner__violation-fix">Как починить: {fix}</div> : null}
         <div className="chs-banner__violation-message">{v.message}</div>
       </li>
     );

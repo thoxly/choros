@@ -58,6 +58,11 @@ describe('StatusBanner — REAL DOM mount, publish lint violations (T-0659)', ()
     expect(screen.getByText(LONG_MESSAGE)).toBeTruthy();
     expect(screen.getByText(/Fix: either route the escalation branch/)).toBeTruthy();
     expect(screen.getByText(/Ветка эскалации таймера не сходится с основным потоком/)).toBeTruthy();
+    // T-0761: elementKind renders as a human Russian noun phrase in the real DOM too
+    // (not just the node-env tree-walk suite), and a Russian "Как починить" hint
+    // is present alongside the (still verbatim) raw message.
+    expect(screen.getByText(/граничное событие/)).toBeTruthy();
+    expect(screen.getByText(/Как починить: Соедините ветку эскалации/)).toBeTruthy();
   });
 
   it('mounts a mixed violation list (string + structured object + unknown shape) without crashing', () => {
