@@ -68,6 +68,22 @@ export function isOrgNodeMoveAction(action) {
 }
 
 /**
+ * True for any RECORD event (`record.create`/`record.update`/`record.deleted`)
+ * — as opposed to `employee.moved`/`department.moved`/`position.moved`, whose
+ * targets are actors/org-tree nodes. Used by AuditEventRow (screen-audit.jsx)
+ * to pick RecordRef as the target-chip primitive: the server's `targetDisplay`
+ * for these rows is a `record-resolver.ts` ResolvedRecord shape
+ * ({id, title, typeLabel, canOpen, appId}) — the SAME wire shape RecordRef
+ * already consumes as its `projection` prop for the T-0756 source-record card
+ * (no reshaping at the call site). T-0769 (столп 4 анти-UUID).
+ * @param {string} action  the audit event `type`.
+ * @returns {boolean}
+ */
+export function isRecordEventAction(action) {
+  return typeof action === 'string' && action.startsWith('record.');
+}
+
+/**
  * Build the GET /api/audit URL with optional actor/action filters + cursor.
  * Filter VALUES are URL-encoded via URLSearchParams (no manual concatenation) —
  * the server binds them as SQL parameters, but encoding here is still correct hygiene.

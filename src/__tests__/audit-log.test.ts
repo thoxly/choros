@@ -35,6 +35,17 @@
  *       a deleted/never-existed node (resolved:false, never a raw id leak), tenant-
  *       scope (the node query is bound to the ACTOR's tenant, defence-in-depth), and
  *       a single page mixing both node kinds resolving in ONE round-trip (no N+1)
+ *   (9) T-0769 [столп 4 анти-UUID] — `record.create`/`record.update`/`record.deleted`
+ *       ALSO get a resolved `targetDisplay` now, through the THIRD sibling batch
+ *       record-resolver.ts (choros.record ⋈ choros.registry_def — a record is
+ *       neither an actor nor an org-tree node): the resolved title reuses
+ *       deriveSafeRecordTitle's schema-designated-title-field heuristic; a
+ *       deleted/never-existed record (genuinely nothing left to name, unlike an
+ *       actor/node) yields `targetDisplay: null` — the row then falls through to
+ *       the SAME pre-existing raw-id MonoId chip, never a fabricated title;
+ *       tenant-scope (bound to the ACTOR's tenant); a page mixing record.create AND
+ *       record.update resolves BOTH in ONE round-trip (no N+1); a page with no
+ *       record.* events never queries the record resolver at all
  */
 
 import { describe, it, expect } from "vitest";
@@ -58,6 +69,8 @@ interface Capture {
   auditParams: unknown[] | null;
   nodeSql: string | null;
   nodeParams: unknown[] | null;
+  recordSql: string | null;
+  recordParams: unknown[] | null;
 }
 
 interface OrgNodeFixture {
@@ -66,12 +79,25 @@ interface OrgNodeFixture {
   kind: "department" | "position";
 }
 
+// T-0769: a choros.record ⋈ choros.registry_def row, as record-resolver.ts's
+// batch query would return it. `recordSchema`/`data` feed deriveSafeRecordTitle
+// (registry-title-field.ts) — the SAME schema-designated-title-field picker
+// process-projection.ts's resolveSourceRecordProjection already uses.
+interface RecordFixture {
+  id: string;
+  data: Record<string, unknown>;
+  recordSchema?: unknown;
+  typeLabel: string;
+  appId: string;
+}
+
 interface Scenario {
   tenantId: string;
   isOwner: boolean;
   hasMgmtGrant: boolean;
   auditRows: Array<Record<string, unknown>>;
   orgNodes: OrgNodeFixture[];
+  records: RecordFixture[];
   capture: Capture;
 }
 
@@ -171,6 +197,24 @@ function makePool(s: Scenario): pg.Pool {
         return { rows, rowCount: rows.length };
       }
 
+      // T-0769 — batchResolveRecords: ONE query joining choros.record + choros.registry_def.
+      if (text.includes("FROM choros.record r") && text.includes("JOIN choros.registry_def rd")) {
+        s.capture.recordSql = text;
+        s.capture.recordParams = (params as unknown[]) ?? null;
+        const [, idsRaw] = (params ?? []) as [string, string[]];
+        const ids = new Set(idsRaw ?? []);
+        const rows = s.records
+          .filter((r) => ids.has(r.id))
+          .map((r) => ({
+            id: r.id,
+            data: r.data,
+            record_schema: r.recordSchema ?? null,
+            type_label: r.typeLabel,
+            application_id: r.appId,
+          }));
+        return { rows, rowCount: rows.length };
+      }
+
       // BEGIN / SET LOCAL / COMMIT / ROLLBACK → no-op OK.
       return { rows: [], rowCount: 1 };
     },
@@ -235,7 +279,15 @@ function baseScenario(over: Partial<Scenario> = {}): Scenario {
     hasMgmtGrant: false,
     auditRows: [],
     orgNodes: [],
-    capture: { auditSql: null, auditParams: null, nodeSql: null, nodeParams: null },
+    records: [],
+    capture: {
+      auditSql: null,
+      auditParams: null,
+      nodeSql: null,
+      nodeParams: null,
+      recordSql: null,
+      recordParams: null,
+    },
     ...over,
   };
 }
@@ -849,6 +901,224 @@ describe("T-0733 (8) — node-resolver batch (department.moved/position.moved ta
       const r = await request(port, "GET", PATH);
       expect(r.status).toBe(200);
       expect(s.capture.nodeSql).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (9) T-0769 [столп 4 анти-UUID] — the record-resolver batch: record.create/
+// record.update/record.deleted targetDisplay now resolves through
+// record-resolver.ts (choros.record ⋈ choros.registry_def), the THIRD sibling
+// of the T-0648 actor batch and the T-0733 node batch. Covers: a resolved
+// title via the schema-designated title field, a fallback `«typeLabel · id8»`
+// title when the schema has no derivable title field, honest null on a
+// deleted/never-existed record (never a fabricated title), cross-tenant
+// non-leak, and a single page mixing record.create + record.update resolving
+// in ONE round-trip.
+// ---------------------------------------------------------------------------
+
+describe("T-0769 (9) — record-resolver batch (record.create/record.update/record.deleted targetDisplay)", () => {
+  it("record.create → targetDisplay resolves to the record's schema-designated title (столп 4 анти-UUID)", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "10101010-0000-0000-0000-000000000010",
+          type: "record.create",
+          actor: "e-owner",
+          occurred_at: "1700000009000",
+          payload: { record_id: "rec-1", registry_def_id: "reg-1", application_id: "app-1" },
+        },
+      ],
+      records: [
+        {
+          id: "rec-1",
+          data: { name: "ООО Вектор" },
+          recordSchema: { properties: { name: { type: "string" } } },
+          typeLabel: "Контрагент",
+          appId: "app-1",
+        },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      expect(ev["target"]).toBe("rec-1");
+      expect(ev["targetDisplay"]).toEqual({
+        id: "rec-1",
+        title: "ООО Вектор",
+        typeLabel: "Контрагент",
+        canOpen: true,
+        appId: "app-1",
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it("record.create with a schema that has no derivable title field → targetDisplay.title falls back to '«typeLabel» · <id8>'", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "10101010-0000-0000-0000-000000000011",
+          type: "record.create",
+          actor: "e-owner",
+          occurred_at: "1700000009100",
+          payload: { record_id: "rec-2-no-title-field", registry_def_id: "reg-1", application_id: "app-1" },
+        },
+      ],
+      records: [
+        {
+          id: "rec-2-no-title-field",
+          data: { amount: 184000 },
+          recordSchema: { properties: { amount: { type: "number" } } },
+          typeLabel: "Счёт",
+          appId: "app-1",
+        },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      expect((ev["targetDisplay"] as { title: string }).title).toBe("Счёт · rec-2-no");
+    } finally {
+      await close();
+    }
+  });
+
+  it("record.update → targetDisplay ALSO resolves (not just record.create)", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "10101010-0000-0000-0000-000000000012",
+          type: "record.update",
+          actor: "e-owner",
+          occurred_at: "1700000009200",
+          payload: { record_id: "rec-3", registry_def_id: "reg-1", application_id: "app-1" },
+        },
+      ],
+      records: [
+        { id: "rec-3", data: { title: "Договор №44" }, recordSchema: { properties: { title: { type: "string" } } }, typeLabel: "Договор", appId: "app-1" },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      expect((body.events[0]!["targetDisplay"] as { title: string }).title).toBe("Договор №44");
+    } finally {
+      await close();
+    }
+  });
+
+  it("record.deleted (record no longer exists — hard delete, records.ts) → targetDisplay is null, honest degradation, NEVER a fabricated title", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "10101010-0000-0000-0000-000000000013",
+          type: "record.deleted",
+          actor: "e-owner",
+          occurred_at: "1700000009300",
+          payload: { record_id: "rec-gone", registry_def_id: "reg-1" },
+        },
+      ],
+      records: [], // the record row is gone — DELETE FROM choros.record already ran
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const ev = body.events[0]!;
+      // target (the raw id) is STILL present — the frontend's pre-existing
+      // MonoId(ev.target) fallback renders it when targetDisplay is null.
+      expect(ev["target"]).toBe("rec-gone");
+      expect(ev["targetDisplay"]).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  it("a CROSS-TENANT record id never resolves — the record query is bound to the ACTOR's tenant, never a request-supplied one", async () => {
+    const s = baseScenario({
+      tenantId: TENANT_B,
+      isOwner: true,
+      auditRows: [
+        {
+          id: "10101010-0000-0000-0000-000000000014",
+          type: "record.create",
+          actor: "e-owner",
+          occurred_at: "1700000009400",
+          payload: { record_id: "rec-tenant-a-only" },
+        },
+      ],
+      records: [], // tenant A's record is invisible to tenant B's query
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      expect(r.status).toBe(200);
+      expect(s.capture.recordParams?.[0]).toBe(TENANT_B);
+      expect(s.capture.recordParams?.[0]).not.toBe(TENANT_A);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      expect(body.events[0]!["targetDisplay"]).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  it("a single page mixing record.create AND record.update resolves BOTH in one record-resolver round-trip (no N+1)", async () => {
+    const s = baseScenario({
+      isOwner: true,
+      auditRows: [
+        {
+          id: "10101010-0000-0000-0000-000000000015",
+          type: "record.create",
+          actor: "e-owner",
+          occurred_at: "1700000009600",
+          payload: { record_id: "rec-mix-1" },
+        },
+        {
+          id: "10101010-0000-0000-0000-000000000016",
+          type: "record.update",
+          actor: "e-owner",
+          occurred_at: "1700000009500",
+          payload: { record_id: "rec-mix-2" },
+        },
+      ],
+      records: [
+        { id: "rec-mix-1", data: { name: "Первая запись" }, recordSchema: { properties: { name: { type: "string" } } }, typeLabel: "Запись", appId: "app-1" },
+        { id: "rec-mix-2", data: { name: "Вторая запись" }, recordSchema: { properties: { name: { type: "string" } } }, typeLabel: "Запись", appId: "app-1" },
+      ],
+    });
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      const body = r.body as { events: Array<Record<string, unknown>> };
+      const created = body.events.find((e) => e["action"] === "record.create")!;
+      const updated = body.events.find((e) => e["action"] === "record.update")!;
+      expect((created["targetDisplay"] as { title: string }).title).toBe("Первая запись");
+      expect((updated["targetDisplay"] as { title: string }).title).toBe("Вторая запись");
+    } finally {
+      await close();
+    }
+  });
+
+  it("a page with NO record.* events at all never queries the record resolver", async () => {
+    const s = baseScenario({ isOwner: true, auditRows: sampleRows() }); // grant.create + agent.deferred only
+    const { port, close } = await startServer(makePool(s));
+    try {
+      const r = await request(port, "GET", PATH);
+      expect(r.status).toBe(200);
+      expect(s.capture.recordSql).toBeNull();
     } finally {
       await close();
     }

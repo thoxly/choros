@@ -25,9 +25,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { execTypeOf, humanError, fmtTs, buildAuditUrl, isOrgNodeMoveAction } from './screen-audit.logic.js';
+import { execTypeOf, humanError, fmtTs, buildAuditUrl, isOrgNodeMoveAction, isRecordEventAction } from './screen-audit.logic.js';
 import { AuditEventRow } from './screen-audit.jsx';
-import { ActorChip, NodeRef, MonoId } from '../components/components.jsx';
+import { ActorChip, NodeRef, RecordRef, MonoId } from '../components/components.jsx';
 
 /** Recursively collect every element of a given `type` (component reference)
  *  in a React element tree — used to prove WHICH primitive (ActorChip vs
@@ -370,5 +370,95 @@ describe('T-0733 AuditEventRow — org-node target-chip (department.moved/positi
     const tree = AuditEventRow({ ev });
     expect(findElementsByType(tree, NodeRef).length).toBe(0);
     expect(findElementsByType(tree, ActorChip).length).toBe(2); // actor + target
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6c. T-0769 [столп 4 анти-UUID] — record.create/record.update/record.deleted
+//     target-chip choice: RecordRef (resolved record title), not ActorChip/
+//     NodeRef/MonoId. A resolver MISS (targetDisplay=null) falls through to the
+//     pre-existing raw-id MonoId chip — the honest baseline this task closes.
+// ---------------------------------------------------------------------------
+
+describe('T-0769 isRecordEventAction', () => {
+  it('true for record.* events', () => {
+    expect(isRecordEventAction('record.create')).toBe(true);
+    expect(isRecordEventAction('record.update')).toBe(true);
+    expect(isRecordEventAction('record.deleted')).toBe(true);
+  });
+  it('false for non-record events and non-strings', () => {
+    expect(isRecordEventAction('employee.moved')).toBe(false);
+    expect(isRecordEventAction('department.moved')).toBe(false);
+    expect(isRecordEventAction('grant.create')).toBe(false);
+    expect(isRecordEventAction('')).toBe(false);
+    expect(isRecordEventAction(undefined)).toBe(false);
+  });
+});
+
+describe('T-0769 AuditEventRow — record target-chip (record.create/update/deleted)', () => {
+  it('record.create with a RESOLVED targetDisplay renders a RecordRef (not ActorChip, not NodeRef, not MonoId) carrying the record title', () => {
+    const ev = {
+      id: 'evt-rec-create',
+      ts: 1700000000000,
+      actor: 'e-owner',
+      actorDisplay: { id: 'e-owner', name: 'Е. Ларина', type: 'human', deactivated: false, resolved: true },
+      action: 'record.create',
+      summary: 'Событие записи',
+      target: 'rec-1',
+      // Server's record-resolver.ts shape (matches RecordRef's `projection` prop).
+      targetDisplay: { id: 'rec-1', title: 'ООО Вектор', typeLabel: 'Контрагент', canOpen: true, appId: 'app-1' },
+    };
+    const tree = AuditEventRow({ ev });
+
+    const recordRefs = findElementsByType(tree, RecordRef);
+    expect(recordRefs.length).toBe(1);
+    expect(recordRefs[0].props.recordId).toBe('rec-1');
+    expect(recordRefs[0].props.projection).toEqual(ev.targetDisplay);
+
+    // Not routed through the org-node or actor primitives.
+    expect(findElementsByType(tree, NodeRef).length).toBe(0);
+    // Only the ACTOR chip (Е. Ларина) — never a second ActorChip for the record.
+    expect(findElementsByType(tree, ActorChip).length).toBe(1);
+    // The raw target id 'rec-1' is NEVER a bare MonoId chip.
+    const monoIds = findElementsByType(tree, MonoId);
+    expect(monoIds.map((m) => m.props.children)).not.toContain('rec-1');
+  });
+
+  it('record.update ALSO renders via RecordRef (not just record.create)', () => {
+    const ev = {
+      id: 'evt-rec-update',
+      ts: 1700000000000,
+      actor: 'e-owner',
+      actorDisplay: { id: 'e-owner', name: 'Е. Ларина', type: 'human', deactivated: false, resolved: true },
+      action: 'record.update',
+      summary: 'Событие записи',
+      target: 'rec-3',
+      targetDisplay: { id: 'rec-3', title: 'Договор №44', typeLabel: 'Договор', canOpen: true, appId: 'app-1' },
+    };
+    const tree = AuditEventRow({ ev });
+    const recordRefs = findElementsByType(tree, RecordRef);
+    expect(recordRefs.length).toBe(1);
+    expect(recordRefs[0].props.projection.title).toBe('Договор №44');
+  });
+
+  it('record.deleted with NO targetDisplay (record gone — honest miss) falls through to the pre-existing raw-id MonoId chip, never a RecordRef', () => {
+    const ev = {
+      id: 'evt-rec-gone',
+      ts: 1700000000000,
+      actor: 'e-owner',
+      actorDisplay: { id: 'e-owner', name: 'Е. Ларина', type: 'human', deactivated: false, resolved: true },
+      action: 'record.deleted',
+      summary: 'Событие записи',
+      target: 'rec-gone',
+      targetDisplay: null, // record hard-deleted — record-resolver.ts returned null
+    };
+    const tree = AuditEventRow({ ev });
+
+    // No RecordRef — nothing to resolve.
+    expect(findElementsByType(tree, RecordRef).length).toBe(0);
+    // The pre-existing fallback: a MonoId chip carrying the raw target id (the
+    // exact honest baseline this task reserves for the genuinely-unresolvable case).
+    const monoIds = findElementsByType(tree, MonoId);
+    expect(monoIds.map((m) => m.props.children)).toContain('rec-gone');
   });
 });
