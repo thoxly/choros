@@ -11,6 +11,9 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   mapTimerEscalation,
   resolveEscalationRole,
@@ -20,6 +23,8 @@ import {
   OWNER_ROLE_SLUG,
 } from "../timer-escalation-mapper.js";
 import { lintBpmn } from "../bpmn-linter.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * A boundary timer guarding task-approve, escalating to task-escalate, with a typed
@@ -204,5 +209,72 @@ describe("T-0458 — round-trip: mapped output passes the timer linter", () => {
     const mapped = mapTimerEscalation(raw);
     const after = lintBpmn(mapped);
     expect(after.ok).toBe(true);
+  });
+});
+
+// ===========================================================================
+// T-0661 [ADR-T0612 §8.5, T-0661-MAPPER-UNCHANGED] — mapTimerEscalation is
+// id/string-keyed and SCOPE-AGNOSTIC: it must behave identically whether the
+// boundary timer + escalation userTask live at the top level of <process> or
+// nested inside an embedded <subProcess> (the D5 fix shape). The mapper's
+// buildTimerTargets/injectCandidateGroupsOnTask/injectTimerBody helpers all
+// scan the WHOLE document by tag name + id attribute, with no concept of
+// subProcess nesting/scope — this is verified structurally below (a synthetic
+// configured-but-empty timer nested in a subProcess still gets its native
+// timer body materialised and its escalation target's candidateGroups wired),
+// and directly against the real D5 fix artifact (which already carries its
+// native timer body + candidateGroups authored, so mapping it is a pure
+// idempotent no-op — output byte-identical to input).
+// ===========================================================================
+
+describe("T-0661 — mapTimerEscalation is scope-agnostic (subProcess nesting)", () => {
+  it("materialises the native timer body AND wires escalation candidateGroups when the boundary timer + escalation task are nested inside a subProcess", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:choros="http://choros.io/bpmn" xmlns:flowable="http://flowable.org/bpmn" targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <subProcess id="sub-fin-approval">
+      <startEvent id="sub-start"/>
+      <userTask id="task-fin" flowable:candidateGroups="role-manager"/>
+      <boundaryEvent id="bnd-fin-timeout" attachedToRef="task-fin" cancelActivity="false"
+                     choros:timerDeadlineKind="duration" choros:timerDeadline="PT2M" choros:escalateTo="owner">
+        <timerEventDefinition></timerEventDefinition>
+      </boundaryEvent>
+      <userTask id="task-esc"/>
+      <exclusiveGateway id="gw-fin-converge"/>
+      <endEvent id="sub-end-terminate"><terminateEventDefinition/></endEvent>
+      <sequenceFlow id="sf-sub-start-fin" sourceRef="sub-start" targetRef="task-fin"/>
+      <sequenceFlow id="sf-fin-converge" sourceRef="task-fin" targetRef="gw-fin-converge"/>
+      <sequenceFlow id="sf-timer-esc" sourceRef="bnd-fin-timeout" targetRef="task-esc"/>
+      <sequenceFlow id="sf-esc-converge" sourceRef="task-esc" targetRef="gw-fin-converge"/>
+      <sequenceFlow id="sf-converge-term" sourceRef="gw-fin-converge" targetRef="sub-end-terminate"/>
+    </subProcess>
+    <endEvent id="end-order-placed"/>
+    <sequenceFlow id="sf-start-sub" sourceRef="start" targetRef="sub-fin-approval"/>
+    <sequenceFlow id="sf-sub-end" sourceRef="sub-fin-approval" targetRef="end-order-placed"/>
+  </process>
+</definitions>`;
+    const out = mapTimerEscalation(xml);
+    // Native timer body materialised on the NESTED boundary event, same as top-level.
+    expect(out).toContain("<timeDuration>PT2M</timeDuration>");
+    // Escalation target (task-esc, also nested) gets role-owner wired, same as top-level.
+    expect(out).toMatch(/<userTask\b[^>]*\bid="task-esc"[^>]*flowable:candidateGroups="role-owner"/);
+    // Sanity: the mapped output still lints clean (D5 shape, scope-local terminate).
+    expect(lintBpmn(out).ok).toBe(true);
+  });
+});
+
+describe("T-0661-MAPPER-UNCHANGED — the real D5 fix artifact maps as a no-op (idempotent, author-wins already satisfied)", () => {
+  it("mapTimerEscalation(fix-artifact) === fix-artifact byte-for-byte (timer body + candidateGroups already authored)", () => {
+    const artifactPath = join(
+      __dirname,
+      "../../../docs/design/T-0612-purchaseApproval-fixed.bpmn20.xml.txt",
+    );
+    const raw = readFileSync(artifactPath, "utf8");
+    const mapped = mapTimerEscalation(raw);
+    expect(mapped).toBe(raw);
+    // Confirm the artifact was actually exercised (not an accidental no-timer no-op):
+    // it does carry a boundary timer that the mapper's cursor walk sees.
+    expect(extractTimerConfigs(raw).length).toBeGreaterThan(0);
   });
 });

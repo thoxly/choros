@@ -1503,7 +1503,19 @@ describe("T-0612 — timer_escalation_no_convergence: zombie shape fails closed 
 });
 
 describe("T-0612 — timer_escalation_no_convergence: fixed shapes pass (200)", () => {
-  it("non-interrupting timer whose escalation branch REJOINS the main path via a converging gateway passes", () => {
+  // T-0661 [ADR-T0612 §8.1/§8.4 correction]: the two "fixed shapes" below were
+  // ORIGINALLY asserted as fully clean (result.ok === true). That assumption was
+  // FACTUALLY WRONG — ADR §8.1 found a converging exclusiveGateway is an
+  // uncontrolled merge that passes each token through independently, so when the
+  // timer actually FIRES (spawning a second concurrent token), a plain endEvent
+  // downstream of the merge can never resolve BOTH tokens — the process instance
+  // hangs. That is exactly the D2 shape T-0661 closes (see the new
+  // "T-0661 — timer_escalation_unresolved_concurrency" describe block below).
+  // These two tests are corrected in place (not deleted) to keep proving what
+  // T-0612's OWN rule still gets right — flow convergence exists, so
+  // timer_escalation_no_convergence must NOT fire — while now also asserting the
+  // NEW T-0661 rule correctly flags the still-unresolved concurrent-token hang.
+  it("non-interrupting timer whose escalation branch REJOINS the main path via a converging gateway: no_convergence does NOT fire, but unresolved_concurrency DOES (no terminate reachable)", () => {
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <definitions xmlns:flowable="http://flowable.org/bpmn" targetNamespace="t">
   <process id="p1">
@@ -1523,16 +1535,28 @@ describe("T-0612 — timer_escalation_no_convergence: fixed shapes pass (200)", 
   </process>
 </definitions>`;
     const result = lintBpmn(xml);
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "timer_escalation_no_convergence")).toBe(false);
+      const v = result.violations.find((x) => x.type === "timer_escalation_unresolved_concurrency");
+      expect(v).toBeDefined();
+      expect(v?.elementId).toBe("bnd-fin-timeout");
+    }
   });
 
-  it("non-interrupting timer whose escalation branch flows straight back into the SAME endEvent as the main path passes", () => {
+  it("non-interrupting timer whose escalation branch flows straight back into the SAME endEvent as the main path: no_convergence does NOT fire, but unresolved_concurrency DOES (still a plain endEvent, no terminate)", () => {
     // This is exactly makeBoundaryTimerBpmn()'s default shape (both branches
     // target the literal same endEvent id="end") — proving the existing T-0458
-    // happy-path fixture is unaffected by this additive check.
+    // happy-path fixture is unaffected by the T-0612 convergence rule, but IS
+    // caught by the stricter T-0661 concurrency-resolution rule (a shared plain
+    // endEvent still cannot resolve two concurrent tokens once the timer fires).
     const xml = makeBoundaryTimerBpmn().replace('cancelActivity="true"', 'cancelActivity="false"');
     const result = lintBpmn(xml);
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "timer_escalation_no_convergence")).toBe(false);
+      expect(result.violations.some((x) => x.type === "timer_escalation_unresolved_concurrency")).toBe(true);
+    }
   });
 
   it("INTERRUPTING timer (cancelActivity=true, default) with a disconnected escalation end is NOT flagged by this check", () => {
@@ -1575,6 +1599,119 @@ describe("T-0612 — timer_escalation_no_convergence: fixed shapes pass (200)", 
     <sequenceFlow id="f1" sourceRef="wait1" targetRef="end-a"/>
   </process>
 </definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+});
+
+// ===========================================================================
+// T-0661 [ADR-T0612 §8] — timer_escalation_unresolved_concurrency: the SECOND
+// completion-order bug (timer ALREADY FIRED → both racing tasks open at once).
+//
+// T-0612's checkTimerEscalationConvergence only verified the escalation branch
+// RECONNECTS to the guarded task's downstream path — necessary, but ADR §8.1
+// found it is NOT SUFFICIENT: a converging exclusiveGateway is an uncontrolled
+// merge, so once the timer fires and spawns a second concurrent token, BOTH
+// racing tasks must complete before a plain endEvent can end the instance. Only
+// a scope-local terminateEndEvent (reachable from the escalation branch) can
+// extinguish the second token deterministically. See
+// docs/design/ADR-T0612-purchase-escalation-convergence.md §8.
+// ===========================================================================
+
+/**
+ * The D5 fix shape (ADR §8.2): the fin-approval race enclosed in an embedded
+ * subProcess. task-fin's non-interrupting boundary timer escalates to task-esc;
+ * BOTH converge into gw-fin-converge, which flows to a SCOPE-LOCAL
+ * terminateEndEvent (terminateAll left at its default "false"). The sub-process
+ * has one outgoing flow to the shared top-level end.
+ */
+function makeSubProcessScopeTerminateBpmn(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:flowable="http://flowable.org/bpmn" targetNamespace="t">
+  <process id="purchaseApproval">
+    <startEvent id="start-fin-branch"/>
+    <subProcess id="sub-fin-approval">
+      <startEvent id="sub-start"/>
+      <userTask id="task-fin" flowable:candidateGroups="role-manager"/>
+      <boundaryEvent id="bnd-fin-timeout" attachedToRef="task-fin" cancelActivity="false">
+        <timerEventDefinition><timeDuration>PT2M</timeDuration></timerEventDefinition>
+      </boundaryEvent>
+      <userTask id="task-esc" flowable:candidateGroups="role-owner"/>
+      <exclusiveGateway id="gw-fin-converge"/>
+      <endEvent id="sub-end-terminate">
+        <terminateEventDefinition/>
+      </endEvent>
+      <sequenceFlow id="sf-sub-start-fin" sourceRef="sub-start" targetRef="task-fin"/>
+      <sequenceFlow id="sf-fin-converge" sourceRef="task-fin" targetRef="gw-fin-converge"/>
+      <sequenceFlow id="sf-timer-esc" sourceRef="bnd-fin-timeout" targetRef="task-esc"/>
+      <sequenceFlow id="sf-esc-converge" sourceRef="task-esc" targetRef="gw-fin-converge"/>
+      <sequenceFlow id="sf-converge-term" sourceRef="gw-fin-converge" targetRef="sub-end-terminate"/>
+    </subProcess>
+    <endEvent id="end-order-placed"/>
+    <sequenceFlow id="sf-start-sub" sourceRef="start-fin-branch" targetRef="sub-fin-approval"/>
+    <sequenceFlow id="sf-sub-end" sourceRef="sub-fin-approval" targetRef="end-order-placed"/>
+  </process>
+</definitions>`;
+}
+
+describe("T-0661 — timer_escalation_unresolved_concurrency: old D2 shape fails closed (422)", () => {
+  it("converging exclusiveGateway → plain endEvent (no terminate) fails with unresolved_concurrency, not no_convergence", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:flowable="http://flowable.org/bpmn" targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="task-fin" flowable:candidateGroups="role-fin"/>
+    <boundaryEvent id="bnd-fin-timeout" attachedToRef="task-fin" cancelActivity="false">
+      <timerEventDefinition><timeDuration>PT2M</timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-esc" flowable:candidateGroups="role-owner"/>
+    <exclusiveGateway id="gw-fin-converge"/>
+    <endEvent id="end-order-placed"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="task-fin"/>
+    <sequenceFlow id="f1" sourceRef="task-fin" targetRef="gw-fin-converge"/>
+    <sequenceFlow id="sf-timer-esc" sourceRef="bnd-fin-timeout" targetRef="task-esc"/>
+    <sequenceFlow id="f2" sourceRef="task-esc" targetRef="gw-fin-converge"/>
+    <sequenceFlow id="f3" sourceRef="gw-fin-converge" targetRef="end-order-placed"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "timer_escalation_no_convergence")).toBe(false);
+      const v = result.violations.find((x) => x.type === "timer_escalation_unresolved_concurrency");
+      expect(v).toBeDefined();
+      expect(v?.elementId).toBe("bnd-fin-timeout");
+      expect(v?.elementKind).toBe("boundaryEvent");
+      expect(v?.message).toMatch(/terminateEndEvent|second, independent token/);
+    }
+  });
+});
+
+describe("T-0661 — timer_escalation_unresolved_concurrency: D5 fix shape (scope-local terminate) passes (200)", () => {
+  it("subProcess with converge → scope-local terminateEndEvent lints clean (no no_convergence, no unresolved_concurrency)", () => {
+    const result = lintBpmn(makeSubProcessScopeTerminateBpmn());
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("T-0661 — the fully-disconnected escalation-own-end shape still fails ONLY with no_convergence (mutually exclusive, un-regressed)", () => {
+  it("makeNonInterruptingTimerNoConvergenceBpmn(): no_convergence fires, unresolved_concurrency does NOT (never got the chance to converge)", () => {
+    const result = lintBpmn(makeNonInterruptingTimerNoConvergenceBpmn());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "timer_escalation_no_convergence")).toBe(true);
+      expect(result.violations.some((x) => x.type === "timer_escalation_unresolved_concurrency")).toBe(false);
+    }
+  });
+});
+
+describe("T-0661 — an INTERRUPTING timer is never subject to the new rule either", () => {
+  it("interrupting timer (cancelActivity=true) with a converge-to-plain-endEvent shape is NOT flagged by unresolved_concurrency", () => {
+    const xml = makeSubProcessScopeTerminateBpmn()
+      .replace('cancelActivity="false"', 'cancelActivity="true"')
+      // Also swap the terminate for a plain endEvent to prove it's the
+      // cancelActivity flag — not the terminate — suppressing the new rule.
+      .replace("<endEvent id=\"sub-end-terminate\">\n        <terminateEventDefinition/>\n      </endEvent>", '<endEvent id="sub-end-terminate"/>');
     const result = lintBpmn(xml);
     expect(result.ok).toBe(true);
   });

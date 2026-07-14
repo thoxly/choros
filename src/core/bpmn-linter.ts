@@ -55,6 +55,22 @@ import type { DmnRuleTable } from "./dmn-middle.js";
 //   — the main path reaches ITS endEvent, but the PROCESS INSTANCE never ends,
 //   because BPMN only ends an instance when every token has reached an end.
 //   See docs/design/ADR-T0612-purchase-escalation-convergence.md.
+// T-0661 [ADR-T0612 §8 addendum]: "timer_escalation_unresolved_concurrency" added
+//   additively — closes a SECOND, distinct false-negative the T-0612 check above
+//   left open. Flow-convergence (T-0612's rule) is NECESSARY but NOT SUFFICIENT:
+//   a converging exclusiveGateway is an UNCONTROLLED MERGE — when a non-interrupting
+//   boundary timer actually FIRES, it spawns a second, independent concurrent token
+//   (the guarded task's own token stays live), and the merge gateway passes EACH
+//   token through to its outgoing flow independently. If that flow only reaches a
+//   plain endEvent, BPMN requires BOTH tokens to be consumed before the instance
+//   completes — the process hangs until the second, now-moot task is ALSO
+//   completed. Only a scope-terminating construct (a terminateEndEvent, scoped
+//   local to an enclosing subProcess so it does not kill unrelated top-level
+//   branches) can extinguish the second token deterministically. This check
+//   verifies, for every non-interrupting boundary timer whose escalation branch
+//   already passed T-0612's convergence check, that a terminateEndEvent is also
+//   reachable from that branch. See ADR §8 (D5/D6) for the full rationale and the
+//   corrected Flowable join-semantics analysis.
 export type LintViolationType =
   | "raw_object_binding"
   | "malformed_xml"
@@ -65,6 +81,7 @@ export type LintViolationType =
   | "message_event_incoherent"
   | "agent_task_incoherent"
   | "timer_escalation_no_convergence"
+  | "timer_escalation_unresolved_concurrency"
   // T-0559: publish-coherence — a live (published) process binds a sandbox (draft)
   // application. Emitted by the publish-time DB-backed gate in process-defs.ts, NOT
   // by the pure linter (which has no DB). Reuses the LintViolation envelope so the
@@ -402,6 +419,14 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
   // escalation branch ever rejoin a path that reaches the same end as the main flow).
   const flowEdges: Array<{ source: string; target: string }> = [];
   const endEventIds = new Set<string>();
+  // T-0661: endEvent ids that carry a <terminateEventDefinition> child (self-close
+  // or paired-empty) — a SCOPE-LOCAL terminate (terminateAll defaults to "false",
+  // which is exactly the D5-required shape; this linter does not need to read
+  // terminateAll itself — see checkTimerEscalationConvergence doc-comment for why
+  // reachability alone is the right question here). Populated via currentEndEventId
+  // below, mirroring the existing currentTimerEvent cursor pattern.
+  const terminateEndEventIds = new Set<string>();
+  let currentEndEventId: string | null = null;
 
   // T-0458 [D8-R3]: timer event collection — always on (structural well-formedness,
   // no opts gate). We collect every boundaryEvent / intermediateCatchEvent that carries
@@ -591,6 +616,17 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
       // userTask that is simply the last node authored so far).
       if (localName === "endEvent") {
         if (elementId) endEventIds.add(elementId);
+        // T-0661: open a cursor so a <terminateEventDefinition> child (below) can be
+        // attributed to THIS endEvent's id. Reset on close/self-close (see both
+        // branches further down) — no stack needed, endEvent never nests endEvent.
+        currentEndEventId = elementId || null;
+      }
+
+      // T-0661: a <terminateEventDefinition> child (self-close or paired-empty) marks
+      // its enclosing endEvent as a scope-local terminate. Runs for both open-tag and
+      // self-close-tag tokens (mirrors the timerEventDefinition detection below it).
+      if (currentEndEventId !== null && localName === "terminateEventDefinition") {
+        terminateEndEventIds.add(currentEndEventId);
       }
 
       // T-0458 [D8-R3]: timer event collection. boundaryEvent / intermediateCatchEvent
@@ -688,6 +724,12 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
 
       // Self-close: immediately pop the scoped context if it was just pushed
       if (token.kind === "self-close-tag") {
+        // T-0661: a self-closing <endEvent id="X"/> has no children by definition
+        // (nothing to capture), so close its cursor immediately. A paired
+        // <endEvent>...</endEvent> closes its cursor at the close-tag branch below.
+        if (localName === "endEvent") {
+          currentEndEventId = null;
+        }
         // T-0458 [D8-R3]: a self-closing timer-body child (<timeDuration/>) carries no
         // text → leave timerBody empty (caught as malformed) and stop accumulating.
         if (currentTimerEvent !== null && TIMER_BODY_NAMES[localName] !== undefined) {
@@ -820,6 +862,12 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
       // T-0436: clear sequenceFlow tracking state when the sequenceFlow closes.
       if (collectGateways && localName === "sequenceFlow") {
         currentSeqFlowSourceRef = "";
+      }
+
+      // T-0661: close the endEvent cursor opened above (paired-tag case; the
+      // self-closing case is already handled in the self-close-tag branch).
+      if (localName === "endEvent") {
+        currentEndEventId = null;
       }
 
       // T-0458 [D8-R3]: timer-event close handling. Close a timer-body child to stop
@@ -958,7 +1006,7 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
     // T-0612: escalation-branch convergence — ALWAYS on, scoped to BOUNDARY timers
     // only (an intermediate timer has no "guarded task main path" to converge
     // with — it IS the main path). See checkTimerEscalationConvergence doc-comment.
-    checkTimerEscalationConvergence(timers, flowEdges, endEventIds, violations);
+    checkTimerEscalationConvergence(timers, flowEdges, endEventIds, terminateEndEventIds, violations);
   }
 
   // T-0459 [D8-R4]: message/signal catch coherence — ALWAYS on. Every message-catch
@@ -1329,13 +1377,17 @@ function reachableSet(
 /**
  * Verify every NON-INTERRUPTING boundary timer's escalation branch reconnects
  * to the guarded task's own downstream path before reaching an endEvent of its
- * own. See the block comment above for the full rationale and algorithm.
+ * own (T-0612), AND — once that convergence is confirmed — that a scope-local
+ * terminateEndEvent is reachable from the escalation branch (T-0661), so the
+ * second concurrent token a fired timer spawns can actually be extinguished.
+ * See the block comments above for the full rationale and algorithm.
  * Pure: no IO, no DB, no side effects.
  */
 function checkTimerEscalationConvergence(
   timers: TimerEventInfo[],
   flowEdges: ReadonlyArray<{ source: string; target: string }>,
   endEventIds: ReadonlySet<string>,
+  terminateEndEventIds: ReadonlySet<string>,
   violations: LintViolation[],
 ): void {
   for (const t of timers) {
@@ -1398,6 +1450,45 @@ function checkTimerEscalationConvergence(
           `(so both paths converge before ending), or set cancelActivity="true" if the ` +
           `escalation is meant to CANCEL the guarded task rather than merely remind`,
       });
+    } else if (converged) {
+      // T-0661 [ADR §8 D6]: flow-convergence alone is NOT sufficient. A converging
+      // exclusiveGateway is an UNCONTROLLED MERGE — when this timer actually FIRES it
+      // spawns a SECOND, independent token (the guarded task's own token stays live);
+      // the merge passes EACH token through independently. If the convergence only
+      // ever reaches a plain endEvent, BOTH tokens must be consumed before the
+      // instance completes — it hangs until the second, now-moot task is ALSO
+      // completed. Only a scope-local terminateEndEvent can extinguish the second
+      // token deterministically (mutually exclusive with timer_escalation_no_convergence
+      // above — this branch only runs when convergence WAS found).
+      const escReach = reachableSet([escalationTarget], flowEdges);
+      let hasTerminate = false;
+      for (const id of escReach) {
+        if (terminateEndEventIds.has(id)) {
+          hasTerminate = true;
+          break;
+        }
+      }
+      if (!hasTerminate) {
+        const elemDesc = t.id ? `boundaryEvent id="${t.id}"` : "boundaryEvent (no id)";
+        violations.push({
+          type: "timer_escalation_unresolved_concurrency",
+          elementId: t.id,
+          elementKind: "boundaryEvent",
+          message:
+            `<${elemDesc}> is a NON-INTERRUPTING boundary timer (cancelActivity="false") ` +
+            `whose escalation branch RECONNECTS to the guarded task's (attachedToRef="` +
+            `${t.attachedToRef}") downstream path (flow convergence exists) but no ` +
+            `terminateEndEvent is reachable from the escalation branch. When this timer ` +
+            `FIRES, it spawns a SECOND, independent token while the guarded task's own ` +
+            `token stays live — a converging gateway/endEvent is an UNCONTROLLED MERGE ` +
+            `that passes each token through independently, so BOTH the guarded task's ` +
+            `completion AND the escalation's completion must occur before the process ` +
+            `instance completes: it hangs until the second, now-moot task is also ` +
+            `finished. Fix: route the convergence into a scope-local terminateEndEvent ` +
+            `(e.g. inside an embedded sub-process) so the first resolution cancels the ` +
+            `other racing task`,
+        });
+      }
     }
   }
 }
