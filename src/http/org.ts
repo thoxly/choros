@@ -315,7 +315,18 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
   //   'observability'— 'observability:read' ∈ capabilities
   //   'admin'        — any mgmt_object:* grant OR isGenesisOwner
   //
-  // Fail-closed: any DB error → { isGenesisOwner:false, capabilities:[], zones:['work'], degraded:true }
+  // T-0772 (столп 7): also returns `displayName` — the CALLER's OWN
+  // employee.display_name (T-0770 humanized it at registration; existing
+  // employees carry whatever name they were given). This is the SAME field
+  // ActorChip already resolves for OTHER actors (T-0648) — here it is just the
+  // caller's own row, reused via the existing findEmployeeById lookup (no new
+  // query shape, no new endpoint). The SPA (active-tenant.js cache → shell.jsx)
+  // uses it to replace the raw KC preferred_username/email in the sidebar
+  // account card. `null` when the lookup fails or degrades — the client falls
+  // back to its existing email-derived name in that case (never worse than
+  // before this task).
+  //
+  // Fail-closed: any DB error → { isGenesisOwner:false, capabilities:[], zones:['work'], degraded:true, displayName:null }
   // dev-no-db → same degraded response (SPA stays functional, only РАБОТА visible).
   router.register("GET", "/api/me/nav-capabilities", withAuth(async (req, res) => {
     // dev-no-db fast-path: no DB available → fail-closed floor.
@@ -327,6 +338,7 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
         capabilities: [],
         zones: ["work"],
         degraded: true,
+        displayName: null,
       }));
       return;
     }
@@ -360,10 +372,15 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
       // Also load all actor grants (getGrantsForSubject) for capability-token check.
       // Both use the same pool/tenant pattern — existing, tested resolver paths.
       const { getGrantsForSubject } = await import("../db/grants-dao.js");
-      const [adminCtx, actorGrants] = await Promise.all([
+      const [adminCtx, actorGrants, employee] = await Promise.all([
         loadAdminContext(getOrgPool(), tenantId, actorSlug, nowMs),
         getGrantsForSubject(getOrgPool(), tenantId, actorSlug, nowMs),
+        // T-0772: the caller's OWN employee row — display_name for the
+        // sidebar account card (findEmployeeById already returns .name =
+        // display_name, the same field ActorChip resolves for other actors).
+        findEmployeeById(getOrgPool(), tenantId, actorSlug),
       ]);
+      const displayName = employee?.name ?? null;
 
       const { isGenesisOwner } = adminCtx;
 
@@ -401,7 +418,7 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ isGenesisOwner, capabilities, zones }));
+      res.end(JSON.stringify({ isGenesisOwner, capabilities, zones, displayName }));
     } catch (err) {
       if (err instanceof HttpError) throw err;
       // Unexpected DB/resolver error → fail-closed degraded response.
@@ -412,6 +429,7 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
         capabilities: [],
         zones: ["work"],
         degraded: true,
+        displayName: null,
       }));
     }
   }));
