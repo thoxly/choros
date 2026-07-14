@@ -290,3 +290,43 @@ describe('T-0660/T-0776 U-1 — one click = ONE undo entry (real bpmn-js Command
     expect(commandStack.canUndo()).toBe(false);
   }, HEAVY_TIMEOUT_MS);
 });
+
+/* --------------------------------------------------------------------------
+   T-0776 (adversarial review, empirically proven) — the host's INCOMING flow
+   (Start_1 → Task_step) must survive the build. bpmn-js SILENTLY DELETES any
+   connection that would cross the new subProcess boundary during
+   moveElements([host, boundary], ..., subProcess) — the D5 builder only ever
+   reconnected the host's OUTGOING flow (host → next, rewired as
+   subProcess → next); nothing reconnected the INCOMING side. Left unfixed:
+   Flow_1 (Start_1 → Task_step) is dropped mid-move, Start_1.outgoing becomes
+   [], subProcess.incoming stays [] — the subProcess (and the whole built
+   escalation branch) is NEVER ENTERED. The process is structurally broken.
+   -------------------------------------------------------------------------- */
+describe('T-0776 — the host\'s INCOMING flow survives the build (subProcess reachable)', () => {
+  it('reconnects Start_1 -> subProcess so the built branch is not orphaned', async () => {
+    const modeler = await makeLiveModeler();
+    const registry = modeler.get('elementRegistry');
+    const boundary = registry.get('Boundary_1');
+
+    const res = applyEscalationBranch({ modeler, boundaryElement: boundary });
+    expect(res.applied).toBe(true);
+
+    const start = registry.get('Start_1');
+    const subProcess = registry.get(res.subProcessId);
+
+    // THE FIX (T-0776): Start_1's flow into the host is reconnected to the
+    // subProcess now enclosing the host, instead of being silently dropped.
+    const startOut = start.outgoing.filter(isSeqFlow);
+    const subIn = subProcess.incoming.filter(isSeqFlow);
+    expect(startOut).toHaveLength(1);
+    expect(startOut[0].target.id).toBe(subProcess.id);
+    expect(subIn).toHaveLength(1);
+    expect(subIn[0].source.id).toBe('Start_1');
+
+    // The exported XML must not contain an orphaned start: a sequenceFlow
+    // sourced at Start_1 must exist, targeting the subProcess.
+    const { xml } = await modeler.saveXML();
+    expect(xml).toMatch(/sourceRef="Start_1"/);
+    expect(xml).toMatch(new RegExp(`sourceRef="Start_1"[\\s\\S]{0,40}targetRef="${subProcess.id}"`));
+  }, HEAVY_TIMEOUT_MS);
+});

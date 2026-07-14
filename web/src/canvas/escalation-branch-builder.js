@@ -61,7 +61,24 @@
      subProcess (encloses):
        subStart → host  ─┐
        timer → escTask ──┼→ gateway → terminateEnd (scope-local)
-     subProcess → next   (top level; replaces the old host → next flow)
+     prior → subProcess → next   (top level; replaces the old prior → host → next flow)
+
+   ----------------------------------------------------------------------------
+   Reparent-connectivity fix (T-0776, adversarial review — empirically proven)
+   ----------------------------------------------------------------------------
+   Moving `host` into the new subProcess (step 4 of preExecute) only ever had
+   its OUTGOING flow handled (`host → next`, retired in step 2 and replaced by
+   `subProcess → next` in step 9/10). The host's INCOMING flow (`prior → host`,
+   typically the process Start) was never touched by this builder — and
+   bpmn-js SILENTLY DELETES that connection during moveElements because it
+   would cross the new subProcess's boundary. Left unfixed: `prior.outgoing`
+   becomes [], `subProcess.incoming` stays [] — the subProcess (and the whole
+   built escalation branch) is NEVER ENTERED; a one-click build produced a
+   structurally broken, unreachable process. Fixed by capturing the host's
+   incoming flows + sources before the move, removing them explicitly, and
+   reconnecting each prior source to the subProcess once it exists (preExecute
+   steps 0, 2b, 4b) — all inside the SAME composite command, so the fix stays
+   part of the single U-1 undo entry.
    ============================================================================ */
 
 /* --------------------------------------------------------------------------
@@ -223,13 +240,32 @@ BuildEscalationBranchHandler.prototype.preExecute = function preExecute(context)
   const hostFlow = normalOutgoing(host)[0];
   const nextEl = hostFlow.target;
 
+  // 0. THE FIX (T-0776, adversarial review — empirically proven): capture the
+  //    host's INCOMING sequence flow(s) and their sources BEFORE anything
+  //    moves. bpmn-js SILENTLY DELETES a connection that would cross the new
+  //    subProcess's boundary once moveElements (step 4) reparents the host —
+  //    unlike the OUTGOING side (handled below, step 2/9), nothing previously
+  //    reconnected the incoming side, so the process's prior step (often the
+  //    Start event) was orphaned and the subProcess was NEVER ENTERED
+  //    (subProcess.incoming stayed [] — a structurally broken, unreachable
+  //    process). A host that IS itself the process start (no incoming) is a
+  //    valid, if unusual, case — hostIncoming is simply empty and nothing is
+  //    reconnected.
+  const hostIncoming = (host.incoming || []).filter(isSequenceFlowConnection);
+  const incomingSources = hostIncoming.map((c) => c.source);
+
   // 1. Timer becomes a non-interrupting reminder (does not cancel the step).
   modeling.updateProperties(boundaryElement, { cancelActivity: false });
 
-  // 2. The host's old top-level flow is retired here: once the race resolves,
-  //    the ENCLOSING subProcess (step 3) carries the flow onward, not the bare
-  //    host (D5 — the host moves INSIDE the subProcess in step 4).
+  // 2. The host's old top-level OUTGOING flow is retired here: once the race
+  //    resolves, the ENCLOSING subProcess (step 3) carries the flow onward,
+  //    not the bare host (D5 — the host moves INSIDE the subProcess in step 4).
   modeling.removeConnection(hostFlow);
+
+  // 2b. The host's old top-level INCOMING flow(s) are retired too, explicitly
+  //     (rather than left for bpmn-js to silently drop during the move) — they
+  //     are reconnected to the subProcess once it exists (step 4b below).
+  hostIncoming.forEach((c) => modeling.removeConnection(c));
 
   // 3. Embedded subProcess (D5, ADR-T0612 §8 / T-0661): encloses the fin-approval
   //    RACE (host + escalation task) so a SCOPE-LOCAL terminate end event can
@@ -247,6 +283,14 @@ BuildEscalationBranchHandler.prototype.preExecute = function preExecute(context)
   // 4. Move the host step — WITH its attached boundary timer — INTO the
   //    subProcess. The host keeps its id/config; only its containment changes.
   modeling.moveElements([host, boundaryElement], { x: 0, y: 0 }, subProcess);
+
+  // 4b. THE FIX (T-0776): reconnect the host's prior incoming source(s) — e.g.
+  //     the process Start event — to the subProcess now enclosing the host.
+  //     Without this, whatever used to flow into the host has nowhere to go:
+  //     the subProcess is never entered and the whole built branch is dead.
+  incomingSources.forEach((src) => {
+    modeling.connect(src, subProcess, { type: 'bpmn:SequenceFlow' });
+  });
 
   // 5. Embedded sub-processes require exactly one none-start event; wire it
   //    to the (now-nested) host so the race actually begins on entry.

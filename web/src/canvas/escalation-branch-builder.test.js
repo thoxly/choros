@@ -30,27 +30,51 @@ function seqFlow(id, source, target) {
 
 function makeGraph() {
   const parent = { id: 'Process_1' };
+  // T-0776: a `prev` element feeding the host (e.g. the process Start) — the
+  // fixture the adversarial review used to empirically prove the reparent bug
+  // (bpmn-js silently drops this flow during moveElements if the builder
+  // doesn't handle it).
+  const prev = {
+    id: 'Start_1', businessObject: { $type: 'bpmn:StartEvent' },
+    x: 20, y: 100, width: 36, height: 36, parent, outgoing: [], incoming: [],
+  };
   const next = {
     id: 'End_1', businessObject: { $type: 'bpmn:EndEvent' },
-    x: 400, y: 100, width: 36, height: 36, parent, outgoing: [],
+    x: 400, y: 100, width: 36, height: 36, parent, outgoing: [], incoming: [],
   };
   const host = {
     id: 'Task_1', businessObject: { $type: 'bpmn:UserTask' },
-    x: 100, y: 80, width: 100, height: 80, parent, outgoing: [],
+    x: 100, y: 80, width: 100, height: 80, parent, outgoing: [], incoming: [],
   };
+  const prevFlow = seqFlow('Flow_prev_host', prev, host);
+  prev.outgoing = [prevFlow];
+  host.incoming = [prevFlow];
   const hostFlow = seqFlow('Flow_host_next', host, next);
   host.outgoing = [hostFlow];
+  next.incoming = [hostFlow];
   const boundary = {
     id: 'Boundary_1', businessObject: { $type: 'bpmn:BoundaryEvent' },
-    host, parent, outgoing: [], x: 150, y: 150, width: 36, height: 36,
+    host, parent, outgoing: [], incoming: [], x: 150, y: 150, width: 36, height: 36,
   };
-  return { parent, next, host, hostFlow, boundary };
+  return { parent, prev, prevFlow, next, host, hostFlow, boundary };
 }
 
-/** A recording mock of the bpmn-js modeling service. Returns real-ish shapes. */
+/**
+ * A recording mock of the bpmn-js modeling service. Returns real-ish shapes.
+ *
+ * T-0776: connect/removeConnection/moveElements now actually mutate the graph
+ * (push/splice source.outgoing + target.incoming) instead of only logging —
+ * this is what lets moveElements mirror bpmn-js's real, otherwise-invisible
+ * behaviour of SILENTLY DROPPING any connection that would cross the new
+ * parent's boundary. Previously this mock kept every connection alive across
+ * a move (just flipping `.parent`), which is why the missing-incoming-flow
+ * reparent bug shipped undetected at the mock-test level — only the real-
+ * bpmn-js test (escalation-branch-undo.test.js) caught it.
+ */
 function makeMockModeler() {
   const calls = [];
   let seq = 0;
+  const elements = new Map();
   const modeling = {
     updateProperties(element, properties) {
       calls.push({ op: 'updateProperties', id: element.id, properties });
@@ -69,6 +93,7 @@ function makeMockModeler() {
         parent: parent && parent.id, position,
         eventDefinitionType: shape.eventDefinitionType,
       });
+      elements.set(el.id, el);
       return el;
     },
     appendShape(source, shape, position, parent) {
@@ -84,20 +109,56 @@ function makeMockModeler() {
         op: 'appendShape', source: source.id, type: shape.type, newId: el.id, position,
         eventDefinitionType: shape.eventDefinitionType,
       });
+      elements.set(el.id, el);
       return el;
     },
     connect(source, target, attrs) {
       seq += 1;
       const c = { id: `Flow_${seq}`, type: attrs.type, source, target };
       calls.push({ op: 'connect', source: source.id, target: target.id, type: attrs.type });
+      (source.outgoing = source.outgoing || []).push(c);
+      (target.incoming = target.incoming || []).push(c);
       return c;
     },
     removeConnection(connection) {
       calls.push({ op: 'removeConnection', id: connection.id });
+      const { source, target } = connection;
+      if (source && Array.isArray(source.outgoing)) {
+        const i = source.outgoing.indexOf(connection);
+        if (i >= 0) source.outgoing.splice(i, 1);
+      }
+      if (target && Array.isArray(target.incoming)) {
+        const i = target.incoming.indexOf(connection);
+        if (i >= 0) target.incoming.splice(i, 1);
+      }
     },
     moveElements(shapes, delta, target) {
       calls.push({ op: 'moveElements', ids: shapes.map((s) => s.id), target: target.id, delta });
-      shapes.forEach((s) => { s.parent = target; });
+      const movedIds = new Set(shapes.map((s) => s.id));
+      shapes.forEach((s) => {
+        s.parent = target;
+        // Mirror bpmn-js: a connection with exactly one endpoint inside the
+        // moved set and the other endpoint OUTSIDE it (and not the new parent
+        // itself) crosses the new subProcess boundary — a real move SILENTLY
+        // DROPS it. If the builder forgot to explicitly remove+reconnect a
+        // boundary-crossing flow before calling moveElements, this reproduces
+        // that loss so the regression is caught here, at the mock level too.
+        ['incoming', 'outgoing'].forEach((dir) => {
+          const list = s[dir] || [];
+          for (let i = list.length - 1; i >= 0; i -= 1) {
+            const c = list[i];
+            const other = dir === 'incoming' ? c.source : c.target;
+            if (other && other.id !== target.id && !movedIds.has(other.id)) {
+              list.splice(i, 1);
+              const otherList = dir === 'incoming' ? other.outgoing : other.incoming;
+              if (Array.isArray(otherList)) {
+                const j = otherList.indexOf(c);
+                if (j >= 0) otherList.splice(j, 1);
+              }
+            }
+          }
+        });
+      });
     },
   };
   // Minimal commandStack mimicking diagram-js semantics: registerHandler
@@ -124,6 +185,7 @@ function makeMockModeler() {
   return {
     get: (name) => (name === 'modeling' ? modeling : name === 'commandStack' ? commandStack : undefined),
     calls,
+    getElement: (id) => elements.get(id),
   };
 }
 
@@ -235,7 +297,7 @@ describe('canBuildEscalationBranch', () => {
    -------------------------------------------------------------------------- */
 describe('applyEscalationBranch — builds the D5 shape (subProcess + scope-local terminate)', () => {
   it('encloses the race in a subProcess converging into a terminateEndEvent', () => {
-    const { boundary, host, next, hostFlow, parent } = makeGraph();
+    const { boundary, host, next, hostFlow, parent, prev, prevFlow } = makeGraph();
     const modeler = makeMockModeler();
     const res = applyEscalationBranch({ modeler, boundaryElement: boundary });
 
@@ -327,6 +389,19 @@ describe('applyEscalationBranch — builds the D5 shape (subProcess + scope-loca
     expect(calls).toContainEqual(
       expect.objectContaining({ op: 'connect', source: subId, target: next.id }),
     );
+
+    // 10. THE FIX (T-0776, adversarial review — empirically proven): the
+    //     host's OLD INCOMING flow (prev → host) is explicitly removed and
+    //     reconnected to the subProcess — NOT silently lost when host moves.
+    //     Without this, prev.outgoing/subProcess.incoming both end up empty
+    //     and the built branch can never be entered.
+    expect(calls).toContainEqual({ op: 'removeConnection', id: prevFlow.id });
+    expect(calls).toContainEqual(
+      expect.objectContaining({ op: 'connect', source: prev.id, target: subId }),
+    );
+    const subEl = modeler.getElement(subId);
+    expect(prev.outgoing.map((c) => c.target.id)).toEqual([subId]);
+    expect(subEl.incoming.map((c) => c.source.id)).toEqual([prev.id]);
   });
 
   it('is a no-op with a reason when preconditions fail (idempotent)', () => {
