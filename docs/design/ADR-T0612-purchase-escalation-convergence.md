@@ -244,3 +244,215 @@ Local (linter is pure, zero-IO — runs anywhere). Live-proof deferred to a
 Flowable-reachable environment (dev stand or a future session with
 uncontended `:8082`/`:55432`) — see FRICTION in pr-handoff for why this
 session could not run it live.
+
+---
+
+## 8. T-0661 addendum — the SECOND completion order (concurrent-token hang)
+
+Task: T-0661 (bug — столпы 1/3, движок/бесшовность; defect is in the same
+BPMN CASE MODEL, a continuation of T-0612's convergence work). Base:
+dev@6613c6a7, branch `task/T-0661`. **DESIGN only** — BUILD + live-proof
+happen once the stand is reachable again (stand unreachable this session).
+
+### 8.1 What T-0612's §2 D2 actually covered — and the gap it left
+
+§2 D2 fixed the completion order where the **timer NEVER fires**: the finance
+director approves within PT2M, one token flows `task-fin → gw-fin-converge →
+end`, the instance completes, and the still-armed-but-unfired boundary timer
+is discarded with the scope. That fix is **correct for that order** and the
+LIVE_PROOF Case A (smoke script) proves it.
+
+The **open order** T-0661 addresses is the one where the **timer HAS ALREADY
+FIRED**. A non-interrupting (`cancelActivity="false"`) boundary event, when it
+fires, **spawns a second, independent concurrent token** at the boundary,
+flowing to `task-esc` — while the original token stays on `task-fin`. Now
+**both userTasks are open at once**. Completing `task-fin` sends its token
+through `gw-fin-converge` to the shared `endEvent`, where **that one token is
+consumed** — but `task-esc`'s token is still parked. BPMN completes an
+instance only when **every** token is consumed, so **the instance hangs**
+until `task-esc` is ALSO completed. The symmetric order (complete `task-esc`
+first, leave `task-fin` parked) hangs identically.
+
+**Root cause — a factual error in §2 D2's rationale.** D2 (and the fix
+artifact's header, now corrected) asserted that a converging `exclusiveGateway`
+"fires on the FIRST arrival and discards the token from whichever branch
+arrives later." **This is not how Flowable/BPMN converging exclusive gateways
+behave.** A converging (merging) exclusive gateway is an **uncontrolled merge**:
+it routes **each** incoming token through its outgoing flow **independently** —
+it never discards a "later" token, because there is no join/wait/merge of
+tokens at an XOR-merge. So when two concurrent tokens exist (post-fire), the
+gateway passes both through separately, each to the `endEvent`, and only the
+consumption of the SECOND one ends the instance. The D2 shape therefore
+resolves the *never-fires* order but **cannot resolve the *already-fired*
+order** — a plain converging-gateway + none-`endEvent` has no mechanism to
+extinguish a second concurrent token.
+
+### 8.2 D5 — "согласование добивает процесс": first resolution cancels the other, scope-locally
+
+**Decision.** The ratified user expectation (столп 1/3, session memory
+`choros-product-direction-tel` / the founder's framing "согласование добивает
+процесс") is: whichever of the two racing tasks resolves **first** — the
+director approving `task-fin`, or the owner handling the escalation `task-esc`
+— **completes the slice and cancels the other, now-moot task.** The escalation
+is a reminder; once **either** party decides, the decision is made and the
+other open task must disappear (not linger as a stale zombie task — the exact
+bad-UX class T-0612 set out to kill).
+
+Resolving a second concurrent token requires **active token cancellation**,
+which no plain gateway/none-end can do. The BPMN-native, deterministic
+mechanism is a **terminate end event** — but scoped so it does **not** end
+unrelated parallel work. Therefore:
+
+> **The fin-approval race is enclosed in an embedded `subProcess`
+> (`sub-fin-approval`). Inside it: `task-fin` carries the unchanged
+> non-interrupting boundary timer escalating to `task-esc`; BOTH tasks
+> converge into the existing `exclusiveGateway gw-fin-converge`; the gateway
+> flows to a `terminateEndEvent` (`sub-end-terminate`) with `terminateAll`
+> left at its default `false` → SCOPE-LOCAL. The sub-process has one outgoing
+> flow to the shared top-level `endEvent` "Заказ размещён".**
+
+Behaviour, all orders deterministic and clean:
+
+- **Timer never fires** (T-0612 Case A, preserved): `task-fin` done → gateway →
+  scope-terminate ends the sub-process (armed timer discarded with the scope) →
+  sub-process completes → main flow → "Заказ размещён". ✓
+- **Timer fired, `task-fin` completed first**: `task-fin` token → gateway →
+  scope-terminate → **kills the parked `task-esc` token** within the
+  sub-process → sub-process completes → "Заказ размещён". ✓ («добивает»)
+- **Timer fired, `task-esc` completed first** (owner steps in for the silent
+  director): `task-esc` token → gateway → scope-terminate → **kills the parked
+  `task-fin` token** → sub-process completes → "Заказ размещён". ✓ (symmetric)
+
+`cancelActivity="false"` is **unchanged** — §2 D1's business semantics hold
+(the escalation never revokes the director's authority; it is simply moot once
+either party decides). This **supersedes** §2 D2's out-of-scope hand-wave that
+"`task-fin` remains an open task in the inbox independently after escalation" —
+under D5 the losing task is deterministically cancelled, which is the correct
+"добивает" semantic, not left dangling.
+
+**Why scope-local (sub-process) terminate, not top-level terminate.** §2 D2
+rejected a *top-level* `terminateEndEvent` because it force-kills the whole
+instance, foreclosing genuinely-parallel top-level branches (the full case
+branches on `${amount>500000}` upstream). D5 keeps that objection satisfied:
+`terminateAll="false"` inside an embedded sub-process terminates **only that
+sub-process's executions** — exactly the two racing tasks and nothing else —
+then the sub-process completes normally and its outgoing flow continues the
+main process. Terminate is used **where it is the correct idiom** (cancel the
+losing racer) and **confined** to where it is safe. This reuses the existing
+convergence gateway; the only added structure is the sub-process wrapper + its
+none-start + the scope-local terminate.
+
+### 8.3 Rejected alternatives (T-0661)
+
+| option | why not |
+|--------|---------|
+| **Interrupting when approved in time** (flip `cancelActivity` to `true`, or retroactively make the fired timer interrupting) | Reintroduces the §2 D1 rejection: an interrupting timer CANCELS `task-fin` the instant it fires, yanking the director's in-progress approval. And an already-FIRED non-interrupting timer cannot be retroactively made interrupting — the second token already exists. Wrong semantics + not mechanically possible for the fired case. |
+| **Top-level `terminateEndEvent`** (converging gateway → top-level terminate, no sub-process) | Minimal diff and works TODAY (this slice has no sibling top-level branch), but re-opens §2 D2's foreclosure foot-gun: once spliced into the full case (which DOES branch upstream), a top-level terminate would kill unrelated parallel branches. D5's sub-process scoping gets the same cancellation without the foot-gun. Acceptable ONLY if a future author can prove the slice is the entire process with zero parallel branches — not a safe default. |
+| **Signal throw/catch cancel** (`task-fin` completion throws a signal; `task-esc` has an interrupting boundary signal catch, and vice-versa) | Achieves cancel-on-first without terminate, but adds four elements (two throws + two boundary catches), and Flowable signals are broadcast/global-scoped by default (cross-instance / cross-tenant leakage risk unless carefully scoped). Heavier and more error-prone than a scope-local terminate for the same outcome. |
+| **Runtime task-pairing hook** (engine-drive reconcile in `inbox.ts` auto-cancels the sibling task when one of a pair completes) | A **bespoke special-case**: it hard-codes a "these two tasks are a pair" convention outside the BPMN model, invisible to anyone reading the process, and duplicates the engine's own token-cancellation machinery in application code. The task brief explicitly prefers a deterministic fix that **reuses existing convergence machinery, not a bespoke special-case**. Rejected. |
+| **"Require both to complete" (accept the hang, make it legible only)** — option 3 in the brief | Contradicts the ratified "добивает" expectation and re-creates the stale-zombie-task UX T-0612 fought. A reminder that the director must ALSO still close after the owner already decided is not the case's intent ("финдир молчит" — the escalation is a fallback for silence, not a co-signature). Rejected as the *default*; the linter still lets an author OPT IN explicitly if a genuine double-close is ever wanted (§8.5, escape hatch) — but silence must never ship it. |
+
+### 8.4 D6 — the linter GREEN-LIGHTS the hanging shape today (false negative to close)
+
+`checkTimerEscalationConvergence` (§2 D3) checks only that the escalation
+branch **reconnects** to the guarded task's downstream path before its own end.
+The D2 shape (`exclusiveGateway → plain endEvent`) **satisfies** that — so the
+linter **passes the very shape §8.1 shows still hangs** when the timer fires.
+That is a false negative: convergence-of-flow is necessary but **not
+sufficient**; the convergence must also be able to **resolve the second
+concurrent token** a non-interrupting timer creates.
+
+**Decision.** Extend the check with a second, tighter obligation for
+non-interrupting boundary timers: **after** confirming flow convergence, verify
+that a **scope-terminating construct** (a `terminateEndEvent`) is **reachable**
+from the escalation branch. Only a terminate can extinguish the second token.
+A convergence that reaches merely a none-`endEvent` is flagged with a NEW,
+distinct violation type so the two failure modes are legible:
+
+- `timer_escalation_no_convergence` (existing) — branch never rejoins at all.
+- `timer_escalation_unresolved_concurrency` (**new**) — branch rejoins, but no
+  `terminateEndEvent` is reachable, so the fired-timer's concurrent token can
+  never be extinguished → the "both tasks open" hang.
+
+This stays inside §2 D3's discipline: narrow (only non-interrupting boundary
+timers — the one shape with a proven live failure), reusing the existing
+`reachableSet` BFS, no general reachability/balance analysis.
+
+### 8.5 BUILD-spec (T-0661) — exact changes, NOT implemented this session
+
+1. **`docs/design/T-0612-purchaseApproval-fixed.bpmn20.xml.txt`** — **DONE this
+   session** (design artifact, not product code): rewritten to the D5 encoding
+   (embedded `sub-fin-approval` sub-process; `task-fin` + non-interrupting
+   `bnd-fin-timeout` → `task-esc`; both → `gw-fin-converge` →
+   `sub-end-terminate` `<terminateEventDefinition/>` scope-local; sub-process →
+   top-level `end-order-placed`). Node ids `task-fin`/`task-esc`/`purchaseApproval`
+   preserved so the smoke script's `taskDefinitionKey`/process-key queries still
+   resolve.
+
+2. **`src/core/bpmn-linter.ts`** (BUILD — spec only):
+   - Add `LintViolationType` union member `"timer_escalation_unresolved_concurrency"`
+     (additive, mirrors the T-0612 `"timer_escalation_no_convergence"` addition).
+   - In `lintBpmn`'s token walk, collect a `terminateEndEventIds: Set<string>`:
+     when inside an `<endEvent>` element, if a `<terminateEventDefinition>` child
+     open/self-close tag is seen, add that endEvent's id (mirror the existing
+     `endEventIds` collection and the `inTimerBodyChild` child-tracking pattern
+     at lines ~404/417/700-840). No new pass — folds into the existing walk.
+   - Extend `checkTimerEscalationConvergence(timers, flowEdges, endEventIds,
+     terminateEndEventIds, violations)` (add the one param): after the existing
+     loop sets `converged === true` for a non-interrupting boundary timer,
+     compute `escReach = reachableSet([escalationTarget], flowEdges)` and, if
+     **no** id in `escReach` is in `terminateEndEventIds`, push a
+     `timer_escalation_unresolved_concurrency` violation (message: names the
+     boundary id + `attachedToRef`; explains the fired-timer concurrent-token
+     hang; prescribes the fix — "route the convergence into a scope-local
+     `terminateEndEvent` (e.g. inside an embedded sub-process) so the first
+     resolution cancels the other racing task"). The two violation types are
+     mutually exclusive per timer (no-convergence OR unresolved-concurrency OR
+     clean). Reuse `reachableSet` — no new traversal helper.
+   - Update the call site (line ~961) to pass `terminateEndEventIds`.
+   - **No mapper change** — `mapTimerEscalation` (`timer-escalation-mapper.ts`)
+     is id/string-keyed and scope-agnostic; it wires `candidateGroups` onto
+     `task-esc` and leaves `bnd-fin-timeout`'s explicit `<timeDuration>` body
+     untouched exactly as before, regardless of the sub-process nesting.
+     Verified against the mapper source (buildTimerTargets scans all
+     sequenceFlows flat; injectCandidateGroupsOnTask matches by userTask id).
+
+3. **`src/__tests__/bpmn-linter.test.ts`** (BUILD — spec only): additive blocks
+   only (mirror the existing T-0612 `describe` blocks; zero change to existing
+   tests). See §8.6 fitness rows for the exact cases.
+
+4. **`ci/checks/flowable/purchase-approval-convergence-smoke.sh`** (BUILD — spec
+   only): extend from Case-A-only to prove all three orders. Add a
+   `FIN_DEADLINE` env override (default `PT2M`) so LIVE_PROOF can deploy a
+   `PT5S` variant, wait for `task-esc` to surface, then assert instance-ENDED
+   after completing (i) `task-fin` first and (ii) — a second instance —
+   `task-esc` first. Its current header comment already concedes Case B was
+   never actually live-proven (deferred to the unit linter) — T-0661 closes
+   that hole for real.
+
+### 8.6 Fitness functions (T-0661)
+
+| id | rule | ci_check |
+|----|------|----------|
+| T-0661-UNRESOLVED-FAIL | the D2 shape (non-interrupting timer, escalation → `exclusiveGateway` → **plain** `endEvent`) — i.e. the *old* "fixed" shape — now fails `lintBpmn` with `timer_escalation_unresolved_concurrency` | `npx vitest run src/__tests__/bpmn-linter.test.ts` |
+| T-0661-TERMINATE-OK | the D5 shape (converging gateway → scope-local `terminateEndEvent`, in a sub-process) passes `lintBpmn` cleanly (no `no_convergence`, no `unresolved_concurrency`) | `npx vitest run src/__tests__/bpmn-linter.test.ts` |
+| T-0661-NOCONV-STILL-FAIL | the original fully-disconnected escalation-own-end shape still fails with `timer_escalation_no_convergence` (existing T-0612 rule un-regressed) | `npx vitest run src/__tests__/bpmn-linter.test.ts` |
+| T-0661-INTERRUPT-SKIP | an interrupting timer (`="true"` or attribute absent) with a convergence-to-plain-end shape is **never** flagged by the new rule (no second token exists) | `npx vitest run src/__tests__/bpmn-linter.test.ts` |
+| T-0661-FIX-ARTIFACT-CLEAN | `docs/design/T-0612-purchaseApproval-fixed.bpmn20.xml.txt` (D5 encoding) lints with zero violations | manual `lintBpmn` invocation (pr-handoff) |
+| T-0661-MAPPER-UNCHANGED | `mapTimerEscalation` on the D5 artifact still injects `flowable:candidateGroups="role-owner"` on `task-esc` and leaves `bnd-fin-timeout`'s body untouched (idempotent, scope-agnostic) | `npx vitest run src/__tests__/timer-escalation-mapper.test.ts` |
+| **T-0661-LIVE-A** (deferred) | timer never fires: complete `task-fin` before deadline → instance `end_time != null` | `ci/checks/flowable/purchase-approval-convergence-smoke.sh` |
+| **T-0661-LIVE-B** (deferred) | timer FIRED (PT5S variant), then complete `task-fin` while `task-esc` is ALSO open → instance `end_time != null` (parked `task-esc` cancelled by scope-terminate) | `purchase-approval-convergence-smoke.sh` (FIN_DEADLINE=PT5S) |
+| **T-0661-LIVE-C** (deferred) | timer FIRED, then complete `task-esc` first while `task-fin` is ALSO open → instance `end_time != null` (symmetric; parked `task-fin` cancelled) | `purchase-approval-convergence-smoke.sh` (FIN_DEADLINE=PT5S) |
+| FF-5/FF-6/FF-9 (inherited) | `bpmn-linter.ts` stays zero-dep, frozen files untouched | `ci/checks/bpmn-linter-isolation.sh` |
+| D-064 anti-case (inherited) | zero case-specific literal added under `src/` (the sub-process/terminate is generic structure; no `purchaseApproval`/`task-fin` literal in `src/`) | `ci/checks/anti-case-lock.sh` |
+
+### 8.7 Traceability (T-0661)
+
+| AC (task) | covered by |
+|-----------|-----------|
+| decide the semantics for the concurrent (both-open) case | §8.2 D5 |
+| which candidate (interrupting / auto-extinguish / require-both) + rationale + rejected | §8.2 (chosen: auto-extinguish via scope-local terminate = candidate 2, encoded structurally) + §8.3 |
+| Flowable join semantics vs token model | §8.1 (uncontrolled XOR-merge passes each token independently; §2 D2's "discards later token" claim corrected) |
+| authoring-time vs runtime fix | §8.2 (authoring-time: model shape) + §8.4 D6 (authoring-time: linter) — runtime task-pairing explicitly rejected §8.3 |
+| deterministic + reuses convergence machinery, not bespoke | §8.2 (reuses `gw-fin-converge`; only adds sub-process + scope-terminate; terminate is native engine cancellation, not app-code pairing) |
+| both completion orders cleanly finish the instance | §8.6 T-0661-LIVE-A/B/C |
