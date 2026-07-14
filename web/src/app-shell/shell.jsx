@@ -1115,7 +1115,25 @@ function AppShell() {
       // Runs after tenant resolution. Fail-closed: null → only РАБОТА (visibleZones default).
       try {
         const caps = await resolveNavCapabilities();
-        if (!cancelled) setNavCaps(caps || null);
+        if (!cancelled) {
+          setNavCaps(caps || null);
+          // T-0772 (столп 7): the sidebar account card previously showed the
+          // raw KC `preferred_username` (== email — kcUserFromClaims falls
+          // back to it because Keycloak never sets a `name` claim for
+          // self-registered owners). caps.displayName is the SAME field
+          // T-0770 humanized at registration (choros.employee.display_name,
+          // also what ActorChip/T-0648 resolves for every OTHER actor) — so
+          // once it resolves, it replaces the token-derived name with the
+          // human one. Functional update (not `devUser.name = ...`) because
+          // `currentUser` may have just been set earlier in THIS same effect
+          // run and the closure snapshot could be stale. Honest-degrade: a
+          // missing/blank displayName (fail-closed caps, dev-no-db, or no
+          // employee row) leaves currentUser untouched — never worse than
+          // before this task.
+          if (caps && typeof caps.displayName === 'string' && caps.displayName.trim()) {
+            setCurrentUser((prev) => (prev ? { ...prev, name: caps.displayName } : prev));
+          }
+        }
       } catch {
         /* fail-closed: navCaps stays null → only РАБОТА */
       }
