@@ -43,6 +43,13 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import {
   listInstanceProjections,
+  // T-0771 (E16 consistency, live-proof T-0742): the SAME single-authority
+  // read-visibility predicate the /api/processes grid's ?definition=<key> deep-link
+  // scopes its rows by (T-0721/T-0722/T-0723). Reused here — no bespoke copy — to
+  // narrow the catalog's per-definition instance_count to what THIS actor will
+  // actually see when they click the count (closes the T-0742 live-proof mismatch:
+  // a card said "3 инстанса" but a non-participant's click showed 0 rows).
+  filterProjectionsByReadVisibility,
   type InstanceProjection,
 } from "./process-projection.js";
 import {
@@ -56,6 +63,10 @@ import {
   type ProcessDefRow,
 } from "../core/process-catalog-view.js";
 import { selectEngineProcessNames } from "../db/engine-process-name.js";
+// T-0771: type-only import (Grant/AncestryOracle) to thread the READ-visibility
+// object into filterProjectionsByReadVisibility — mirrors processes.ts's identical
+// import (types erase at compile; this is not the lattice math itself).
+import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 
 // ---------------------------------------------------------------------------
 // Constants / helpers
@@ -85,6 +96,24 @@ export interface ProcessCatalogDeps {
    * degrade to the audit-snapshot projection — never worse than the pre-T-0709 catalog.
    */
   flowable?: CatalogEnginePort;
+  /**
+   * T-0771 (E16 consistency, live-proof T-0742): OPTIONAL read-visibility resolver —
+   * BYTE-IDENTICAL composition to registerProcessesRoutes'/registerRecordRoutes'
+   * resolveReadVisibility (getGrantsForSubject + loadTenantOrgAncestry →
+   * makeResourceAncestryOracle; single-resolver, FF-INST-VIS-2, no bespoke grant
+   * query). When present, the catalog narrows its instance projections to the SAME
+   * READ-visibility set the /api/processes grid's ?definition=<key> deep-link
+   * applies (filterProjectionsByReadVisibility, T-0721/T-0722/T-0723) BEFORE
+   * counting instances per definition — so "N инстансов" on a card equals what the
+   * grid will actually show for the viewing actor, never a lying higher number.
+   * Absent (no-DB / pre-wiring) ⇒ honest degrade: instance_count stays
+   * tenant-scope-only, byte-identical to pre-T-0771 behaviour, never worse.
+   */
+  resolveReadVisibility?: (
+    actorSlug: string,
+    tenantId: string,
+    nowMs: number,
+  ) => Promise<{ readonly grants: readonly Grant[]; readonly ancestry: AncestryOracle }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +349,7 @@ export function registerProcessCatalogRoutes(
   deps?: ProcessCatalogDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant, flowable } = deps;
+  const { pool, resolveActorTenant, flowable, resolveReadVisibility } = deps;
 
   // -------------------------------------------------------------------------
   // GET /api/process-catalog — REAL definitions + REAL instances + bindings.
@@ -343,22 +372,49 @@ export function registerProcessCatalogRoutes(
       // WHERE tenant_id guard, audit-backed). Real instances only — never seed/mock.
       const projections: InstanceProjection[] = await listInstanceProjections(pool, tenantId);
 
+      // T-0771 (E16 consistency, live-proof T-0742): narrow the tenant-scoped
+      // `projections` to the READ-visibility of each instance — the SAME single
+      // authority (isRecordReadable for record-backed instances / isInstanceParticipant
+      // for record-less ones, via filterProjectionsByReadVisibility) the /api/processes
+      // grid's ?definition=<key> deep-link applies (T-0722/T-0723). Everything below —
+      // the live overlay, the engine-name lookup, AND the per-definition instance_count
+      // — is derived from this SAME visible set, so a card's "N инстансов" equals
+      // exactly what clicking through to the grid will show. Honest-degrade (NF-2):
+      // resolveReadVisibility absent (no-DB / pre-wiring) ⇒ unchanged tenant-scope-only
+      // behaviour (byte-identical to pre-T-0771).
+      let visibleProjections: InstanceProjection[] = projections;
+      if (resolveReadVisibility) {
+        const gateNowMs = Date.now();
+        const { grants, ancestry } = await resolveReadVisibility(actor, tenantId, gateNowMs);
+        visibleProjections = await filterProjectionsByReadVisibility(
+          pool,
+          tenantId,
+          projections,
+          grants,
+          ancestry,
+          gateNowMs,
+          actor,
+        );
+      }
+
       // T-0709 [E16/P1]: overlay each non-done instance's LIVE active user-task
       // (step/role) from the engine — the SAME source /api/processes/:inst reads — so
       // the catalog shows the node the token is REALLY on, not the NEXT step's label
       // that the start-time process.started snapshot may have frozen in (the родитель
       // T-0349 divergence). Best-effort: no flowable, or a per-instance engine miss,
       // leaves that projection on its honest audit snapshot (overlayLiveSteps no-ops).
-      let displayProjections: InstanceProjection[] = projections;
+      // T-0771: overlays the already-visible set — a hidden instance never reaches the
+      // engine layer either (mirrors the /api/processes list route's ordering).
+      let displayProjections: InstanceProjection[] = visibleProjections;
       if (flowable) {
-        const runningInstIds = projections
+        const runningInstIds = visibleProjections
           .filter((p) => p.status !== "done")
           .map((p) => p.inst);
         if (runningInstIds.length > 0) {
           const liveByInst = await resolveLiveNodesByInstance(flowable, runningInstIds, {
             deadlineMs: LIVE_OVERLAY_DEADLINE_MS,
           });
-          displayProjections = overlayLiveSteps(projections, liveByInst);
+          displayProjections = overlayLiveSteps(visibleProjections, liveByInst);
         }
       }
 
@@ -369,8 +425,12 @@ export function registerProcessCatalogRoutes(
       // engine definitions show the human name (e.g. «Канонический линейный ТЭЛ»)
       // instead of the bare key. Tenant-scoped + own explicit WHERE tenant_id (no
       // cross-tenant leak). Empty / no engine keys ⇒ no query, unchanged behaviour.
+      // T-0771: keyed off visibleProjections — an engine-only definition the actor
+      // cannot see any instance of carries no name/version/status of its own (it is
+      // ENTIRELY derived from instances), so it honestly does not surface either
+      // (consistent with the module's own "nothing is fabricated" invariant).
       const defKeys = new Set(defRows.map((d) => d.process_key));
-      const engineKeys = [...new Set(projections.map((p) => p.procKey))].filter(
+      const engineKeys = [...new Set(visibleProjections.map((p) => p.procKey))].filter(
         (k) => !defKeys.has(k),
       );
       const engineNames =
@@ -381,10 +441,12 @@ export function registerProcessCatalogRoutes(
           : new Map<string, string>();
 
       // Definitions count instances by key — unaffected by the step/role overlay, so
-      // build them from the original projections (both arrays share the same instances).
+      // build them from visibleProjections (the READ-visibility-narrowed set, T-0771)
+      // rather than the raw tenant-scoped projections: instance_count must equal what
+      // the grid's deep-link shows, not the tenant-wide total.
       const definitions: CatalogDefinition[] = buildCatalogDefinitions(
         defRows,
-        projections,
+        visibleProjections,
         engineNames,
       );
       const instances: CatalogInstance[] = displayProjections.map(serializeInstance);
